@@ -47,6 +47,7 @@ def _card(conn, title, created_at):
     tid = kb.create_task(conn, title=title, assignee="default", runs_on=list(LABELS))
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET created_at = ? WHERE id = ?", (created_at, tid))
+        conn.execute("UPDATE task_events SET created_at = ? WHERE task_id = ? AND kind = 'created'", (created_at, tid))
     return tid
 
 
@@ -224,3 +225,18 @@ def test_update_hold_takes_precedence_over_recent_pool_claims(hub):
     text = kcw.notice_text(payload)
     assert "claims are held for a pending Hermes update" in text
     assert "Not a placement problem" not in text
+
+
+def test_claims_before_current_ready_episode_do_not_veto_capability_drop(hub):
+    from hermes_cli import kanban_label_backlog as klb
+    tid = _seed(hub.conn, claims=1)
+    now = int(time.time())
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE task_events SET created_at=? WHERE kind='claimed'", (now - 60,))
+        kb._append_event(hub.conn, tid, "continued", {"status": "ready"})
+    result = klb.read(hub.conn, tid, LABELS, machines={"worker-3"}, now=now)
+    assert result["known"] and result["claimed_recent"] == 0
+    assert klb.move_refusal(hub.conn, tid, "ready", LABELS, ["pool:worker"], machines=POOL, now=now) is None
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE task_events SET created_at=? WHERE kind='claimed'", (now,))
+    assert klb.move_refusal(hub.conn, tid, "ready", LABELS, ["pool:worker"], machines=POOL, now=now)

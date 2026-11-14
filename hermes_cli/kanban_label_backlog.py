@@ -52,8 +52,9 @@ def read(conn: sqlite3.Connection, task_id: str, labels: Iterable[str], *,
     """Exact-label ready predecessors and distinct recently claimed cards in this board view.
 
     Use canonical worker dispatch ordering (including donated priority). Counts are approximate: admission may
-    skip a predecessor. Require a Board holder receipt from a currently matching available machine. Current task
-    labels are usable only without a subsequent move/edit/repin; ambiguous history is excluded, not guessed.
+    skip a predecessor. Require a Board holder receipt from a currently matching available machine during the
+    current ready episode, capped at 30 minutes. Current labels are usable only without a subsequent move/edit;
+    ambiguous history is excluded, not guessed.
     Unreadable evidence stays unknown and cannot refuse a move.
     """
     wanted, holders = frozenset(labels), set(machines)
@@ -67,6 +68,9 @@ def read(conn: sqlite3.Connection, task_id: str, labels: Iterable[str], *,
         ordered = [row[0] for row in lane_rows(conn, "ready")]
         if task_id not in ordered:
             return out
+        from hermes_cli.kanban_parent_unclaimed import ready_since
+        created = conn.execute("SELECT created_at FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
+        since = max(now - WINDOW_SECONDS, ready_since(conn, task_id, created))
         before = set(ordered[:ordered.index(task_id)])
         ahead = sum(row[0] in before and _labels(row[1]) == wanted for row in conn.execute(
             "SELECT id, runs_on FROM tasks WHERE status = 'ready' AND claim_lock IS NULL"))
@@ -77,7 +81,7 @@ def read(conn: sqlite3.Connection, task_id: str, labels: Iterable[str], *,
             "WHERE e.kind = 'claimed' AND e.created_at >= ? AND e.created_at <= ? AND e.task_id != ? "
             "AND NOT EXISTS (SELECT 1 FROM task_events m WHERE m.task_id=e.task_id "
             "AND m.kind IN ('moved', 'edited') AND m.created_at >= e.created_at)",
-            (int(now - WINDOW_SECONDS), int(now), task_id),
+            (int(since), int(now), task_id),
         ):
             holder = _holder(row[1])
             if _labels(row[2]) != wanted or holder not in holders:
