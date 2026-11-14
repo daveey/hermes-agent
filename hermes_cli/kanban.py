@@ -1487,24 +1487,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                                         or f"cannot schedule {tid}"), conn=conn)
 
 
-def _cmd_unblock(args: argparse.Namespace) -> int:
-    from hermes_cli.kanban_cli_actor import cli_actor
-    if os.environ.get("HERMES_KANBAN_TASK"):
-        return _err("kanban unblock is orchestrator-only; workers must hand off their assigned task")
-    ids, rc = _require_ids(args, _REASON_FLAG_HINT)
-    if rc:
-        return rc
-    reason = _stripped_or_none(getattr(args, "reason", None))
-    author = _profile_author() if reason else None
-    suffix = f": {reason}" if reason else ""
-    with kbc.connect_closing() as conn:
-        rc = _ids_error(ids, _REASON_FLAG_HINT, conn)
-        if rc:
-            return rc
-        op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment, event_extra={"actor": cli_actor()}))
-        from hermes_cli.kanban_shared_blockers import unblock_verdict
-        return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}; {unblock_verdict(conn, tid)}",
-                           lambda tid: kb.unblock_refusal(conn, tid) or f"cannot unblock {tid} (not blocked/scheduled?)", conn=conn)
+from hermes_cli.kanban_cli_release import cmd_unblock as _cmd_unblock
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
@@ -1572,35 +1555,7 @@ def _cmd_reopen_review(args: argparse.Namespace) -> int:
                            lambda tid: f"cannot reopen {tid} (not in review?)", conn=conn)
 
 
-def _cmd_promote(args: argparse.Namespace) -> int:
-    reason = _joined_words(args.reason)
-    author = _profile_author()
-    # Dedupe while preserving order; positional task_id always first.
-    ids = list(dict.fromkeys(_bulk_ids(args)))
-    dry_run = bool(args.dry_run)
-
-    results: list[dict[str, object]] = []
-    with kbc.connect_closing() as conn:
-        for tid in ids:
-            ok, err = kb.promote_task(conn, tid, actor=author, reason=reason, dry_run=dry_run)
-            results.append({"task_id": tid, "promoted": ok, "dry_run": dry_run,
-                            "reason": reason, "error": err})
-
-    failed = [r for r in results if not r["promoted"]]
-    if getattr(args, "json", False):
-        # Single-id stays a flat object for back-compat; bulk emits a list.
-        _print_json(results[0] if len(results) == 1 else results)
-        return 0 if not failed else 1
-
-    tag = " (dry)" if dry_run else ""
-    label = "Would promote" if dry_run else "Promoted"
-    suffix = f": {reason}" if reason else ""
-    for r in results:
-        if r["promoted"]:
-            print(f"{label} {r['task_id']} -> ready{tag}{suffix}")
-        else:
-            print(f"cannot promote {r['task_id']}: {r['error']}", file=sys.stderr)
-    return 0 if not failed else 1
+from hermes_cli.kanban_cli_release import cmd_promote as _cmd_promote
 
 
 def _cmd_archive(args: argparse.Namespace) -> int:

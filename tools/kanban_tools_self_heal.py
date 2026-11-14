@@ -190,6 +190,13 @@ def handle_unblock(args: dict, **kw) -> str:
         asked: dict = {}
 
         def note_request(current) -> None:
+            from gateway.session_context import get_session_env
+            from hermes_cli.kanban_release_comments import check, UnreadComments
+            try:
+                check(current, tid, session=get_session_env("HERMES_SESSION_ID", ""),
+                      seen=args.get("seen_comment_id"), board=args.get("board"))
+            except UnreadComments as exc:
+                raise kt._Reject(str(exc), "unread_comments") from exc
             asked["human"] = cw.had_human_request(current, tid)  # unblock_task clears human_request
 
         kt._check(kb.unblock_task(conn, tid, precondition=note_request),

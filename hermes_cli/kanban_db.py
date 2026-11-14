@@ -3256,54 +3256,7 @@ def request_changes(
 _PROMOTABLE_STATUSES = ("todo", "blocked", "triage")
 
 
-def promote_task(
-    conn: sqlite3.Connection, task_id: str, *, actor: str, reason: Optional[str] = None,
-    dry_run: bool = False,
-) -> tuple[bool, Optional[str]]:
-    """Operator promotion ``todo``/``blocked``/``triage`` -> ``ready`` with an
-    audit event. ``triage`` is the supported exit for a card a block loop
-    escalated (or any triage card a human has already specified) without
-    running the specifier/decomposer. [daveey]
-    Refused while a parent is unfinished; ``dry_run`` only validates.
-    Returns ``(ok, reason)``."""
-    cur_status = _task_status(conn, task_id)
-    if cur_status is None:
-        return False, f"task {task_id} not found"
-
-    if cur_status not in _PROMOTABLE_STATUSES:
-        return False, (
-            f"task {task_id} is {cur_status!r}; promote only applies to "
-            f"'todo', 'blocked' or 'triage'"
-        )
-
-    # No override: claim_task demotes ready -> todo on an undone parent whichever
-    # writer set 'ready', so a forced promotion would only report a success the
-    # first claim silently reverts (#106195). The dependency itself is the knob.
-    unsatisfied = [pid for pid, st in parent_states(conn, task_id) if st not in ("done", "archived")]
-    if unsatisfied:
-        return False, (
-            f"unsatisfied parent dependencies: {', '.join(unsatisfied)} "
-            f"(the ready -> running claim re-checks parents, so promotion cannot "
-            f"bypass them; complete the parents or drop the link with "
-            f"`hermes kanban unlink <parent_id> {task_id}`)"
-        )
-
-    if dry_run:
-        return True, None
-
-    with write_txn(conn):
-        upd = conn.execute(
-            "UPDATE tasks SET status = 'ready' "
-            "WHERE id = ? AND status IN ('todo', 'blocked', 'triage')", (task_id,),
-        )
-        if upd.rowcount != 1:
-            return False, f"task {task_id} status changed during promotion"
-        _append_event(conn, task_id, "promoted_manual", {
-            "actor": actor, "reason": reason,
-            **({"from_status": cur_status} if cur_status != "todo" else {}),
-        })
-
-    return True, None
+from hermes_cli.kanban_db_promote import promote_task
 
 
 def _reclaim_dangling_run(

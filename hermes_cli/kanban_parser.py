@@ -562,6 +562,7 @@ _SPECS = [
         *_WAKE_CHECK_ARGS(),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
+        _arg("--seen", dest="seen_comment_id", type=int, help="Newest comment id read; otherwise refuse foreign comments from the last 60 minutes."),
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
         _TASK_IDS,
     ], help="Return blocked/scheduled/triage tasks to ready, or todo while parents remain open"),
@@ -598,6 +599,7 @@ _SPECS = [
         _json_flag(),
     ], help="Operator-only (hub, Board admin key): free workspace_source custody held by a dead or disabled holder"),
     _cmd("promote", [
+        _arg("--seen", dest="seen_comment_id", type=int, help="Newest comment id read; otherwise refuse foreign comments from the last 60 minutes."),
         _TASK_ID,
         _arg("reason", nargs="*", help="Audit-trail reason (recorded on the task_events row)"),
         _bulk_ids("promote"),

@@ -1067,6 +1067,7 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
+        "seen_comment_id": _prop("integer", "Newest comment id read on this card. Without it, foreign-session comments in the last 60 minutes refuse manual release with unread_comments; read the listing before retrying."),
     },
     ["task_id"],
 )
