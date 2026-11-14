@@ -56,7 +56,6 @@ HOLDER_REFRESH_AGE_S = 20.0  # the holder re-reads an unchanged scope this long 
 NARROW_CONFIRM_S = 6.0  # an unchanged narrow key re-stamps the copy's display ``verified_at`` this often
 _VERSION = 1
 _UNDECLARED = "undeclared"
-_fp_local = threading.local()  # .waiting: the declared waiting inputs the last fingerprint() on this thread read
 _holder_ctx = threading.local()  # .active: this thread is the holder (only it pays for a narrow key)
 
 
@@ -181,11 +180,9 @@ def fingerprint(scope: tuple[str, ...], full: tuple, wall: float) -> tuple[str, 
     from hermes_cli import kanban_session_activity as _ksa
 
     try:
-        _fp_local.waiting = None
         if not _ksa._revalidate.revalidatable(full, wall):
             return None
         waiting, complete = _waiting_inputs(dict(_ksa._waiting_sources))
-        _fp_local.waiting = waiting
         body = [_VERSION, list(scope), core_sha(), _portable(full),
                 [[name, _code_id(fn)] for name, fn in sorted(_ksa._done_checks.items())], waiting]
         digest = hashlib.sha256(json.dumps(body, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
@@ -206,15 +203,29 @@ def _inputs_now(scope: tuple[str, ...]) -> tuple[tuple, tuple, float, tuple[str,
     return local, full, wall, fingerprint(scope, full, wall)
 
 
-def _narrow_now(scope: tuple[str, ...], full: tuple, fp: tuple[str, bool] | None) -> str | None:
-    """The display/holder-only narrow key (``kanban_annotation_narrow``) for the inputs :func:`fingerprint` just
-    read on this thread; None (= moved) whenever it is unknown. Never used to certify an exact adoption."""
-    waiting = getattr(_fp_local, "waiting", None)
-    if fp is None or waiting is None:
-        return None
+def _narrow_now(scope: tuple[str, ...], full: tuple) -> str | None:
+    """The display/holder-only narrow key (``kanban_annotation_narrow``) for the activity fingerprint ``full``;
+    None (= moved) whenever it is unknown. Never used to certify an exact adoption. [daveey] It keys the waiting
+    sources' code identity, not their declared inputs, so it never runs a waiting-input probe."""
     from hermes_cli import kanban_annotation_narrow as _narrow
 
+    try:
+        waiting = waiting_identity()[0]
+    except Exception:  # health: allow BLE001 -- unknown code identity is no key (= moved)
+        log.debug("kanban annotation waiting identity unavailable", exc_info=True)
+        return None
     return _narrow.key(scope, full, waiting)
+
+
+def _activity_now() -> tuple[tuple, float]:
+    """``(full, wall)``: the activity fingerprint with shadows (or the pinned one), without waiting inputs."""
+    from hermes_cli import kanban_session_activity as _ksa
+
+    wall = time.time()
+    pinned = getattr(_ksa._revalidate.inputs_pin, "fingerprints", None)
+    if pinned is not None and pinned[1] is not None:
+        return pinned[1], wall
+    return _ksa._activity_fingerprint(include_shadows=False) + _ksa._shadow_fingerprint(), wall
 
 
 # -- the read -----------------------------------------------------------------------------------------------------
@@ -253,8 +264,9 @@ def read_annotation_parts() -> tuple:
 
 # -- adopt --------------------------------------------------------------------------------------------------------
 
-def _display_identity(scope: tuple[str, ...]) -> tuple[str, bool]:
-    """Code/registration identity only: never runs a waiting input probe."""
+def waiting_identity() -> tuple[list, bool]:
+    """``([[name, code id, inputs code id or "undeclared"]...], all declared)`` of the registered waiting sources:
+    code/registration identity only, never a waiting input probe."""
     from hermes_cli import kanban_session_activity as _ksa
 
     sources = dict(_ksa._waiting_sources)
@@ -264,6 +276,14 @@ def _display_identity(scope: tuple[str, ...]) -> tuple[str, bool]:
         has_inputs = declared is not None and declared[0] is fn
         complete = complete and has_inputs
         waiting.append([name, _code_id(fn), _code_id(declared[1]) if declared is not None and has_inputs else _UNDECLARED])
+    return waiting, complete
+
+
+def _display_identity(scope: tuple[str, ...]) -> tuple[str, bool]:
+    """Code/registration identity only: never runs a waiting input probe."""
+    from hermes_cli import kanban_session_activity as _ksa
+
+    waiting, complete = waiting_identity()
     body = [_VERSION, list(scope), core_sha(),
             [[name, _code_id(fn)] for name, fn in sorted(_ksa._done_checks.items())], waiting]
     return hashlib.sha256(json.dumps(body, separators=(",", ":"), sort_keys=True).encode()).hexdigest(), complete
@@ -349,7 +369,7 @@ def prepare(scope: tuple[str, ...]) -> tuple | None:
         # counts that predate a closeout mutation outside the board fingerprint.
         token = _mutation.current(scope) if getattr(_ksa._revalidate.force_read, "scope", None) == scope else None
         local, full, wall, fp = _inputs_now(scope)
-        narrow = _narrow_now(scope, full, fp) if getattr(_holder_ctx, "active", False) else None
+        narrow = _narrow_now(scope, full) if fp is not None and getattr(_holder_ctx, "active", False) else None
     except Exception:  # health: allow BLE001 -- the read itself reports a board error
         log.debug("kanban annotation host inputs unavailable", exc_info=True)
         return None
@@ -454,19 +474,25 @@ def _holder_refresh_scope(scope: tuple[str, ...]) -> bool:
     renew = copy_age is not None and copy_age >= HOLDER_REFRESH_AGE_S
     kicked = _mutation.pending(scope)
     if copy is not None and not renew and not kicked:
-        _local, full, wall, fp = _inputs_now(scope)
-        if fp is not None and fp[0] == copy[0]:
-            return False
+        # [daveey] Inside the floor nothing refreshes either way: return before reading any input.
         if copy_age is not None and 0 <= copy_age < HOLDER_MOVED_FLOOR_S:
             return False
-        # [daveey] Exact inputs moved past the floor: refresh only for a substantive move (narrow key). An
-        # unchanged narrow key re-stamps the display ``verified_at`` (header only) and waits for the 20 s renewal.
-        published = header.get("narrow_key")
-        if published and _narrow_now(scope, full, fp) == published:
-            verified = header.get("verified_at")
-            if not isinstance(verified, (int, float)) or wall - verified >= NARROW_CONFIRM_S:
-                _disk.confirm_host(scope, published, wall)
-            return False
+        # Past the floor: refresh only for a substantive move (narrow key). An unchanged narrow key re-stamps the
+        # display ``verified_at`` (header only) and waits for the 20 s renewal. The narrow key needs no exact
+        # fingerprint (whose waiting-input probes cost more than it), so a known key answers alone.
+        published, narrow = header.get("narrow_key"), None
+        if published:
+            full, wall = _activity_now()
+            narrow = _narrow_now(scope, full)
+            if narrow == published:
+                verified = header.get("verified_at")
+                if not isinstance(verified, (int, float)) or wall - verified >= NARROW_CONFIRM_S:
+                    _disk.confirm_host(scope, published, wall)
+                return False
+        if not published or narrow is None:  # no narrow verdict: the exact fingerprint decides
+            _local, full, wall, fp = _inputs_now(scope)
+            if fp is not None and fp[0] == copy[0]:
+                return False
     if not _ksa._annotate_refresh_lock.acquire(blocking=False):
         return False  # a poll here is already reading (it publishes)
     # [daveey] An aging copy is renewed by a real read: the counts cache would answer the unchanged inputs with the

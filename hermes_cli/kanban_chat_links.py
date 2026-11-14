@@ -521,20 +521,14 @@ def _read_replica(path: Path, gateway: str,
     release is unverified, whose owner-written ``shepherd`` sibling was released because the card closed. It hid 19
     such hub cards from chat 20261026_170127_f07c32 that the ledger lists as ``unknown`` (David-MBP links_diff,
     2026-11-13). Each link now carries its own answer, as ``replica_cards`` says: only a released link drops it."""
-    from hermes_cli.kanban_activity_revision import SHADOW_TABLES, is_revision
+    from hermes_cli.kanban_activity_revision import SHADOW_TABLES
     from hermes_cli.kanban_session_activity import _board_content_key, cached_ro  # lazy: that module imports this one
     # [daveey] The link rows only change with the replica's tasks/task_chat_links content; a pull that only moves
     # ``pulled_at`` (every few seconds) re-reads the stamp, not the ~10k links. Rows are read-only to callers.
-    memo_key = (str(path), gateway, profile)
     content = _board_content_key(path, SHADOW_TABLES)
-    hit = _replica_rows.get(memo_key)
     with cached_ro(path) as conn:
         conn.row_factory = sqlite3.Row
-        # Only a trigger-backed revision vouches for the rows; a stat key (no counter) always reads.
-        rows = hit[1] if hit is not None and hit[0] == content and is_revision(content) else None
-        if rows is None:
-            rows = _read_replica_links(conn, gateway, profile)
-            _replica_rows[memo_key] = (content, rows)
+        rows = replica_link_rows(conn, path, gateway, profile, content)
         # Never memoised: a pulled heartbeat is bookkeeping, so ``content`` does not move for it, while the run's
         # newest liveness event is exactly what dates the card (review t_01a1d0f7c4cc4688).
         runs = read_runs(conn, gateway, profile)
@@ -548,6 +542,22 @@ def _read_replica(path: Path, gateway: str,
 
 # (replica path, gateway, profile) -> (content key, link rows) of the last ``_read_replica``.
 _replica_rows: dict[tuple[str, str, str], tuple[tuple, list[dict[str, Any]]]] = {}
+
+
+def replica_link_rows(conn: sqlite3.Connection, path: Path, gateway: str, profile: str,
+                      content: tuple) -> list[dict[str, Any]]:
+    """[daveey] This origin's unreleased link rows in replica ``path`` (``_read_replica_links`` on ``conn``, whose
+    ``row_factory`` must be ``sqlite3.Row``), memoised under ``content`` (the shadow's content key). Only a
+    trigger-backed revision vouches for the rows; a stat key (no counter) always reads. Shared with the annotation
+    holder's narrow key (``kanban_annotation_narrow``), so a shadow commit is read once for both."""
+    from hermes_cli.kanban_activity_revision import is_revision
+    memo_key = (str(path), gateway, profile)
+    hit = _replica_rows.get(memo_key)
+    if hit is not None and hit[0] == content and is_revision(content):
+        return hit[1]
+    rows = _read_replica_links(conn, gateway, profile)
+    _replica_rows[memo_key] = (content, rows)
+    return rows
 
 
 def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) -> list[dict[str, Any]]:
