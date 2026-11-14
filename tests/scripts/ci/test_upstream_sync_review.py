@@ -462,9 +462,9 @@ def test_nonempty_unparsed_remerge_diff_requires_review(monkeypatch, tmp_path):
 
     def unparsed_output(repo, *args):
         calls.append((repo, args))
-        return "unrecognized non-empty remerge output\n"
+        return subprocess.CompletedProcess(args, 0, "unrecognized non-empty remerge output\n", "")
 
-    monkeypatch.setattr(review, "_out", unparsed_output)
+    monkeypatch.setattr(review, "_git", unparsed_output)
     assert review.remerge_files(tmp_path, "a" * 40) == ["(unparsed remerge-diff)"]
     assert calls == [(tmp_path, ("show", "--remerge-diff", "--no-color", "--no-ext-diff", "--format=", "a" * 40))]
 
