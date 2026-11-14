@@ -6,7 +6,8 @@ row. A bystander (``remote_sweep_projection.compactable``) is never offered to a
 states still reach the observation ledger (a card linked later must keep main's ``first_seen``): a re-decoded
 row whose ``(ref, state)`` was not yet queued goes to ``Lane.pending``, which ``observe`` persists with the
 relevant cards. The table belongs to one ledger file; a second ledger path turns the lane off (full form, one
-cold re-read), a replaced ledger file re-reads so every terminal bystander is written to it.
+cold re-read), a replaced ledger file re-reads so every terminal bystander is written to it. The table also
+belongs to one ``me`` (the replica's ``meta.gateway``): a renamed gateway re-classifies every row.
 """
 from __future__ import annotations
 
@@ -50,6 +51,7 @@ class Lane:
         self.table = Table()
         self.home: tuple | None = None  # (ledger path, ledger file id) | _MULTI
         self.pending: list[tuple] = []  # (owner, key, summary) not yet written to the home ledger
+        self.me = None  # the gateway the table's rows were classified for
 
     @property
     def enabled(self) -> bool:
@@ -93,6 +95,11 @@ def scan(conn, rows, tag: str, me, decoded: dict, lane: Lane, summarize) -> list
     collide = {a for a, b in pairwise(ordered) if a == b}
     del ordered
     seen, cards, entries = set(), [], []
+    if lane.me != me:  # a bystander for the old name may be linked to this one: re-read and re-classify every row
+        lane.table.trusted = False  # its state hashes still hold, so unchanged terminal states are not re-queued
+        for ident in [ident for ident in decoded if ident[0] == tag]:
+            del decoded[ident]
+        lane.me = me
     old = lane.table
     for (owner, key, seq, _), row_hash in zip(canonical, hashes):
         ident = (tag, owner, key)

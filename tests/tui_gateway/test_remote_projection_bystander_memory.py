@@ -217,3 +217,21 @@ def test_observation_lane_keeps_bystanders_in_fixed_width_columns(tmp_path):
     with sqlite3.connect(ledger) as conn:  # bystander terminal states still reach the ledger, as on main
         refs = {ref for (ref,) in conn.execute("SELECT ref FROM observations")}
     assert refs == {f"hub/{_relevant(0)['key']}"} | {f"hub/{_bystander(i)['key']}" for i in range(50)}
+
+
+def test_bystander_linked_after_an_in_place_gateway_rename_is_observed(tmp_path):
+    # The replica's meta.gateway changes in place: a row that was a bystander for the old name and is linked to the
+    # new one must be re-classified at once (as main decodes every row), not stay compact until its seq moves.
+    card = _card("t_b", "chat_x", status="done", at=NOW - 60)
+    card["task"]["sessions"][0]["gw"] = "otherbox"
+    replica = _hub(tmp_path, [card])
+    ledger = tmp_path / "remote-notices.db"
+    remote._reset_for_tests()
+    assert obs.observe(replica, ledger, NOW) == {}
+    with sqlite3.connect(replica) as conn:
+        conn.execute("UPDATE meta SET v = 'otherbox' WHERE k = 'gateway'")
+        conn.execute("UPDATE meta SET v = '101' WHERE k IN ('cursor', 'head')")
+    fresh = obs.observe(replica, ledger, NOW + 5)
+    assert card["key"] in {key for (_gw, key, _state) in fresh}
+    (flight,) = obs._retained.values()
+    assert len(flight.lane.table) == 0 and flight.lane.me == "otherbox"
