@@ -124,6 +124,8 @@ def build_request_payload(
     adopt_managed_policy(agent)
     from agent.model_routing_request import validate_class_request
     if getattr(agent, "model_routing", None):
+        from agent.model_routing_runtime import reselect_class_credential
+        reselect_class_credential(agent)
         validate_class_request(agent, {
             "model": agent.model, "messages": api_messages, "tools": tools_for_api,
             "max_tokens": agent.max_tokens,

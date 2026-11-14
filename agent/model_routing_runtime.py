@@ -219,6 +219,22 @@ def refresh_class_responses_token(agent):
                                             reason='class_oauth_refresh')
 
 
+def reselect_class_credential(agent):
+    """[daveey] Re-adopt a subscription pool entry a rotation left unselected, before the next attempt.
+
+    A 429 that benches the last row for this model leaves ``pool.current()`` empty and the turn waits
+    (up to 600 s). A sibling row whose cooldown lapsed meanwhile is room, yet nothing reselected it, so
+    the pre-send check refused the retry as "no selected pool entry" (hub 2026-11-14 05:50Z)."""
+    metadata = getattr(agent, "model_routing", None)
+    pool = getattr(agent, "_credential_pool", None)
+    if not metadata or metadata.get("billing_group") != "subscription" or pool is None or pool.current():
+        return
+    entry = pool.select(model=agent.model)
+    if entry is not None and agent._swap_credential(entry) is not False:
+        logger.info("Class route re-selected pool entry %s for %s after a rotation left none",
+                    entry.label or entry.id[:8], agent.model)
+
+
 def verify_agent_class_credentials(agent):
     """Recheck the actual native credential immediately before client checkout."""
     metadata = getattr(agent, "model_routing", None)
@@ -243,12 +259,17 @@ def verify_class_runtime(runtime, metadata):
     pool = runtime.get("credential_pool")
     entry = pool.current() if pool else None
     if entry is None:
-        from agent.model_routing_unavailable import quota_unavailable
+        from agent.model_routing_unavailable import SubscriptionAuthUnavailable, auth_churned, quota_unavailable
+        model = metadata["selected_model"]
         if pool is not None and any(
             candidate.auth_type == "oauth" and candidate.runtime_api_key == runtime["api_key"]
             for candidate in pool.entries()
-        ) and (unavailable := quota_unavailable(pool, metadata["selected_model"])):
-            raise unavailable
+        ):
+            # [daveey] Same ladder as resolution: a rotated-off pool's own state types the refusal.
+            if unavailable := quota_unavailable(pool, model):
+                raise unavailable
+            if auth_churned(pool, model):
+                raise SubscriptionAuthUnavailable(metadata["selected_provider"], model)
         raise ModelRoutingError("Subscription OAuth credential is unavailable; no selected pool entry")
     if entry.auth_type != "oauth":
         raise ModelRoutingError("Subscription routing requires an OAuth credential, never a paid API key")
