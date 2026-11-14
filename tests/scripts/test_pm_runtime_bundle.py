@@ -9,12 +9,26 @@ import sys
 import pytest
 
 
-def _exercise_relocated_pm_runtime(tmp_path, monkeypatch):
-    from scripts.bundles import native
+def _isolate_home(tmp_path, monkeypatch):
+    """Move every home PM reads under *tmp_path*, the passwd account's included.
 
+    ``pm.environments.account_home_root`` asks the password database, not ``Path.home``, for the
+    account's ``~/.hermes`` and borrows its uv cache when that home is on tmp_path's filesystem
+    (run_tests.sh's ``env -i`` drops CI's ``HERMES_PM_ACCOUNT_SEED=0``). Whether a runner has that
+    home is outside the test, so pin the account home too: no real home is probed or borrowed.
+    """
+    import hermes_constants
+
+    monkeypatch.setattr(hermes_constants, "_account_home", lambda: tmp_path / "home")
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "tools"))
+
+
+def _exercise_relocated_pm_runtime(tmp_path, monkeypatch):
+    from scripts.bundles import native
+
+    _isolate_home(tmp_path, monkeypatch)
     uv = shutil.which("uv")
     assert uv, "the packaging test requires uv"
     root = tmp_path / "build"
@@ -95,10 +109,10 @@ def test_resident_pm_bypasses_windows_redirector_after_move(tmp_path, monkeypatc
 @pytest.mark.parametrize("poison", ["cwd", "global"])
 def test_pm_builder_ignores_ambient_uv_configuration(tmp_path, monkeypatch, poison):
     from pm import stage_manager_runtime
+    from pm.environments import account_home_root
 
-    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "tools"))
+    _isolate_home(tmp_path, monkeypatch)
+    assert account_home_root() is None
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "config"))
     monkeypatch.chdir(tmp_path)
