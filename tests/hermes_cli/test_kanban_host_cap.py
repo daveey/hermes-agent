@@ -271,10 +271,10 @@ def test_unspawnable_review_does_not_reserve_the_only_ready_slot(
     assert [task_id for task_id, *_ in res.spawned] == [ready_id]
 
 
-def test_unguarded_review_reserves_the_only_ready_slot(
+def test_urgent_review_wins_the_only_shared_slot(
     kanban_home, all_assignees_spawnable, monkeypatch,
 ):
-    """A dispatchable review card still receives the single shared slot."""
+    """A dispatchable urgent review wins by score, not an unconditional reservation."""
     import hermes_cli.config as cfgmod
 
     monkeypatch.setattr(
@@ -286,6 +286,8 @@ def test_unguarded_review_reserves_the_only_ready_slot(
     with kbc.connect() as conn:
         kb.create_task(conn, title="ready-now", assignee="alice")
         review_id = _park_in_review(conn, "review-now", "reviewer")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET priority=900 WHERE id=?", (review_id,))
         res = kbd.dispatch_once(
             conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=1,
         )

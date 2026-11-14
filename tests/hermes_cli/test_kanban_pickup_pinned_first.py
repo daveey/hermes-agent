@@ -92,10 +92,14 @@ def test_a_fresh_pin_with_no_wall_is_copied(gws, imports, monkeypatch):
     assert wn.pickup(worker.conn, budget=1) == [tid]
 
 
-def test_a_machine_pinned_card_is_picked_ahead_of_more_pool_cards_than_the_budget(gws, imports):
+@pytest.mark.parametrize("age_s", [0, 3600])
+def test_machine_pinned_wait_competes_with_pool_urgency(gws, imports, monkeypatch, age_s):
     hub, worker = gws
+    now = time.time()
+    with monkeypatch.context() as clock:
+        clock.setattr(time, "time", lambda: now - age_s)
+        pinned = support._hub_card(hub, title="pinned to this machine", priority=0, runs_on=PIN)
     pool = [support._hub_card(hub, title=f"pool {i}", priority=1000 - i, runs_on=["linux"]) for i in range(3)]
-    pinned = support._hub_card(hub, title="pinned to this machine", priority=0, runs_on=PIN)
     worker.round()
     worker.enter()
     replica = wn.open_replica(worker.conn)
@@ -105,8 +109,9 @@ def test_a_machine_pinned_card_is_picked_ahead_of_more_pool_cards_than_the_budge
                                      profile_exists=None, full_detail="pickup batch full this tick")
     finally:
         replica.close()
-    assert picked == [pinned, pool[0]]  # this machine's card first, then pool cards in their own order
-    assert pinned not in skips
+    expected = [pinned, pool[0]] if age_s else pool[:2]
+    assert picked == expected  # age protects pins; a fresh pin does not defeat explicit urgency
+    assert (pinned not in skips) == bool(age_s)
     worker.tick(max_spawn=2)
-    assert pinned in imports
-    assert _status(worker.conn, pinned) == "running"
+    assert (pinned in imports) == bool(age_s)
+    assert (_status(worker.conn, pinned) == "running") == bool(age_s)

@@ -192,7 +192,8 @@ def test_unavailable_matching_workers_do_not_override_current_holds(hub, state):
     assert "Not a placement problem" not in text
 
 
-def test_claim_duplicates_count_once_and_priority_donation_orders_queue(hub):
+@pytest.mark.parametrize("priority,ahead", [(100, 2), (1000, 3)])
+def test_claim_duplicates_count_once_and_priority_donation_orders_queue(hub, priority, ahead):
     from hermes_cli import kanban_label_backlog as klb
     tid = _seed(hub.conn, claims=1)
     claimed = hub.conn.execute("SELECT id FROM tasks WHERE title='claimed 0'").fetchone()[0]
@@ -200,10 +201,11 @@ def test_claim_duplicates_count_once_and_priority_donation_orders_queue(hub):
     waiter = _card(hub.conn, "urgent waiter", int(time.time()))
     with kb.write_txn(hub.conn):
         kb._append_event(hub.conn, claimed, "claimed", {"holder": "worker-3"})
-        hub.conn.execute("UPDATE tasks SET priority=100, status='todo' WHERE id=?", (waiter,))
+        hub.conn.execute("UPDATE tasks SET priority=?, status='todo' WHERE id=?", (priority, waiter))
         hub.conn.execute("INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)", (later, waiter))
     backlog = klb.read(hub.conn, tid, LABELS, machines={"worker-3"})
-    assert backlog["ahead"] == 3 and backlog["claimed_recent"] == 1
+    # Thirty-one minutes of age beats donated 100, but not donated 1000.
+    assert backlog["ahead"] == ahead and backlog["claimed_recent"] == 1
     assert "approximate, this board view" in klb.words(backlog)
 
 

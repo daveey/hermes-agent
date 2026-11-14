@@ -23,6 +23,8 @@ from hermes_cli.kanban_db_dispatch_queries import lane_rows
 @pytest.fixture
 def conn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home = tmp_path / ".hermes"
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
@@ -38,6 +40,7 @@ def _ready(conn, title, *, priority=0, created_at=None, parents=()):
                          initial_status="running")
     if created_at is not None:
         conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (created_at, tid))
+        conn.execute("UPDATE task_events SET created_at=? WHERE task_id=?", (created_at, tid))
         conn.commit()
     return tid
 
@@ -47,7 +50,7 @@ def _ids(rows):
 
 
 def test_ready_parent_with_waiting_child_dispatches_before_older_leaves(conn):
-    base = int(time.time()) - 3600
+    base = int(time.time()) - 3590
     old1 = _ready(conn, "old leaf 1", created_at=base)
     old2 = _ready(conn, "old leaf 2", created_at=base + 1)
     parent = _ready(conn, "newest parent", created_at=base + 2)
@@ -59,7 +62,7 @@ def test_ready_parent_with_waiting_child_dispatches_before_older_leaves(conn):
 
 
 def test_parent_inherits_waiting_childs_priority(conn):
-    base = int(time.time()) - 3600
+    base = int(time.time()) - 3590
     parent = _ready(conn, "p0 parent", priority=0, created_at=base + 5)
     leaf = _ready(conn, "p5 leaf", priority=5, created_at=base)
     kb.create_task(conn, title="p10 child", assignee="default", priority=10, parents=[parent])
@@ -69,15 +72,15 @@ def test_parent_inherits_waiting_childs_priority(conn):
 
 
 def test_explicit_priority_still_wins_over_waiting_child(conn):
-    base = int(time.time()) - 3600
+    base = int(time.time()) - 3590
     parent = _ready(conn, "p0 parent", created_at=base)
-    high = _ready(conn, "p5 leaf", priority=5, created_at=base + 1)
+    high = _ready(conn, "p100 leaf", priority=100, created_at=base + 1)
     kb.create_task(conn, title="p0 child", assignee="default", parents=[parent])
     assert _ids(lane_rows(conn, "ready"))[:2] == [high, parent]
 
 
 def test_list_tasks_default_order_matches_lane(conn):
-    base = int(time.time()) - 3600
+    base = int(time.time()) - 3590
     _ready(conn, "old leaf", created_at=base)
     parent = _ready(conn, "parent", created_at=base + 1)
     kb.create_task(conn, title="child", assignee="default", parents=[parent])
@@ -86,7 +89,7 @@ def test_list_tasks_default_order_matches_lane(conn):
 
 def test_queue_position_counts_the_dependent_order(conn):
     from hermes_cli import kanban_queue_position as kqp
-    base = int(time.time()) - 3600
+    base = int(time.time()) - 3590
     _ready(conn, "old leaf", created_at=base)
     _ready(conn, "old leaf 2", created_at=base + 1)
     parent = _ready(conn, "parent", created_at=base + 2)
@@ -96,7 +99,7 @@ def test_queue_position_counts_the_dependent_order(conn):
 
 def test_worker_node_candidates_put_waited_on_parent_first(conn):
     from hermes_cli import kanban_worker_node as wn
-    base = int(time.time()) - 3600
+    base = int(time.time()) - 3590
     leaf = _ready(conn, "old leaf", created_at=base)
     parent = _ready(conn, "parent", created_at=base + 1)
     kb.create_task(conn, title="child", assignee="default", parents=[parent])
