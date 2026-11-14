@@ -16,7 +16,7 @@ _ANSI_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": 
                 "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
 _ANSI_NUMERIC_RE = re.compile(
     r"x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})")
-# A quoted piece of a three-letter word is short; longer spans are never `let`.
+# Plain apostrophe pieces cannot shrink; escaped pieces are bounded after decoding.
 _SPAN_LIMIT = 40
 
 
@@ -75,8 +75,9 @@ def _unquoted_piece(command: str, pos: int) -> tuple[str | None, int]:
 def _double_quoted_piece(command: str, pos: int) -> tuple[str | None, int]:
     """Inside ``"…"`` a backslash quotes only ``" \\ $ ` newline``. An expansion stays in
     the text as ``$``/backtick, which no ``let`` holds."""
-    text, index, limit = "", pos, min(len(command), pos + _SPAN_LIMIT)
-    while index < limit:
+    # Bound decoded text, not source: arbitrarily many continuations disappear.
+    text, index = "", pos
+    while index < len(command) and len(text) <= 3:
         char = command[index]
         if char == '"':
             return text, index + 1
@@ -94,11 +95,16 @@ def _ansi_c_piece(command: str, pos: int) -> tuple[str | None, int]:
     """Decode a ``$'…'`` body starting at *pos* the way bash does for escapes that can
     spell a letter. Others (``\\cX``, unknown escapes) keep their backslash here, which no
     ``let`` holds either."""
-    out, index, limit = [], pos, min(len(command), pos + _SPAN_LIMIT)
-    while index < limit:
+    out, index, limit = [], pos, len(command)
+    truncated = False
+    while index < limit and len(out) <= 3:
         char = command[index]
         if char == "'":
             return "".join(out), index + 1
+        if truncated:
+            # NUL drops the rest of this piece, but escaped quotes do not close it.
+            index += 2 if char == "\\" else 1
+            continue
         if char != "\\" or index + 1 >= limit:
             out.append(char)
             index += 1
@@ -107,8 +113,14 @@ def _ansi_c_piece(command: str, pos: int) -> tuple[str | None, int]:
         if numeric:
             hexa = numeric.group(1) or numeric.group(2) or numeric.group(3)
             value = int(hexa, 16) if hexa else int(numeric.group(4), 8) & 0xFF
-            out.append(chr(value) if value <= 0x10FFFF else "\ufffd")
+            truncated = value == 0
+            if not truncated:
+                out.append(chr(value) if value <= 0x10FFFF else "\ufffd")
             index = numeric.end()
+            continue
+        if command.startswith("\\c@", index):
+            truncated = True
+            index += 3
             continue
         escaped = command[index + 1]
         out.append(_ANSI_SIMPLE.get(escaped, "\\" + escaped))

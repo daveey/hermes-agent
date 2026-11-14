@@ -16,8 +16,20 @@ from tools.shell_arith_sink import substitution_in_arithmetic
 from tools.shell_heredoc import output_reaches_shell
 from tools.shell_let_word import hidden_let_end
 
+# NUL truncates only its ANSI-C piece, not subsequent quoted/literal pieces.
+REVIEW_SINKS = [
+    r"$'let\0ignored' 'a[$(SCRIPT)]=1'",
+    r"$'le\x00ignored't 'a[$(SCRIPT)]=1'",
+    r"$'le\u0000ignored't 'a[$(SCRIPT)]=1'",
+    r"$'le\U00000000ignored't 'a[$(SCRIPT)]=1'",
+    r"$'le\c@ignored't 'a[$(SCRIPT)]=1'",
+    r"$'le\000ignored\'still ignored't 'a[$(SCRIPT)]=1'",
+    "$'le\\0" + "ignored" * 40 + "'t 'a[$(SCRIPT)]=1'",
+    '"l' + "\\\n" * 21 + 'et" \'a[$(SCRIPT)]=1\'',
+]
+
 # SCRIPT is an executable payload that touches a marker and prints 0.
-SINKS = [
+SINKS = REVIEW_SINKS + [
     r"\let 'a[$(SCRIPT)]=1'",
     r"'let' 'a[$(SCRIPT)]=1'",
     r'"let" "a[$(SCRIPT)]=1"',
@@ -64,6 +76,10 @@ PRINTED = [
 # Bash runs none of these: no word is `let` after quote removal, or none of its operands
 # holds a subscript substitution.
 DATA = [
+    r"$'let\0ignored'x 'a[$(SCRIPT)]=1' 2>/dev/null",
+    r"$'lex\0let' 'a[$(SCRIPT)]=1' 2>/dev/null",
+    r"$'letx\0' 'a[$(SCRIPT)]=1' 2>/dev/null",
+    r"$'le\0ignored' 'a[$(SCRIPT)]=1' 2>/dev/null",
     r"\letter 'a[$(SCRIPT)]=1' 2>/dev/null",
     r"'let'x 'a[$(SCRIPT)]=1' 2>/dev/null",
     r"'let x' 'a[$(SCRIPT)]=1' 2>/dev/null",
@@ -118,7 +134,7 @@ def test_double_quoted_let_text_is_printed_not_evaluated(tmp_path, shape):
 
 
 @pytest.mark.platforms("posix")
-@pytest.mark.parametrize("shape", SINKS[:6])
+@pytest.mark.parametrize("shape", SINKS[:len(REVIEW_SINKS) + 6])
 def test_lifecycle_guard_scans_the_hidden_let_payload(tmp_path, shape):
     script = tmp_path / "payload.sh"
     script.write_text("# padding\n" * 150000, encoding="utf-8")  # past the scan cap
