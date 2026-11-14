@@ -4,7 +4,7 @@ The list lives in its own auth.json section, ``disabled_credentials: {provider: 
 never on the pool rows. Every pool writer (rotation, exhaustion, refresh, the stale-writer merge, hub
 pulls) rewrites rows from its in-memory copy, so a flag stored on a row would be undone by the next
 flush from any process that loaded the pool before the user disabled it. Only
-:func:`set_credential_disabled` writes this section, under the auth-store lock.
+:func:`set_credential_disabled` and the relay write this section, under the auth-store lock.
 
 A record ``{"id", "label", "account", "fp", "src"}`` matches a row by any of:
 - ``id``: the row itself (survives token refreshes, which keep the id);
@@ -124,10 +124,13 @@ def _source_tokens(provider: str, source: str) -> set[str]:
 
 def _keys_from_records(records: Iterable[dict[str, Any]]) -> tuple:
     """``(ids, markers, records)``: ids and markers only say "something is disabled" cheaply; ``records``
-    holds one ``(id, label, account, fingerprint, borrowed source)`` tuple per record, matched one record at a time."""
+    holds one ``(id, label, account, fingerprint, borrowed source, scope)`` tuple per record."""
     recs = frozenset(
-        (str(r.get("id") or ""), "" if _generic(_norm_label(r.get("label"))) else _norm_label(r.get("label")),
-         _norm_label(r.get("account")), str(r.get("fp") or ""), str(r.get("src") or ""))
+        (str(r.get("id") or ""),
+         _norm_label(r.get("label")) if r.get("scope") == "manual:hub_minted" else
+         ("" if _generic(_norm_label(r.get("label"))) else _norm_label(r.get("label"))),
+         _norm_label(r.get("account")), str(r.get("fp") or ""), str(r.get("src") or ""),
+         str(r.get("scope") or ""))
         for r in records)
     recs = frozenset(t for t in recs if any(t))
     ids = frozenset(t[0] for t in recs if t[0])
@@ -188,13 +191,14 @@ def matches(entry: Any, keys: tuple) -> bool:
         return False
     entry_id = str(getattr(entry, "id", "") or "")
     label = _norm_label(getattr(entry, "label", ""))
-    label = "" if _generic(label) else label
     acct = account_of(entry) or ""
     fp = fingerprint_of(entry) or ""
     src = _borrowed_source(entry)
     # An env:VAR row keeps its id when the variable's value changes: there the record means that value.
     env_row = str(getattr(entry, "source", "") or "").startswith("env:")
-    for rid, rlabel, racct, rfp, rsrc in keys[2]:
+    for rid, rlabel, racct, rfp, rsrc, scope in keys[2]:
+        if scope and scope != str(getattr(entry, "source", "") or ""):
+            continue
         if racct and acct and racct != acct and not acct.startswith(racct + "/"):  # older records: workspace only
             continue
         if env_row and rfp and fp and rfp != fp:
@@ -218,7 +222,7 @@ def is_credential_disabled(provider: str, entry: Any) -> bool:
 def set_credential_disabled(provider: str, entry: Any, disabled: bool) -> bool:
     """Disable or re-enable *entry* in the ACTIVE store. Returns True when the section changed.
 
-    Enabling drops every record matching the entry's id or label. A record that lives only in the
+    Relay-owned records are never changed here: local intent is independent. A record only in the
     global root is not touched from a profile; :func:`disabled_by_root` tells the caller so.
     """
     from hermes_cli import auth as auth_mod
@@ -230,7 +234,7 @@ def set_credential_disabled(provider: str, entry: Any, disabled: bool) -> bool:
         if not isinstance(section, dict):
             section = {}
         records = _records(store, provider)
-        keys = _keys_from_records(records)
+        keys = _keys_from_records(r for r in records if r.get("source") != "hub-oauth-relay")
         hit = matches(entry, keys)
         if disabled:
             if hit:
@@ -246,7 +250,8 @@ def set_credential_disabled(provider: str, entry: Any, disabled: bool) -> bool:
         else:
             if not hit:
                 return False
-            records = [r for r in records if not matches(entry, _keys_from_records([r]))]
+            records = [r for r in records if r.get("source") == "hub-oauth-relay"
+                       or not matches(entry, _keys_from_records([r]))]
         if records:
             section[provider] = records
         else:
@@ -267,7 +272,8 @@ def forget_removed(provider: str, removed: Any, remaining: Iterable[Any]) -> boo
     with auth_mod._auth_store_lock():
         store = auth_mod._load_auth_store()
         records = _records(store, provider)
-        keep = [r for r in records if not matches(removed, _keys_from_records([r]))
+        keep = [r for r in records if r.get("source") == "hub-oauth-relay"
+                or not matches(removed, _keys_from_records([r]))
                 or any(matches(e, _keys_from_records([r])) for e in remaining)]
         if len(keep) == len(records):
             return False
@@ -313,7 +319,7 @@ def token_disabled(provider: str, *tokens: Optional[str]) -> bool:
     fps = {fingerprint_secret_value(t) for t in wanted}
     if any(matches(SimpleNamespace(id="", label="", access_token=t, extra={}), keys) for t in wanted):
         return True  # fingerprint or JWT account of a disabled record
-    if any(wanted & _source_tokens(provider, rsrc) for *_, rsrc in keys[2] if rsrc):
+    if any(wanted & _source_tokens(provider, rsrc) for _, _, _, _, rsrc, _ in keys[2] if rsrc):
         return True  # the current token of a disabled Claude Code login
     from agent.credential_pool import PooledCredential
     from hermes_cli import auth as auth_mod
