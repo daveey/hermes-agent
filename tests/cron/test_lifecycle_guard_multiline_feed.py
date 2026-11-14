@@ -66,6 +66,10 @@ def files(tmp_path) -> dict[str, str]:
         # A process substitution spanning lines.
         "python3 <(\ncat {py}\n)",
         "bash <(\ncat {sh}\n)",
+        # ... and one whose last command ends at the line break, not at `;` (#2393 follow-up).
+        "python3 <(cat {py}\n)",
+        "bash < <(cat {sh}\n)",
+        "python3 <(cat {py};\n)",
         # A quoted newline inside the group body is data, not a line break.
         "{{\necho 'a\nb'\ncat {py}\n}} | python3",
         # A heredoc body's `}` does not close the group around its command.
@@ -104,6 +108,8 @@ def test_multiline_compound_feeds_are_scanned(files, template):
         # A heredoc body's `{` does not open a group the command's `}` then closes.
         "cat <<EOF\n{{\nEOF\ncat {py}\n}} | python3",
         "cat <<EOF\n(\nEOF\ncat {py}\n) | python3",
+        # stdin comes from the clean file; the process substitution is only an argument.
+        "cat {clean} | python3 - <(cat {py} |\ncat)",
     ],
 )
 def test_multiline_bodies_without_a_feed_stay_allowed(files, template):
