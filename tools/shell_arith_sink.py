@@ -49,12 +49,9 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
     even for benign producers. Unmasked literal bodies are scanned as programs;
     only the caller may mask a proven-inert body.
     """
-    if _depth >= 32:
-        return True
-    if "$(" not in command and not any(mark in command for mark in ("'", '"', "`")):
-        return False
-    if "$(" in command and _INTEGER_DECLARATION_RE.search(command):
-        return True
+    quick = _quick_result(command, _depth)
+    if quick is not None:
+        return quick
     closes = [m.start() for m in re.finditer(r"\]\]", command)]
     operators = [m.start() for m in _INT_OPERATOR_RE.finditer(command)]
     pending = []
@@ -116,6 +113,16 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
             pos = start
     # Callers also pass opener-only command units; queued bodies are not quote errors.
     return backtick_open or any(frame[3] for frame in stack)
+
+
+def _quick_result(command: str, depth: int) -> bool | None:
+    if depth >= 32:
+        return True
+    if "$(" not in command and not any(mark in command for mark in ("'", '"', "`")):
+        return False
+    if "$(" in command and _INTEGER_DECLARATION_RE.search(command):
+        return True
+    return None
 
 
 def _skip_data(command, token, start, pos, quoted, kind, pending, date_exempt, depth) -> int | None:
