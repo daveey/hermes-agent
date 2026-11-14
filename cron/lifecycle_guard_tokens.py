@@ -28,7 +28,8 @@ def _iter_command_token_lists(command: str, *, _nesting: int = 0) -> Iterator[li
     of its own (``python3 -<f.py``), as in the shell."""
     if _nesting >= MAX_SUBSTITUTION_DEPTH:
         raise SubstitutionNestingLimit('substitution nesting limit reached')
-    command = strip_shell_comments(command).replace("\\\n", "")
+    # Separate nested quote frames before any flat comment/quote preprocessing.
+    # A quoted hash inside $(...) is data even inside an outer double quote.
     outer, bodies = separate_substitutions(command)
     for body in bodies:
         yield from _iter_command_token_lists(body, _nesting=_nesting + 1)
@@ -43,6 +44,7 @@ def _iter_command_token_lists(command: str, *, _nesting: int = 0) -> Iterator[li
 
 def _iter_plain_token_lists(command: str) -> Iterator[list[str]]:
     """Tokenize without evaluating or separating any expansion."""
+    command = strip_shell_comments(command).replace("\\\n", "")
     normalized = normalize_ansi_c_quotes(command)
     # Normalization helps shlex with Bash quoting, but must not erase evidence
     # recovered by the original physical-line fallback (the line splitter has
