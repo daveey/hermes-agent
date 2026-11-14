@@ -288,6 +288,56 @@ def test_aux_task_base_url_override_never_receives_the_entry_origin_key(_isolate
     assert POOLED in {e.access_token for e in pool_for_aux_provider(provider, "myep", load_pool, OLD).entries()}
 
 
+NEW_A, NEW_B = "sk-new...aaaa", "sk-new...bbbb"
+
+
+@pytest.mark.parametrize("provider", ["custom:myep", "myep"])
+def test_aux_429_on_a_base_url_override_rotates_the_row_bound_to_that_address(_isolate_hermes_home, monkeypatch,
+                                                                               provider):
+    """Credential recovery is bound to where the failed request went, through the real ladder: a 429
+    from the task's NEW override benches the NEW row that sent it and rotates to its NEW sibling,
+    never reading the entry's OLD-origin view (which holds neither key)."""
+    from types import SimpleNamespace
+
+    from openai.resources.chat.completions import Completions
+
+    from agent import auxiliary_client as ac
+    from agent.credential_pool import AUTH_TYPE_API_KEY, SOURCE_MANUAL, PooledCredential, load_pool
+    _entry()
+    _add_row()
+    for priority, (row_id, key) in enumerate((("newa01", NEW_A), ("newb01", NEW_B)), start=1):
+        load_pool("myep").add_entry(PooledCredential(
+            provider="myep", id=row_id, label=row_id, auth_type=AUTH_TYPE_API_KEY, priority=priority,
+            source=SOURCE_MANUAL, access_token=key, base_url=NEW))
+    _set(auxiliary={"compression": {"provider": provider, "model": "m", "base_url": NEW}})
+    monkeypatch.setattr("agent.auxiliary_rate_limit_backoff.rate_limit_wait", lambda *_a, **_k: 0.0)
+    for name in ("_try_configured_fallback_chain", "_try_main_fallback_chain", "_try_payment_fallback"):
+        monkeypatch.setattr(ac, name, lambda *_a, **_k: (None, None, ""))
+    sent = []
+
+    class _RateLimited(Exception):
+        status_code = 429
+
+    def _create(self, **kwargs):
+        sent.append((str(self._client.base_url).rstrip("/"), self._client.api_key))
+        if self._client.api_key == NEW_B:
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content="ok", tool_calls=None), finish_reason="stop")], usage=None, model="m")
+        raise _RateLimited("Error code: 429 - rate limit exceeded, retry shortly")
+
+    monkeypatch.setattr(Completions, "create", _create)
+    ac._client_cache.clear()
+
+    resp = ac.call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
+
+    assert resp.choices[0].message.content == "ok"
+    assert sent == [(NEW, NEW_A), (NEW, NEW_A), (NEW, NEW_B)]
+    rows = {r["id"]: r for r in _stored_rows("myep")}
+    assert rows["newa01"].get("last_status") == "exhausted"
+    assert rows["newb01"].get("last_status") != "exhausted"
+    assert rows["row001"].get("last_status") != "exhausted"
+
+
 def test_resolving_a_same_named_entry_never_moves_the_builtin_pool_to_the_entry_host(_isolate_hermes_home, monkeypatch):
     """A built-in's manual row with no recorded address belongs to the built-in's own address: a
     ``providers.deepseek`` proxy entry neither stamps it with the proxy URL nor sends it there."""

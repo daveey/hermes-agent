@@ -78,6 +78,44 @@ async def test_native_recovery_resolves_route_owners_off_the_loop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_native_recovery_primes_adapter_routing_cache_on_the_loop(monkeypatch):
+    """Route resolution runs in a worker thread, but adapter caches are loop-owned: priming must
+    stay on the event loop thread and finish before the recovered sessions are bound."""
+    import gateway.session_detached as detached
+    import gateway.session_native_recovery_routes as recovery_routes
+    from gateway.run_runtime import recover_profile_native_sessions
+    monkeypatch.setattr(detached, 'recover_detached_sessions', lambda authority, pending: [])
+    monkeypatch.setattr(recovery_routes, 'recovered_native_source',
+                        lambda runner, authority, entry, owner: entry.origin)
+    calls = []
+
+    class _Adapter:
+        def __init__(self):
+            self.primed = []
+
+        def prime_routing_cache(self, event):
+            calls.append(('prime', threading.get_ident()))
+            self.primed.append(event.source)
+
+    adapter = _Adapter()
+
+    class _PrimingAuthority(_Authority):
+        async def recover_native_sessions(self, bindings):
+            calls.append(('recover', threading.get_ident()))
+            return await super().recover_native_sessions(bindings)
+
+    authority = _PrimingAuthority([{'target_session_id': 'root', 'status': 'queued'}], [])
+    runner = _runner([])
+    runner._adapter_for_source = lambda origin: adapter
+    loop_thread = threading.get_ident()
+
+    assert await recover_profile_native_sessions(runner, authority) == {}
+
+    assert adapter.primed == ['origin-a']
+    assert calls == [('prime', loop_thread), ('recover', loop_thread)]
+
+
+@pytest.mark.asyncio
 async def test_native_recovery_skips_route_scan_when_nothing_is_pending(monkeypatch):
     import gateway.session_detached as detached
     from gateway.run_runtime import recover_profile_native_sessions
