@@ -239,8 +239,7 @@ def _board_file(path: Path) -> bool:
         return False
 
 
-def paths() -> list[Path]:
-    root = capacity.policy_root()
+def _installation_boards(root: Path) -> list[Path]:
     found = []
     # Only ENOENT is absence (``_missing``): an unreadable directory raises
     # instead of silently dropping every board under it.
@@ -253,6 +252,17 @@ def paths() -> list[Path]:
         from hermes_cli import kanban_db as kb
         found.extend(child / 'kanban.db' for child in boards.iterdir()
                      if kb._BOARD_SLUG_RE.match(child.name) and _board_file(child / 'kanban.db'))
+    return found
+
+
+def paths() -> list[Path]:
+    root = capacity.policy_root()
+    found = _installation_boards(root)
+    profiles = root / 'profiles'
+    if not _missing(profiles):
+        for profile in profiles.iterdir():
+            if profile.is_dir():
+                found.extend(_installation_boards(profile))
     directory = root / 'worker-resources' / 'boards'
     if not _missing(directory):
         for record in directory.iterdir():
@@ -277,4 +287,4 @@ def paths() -> list[Path]:
                     raise
                 continue  # read-only: register() retires it under the fence
             found.append(Path(raw))
-    return [path for path in found if _account_board(path)]
+    return list(dict.fromkeys(path for path in found if _account_board(path)))

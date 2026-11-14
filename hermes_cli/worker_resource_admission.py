@@ -100,7 +100,7 @@ def occupied_count_for_host(echo=None, *, claimant=None) -> int | None:
     from hermes_cli import machine_metrics
     from hermes_cli.worker_account_boards import paths
     active_owners = set()
-    active = machine_metrics.active_card_runs(exclude=echo, owner_output=active_owners, extra_paths=paths())
+    active = machine_metrics.active_card_runs(exclude=echo, owner_output=active_owners, board_paths=paths())
     if active is None:
         return None
     owners = {}

@@ -163,7 +163,8 @@ def test_census_wiring_and_unknown_stays_reserved(env, monkeypatch):
     from hermes_cli import machine_metrics
     home, pool, boot, db = env
     monkeypatch.setattr('hermes_cli.worker_account_boards.paths', list)
-    def fake_active(exclude=None, owner_output=None, extra_paths=None):
+    def fake_active(exclude=None, owner_output=None, board_paths=None):
+        assert board_paths == []
         owner_output.add((str(db.resolve()), 't1'))
         return 1
     monkeypatch.setattr(machine_metrics, 'active_card_runs', fake_active)

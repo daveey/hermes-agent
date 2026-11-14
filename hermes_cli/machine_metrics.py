@@ -118,7 +118,8 @@ def table_columns(db, table: str) -> set:
     return set(row[0].split("\x1f")) if row and row[0] else set()
 
 
-def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_output=None, extra_paths=()) -> Optional[int]:
+def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_output=None, extra_paths=(),
+                     board_paths=None) -> Optional[int]:
     """All profiles share the kanban root. Count its execution boards, not replicas.
 
     Unreadable/schema-unknown boards invalidate the whole sample. Conservative
@@ -127,14 +128,15 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_outpu
     ``exclude`` (final admission only, a :class:`kanban_grant_echo.GrantEcho`): on the board whose file identity is
     ``exclude.db_identity``, the ONE row that is still exactly the echo of the claimer's own unused grant is not
     counted (review F5); it is re-proven here on this read connection, and more than one match fails closed.
-    ``detail`` receives ``{"excluded": n}``.
+    ``detail`` receives ``{"excluded": n}``. ``board_paths`` is an authoritative
+    inventory for account worker admission; no current-home discovery is added.
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_boards import named_board_db_files
 
     try:
-        default = kb.kanban_home() / "kanban.db"
-        paths = [default, *(p for _, p in named_board_db_files()), *extra_paths]
+        default = kb.kanban_home() / "kanban.db" if board_paths is None else None
+        paths = [default, *(p for _, p in named_board_db_files()), *extra_paths] if board_paths is None else board_paths
         total = excluded = 0
         owners = set()
         seen = set()
