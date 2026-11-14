@@ -867,12 +867,21 @@ def test_advisory_age_boundary_10000_ms_is_fresh_and_the_locked_read_keeps_15000
     """Pre-lease: 10 s (15 s minus the lease headroom). The locked gate reads the same file and accepts up to 15 s."""
     conn, home = board
     configure(home)
-    advisory(home, age_ms=9_900)
+    # Freeze only the admission clock: task creation or runner descheduling must not
+    # consume a 100 ms margin before the pre-lease read. Exercise the exact bounds.
+    now = int(time.time())
+    monkeypatch.setattr(ka, "_now", lambda: now)
+    mm.record_hub_cpu_sample({"cpu_busy_pct": 10.0, "cpu_busy_window_ms": 1000,
+                              "cpu_busy_sample_end_ms": now * 1000 - 10_000}, root=home)
     t = task(conn)
     assert kb.claim_task(conn, t) is not None
     assert ka.ADVISORY_MAX_AGE_MS - ka.PRELEASE_HEADROOM_MS == 10_000
-    advisory(home, age_ms=14_000)  # too old to take a lease, still fresh for the locked read
+    now += 0.001
+    assert ka.sampler_sample(10_000) is None
+    now = int(now) + 5  # same sample, exactly 15 s old: still fresh for the locked read
     assert ka.sampler_sample() is not None and ka.sampler_sample(10_000) is None
+    now += 0.001
+    assert ka.sampler_sample() is None
 
 
 @pytest.mark.parametrize("review", [False, True])
