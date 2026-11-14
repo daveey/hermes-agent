@@ -74,6 +74,70 @@ def pytest_unconfigure(config):
     assert "Timeout (" in output and "in blocked_shutdown" in output, output
 
 
+@pytest.mark.parametrize("mode", ["sessionfinish", "captured-stderr", "repeat"])
+def test_sessionfinish_watchdog_survives_blocked_hook(tmp_path, monkeypatch, mode):
+    monkeypatch.setattr(launch, "_fork_server_for_run", lambda root: None)
+    test = tmp_path / "test_pass.py"
+    test.write_text("def test_pass():\n    assert True\n", encoding="utf-8")
+    # A wrapper's post-yield arm runs after the diagnostic sessionfinish hook,
+    # but before unconfigure can rearm it. Capture is deliberately left active
+    # in one case: neither markers nor watchdog output may depend on fd 2.
+    (tmp_path / "conftest.py").write_text('''
+import os
+import threading
+import pytest
+from scripts import pytest_exit_diagnostics as diagnostics
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_sessionfinish(session, exitstatus):
+    yield
+    if CAPTURE:
+        session.config.pluginmanager.getplugin("capturemanager").resume_global_capture()
+        os.write(2, b"ordinary-stderr-is-captured\\n")
+    diagnostics._mark("blocked-hook-enter")
+    blocked_sessionfinish()
+
+def blocked_sessionfinish():
+    threading.Event().wait()
+'''.replace("CAPTURE", repr(mode == "captured-stderr")), encoding="utf-8")
+    env = build_subprocess_env()
+    env["HERMES_HOME"] = str(tmp_path / "home")
+    env["TMPDIR"] = str(tmp_path)
+    proc, _ = launch.start_pytest(
+        test, ["-p", PLUGIN, "-o", "exit_diagnostics_delay=0.1", "-q"],
+        ROOT, env, str(tmp_path),
+    )
+    captured = []
+    stacks_seen = threading.Event()
+    required = 2 if mode == "repeat" else 1
+
+    def read_output():
+        stacks = 0
+        for line in proc.stdout:
+            captured.append(line)
+            if "in blocked_sessionfinish" in line:
+                stacks += 1
+                if stacks >= required:
+                    stacks_seen.set()
+
+    reader = threading.Thread(target=read_output)
+    reader.start()
+    try:
+        assert stacks_seen.wait(15), "".join(captured)
+        assert proc.poll() is None
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+        reader.join(timeout=10)
+        proc.stdout.close()
+    assert not reader.is_alive()
+    output = "".join(captured)
+    assert "blocked-hook-enter" in output, output
+    assert output.count("Timeout (") >= required, output
+    assert "unconfigure-enter" not in output, output
+    assert "ordinary-stderr-is-captured" not in output, output
+
+
 @pytest.mark.parametrize("succeeds", [True, False])
 def test_plugin_preserves_normal_pytest_exit(tmp_path, monkeypatch, succeeds):
     monkeypatch.setattr(launch, "_fork_server_for_run", lambda root: None)
