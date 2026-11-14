@@ -1065,6 +1065,8 @@ def _settle_stale_claims(states: dict, path, ledger) -> int:
     swept reason=delivered after 9eb41135c6). A live holder, a card still in that state (the re-offer path owns
     it) and a card missing from the replica (partial sync) are left alone. Never raises.
     """
+    from tui_gateway.remote_sweep_projection import CompactTask
+
     try:
         conn = _ledger(ledger)
         try:
@@ -1078,7 +1080,12 @@ def _settle_stale_claims(states: dict, path, ledger) -> int:
                     continue
                 if _holder_is_me(row["holder_pid"]) or _holder_alive(row["holder_pid"], row["holder_start"]):
                     continue
-                profile, notice_id = _stale_notice_id(row, current[1])
+                task = current[1]
+                if isinstance(task, CompactTask):  # [daveey] a bystander row keeps no sessions: read them back
+                    task = task.load(path)
+                    if task is None:
+                        continue  # the row moved since this snapshot: the next sweep settles it from its own
+                profile, notice_id = _stale_notice_id(row, task)
                 swept_key = (str(path), profile, str(row["session"]), notice_id)
                 with conn:
                     cur = conn.execute(
