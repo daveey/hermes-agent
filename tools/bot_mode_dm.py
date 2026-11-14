@@ -943,7 +943,10 @@ def _persist_reply_when_done(proc_id: str, agent: Any) -> bool:
             logger.warning("message_agent: could not persist the reply of %s into session %s: %s",
                            proc_id, session_id, exc)
 
-    threading.Thread(target=_run, name=f"message-agent-reply-{proc_id}", daemon=True).start()
+    # The spool is profile-local; the watcher must retain the sender's scope after its turn exits.
+    from contextvars import copy_context
+    threading.Thread(target=copy_context().run, args=(_run,),
+                     name=f"message-agent-reply-{proc_id}", daemon=True).start()
     return True
 
 
