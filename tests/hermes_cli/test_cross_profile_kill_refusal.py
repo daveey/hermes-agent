@@ -21,20 +21,30 @@ from pathlib import Path
 import pytest
 
 from gateway.status import recorded_gateway_home_conflicts
+from tests.waiting import wait_until
 
 
 def _spawn_gateway_lookalike(bin_dir: Path, lock_path: Path) -> subprocess.Popen:
-    """Real child process whose argv matches the gateway runtime matcher."""
+    """Real child process whose argv matches the gateway runtime matcher.
+
+    Returns only once the child HOLDS the flock. ``open(..., 'a+')`` creates the lock file before
+    ``flock`` runs, so waiting for the file to exist let a CPU-starved child be caught in between:
+    the lock read as inactive and ``stop_profile_gateway`` returned False. The child touches a
+    ready file after ``flock`` succeeds and the parent waits for that instead.
+    """
     bin_dir.mkdir(parents=True, exist_ok=True)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    ready_path = bin_dir / f"{lock_path.parent.name}-lookalike.ready"
+    ready_path.unlink(missing_ok=True)
     script = bin_dir / "hermes"
     if sys.platform == "win32":
-        body = "import time\ntime.sleep(120)\n"
+        body = f"import time\nopen({str(ready_path)!r}, 'w').close()\ntime.sleep(120)\n"
     else:
         body = (
             "import fcntl, time\n"
             f"fh = open({str(lock_path)!r}, 'a+')\n"
             "fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            f"open({str(ready_path)!r}, 'w').close()\n"
             "time.sleep(120)\n"
         )
     script.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
@@ -46,11 +56,18 @@ def _spawn_gateway_lookalike(bin_dir: Path, lock_path: Path) -> subprocess.Popen
     proc = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and not lock_path.exists():
+
+    def _ready() -> bool:
         if proc.poll() is not None:
             raise RuntimeError("gateway lookalike died at startup")
-        time.sleep(0.05)
+        return ready_path.exists()
+
+    try:
+        wait_until(_ready, timeout=60.0, what="gateway lookalike to hold its flock")
+    except BaseException:
+        proc.kill()
+        proc.wait(timeout=10)
+        raise
     return proc
 
 
