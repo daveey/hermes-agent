@@ -131,6 +131,9 @@ async def test_native_recovery_binds_only_routes_with_pending_owners(monkeypatch
         {'target_session_id': 'queued-root', 'status': 'queued'},
         {'target_session_id': 'unknown-root', 'status': 'unknown'},
     ], [])
+    # Route selection is under test; provenance's DB query has separate coverage.
+    monkeypatch.setattr('gateway.session_native_recovery_routes.recovered_native_source',
+                        lambda runner, authority, entry, owner: entry.origin)
     owners = {'queued-tip': 'queued-root', 'unknown-tip': 'unknown-root', 'idle-tip': 'idle-root'}
     monkeypatch.setattr(authority, 'logical_owner', owners.__getitem__)
     entries = [SimpleNamespace(session_id=sid, origin=sid) for sid in owners]
