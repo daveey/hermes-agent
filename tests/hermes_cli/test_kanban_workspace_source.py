@@ -606,6 +606,50 @@ def test_resolve_refuses_source_card_when_disabled(conn, monkeypatch):
     assert (err.value.code, err.value.scope, err.value.evidence["manifest_revision"]) == ("source_disabled", "host", 1)
 
 
+@pytest.mark.parametrize("mode", ["materialized", "holder_reuse"])
+def test_materialized_event_names_current_holder_and_grant_source(conn, mode):
+    from hermes_cli import kanban_source_dispatch as dispatch
+    from hermes_cli.kanban_source_resolver import ResolvedSource
+    tid = kb.create_task(conn, title="source event", assignee="worker")
+    assert kb.claim_task(conn, tid)
+    claimed = kb.get_task(conn, tid)
+    assert claimed is not None
+    own = dispatch._me(conn)
+    previous = "previous-worker" if mode == "materialized" else own
+    snapshot = kws.SourceSnapshot(manifest(manifest_revision=7), kws.Custody(previous, "published", 7))
+    # A reused local copy may carry only its path/branch; the grant owns publication metadata.
+    source = ResolvedSource("/source/task", "wt/t_1", None, None, mode)
+    dispatch.materialized_event(conn, claimed, snapshot, source)
+    payload = json.loads(conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='workspace_source_materialized'", (tid,)
+    ).fetchone()[0])
+    assert payload["holder"] == own
+    assert payload["prev_holder"] == previous
+    assert {key: payload[key] for key in ("repository", "commit", "manifest_revision", "source_kind")} == {
+        "repository": "acme/widget", "commit": C1, "manifest_revision": 7, "source_kind": "task_worktree"}
+    assert payload["run_uid"] == sync.run_uid(conn, claimed.current_run_id)
+    assert payload["path"] == source.path and payload["mode"] == mode
+
+
+@pytest.mark.parametrize("snapshot_kind", ["no_snapshot", "no_custody", "custody_only"])
+def test_materialized_event_without_manifest_keeps_known_metadata(conn, snapshot_kind):
+    from hermes_cli import kanban_source_dispatch as dispatch
+    from hermes_cli.kanban_source_resolver import ResolvedSource
+    tid = kb.create_task(conn, title="unpublished source", assignee="worker")
+    custody_value = kws.Custody("previous", "retained", 3) if snapshot_kind == "custody_only" else None
+    snapshot = None if snapshot_kind == "no_snapshot" else kws.SourceSnapshot(None, custody_value)
+    source = ResolvedSource("/source/task", "wt/t_1", None, None, "holder_reuse")
+    dispatch.materialized_event(conn, SimpleNamespace(id=tid), snapshot, source)
+    payload = json.loads(conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='workspace_source_materialized'", (tid,)
+    ).fetchone()[0])
+    assert payload["holder"] == dispatch._me(conn)
+    assert payload["prev_holder"] == ("previous" if custody_value else None)
+    assert payload["manifest_revision"] == (3 if custody_value else None)
+    assert payload["repository"] is None and payload["commit"] is None and payload["source_kind"] is None
+    assert payload["run_uid"] is None
+
+
 def test_refusal_codes_scoped():
     assert kws.WorkspaceSourceRefusal("materialize_timeout").scope == "host"  # Q3
     for code in ("remote_drift", "remote_branch_missing", "manifest_invalid", "custody_source_missing"):

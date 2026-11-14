@@ -92,10 +92,17 @@ def materialized_event(conn: sqlite3.Connection, claimed: Any, snapshot: Any, so
     from hermes_cli import kanban_db as kb
     run_id = getattr(claimed, "current_run_id", None)
     row = conn.execute("SELECT uid FROM task_runs WHERE id = ?", (run_id,)).fetchone() if run_id else None
-    holder = snapshot.custody.source_holder if snapshot.custody is not None else None
+    custody = snapshot.custody if snapshot is not None else None
+    payload = source.event_payload(holder=_me(conn), run_uid=row[0] if row else None)
+    payload["prev_holder"] = custody.source_holder if custody is not None else None
+    if snapshot is not None and snapshot.manifest_value is not None:
+        manifest = snapshot.manifest()
+        payload.update(repository=manifest.full_name, commit=manifest.commit,
+                       manifest_revision=manifest.manifest_revision, source_kind=manifest.source_kind)
+    elif custody is not None:
+        payload["manifest_revision"] = custody.manifest_revision
     with kb.write_txn(conn):
-        kb._append_event(conn, claimed.id, "workspace_source_materialized",
-                         source.event_payload(holder=holder, run_uid=row[0] if row else None), run_id=run_id)
+        kb._append_event(conn, claimed.id, "workspace_source_materialized", payload, run_id=run_id)
 
 
 def _revision(exc: WorkspaceSourceRefusal) -> Optional[int]:

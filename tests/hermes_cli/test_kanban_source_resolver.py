@@ -128,7 +128,7 @@ def test_materialize_exact_branch_and_sha(world):
     out = resolve(world, conn, cfg, snap(world))
     clone = world.homes["worker-2"].clone
     assert (out.mode, out.branch, out.commit, out.manifest_revision) == ("materialized", BRANCH, world.tip, 1)
-    assert out.path == str(clone.resolve() / ".worktrees" / TASK)
+    assert out.path == str(clone.resolve().parent / ".worktrees" / str(REPO_ID) / TASK)
     assert git(out.path, "rev-parse", "HEAD") == world.tip
     assert git(out.path, "symbolic-ref", "HEAD") == f"refs/heads/{BRANCH}"
     assert git(clone, "rev-parse", f"refs/hermes/source/{TASK}") == world.tip
@@ -140,6 +140,20 @@ def test_materialize_exact_branch_and_sha(world):
         "repository": "acme/widget", "branch": BRANCH, "commit": world.tip, "manifest_revision": 1, "path": out.path,
         "source_kind": "task_worktree", "mode": "materialized", "holder": "hub", "run_uid": "r2"}
     assert payload["hostname"]
+
+
+def test_materialized_worktree_cannot_inherit_clone_build_config(world):
+    conn, cfg = use_home(world, "worker-2")
+    clone = world.homes["worker-2"].clone
+    clone_head = commit(clone, "config.nims", 'switch("path", "src")')
+    out = resolve(world, conn, cfg, snap(world))
+    path = Path(out.path).resolve()
+    # Tools such as Nim discover config by walking ancestors, independent of Git's worktree boundary.
+    inherited = [parent / "config.nims" for parent in path.parents if (parent / "config.nims").exists()]
+    assert inherited == []
+    assert not path.is_relative_to(clone.resolve())
+    assert git(path, "rev-parse", "HEAD") == world.tip
+    assert git(clone, "rev-parse", "HEAD") == clone_head
 
 
 def test_stale_tracking_ref_is_never_read(world):
@@ -223,7 +237,7 @@ def test_remote_drift_is_card_scope(world):
     git(world.author, "push", "-q", "origin", BRANCH)
     err = refusal(lambda: resolve(world, conn, cfg, snap(world)))
     assert (err.code, err.scope) == ("remote_drift", "card")
-    assert not (world.homes["worker-2"].clone / ".worktrees" / TASK).exists()
+    assert not (world.homes["worker-2"].clone.parent / ".worktrees" / str(REPO_ID) / TASK).exists()
 
 
 def test_remote_branch_missing_is_card_scope(world):
@@ -338,9 +352,20 @@ def test_live_checkout_refused_as_clone(world):
 
 def test_occupied_path_refused(world):
     conn, cfg = use_home(world, "worker-2")
-    (world.homes["worker-2"].clone / ".worktrees" / TASK).mkdir(parents=True)
+    (world.homes["worker-2"].clone.parent / ".worktrees" / str(REPO_ID) / TASK).mkdir(parents=True)
     err = refusal(lambda: resolve(world, conn, cfg, snap(world)))
     assert (err.code, err.scope) == ("occupied_path", "host")
+
+
+def test_uncreated_destination_reserved_by_other_task_refused(world):
+    from hermes_cli import kanban_db_workspace as kbw
+    conn, cfg = use_home(world, "worker-2")
+    target = world.homes["worker-2"].clone.parent / ".worktrees" / str(REPO_ID) / TASK
+    other = kb.create_task(conn, title="reserved", assignee="worker")
+    kbw.set_workspace_path(conn, other, str(target))
+    err = refusal(lambda: resolve(world, conn, cfg, snap(world)))
+    assert (err.code, err.scope) == ("occupied_path", "host")
+    assert not target.exists()
 
 
 def test_destination_claimed_by_other_task_refused(world):

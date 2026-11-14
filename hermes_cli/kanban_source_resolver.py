@@ -141,7 +141,9 @@ def materialize(conn: sqlite3.Connection, task_id: str, manifest: Manifest, cfg:
             raise WorkspaceSourceRefusal("diverged_local_branch", f"local {manifest.branch} {local} is not an "
                                          f"ancestor of {manifest.commit}")
         bound.git(clone.path, "update-ref", manifest.branch, manifest.commit, local)
-    target = str(Path(clone.path) / ".worktrees" / task_id)
+    # A nested checkout inherits ancestor build configuration (e.g. Nim's config.nims)
+    # from the clone's unrelated HEAD. Keep new trees beside, never inside, the clone.
+    target = str(Path(clone.path).parent / ".worktrees" / str(manifest.repository_id) / task_id)
     if Path(target).exists():
         raise WorkspaceSourceRefusal("occupied_path", f"{target} already exists")
     if (other := _occupied_by_other_task(conn, task_id, target)) is not None:
