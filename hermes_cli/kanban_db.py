@@ -2501,7 +2501,7 @@ def complete_task(
         return False
     from hermes_cli.kanban_metadata_files import discard_on_error
     staged: list[Path] = []
-    with discard_on_error(staged), write_txn(conn):
+    with _prestaged(conn, task_id, metadata), discard_on_error(staged), write_txn(conn):
         require_review(conn, task_id, expected_run_id, placement_settled=placement_settled)
         if not _parents_satisfied(conn, task_id):
             return False
@@ -2624,7 +2624,7 @@ def _substantive_text(value: Optional[str]) -> bool:
 
 
 from hermes_cli.kanban_completion_evidence import gate_empty_completion as _gate_empty_completion
-
+from hermes_cli.kanban_artifact_prestage import prestaged as _prestaged  # large files are read before the write lock
 
 
 from hermes_cli.kanban_metadata_files import stage_completion_artifacts as _stage_completion_artifacts
@@ -3055,7 +3055,7 @@ def request_review(
     # leave orphans that make the retry stage ``name_1.ext`` beside them.
     staged_copies: list[Path] = []
     try:
-        with write_txn(conn):
+        with _prestaged(conn, task_id, metadata), write_txn(conn):
             if not _parents_satisfied(conn, task_id):
                 return _ret(False, "parent dependencies are not satisfied")
             trow = conn.execute(

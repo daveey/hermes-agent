@@ -16,6 +16,8 @@ def receipt_delivery_paths(conn, task_id: str, records: list) -> list[str]:
     for record in records:
         if not isinstance(record, dict) or record.get("warning") or not record.get("sha256"):
             continue
+        if record.get("role") == "evidence":
+            continue  # Evidence keeps custody; only declared artifacts become chat uploads.
         uid = record.get("attachment_uid")
         # Large files have no replicated attachment. Only their writer may use
         # the original (or scratch-GC-retained) path, with the recorded digest.

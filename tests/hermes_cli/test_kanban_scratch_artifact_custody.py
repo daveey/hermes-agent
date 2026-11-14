@@ -48,13 +48,18 @@ def test_missing_declared_scratch_file_completes_with_warning(kanban_home):
 
 @pytest.mark.parametrize("large", [False, True])
 def test_scratch_copy_failure_does_not_destroy_existing_evidence(kanban_home, monkeypatch, large):
-    from hermes_cli import kanban_artifact_receipt as custody
+    from hermes_cli import kanban_artifact_prestage as prestage
 
     if large:
         monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 4)
     def fail(*args, **kwargs):
         raise OSError("controlled preservation failure")
-    monkeypatch.setattr(custody.shutil, "copyfileobj", fail)
+
+    def fail_partway(source, dest):
+        if dest is not None:
+            dest.write_bytes(b"pa")  # a partial pre-lock copy must not survive
+        fail()
+    monkeypatch.setattr(prestage, "_read", fail_partway)
     if not large:
         monkeypatch.setattr(kb, "_copy_capped", fail)
     with kbc.connect_closing() as conn:

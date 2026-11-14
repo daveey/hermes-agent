@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import os
-import shutil
 import socket
 from pathlib import Path
 
@@ -61,12 +59,77 @@ def declared_files(metadata: dict) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def _in_managed_workspace(conn, task_id: str, source: Path) -> bool:
+def in_managed_workspace(conn, task_id: str, source: Path) -> bool:
     from hermes_cli.kanban_db_workspace import _scratch_workspace, _managed_scratch_path_info
 
     workspace = _scratch_workspace(conn, task_id)
     return bool(workspace is not None and _managed_scratch_path_info(workspace)[0]
                 and source.resolve().is_relative_to(workspace.resolve()))
+
+
+def attachment_board(conn, task_id: str):
+    """The task's own board, never the process's current board.
+
+    A card on a non-default board can complete while another board is current
+    (machine flows resolve through the pin); its copies must land under its own
+    board's attachments root, where per-board cleanup looks for them.
+    """
+    from hermes_cli.kanban_db_workspace import _scratch_workspace, _managed_scratch_path_info
+
+    workspace = _scratch_workspace(conn, task_id)
+    if workspace is not None:
+        managed, board = _managed_scratch_path_info(workspace)
+        if managed and board:
+            return board
+    from hermes_cli.kanban_host_counts import board_of
+
+    return board_of(conn)
+
+
+def _names_missing_file(conn, task_id: str, raw: str) -> bool:
+    """Whether an absent evidence ref claims a file, so its absence earns a warning.
+
+    Evidence refs are free text: ``/api/v1/tasks``, ``/src/x.py:12`` or ``/repo
+    commit abc`` start with ``/`` but name no file. Scratch refs always count
+    (they are preserved or fail closed); otherwise only an exact path whose
+    parent directory exists below the filesystem root.
+    """
+    path = Path(raw).expanduser()
+    if in_managed_workspace(conn, task_id, path):
+        return True
+    if any(ch.isspace() for ch in raw) or ":" in raw or path.exists():
+        return False
+    parent = path.parent
+    return parent != Path(parent.anchor) and parent.is_dir()
+
+
+def _large(conn, task_id: str, source: Path, stat, record: dict, staged: list[Path], board) -> None:
+    """Record a file over the attachment cap from its pre-lock observation only.
+
+    This runs under the board write lock, so it never reads the file: the digest
+    (and a managed-scratch copy) come from :mod:`kanban_artifact_prestage`,
+    re-verified here by stat identity.
+    """
+    from hermes_cli import kanban_artifact_prestage as prestage
+    from hermes_cli import kanban_db as kb
+
+    observed = prestage.take(source, stat)
+    managed = in_managed_workspace(conn, task_id, source)
+    if observed is None or "error" in observed:
+        reason = observed["error"] if observed else "changed after it was read before the completion lock"
+        if managed:
+            raise kb.ArtifactPreservationError(f"{reason}; retry")
+        record["warning"] = f"Over {kb.KANBAN_ATTACHMENT_MAX_BYTES} bytes and not hashed: {reason}"
+        return
+    if managed:
+        # Large files cannot use blob sync, but must outlive scratch GC.
+        directory = kb.task_attachments_dir(task_id, board=board) / "local-artifacts"
+        dest = kb._unique_attachment_path(directory, source.name, set(staged))
+        staged.append(dest)
+        observed["temp"].rename(dest)
+        observed["temp"] = None
+        record["retained_path"] = str(dest)
+    record["sha256"] = observed["sha256"]
 
 
 def record_files(conn, task_id: str, metadata: dict, originals: list[str], now: int,
@@ -76,18 +139,26 @@ def record_files(conn, task_id: str, metadata: dict, originals: list[str], now: 
     The generated receipt never rewrites an observed evidence identity. A local
     attachment path is useful only alongside its machine; attachment_uid locates
     the bytes on another replica after normal Board blob synchronization.
+    ``role`` separates declared deliverables (``artifact``, uploaded to chat)
+    from ``evidence`` refs (custody only). Free-text evidence that names no file
+    gets no record. Files over the attachment cap are never read here (``_large``).
     """
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_metadata_files import ATTACHED_KEY
+    from hermes_cli.kanban_metadata_files import ATTACHED_KEY, cleaned_artifact_paths
 
     machine = executing_machine(conn)
+    board = attachment_board(conn, task_id)
+    declared = set(cleaned_artifact_paths(metadata))
     kept = dict(relocated)
     kept.update(metadata.get(ATTACHED_KEY, {}))
     records = []
     for raw in originals:
-        record: dict = {"machine": machine, "path": raw}
-        records.append(record)
+        role = "artifact" if raw in declared else "evidence"
         source = Path(kept.get(raw, raw)).expanduser()
+        if role == "evidence" and not source.is_file() and not _names_missing_file(conn, task_id, raw):
+            continue
+        record: dict = {"machine": machine, "path": raw, "role": role}
+        records.append(record)
         dest = None
         try:
             if not source.is_file():
@@ -98,44 +169,34 @@ def record_files(conn, task_id: str, metadata: dict, originals: list[str], now: 
             if validate_media_delivery_path(str(source)) is None:
                 record["warning"] = "Artifact denied by delivery policy on executing machine"
                 continue
-            size = source.stat().st_size
-            record["size"] = size
-            if size <= kb.KANBAN_ATTACHMENT_MAX_BYTES:
-                row = conn.execute(
-                    "SELECT * FROM task_attachments WHERE task_id=? AND stored_path=?",
-                    (task_id, str(source)),
-                ).fetchone()
-                if row is None:
-                    directory = kb.task_attachments_dir(task_id)
-                    directory.mkdir(parents=True, exist_ok=True)
-                    dest = kb._unique_attachment_path(directory, source.name, set(staged))
-                    staged.append(dest)
-                    kb._copy_capped(source, dest, raw)
-                    kb._insert_completion_attachment(
-                        conn, task_id, filename=dest.name, stored_path=str(dest),
-                        size=dest.stat().st_size, created_at=now, uploaded_by=uploaded_by,
-                    )
-                    source = dest
-                    row = conn.execute(
-                        "SELECT * FROM task_attachments WHERE task_id=? AND stored_path=?",
-                        (task_id, str(dest)),
-                    ).fetchone()
-                record["attachment_id"] = row["id"]
-                if "uid" in row.keys():
-                    record["attachment_uid"] = row["uid"]
-                record["attachment_path"] = row["stored_path"]
-            elif _in_managed_workspace(conn, task_id, source):
-                # Large files cannot use blob sync, but must outlive scratch GC.
-                directory = kb.task_attachments_dir(task_id) / "local-artifacts"
+            stat = source.stat()
+            record["size"] = stat.st_size
+            if stat.st_size > kb.KANBAN_ATTACHMENT_MAX_BYTES:
+                _large(conn, task_id, source, stat, record, staged, board)
+                continue
+            row = conn.execute(
+                "SELECT * FROM task_attachments WHERE task_id=? AND stored_path=?",
+                (task_id, str(source)),
+            ).fetchone()
+            if row is None:
+                directory = kb.task_attachments_dir(task_id, board=board)
                 directory.mkdir(parents=True, exist_ok=True)
                 dest = kb._unique_attachment_path(directory, source.name, set(staged))
                 staged.append(dest)
-                with source.open("rb") as src, dest.open("xb") as dst:
-                    shutil.copyfileobj(src, dst, 1024 * 1024)
-                    dst.flush()
-                    os.fsync(dst.fileno())
+                kb._copy_capped(source, dest, raw)
+                kb._insert_completion_attachment(
+                    conn, task_id, filename=dest.name, stored_path=str(dest),
+                    size=dest.stat().st_size, created_at=now, uploaded_by=uploaded_by,
+                )
                 source = dest
-                record["retained_path"] = str(dest)
+                row = conn.execute(
+                    "SELECT * FROM task_attachments WHERE task_id=? AND stored_path=?",
+                    (task_id, str(dest)),
+                ).fetchone()
+            record["attachment_id"] = row["id"]
+            if "uid" in row.keys():
+                record["attachment_uid"] = row["uid"]
+            record["attachment_path"] = row["stored_path"]
             with source.open("rb") as stream:
                 record["sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
         except (OSError, kb.ArtifactPreservationError) as exc:
@@ -144,7 +205,8 @@ def record_files(conn, task_id: str, metadata: dict, originals: list[str], now: 
                 with contextlib.suppress(OSError):
                     dest.unlink(missing_ok=True)
             record.pop("retained_path", None)
-            if _in_managed_workspace(conn, task_id, Path(raw).expanduser()):
+            record.pop("sha256", None)
+            if in_managed_workspace(conn, task_id, Path(raw).expanduser()):
                 raise kb.ArtifactPreservationError(
                     f"could not preserve scratch artifact {raw}: {exc}"
                 ) from exc

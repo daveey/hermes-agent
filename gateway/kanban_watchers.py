@@ -262,7 +262,11 @@ class GatewayKanbanWatchersMixin:
             from hermes_cli.kanban_artifact_delivery import delivery_paths
 
             records = event_payload["artifact_receipt"]
-            raw_paths = delivery_paths(task.id, records, board) if task is not None and isinstance(records, list) else []
+            # Digesting writer-local files reads them in full: keep it off the gateway loop.
+            raw_paths = (
+                await asyncio.to_thread(delivery_paths, task.id, records, board)
+                if task is not None and isinstance(records, list) else []
+            )
         candidates: list[str] = []
         for path in raw_paths:
             expanded = os.path.expanduser(path) if path else ""

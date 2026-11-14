@@ -1,0 +1,166 @@
+"""Artifact custody stays bounded, declared-only for chat, and on the task's board."""
+if not __name__.startswith("tests."):
+    raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")
+
+import hashlib
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+from tests.hermes_cli import test_kanban_metadata_files as helpers
+from tests.hermes_cli.test_kanban_receipt_artifacts import receipt
+
+kanban_home = helpers.kanban_home
+BIG = b"larger than the fixture cap"
+
+
+def _spy_reads(monkeypatch, conn, target: Path) -> list[bool]:
+    """Record, for every read-open of *target*, whether the write txn was open."""
+    seen: list[bool] = []
+    original = Path.open
+
+    def spy(self, mode="r", *args, **kwargs):
+        if "r" in mode and self.expanduser() == target:
+            seen.append(conn.in_transaction)
+        return original(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", spy)
+    return seen
+
+
+@pytest.mark.parametrize("in_scratch", [True, False])
+def test_large_file_is_never_read_under_the_write_lock(kanban_home, monkeypatch, tmp_path, in_scratch):
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 4)
+    with kbc.connect_closing() as conn:
+        task, ws, run = helpers._scratch_card(conn)
+        source = (ws if in_scratch else tmp_path) / "checkpoint.bin"
+        source.write_bytes(BIG)
+        reads = _spy_reads(monkeypatch, conn, source)
+        assert kb.complete_task(conn, task, summary="Checkpoint", expected_run_id=run,
+                                metadata={"completion_receipt": receipt(str(source))})
+        record = kb.latest_run(conn, task).metadata["artifact_receipt"][0]
+    assert reads and not any(reads), "large file read while the board write lock was held"
+    assert record["sha256"] == hashlib.sha256(BIG).hexdigest()
+    assert record["size"] == len(BIG)
+    if in_scratch:
+        retained = Path(record["retained_path"])
+        assert retained.read_bytes() == BIG
+        assert not list(retained.parent.glob(".prestage-*"))
+
+
+@pytest.mark.parametrize("in_scratch", [True, False])
+def test_large_file_changed_after_pre_lock_read_is_not_claimed(kanban_home, monkeypatch, tmp_path, in_scratch):
+    from hermes_cli import kanban_artifact_prestage as prestage
+
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 4)
+    with kbc.connect_closing() as conn:
+        task, ws, run = helpers._scratch_card(conn)
+        source = (ws if in_scratch else tmp_path) / "checkpoint.bin"
+        source.write_bytes(BIG)
+        fill = prestage._fill
+
+        def fill_then_write(*args):
+            fill(*args)
+            with source.open("ab") as stream:
+                stream.write(b"more")
+
+        monkeypatch.setattr(prestage, "_fill", fill_then_write)
+        metadata = {"artifacts": [str(source)]}
+        if in_scratch:
+            with pytest.raises(kb.ArtifactPreservationError, match="checkpoint.bin"):
+                kb.complete_task(conn, task, summary="Checkpoint", expected_run_id=run, metadata=metadata)
+            assert kb.get_task(conn, task).status == "running"
+            assert not [p for p in kb.task_attachments_dir(task).rglob("*") if p.is_file()]
+            return
+        assert kb.complete_task(conn, task, summary="Checkpoint", expected_run_id=run, metadata=metadata)
+        record = kb.latest_run(conn, task).metadata["artifact_receipt"][0]
+    assert "sha256" not in record
+    assert "not hashed" in record["warning"]
+
+
+def test_evidence_refs_keep_custody_but_only_declared_artifacts_upload(kanban_home, tmp_path):
+    from hermes_cli import kanban_artifact_delivery as delivery
+    from hermes_cli.kanban_artifact_receipt import format_receipt
+
+    deliverable = tmp_path / "deliverable.md"
+    deliverable.write_text("deliverable")
+    evidence = tmp_path / "evidence.log"
+    evidence.write_text("evidence")
+    value = receipt(str(evidence))
+    value["items"][0]["evidence"] += [
+        {"ref": ref, "observed_at": "2026-01-01T00:00:00Z", "verification": "reported"}
+        for ref in ("/api/v1/tasks", f"{evidence}:12", "/repo commit abc123", "/healthz", str(tmp_path / "gone.md"))
+    ]
+    with kbc.connect_closing() as conn:
+        task, _, run = helpers._scratch_card(conn)
+        assert kb.complete_task(conn, task, summary="Report", expected_run_id=run,
+                                metadata={"artifacts": [str(deliverable)], "completion_receipt": value})
+        records = kb.latest_run(conn, task).metadata["artifact_receipt"]
+        by_path = {r["path"]: r for r in records}
+        assert set(by_path) == {str(deliverable), str(evidence), str(tmp_path / "gone.md")}
+        assert by_path[str(evidence)]["sha256"]  # custody is still recorded and attached
+        assert "missing" in by_path[str(tmp_path / "gone.md")]["warning"].lower()
+        uploads = delivery.receipt_delivery_paths(conn, task, records)
+    assert [Path(p).read_text() for p in uploads] == ["deliverable"]
+    notice = format_receipt({"artifact_receipt": records})
+    assert "/api/v1/tasks" not in notice and "/healthz" not in notice and "commit" not in notice
+
+
+def test_missing_declared_artifact_still_warns_whatever_its_shape(kanban_home):
+    with kbc.connect_closing() as conn:
+        task, _, run = helpers._scratch_card(conn)
+        assert kb.complete_task(conn, task, summary="Report", expected_run_id=run,
+                                metadata={"artifacts": ["/api/v1/report"]})
+        record = kb.latest_run(conn, task).metadata["artifact_receipt"][0]
+    assert record["path"] == "/api/v1/report"
+    assert "missing" in record["warning"].lower()
+
+
+@pytest.mark.parametrize("large", [False, True])
+def test_custody_copies_land_on_the_tasks_board(kanban_home, monkeypatch, tmp_path, large):
+    kb.create_board("other")
+    if large:
+        monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 4)
+    with kbc.connect_closing(board="other") as conn:
+        task = kb.create_task(conn, title="other board", assignee="default")
+        ws = helpers.kbw.resolve_workspace(kb.get_task(conn, task), board="other")
+        helpers.kbw.set_workspace_path(conn, task, ws)
+        assert kb.claim_task(conn, task)
+        run = kb.get_task(conn, task).current_run_id
+        sources = [ws / "report.bin", tmp_path / "outside.bin"]
+        for source in sources:
+            source.write_bytes(BIG if large else b"ok")
+        assert kb.get_current_board() == kb.DEFAULT_BOARD
+        assert kb.complete_task(conn, task, summary="Report", expected_run_id=run,
+                                metadata={"artifacts": [str(p) for p in sources]})
+        records = kb.latest_run(conn, task).metadata["artifact_receipt"]
+    root = kb.attachments_root(board="other").resolve()
+    kept = [r.get("attachment_path") or r.get("retained_path") for r in records]
+    kept = [Path(p).resolve() for p in kept if p]
+    assert kept and all(p.is_relative_to(root) for p in kept), (kept, root)
+
+
+@pytest.mark.asyncio
+async def test_notifier_digests_off_the_event_loop(monkeypatch):
+    from gateway.kanban_watchers import GatewayKanbanWatchersMixin
+    from hermes_cli import kanban_artifact_delivery as delivery
+
+    loop_thread = threading.get_ident()
+    seen = []
+
+    def fake(task_id, records, board):
+        seen.append(threading.get_ident())
+        return []
+
+    monkeypatch.setattr(delivery, "delivery_paths", fake)
+    adapter = SimpleNamespace(extract_local_files=lambda text: ([], []), send_document=AsyncMock())
+    await GatewayKanbanWatchersMixin._deliver_kanban_artifacts(
+        None, adapter=adapter, chat_id="chat", metadata={},
+        event_payload={"artifact_receipt": [{"machine": "m", "path": "/x", "sha256": "0"}]},
+        task=SimpleNamespace(id="t_1", result="done"),
+    )
+    assert seen and seen[0] != loop_thread

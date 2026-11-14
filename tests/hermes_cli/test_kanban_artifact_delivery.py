@@ -47,7 +47,10 @@ async def test_notifier_uploads_large_artifact_on_writer(stores, monkeypatch):
     monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 1)
     payload = support.complete(conn, tid, [str(report)])
     adapter = SimpleNamespace(extract_local_files=lambda text: ([], []), send_document=AsyncMock())
-    monkeypatch.setattr(delivery, "delivery_paths", lambda task_id, records, board: delivery.receipt_delivery_paths(conn, task_id, records))
+    # Resolved on the test thread: the notifier digests on a worker thread, where
+    # this fixture's sqlite connection may not be used.
+    resolved = delivery.receipt_delivery_paths(conn, tid, payload["artifact_receipt"])
+    monkeypatch.setattr(delivery, "delivery_paths", lambda task_id, records, board: resolved)
     await GatewayKanbanWatchersMixin._deliver_kanban_artifacts(
         None, adapter=adapter, chat_id="chat", metadata={},
         event_payload=payload, task=SimpleNamespace(id=tid, result="done"),
@@ -101,6 +104,11 @@ async def test_notifier_uses_replicated_attachment_and_not_foreign_paths(stores,
     task = SimpleNamespace(id=tid, result=str(report))
     adapter = SimpleNamespace(extract_local_files=lambda text: ([text], []), send_document=AsyncMock())
     monkeypatch.setattr(delivery, "delivery_paths", lambda task_id, records, board: delivery.receipt_delivery_paths(home_conn, task_id, records))
+    from gateway import kanban_watchers
+
+    async def inline(fn, *args):  # home_conn is bound to this thread; off-loop digesting has its own test
+        return fn(*args)
+    monkeypatch.setattr(kanban_watchers.asyncio, "to_thread", inline)
     call = dict(adapter=adapter, chat_id="chat", metadata={}, event_payload=payload, task=task)
     # Both writer-local paths exist here: receiver must not use either before sync.
     await GatewayKanbanWatchersMixin._deliver_kanban_artifacts(None, **call)
