@@ -181,7 +181,7 @@ def main() -> int:
         result = {"replay": replay(0, a.rounds, a.store)}
         print(json.dumps(result, indent=1))
         if a.json:
-            Path(a.json).write_text(json.dumps(result, indent=1))
+            Path(a.json).write_text(json.dumps(result, indent=1), encoding="utf-8")
         return 0
     sizes = [int(s) for s in a.sizes.split(",")]
     result: dict = {"scale": [scale(n) for n in sizes]}
@@ -191,7 +191,7 @@ def main() -> int:
     result["replay"] = replay(a.replay_size, a.rounds)
     print(json.dumps(result, indent=1))
     if a.json:
-        Path(a.json).write_text(json.dumps(result, indent=1))
+        Path(a.json).write_text(json.dumps(result, indent=1), encoding="utf-8")
     worst = max(result["growth"].get(k, 0) for k in ("served_ms", "heartbeat_rerank_ms", "message_rerank_ms"))
     return 0 if worst <= 1.5 else 1
 
