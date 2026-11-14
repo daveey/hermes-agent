@@ -54,24 +54,30 @@ def waiting_mini_jobs(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def find_waiting(api: Api, repo: str, own_run_id: int) -> list[dict[str, Any]]:
-    """Every waiting mini job across this repository's open runs, ours excluded.
+    """Waiting mini jobs observed in bounded scans of open runs, ours excluded.
 
     Busy hours have 100+ open runs, so each state's listing is read page by
-    page until a short page; a waiting job on page 2 counts like one on page 1.
-    Past MAX_RUN_PAGES full pages the queue is saturated by any measure
-    (QueueSaturated: skip). Job lists are read 8 at a time (read serially,
-    one probe took ~3 min).
+    page until empty or a short page whose offset reaches total_count. GitHub
+    can return a short nonterminal filtered page. Confirm all states with a
+    second pass: disappearing earlier runs can move an unseen run behind the
+    first pass's offset. Union both passes, reading each run's jobs only once.
+    This is bounded reconciliation, not a snapshot guarantee under arbitrary
+    churn. Past MAX_RUN_PAGES unexhausted pages the queue is saturated
+    (QueueSaturated: skip). Job lists are read 8 at a time.
     """
     run_ids: list[int] = []
-    for state in OPEN_RUN_STATES:
+    for state in OPEN_RUN_STATES * 2:
         for page in range(1, MAX_RUN_PAGES + 1):
             path = f"repos/{repo}/actions/runs?status={state}&per_page={PAGE_SIZE}&page={page}"
-            runs = api(path).get("workflow_runs") or []
+            response = api(path)
+            runs = response.get("workflow_runs") or []
             for run in runs:
                 run_id = int(run["id"])
                 if run_id != own_run_id and run_id not in run_ids:
                     run_ids.append(run_id)
-            if len(runs) < PAGE_SIZE:
+            # A filtered GitHub page can be short while rel=next still exists.
+            # Count offsets, not returned rows; absent totals need an empty page.
+            if not runs or (len(runs) < PAGE_SIZE and page * PAGE_SIZE >= response.get("total_count", float("inf"))):
                 break
         else:
             raise QueueSaturated(f"{MAX_RUN_PAGES * PAGE_SIZE}+ {state} runs")

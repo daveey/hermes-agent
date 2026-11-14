@@ -70,7 +70,7 @@ def _api(runs: dict[str, list[dict]], jobs: dict[int, list[dict]], calls: list[s
             run_id = int(path.split("/runs/")[1].split("/")[0])
             return {"jobs": jobs.get(run_id, [])}
         state = path.split("status=")[1].split("&")[0]
-        return {"workflow_runs": runs.get(state, [])}
+        return {"total_count": len(runs.get(state, [])), "workflow_runs": runs.get(state, [])}
     return api
 
 
@@ -115,7 +115,8 @@ def _paged_api(pages: dict[str, list[list[dict]]], jobs: dict[int, list[dict]], 
         state = path.split("status=")[1].split("&")[0]
         page = int(path.split("page=")[-1].split("&")[0]) if "&page=" in path else 1
         listing = pages.get(state, [])
-        return {"workflow_runs": listing[page - 1] if page <= len(listing) else []}
+        return {"total_count": sum(map(len, listing)),
+                "workflow_runs": listing[page - 1] if page <= len(listing) else []}
     return api
 
 
@@ -128,7 +129,7 @@ def test_a_mini_job_waiting_only_in_a_later_page_of_runs_still_skips_the_slot():
     assert run is False
     assert "1 job(s) already waiting" in reason
     assert any("status=in_progress" in c and "&page=2" in c for c in calls)
-    # A short page ends the listing: no page 3 read.
+    # A final short page reaches total_count: no page 3 read.
     assert not any("status=in_progress" in c and "&page=3" in c for c in calls)
 
 
@@ -150,7 +151,7 @@ def test_final_supported_page_is_read_before_deciding_saturation(final_job):
     prefix = f"repos/{REPO}/actions/runs?status=queued&per_page={gate.PAGE_SIZE}&page="
     assert [c for c in calls if c.startswith(prefix)] == [
         f"{prefix}{page}" for page in range(1, gate.MAX_RUN_PAGES + 1)
-    ]
+    ] * 2
     if final_job == "queued":
         assert run is False
         assert "1 job(s) already waiting for the mini" in reason
@@ -160,6 +161,55 @@ def test_final_supported_page_is_read_before_deciding_saturation(final_job):
         assert calls.count(
             f"repos/{REPO}/actions/runs/{final_id}/jobs?filter=latest&per_page=100"
         ) == 1
+
+
+@pytest.mark.parametrize("reported_total", [None, 45])
+def test_short_nonterminal_page_does_not_hide_a_waiting_mini_job(reported_total):
+    gate = _gate()
+    gate.PAGE_SIZE = 5
+    calls: list[str] = []
+    # Captured GitHub geometry: queued page 1 had four rows, total_count=45,
+    # rel=next page 2; page 2 still had five rows. Eligibility is controlled.
+    pages = {"queued": [[{"id": i} for i in range(1, 5)], [{"id": 6}]]}
+    listing = _paged_api(pages, {6: [_job("queued")]}, calls)
+
+    def api(path):
+        response = listing(path)
+        if "workflow_runs" in response:
+            response.pop("total_count", None)
+            if reported_total is not None:
+                response["total_count"] = reported_total if "status=queued" in path else 0
+        return response
+
+    assert gate.decide("schedule", api, REPO, own_run_id=99)[0] is False
+    assert any("/runs/6/jobs" in c for c in calls)
+
+
+def test_confirmation_recovers_waiting_run_shifted_behind_first_pass_offset():
+    gate = _gate()
+    gate.PAGE_SIZE = 2
+    calls: list[str] = []
+    pass_number = 0
+
+    def api(path):
+        nonlocal pass_number
+        calls.append(path)
+        if "/jobs" in path:
+            return {"jobs": [_job("queued")] if "/runs/3/jobs" in path else []}
+        if "status=queued" not in path:
+            return {"total_count": 0, "workflow_runs": []}
+        page = int(path.split("&page=")[1])
+        if page == 1:
+            pass_number += 1
+        # First page sees [1, 2, 3]; run 1 completes before page 2, so
+        # run 3 moves to offset 1, behind the cursor. It remains waiting.
+        population = [1, 2, 3] if pass_number == 1 and page == 1 else [2, 3]
+        return {"total_count": len(population),
+                "workflow_runs": [{"id": i} for i in population[(page - 1) * 2:page * 2]]}
+
+    assert gate.decide("schedule", api, REPO, own_run_id=99)[0] is False
+    assert pass_number == 2
+    assert sum("/runs/3/jobs" in c for c in calls) == 1
 
 
 def test_a_state_with_more_full_pages_than_the_cap_is_treated_as_busy():
