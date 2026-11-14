@@ -777,7 +777,9 @@ def test_live_local_backend_noclobber_startup_keeps_caller_input(configured_pass
     env = LocalEnvironment(cwd=str(tmp_path), timeout=10, env={"TMPDIR": str(temp), "BASH_ENV": str(startup)})
     try:
         assert env.execute(f"export PATH={fake.parent}:$PATH")["returncode"] == 0
-        result = env.execute('read -r p; echo "got:$p"; sudo true', stdin_data="rest\n")
+        # Refuse to reach a host sudo if the PATH export did not carry (it once did not, under set -C).
+        result = env.execute(f'case ":$PATH:" in *":{fake.parent}:"*) ;; *) exit 97 ;; esac; '
+                             'read -r p; echo "got:$p"; sudo true', stdin_data="rest\n")
     finally:
         env.cleanup()
     assert result["returncode"] == 0, result
