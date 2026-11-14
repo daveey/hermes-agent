@@ -5,7 +5,9 @@ and a foreign card at pickup (``kanban_hub_admission_pickup``). Nothing judged a
 gate: its ``runs_on`` and ``placement_policy`` are NULL, so the claim backstop (``pickup.refusals``, foreign
 hub-bound copies only) never saw it. On 11-12 the hourly pin sweep moved 7 such cards off the hub by hand after
 their runs (all denied by the judge), and 26 more waited (t_01a1d09606b75027). The dispatcher is the one place
-every hub run passes, so before the hub claims a ready, label-less card with no verdict, :func:`screen`:
+every hub run passes. The dispatcher freezes its ready/review candidates before :func:`screen`: async
+wake probes finishing during admission must wait for the next tick, not join an unscreened claim pass.
+The screen covers ready and review because a scheduled continuation can resume either lane:
 
 * judges ``{title, body}`` outside any write transaction (one outage per tick: the rest are not judged);
 * records a ``hub_admission`` event with ``entry: "claim"``;
@@ -76,7 +78,7 @@ class Counts:
                 ).format(**asdict(self)) + ids
 
 
-_SCREENABLE = ("status = 'ready' AND claim_lock IS NULL AND (runs_on IS NULL OR runs_on IN ('', '[]')) "
+_SCREENABLE = ("status IN ('ready', 'review') AND claim_lock IS NULL AND (runs_on IS NULL OR runs_on IN ('', '[]')) "
                "AND placement_policy IS NULL")
 
 
@@ -85,7 +87,8 @@ def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     claims reach first and never lets lower-priority work jump a deferred higher-priority card."""
     from hermes_cli.kanban_db_dispatch_queries import lane_rows
     rows = {row["id"]: row for row in conn.execute(f"SELECT * FROM tasks WHERE {_SCREENABLE}").fetchall()}
-    return [rows[row["id"]] for row in lane_rows(conn, "ready") if row["id"] in rows]
+    lanes = lane_rows(conn, "ready") + lane_rows(conn, "review")
+    return [rows[row["id"]] for row in lanes if row["id"] in rows]
 
 
 def _current(conn: sqlite3.Connection, tid: str) -> tuple[Optional[sqlite3.Row], int]:
@@ -271,6 +274,20 @@ def print_deferred(ids: list[str]) -> None:
     """``hermes kanban dispatch`` text line for ``DispatchResult.admission_deferred``."""
     if ids:
         print(f"Deferred by the hub claim screen (unjudged, judged next tick): {', '.join(ids)}")
+
+
+def screened_lanes(conn: sqlite3.Connection, dry_run: bool, review_enabled: bool, deferred=()) -> tuple:
+    """Freeze claim candidates before judging. Async wakes during the screen wait for the next tick."""
+    from hermes_cli.kanban_db_dispatch_queries import lane_rows
+    from hermes_cli.kanban_db_sync import board_mode
+
+    ready = lane_rows(conn, "ready")
+    review = lane_rows(conn, "review") if review_enabled else []
+    deferred = set(deferred)
+    if not dry_run and board_mode(conn) == "primary":
+        deferred.update(safe_screen(conn))
+    return ([row for row in ready if row["id"] not in deferred],
+            [row for row in review if row["id"] not in deferred], deferred)
 
 
 def safe_screen(conn: sqlite3.Connection) -> frozenset:

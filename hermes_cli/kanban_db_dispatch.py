@@ -2217,13 +2217,11 @@ def _dispatch_once_locked(
     # Cards this machine cannot lease (runs_on for another machine, ...) are never candidates: before 10-28 a
     # review card pinned to the hub sat first in the MacBook's review lane, took the review reservation every
     # tick, and the Board refused its lease every tick, so the eligible ready queue never started.
-    all_ready = [row for row in lane_rows(conn, "ready") if row["id"] not in unjudged]  # hub: judged next tick
+    from hermes_cli.kanban_hub_admission_claim import screened_lanes
+    all_ready, all_review, unjudged = screened_lanes(conn, dry_run, review_dispatch_enabled(), unjudged)
     result.admission_deferred = sorted(unjudged)
     from hermes_cli.kanban_db_dispatch_preclaim import eligible_rows as _eligible_rows
     ready_rows = _eligible_rows(conn, all_ready, "ready", result)
-    # Review rows are enumerated up front so the budget split can see whether
-    # review work exists at all.
-    all_review = lane_rows(conn, "review") if review_dispatch_enabled() else []
     review_rows = _eligible_rows(conn, all_review, "review", result) if all_review else []
     result.lane_candidates = len(all_ready) + len(all_review)
     # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not

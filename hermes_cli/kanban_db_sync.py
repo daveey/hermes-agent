@@ -1180,9 +1180,8 @@ def set_runs_on(conn: sqlite3.Connection, task_id: str, runs_on: Any) -> None:
 
 
 def worker_pickup(conn: sqlite3.Connection, budget: Any, dry_run: bool, profile_exists_fn: Any) -> frozenset:
-    """Dispatcher seam: a worker node copies eligible cards other gateways created (``kanban_worker_node``); the
-    hub then judges its own label-less unjudged ready cards (``kanban_hub_admission_claim``) before the claims.
-    Returns the ids this tick must not claim (still unjudged: edited while judged, or past the judge budget)."""
+    """Copy eligible foreign cards before the dispatcher freezes its lane candidates and screens admission.
+    Retain the deferred-id return contract for dispatcher callers."""
     if dry_run or board_mode(conn) != "primary":
         return frozenset()
     from hermes_cli import kanban_worker_node as wn
@@ -1190,8 +1189,7 @@ def worker_pickup(conn: sqlite3.Connection, budget: Any, dry_run: bool, profile_
         wn.pickup(conn, budget=budget, profile_exists=profile_exists_fn())
     except Exception:  # health: allow BLE001 -- a failed pickup must not stop the tick dispatching local work
         _log.warning("kanban: worker-node pickup failed", exc_info=True)
-    from hermes_cli.kanban_hub_admission_claim import safe_screen
-    return safe_screen(conn)  # [daveey] the hub judges its own unjudged ready cards before this tick's claims
+    return frozenset()  # admission runs after the dispatcher freezes its claim candidates
 
 
 def worker_pickup_capped(conn: sqlite3.Connection, result: Any, dry_run: bool, profile_exists_fn: Any) -> Any:
