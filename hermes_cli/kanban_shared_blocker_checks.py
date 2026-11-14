@@ -254,8 +254,9 @@ def run_due_checks(conn, *, cfg=None, now=None, due_out=None) -> list[str]:
                 if due_out is not None:
                     due_out.append(ts + CHECK_EVERY_SECONDS)
                 continue
-            # Runs open now were admitted while the command was in flight; later same-second
-            # claims are absent, so the fence can tell them apart.
+            # Millisecond evidence complements the local snapshot for remote
+            # claims not yet synced. Explicit replay clocks have second precision.
+            payload['checked_at_ms'] = int(time.time() * 1000) if now is None else ts * 1000
             payload["active_runs"] = _active_run_ids(conn)
             kb._append_event(conn, homes[0], CHECK_EVENT, payload)
         if rc == 0:

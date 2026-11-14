@@ -104,3 +104,33 @@ def test_non_probe_context_requires_live_check(kanban_home):
         assert '--reserve-ok' in text
         assert 'Never re-assert without a live check' in text
         assert 'instead of rediscovering' not in text
+
+
+def test_promoted_card_after_reset_checks_before_continuing(kanban_home, monkeypatch):
+    from hermes_cli import config, kanban_shared_blocker_checks as checks
+
+    clock = [1800000000]
+    monkeypatch.setattr(blockers.time, 'time', lambda: clock[0])
+    # The controlled checker represents the companion ledger after its reset.
+    cfg = {'kanban': {'shared_blocker_checks': {'github-rest-quota': 'exit 0'}}}
+    monkeypatch.setattr(config, 'load_config', lambda: cfg)
+    with kbc.connect_closing() as conn:
+        carrier = helpers._blocked_behind(conn, 'before reset', blocker_id=ALIASES[2])
+        parent = kb.create_task(conn, title='review', assignee='default')
+        child = kb.create_task(conn, title='landing needs GitHub', assignee='default', parents=[parent])
+        assert kb.get_task(conn, child).status == 'todo'
+        clock[0] += 120
+        assert kb.claim_task(conn, parent)
+        assert kb.complete_task(conn, parent, result='review done')
+        assert kb.get_task(conn, child).status == 'ready'
+        assert child not in blockers.blocker_states(conn)[ALIASES[0]].behind
+        text = blockers.render_blocker_context(conn, child)
+        assert 'exit 0' in text and 'Never re-assert without a live check' in text
+        assert 'instead of rediscovering' not in text
+        # Execute the rendered policy's command, not a fresh blocker assertion.
+        assert checks._run_check(checks.registered_checks(cfg)[ALIASES[0]])[0] == 0
+        assert checks.run_due_checks(conn, cfg=cfg) == [ALIASES[0]]
+        assert blockers.release_cleared_blockers(conn) == [carrier]
+        assert kb.claim_task(conn, child)
+        assert kb.complete_task(conn, child, result='continued after cheap check')
+        assert not blockers.blocker_states(conn)[ALIASES[0]].is_open

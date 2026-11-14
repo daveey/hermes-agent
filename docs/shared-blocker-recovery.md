@@ -6,7 +6,7 @@ assertion still behind the wall when no probe has started.
 
 `kanban.shared_blocker_checks` maps canonical blocker ids to shell commands.
 The built-in `github-rest-quota` check is
-`<Hermes home>/bin/github_quota.py --reserve-ok`. Install the companion quota
+`python3 <Hermes home>/bin/github_quota.py --reserve-ok`. Install the companion quota
 helper with that flag before relying on this check. Override a command with an
 empty string to disable it. Commands run as the dispatcher account, outside
 SQLite write transactions, with a ten-second timeout. Configure only trusted,
@@ -28,8 +28,12 @@ that family. Historical run and event payloads are normalized on read.
 
 Workers with a registered check are told to run it when their next action
 needs that capability, rather than blindly repeat context. A GitHub quota
-assertion from a run started at or before the last verified recovery cannot
-reopen the wall after that recovery. It remains eligible for release. A new
+assertion from a run known to have started before the last verified recovery
+cannot reopen the wall after that recovery. It remains eligible for release.
+An active-run snapshot handles local same-second claims; UUIDv7 claim-initiation
+milliseconds also identify earlier remote claims not yet synced at recovery.
+This is wall-clock evidence, not distributed causal order: clock skew, missing
+precision and exact ties retain the legacy timestamp/snapshot fallback. A new
 run after the recovery can report a new outage. Other blocker families retain
 their existing assertion semantics.
 
