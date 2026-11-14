@@ -141,6 +141,42 @@ def test_later_heredoc_in_a_terminator_view_is_split_from_the_group(tmp_path):
     assert scan_gateway_lifecycle(command) == (True, None)
 
 
+# (words after the first ``<<``, first body's terminator, second body's terminator): bash reads
+# both bodies in order, so the second body's ``}`` line never closes the group.
+TWO_WORD_OPENERS = [
+    ("$(echo E) <<A", "$(echo E)", "A"),
+    ("$(echo  E|cat) <<A", "$(echo E | cat)", "A"),
+    ("$(echo E) <<-A", "$(echo E)", "\tA"),
+    ("A <<$(echo E)", "A", "$(echo E)"),
+    ("$(echo E) <<$(echo F)", "$(echo E)", "$(echo F)"),
+    ("$(echo E) <<'$(echo  F)'", "$(echo E)", "$(echo  F)"),
+]
+
+
+def _two_body_group(words: str, first: str, second: str, inner: str, sink: str) -> str:
+    return f"{{\ncat <<{words}\nx\n{first}\n}}\n{second}\n{inner}\n}} | {sink}"
+
+
+@pytest.mark.parametrize(("words", "first", "second"), TWO_WORD_OPENERS)
+def test_group_feed_after_two_heredocs_on_one_opener_is_scanned(tmp_path, words, first, second):
+    command = _two_body_group(words, first, second, f"cat {_lifecycle_script(tmp_path)}", "python3")
+    assert scan_gateway_lifecycle(command) == (True, None)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.parametrize(("words", "first", "second"), TWO_WORD_OPENERS)
+def test_bash_reads_both_bodies_of_one_opener(words, first, second):
+    command = _two_body_group(words, first, second, "echo MARKER_FED", "cat")
+    result = subprocess.run(["bash", "-c", command], capture_output=True, text=True,
+                            timeout=20, check=False)
+    assert "MARKER_FED" in result.stdout.splitlines(), result.stderr
+
+
+def test_two_heredocs_on_one_opener_with_harmless_group_stay_allowed():
+    command = _two_body_group("$(echo  E|cat) <<A", "$(echo E | cat)", "A", "echo fed", "cat")
+    assert scan_gateway_lifecycle(command) == (False, None)
+
+
 def _candidate_lines(count: int) -> str:
     lines = [f"echo $(echo {index})" for index in range(count)]
     return "\n".join(["{", "cat <<$(echo E)", *lines, "} | cat"])

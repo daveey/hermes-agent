@@ -426,7 +426,7 @@ def heredoc_scripts(command: str) -> Iterator[str]:
     (``tools.shell_heredoc_words``), which is not predicted here. Such an opener stops the body
     walk and its body's lines stay in the script, where a ``}`` would close an outer group early.
     So the script is also yielded once per later line holding ``$(`` (each a line bash could end
-    the body at), with the opener's heredoc words and the body through that line removed. Past
+    the body at), with the word and that line spelled as one synthetic plain delimiter. Past
     ``MAX_REPRINTED_TERMINATOR_VIEWS`` such lines, see ``heredoc_views_overflow``."""
     return (script for script in _heredoc_scripts(command) if script is not None)
 
@@ -474,21 +474,49 @@ def _heredoc_scripts(command: str) -> Iterator[Optional[str]]:
 
 
 def _reprinted_terminator_views(text: str, unit_start: int, unit_end: int) -> Iterator[str]:
-    """*text* without the heredoc words of its stopped command unit and without the lines after
-    it through a later line holding ``$(``: one view per such line. None unless the unit holds a
-    ``$(`` after a ``<<`` (only then may bash's terminator be a line the opener parser missed)."""
+    """One view of *text* per later line holding ``$(``, each a line bash may end the stopped
+    unit's first ``$(…)``-delimited body at. The view spells that word and that line as one
+    synthetic plain delimiter, so a re-walk takes the body, and any later heredoc word on the
+    opener, in bash's order. None unless the unit holds a ``$(`` after a ``<<`` (only then may
+    bash's terminator be a line the opener parser missed). A unit with no such word that parses
+    falls back to dropping its heredoc words and the lines through the candidate line."""
     unit = text[unit_start:unit_end]
     opener = unit.find("<<")
     if opener < 0 or "$(" not in unit[opener:]:
         return
-    neutral = text[:unit_start] + _without_heredoc_words(unit)
+    word = _first_reprinted_word(unit)
+    synthetic = "HERMES_REPRINTED_DELIMITER"
+    while synthetic in text:
+        synthetic += "_"
     line_start = unit_end + 1
     while line_start < len(text):
         line_end = text.find("\n", line_start)
         line_end = len(text) if line_end < 0 else line_end
         if "$(" in text[line_start:line_end]:
-            yield neutral + text[line_end:]
+            if word is None:
+                yield text[:unit_start] + _without_heredoc_words(unit) + text[line_end:]
+            else:
+                start, end, strip_tabs = word
+                yield (text[:unit_start] + unit[:start] + ("<<-" if strip_tabs else "<<") + synthetic
+                       + unit[end:] + text[unit_end:line_start] + synthetic + text[line_end:])
         line_start = line_end + 1
+
+
+def _first_reprinted_word(unit: str) -> Optional[tuple[int, int, bool]]:
+    """``(start, end, strip_tabs)`` of the first ``<<`` word in *unit* only bash's reprint ends
+    (``<<$(echo E)``), past any exact words before it; None when an earlier word does not parse."""
+    from tools.shell_heredoc import _parse_heredoc_operator
+
+    cursor = 0
+    for match in _HEREDOC_OPERATOR.finditer(unit):
+        if match.start() < cursor:
+            continue
+        parsed = _parse_heredoc_operator(unit, match.start())
+        if parsed is None:
+            parsed = _parse_heredoc_operator(unit, match.start(), reprinted_ok=True)
+            return None if parsed is None else (match.start(), parsed[0], parsed[2])
+        cursor = parsed[0]
+    return None
 
 
 def _without_heredoc_words(unit: str) -> str:
