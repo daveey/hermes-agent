@@ -10,7 +10,7 @@ guessed a quota wall and parked the card. The tick logs had rotated, so the real
   ONE ``dispatch_skipped {reason, detail, until?}`` event per (card, reason, detail) per ready episode for every
   row the tick passed over: ``skipped_ineligible``, ``capsule_refused``, ``no_progress_held``,
   ``per_profile_capped``, ``claim_deferred`` (Board lease refusals and this host's admission-gate refusals, told
-  apart by the deferral's ``origin``), ``owner_down`` and ``pinned_quota_wall``.
+  apart by the deferral's ``origin``), ``owner_down``, ``pinned_quota_wall`` and ``llm_paced``.
   A (reason, detail) the episode already holds adds nothing; a new one appends. At most :data:`MAX_PER_EPISODE` per
   episode, so two dispatchers that disagree cannot grow a card's history without bound.
 * :func:`pinned_quota_hold` holds a fresh card (no run yet) on the ready lane whose explicit pin's provider pool
@@ -44,6 +44,8 @@ _log = logging.getLogger(__name__)
 
 EVENT = "dispatch_skipped"
 PINNED_QUOTA_WALL = "pinned_quota_wall"
+# The LLM quota-pace governor held the card (``kanban.llm_pacing``): detail ``<provider> <paced|held>, ...``.
+LLM_PACED = "llm_paced"
 MAX_PER_EPISODE = 16
 DETAIL_CHARS = 200
 UNRECORDED_AFTER_SECONDS = 30 * 60
@@ -214,6 +216,7 @@ def _tick_skips(result: Any) -> list[tuple[str, str, Any, Optional[float], dict[
     out += [(tid, "owner_down", f"{who}:{code}", None, {}) for tid, who, code in getattr(result, "owner_down", ())]
     out += [(tid, PINNED_QUOTA_WALL, f"{model} ({provider})", until, {"model": model, "provider": provider})
             for tid, model, provider, until in getattr(result, "pinned_quota_held", ())]
+    out += [(tid, LLM_PACED, detail, until, extra) for tid, detail, until, extra in getattr(result, LLM_PACED, ())]
     return out
 
 
@@ -288,6 +291,7 @@ def _stamp(epoch: Any, now: Optional[float] = None) -> str:
 
 _WORDS = {
     PINNED_QUOTA_WALL: "held: pinned model {detail} quota-walled",
+    LLM_PACED: "held: LLM quota pacing ({detail} pool)",
     "per_profile_capped": "skipped: assignee {detail} is at its per-profile worker cap",
     "skipped_ineligible": "skipped: this machine cannot lease it ({detail})",
     "capsule_refused": "skipped: capsule admission refused it ({detail})",
@@ -332,6 +336,9 @@ def advice(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
     if _wall_passed(skip, now):
         return ("that wall's reset has passed; the next dispatcher tick re-checks the pin. Priority changes do not "
                 "clear a quota wall. Do not run its work outside the dispatcher")
+    if skip.get("reason") == LLM_PACED:
+        return ("it starts on its own once its provider pool is back on pace or a paced slot frees; priority changes "
+                "do not lift a pacing hold. Do not run its work outside the dispatcher")
     if skip.get("reason") == PINNED_QUOTA_WALL:
         return ("it starts on its own when that wall resets. Re-pin it (`hermes kanban set-model <id> ...`) only if it "
                 "cannot wait; priority changes do not clear a quota wall. Do not run its work outside the dispatcher")

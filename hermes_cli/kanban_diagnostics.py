@@ -790,22 +790,40 @@ def _foreign_machines(task, cfg) -> list[str]:
             if str(l).startswith("machine:") and str(l).split(":", 1)[1] != own]
 
 
-def _pinned_quota_hold_until(events, now) -> Optional[int]:
-    """Reset time when the current ready episode's latest ``dispatch_skipped`` is a ``pinned_quota_wall``
-    hold still in the future (``kanban_dispatch_skip``); else None. Same episode bounds as its reader."""
-    from hermes_cli.kanban_dispatch_skip import EVENT, PINNED_QUOTA_WALL, _episode_kinds
+def _episode_skip(events) -> dict:
+    """Payload of the current ready episode's latest ``dispatch_skipped`` (``kanban_dispatch_skip``), or {} when a
+    later episode event (or none) ends it. Same episode bounds as its reader."""
+    from hermes_cli.kanban_dispatch_skip import EVENT, _episode_kinds
     bounds = _episode_kinds() | {EVENT}
     ordered = (events.quota_candidates if isinstance(events, EventHistory) else
                sorted(events or [], key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0), reverse=True))
     for ev in ordered:
         if _event_kind(ev) not in bounds:
             continue
-        payload = _parse_payload(ev) if _event_kind(ev) == EVENT else {}
-        until = payload.get("until")
-        if payload.get("reason") == PINNED_QUOTA_WALL and isinstance(until, (int, float)) and until > now:
-            return int(until)
-        return None
+        return _parse_payload(ev) if _event_kind(ev) == EVENT else {}
+    return {}
+
+
+def _pinned_quota_hold_until(events, now) -> Optional[int]:
+    """Reset time when the current ready episode's latest ``dispatch_skipped`` is a ``pinned_quota_wall``
+    hold still in the future (``kanban_dispatch_skip``); else None."""
+    from hermes_cli.kanban_dispatch_skip import PINNED_QUOTA_WALL
+    payload = _episode_skip(events)
+    until = payload.get("until")
+    if payload.get("reason") == PINNED_QUOTA_WALL and isinstance(until, (int, float)) and until > now:
+        return int(until)
     return None
+
+
+def _llm_paced_hold(events, now) -> Optional[dict]:
+    """The episode's latest skip when it is an LLM quota-pacing hold (``llm_paced``) whose pool reset, if it named
+    one, is still ahead; else None. A paced pool names no reset: the dispatcher re-reads it every interval."""
+    from hermes_cli.kanban_dispatch_skip import LLM_PACED
+    payload = _episode_skip(events)
+    until = payload.get("until")
+    if payload.get("reason") != LLM_PACED or (isinstance(until, (int, float)) and until <= now):
+        return None
+    return payload
 
 
 def _ready_hold_reason(task, events, cfg, now=None) -> Optional[str]:
@@ -823,8 +841,11 @@ def _ready_hold_reason(task, events, cfg, now=None) -> Optional[str]:
         return "respawn_guarded"
     if _foreign_machines(task, cfg):
         return "foreign_runs_on"
-    if _pinned_quota_hold_until(events, time.time() if now is None else now):
+    now = time.time() if now is None else now
+    if _pinned_quota_hold_until(events, now):
         return "pinned_quota_wall"  # a fresh pin held on its live quota wall (kanban-dd62aef001)
+    if _llm_paced_hold(events, now):
+        return "llm_paced"  # the quota-pace governor holds it until its provider pool is back on pace
     return None
 
 
@@ -942,18 +963,26 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     guard_reason, hold_until = _guard_clock(events, runs, cfg, since) if reason == "respawn_guarded" else (None, None)
     if reason == "pinned_quota_wall":
         hold_until = _pinned_quota_hold_until(events, now)
+    paced = _llm_paced_hold(events, now) if reason == "llm_paced" else None
+    if paced:
+        guard_reason = str(paced.get("detail") or "") or None
+        hold_until = int(paced["until"]) if isinstance(paced.get("until"), (int, float)) else None
     hold = f"{reason}: {guard_reason}" if guard_reason else reason
     if hold_until:
         stamp = time.strftime("%H:%M:%SZ", time.gmtime(hold_until))
         hold += f", until {stamp}" if hold_until > now else f", expired {stamp}"
     return [Diagnostic(
         kind="held_in_ready", severity="warning",
-        title=(f"Ready {int(age / 60)}m, last observed hold ({hold})" if reason == "respawn_guarded"
+        title=(f"Ready {int(age / 60)}m, last observed hold ({hold})" if reason in ("respawn_guarded", "llm_paced")
                else f"Ready {int(age / 60)}m, held ({hold})"),
         detail=("The last recorded dispatch decision was a guard hold; the current hold is not verified. "
                 "A cleared blocker, capacity limit, or missing pickup can leave this historical event "
                 "unchanged. Check the execution machine's current dispatcher verdict."
                 if reason == "respawn_guarded" else
+                "The LLM quota-pace governor (kanban.llm_pacing) held its claim: the provider's OAuth pool burns "
+                "ahead of its sustainable rate (paced) or every account is past its reserve (held), so the "
+                "dispatcher keeps fewer runs on it. It starts on its own once the pool is back on pace; this "
+                "is the last recorded verdict, not a live one." if reason == "llm_paced" else
                 "Its explicit model pin is quota-walled and no same-class reroute applies; it starts when "
                 "the wall resets." if reason == "pinned_quota_wall" else
                 "A foreign machine:* pin waits for that machine (or a re-file)."),

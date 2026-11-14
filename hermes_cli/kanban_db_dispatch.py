@@ -202,10 +202,10 @@ class DispatchResult(QuietResultFields):
     """``(task_id, reason)`` whose claim the Board lease deferred this tick (``lease_held``, ``labels_mismatch``,
     ``offline``). The tick moves on to the next candidate; the stuck warning names these. [daveey]"""
     admission_deferred: list[str] = field(default_factory=list)  # hub claim screen left unclaimed, unjudged [daveey]
-    crashed: list[str] = field(default_factory=list)
-    """Task ids reclaimed because their worker PID disappeared."""
+    crashed: list[str] = field(default_factory=list)  # task ids reclaimed because their worker PID disappeared
     capsule_refused: list[tuple[str, str]] = field(default_factory=list)  # (task_id, code): kanban_capsule_admission [daveey]
     pinned_quota_held: list = field(default_factory=list)  # (task_id, model, provider, reset): kanban_dispatch_skip
+    llm_paced: list = field(default_factory=list)  # (task_id, detail, until, extra): the quota-pace governor's holds
     remote_archived: list[str] = field(default_factory=list)  # archived on another gateway's stop (kanban_remote_stop)
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""

@@ -154,13 +154,23 @@ def _held_until(current: list[Reading], cfg: PacingConfig) -> Optional[float]:
     return min(frees) if frees else None
 
 
+def _sustainable(reading: Optional[Reading], kind: str, cfg: PacingConfig) -> float:
+    """Percent per second a headroom account can burn in ``kind`` and reach ``target`` at its reset. A window not
+    started yet counts as a fresh full window: ``/api/oauth/usage`` reports an idle account's five_hour as
+    ``null`` (no reading at all; 6 of 7 accounts on 11-14 16:57Z), or a reading may carry no reset."""
+    used = reading.used if reading is not None else 0.0
+    if reading is None or reading.reset_at is None:
+        return max(0.0, cfg.target - used) / WINDOW_SECONDS[kind]
+    return max(0.0, cfg.target - used) / max(60.0, reading.reset_at - reading.ts)
+
+
 def _factor(current: list[Reading], history: list[Reading], headroom: set[str], cfg: PacingConfig) -> float:
     factor = math.inf
     for kind in (FIVE_HOUR, SEVEN_DAY):
         readings = [r for r in current if r.kind == kind]
         burn = sum(burn_rate(r, history, cfg) for r in readings)
-        sustainable = sum(max(0.0, cfg.target - r.used) / max(60.0, r.reset_at - r.ts)
-                          for r in readings if r.account in headroom and r.reset_at is not None)
+        by_account = {r.account: r for r in readings}
+        sustainable = sum(_sustainable(by_account.get(account), kind, cfg) for account in headroom)
         if burn > 0:
             factor = min(factor, sustainable / burn)
     return factor

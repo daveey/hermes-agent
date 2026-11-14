@@ -239,6 +239,10 @@ def _record(conn: sqlite3.Connection, task_id: str, verdicts: list[dict], result
     until = min((v["until"] for v in verdicts if v.get("until")), default=None)
     result.respawn_guarded.append((task_id, lp.GUARD_REASON))
     result.clock_held[task_id] = (lp.GUARD_REASON, int(until or now + cfg.read_interval))
+    # The tick's skip record (``kanban_dispatch_skip``): notices and diagnostics name the hold, not "unrecorded".
+    detail = ", ".join(f"{v['provider']} {v['state']}" for v in verdicts)
+    result.llm_paced.append((task_id, detail, int(until) if until else None, {"providers": [
+        {k: v.get(k) for k in ("provider", "state", "limit", "running")} for v in verdicts]}))
     if dry_run:
         return
     last = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = ? "

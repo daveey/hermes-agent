@@ -1522,6 +1522,28 @@ To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` 
 
 `recent_success` and `active_pr` hold the **ready** lane only — they are the inputs to a review handoff, not signals against one. To have a reviewer, closer or other recovery profile pick up a card whose PR is already open, either move it to the review lane with `hermes kanban request-review <id>` (accepted from `ready` as well as `running`; the review-lane spawn is not subject to either guard) or hand the ready card to that profile with `hermes kanban assign <id> <profile>`: a handoff recorded *after* the PR comment — an operator reassign, a reviewer's changes-requested verdict, or a review reopen — lifts `active_pr` for the profile now named on the card, because that PR is exactly what it must work on. Only a change to a *different* profile counts: re-assigning the same profile, unassigning, or the dispatcher's own `kanban.default_assignee` fill-in does not lift the guard, so the assignee that opened the PR is still not re-spawned against it after a crash, reclaim or no-op reassign, and a newer PR comment posted after the handoff guards again. A deliberate re-queue after a success (drag `done→ready`, `unblock`, re-promotion) also lifts `recent_success`, so a manual re-run is never silently held for the whole window.
 
+### LLM quota pacing (`kanban.llm_pacing`)
+
+Before claiming a ready or review card, the dispatcher checks the OAuth pool of the provider the card's next run would use (for a `class:*` selector, every provider the class may route to; the card waits only when all of them hold it). It reads each account's account-wide usage windows (`five_hour` and `seven_day` from `/api/oauth/usage`; Codex `Session`/`Weekly`) at most every `read_interval_seconds`, measures each window's burn rate from its recent samples, and compares the pool's burn with the rate that would bring every account with headroom to `target_percent` exactly at its window's reset. An account whose window has not started yet (the endpoint reports `null` for an idle `five_hour`) counts as a fresh full window.
+
+- **open**: the pool is on or behind pace, so claims proceed (just behind pace, this host may grow only to its recent concurrency × the pace factor, at least one run).
+- **paced**: the pool is ahead of pace, so this host keeps its recent average concurrency on that provider × the pace factor. Review-lane, negative-priority and continuation-woken cards get only `deferrable_share` of that limit.
+- **held**: every readable account is past its reserve (`reserve_five_hour_percent` / `reserve_seven_day_percent`), so no Kanban claim starts until the earliest reset frees one; the remaining headroom is left to chats, cron and notices.
+
+A held card stays `ready` and unclaimed. The dispatcher records an `llm_paced` event (providers, state, limit, running) and a `dispatch_skipped` row with reason `llm_paced`. Queue position, the chat-wait and parent-unclaimed notices, and `hermes kanban diagnostics` (`held_in_ready`) name the hold instead of "skip reason unrecorded". Raising the card's priority does not lift it. If no account can be read, the governor fails open, and mandatory model pins and ungoverned providers always start. Only Kanban dispatch consults it.
+
+| Config key | Default | What it does |
+|------------|---------|--------------|
+| `kanban.llm_pacing.enabled` | `true` | `false` restores ungoverned claims. |
+| `kanban.llm_pacing.target_percent` | `95` | Usage each window may reach by its reset. |
+| `kanban.llm_pacing.reserve_five_hour_percent` | `80` | Past this, an account's five-hour window counts as reserved for non-Kanban callers. |
+| `kanban.llm_pacing.reserve_seven_day_percent` | `85` | The same for the weekly window. |
+| `kanban.llm_pacing.providers` | `["anthropic", "openai-codex"]` | Governed providers; cards on other providers always start. |
+| `kanban.llm_pacing.read_interval_seconds` | `300` | Minimum seconds between usage reads per Hermes home (shared through `<kanban home>/llm_pacing.json`). |
+| `kanban.llm_pacing.rate_window_seconds` | `3600` | Lookback for burn rates and this host's average concurrency. |
+| `kanban.llm_pacing.min_rate_span_seconds` | `600` | Shortest sample span a burn slope is measured over. |
+| `kanban.llm_pacing.deferrable_share` | `0.5` | Share of a paced limit that deferrable cards may use (0-1). |
+
 ### Dependency-review repair continuation
 
 An owning worker can link independent review cards as parents with `kanban_link`,
