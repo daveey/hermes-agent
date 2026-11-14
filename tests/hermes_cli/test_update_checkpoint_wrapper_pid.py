@@ -31,6 +31,35 @@ psutil = pytest.importorskip("psutil")
 NONCE = "episode-wrapper"
 
 
+def _children_by_script(children):
+    names = {}
+    for child in children:
+        # A child may be in exec: validate and index the same /proc snapshot.
+        argv = child.cmdline()
+        if len(argv) >= 2:
+            names[Path(argv[1]).name] = child.pid
+    return names
+
+
+def test_child_discovery_uses_one_argv_snapshot():
+    from unittest.mock import Mock
+
+    # /proc cmdline can become empty between reads while a child execs.
+    gateway = Mock(pid=101)
+    gateway.cmdline.side_effect = [[sys.executable, "/fixture/main.py"], []]
+    worker = Mock(pid=102)
+    worker.cmdline.side_effect = [[sys.executable, "/fixture/card_worker.py"], []]
+    starting = Mock(pid=103)
+    starting.cmdline.return_value = []
+    short = Mock(pid=104)
+    short.cmdline.return_value = [sys.executable]
+    assert _children_by_script([gateway, worker, starting, short]) == {
+        "main.py": 101, "card_worker.py": 102,
+    }
+    for child in (gateway, worker, starting, short):
+        child.cmdline.assert_called_once_with()
+
+
 @pytest.fixture()
 def wrapper_tree(tmp_path):
     """``wrapper`` (the unit's MainPID) -> [a ``gateway run`` child, a non-gateway card worker child]."""
@@ -50,7 +79,7 @@ def wrapper_tree(tmp_path):
     try:
         def started():
             children = psutil.Process(wrapper.pid).children()
-            names = {Path(c.cmdline()[1]).name: c.pid for c in children if len(c.cmdline()) >= 2}
+            names = _children_by_script(children)
             return names if set(names) == {"main.py", "card_worker.py"} else None
         by_script = wait_until(started, timeout=10, what="the wrapper's two children")
         yield wrapper.pid, by_script["main.py"], by_script["card_worker.py"]
