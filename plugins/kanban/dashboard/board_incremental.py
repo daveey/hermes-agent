@@ -188,7 +188,8 @@ def _diagnostics(conn, cards, by_id, prev, affected, diagnostic_inputs, br):
     graphs = {tid: old_graph[tid] for tid in ids if tid not in refresh}
     if refresh:
         graphs.update(kanban_db.task_graph_contexts(conn, refresh))
-    return br._incremental_diag_inputs(conn, diag_rows, prev["_memo"]["diag"], diagnostic_inputs, graphs=graphs)
+    return br._incremental_diag_inputs(conn, diag_rows, prev["_memo"]["diag"], diagnostic_inputs,
+                                       graphs=graphs, event_changed=affected)
 
 
 def _pickers(conn, prev, changed):

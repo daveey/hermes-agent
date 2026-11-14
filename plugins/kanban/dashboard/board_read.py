@@ -7,6 +7,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from dataclasses import asdict
+from types import MappingProxyType
 from typing import Callable, Optional
 
 from hermes_cli import kanban_db
@@ -30,12 +31,12 @@ def _rows_by_task(conn: sqlite3.Connection, table: str, row_ids: list) -> dict[s
     if row_ids:
         for row in conn.execute(
                 f"SELECT * FROM {table} WHERE task_id IN ({_placeholders(row_ids)}) ORDER BY id", tuple(row_ids)):
-            by_task.setdefault(row["task_id"], []).append(row)
-    return {tid: tuple(v) for tid, v in by_task.items()}  # sqlite3.Row is immutable
+            by_task.setdefault(row["task_id"], []).append(MappingProxyType(dict(row)))
+    return {tid: tuple(v) for tid, v in by_task.items()}  # immutable, O(1) field lookup
 
 
 def _raw(rows) -> tuple:
-    return tuple(tuple(r) for r in rows)
+    return tuple(tuple(r.values()) if isinstance(r, MappingProxyType) else tuple(r) for r in rows)
 
 
 _NO_EVENTS = (0, None)  # _event_marks of a task without events
@@ -163,17 +164,22 @@ def _diag_memo(rows, events_by_task, runs_by_task, marks) -> dict:
                       events_by_task.get(r["id"], ())) for r in rows}
 
 
-def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_inputs: Callable, *, graphs=None) -> tuple:
-    """``(diagnostic inputs, memo)`` re-reading events only for tasks whose row, runs or event
-    count/max id moved. A heartbeat touches one task: its row (``last_heartbeat_at``), its run
-    and one event, so a refresh re-reads that task's events, not the board's ~50k. Runs and the
-    graph/wake contexts are read whole (cheap, and a parent's change moves a child's graph)."""
+def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_inputs: Callable, *,
+                             graphs=None, event_changed=None) -> tuple:
+    """Retain event histories independently of task/run bookkeeping. ``event_changed``
+    is the trusted P2 invalidation set; updates/deletes of events always mark their task.
+    Count/max additionally catches excluded heartbeat inserts. Legacy callers without
+    a cursor retain the conservative row/run invalidation. Clock/config rules stay fresh.
+    """
     ids = [r["id"] for r in diag_rows]
     marks = _event_marks(conn, ids)
     runs = _rows_by_task(conn, "task_runs", ids)
+    raw_runs = {tid: _raw(runs[tid]) for tid in ids}
     changed = {tid for r, tid in zip(diag_rows, ids)
-               if (old := prev.get(tid)) is None or old[2] is None or old[0] != tuple(r)
-               or old[1] != _raw(runs[tid]) or old[2] != marks.get(tid, _NO_EVENTS)}
+               if (old := prev.get(tid)) is None or old[2] is None
+               or old[2] != marks.get(tid, _NO_EVENTS)
+               or (event_changed is not None and tid in event_changed)
+               or (event_changed is None and (old[0] != tuple(r) or old[1] != raw_runs[tid]))}
     part = diagnostic_inputs(conn, task_ids=[tid for tid in ids if tid in changed]) if changed else None
     fresh_events = part[1] if part is not None else {}
     events = {}
@@ -181,10 +187,10 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
     for r, tid in zip(diag_rows, ids):
         if tid in fresh_events or tid not in changed:
             events[tid] = fresh_events[tid] if tid in fresh_events else prev[tid][3]
-            memo[tid] = (tuple(r), _raw(runs[tid]), marks.get(tid, _NO_EVENTS), events[tid])
+            memo[tid] = (tuple(r), raw_runs[tid], marks.get(tid, _NO_EVENTS), events[tid])
         else:  # vanished between reads: no events held, so never vouch for a mark
             events[tid] = ()
-            memo[tid] = (tuple(r), _raw(runs[tid]), None, ())
+            memo[tid] = (tuple(r), raw_runs[tid], None, ())
     if graphs is None:
         graphs = kanban_db.task_graph_contexts(conn, ids)
     inputs = (tuple(diag_rows), events, runs, graphs, _wake_states(conn, ids))
