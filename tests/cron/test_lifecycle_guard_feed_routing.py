@@ -50,7 +50,17 @@ def files(tmp_path) -> dict[str, str]:
         "cat {sh} 2>&1 | bash",
         "cat {py} 2>&1 |& python3",
         "cat {py} 2>/dev/null 2>&1 | python3",
-        # 2. Output process substitution.
+        # Literal private-use words must not turn into pipeline-ending ampersands.
+        "cat {py} \ue000 | python3",
+        "cat {py} \ue000\ue000 | python3",
+        "cat {py} \ue000 2>&1 | python3",
+        "cat {py} \ue000\ue001 2>&1 | python3",
+        # 2. Output process substitution, including redirects after the body.
+        "cat > >(python3) < {py}",
+        "cat > >(python3) <{py}",
+        "cat >> >(python3) < {py}",
+        "cat > >(python3) < {py} 2>&1",
+        "cat > >(python3) > >(wc -l) < {py}",
         "cat {py} > >(python3)",
         "cat {sh} > >(bash)",
         "cat {py} | tee >(python3)",
