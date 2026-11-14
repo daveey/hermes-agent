@@ -16,6 +16,8 @@ from hermes_cli import kanban_worker_node as node
 @pytest.fixture
 def board(tmp_path):
     conn = kbc.connect(tmp_path / 'board.db')
+    conn.close()
+    conn = kbc.connect(tmp_path / 'board.db')  # attest the existing file at open for shared memos
     try:
         yield conn
     finally:

@@ -18,6 +18,9 @@ State per (file identity, name, extra key) is one immutable ``(Cursor, mapping t
   writes, which ``partial`` sees) but never stores: the caller may roll back and the revision it bumped to can be
   reused by other rows (as ``kanban_sweep_gate.memo``);
 * nothing is stored without a cursor (in-memory file, untrusted coverage, a file swapped while reading);
+* reuse/publication requires the managed connection factory's open-time inode attestation. Raw connections,
+  newly created files (absent before open), and retained handles to replaced files read through without caching;
+  a pathname stat at first memo use cannot establish which inode SQLite actually opened;
 * only tasks whose value is truthy are stored, and memory is bounded (``MAX_SLOTS`` slots, ``MAX_ENTRIES`` per slot).
 
 Values must be functions of the task's OWN rows only (its ``tasks`` row and rows keyed by its ``task_id`` in the
@@ -150,7 +153,9 @@ def state(name: str, conn: sqlite3.Connection, *,
     tables = tuple(table for table, _cols in watched)
     from hermes_cli.kanban_sweep_gate import file_identity
     ident = file_identity(conn)
-    if ident is None:
+    if ident is None or getattr(conn, "_hermes_open_identity", None) != ident[1:]:
+        # Raw connections (and files created by this open) have no open-time
+        # attestation. A pathname stat cannot identify the inode they read.
         return _State(None, _clean(full(conn)))
     slot = (ident, name, extra)
     held = _STATES.get(slot)
@@ -187,6 +192,8 @@ def state(name: str, conn: sqlite3.Connection, *,
     finally:
         if own:
             conn.execute("COMMIT")
+    if file_identity(conn) != ident or (fresh is not None and (fresh.dev, fresh.ino) != ident[1:]):
+        fresh = None  # replacement during cursor/full/partial reads: never publish under either file
     if held is not None and values is held.values:
         if fresh == held.cursor:
             return held

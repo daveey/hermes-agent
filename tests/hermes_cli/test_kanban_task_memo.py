@@ -56,7 +56,8 @@ def _open(path):
             conn.execute("ALTER TABLE tasks ADD COLUMN created_on TEXT")
         rev.ensure_revision(conn, rev.LOCAL_TABLES)  # the update trigger now names the new column
     _set_gateway(conn)
-    return conn
+    conn.close()
+    return kbc.connect(path)  # reopen the initialized file with open-time identity attestation
 
 
 @pytest.fixture
@@ -102,6 +103,79 @@ def _truth_cand(conn, statuses, kinds, exclude=False):
     return tuple(sorted(r[0] for r in conn.execute(
         f"SELECT id FROM tasks WHERE status {op} ({','.join('?' * len(statuses))}) AND id IN (SELECT task_id FROM "
         f"task_events WHERE kind IN ({','.join('?' * len(kinds))}))", (*statuses, *kinds))))
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_retained_connection_cannot_poison_replacement(tmp_path, managed):
+    path, replacement = tmp_path / "old.db", tmp_path / "new.db"
+    c = _open(path)
+    tid = _task(c, OTHER, "running")
+    _write(c, "INSERT INTO task_events(task_id, kind, created_at) VALUES (?, ?, 1)",
+           (tid, "remote_stop_requested"))
+    c.close()
+    # DELETE mode isolates the file-generation boundary from WAL sidecars.
+    with sqlite3.connect(path) as setup:
+        setup.execute("PRAGMA journal_mode=DELETE")
+    shutil.copyfile(path, replacement)
+    with sqlite3.connect(path) as original:
+        original.execute("UPDATE tasks SET title='changed'")
+    with sqlite3.connect(replacement) as newer:
+        newer.execute("UPDATE tasks SET status='done', created_on=?", (OWN,))
+    from hermes_cli import kanban_lockguard
+    opening = kanban_lockguard.connect if managed else sqlite3.connect
+    old = opening(path)
+    old.execute("SELECT * FROM tasks").fetchall()
+    os.replace(replacement, path)
+    try:
+        assert cand.candidate_task_ids(old, ("running",), ("remote_stop_requested",)) == (tid,)
+        assert kwc.foreign_ids(old) == {tid}
+        fresh = opening(path)
+        try:
+            assert cand.candidate_task_ids(fresh, ("running",), ("remote_stop_requested",)) == ()
+            assert kwc.foreign_ids(fresh) == set()
+        finally:
+            fresh.close()
+    finally:
+        old.close()
+
+
+def test_replacement_during_full_read_is_not_published(tmp_path):
+    path, replacement = tmp_path / "board.db", tmp_path / "replacement.db"
+    conn = _open(path)
+    _task(conn, OTHER)
+    conn.close()
+    with sqlite3.connect(path) as setup:
+        setup.execute("PRAGMA journal_mode=DELETE")
+    shutil.copyfile(path, replacement)
+    from hermes_cli.kanban_lockguard import connect
+    conn = connect(path)
+    try:
+        def full(c):
+            result = {r[0]: True for r in c.execute("SELECT id FROM tasks")}
+            os.replace(replacement, path)
+            return result
+        result = memo.state("replace_during_read", conn, full=full,
+                            partial=lambda c, ids: {}, columns=CREATED_ON)
+        assert result.values
+        assert result.cursor is None
+        assert not memo._STATES
+    finally:
+        conn.close()
+
+
+def test_new_file_and_raw_connections_never_publish(tmp_path):
+    conn = kbc.connect(tmp_path / "new.db")
+    try:
+        assert conn._hermes_open_identity is None
+        memo.state("new", conn, full=lambda c: {"a": True}, partial=lambda c, ids: {},
+                   columns={"tasks": ("status",)})
+        assert not memo._STATES
+    finally:
+        conn.close()
+    with sqlite3.connect(tmp_path / "new.db") as raw:
+        memo.state("raw", raw, full=lambda c: {"a": True}, partial=lambda c, ids: {},
+                   columns={"tasks": ("status",)})
+        assert not memo._STATES
 
 
 class _Trace:
@@ -189,6 +263,8 @@ def test_a_heartbeat_kind_declaration_is_refused(board):
 def test_a_column_added_after_the_triggers_is_never_trusted(tmp_path):
     """A sync migration's ``ADD COLUMN created_on`` on an open board: the update trigger does not watch it until a
     writer init reinstalls the triggers, so its changes mark nothing and every call must read in full."""
+    conn = kbc.connect(tmp_path / "board.db")
+    conn.close()
     conn = kbc.connect(tmp_path / "board.db")
     try:
         _set_gateway(conn)
