@@ -409,7 +409,7 @@ def _dependency_handoff_after(conn: sqlite3.Connection, task_id: str, since: int
         return False
     requeued = requeued_run_ids(conn, task_id)
     if any(e["kind"] in {"crashed", "reclaimed", "timed_out"} and at >= parked_at
-           and not (e["kind"] == "reclaimed" and e["run_id"] in requeued)
+           and e["run_id"] not in requeued
            for at, e in timed):
         return False
     if not any(e["kind"] == "promoted" and at >= ended

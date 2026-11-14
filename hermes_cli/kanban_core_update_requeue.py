@@ -8,7 +8,8 @@ counted as one, so the guard then held the owner ``active_pr`` with no worker (2
 t_01a1ce8aff1f09c1 on worker-5). A requeued run is skipped as if it never ran.
 
 Only an exact manual reclaim with that reason, whose run ended ``reclaimed`` and carries no
-crash or timeout evidence, qualifies. Any other reclaim, crash or timeout still consumes the
+independent crash or timeout evidence, qualifies. A same-run SIGTERM diagnostic matching
+its successful host-local updater termination receipt is not an independent crash. Any other reclaim, crash or timeout still consumes the
 handoff (fail closed). A PR the requeued run reported is a newer PR comment that post-dates every
 handoff; when that run itself wrote every such comment, ran as the card's assignee and no real
 run was claimed since, the pause grants its lineage one continuation
@@ -35,19 +36,47 @@ def is_core_update_requeue(conn: sqlite3.Connection, run) -> bool:
 
     if run["outcome"] != "reclaimed" or run["ended_at"] is None:
         return False
-    requeued = False
-    for event in conn.execute(
-        "SELECT kind, payload FROM task_events WHERE task_id = ? AND run_id = ? "
+    events = list(conn.execute(
+        "SELECT kind, payload, created_at FROM task_events WHERE task_id = ? AND run_id = ? "
         f"AND kind IN ('reclaimed', {', '.join('?' * len(_FAILURE_KINDS))})",
         (run["task_id"], run["id"], *_FAILURE_KINDS),
-    ):
-        if event["kind"] != "reclaimed":
-            return False
+    ))
+    reclaims = [e for e in events if e["kind"] == "reclaimed"]
+    if not reclaims:
+        return False
+    for event in reclaims:
         payload = kb._json_dict(event["payload"])
         if payload.get("manual") is not True or payload.get("reason") != CORE_UPDATE_REQUEUE_REASON:
             return False
-        requeued = True
-    return requeued
+    return all(e["kind"] == "reclaimed" or _updater_term(e, reclaims, run["ended_at"])
+               for e in events)
+
+
+def _updater_term(event, reclaims, ended_at) -> bool:
+    """Recognize only the updater's successful TERM, not an independent crash.
+
+    Reclaim and process observation can race and both append a terminal event.
+    Require the same run (caller's query), PID, claim and exact end second; missing
+    or conflicting evidence stays a failure. No event or run history is rewritten.
+    """
+    from hermes_cli import kanban_db as kb
+
+    crash = kb._json_dict(event["payload"])
+    if (event["kind"] != "crashed" or event["created_at"] != ended_at
+            or crash.get("exit_kind") != "signaled" or type(crash.get("exit_code")) is not int
+            or crash["exit_code"] != 15 or "worker_lost" in crash or "attempt_note" in crash):
+        return False
+    for receipt in reclaims:
+        p = kb._json_dict(receipt["payload"])
+        if (receipt["created_at"] == ended_at
+                and p.get("host_local") is True and p.get("termination_attempted") is True
+                and p.get("terminated") is True and p.get("sigkill") is False
+                and type(p.get("prev_pid")) is int and p["prev_pid"] > 0
+                and type(crash.get("pid")) is int and crash["pid"] == p["prev_pid"]
+                and isinstance(p.get("prev_lock"), str) and p["prev_lock"].strip()
+                and crash.get("claimer") == p["prev_lock"]):
+            return True
+    return False
 
 
 def requeued_run_ids(conn: sqlite3.Connection, task_id: str) -> set[int]:
