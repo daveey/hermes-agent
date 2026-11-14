@@ -129,6 +129,10 @@ class _ForkedPytest:
         finally:
             os.unlink(self._out)
 
+    def poll(self) -> int | None:
+        self.returncode = forked_exit_status(self._proc, 0)
+        return self.returncode
+
     def kill(self) -> None:
         import signal as _signal
 
@@ -152,6 +156,9 @@ def start_pytest(
     *scratch_dir* holds a forked child's output file until the runner reads it.
     """
     server = _fork_server_for_run(repo_root)
+    # Temporary, targeted evidence for tests passing then hanging at interpreter exit.
+    if file.resolve() == (repo_root / "tests/gateway/test_derived_session_after_delete.py").resolve():
+        pytest_args = [*pytest_args, "-p", "scripts.pytest_exit_diagnostics"]
     selection = list(targets) if targets else [str(file)]
     # The first files copied os.environ before the knob was popped; no test sees it.
     env.pop("HERMES_TEST_FORKSERVER", None)

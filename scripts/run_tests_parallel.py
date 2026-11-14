@@ -859,6 +859,7 @@ def _run_one_file_attempt(
         output, _ = proc.communicate(timeout=file_timeout)
         rc = proc.returncode
     except subprocess.TimeoutExpired:
+        child_status = proc.poll()  # Before kill: communicate can also wait on inherited pipe EOF.
         _kill_tree(proc, pgid=pgid)
         try:
             output, _ = proc.communicate(timeout=10)
@@ -867,7 +868,8 @@ def _run_one_file_attempt(
         rc = 124  # de facto convention for "killed by timeout".
         output = (
             f"({file_timeout:.0f}s exceeded; "
-            f"process tree SIGKILL'd)\n{output}"
+            f"process tree SIGKILL'd; child exit status before kill={child_status!r}, "
+            f"None means still running)\n{output}"
         )
     except BaseException:
         # KeyboardInterrupt / runner crash — make sure no zombie
