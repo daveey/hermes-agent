@@ -13,7 +13,7 @@ from tests.hermes_cli import test_kanban_owner_restart_failed_receipt as restart
 board = restart.board
 
 
-def lost_after_restart(conn, context):
+def lost_after_restart(conn, context, *, emit_loss=True):
     restart._failed_child(conn, context)
     restart.book(context, True)
     import subprocess
@@ -26,7 +26,8 @@ def lost_after_restart(conn, context):
                           env=build_subprocess_env(), cwd=str(Path(__file__).resolve().parents[2]))
     assert done.returncode == 0, done.stderr
     bound = json.loads(conn.execute("SELECT payload FROM task_events WHERE kind='worker_bound' ORDER BY id DESC LIMIT 1").fetchone()[0])
-    record_worker_loss(SimpleNamespace(kanban_json=json.dumps(context)), 'EOFError', pid=bound['pid'], bound=True)
+    if emit_loss:
+        record_worker_loss(SimpleNamespace(kanban_json=json.dumps(context)), 'EOFError', pid=bound['pid'], bound=True)
     return bound
 
 
