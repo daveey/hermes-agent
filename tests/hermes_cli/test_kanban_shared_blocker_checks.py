@@ -6,7 +6,10 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_shared_blockers as blockers
-from tests.hermes_cli.test_kanban_shared_blockers import _blocked_behind, kanban_home
+from tests.hermes_cli import test_kanban_shared_blockers as helpers
+
+kanban_home = helpers.kanban_home
+_blocked_behind = helpers._blocked_behind
 
 
 def test_success_is_durable_even_with_worker_probe_running(kanban_home):

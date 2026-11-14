@@ -90,6 +90,7 @@ def _run_check(command: str) -> tuple[object, str]:
         proc = subprocess.Popen(
             ["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, env=build_subprocess_env(strip_launch_profile=True),
+            # detached-spawn: ok — bounded communicate; timeout kills the process group.
             text=True, encoding="utf-8", errors="replace", start_new_session=True)
     except OSError as exc:
         return "error", str(exc)
