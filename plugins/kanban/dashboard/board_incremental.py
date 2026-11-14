@@ -49,9 +49,9 @@ def _fetch(conn, filters: dict, ids: list) -> dict:
     return {kanban_db._lossy_text(r["id"]): r for r in rows}
 
 
-def _extras(conn, cards: dict, board_read) -> dict[str, dict]:
-    """Full-path aggregates, restricted to displayed IDs (including unmarked run changes)."""
-    ids = list(cards)
+def _rollups(conn, ids) -> dict[str, dict]:
+    """Content-only aggregates for invalidated displayed tasks."""
+    ids = list(ids)
     if not ids:
         return {}
     ph, params = _ph(ids), tuple(ids)
@@ -71,6 +71,27 @@ def _extras(conn, cards: dict, board_read) -> dict[str, dict]:
         p = progress.setdefault(pid, {"done": 0, "total": 0})
         p["total"] += 1
         p["done"] += status == "done"
+    return {tid: {"link_counts": counts[tid], "comment_count": comments.get(tid, 0),
+                  "progress": progress.get(tid)} for tid in ids}
+
+
+def _affected(conn, cards, pcards, changed):
+    """P2 marks both deleted-link endpoints; surviving edges add direct neighbours."""
+    affected = set(changed) | (set(cards) - set(pcards))
+    if changed:
+        ph, params = _ph(changed), tuple(changed)
+        for own, other in (("parent_id", "child_id"), ("child_id", "parent_id")):
+            affected.update(r[0] for r in conn.execute(
+                f"SELECT {other} FROM task_links WHERE {own} IN ({ph})", params))
+    return affected & set(cards)
+
+
+def _extras(conn, cards, pcards, affected, board_read):
+    ids = list(cards)
+    if not ids:
+        return {}
+    rollups = _rollups(conn, sorted(affected)) if affected else {}
+    ph, params = _ph(ids), tuple(ids)
     summaries = kanban_db.latest_summaries(conn, ids)
     starts = kanban_db.current_run_started_ats(conn, ids)
     try:
@@ -81,15 +102,19 @@ def _extras(conn, cards: dict, board_read) -> dict[str, dict]:
         managers = {}
     cap = board_read._CARD_SUMMARY_PREVIEW_CHARS
     return {tid: {
+        **(rollups[tid] if tid in rollups else pcards[tid][2]),
         "latest_summary": summaries[tid][:cap] if summaries.get(tid) else None,
         "current_run_started_at": starts.get(tid),
-        "link_counts": counts[tid], "comment_count": comments.get(tid, 0), "progress": progress.get(tid),
         "managing_session_id": managers.get(tid) or cards[tid][0].session_id or None} for tid in ids}
 
 
 def _done_window(inc, by_id, changed, cap):
     """Update the retained ranking; decline whenever an unseen card might enter the window."""
-    done_ids = set(inc["done_ids"])
+    done_ids = inc["done_ids"]
+    membership_changes = {tid for tid in changed
+                          if (tid in done_ids) != (tid in by_id and by_id[tid]["status"] == "done")}
+    if membership_changes:
+        done_ids = set(done_ids)
     entries = dict(inc["window"])
     truncated = len(done_ids) > cap
     cutoff = inc["window"][-1] if inc["window"] else ("", None)
@@ -99,7 +124,8 @@ def _done_window(inc, by_id, changed, cap):
             if tid in entries and truncated:
                 return None
             entries.pop(tid, None)
-            done_ids.discard(tid)
+            if tid in membership_changes:
+                done_ids.discard(tid)
             continue
         item = (tid, done_epoch(row))
         if tid in entries and truncated and _cmp(item, cutoff) > 0:
@@ -108,7 +134,8 @@ def _done_window(inc, by_id, changed, cap):
             return None
         if tid in entries or not truncated or _cmp(item, cutoff) < 0:
             entries[tid] = item[1]
-        done_ids.add(tid)
+        if tid in membership_changes:
+            done_ids.add(tid)
     window = tuple(sorted(entries.items(), key=rank_key)[:cap])
     if any(tid not in by_id or by_id[tid]["status"] != "done" for tid, _ep in window):
         return None
@@ -148,14 +175,20 @@ def _parse_cards(by_id, order, memo):
     return cards, parsed, raws
 
 
-def _diagnostics(conn, cards, by_id, old_memo, diagnostic_inputs, br):
+def _diagnostics(conn, cards, by_id, prev, affected, diagnostic_inputs, br):
     """Use the freshly read task rows even for unmarked ready/done bookkeeping."""
     diag_rows = [by_id[tid] for tid, (task, _fields) in cards.items() if task.status != "archived"]
     if not diag_rows:
         return None, {}
     # All displayed marks/runs and graph contexts are bounded by open rows plus
     # the done cap. Event histories alone are selectively re-read.
-    return br._incremental_diag_inputs(conn, diag_rows, old_memo, diagnostic_inputs)
+    old_graph = prev["diag_inputs"][3] if prev["diag_inputs"] else {}
+    ids = [r["id"] for r in diag_rows]
+    refresh = [tid for tid in ids if tid in affected or tid not in old_graph]
+    graphs = {tid: old_graph[tid] for tid in ids if tid not in refresh}
+    if refresh:
+        graphs.update(kanban_db.task_graph_contexts(conn, refresh))
+    return br._incremental_diag_inputs(conn, diag_rows, prev["_memo"]["diag"], diagnostic_inputs, graphs=graphs)
 
 
 def _pickers(conn, prev, changed):
@@ -200,8 +233,9 @@ def delta(conn, filters: dict, done_limit, diagnostic_inputs: Callable, prev: di
     if parsed_cards is None:
         return None
     cards, parsed, raws = parsed_cards
-    extras = _extras(conn, cards, br)
-    diag_inputs, memo_diag = _diagnostics(conn, cards, by_id, memo["diag"], diagnostic_inputs, br)
+    affected = _affected(conn, cards, pcards, changed)
+    extras = _extras(conn, cards, pcards, affected, br)
+    diag_inputs, memo_diag = _diagnostics(conn, cards, by_id, prev, affected, diagnostic_inputs, br)
     latest = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"]
     tenants, assignees = _pickers(conn, prev, changed)
     return {

@@ -331,6 +331,37 @@ def test_out_of_filter_waiter_priority_reorders_displayed_ancestors(conn):
     assert [t.id for t, _f, _e in board.rows["cards"]] == [parent, rival]
 
 
+def test_unchanged_and_nondone_changes_retain_done_membership(conn):
+    ids = _seed(conn)
+    board = Board(conn)
+    old = board.full()["_memo"]["inc"]["done_ids"]
+    board.refresh()
+    assert board.rows["_memo"]["inc"]["done_ids"] is old
+    kb.add_comment(conn, ids[4], "me", "unrelated to done history")
+    board.refresh()
+    assert board.rows["_memo"]["inc"]["done_ids"] is old
+    _same(board)
+
+
+def test_rollups_and_graphs_only_refresh_changed_neighbours(conn, monkeypatch):
+    ids = _seed(conn)
+    board = Board(conn)
+    board.full()
+    from plugins.kanban.dashboard import board_incremental as inc
+    real = kb.task_graph_contexts
+    calls = []
+    monkeypatch.setattr(kb, "task_graph_contexts", lambda c, tids: calls.append(set(tids)) or real(c, tids))
+    with mock.patch.object(inc, "_rollups", wraps=getattr(inc, "_rollups", None), create=True) as rollups:
+        board.refresh()
+        assert not calls and not rollups.called
+        conn.execute("UPDATE tasks SET title='renamed child' WHERE id=?", (ids[1],))
+        conn.commit()
+        board.refresh()
+        assert set().union(*calls) == {ids[0], ids[1]}
+        assert set(rollups.call_args.args[1]) == {ids[0], ids[1]}
+    _same(board)
+
+
 def test_a_delta_chain_stays_exact(conn):
     ids = _seed(conn)
     board = Board(conn)

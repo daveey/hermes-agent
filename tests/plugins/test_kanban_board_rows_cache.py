@@ -1,10 +1,8 @@
 """GET /board keeps its SQL rows while the database is unchanged.
 
-The board snapshot re-reads an unchanged board every CACHE_TTL_S so clock-driven
-diagnostics, ages, config and profiles stay current. Only that projection has to run
-again: the materialized rows (the bulk of the read) are reused until a retained read-only
-observer's ``PRAGMA data_version`` moves, which any commit by another connection does,
-bookkeeping-only writes included.
+Every GET reprojects clock-driven diagnostics, ages, config and profiles. Retained
+rows avoid full materialization: commits patch changed rows incrementally, including
+bookkeeping-only writes observed through ``PRAGMA data_version``.
 """
 
 from __future__ import annotations
@@ -115,7 +113,7 @@ def test_unchanged_board_materializes_rows_once(env, monkeypatch):
     assert all(_strip_now(b) == _strip_now(bodies[0]) for b in bodies[1:])
 
 
-def test_local_commit_is_read_on_the_next_refresh(env):
+def test_local_commit_is_read_on_the_next_read_without_full_materialization(env):
     mod, sql_reads, _home = env
     _create("first")
     _read(mod)
@@ -123,12 +121,12 @@ def test_local_commit_is_read_on_the_next_refresh(env):
     second = _create("second")
     body = _read(mod)
     assert second in _cards(body)
-    assert len(sql_reads) == 2
+    assert len(sql_reads) == 1
     _read(mod)
-    assert len(sql_reads) == 2
+    assert len(sql_reads) == 1
 
 
-def test_external_process_commit_is_read_on_the_next_refresh(env):
+def test_external_process_commit_is_read_on_the_next_read_without_full_materialization(env):
     mod, sql_reads, _home = env
     tid = _create("before")
     _read(mod)
@@ -137,20 +135,22 @@ def test_external_process_commit_is_read_on_the_next_refresh(env):
     subprocess.run([sys.executable, "-c", code, str(kb.kanban_db_path()), tid], check=True)
     body = _read(mod)
     assert _cards(body)[tid]["title"] == "after"
-    assert len(sql_reads) == 2
+    assert len(sql_reads) == 1
 
 
-def test_heartbeat_only_write_is_read_on_the_next_refresh(env):
+def test_heartbeat_only_write_is_read_on_the_next_read_without_full_materialization(env):
     """Bookkeeping columns (excluded from the activity revision) are in the payload."""
     mod, sql_reads, _home = env
     tid = _create("hb")
     assert _cards(_read(mod))[tid]["last_heartbeat_at"] is None
     _raw("UPDATE tasks SET last_heartbeat_at = 1234567 WHERE id = ?", (tid,))
     assert _cards(_read(mod))[tid]["last_heartbeat_at"] == 1234567
-    assert len(sql_reads) == 2
+    assert len(sql_reads) == 1
 
 
-def test_wake_check_only_write_is_read_on_the_next_refresh(env):
+def test_wake_check_only_write_is_read_on_the_next_read_without_full_materialization(env, monkeypatch):
+    from plugins.kanban.dashboard import board_read
+
     mod, sql_reads, _home = env
     tid = _create("parked")
     _read(mod)
@@ -158,8 +158,12 @@ def test_wake_check_only_write_is_read_on_the_next_refresh(env):
     assert len(sql_reads) == 1
     _raw("INSERT INTO task_wake_checks (task_id, cmd, every, next_at, fails, generation) "
          "VALUES (?, 'true', 60, 1, 0, 'g')", (tid,))
+    seen = []
+    real = board_read._wake_states
+    monkeypatch.setattr(board_read, "_wake_states", lambda *a: seen.append(real(*a)) or seen[-1])
     _read(mod)
-    assert len(sql_reads) == 2
+    assert len(seen) == 1 and tid in seen[0]
+    assert len(sql_reads) == 1
 
 
 def test_commit_during_the_row_read_is_read_again(env, monkeypatch):
@@ -379,10 +383,8 @@ def test_observer_never_writes_or_holds_a_snapshot(env):
     assert busy == 0
 
 
-def test_snapshot_refresh_cadence_reprojects_unchanged_board(env, monkeypatch):
-    """Through GET /board: the TTL refresh re-runs only the projection."""
-    from plugins.kanban.dashboard.board_snapshot import CACHE_TTL_S, join_refresh
-
+def test_each_get_reprojects_unchanged_board_without_sql(env, monkeypatch):
+    """Through GET /board: age changes appear without waiting for a snapshot TTL."""
     mod, sql_reads, _home = env
     app = FastAPI()
     app.include_router(mod.router, prefix="/api/plugins/kanban")
@@ -394,9 +396,6 @@ def test_snapshot_refresh_cadence_reprojects_unchanged_board(env, monkeypatch):
     monkeypatch.setattr(time, "time", lambda: wall["t"])
     one = _cards(client.get("/api/plugins/kanban/board").json())[tid]["age"]["created_age_seconds"]
     wall["t"] += 600
-    mono["t"] += CACHE_TTL_S + 1
-    client.get("/api/plugins/kanban/board")  # stale snapshot served, refresh scheduled
-    join_refresh()
     two = _cards(client.get("/api/plugins/kanban/board").json())[tid]["age"]["created_age_seconds"]
     assert two == one + 600
     assert len(sql_reads) == 1

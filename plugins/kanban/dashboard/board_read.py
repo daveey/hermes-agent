@@ -163,7 +163,7 @@ def _diag_memo(rows, events_by_task, runs_by_task, marks) -> dict:
                       events_by_task.get(r["id"], ())) for r in rows}
 
 
-def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_inputs: Callable) -> tuple:
+def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_inputs: Callable, *, graphs=None) -> tuple:
     """``(diagnostic inputs, memo)`` re-reading events only for tasks whose row, runs or event
     count/max id moved. A heartbeat touches one task: its row (``last_heartbeat_at``), its run
     and one event, so a refresh re-reads that task's events, not the board's ~50k. Runs and the
@@ -185,7 +185,9 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
         else:  # vanished between reads: no events held, so never vouch for a mark
             events[tid] = ()
             memo[tid] = (tuple(r), _raw(runs[tid]), None, ())
-    inputs = (tuple(diag_rows), events, runs, kanban_db.task_graph_contexts(conn, ids), _wake_states(conn, ids))
+    if graphs is None:
+        graphs = kanban_db.task_graph_contexts(conn, ids)
+    inputs = (tuple(diag_rows), events, runs, graphs, _wake_states(conn, ids))
     return inputs, memo
 
 

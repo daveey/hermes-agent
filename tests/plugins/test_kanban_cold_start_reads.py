@@ -6,7 +6,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
 from plugins.kanban.dashboard.board_prewarm import prewarm_boards
-from tests.plugins.test_kanban_board_read_cache import _create, _titles
+from tests.plugins.test_kanban_board_read_cache import _create, _full_reads, _titles
 
 pytest_plugins = ["tests.plugins.test_kanban_board_read_cache"]
 
@@ -50,8 +50,9 @@ def test_counts_accept_legacy_status_only_schema_and_do_not_create(board, tmp_pa
     assert not missing.exists()
 
 
-def test_prewarm_covers_blocked_board_poll_without_warming_every_board(board):
+def test_prewarm_covers_blocked_board_poll_without_warming_every_board(board, monkeypatch):
     mod, client, reads = board
+    sql_reads = _full_reads(monkeypatch)
     _create("default")
     for slug in ("waiting", "quiet"):
         kb.create_board(slug)
@@ -61,9 +62,9 @@ def test_prewarm_covers_blocked_board_poll_without_warming_every_board(board):
                 conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,))
     prewarm_boards(mod)
     assert {args[2] for args in reads} == {"default", "waiting"}
-    before = len(reads)
+    assert len(sql_reads) == 2
     assert _titles(client.get("/api/plugins/kanban/board?board=waiting").json()) == {"waiting"}
-    assert len(reads) == before
+    assert len(sql_reads) == 2
 
 
 def test_failed_prewarm_is_observable(board, monkeypatch, caplog):
@@ -101,7 +102,8 @@ def test_counts_connection_is_query_only_and_closed(board, monkeypatch):
 
 
 def test_discovery_failure_preserves_default_warmup(board, monkeypatch, caplog):
-    mod, client, reads = board
+    mod, client, _reads = board
+    sql_reads = _full_reads(monkeypatch)
     _create("default")
 
     def fail(*args, **kwargs):
@@ -112,4 +114,4 @@ def test_discovery_failure_preserves_default_warmup(board, monkeypatch, caplog):
         prewarm_boards(mod)
     assert "kanban board prewarm discovery failed" in caplog.text
     assert _titles(client.get("/api/plugins/kanban/board").json()) == {"default"}
-    assert len(reads) == 1
+    assert len(sql_reads) == 1
