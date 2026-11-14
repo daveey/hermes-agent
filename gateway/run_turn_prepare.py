@@ -41,7 +41,7 @@ logger = logging.getLogger("gateway.run")
 _TIER_FROM_RUNNER = object()
 
 
-def _resolve_policy_agent_runtime(runner, policy, *, fallback=True) -> tuple[str, dict]:
+def _resolve_policy_agent_runtime(runner, policy, *, fallback=True, session_id=None) -> tuple[str, dict]:
     """``_resolve_session_agent_runtime`` for a session bound to a launch policy: the route's FROZEN
     config and launch credential, walking its own fallback chain on an AuthError unless
     ``fallback=False`` (a session control asking which route the session itself runs). Module-level
@@ -54,8 +54,11 @@ def _resolve_policy_agent_runtime(runner, policy, *, fallback=True) -> tuple[str
     # A follow_profile_config session's route is the profile's current one, model and endpoint from one read.
     frozen, model = policy.effective(authority)
     provider = (frozen.get('model') or {}).get('provider')
-    runtime, fallback_entry = route_runtime(policy, frozen, model, route_launch_key(authority, policy, frozen),
-                                            fallback=fallback)
+    from agent.model_routing_runtime import current_routing_session, routing_session
+    # Reference expansion precedes TurnRunner's scope, but already owns a local session.
+    with routing_session(current_routing_session() or session_id):
+        runtime, fallback_entry = route_runtime(policy, frozen, model, route_launch_key(authority, policy, frozen),
+                                                fallback=fallback)
     if fallback_entry is not None:
         from hermes_cli.fallback_config import pre_agent_fallback_notice
         runner._pre_agent_fallback_notice = pre_agent_fallback_notice(
@@ -205,7 +208,8 @@ class GatewayTurnPrepareMixin:
         self._pre_agent_fallback_notice = None
         policy = policy_for_source(self, source) if source is not None else None
         if policy is not None:
-            return _resolve_policy_agent_runtime(self, policy, fallback=fallback)
+            return _resolve_policy_agent_runtime(self, policy, fallback=fallback,
+                                                 session_id=getattr(source, 'chat_id', None))
         skey = self._resolve_session_key_or_none(source, session_key)
         model = _resolve_gateway_model(user_config)
         if skey:

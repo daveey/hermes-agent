@@ -125,8 +125,9 @@ def log_not_deferred(wall, reason):
     if episode in _NOT_DEFERRED_SEEN:
         return
     _NOT_DEFERRED_SEEN.add(episode)
-    logger.warning("routing: walled pin not deferred (reason=%s) %s/%s until %s", reason, wall.provider,
-                   wall.model, reset_pt(reset))
+    emit = logger.error if reason == "no-session" else logger.warning
+    emit("routing: walled pin not deferred (reason=%s) %s/%s until %s", reason, wall.provider,
+         wall.model, reset_pt(reset))
 
 
 def predicted_target(config, level, wall):

@@ -41,6 +41,17 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _reject_unbound_routing_session(caplog):
+    """A gateway quota deferral without an owner is a broken pre-turn binding."""
+    yield
+    records = [record for phase in ('setup', 'call') for record in caplog.get_records(phase)]
+    failures = [record.getMessage() for record in records
+                if record.name == 'agent.model_routing_walls'
+                and 'reason=no-session' in record.getMessage()]
+    assert not failures, failures
+
+
+@pytest.fixture(autouse=True)
 def _join_api_turn_workers():
     """Join the API turn workers a test left running, as its loop's teardown used to.
 

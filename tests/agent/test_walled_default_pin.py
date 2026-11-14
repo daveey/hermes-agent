@@ -357,6 +357,8 @@ def test_walled_pin_on_a_foreign_endpoint_refuses_before_deferral_and_says_why(h
 def test_walled_pin_outside_a_routing_session_logs_no_session(home, monkeypatch, caplog):
     skipped = _injected_wall_refusal(home, monkeypatch, caplog, session=False)
     assert len(skipped) == 1 and 'reason=no-session' in skipped[0], skipped
+    assert any(r.levelno == logging.ERROR and 'reason=no-session' in r.getMessage()
+               for r in caplog.records)
 
 
 def test_walled_pin_with_nothing_else_in_its_class_logs_no_target(home, monkeypatch, caplog):
