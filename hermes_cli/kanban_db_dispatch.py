@@ -38,7 +38,7 @@ from hermes_cli.kanban_db_dispatch_allowlist import _dispatch_profile_allowlist,
 from hermes_cli import kanban_worker_scope as _worker_scope, kanban_aggregate_scope as _aggregate_scope
 from hermes_cli import kanban_host_reboot as _host_reboot, kanban_owner_unavailable as _ou  # [daveey]
 from hermes_cli import kanban_owner_death as _owner_death, kanban_parent_unclaimed as _parent_unclaimed  # [daveey]
-from hermes_cli import kanban_guard_refusal as _guard_refusal, loop_accounting as _la  # [daveey]
+from hermes_cli import kanban_guard_refusal as _guard_refusal, loop_accounting as _la, kanban_requeue_custody as _requeue_custody  # [daveey]
 from hermes_cli.kanban_db_dispatch_crash_accounting import _account_crashes  # [daveey]
 from hermes_cli.kanban_failure_accounting import _record_task_failure
 from hermes_cli.kanban_db_dispatch_dead_worker import _DeadWorker
@@ -1954,8 +1954,8 @@ def _run_reclaim_phase(
     _la.timed("dispatch.reap_worker_zombies", reap_worker_zombies)
     result.reaped_terminal_workers = _la.timed("dispatch.reap_terminal_workers", reap_terminal_workers, conn)
     result.stopped_run_scopes = _la.timed("dispatch.stopped_scope_units", _worker_scope.stopped_scope_units, conn, board=board)  # orphans of ended runs [daveey]
-    # Stop requests and forwarded owner card archives other gateways sent (kanban_owner_archive_relay). Before the
-    # reclaim sweeps, so they see the archived cards. [daveey]
+    _la.timed("dispatch.requeue_custody", _requeue_custody.sweep, conn)  # requeued runs' persisted jobs: release or bound
+    # Stop requests and owner card archives other gateways sent (kanban_owner_archive_relay), before the reclaim sweeps. [daveey]
     from hermes_cli.kanban_owner_archive_relay import apply_remote_archives
     result.remote_archived = _la.timed("dispatch.apply_remote_archives", apply_remote_archives, conn)
     # [daveey] Before any stale check: a long gap since the last pass is a host suspend, which the
