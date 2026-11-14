@@ -42,7 +42,10 @@ def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False):
     def key_of(check):
         if runs:
             if distinct_suites:
-                return (check["name"], check["app"]["id"], check["check_suite"]["id"])
+                # Names are not job identities, even within one suite/attempt.
+                # Retain every run: without proven supersession, a later sibling
+                # success cannot replace a failure (or a pending merge-time run).
+                return (check["name"], check["app"]["id"], check["check_suite"]["id"], check["id"])
             return (check["name"], check["app"]["id"])
         return (check["context"], (check.get("creator") or {}).get("id"))
 

@@ -112,6 +112,17 @@ def test_merged_fallback_keeps_same_name_workflows_distinct(evidence):
     assert [c["id"] for c in receipt["checks"]] == [1, 2]
 
 
+@pytest.mark.parametrize("outcome,expected", [("failure", "failure"), ("pending", "pending"),
+                                             ("cancelled", "infra"), ("success", "success")])
+@pytest.mark.parametrize("started", ["2026-11-02T12:00:00Z", "2026-11-02T12:30:00Z"])
+def test_merged_fallback_preserves_same_suite_siblings(evidence, outcome, expected, started):
+    evidence.update(merged=True, runs=[run(outcome), run("success", id=2, started=started)])
+    receipt = gate.collect_acceptance(URL, None)
+    assert receipt["classification"] == expected
+    assert receipt["ok"] is (expected == "success")
+    assert [c["id"] for c in receipt["checks"]] == [1, 2]
+
+
 def test_fallback_merge_cutoff(evidence):
     evidence.update(merged=True, runs=[run("failure"), run("success", id=2, started="2026-11-02T14:00:00Z")])
     receipt = gate.collect_acceptance(URL, None)
