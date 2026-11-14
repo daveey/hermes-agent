@@ -180,6 +180,32 @@ def test_every_offkey_approval_requires_reply_guard(land_stub, tmp_path, monkeyp
     assert state["filed"] == []
 
 
+def test_success_detail_names_first_offkey_receipt_before_github(land_stub, tmp_path, monkeypatch):
+    board(tmp_path / "land-state.db")
+    land_stub.update(approve={CARD: SHA})
+    checker = review.ShipReview(tmp_path)
+    mod = checker._module()
+    original_gate = mod.review_gate
+    receipts = []
+
+    def review_gate(*args, **kwargs):
+        if args[6]:
+            receipt = original_gate(*args, **kwargs)
+        else:
+            receipt = {"source": "github", "id": 12345, "reviewed_sha": SHA, "verdict": "approve"}
+        receipts.append(receipt)
+        return receipt
+
+    monkeypatch.setattr(mod, "review_gate", review_gate)
+    monkeypatch.setattr(checker, "_module", lambda: mod)
+    accepted, detail = checker.check("example/fork", 7, SHA, "sync/head")
+
+    assert [(r["source"], r["id"]) for r in receipts] == [("kanban", CARD), ("github", 12345)]
+    assert accepted is True
+    assert detail == f"independent exact-head review kanban {CARD} approves {SHA}"
+    assert land_stub.read()["filed"] == []
+
+
 def test_keyed_refusal_cannot_be_bypassed_by_offkey(land_stub, tmp_path):
     board(tmp_path / "land-state.db")
     land_stub.update(cards={f"example/fork#7:{SHA}": "t_keyed"}, approve={CARD: SHA})
