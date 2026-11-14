@@ -103,7 +103,15 @@ def run_effect(outcome: Optional[str], metadata) -> tuple[str, Optional[str]]:
     # a pass on the hub board). Writers use json.dumps, which never escapes an ASCII key name.
     if isinstance(metadata, str) and '"blocker_id"' not in metadata and f'"{CLEAR_FLAG}"' not in metadata:
         return "pass", None
-    meta = kb._json_dict(metadata)
+    if isinstance(metadata, str):
+        # G2b: three lanes decode the same run histories each pass; the result is a pure function of
+        # the row and the pass's config snapshot (``kanban_blocker_inputs.memo``).
+        from hermes_cli.kanban_blocker_inputs import memo
+        return memo("run_effect", metadata, lambda: _decoded_effect(kb._json_dict(metadata)))
+    return _decoded_effect(kb._json_dict(metadata))
+
+
+def _decoded_effect(meta) -> tuple[str, Optional[str]]:
     bid = normalize_blocker_id(meta.get("blocker_id"))
     if bid is not None:
         return "assert", bid
@@ -138,10 +146,10 @@ def normalize_blocker_id(raw, *, cfg=None) -> Optional[str]:
     if re.fullmatch(r"github(-(shared|rest|core))*-quota(-reserve)?", slug):
         return "github-rest-quota"
     if cfg is None:
-        from hermes_cli.config import load_config_readonly
         from hermes_cli.config_backend import ConfigBackendUnavailable
+        from hermes_cli.kanban_blocker_inputs import config
         try:
-            cfg = load_config_readonly()
+            cfg = config()
         except ConfigBackendUnavailable:
             return slug or None
     aliases = (cfg.get("kanban") or {}).get("shared_blocker_aliases", {})

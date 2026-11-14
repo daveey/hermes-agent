@@ -3,6 +3,7 @@ from pathlib import Path
 import sqlite3
 
 from hermes_cli import kanban_activity_revision as revision
+from hermes_cli.kanban_blocker_inputs import input_pass
 
 
 def event_candidates(conn: sqlite3.Connection, statuses: tuple[str, ...], kinds: tuple[str, ...],
@@ -58,8 +59,13 @@ def _on_connection(conn, statuses, kinds, exclude_statuses=False):
     return found
 
 
+@input_pass
 def sweep_shared_blockers(conn, result) -> None:
     """Skip proven-empty lanes; positive candidates still obey time-based policy.
+
+    G2b: the three lanes share one blocker-input scope (``kanban_blocker_inputs``): a lane's write, a
+    peer's commit or a config alias change still invalidates every retained input, and no derived
+    ``BlockerState`` is shared.
 
     [daveey] G2: each lane also skips while the board's content revision, this gateway's id and the config hold
     and none of its clocks ran out (``kanban_sweep_gate``). Both lanes read only content rows (``task_runs``
