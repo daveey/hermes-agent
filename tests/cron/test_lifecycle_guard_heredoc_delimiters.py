@@ -177,6 +177,27 @@ def test_two_heredocs_on_one_opener_with_harmless_group_stay_allowed():
     assert scan_gateway_lifecycle(command) == (False, None)
 
 
+@pytest.mark.parametrize("prefix", [
+    "cat <<A\nx\nA\n",
+    "cat <<'A'\n}\nA\n",
+    "cat <<-A\n\tx\n\tA\n",
+    "cat <<A <<B\nx\nA\ny\nB\n",
+    "cat <<A\nx\nA\ncat <<B\ny\nB\n",
+])
+@pytest.mark.parametrize(("delimiter", "terminator"), [REPRINTED[0], REPRINTED[3]])
+def test_reprinted_view_preserves_earlier_heredoc_bodies(tmp_path, prefix, delimiter, terminator):
+    def command(inner, sink):
+        return "{\n" + prefix + _group(delimiter, terminator, inner, sink)[2:]
+
+    assert scan_gateway_lifecycle(command(f"cat {_lifecycle_script(tmp_path)}", "python3")) == (True, None)
+    assert scan_gateway_lifecycle(command("echo MARKER_FED", "cat")) == (False, None)
+    if shutil.which("bash"):
+        result = subprocess.run(["bash", "-c", command("echo MARKER_FED", "cat")],
+                                capture_output=True, text=True, timeout=20, check=False)
+        assert result.returncode == 0, result.stderr
+        assert "MARKER_FED" in result.stdout.splitlines(), result.stderr
+
+
 def _candidate_lines(count: int) -> str:
     lines = [f"echo $(echo {index})" for index in range(count)]
     return "\n".join(["{", "cat <<$(echo E)", *lines, "} | cat"])

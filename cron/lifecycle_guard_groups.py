@@ -468,7 +468,9 @@ def _heredoc_scripts(command: str) -> Iterator[Optional[str]]:
                 overflow = True
                 break
             views -= 1
-            pending.append(head + view)
+            # A view is parsed again: retain earlier bodies with their openers,
+            # or a bodiless earlier opener consumes the rest of the group.
+            pending.append(script[:previous] + view)
     if overflow:
         yield None
 
