@@ -89,13 +89,14 @@ def draining(entry: Optional[dict[str, Any]], *, now: Optional[float] = None) ->
     return {"until_ms": int(until)} if isinstance(until, (int, float)) and until > 0 else {}
 
 
-def placement(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]]:
+def placement(conn: sqlite3.Connection, task_id: str, *, backlog: bool = True) -> Optional[dict[str, Any]]:
     """For a card whose ``runs_on`` this machine does not satisfy, on a synced board with a readable machine
     registry: ``{"lane": "unplaceable", runs_on, missing, machines}`` when no known machine satisfies it (``missing``
     = labels no machine carries; empty when each exists but none carries them all), else ``{"lane": "machine",
     runs_on, machines}`` naming the machines that can lease it. None otherwise (no labels, sync off, registry
     unknown, or this machine fits): an unknown registry never reads as unplaceable. [daveey] t_01a1a521638d0a78
-    (runs_on ["hermes-hub"], no machine carries it) sat ready for days reading as a local slot wait."""
+    (runs_on ["hermes-hub"], no machine carries it) sat ready for days reading as a local slot wait.
+    Set ``backlog=False`` for the same placement verdict without ranking the label queue."""
     labels = _runs_on(conn, task_id)
     if not labels:
         return None
@@ -129,10 +130,11 @@ def placement(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]
             until = [d["until_ms"] for d in drains.values() if "until_ms" in d]
             if until:
                 place["drain_until_ms"] = max(until)
-        from hermes_cli import kanban_label_backlog as klb
-        backlog = klb.read(conn, task_id, labels, machines=klb.available(labels, machines))
-        if backlog.get("ahead") or klb.busy(backlog):
-            place["backlog"] = backlog
+        if backlog:
+            from hermes_cli import kanban_label_backlog as klb
+            queue = klb.read(conn, task_id, labels, machines=klb.available(labels, machines))
+            if queue.get("ahead") or klb.busy(queue):
+                place["backlog"] = queue
         return place
     every = set().union(*carried.values())
     return {"lane": "unplaceable", "runs_on": labels, "missing": [lb for lb in labels if lb not in every],
