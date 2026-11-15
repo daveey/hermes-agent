@@ -77,26 +77,25 @@ def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
 
 
 def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional[str]) -> dict:
-    """``{session_id, origin_profile}`` a card routed to another gateway carries as its origin chat. [daveey]
+    """Preserve the discovered chat owner, including a foreign gateway.
 
-    The receiving gateway never sees a worker's creator card (it lives on this board), so it cannot walk to the
-    creator's chat itself. A dispatcher worker sends the nearest real chat ``resolve_chats`` finds here: on THIS
-    gateway only, because ``hermes-hub create-task`` binds an origin on the sending gateway. A worker transcript is
-    never an origin (no chat reads it back); anything else keeps the caller's session. ``origin_profile`` None
-    means this process's profile.
+    Discovery is not authorization: foreign sessions are verified on their own
+    gateway by the authenticated forward adapter, never in the worker's state.db.
+    Resolution errors must not turn a qualified origin into a plain local session.
     """
     from hermes_cli.kanban_db_notify import is_headless_session
     if creator_task_id:
-        try:  # never raises: placement itself decides what an identity failure means
-            from hermes_cli import kanban_capability_registry as reg
-            from hermes_cli.kanban_creator_chats import resolve_chats
-            self_gw = reg.self_gateway()
-            has_links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone()
-            for owner in (resolve_chats(conn, creator_task_id) if has_links else []):
-                if self_gw and owner["chat_gateway"] == self_gw and _persisted_session_id(owner["chat_session"]):
-                    return {"session_id": owner["chat_session"], "origin_profile": owner.get("chat_profile") or None}
-        except Exception:
-            logger.warning("Could not resolve the creator chat for a placed card", exc_info=True)
+        from hermes_cli import kanban_capability_registry as reg
+        from hermes_cli.kanban_creator_chats import resolve_chats
+        self_gw = reg.self_gateway()
+        has_links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone()
+        for owner in (resolve_chats(conn, creator_task_id) if has_links else []):
+            gateway, session = owner["chat_gateway"], owner["chat_session"]
+            if gateway and gateway != self_gw:
+                return {"session_id": session, "origin_profile": owner.get("chat_profile") or "default",
+                        "origin_gateway": gateway}
+            if self_gw and gateway == self_gw and _persisted_session_id(session):
+                return {"session_id": session, "origin_profile": owner.get("chat_profile") or None}
     if session_id and is_headless_session(session_id):
         return {"session_id": None, "origin_profile": None}
     return {"session_id": session_id, "origin_profile": None}
@@ -203,7 +202,7 @@ def _denied_fields(conn, task_id: str, marker_placement: dict) -> Optional[dict]
 
 
 def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict], session_id: Optional[str],
-                             origin_profile: Optional[str] = None) -> dict:
+                             origin_profile: Optional[str] = None, origin_gateway: Optional[str] = None) -> dict:
     """Result fields for a card a placement marker kept here; a deferred card records its forward. [daveey]"""
     if not marker_placement:
         return {}
@@ -214,7 +213,8 @@ def _marker_placement_fields(conn, new_tid: str, marker_placement: Optional[dict
         from hermes_cli import kanban_placement_forward as _kpf
         from hermes_cli.profiles import current_profile_name as _cpn
         _kpf.record_deferral(conn, new_tid, target=marker_placement["defer"], origin_session=session_id,
-                             origin_profile=origin_profile or _cpn("default") or "default")
+                             origin_profile=origin_profile or _cpn("default") or "default",
+                             origin_gateway=origin_gateway)
         return {"placement": {"where": "local", "defer": marker_placement["defer"], "why": marker_placement["why"]},
                 "note": (f"Created here as {new_tid} so it can wait on its parents; it runs on "
                          f"{marker_placement['defer']}, not here: when the parents finish the dispatcher "

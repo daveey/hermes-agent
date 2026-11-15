@@ -131,13 +131,16 @@ def test_placed_worker_child_of_an_unresolved_creator_has_no_origin(placed, monk
     assert placed == [{"target": "hub", "origin_session": None, "origin_profile": "default"}]
 
 
-def test_placed_worker_child_skips_a_chat_on_another_gateway(placed, monkeypatch):
-    """hermes-hub create-task binds an origin on THIS gateway only, so a foreign chat cannot be the origin."""
+def test_placed_foreign_chat_without_creator_authority_refuses(placed, monkeypatch):
+    """A foreign chat must never be silently dropped or stamped with this worker."""
     with kbc.connect_closing() as conn:
         creator = kb.create_task(conn, title="creator", assignee="default", session_id=WORKER)
         _link(conn, creator, "away", None, CHAT)
-    _place(creator, monkeypatch)
-    assert placed == [{"target": "hub", "origin_session": None, "origin_profile": "default"}]
+    monkeypatch.setenv("HERMES_KANBAN_TASK", creator)
+    out = json.loads(tools._handle_create({"title": "routed child", "assignee": "default", "requires": []}))
+    assert out.get("created") is False, out
+    assert "origin_forward_creator_unknown" in out["error"]
+    assert placed == []
 
 
 def test_deferred_worker_child_records_the_creator_chat_for_its_forward(placed, monkeypatch):

@@ -1458,7 +1458,8 @@ def _placed_rejection(kp, rid: str, target: str, fields: dict) -> Optional[str]:
 
 
 def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id, conn=None,
-                  note_local_pin: bool = True, origin_profile=None) -> tuple[Optional[str], Optional[dict]]:
+                  note_local_pin: bool = True, origin_profile=None, origin_gateway=None,
+                  creator_task_id=None) -> tuple[Optional[str], Optional[dict]]:
     """[daveey] Create the card on the gateway ``kanban.placement`` routes this one to.
 
     Returns a remote result/refusal, or local placement metadata. Worker-policy metadata
@@ -1488,13 +1489,18 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             return (tool_error(stranded, rejection="sync_not_running"), None) if stranded else (None, local)
         self_gw = reg.self_gateway() or "local"
         cfg = kp.config()
+        forwarding = {}
+        if origin_gateway and origin_gateway != self_gw:
+            from hermes_cli.kanban_placement_provenance import forwarding_authority
+            forwarding = {"origin_gateway": origin_gateway, **forwarding_authority(
+                conn, creator_task_id, _worker_run_id(creator_task_id) if creator_task_id else None, self_gw=self_gw)}
         placed = kp.create_remote(view, target=target, origin_session=session_id,
                                   origin_profile=origin_profile or current_profile_name("default") or "default",
-                                  self_gw=self_gw, cfg=cfg, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")))
+                                  self_gw=self_gw, cfg=cfg, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")), **forwarding)
         if not placed.get("ok"):
             logger.warning("kanban placement: %s refused the card (%s)",
                            target, placed.get("error"))
-            if placed.get("fatal") or kp.explicit_foreign_pin(view, reg.self_gateway()):
+            if forwarding or placed.get("fatal") or kp.explicit_foreign_pin(view, reg.self_gateway()):
                 return _placement_refused(target, f"{target} refused the card: {placed.get('error')}"), None
             return None, None
         rid = placed["request_id"]
@@ -1527,6 +1533,9 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
         return _ok(task_id=None, status="queued", **fields, runs_where=target, note=note), None
     except Exception as exc:
         logger.warning("kanban placement failed", exc_info=True)
+        if origin_gateway:
+            return _placement_refused(str(args.get("placement") or "auto"),
+                                      f"qualified origin forwarding failed: {exc}"), None
         try:
             from hermes_cli import kanban_placement as kp2
             from hermes_cli import kanban_capability_registry as reg2
@@ -1633,7 +1642,7 @@ def _handle_create(args: dict, **kw) -> str:
             place_origin = _placement_origin(conn, self_tid, session_id)  # a worker's: its creator's chat
             remote, marker_placement = _place_remote(
                 args, assignee=str(assignee), skills=skills, parents=parents, project_id=project_id, conn=conn,
-                note_local_pin=pinned_machine is None, **place_origin)  # a machine pin was rewritten to "local"
+                creator_task_id=self_tid, note_local_pin=pinned_machine is None, **place_origin)
             if remote is not None:
                 return remote
             if marker_placement and marker_placement.get("runs_on") and runs_on is None:

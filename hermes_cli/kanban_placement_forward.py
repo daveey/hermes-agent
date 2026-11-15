@@ -59,11 +59,12 @@ MODULE = "hermes_cli.kanban_placement_forward"
 # --- state -------------------------------------------------------------------------------------
 
 def record_deferral(conn: sqlite3.Connection, task_id: str, *, target: str, origin_session: Optional[str],
-                    origin_profile: str) -> None:
+                    origin_profile: str, origin_gateway: Optional[str] = None) -> None:
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
         kb._append_event(conn, task_id, DEFERRED, {
-            "target": target, "origin_session": origin_session or None, "origin_profile": origin_profile})
+            "target": target, "origin_session": origin_session or None, "origin_profile": origin_profile,
+            **({"origin_gateway": origin_gateway} if origin_gateway else {})})
 
 
 def state(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
@@ -573,9 +574,14 @@ class Forwarder:
         return self._await(task, target, rid)
 
     def _create(self, args: dict, target: str, st: dict, key: str) -> dict:
+        forwarding = {}
+        if st.get("origin_gateway") and st["origin_gateway"] != self.self_gw:
+            from hermes_cli.kanban_placement_provenance import forwarding_authority
+            forwarding = {"origin_gateway": st["origin_gateway"], **forwarding_authority(
+                self.conn, self.task_id, self.run_id, self_gw=self.self_gw)}
         return self.create(args, target=target, origin_session=st.get("origin_session"),
                            origin_profile=st.get("origin_profile") or "default", self_gw=self.self_gw,
-                           cfg=self.cfg, hub_cli=self.hub_cli, transport_key=key)
+                           cfg=self.cfg, hub_cli=self.hub_cli, transport_key=key, **forwarding)
 
     def _await(self, task, target: str, rid: str) -> str:
         from hermes_cli.kanban_placement import FAILED_STATES
@@ -655,6 +661,9 @@ class Forwarder:
             kb._append_event(self.conn, self.task_id, kind, payload)
 
     def _cancel(self, why: str) -> str:
+        st = state(self.conn, self.task_id) or {}
+        if st.get("origin_gateway") and st["origin_gateway"] != self.self_gw:
+            return self._park_clock(f"qualified origin forwarding refused; no local fallback: {why}")
         self._event(CANCELLED, {"why": why})
         return "fallback"
 
