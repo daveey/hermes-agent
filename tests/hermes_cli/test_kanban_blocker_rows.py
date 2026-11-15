@@ -370,6 +370,38 @@ def test_a_shared_walk_is_keyed_by_the_callers_window(kanban_home):
         one_pass()
 
 
+def test_peer_commit_between_window_and_walk_key(kanban_home, monkeypatch):
+    """A newly inserted boundary assertion must not be stored under the old window ids."""
+    with kbc.connect_closing() as conn, kbc.connect_closing() as peer:
+        helpers._blocked_behind(conn, "steady")
+        now = _now(conn)
+        original = inputs.read
+        injected = []
+
+        def racing_read(name, connection, key, compute, **kwargs):
+            if name == "walk" and not injected:
+                tid = helpers._blocked_behind(peer, "boundary", blocker_id="boundary-wall")
+                with kb.write_txn(peer):
+                    peer.execute("UPDATE task_runs SET ended_at = ? WHERE task_id = ?",
+                                 (now - ksb._LOOKBACK_SECONDS + 1, tid))
+                injected.append(tid)
+            return original(name, connection, key, compute, **kwargs)
+
+        monkeypatch.setattr(inputs, "read", racing_read)
+
+        @inputs.input_pass
+        def one_pass():
+            first = ksb.blocker_states(conn, now=now)
+            assert "boundary-wall" in first
+            later = ksb.blocker_states(conn, now=now + 3)
+            assert "boundary-wall" not in later
+            return _snap(later)
+
+        got = one_pass()
+        assert injected
+        assert got == cold(conn, now + 3)
+
+
 def test_held_rows_are_bounded_to_tasks_with_assertions(kanban_home):
     with kbc.connect_closing() as conn:
         a = helpers._blocked_behind(conn, "a")

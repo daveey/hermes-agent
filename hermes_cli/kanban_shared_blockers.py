@@ -343,8 +343,12 @@ def blocker_states(conn: sqlite3.Connection, *, now: Optional[int] = None,
 
     now = int(time.time()) if now is None else int(now)
     window, _tasks = rows.inputs(conn, now)
-    states, asserting = read("walk", conn, ("walk", frozenset(r.id for r in window)),
-                             lambda: _walk(conn, *rows.inputs(conn, now)))
+    window_ids = frozenset(r.id for r in window)
+    # A peer can commit between the window read and read()'s pre-compute key.
+    # Never publish a walk of a different window under that earlier set of ids.
+    states, asserting = read("walk", conn, ("walk", window_ids),
+                             lambda: _walk(conn, *rows.inputs(conn, now)),
+                             store_if=lambda value: frozenset(r.id for r in value[1]) == window_ids)
     _note_window_exit(oldest_out, asserting)
     if not states:
         return states

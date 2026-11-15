@@ -125,7 +125,7 @@ def _key(conn, now, aliases=None):
         return None
 
 
-def read(name, conn, now, compute):
+def read(name, conn, now, compute, *, store_if=lambda _value: True):
     """Bracket inputs with their commit/config identity; unknown means uncached.
 
     Transactions (including savepoints) always bypass. total_changes catches
@@ -136,7 +136,9 @@ def read(name, conn, now, compute):
     solely through the pass snapshot (``config``), so the value is fresh for
     the key's aliases iff the snapshot still carries them afterwards. A live
     edit during ``compute`` is caught by the next read's key. With no snapshot
-    held the post-compute key falls back to a live read.
+    held the post-compute key falls back to a live read. ``store_if`` additionally
+    checks caller-derived key material against the computed value; a mismatch
+    returns the value to this consumer without publishing it for another lane.
     """
     scope = _SCOPE.get()
     if scope is None:
@@ -151,6 +153,6 @@ def read(name, conn, now, compute):
         return deepcopy(held[1])
     scope.pop(slot, None)
     value = compute()
-    if _key(conn, now, _snapshot_aliases(scope)) == key:
+    if _key(conn, now, _snapshot_aliases(scope)) == key and store_if(value):
         scope[slot] = (key, deepcopy(value))
     return value
