@@ -19,6 +19,11 @@ SHAPES = [
     r'x="a[\$(SCRIPT)]"; echo ${!x}',
     r'x="a[\$(SCRIPT)]"; echo "${!x}"',
     r'x="a[\$(SCRIPT)]"; echo ${!x:-d}',
+    *[f'x=\'a[$(SCRIPT)]\'; echo ${{!x{operator}}}' for operator in
+      ('-d', '+d', '=d', '?e', '#p', '##p', '%p', '%%p', '/a/b', '//a/b', '^', '^^', ',', ',,', '@Q')],
+    *[f'x=\'a[$(SCRIPT)]\'; {setup}; {unset} "$x"' for setup in
+      ('a=(1)', 'a=1', 'read -a a <<< 1', 'declare -A a')
+      for unset in ('unset', 'unset -v')],
     "declare 'a[$(SCRIPT)]=1'",
     r"declare a[\$\(SCRIPT\)]=1",
     "declare -a 'a[$(SCRIPT)]=1'",
@@ -166,7 +171,6 @@ def test_name_and_indirection_scripts_are_scanned(tmp_path, shape, bash_version)
     "x='a[$(SCRIPT)]'; printf -v x 1",
     "x='a[$(SCRIPT)]'; read x <<< 1",
     "x='a[$(SCRIPT)]'; unset x",
-    'x=\'a[$(SCRIPT)]\'; unset "$x"',
     "x='a[$(SCRIPT)]'; echo '${!x}'",
     r"x='a[$(SCRIPT)]'; echo \${!x}",
     "x='a[$(SCRIPT)]'; echo $${!x}",
@@ -179,6 +183,19 @@ def test_inert_name_words_stay_allowed(tmp_path, shape):
     ran, script = _run_bash(tmp_path, command)
     assert not ran
     script.write_text("hermes gateway restart\n", encoding="utf-8")
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+
+
+@pytest.mark.platforms("posix")
+def test_unset_unknown_target_conservatively_scans(tmp_path):
+    # No local target means no execution in this fixture, but inherited/sourced
+    # state may supply it; do not infer that every expanded unset is inert.
+    command = 'x=\'a[$(SCRIPT)]\'; unset "$x"'.replace("SCRIPT", str(tmp_path / "payload.sh"))
+    ran, script = _run_bash(tmp_path, command)
+    assert not ran
+    script.write_text("hermes gateway restart\n", encoding="utf-8")
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (True, None)
+    script.write_text("echo hello\n", encoding="utf-8")
     assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
 
 

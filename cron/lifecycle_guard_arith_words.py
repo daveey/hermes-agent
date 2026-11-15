@@ -105,9 +105,9 @@ def _recursive_arithmetic_segment(segment: list[str]) -> bool:
     # NAME subscripts recursively evaluate variables just like explicit arithmetic.
     # Expansion-supplied names and nameref targets can hide the entire subscript
     # in an earlier assignment. A plain NAME does not: `read x` stays inert.
-    # Bash unset does not re-expand a subscript supplied through a parameter.
-    expanded_name = any("[" in token or (name != "unset" and "$" in token)
-                        for token in arguments)
+    # unset re-expands parameter-supplied subscripts when the target exists;
+    # its absence cannot be proved without tracking shell state.
+    expanded_name = any("[" in token or "$" in token for token in arguments)
     return name == "let" or (
         name == "[[" and (any(token in _INT_OPERATORS for token in arguments)
                           or ("-v" in arguments and expanded_name))
@@ -135,7 +135,7 @@ def _implicit_arithmetic_expansion(command: str) -> bool:
     This is only a context prefilter, not an evaluator. Preserve shell quoting so
     literal examples in printf/echo do not activate unrelated data assignments.
     """
-    tokens = re.compile(r'''\\.|'|"|\$\$|\$\[|\$\{![A-Za-z_]\w*(?=[}:])|\$\{[#!]?(?:[A-Za-z_]\w*|\d+|[@*#?$!-])(?:\[|:(?![-=?+]))''')
+    tokens = re.compile(r'''\\.|'|"|\$\$|\$\[|\$\{![A-Za-z_]\w*(?=[}:=+?/#%^,\-]|@[A-Za-z])|\$\{[#!]?(?:[A-Za-z_]\w*|\d+|[@*#?$!-])(?:\[|:(?![-=?+]))''')
     quoted = False
     pos = 0
     while match := tokens.search(command, pos):
