@@ -173,10 +173,15 @@ def may_set_integer_attributes(command: str, *, aliases_defined: bool = False) -
         name = guard._executable_name(words[index])
         # Alias values are dequoted assignment words: the '=' before declare
         # prevents the ordinary declaration regex from matching its command name.
+        # A value may also be only an option (`alias i='-i'`) that a trailing-space
+        # alias (`alias d='declare '`) expands into `d i x`. Do not evaluate
+        # aliases: any value carrying an integer option word sets the hint.
         # Inspect only alias definitions, not arbitrary data assignments.
         if name == "alias" and any(
-            _INTEGER_DECLARATION_RE.search(word.partition("=")[2])
+            _INTEGER_DECLARATION_RE.search(value)
+            or _integer_declaration(re.sub(r"[\"'\\]", "", value).split())
             for word in words[index + 1:] if "=" in word
+            for value in (word.partition("=")[2],)
         ):
             return True
         # Do not evaluate expansions or source files to discover attributes. Either
