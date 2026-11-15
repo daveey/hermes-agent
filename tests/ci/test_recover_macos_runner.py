@@ -120,6 +120,21 @@ def test_historical_runner_loss_reruns_failed_jobs_once():
     assert api.posts == [f"repos/{REPO}/actions/runs/41003441463/rerun-failed-jobs"]
 
 
+# The mini's agent and the three Softmax room minis' bbci daemons (listed here,
+# not read from the module, so an emptied allowlist cannot pass vacuously).
+DEDICATED_RUNNERS = ["mini-hermes-state-1", "sx-main-room-mini-hermes",
+                     "sx-heart-room-mini-hermes", "sx-conway-mini-hermes"]
+
+
+@pytest.mark.parametrize("runner", DEDICATED_RUNNERS)
+def test_runner_loss_on_each_dedicated_runner_reruns_once(runner):
+    run, api = _loss(job_changes={"runner_name": runner})
+    decision = recover.recover(_event(run), api, repository=REPO)
+    assert decision.action == "rerun", decision.reason
+    assert f"runner lost on {runner};" in decision.reason
+    assert api.posts == [f"repos/{REPO}/actions/runs/{run['id']}/rerun-failed-jobs"]
+
+
 # --- run 40751299089: ordinary test failure (real, historical) ---------------------
 TEST_FAILURE_RUN = {
     "id": 40751299089, "name": "hermes_state (macOS)",
@@ -278,6 +293,8 @@ def test_api_state_overrides_a_stale_or_forged_event():
 @pytest.mark.parametrize("job_changes,fragment", [
     ({"runner_name": "mini-hermes-state-2"}, "ran on"),
     ({"runner_name": None}, "ran on"),
+    ({"runner_name": "sx-main-room-mini"}, "ran on"),
+    ({"runner_name": ["sx-main-room-mini-hermes"]}, "ran on"),
     ({"name": "tests/hermes_state (macOS, mini) "}, "expected exactly one"),
     ({"name": "hermes_state (macOS) / tests/hermes_state (macOS, mini)"}, "expected exactly one"),
     ({"conclusion": "cancelled"}, "not completed/failure"),

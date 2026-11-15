@@ -5,10 +5,13 @@ name: hermes_state (macOS)
 # darwin-only divergence (65 failures, fixed in a408ba1b05) stayed green for
 # weeks. This lane closes that gap.
 #
-# Runner: self-hosted on the Mac mini (labels self-hosted, macOS, hermes-state),
-# a dedicated launchd user agent (com.daveey.ci-runner-hermes-state) with its own
-# work dir, one job at a time. GitHub-hosted runners are not used (account
-# billing refusal), so this lane does not depend on billing.
+# Runners: self-hosted, labels self-hosted, macOS, hermes-state. Each is a
+# dedicated runner with its own work dir, one job at a time: the three Softmax
+# room Mac minis (sx-{main,heart,conway}-...-hermes, a hidden non-GUI bbci
+# user's LaunchDaemon at nice 19 + low-priority I/O) and the Mac mini's launchd
+# user agent (com.daveey.ci-runner-hermes-state). Which of them carry the label
+# is runner configuration, not this file. GitHub-hosted runners are not used
+# (account billing refusal), so this lane does not depend on billing.
 #
 # ci.yaml calls this for selected same-repository PRs and release/dispatch runs.
 # Its macOS state required (v1) consumer requires success when selected.
@@ -31,8 +34,9 @@ name: hermes_state (macOS)
 # Renaming or moving this file needs that SCHEDULED entry updated too.
 #
 # HERMES_HOME points at a throwaway temp dir, so the lane writes none of the live
-# ~/.hermes's config, state, sessions or environments. The runner is the daveey
-# login (HOME=/Users/daveey, same APFS volume as RUNNER_TEMP), so the temp home
+# ~/.hermes's config, state, sessions or environments. The runner is its host's
+# CI login (daveey on the mini, bbci on the room minis; HOME on the same APFS
+# volume as RUNNER_TEMP), so the temp home
 # BORROWS that account's content-checked state (pm/AGENTS.md, Homes that borrow
 # the account's state): run_tests.sh provisions from its tool store when the
 # pins match, pm hard-links its verified tool entries and unchanged snapshot
@@ -69,7 +73,7 @@ concurrency:
 jobs:
   hermes-state-macos:
     name: tests/hermes_state (macOS, mini)
-    # Defense in depth for other callers: fork PR code never reaches the mini.
+    # Defense in depth for other callers: fork PR code never reaches a self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, macOS, hermes-state]
     # Include cold environment provisioning and reduced-priority shared-host work.
@@ -87,9 +91,21 @@ jobs:
           import shutil
           import subprocess
 
-          ROOT = Path('/Users/daveey/ci-runner-hermes-state')
+          # Dedicated runner roots: the Mac mini's daveey login agent and the
+          # Softmax room minis' bbci LaunchDaemons (one job at a time each).
+          ROOTS = (
+              Path('/Users/daveey/ci-runner-hermes-state'),
+              Path('/Users/bbci/actions-runner-hermes'),
+          )
 
           def prepare():
+              # Use the root this runner runs from; any other runner or user
+              # checkout matches none and is refused before anything is read.
+              matches = [root for root in ROOTS
+                         if os.environ.get('RUNNER_TEMP') == str(root / '_work' / '_temp')]
+              if len(matches) != 1:
+                  raise RuntimeError('Refusing cleanup outside dedicated CI workspace')
+              ROOT = matches[0]
               work = ROOT / '_work'
               expected = {
                   'GITHUB_ACTIONS': 'true',
@@ -152,7 +168,8 @@ jobs:
           HERMES_HOME="$(mktemp -d "${RUNNER_TEMP:-/tmp}/hermes-home.XXXXXX")"
           export HERMES_HOME
           trap 'rm -rf "$HERMES_HOME"' EXIT
-          # The mini also runs BabyBear services and Desktop builds/signing: utility QoS lets
+          # The hosts also run other work (the mini: BabyBear services, Desktop builds and
+          # signing; the room minis: meetings, signage, BabyBear CI): utility QoS lets
           # macOS put those first, and 2 workers instead of 4 halve this lane's CPU.
           taskpolicy -c utility scripts/run_tests.sh tests/hermes_state/ -j 2
         env:

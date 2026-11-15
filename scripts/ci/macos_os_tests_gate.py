@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Decide whether a scheduled macOS OS-marked test run may take the mini.
+"""Decide whether a scheduled macOS OS-marked test run may take a macOS runner.
 
-Called by .github/workflows/macos-os-tests.yml before its job on the Mac mini's
-self-hosted runner (labels self-hosted, macOS, hermes-state). That one runner
-also serves the required hermes_state (macOS) and Native memory lanes of pull
-requests, and it is already saturated by them. So the scheduled run yields:
-when any job for the mini's label is waiting for a runner (queued, waiting,
-pending or requested) in another workflow run, this run skips, and the next
-schedule slot tries again. A job that is already running on the mini is not a
-reason to skip: ours queues behind one job, it does not starve a queue.
+Called by .github/workflows/macos-os-tests.yml before its job on the self-hosted
+macOS runners (labels self-hosted, macOS, hermes-state: the room minis and the
+Mac mini). They also serve the required hermes_state (macOS) and Native memory
+lanes of pull requests, which come first. So the scheduled run yields: when any
+job for that label is waiting for a runner (queued, waiting, pending or
+requested) in another workflow run, this run skips, and the next schedule slot
+tries again. A job that is already running is not a reason to skip: ours queues
+behind running jobs, it does not starve a queue.
 
 Only ``schedule`` runs are gated. A manual dispatch or a probe push always runs.
 If the API cannot be read, the run goes ahead (fail open to testing): a

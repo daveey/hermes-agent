@@ -9,7 +9,7 @@ name: Native memory (macOS)
 # dispatch / release. "All required checks pass (v2)" then requires its success,
 # so the PR cannot land with this lane pending, skipped or red. There is no
 # pull_request trigger here: a second, unrequired copy of the job would only
-# hold the one mini runner. Main pushes run here directly; CI masks its
+# hold a macOS runner. Main pushes run here directly; CI masks its
 # duplicate call only on main pushes.
 on:
   push:
@@ -44,7 +44,7 @@ concurrency:
 jobs:
   native-memory:
     name: Native memory ABI and no-fork tests
-    # Defense in depth for other callers: fork PR code never reaches the mini.
+    # Defense in depth for other callers: fork PR code never reaches a self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, macOS, hermes-state]
     timeout-minutes: 30

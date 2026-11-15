@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rerun a macOS state job once when the mini's self-hosted runner was lost.
+"""Rerun a macOS state job once when its dedicated self-hosted runner was lost.
 
 Called by .github/workflows/hermes-state-recovery.yml on ``workflow_run``
 (completed) for CI and hermes_state (macOS). That workflow checks out only its
@@ -14,9 +14,9 @@ when ALL of these hold, read from the API, not only from the event payload:
 * the workflow file is one of the approved paths;
 * the run is attempt 1, completed, conclusion ``failure``;
 * attempt 1 has exactly one job with the approved macOS job name for that
-  workflow, it ran on ``mini-hermes-state-1``, failed, no step reports a
-  failure, and every failure annotation on it is GitHub's exact runner-loss
-  message;
+  workflow, it ran on one of the dedicated runners (``RUNNER_NAMES``), failed,
+  no step reports a failure, and every failure annotation on it is GitHub's
+  exact runner-loss message;
 * every other non-successful job in attempt 1 is a known downstream aggregate
   (which rerun-failed-jobs reruns anyway as a dependent);
 * immediately before the POST the run is re-read and is still attempt 1,
@@ -41,7 +41,14 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 TRUSTED_REPOSITORY = "softmax-universe/daveey-hermes"
-RUNNER_NAME = "mini-hermes-state-1"
+# The dedicated self-hosted runners of the macOS lanes (label hermes-state):
+# the Mac mini's daveey login agent and the Softmax room minis' bbci daemons.
+RUNNER_NAMES = frozenset({
+    "mini-hermes-state-1",
+    "sx-main-room-mini-hermes",
+    "sx-heart-room-mini-hermes",
+    "sx-conway-mini-hermes",
+})
 MACOS_JOB = "tests/hermes_state (macOS, mini)"
 
 # Approved workflow file -> exact job name of the macOS lane in that workflow,
@@ -160,8 +167,9 @@ def _job_problem(job: dict[str, Any], annotations: list[Any]) -> str | None:
         return f"job attempt is {job.get('run_attempt')!r}, not 1"
     if job.get("status") != "completed" or job.get("conclusion") != "failure":
         return f"job is {job.get('status')!r}/{job.get('conclusion')!r}, not completed/failure"
-    if job.get("runner_name") != RUNNER_NAME:
-        return f"job ran on {job.get('runner_name')!r}, not {RUNNER_NAME!r}"
+    runner = job.get("runner_name")
+    if not isinstance(runner, str) or runner not in RUNNER_NAMES:
+        return f"job ran on {runner!r}, not a dedicated macOS runner"
     failed_steps = [s.get("name") for s in job.get("steps") or [] if s.get("conclusion") == "failure"]
     if failed_steps:
         return f"step(s) failed: {failed_steps}"
@@ -230,7 +238,7 @@ def recover(event: dict[str, Any], api: Api, *, repository: str = TRUSTED_REPOSI
         pull = api.get(f"repos/{repository}/pulls/{pulls[0]['number']}")
         if pull.get("state") != "open" or (pull.get("head") or {}).get("sha") != run.get("head_sha"):
             return _skip("PR closed or head superseded", run_id)
-    reason = f"runner lost on {RUNNER_NAME}; rerunning failed jobs of attempt 1"
+    reason = f"runner lost on {target['runner_name']}; rerunning failed jobs of attempt 1"
     if dry_run:
         return Decision("rerun", reason, run_id, dry_run=True)
     api.post(f"{run_path}/rerun-failed-jobs")

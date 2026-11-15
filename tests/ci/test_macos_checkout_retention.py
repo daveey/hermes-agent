@@ -23,12 +23,12 @@ def boundary(tmp_path, monkeypatch):
     tree = ast.parse(first['run'])
     assert isinstance(tree.body[-1], ast.Expr)
     assert ast.unparse(tree.body[-1]) == 'prepare()'
-    # Load definitions, then replace only the hard-coded root with a temp tree.
+    # Load definitions, then replace only the hard-coded runner roots with a temp tree.
     tree.body.pop()
     namespace = {}
     exec(compile(tree, '<workflow-cleanup>', 'exec'), namespace)
     root = tmp_path / 'ci-runner-hermes-state'
-    namespace['ROOT'] = root
+    namespace['ROOTS'] = (root,)
     work = root / '_work'
     current = work / 'daveey-hermes/daveey-hermes'
     old = work / 'hermes'
@@ -106,6 +106,35 @@ def test_probe_failures_preserve_checkout(boundary, monkeypatch, error):
 def test_explicit_ci_allowlist(boundary, monkeypatch, key):
     prepare, current, old, calls = boundary
     monkeypatch.setenv(key, '/unrelated/user/path')
+    with pytest.raises(RuntimeError, match='outside dedicated CI'):
+        prepare()
+    assert not calls
+    assert (current / 'sentinel').exists() and (old / 'sentinel').exists()
+
+
+def test_real_roots_are_the_mini_agent_and_room_mini_daemons():
+    tree = ast.parse(steps()[0]['run'])
+    tree.body.pop()
+    namespace = {}
+    exec(compile(tree, '<workflow-cleanup>', 'exec'), namespace)
+    assert namespace['ROOTS'] == (Path('/Users/daveey/ci-runner-hermes-state'),
+                                  Path('/Users/bbci/actions-runner-hermes'))
+
+
+def test_runner_from_a_later_listed_root_cleans_its_own_checkout(boundary, tmp_path):
+    # A room mini's runner root is listed after the mini's: selection follows
+    # RUNNER_TEMP, not list order.
+    prepare, current, old, calls = boundary
+    prepare.__globals__['ROOTS'] = (tmp_path / 'other-runner', *prepare.__globals__['ROOTS'])
+    prepare()
+    assert list(current.iterdir()) == []
+    assert not old.exists()
+    assert calls == [current, old]
+
+
+def test_runner_from_an_unlisted_root_is_refused(boundary, tmp_path):
+    prepare, current, old, calls = boundary
+    prepare.__globals__['ROOTS'] = (tmp_path / 'other-runner',)
     with pytest.raises(RuntimeError, match='outside dedicated CI'):
         prepare()
     assert not calls
