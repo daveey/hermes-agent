@@ -9,6 +9,7 @@ captured only #2097. R2 then approved #2108 at its exact head. The owner stayed
 import json
 import subprocess
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli import kanban_db_dispatch_pr_state as prs
 from hermes_cli import kanban_dependency_review_historical as hist
+from hermes_cli import kanban_host_identity as host_identity
 from hermes_cli.kanban_dependency_review import resumes_review
 from tests.hermes_cli import test_kanban_dependency_review as helpers
 from tests.hermes_cli.kanban_guard_helpers import worker_comment
@@ -31,8 +33,19 @@ OTHER_HEAD = "c" * 40
 _REAL_GH_PR_STATE = prs._gh_pr_state
 
 
+@pytest.fixture(params=["native", "darwin"])
+def host_platform(request, monkeypatch):
+    """Exercise cold macOS identity lookup without changing pytest's platform."""
+    real_boot_prefix = host_identity.boot_prefix
+    real_boot_prefix.cache_clear()
+    if request.param == "darwin":
+        monkeypatch.setattr(host_identity, "sys", SimpleNamespace(platform="darwin"))
+    yield
+    real_boot_prefix.cache_clear()
+
+
 @pytest.fixture(autouse=True)
-def gh(monkeypatch):
+def gh(monkeypatch, host_platform):
     """Fake ``gh pr view``: ``gh.heads[url]`` is the PR's head; ``gh.fail`` fails every read."""
     class Gh:
         heads = {CORE: HEAD, STATE: STATE_HEAD}
@@ -49,6 +62,9 @@ def gh(monkeypatch):
         out = {"state": "OPEN", "headRefOid": Gh.heads.get(url), "comments": []}
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(out), stderr="")
 
+    # Claim ownership is unrelated to PR history. Do not send macOS sysctl
+    # through the gh-only subprocess fake (or rely on a warmed boot cache).
+    monkeypatch.setattr(host_identity, "boot_prefix", lambda: None)
     monkeypatch.setattr(prs, "_gh_pr_state", _REAL_GH_PR_STATE)
     monkeypatch.setattr(prs, "_gh_argv", lambda: ["gh"])
     monkeypatch.setattr(subprocess, "run", run)
