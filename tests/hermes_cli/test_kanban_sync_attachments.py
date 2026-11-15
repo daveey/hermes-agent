@@ -47,6 +47,9 @@ class BlobService(FakeService):
 @pytest.fixture
 def stores(tmp_path, monkeypatch):
     home = support.kanban_home(tmp_path, monkeypatch)
+    # These stores launch no external workspace-owning jobs. Keep the real
+    # cleanup veto, but do not make byte-custody assertions scan the busy host.
+    monkeypatch.setattr("psutil.process_iter", lambda: iter(()))
     support.write_sync_config(home, True)
     worker = tmp_path / "worker"
     worker.mkdir()
@@ -97,6 +100,15 @@ def test_worker_attachment_reaches_normal_home_read_path(stores):
     assert Path(rows[0].stored_path).read_bytes() == data
 
 
+@pytest.fixture
+def unavailable_host_inventory(monkeypatch):
+    # The stores fixture must override discovery even on an unhealthy host.
+    def unavailable():
+        raise RuntimeError("host process inventory unavailable")
+    monkeypatch.setattr("psutil.process_iter", unavailable)
+
+
+@pytest.mark.usefixtures("unavailable_host_inventory")
 def test_worker_completion_removes_scratch_but_home_reads_its_bytes(stores):
     from hermes_cli import kanban_db_workspace as workspace
     home, worker, hub_conn, conn, _service, tid, round_at = stores
