@@ -71,6 +71,15 @@ def lapsed_row_reclaimable(holder: str, expires_at: float, now: float) -> bool:
     return not recently_woke()
 
 
+def stale_turn_lease(row, now: float) -> bool:
+    """A turn-lease row a lease-less transcript writer may delete (``_check_transcript_write_guards``): a
+    provably dead holder, or the acquisition expiry rule above, so a wake does not let the first detached
+    delivery delete a live holder's lapsed row before its post-wake renewal."""
+    from hermes_state import _compression_lock_holder_process_is_dead
+    return (_compression_lock_holder_process_is_dead(row["holder"])
+            or lapsed_row_reclaimable(row["holder"], row["expires_at"], now))
+
+
 def _reset_for_tests() -> None:
     global _last_total, _woke_at
     with _lock:

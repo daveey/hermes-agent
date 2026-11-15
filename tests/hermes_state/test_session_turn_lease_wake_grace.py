@@ -137,6 +137,38 @@ def test_runtime_worker_acquire_honors_the_wake_grace(tmp_path, monkeypatch):
     assert _owner(path) == holder
 
 
+def test_lease_less_writer_does_not_delete_live_holders_lease_right_after_a_suspend(tmp_path, monkeypatch):
+    """Producer/detached writers check the turn lease without holding one; their stale rule must match
+    acquisition, or the first post-wake delivery deletes the holder's row and the holder's refresh fails."""
+    from hermes_state_errors import SessionTurnLeaseLostError
+
+    clocks = _FakeClocks(monkeypatch)
+    path = tmp_path / "state.db"
+    db = SessionDB(path)
+    db.create_session("chat", source="desktop")
+    holder = f"pid={os.getpid()}:turn=tui"
+    assert db.try_acquire_session_turn_lease("chat", holder, ttl_seconds=300)
+    clocks.sleep(441)
+    _expire(path, holder)
+
+    with pytest.raises(SessionTurnLeaseLostError):
+        db.append_delegation_delivery("chat", "delegate answered", {"delegation_id": "d-1"})
+    assert _owner(path) == holder
+    assert db.refresh_session_turn_lease("chat", holder, ttl_seconds=300)
+
+
+def test_lease_less_writer_reclaims_a_lapsed_lease_without_a_suspend(tmp_path, monkeypatch):
+    _FakeClocks(monkeypatch)
+    path = tmp_path / "state.db"
+    db = SessionDB(path)
+    db.create_session("chat", source="desktop")
+    holder = f"pid={os.getpid()}:turn=old"
+    assert db.try_acquire_session_turn_lease("chat", holder, ttl_seconds=300)
+    _expire(path, holder)
+    db.append_delegation_delivery("chat", "delegate answered", {"delegation_id": "d-1"})
+    assert _owner(path) is None
+
+
 @pytest.mark.parametrize("value", [None])
 def test_tracker_without_a_suspend_clock_never_defers(monkeypatch, value):
     monkeypatch.setattr(wake_grace, "suspended_total_s", lambda: value)
