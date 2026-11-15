@@ -18,8 +18,9 @@ The screen covers ready and review because a scheduled continuation can resume e
   hub-local wake_check, or no worker queue fits): the verdict carries ``kept: <reason>``. A probe registered on
   this gateway stays here independently of the ready card's execution; unknown legacy probe custody stays local.
   A fleet probe in :data:`PORTABLE_WAKE_PROBES` (or ``kanban.placement.portable_wake_probes``) is also portable;
-* an earlier deny that left the card here (a ``kept`` that no longer holds, or none) is re-placed on the worker
-  queue once it has waited ready 5 min (``kanban_worker_first_selfcheck.denied_target``), with no new judge call;
+* an earlier deny is resolved immediately, including a card bounced back to this hub's machine pin: re-evaluate
+  the structural/pickup constraints, record a current keep or move before claiming, without a new judge call;
+  unchanged keep dispositions do not append duplicate events on each screen;
 * judge unavailable: claimed as before, warning logged, nothing recorded (judged at its next ready). Failing open
   here keeps a judge outage from freezing the hub; only pre-gate cards reach this path.
 * deferred (``Counts.deferred_ids``, left out of this tick's claims and judged next tick): a card edited while the
@@ -29,8 +30,8 @@ The screen covers ready and review because a scheduled continuation can resume e
   result (``DispatchResult.admission_deferred``) name them, so a ready card that keeps not starting is traceable.
 
 A card with any verdict (forced or skipped included) makes no model call. :func:`unjudged_claims` is the
-detector: this gateway's claims of a card that had no verdict yet (``hermes doctor`` reports it on the hub). Its
-gate (the board's first verdict) counts audits riding a ``created`` payload as well as ``hub_admission`` events.
+detector: this gateway's claims without a prior verdict or with a prior deny lacking an explicit keep/force.
+Its gate counts audits riding a ``created`` payload as well as ``hub_admission`` events.
 """
 from __future__ import annotations
 
@@ -78,8 +79,20 @@ class Counts:
                 ).format(**asdict(self)) + ids
 
 
-_SCREENABLE = ("status IN ('ready', 'review') AND claim_lock IS NULL AND (runs_on IS NULL OR runs_on IN ('', '[]')) "
-               "AND placement_policy IS NULL")
+_SCREENABLE = "status IN ('ready', 'review') AND claim_lock IS NULL AND placement_policy IS NULL"
+
+
+def _eligible(conn: sqlite3.Connection, card: sqlite3.Row) -> bool:
+    """Unlabelled legacy cards, plus denied cards bounced back to this hub's machine pin."""
+    from hermes_cli import kanban_hub_admission_pickup as pickup
+    from hermes_cli import kanban_worker_node as wn
+    labels = wn._parse(card["runs_on"])
+    if not labels:
+        return True
+    if labels != [f"machine:{wn._own(conn)}"]:
+        return False
+    prior = pickup.verdict(conn, card["id"])
+    return bool(prior and prior.get("admit") is False and not prior.get("forced"))
 
 
 def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -88,7 +101,7 @@ def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     from hermes_cli.kanban_admission_pools import lane_rows
     rows = {row["id"]: row for row in conn.execute(f"SELECT * FROM tasks WHERE {_SCREENABLE}").fetchall()}
     lanes = lane_rows(conn, "ready") + lane_rows(conn, "review")
-    return [rows[row["id"]] for row in lanes if row["id"] in rows]
+    return [rows[row["id"]] for row in lanes if row["id"] in rows and _eligible(conn, rows[row["id"]])]
 
 
 def _current(conn: sqlite3.Connection, tid: str) -> tuple[Optional[sqlite3.Row], int]:
@@ -97,7 +110,8 @@ def _current(conn: sqlite3.Connection, tid: str) -> tuple[Optional[sqlite3.Row],
     start of the tick would make :func:`_apply` defer it for any write in between and waste its judge call.
     The row is ``None`` when the card stopped being screenable meanwhile (claimed, labelled, no longer ready)."""
     event_head = _event_head(conn, tid)
-    return conn.execute(f"SELECT * FROM tasks WHERE id = ? AND {_SCREENABLE}", (tid,)).fetchone(), event_head
+    card = conn.execute(f"SELECT * FROM tasks WHERE id = ? AND {_SCREENABLE}", (tid,)).fetchone()
+    return (card if card is not None and _eligible(conn, card) else None), event_head
 
 
 def _latest_wake_check(conn: sqlite3.Connection, task_id: str) -> str:
@@ -201,7 +215,11 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int 
             target = None if kept else pickup._target(fields, own, cfg, audit)
             if kept is None and target is None:
                 # A deny pool_route keeps home (the claim gate refuses the text on every worker) names that reason.
-                kept = audit.get("home") or NO_QUEUE
+                kept = audit.get("home")
+                if not kept:
+                    _apply(conn, own, tid, audit, None, expected=card, event_head=event_head)
+                    counts.defer(tid)
+                    continue  # no attested queue is not permission to run a portable deny on the hub
             if kept:
                 audit["kept"] = kept
         applied = _apply(conn, own, tid, audit, target, expected=card, event_head=event_head)
@@ -227,7 +245,9 @@ def _apply(conn: sqlite3.Connection, own: str, tid: str, audit: dict, target: Op
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
         if row is None or dict(row) != dict(expected) or _event_head(conn, tid) != event_head:
             return None  # the verdict and route belong only to the snapshot the judge saw
-        kb._append_event(conn, tid, "hub_admission", audit)
+        from hermes_cli.kanban_hub_admission_pickup import verdict
+        if verdict(conn, tid) != audit:
+            kb._append_event(conn, tid, "hub_admission", audit)
         if target is None:
             return False
         previous = wn._parse(row["runs_on"])  # None (NULL or '') or [] ('[]'): what the card carried
@@ -264,7 +284,10 @@ def _self_check(conn: sqlite3.Connection, card: sqlite3.Row, own: str, cfg: dict
             log_repin(card["id"], target, reason)
             counts.repinned += 1
             return
-        audit["kept"] = kept or audit.get("home") or NO_QUEUE
+        if not kept and not audit.get("home"):
+            counts.defer(card["id"])
+            return  # queue unavailability is not a structural permission to execute on the hub
+        audit["kept"] = kept or audit["home"]
         applied = _apply(conn, own, card["id"], audit, None, expected=card, event_head=event_head)
         if applied is None:
             counts.defer(card["id"])
@@ -327,7 +350,7 @@ def safe_screen(conn: sqlite3.Connection) -> frozenset:
 def unjudged_claims(conn: sqlite3.Connection, own: str, *, now: Optional[float] = None,
                     window: int = WINDOW_SECONDS) -> list[tuple[str, int]]:
     """``[(task_id, claimed_at)]``: claims by ``own`` in the last ``window`` seconds, after the board's first
-    verdict (the gate's rollout), of a card with no verdict before that claim."""
+    verdict (the gate's rollout), without a verdict or with a deny lacking an explicit keep/force."""
     now = time.time() if now is None else now
     gate = conn.execute(  # a verdict is a hub_admission event or an audit riding a created payload
         "SELECT MIN(t) FROM (SELECT MIN(created_at) AS t FROM task_events WHERE kind = 'hub_admission' "

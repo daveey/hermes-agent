@@ -189,16 +189,18 @@ def test_the_newest_wake_check_decides(gws, hub_judge):
     assert _holder(svc, tid) != HUB and len(_events(hub.conn, tid, "moved")) == 1
 
 
-def test_a_deny_with_no_worker_queue_is_kept_and_claimed(gws, hub_judge, monkeypatch):
+def test_a_deny_with_no_worker_queue_is_deferred(gws, hub_judge, monkeypatch):
     from hermes_cli import kanban_placement as kp
     hub, _worker, svc = gws
     monkeypatch.setattr(kp, "config", lambda: {"worker_pools": {HUB: [WORKER]}})  # no worker_queue label
     hub_judge.admit_next = False
     tid = _hub_card(hub)
     _tick(hub)
-    assert _holder(svc, tid) == HUB  # never stranded
+    assert _holder(svc, tid) != HUB  # queue absence is not structural permission
     [verdict] = _events(hub.conn, tid, "hub_admission")
-    assert verdict["kept"] == hac.NO_QUEUE and _events(hub.conn, tid, "moved") == []
+    assert "kept" not in verdict and _events(hub.conn, tid, "moved") == []
+    _tick(hub)
+    assert len(hub_judge.calls) == 1 and _holder(svc, tid) != HUB
 
 
 def test_a_deny_no_worker_can_claim_is_kept_home_with_the_action_reason(gws, hub_judge, caplog):
@@ -577,7 +579,7 @@ def test_doctor_flags_unjudged_hub_claims(gws, monkeypatch, capsys):
     _tick(hub)
     hub.enter()
     assert doctor_state._check_hub_admission_claims(False).manual_issues == []
-    assert "0 hub claims of unjudged cards" in capsys.readouterr().out
+    assert "0 hub claims without an admission disposition" in capsys.readouterr().out
     monkeypatch.setattr(judge, "admit", lambda card, hub_reason=None: judge.Verdict())
     tid = _hub_card(hub, title="claimed unjudged")
     _tick(hub)
@@ -585,7 +587,7 @@ def test_doctor_flags_unjudged_hub_claims(gws, monkeypatch, capsys):
     hub.enter()
     found = doctor_state._check_hub_admission_claims(False)
     assert len(found.manual_issues) == 1 and tid in found.manual_issues[0], found.manual_issues
-    assert "1 hub claim(s) of unjudged cards" in capsys.readouterr().out
+    assert "1 hub claim(s) without an admission disposition" in capsys.readouterr().out
 
 
 def test_doctor_hub_claim_check_is_silent_off_the_hub(gws, monkeypatch, capsys):
