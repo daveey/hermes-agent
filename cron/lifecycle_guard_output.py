@@ -53,6 +53,13 @@ def iter_printed_shell_payloads(
 
     if not shell_sink and not output_reaches_shell(command):
         return
+    # The sink regex is quote-blind: `|\[bash` inside a grep/rg/sqlite3 pattern reads as a pipe
+    # into bash. Re-check with data-sink arguments masked (fail-closed: lines piping into a shell
+    # or arguments carrying `$(`, backticks, `<(`… are never masked), so a real sink survives
+    # (self-heal lifecycleguard-f82a8e8dd311).
+    if not shell_sink and not output_reaches_shell(
+            guard._mask_data_sink_arguments(guard.join_line_continuations(command))):
+        return
     seen: set[str] = set()
 
     def unseen(text: str, raw_quote: bool) -> Iterator[tuple[str, bool]]:
