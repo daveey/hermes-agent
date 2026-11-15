@@ -51,3 +51,31 @@ def test_unrecognized_heredoc_does_not_open_phantom_case(
     assert helpers._bash_runs(tmp_path, command) is dangerous
     refused, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))
     assert refused is dangerous, reason
+
+
+# Bash decodes these delimiters ($'E' -> E); a naive reading guesses the second column. A later
+# line equal to that guess must not end a skipped "body" past the real closer, and an outer
+# subshell's `)` must not stand in for the substitution's lost closer.
+GUESSED = [
+    ("cat <<$'E'\ncase x in\nE\n", "$E"),
+    ('cat <<$"E"\ncase x in\nE\n', "$E"),
+    ("cat <<$'E\\x41'\ncase x in\nEA\n", "$E\\x41"),
+    # Undecodable after a decodable delimiter on one command.
+    ("cat <<A <<$'E'\nA\ncase x in\nE\n", "$E"),
+]
+
+
+@pytest.mark.parametrize("body,guess", GUESSED)
+@pytest.mark.parametrize("frame", FRAMES)
+@pytest.mark.parametrize("outer", [False, True], ids=["root", "subshell"])
+@pytest.mark.parametrize("dangerous", [True, False], ids=["RUN", "clean"])
+def test_misread_delimiter_with_matching_later_line_hides_no_command(
+        tmp_path, body, guess, frame, outer, dangerous):
+    helpers._tree(tmp_path)
+    cmd = "bash ./r.sh" if dangerous else "python3 ./clean.py"
+    command = frame.replace("BODY", body) + '; ' + cmd + '\n' + guess
+    if outer:
+        command = '(\n' + command + '\n)'
+    assert helpers._bash_runs(tmp_path, command) is dangerous
+    refused, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert refused is dangerous, reason

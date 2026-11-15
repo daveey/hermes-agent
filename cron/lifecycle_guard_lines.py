@@ -108,8 +108,12 @@ class _CaseClauses:
         return True
 
 
-def _heredoc_delimiter(text: str, pos: int) -> tuple[str, bool] | None:
-    """The delimiter of a ``<<`` / ``<<-`` operator at *pos* (quotes removed), else None."""
+def _heredoc_delimiter(text: str, pos: int) -> tuple[str | None, bool] | None:
+    """The delimiter of a ``<<`` / ``<<-`` operator at *pos* (quotes removed), else None.
+
+    A delimiter this reader cannot decode the way bash does (``$'E'`` -> ``E``, ``$"E"`` -> ``E``)
+    comes back as ``(None, strip_tabs)``: guessing it could let a later line equal to the guess
+    end a skipped "body" past the frame's real closer."""
     if not text.startswith("<<", pos) or text.startswith("<<<", pos):
         return None
     pos += 2
@@ -120,6 +124,8 @@ def _heredoc_delimiter(text: str, pos: int) -> tuple[str, bool] | None:
     word: list[str] = []
     while pos < len(text) and text[pos] not in _WORD_BREAKS:
         char = text[pos]
+        if char == "$" and text[pos + 1:pos + 2] in ("'", '"'):
+            return None, strip_tabs
         if char in "'\"":
             end = _quoted_end(text, pos + 1, char, escapes=char == '"')
             word.append(text[pos + 1:end - 1])
@@ -134,12 +140,15 @@ def _heredoc_delimiter(text: str, pos: int) -> tuple[str, bool] | None:
     return ("".join(word), strip_tabs) if word else None
 
 
-def _heredoc_bodies_end(text: str, pos: int, delimiters: list[tuple[str, bool]]) -> int:
+def _heredoc_bodies_end(text: str, pos: int,
+                        delimiters: list[tuple[str | None, bool]]) -> int:
     """End of the here-document bodies starting at *pos* (just after their command's newline).
 
     Inside ``$(...)`` bash also ends a body at a line that starts with the delimiter and has a
     ``)`` after it (``E)``, ``E )``); the rest of that line is shell again, so stop before it."""
     for delimiter, strip_tabs in delimiters:
+        if delimiter is None:
+            return -1  # undecodable: like an unterminated body, skip nothing
         while pos < len(text):
             end = text.find("\n", pos)
             end = len(text) if end < 0 else end
@@ -159,7 +168,7 @@ class _HereDocs:
     comment or ``case`` word in it moves the frame. Arithmetic (``$((1<<2))``) opens none."""
 
     def __init__(self) -> None:
-        self._pending: list[tuple[str, bool]] = []
+        self._pending: list[tuple[str | None, bool]] = []
         self.unbounded = False
         self.skipped = False
 
