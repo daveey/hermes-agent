@@ -789,6 +789,29 @@ def _worker_assignment(conn, execution_id, session_id, generation):
     return row
 
 
+def worker_turn_lease(db, *, epoch, execution_id, session_id, generation, holder):
+    """Fresh assignment and exact-holder lease in one read transaction; no replay receipts."""
+    _text(holder)
+    with db._read_ctx() as conn:
+        began = not conn.in_transaction
+        if began:
+            conn.execute('BEGIN')
+        try:
+            _epoch(conn, epoch)
+            row = _worker_assignment(conn, execution_id, session_id, generation)
+            if row['owner_epoch'] != epoch:
+                raise RuntimeStoreError('stale_epoch')
+            if row['status'] not in ('registered', 'running'):
+                raise RuntimeStoreError('stale_generation')
+            lease = conn.execute(
+                'SELECT expires_at FROM session_turn_leases WHERE conversation_id=? AND holder=?',
+                (db._session_turn_lease_key_on_conn(conn, session_id), holder)).fetchone()
+            return {'expires_at': float(lease[0]) if lease else None}
+        finally:
+            if began and conn.in_transaction:
+                conn.execute('ROLLBACK')
+
+
 def _linked_worker_admission(conn, session_id, generation, owner_epoch, statuses):
     placeholders = ','.join('?' for _ in statuses)
     rows = conn.execute(f"""SELECT * FROM session_admissions

@@ -51103,6 +51103,81 @@
         "title": "WorkerScopeParams",
         "type": "object"
       },
+      "WorkerTurnLeaseParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "execution_id": {
+            "title": "Execution Id",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "pid": {
+            "title": "Pid",
+            "type": "integer"
+          },
+          "birth": {
+            "title": "Birth",
+            "type": "number"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          },
+          "epoch": {
+            "title": "Epoch",
+            "type": "integer"
+          },
+          "holder": {
+            "title": "Holder",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "session_id",
+          "execution_id",
+          "generation",
+          "pid",
+          "birth",
+          "secret",
+          "epoch",
+          "holder"
+        ],
+        "title": "WorkerTurnLeaseParams",
+        "type": "object"
+      },
+      "WorkerTurnLeaseResult": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          }
+        },
+        "required": [
+          "expires_at"
+        ],
+        "title": "WorkerTurnLeaseResult",
+        "type": "object"
+      },
       "_SessionScoped": {
         "additionalProperties": false,
         "description": "Handlers that look a live session up with ``_sessions.get(params.get(\"session_id\"))``: an\nabsent / unknown id falls back to the launch profile's config, so it is never required.",
@@ -52106,6 +52181,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/WorkerExecution"
+        }
+      }
+    },
+    {
+      "name": "worker.turnLease",
+      "summary": "Fresh owner-fenced exact-holder turn lease expiry; never a persistence receipt.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/WorkerTurnLeaseParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/WorkerTurnLeaseResult"
         }
       }
     }

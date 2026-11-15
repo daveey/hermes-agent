@@ -604,6 +604,13 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
         self._session(session_id)
         return self._apply('turn.renew', {'holder': holder, 'ttl_seconds': ttl_seconds})['value']
 
+    def session_turn_lease_expires_at(self, session_id, holder):
+        """Observe current owner authority, never replay a journaled lease receipt."""
+        with self.lock:
+            self._session(session_id)
+            result = self.rpc('worker.turnLease', **self.scope, holder=holder)
+            return float(result['expires_at']) if result['expires_at'] is not None else None
+
     def release_session_turn_lease(self, session_id, holder, *, patience_s=None):
         # DurableTurnLease retains its admission target across physical rotation. ``patience_s`` (the
         # owner's local write-lock patience) has no meaning for a receipt RPC.

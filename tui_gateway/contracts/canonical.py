@@ -531,6 +531,19 @@ canonical_method("worker.adopt", params=WorkerScopeParams, result=WorkerExecutio
                  doc="Adopt a registered execution after verifying the live producer claim.")
 
 
+class WorkerTurnLeaseParams(WorkerScopeParams):
+    epoch: int
+    holder: str
+
+
+class WorkerTurnLeaseResult(Result):
+    expires_at: float | None
+
+
+canonical_method("worker.turnLease", params=WorkerTurnLeaseParams, result=WorkerTurnLeaseResult,
+                 doc="Fresh owner-fenced exact-holder turn lease expiry; never a persistence receipt.")
+
+
 class WorkerPersistParams(WorkerScopeParams):
     epoch: int
     sequence: int

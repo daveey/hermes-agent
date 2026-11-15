@@ -5220,6 +5220,20 @@ export interface WorkerScopeParams {
   birth: number
   secret: string
 }
+export interface WorkerTurnLeaseParams {
+  profile_id: string
+  session_id: string
+  execution_id: string
+  generation: number
+  pid: number
+  birth: number
+  secret: string
+  epoch: number
+  holder: string
+}
+export interface WorkerTurnLeaseResult {
+  expires_at: number | null
+}
 export interface WorkerPersistParams {
   profile_id: string
   session_id: string
@@ -7354,6 +7368,8 @@ export interface CanonicalRpcMethods {
   'worker.persist': { params: WorkerPersistParams; result: WorkerPersistResult }
   /** Register a compute worker execution on an idle session. */
   'worker.register': { params: WorkerRegisterParams; result: WorkerExecution }
+  /** Fresh owner-fenced exact-holder turn lease expiry; never a persistence receipt. */
+  'worker.turnLease': { params: WorkerTurnLeaseParams; result: WorkerTurnLeaseResult }
 }
 export type CanonicalRpcMethod = keyof CanonicalRpcMethods
 export const CANONICAL_RPC_METHODS = [
@@ -7409,7 +7425,8 @@ export const CANONICAL_RPC_METHODS = [
   'shell.exec',
   'worker.adopt',
   'worker.persist',
-  'worker.register'
+  'worker.register',
+  'worker.turnLease'
 ] as const satisfies readonly CanonicalRpcMethod[]
 
 // ── Canonical method namespaces: member names exist only at runtime (gate on `capability`) ──
