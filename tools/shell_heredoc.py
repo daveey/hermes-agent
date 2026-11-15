@@ -643,7 +643,8 @@ def heredoc_body_spans(command: str) -> list[tuple[int, int, int]]:
 def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: int = 0) -> str:
     """Mask heredoc bodies that are provably inert data (see module docstring).
 
-    ``nested=True`` (the lifecycle guard's executed-path walk only) also masks data-consumer
+    ``nested=True`` (the lifecycle guard's executed-path walk only) also masks literal
+    unquoted data bodies with no expansion or escape characters, and data-consumer
     heredocs nested in the single quoted body of an outer heredoc a shell reads verbatim (``ssh h
     'bash -s' <<'R'``); the outer body's own lines stay visible. Text scanners keep the default:
     a nested body's literal text stays visible to them, whatever the outer body does with it."""
@@ -686,7 +687,15 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
         body_cursor = bodies[-1][2]
         quoted = [spec_quoted for _delimiter, _strip_tabs, spec_quoted in specs]
         consumer = None
-        if all(quoted) and not post_heredoc_list_operator:
+        # The executed-path walk need not interpret literal unquoted data as shell
+        # syntax (notably Python calls under a login shell's unknown aliases).
+        # Keep every expansion/escape uncertain; backslash-newline can even change
+        # where an unquoted delimiter ends. Text scanners retain their old view.
+        literal_data = nested and all(
+            not any(char in command[start:terminator] for char in "$`\\")
+            for start, terminator, _end in bodies
+        )
+        if (all(quoted) or literal_data) and not post_heredoc_list_operator:
             consumer = _owner_runs_inert_consumer(command, command_start, command_end, owner_start)
         prefix_intact = stdin.before_heredoc(command, command_start, owner_start)
         if _depth and not prefix_intact:

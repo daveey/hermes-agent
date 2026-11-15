@@ -45,7 +45,15 @@ def test_allowlisted_name_function_heredoc_stays_visible(tmp_path):
 def test_unquoted_heredoc_body_path_still_walked(tmp_path):
     """An expansion-capable body is not provably inert: the walk still sees it and fails closed."""
     big = _big_file(tmp_path)
-    assert guard(f"cat > /tmp/x <<EOF\n{big}\nEOF", cwd=str(tmp_path)) is True
+    assert guard(f"cat > /tmp/x <<EOF\n{big} $HOME\nEOF", cwd=str(tmp_path)) is True
+
+
+def test_literal_unquoted_heredoc_body_matches_quoted_twin(tmp_path):
+    """Without ``$``, backtick or backslash an unquoted body is byte-identical to its quoted
+    twin, so the executed-path walk masks both alike."""
+    big = _big_file(tmp_path)
+    for delimiter in ("EOF", "'EOF'"):
+        assert guard(f"cat > /tmp/x <<{delimiter}\n{big}\nEOF", cwd=str(tmp_path)) is False
 
 
 def test_inert_heredoc_body_script_path_still_read(tmp_path):
