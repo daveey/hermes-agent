@@ -141,7 +141,6 @@ def _guarantee() -> Inputs:
 
     keys, due = [], float('inf')
     now = time.time()
-    sql = ng._CANDIDATES_SQL.format(last_active=_sql_session_last_active('s'))
     for path in _profile_paths():
         with profile_store(path) as store:
             if store is None:
@@ -149,6 +148,7 @@ def _guarantee() -> Inputs:
                 keys.append((str(path), None))
                 continue
             db = reader_of(store)
+            sql = ng.candidates_sql(db).format(last_active=_sql_session_last_active('s'))
             digest = hashlib.blake2b(digest_size=16)
             for row in rows(db, sql):
                 meta = _decode(row['display_metadata'])

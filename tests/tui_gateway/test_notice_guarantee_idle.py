@@ -18,7 +18,7 @@ def _trace(db):
 
 
 def _scans(statements):
-    return [s for s in statements if 'FROM sessions s' in s]
+    return [s for s in statements if 'sessions s' in s]
 
 
 def test_unchanged_notice_candidates_do_not_rescan(db):

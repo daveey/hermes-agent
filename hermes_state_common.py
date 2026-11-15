@@ -960,6 +960,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_active_null
 -- Logical-identity recovery (agent.transcript_repair._active_logical_message_row) runs inside the write lock.
 CREATE INDEX IF NOT EXISTS idx_messages_session_uid
     ON messages(session_id, message_uid) WHERE active = 1;
+-- The notice-guarantee candidate scan (tui_gateway.notice_guarantee) starts from the kanban-notice rows (a few
+-- thousand) instead of probing the last message of every session (tens of thousands) each 30 s pass.
+CREATE INDEX IF NOT EXISTS idx_messages_kanban_notice
+    ON messages(session_id, id) WHERE display_kind = 'kanban_notice';
 CREATE INDEX IF NOT EXISTS idx_sessions_session_key
     ON sessions(session_key, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_gateway_peer
