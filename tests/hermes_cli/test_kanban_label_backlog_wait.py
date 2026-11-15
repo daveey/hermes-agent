@@ -250,17 +250,20 @@ def test_malformed_holders_are_not_evidence(raw):
     assert klb._holder(raw) is None
 
 
-def test_update_hold_takes_precedence_over_recent_pool_claims(hub):
+def test_hub_update_hold_does_not_hide_recent_pool_claims(hub):
+    """This host's update hold never stops a pool card it cannot lease: the busy-pool reason stays
+    (t_01a1e01b9645d70c; this test used to assert the reverse)."""
     tid = _seed(hub.conn, claims=1)
     assert kpu.post_notice(hub.conn, tid, tid, wait_key="hold", waited_seconds=1900, ready_seconds=1900,
-                           kind=kcw.NOTICE_KIND, extra={"core_update_hold": True})
+                           kind=kcw.NOTICE_KIND, extra={"core_update_hold": True, "core_update_started": "x"})
     raw = hub.conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?",
                            (tid, kcw.NOTICE_KIND)).fetchone()[0]
     payload = json.loads(raw)
-    assert payload["admission"] == {"reason": "core_update_hold", "status": "held"}
+    assert payload["admission"] == {"reason": "matching_pool_busy", "status": "queued"}, payload
+    assert not any(k.startswith("core_update_") for k in payload), payload
     text = kcw.notice_text(payload)
-    assert "claims are held for a pending Hermes update" in text
-    assert "Not a placement problem" not in text
+    assert "claims are held for a pending Hermes" not in text
+    assert "Not a placement problem" in text
 
 
 @pytest.mark.parametrize("transition", ["continued", "shared_blocker_wake", "clear_already_ready"])

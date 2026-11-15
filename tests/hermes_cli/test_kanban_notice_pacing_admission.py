@@ -330,8 +330,25 @@ def test_a_busy_pool_and_a_core_update_hold_still_come_first(hub):
     hint = pu.ready_hint(hub.conn, kb.get_task(hub.conn, busy))
     assert hint is not None and "Not a placement problem" in hint
     assert "LLM quota pacing" not in hint
-    held = _pool_card(hub.conn, title="held for an update")
+    # This host's update hold comes first only for a card this host leases; a pool card keeps its own reason, here
+    # the busy pool (t_01a1e01b9645d70c: 41 pool notices blamed the hub's own update swap).
+    held = kb.create_task(hub.conn, title="hub-leasable, held for an update", assignee="default", session_id="owner-chat")
+    assert (kqp.position(hub.conn, kb.get_task(hub.conn, held)) or {}).get("lane") == "local"
     assert _post(hub.conn, held, core_update_hold=True)["admission"] == {"reason": "core_update_hold", "status": "held"}
+    pooled = _post(hub.conn, _pool_card(hub.conn, title="queued, not held"), core_update_hold=True)
+    assert pooled["admission"] == {"reason": "matching_pool_busy", "status": "queued"}, pooled
+    assert "core_update_hold" not in pooled, pooled
+
+
+def test_this_hosts_update_hold_does_not_hide_a_pool_cards_pacing_wait(hub):
+    """The incident shape (t_01a1e01b9645d70c): a pool card paced by the governor while the hub swaps its own
+    core gets the pacing notice, not the hub's hold sentence."""
+    _store(("anthropic", lp.PACED))
+    payload = _post(hub.conn, _pool_card(hub.conn), core_update_hold=True, core_update_started="x")
+    assert payload["admission"]["reason"] == "llm_pacing", payload
+    assert not any(k.startswith("core_update_") for k in payload), payload
+    text = cw.notice_text(payload)
+    assert "LLM quota pacing" in text and "claims are held for a pending" not in text, text
 
 
 def test_a_card_missing_from_the_shared_board_is_not_a_pacing_wait(hub):

@@ -263,6 +263,16 @@ def _pacing_admission(conn, task_id: str, place: dict[str, Any], extra: Optional
         return None
 
 
+def _host_hold_only_if_local(extra: Optional[dict[str, Any]], place: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """``extra`` without this host's core-update hold (``core_update_*``) unless this host leases the card (lane
+    ``local``). The hold only stops this host's claims: a pool or remote-placed card is leased elsewhere, so its
+    notice keeps the queue/pacing reason (41 pool notices blamed the hub's own update swap, t_01a1e01b9645d70c).
+    An unknown place is not proof the host leases it, so it drops the hold too. [daveey]"""
+    if not extra or not extra.get("core_update_hold") or place.get("lane") == "local":
+        return extra
+    return {k: v for k, v in extra.items() if not k.startswith("core_update_")}
+
+
 def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_seconds: float,
                 ready_seconds: float, parent_title: Optional[str] = None, kind: str = NOTICE_KIND,
                 extra: Optional[dict[str, Any]] = None) -> bool:
@@ -278,6 +288,7 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     if _already_posted(conn, task_id, waiting_on, wait_key, kind):
         return False  # before the queue place: every tick asks again for each long-ready card [daveey]
     place = _place(conn, waiting_on)
+    extra = _host_hold_only_if_local(extra, place)
     busy = klb.busy(place.get("backlog"))
     observed = {"board": place.get("board") or khc.board_of(conn), "observed_at": place.get("observed_at") or int(time.time()),
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
