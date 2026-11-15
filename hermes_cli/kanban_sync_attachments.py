@@ -144,7 +144,10 @@ def transfer_pending(conn, hub, board, *, limit=2):
         "SELECT a.* FROM task_attachments a LEFT JOIN kanban_attachment_retry r ON r.uid=a.uid "
         "WHERE a.uid IS NOT NULL "
         "AND (r.uid IS NULL OR r.blob_key IS NOT a.blob_key OR r.retry_at<=?) "
-        "ORDER BY coalesce(r.retry_at,0),a.id LIMIT ?", (now, limit)).fetchall()
+        # First transfers and newly available/retryable bytes precede maintenance.
+        "ORDER BY CASE WHEN r.uid IS NULL OR r.blob_key IS NOT a.blob_key "
+        "OR (r.error IS NOT NULL AND a.blob_key IS NOT NULL) THEN 0 ELSE 1 END, "
+        "coalesce(r.retry_at,0),a.id LIMIT ?", (now, limit)).fetchall()
     transferred = 0
     for raw in rows:
         row, error, done = dict(raw), None, False

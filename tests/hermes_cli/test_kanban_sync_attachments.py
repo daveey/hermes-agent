@@ -238,6 +238,105 @@ def test_outside_storage_source_is_never_uploaded(stores, tmp_path):
     assert not service.blobs
 
 
+def _queued_attachment(conn, tid, name, *, retry_at=None, keyed=True, error=None):
+    """Seed local queue state, retaining real file verification and publication."""
+    from hermes_cli import kanban_sync_attachments as attachments
+    data = name.encode()
+    aid = kb.store_attachment_bytes(conn, tid, name, data)
+    key = "sha256:" + hashlib.sha256(data).hexdigest() if keyed else None
+    attachments._setup(conn)
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE task_attachments SET blob_key=? WHERE id=?", (key, aid))
+        row = conn.execute("SELECT * FROM task_attachments WHERE id=?", (aid,)).fetchone()
+        if retry_at is not None:
+            conn.execute("INSERT INTO kanban_attachment_retry VALUES (?,?,1,?,?)",
+                         (row["uid"], key, retry_at, error))
+    return dict(row), data
+
+
+@pytest.mark.parametrize("urgent", ["late_receipt", "failed_fetch", "first_transfer"])
+def test_needed_bytes_precede_due_verification_backlog(stores, monkeypatch, urgent):
+    from hermes_cli import kanban_sync_attachments as attachments
+    home, _, conn, _, service, tid, _ = stores
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    clock = [100.0]
+    monkeypatch.setattr(attachments, "_now", lambda: clock[0])
+    backlog = [_queued_attachment(conn, tid, f"verified-{i}", retry_at=-100 + i)[0]
+               for i in range(3)]
+    row, data = _queued_attachment(conn, tid, "urgent")
+    Path(row["stored_path"]).unlink()
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE task_attachments SET stored_path='' WHERE uid=?", (row["uid"],))
+    service.blobs[row["uid"]] = data
+    # Exercise the real metadata-first/fetch-failure attempt before its receipt.
+    if urgent != "first_transfer":
+        with kbc.write_txn(conn):
+            conn.execute("UPDATE kanban_attachment_retry SET retry_at=1000")
+            if urgent == "late_receipt":
+                conn.execute("UPDATE task_attachments SET blob_key=NULL WHERE uid=?", (row["uid"],))
+        service.blobs_offline = urgent == "failed_fetch"
+        assert attachments.transfer_pending(conn, service.hub("hub"), "default", limit=2) == 0
+        receipt = conn.execute("SELECT * FROM kanban_attachment_retry WHERE uid=?", (row["uid"],)).fetchone()
+        assert receipt["retry_at"] == 130
+        assert receipt["error"] == ("OSError" if urgent == "failed_fetch" else None)
+        service.blobs_offline = False
+        with kbc.write_txn(conn):
+            for i, old in enumerate(backlog):
+                conn.execute("UPDATE kanban_attachment_retry SET retry_at=? WHERE uid=?", (-100 + i, old["uid"]))
+            conn.execute("UPDATE task_attachments SET blob_key=? WHERE uid=?", (row["blob_key"], row["uid"]))
+        if urgent == "failed_fetch":
+            clock[0] = 129
+            assert attachments.transfer_pending(conn, service.hub("hub"), "default", limit=0) == 0
+            # No failed fetch may bypass its backoff, even when it ranks urgent.
+            with kbc.write_txn(conn):
+                conn.execute("UPDATE kanban_attachment_retry SET retry_at=1000 WHERE uid!=?", (row["uid"],))
+            assert attachments.transfer_pending(conn, service.hub("hub"), "default", limit=2) == 0
+            with kbc.write_txn(conn):
+                for i, old in enumerate(backlog):
+                    conn.execute("UPDATE kanban_attachment_retry SET retry_at=? WHERE uid=?", (-100 + i, old["uid"]))
+            clock[0] = 130
+    assert attachments.transfer_pending(conn, service.hub("hub"), "default", limit=2) == 2
+    published = conn.execute("SELECT stored_path FROM task_attachments WHERE uid=?", (row["uid"],)).fetchone()[0]
+    assert published, "needed bytes must publish in the first bounded backlog round"
+    assert Path(published).read_bytes() == data
+    attempts = [conn.execute("SELECT attempts FROM kanban_attachment_retry WHERE uid=?", (old["uid"],)).fetchone()[0]
+                for old in backlog]
+    assert attempts == [2, 1, 1]  # stable retry_at/id order, and exactly two candidates
+
+
+def test_first_metadata_attempt_precedes_due_verification(stores, monkeypatch):
+    from hermes_cli import kanban_sync_attachments as attachments
+    home, _, conn, _, service, tid, _ = stores
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(attachments, "_now", lambda: 100)
+    backlog = [_queued_attachment(conn, tid, f"verified-{i}", retry_at=-100)[0] for i in range(3)]
+    row, _ = _queued_attachment(conn, tid, "new-metadata", keyed=False)
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE task_attachments SET stored_path='' WHERE uid=?", (row["uid"],))
+    assert attachments.transfer_pending(conn, service.hub("hub"), "default", limit=2) == 1
+    receipt = conn.execute("SELECT attempts,retry_at FROM kanban_attachment_retry WHERE uid=?", (row["uid"],)).fetchone()
+    assert tuple(receipt) == (1, 130)
+    attempts = [conn.execute("SELECT attempts FROM kanban_attachment_retry WHERE uid=?", (old["uid"],)).fetchone()[0]
+                for old in backlog]
+    assert attempts == [2, 1, 1]
+
+
+@pytest.mark.parametrize("error", [None, "OSError"])
+def test_metadata_only_retry_does_not_displace_due_verification(stores, monkeypatch, error):
+    from hermes_cli import kanban_sync_attachments as attachments
+    home, _, conn, _, service, tid, _ = stores
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(attachments, "_now", lambda: 100)
+    backlog = [_queued_attachment(conn, tid, f"verified-{i}", retry_at=-100)[0] for i in range(3)]
+    row, _ = _queued_attachment(conn, tid, "metadata", retry_at=0, keyed=False, error=error)
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE task_attachments SET stored_path='' WHERE uid=?", (row["uid"],))
+    assert attachments.transfer_pending(conn, service.hub("hub"), "default", limit=2) == 2
+    attempts = [conn.execute("SELECT attempts FROM kanban_attachment_retry WHERE uid=?", (old["uid"],)).fetchone()[0]
+                for old in [*backlog, row]]
+    assert attempts == [2, 2, 1, 1]
+
+
 @pytest.mark.parametrize("damage", ["deleted", "corrupted"])
 def test_verified_local_file_is_repaired_from_storage(stores, damage):
     home, worker, hub_conn, conn, _service, tid, round_at = stores
