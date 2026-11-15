@@ -332,21 +332,22 @@ def replay(union: dict, key_ms: float, per_refresh_ms: float, probe_ms: float, e
     comps = {"hub", "ledger"}
     samples = union["samples"]
     last, refreshes, renews, keys, probes, pending = -1e9, 0, 0, 0, 0, False
-    exact_since = False
     for i, s in enumerate(samples):
         t = (i + 1) * 2.0
         moved = set(s["moved"].get("default", ()))
-        probes += 1
-        exact_since = exact_since or bool(moved) or random.random() < exact_move_rate
         pending = pending or bool(moved & comps) or random.random() < local_move_rate
         if t - last >= 20.0:
-            refreshes, renews, last, pending, exact_since = refreshes + 1, renews + 1, t, False, False
+            refreshes, renews, last, pending = refreshes + 1, renews + 1, t, False
             continue
-        if t - last < 10.0 or not exact_since:
+        if t - last < 10.0:
             continue
-        keys += 1  # exact moved past the floor: the holder computes the narrow key
+        # Match _holder_refresh_scope: no input work inside the floor; every
+        # post-floor pass probes the narrow key, even when exact inputs are quiet.
+        # Refresh cost already includes its publication-time input/key reads.
+        probes += 1
+        keys += 1
         if pending:
-            refreshes, last, pending, exact_since = refreshes + 1, t, False, False
+            refreshes, last, pending = refreshes + 1, t, False
     elapsed = len(samples) * 2.0
     holder = (refreshes * per_refresh_ms + keys * key_ms + probes * probe_ms) / 1000 / elapsed * 100
     base_refreshes = sum(1 for _ in samples if random.random() < exact_move_rate)
