@@ -244,6 +244,8 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     # the per-task breaker auto-blocks quietly, so the operator needs a signal.
     HEALTH_WINDOW = 6  # ticks (default 30s at interval=5)
     health_state = {"bad_ticks": 0, "last_warn_at": 0}
+    from hermes_cli.kanban_dispatch_expected_holds import ExpectedHoldMonitor
+    hold_monitor = ExpectedHoldMonitor()
 
     def _ready_queue_nonempty() -> bool:
         """Is there a ready+assigned+unclaimed task the dispatcher would spawn for?
@@ -257,7 +259,10 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     def _on_tick(res):
         ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
         # A full cap, or every ready card waiting on a known clock (quota reset, cooldown), is idle, not stuck [daveey]
-        if ready_pending and not res.spawned and not res.at_capacity and not kbd.all_clock_held([res]):
+        expected = hold_monitor.observe([("default", res)], time.time(),
+            lambda level, message: print(f"[{_fmt_ts(int(time.time()))}] {logging.getLevelName(level)} {message}",
+                                         file=sys.stderr, flush=True))
+        if ready_pending and not res.spawned and not res.at_capacity and not kbd.all_clock_held([res]) and not expected:
             health_state["bad_ticks"] += 1
         else:
             health_state["bad_ticks"] = 0
