@@ -432,12 +432,28 @@ def refresh_bound_home() -> None:
     _home_layer(force_stamp_check=True).misses.clear()
 
 
-def _bound_home_layer() -> tuple[_HomeLayer, Path | None, str]:
-    try:
-        from hermes_constants import get_hermes_home, hermes_home_key
+# (inputs that select the home, home, key). Only stored once ``hermes_home_key`` itself remembers the
+# path (it exists on disk), so a home that appears or moves is re-resolved exactly as before.
+_BOUND_HOME_MEMO: tuple[tuple, Path, str] | None = None
 
-        home = Path(get_hermes_home())
-        key = hermes_home_key(home)
+
+def _bound_home_layer() -> tuple[_HomeLayer, Path | None, str]:
+    global _BOUND_HOME_MEMO
+    try:
+        import os
+
+        from hermes_constants import _HOME_KEY_CACHE, get_hermes_home, get_hermes_home_override, hermes_home_key
+
+        env = os.environ
+        inputs = (get_hermes_home_override(), env.get("HERMES_HOME"), env.get("HERMES_DATA_DIR_SUFFIX"), env.get("HOME"))
+        memo = _BOUND_HOME_MEMO
+        if memo is not None and memo[0] == inputs and os.fspath(memo[1]) in _HOME_KEY_CACHE:
+            _, home, key = memo
+        else:
+            home = Path(get_hermes_home())
+            key = hermes_home_key(home)
+            if os.fspath(home) in _HOME_KEY_CACHE:
+                _BOUND_HOME_MEMO = (inputs, home, key)
     except Exception:
         home, key = None, ""
     with _HOME_LAYERS_LOCK:

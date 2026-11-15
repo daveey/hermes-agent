@@ -92,3 +92,20 @@ def home_config():
     (get_hermes_home() / "config.yaml").write_text(
         "model:\n  default: x\n  provider: openrouter\nmodel_catalog:\n  providers:\n    acme: {url: u}\n")
     return get_hermes_home()
+
+
+def test_bound_home_layer_follows_home_changes(tmp_path, monkeypatch):
+    """The memoized home resolution must re-resolve whenever HERMES_HOME (or an override) changes."""
+    import providers
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(a))
+    layer_a, _home_a, key_a = providers._bound_home_layer()
+    assert providers._bound_home_layer()[0] is layer_a
+    monkeypatch.setenv("HERMES_HOME", str(b))
+    layer_b, home_b, key_b = providers._bound_home_layer()
+    assert layer_b is not layer_a and home_b == b and key_b != key_a
+    monkeypatch.setenv("HERMES_HOME", str(a))
+    assert providers._bound_home_layer()[0] is layer_a
