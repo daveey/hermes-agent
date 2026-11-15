@@ -98,11 +98,40 @@ def _notices(live: frozenset = frozenset()) -> Inputs:
             # pending (dead-holder recovery is a process-liveness decision, not structure). The board's own
             # revision is NOT in the key: a live board is rewritten by bookkeeping all the time, and the
             # emptiness of the candidate set is re-evaluated by every probe.
-            if any(sub.get('inflight_from') is not None or str(sub.get('chat_id') or '') not in live
-                   for sub in subscriptions(conn, _KANBAN_NOTIFY_KINDS)):
+            orphans = []
+            for sub in subscriptions(conn, _KANBAN_NOTIFY_KINDS):
+                chat = str(sub.get('chat_id') or '')
+                if sub.get('inflight_from') is None and chat in live:
+                    continue
+                if sub.get('inflight_from') is None and _orphan_chat(conn, sub, chat):
+                    orphans.append((str(sub.get('task_id')), chat, sub.get('last_event_id')))
+                    continue
                 return Inputs()
-            keys.append((str(path),))
+            # An orphan is part of the key: a new one (or one whose cursor moved) runs the sweep once.
+            keys.append((str(path), tuple(sorted(orphans, key=repr))))
     return Inputs(tuple(keys), pending=False)
+
+
+def _orphan_chat(conn, sub: dict, chat: str) -> bool:
+    """True when the sweep can do nothing for this sub until one of its inputs changes: its chat is in NO profile
+    store, so the delivery path ends at ``session_db(chat) -> (None, None)`` ("no store holds this chat: leave the
+    cursor alone, the chat may still appear"). A chat appearing in any store, the card being archived (that path
+    drops the sub) or a placement placeholder id (dropped) is NOT an orphan: those run. One such sub whose chat was
+    deleted six days ago held the whole pass hot on the hub, opening every profile store each pass (t_01a1dfa94f2251cd).
+    Any read failure raises: the probe's caller treats that as unknown (``Inputs()``)."""
+    from hermes_cli.kanban_placement import is_placeholder_session
+    from tui_gateway.kanban_notice_session_store import profile_store, reader_of
+
+    if not chat or is_placeholder_session(chat):
+        return False
+    status = conn.execute('SELECT status FROM tasks WHERE id = ?', (sub.get('task_id'),)).fetchone()
+    if status is None or status[0] == 'archived':
+        return False
+    for path in _profile_paths():
+        with profile_store(path) as store:
+            if store is not None and reader_of(store)._read_one('SELECT 1 FROM sessions WHERE id = ?', (chat,)) is not None:
+                return False
+    return True
 
 
 def _profile_paths(every_store: bool = True) -> list:
@@ -221,7 +250,7 @@ def _session_empty(kind: str) -> Inputs:
                   due=time.time() + RECOVER_EVERY_S if kind == 'delegation' else float('inf'))
 
 
-def _remote() -> Inputs:
+def _remote(live: frozenset = frozenset()) -> Inputs:
     from hermes_cli.kanban_origin import _hub_db, gateway_names
     from hermes_cli.kanban_reader_retention import reader
     from tui_gateway import kanban_remote_notices as remote
@@ -235,10 +264,6 @@ def _remote() -> Inputs:
     if not me or stamp is None:
         return Inputs()
     cards, _states = remote._sweep_snapshot(path, me)
-    # Even already delivered terminal cards are conservatively hot. Freshness,
-    # live unloads, ledger releases and _woken running flags are not DB commits.
-    if cards:
-        return Inputs()
     with remote._woken_lock:
         if remote._woken:
             return Inputs()
@@ -247,9 +272,39 @@ def _remote() -> Inputs:
     if ledger.exists():
         with reader(ledger) as conn:
             ledger_stamp = _revision(conn)
-            if conn.execute('SELECT 1 FROM notices WHERE delivered=0 LIMIT 1').fetchone():
-                return Inputs()  # preserve holder-death and stale-claim recovery
-    return Inputs((str(path), me, stamp, str(ledger), ledger_stamp), pending=False)
+            # Holder-death and stale-claim recovery: only a claim WITH a holder is ever settled by the sweep.
+            if conn.execute('SELECT 1 FROM notices WHERE delivered=0 AND holder_pid IS NOT NULL LIMIT 1').fetchone():
+                return Inputs()
+            if cards and not _cards_settled(conn, cards, live):
+                return Inputs()
+    elif cards:
+        return Inputs()
+    # The key is what the pass would read, not the replica's commit counter: the hub's replica commits on every
+    # sync, and none of those commits changed a card this host owes a notice for (t_01a1dfa94f2251cd).
+    digest = hashlib.sha256()
+    for owner, key, task, links in cards:
+        digest.update(repr((owner, key, remote._notice_state(task),
+                            tuple((link.get('profile'), link.get('session')) for link in links))).encode())
+    return Inputs((str(path), me, digest.hexdigest(), str(ledger), ledger_stamp), pending=False)
+
+
+def _cards_settled(conn, cards, live) -> bool:
+    """True when every notice the sweep could deliver already has a settled ledger row, so the pass has nothing to
+    deliver, claim, wait on or count. Anything unproven (a link without a settled row, an open chat, whose poller
+    the sweep notes) keeps the pass hot. Blank and placement-placeholder links are dropped by the delivery
+    itself, with no effect."""
+    from hermes_cli.kanban_placement import is_placeholder_session
+    from tui_gateway import kanban_remote_notices as remote
+
+    for owner, key, task, links in cards:
+        ref, state = f'{owner}/{key}', remote._notice_state(task)
+        for link in links:
+            profile, sid = link.get('profile'), link.get('session')
+            if not profile or not sid or is_placeholder_session(sid):
+                continue
+            if sid in live or not remote._ledger_settled(conn, (sid,), ref, state):
+                return False
+    return True
 
 
 def probe(kind: str, *, every_store: bool = True, live: frozenset | set = frozenset()) -> Inputs:
@@ -267,7 +322,7 @@ def probe(kind: str, *, every_store: bool = True, live: frozenset | set = frozen
         if kind == 'guarantee_pass':
             return _guarantee()
         if kind == 'remote_notices':
-            return _remote()
+            return _remote(frozenset(live))
         if kind in ('delegation', 'killed_notices'):
             return _session_empty(kind)
     except Exception:  # health: allow BLE001 -- admission failure must retain the recovery path

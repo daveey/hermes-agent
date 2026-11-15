@@ -59,8 +59,14 @@ def test_host_rechecks_live_set_even_when_stores_do_not_change(host):
     assert calls == ['notices', 'notices']
 
 
-def test_pending_notice_returning_empty_keeps_busy_retry_hot(host):
+def test_pending_notice_returning_empty_keeps_busy_retry_hot(host, monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+    from tui_gateway import kanban_unloaded_gates as gates
     tid, _, calls = host
+    # The chat exists (a busy retry); an absent chat is the orphan case below, which has nothing to retry.
+    db = SessionDB(tmp_path / 'state.db')
+    db.create_session('chat', 'desktop')
+    monkeypatch.setattr(gates, '_profile_paths', lambda every_store=True: [db.db_path])
     with contextlib.closing(kbc.connect()) as conn:
         kb.complete_task(conn, tid, summary='ready')
     ku.host_pass()
@@ -208,6 +214,9 @@ def test_host_delivers_after_deferral_with_no_new_event(host, monkeypatch, tmp_p
     db = SessionDB(tmp_path / 'chat.db')
     db.create_session('chat', 'desktop')
     db.append_message('chat', 'user', 'work')
+    from tui_gateway import kanban_unloaded_gates as gates
+    # The injected opener and the production lookup name the same store: the chat exists, so it is no orphan.
+    monkeypatch.setattr(gates, '_profile_paths', lambda every_store=True: [db.db_path])
     with contextlib.closing(kbc.connect()) as conn:
         kb.complete_task(conn, tid, summary='ready')
     now = time.time() + 60
@@ -292,3 +301,143 @@ def test_probe_failure_does_not_skip_host_work(host, monkeypatch):
     ku.host_pass()
     ku.host_pass()
     assert calls == ['notices', 'notices']
+
+
+# --- orphan subs: a chat in no store has nothing to deliver to (t_01a1dfa94f2251cd) --------------------------------
+
+@pytest.fixture
+def orphan(host, monkeypatch, tmp_path):
+    """A completed card whose subscriber chat 'chat' is in no profile store (the hub's t_01a1c070c0c00298 shape)."""
+    from hermes_state import SessionDB
+    from tui_gateway import kanban_unloaded_gates as gates
+    tid, _live, calls = host
+    db = SessionDB(tmp_path / 'state.db')
+    monkeypatch.setattr(gates, '_profile_paths', lambda every_store=True: [db.db_path])
+    with contextlib.closing(kbc.connect()) as conn:
+        kb.complete_task(conn, tid, summary='ready')
+    yield tid, db, calls
+    db.close()
+
+
+def test_orphan_sub_does_not_hold_the_notice_sweep_hot(orphan):
+    _, _, calls = orphan
+    ku.host_pass()
+    ku.host_pass()
+    ku.host_pass()
+    assert calls == ['notices']
+
+
+def test_orphan_sub_runs_again_when_its_chat_appears(orphan):
+    _, db, calls = orphan
+    ku.host_pass()
+    ku.host_pass()
+    db.create_session('chat', 'desktop')
+    ku.host_pass()
+    ku.host_pass()
+    assert calls == ['notices', 'notices', 'notices']  # hot once the chat exists: a busy retry stays pending
+
+
+def test_orphan_sub_of_an_archived_card_still_runs(orphan):
+    from hermes_cli.kanban_db_archive import archive_task
+    tid, _, calls = orphan
+    with contextlib.closing(kbc.connect()) as conn:
+        archive_task(conn, tid)
+    ku.host_pass()
+    ku.host_pass()
+    assert calls == ['notices', 'notices']  # the sweep drops an archived card's sub
+
+
+def test_orphan_with_an_inflight_claim_stays_hot(orphan):
+    tid, _, calls = orphan
+    with contextlib.closing(kbc.connect()) as conn:
+        with conn:
+            conn.execute('UPDATE kanban_notify_subs SET inflight_from = 1, inflight_pid = 1 WHERE task_id = ?', (tid,))
+    ku.host_pass()
+    ku.host_pass()
+    assert calls == ['notices', 'notices']  # dead-holder recovery is not structure
+
+
+def test_orphan_probe_failure_stays_hot(orphan, monkeypatch):
+    from tui_gateway import kanban_unloaded_gates as gates
+    _, _, calls = orphan
+    def unreadable(*a, **k):
+        raise OSError('store unreadable')
+    monkeypatch.setattr(gates, '_profile_paths', unreadable)
+    ku.host_pass()
+    ku.host_pass()
+    assert calls == ['notices', 'notices']
+
+
+# --- remote_notices: a replica commit that changes no owed notice is not work (t_01a1dfa94f2251cd) ------------------
+
+@pytest.fixture
+def remote_host(monkeypatch, tmp_path):
+    from hermes_cli import kanban_origin
+    from tui_gateway import kanban_remote_notices as remote
+    from tui_gateway import kanban_replica_observer as observer
+    from tui_gateway import kanban_unloaded_gates as gates
+
+    replica = tmp_path / 'hub.db'
+    replica.write_bytes(b'')
+    ledger = tmp_path / 'remote-notices.db'
+    stamp = [1]
+    cards = [('macbook', 'default/t_1', {'id': 't_1', 'status': 'done', 'completed_at': 100.0},
+              [{'profile': 'default', 'session': 'chat-a'}])]
+    monkeypatch.setattr(kanban_origin, '_hub_db', lambda: replica)
+    monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: ['hub'])
+    monkeypatch.setattr(remote, 'ledger_path', lambda: ledger)
+    monkeypatch.setattr(observer, 'fingerprint', lambda path: ('stamp', stamp[0]))
+    monkeypatch.setattr(remote, '_sweep_snapshot', lambda path, me: (list(cards), {}))
+    gates.reset_for_tests()
+    remote._ledger(ledger).close()
+
+    def settle(session='chat-a', state=None, delivered=remote.DELIVERED, holder=None):
+        with contextlib.closing(remote._ledger(ledger)) as conn, conn:
+            conn.execute('INSERT OR REPLACE INTO notices (session, ref, state, at, delivered, holder_pid, notice_key) '
+                         'VALUES (?,?,?,?,?,?,?)',
+                         (session, 'macbook/default/t_1', state or remote._notice_state(cards[0][2]), 1.0,
+                          delivered, holder, 'k'))
+    return gates, cards, stamp, settle
+
+
+def test_remote_probe_stays_hot_until_every_owed_notice_is_settled(remote_host):
+    gates, _, _, settle = remote_host
+    assert gates._remote().pending
+    settle()
+    assert not gates._remote().pending
+
+
+def test_remote_probe_key_ignores_unrelated_replica_commits(remote_host):
+    gates, _, stamp, settle = remote_host
+    settle()
+    first = gates._remote()
+    stamp[0] += 1
+    assert gates._remote() == first
+
+
+def test_remote_probe_key_changes_with_the_card_state_and_the_ledger(remote_host):
+    gates, cards, _, settle = remote_host
+    settle()
+    first = gates._remote()
+    settle(session='chat-b')
+    assert gates._remote().key != first.key
+    cards[0] = (*cards[0][:2], {'id': 't_1', 'status': 'blocked', 'blocked_at': 200.0}, cards[0][3])
+    assert gates._remote().pending  # the new state has no settled row: it runs
+
+
+def test_remote_probe_open_chat_in_flight_claim_and_woken_stay_hot(remote_host):
+    from tui_gateway import kanban_remote_notices as remote
+    gates, _, _, settle = remote_host
+    settle()
+    assert not gates._remote().pending
+    assert gates._remote(frozenset({'chat-a'})).pending
+    settle(session='chat-b', delivered=0, holder=12345)
+    assert gates._remote().pending
+    settle(session='chat-b', delivered=remote.DELIVERED)
+    with remote._woken_lock:
+        remote._woken['x'] = 1
+    try:
+        assert gates._remote().pending
+    finally:
+        with remote._woken_lock:
+            remote._woken.clear()
