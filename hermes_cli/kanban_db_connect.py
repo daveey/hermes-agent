@@ -1252,6 +1252,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             if name not in run_cols:
                 _add_column_if_missing(conn, "task_runs", name, ddl)
         _ensure_run_partial_indexes(conn)
+        _ensure_run_started_index(conn)
         _backfill_legacy_inflight_runs(conn)
 
     # One-shot event-kind rename: old names still worked but were awkward on
@@ -1395,6 +1396,13 @@ _EVENT_BLOCKER_ASSERT_INDEX = (
 )
 
 
+def _ensure_run_started_index(conn: sqlite3.Connection) -> None:
+    # Board-wide MAX(started_at) must not scan history on every starvation pick.
+    # Legacy TEXT-PK tables may lack this column until the rebuild below.
+    if "started_at" in _column_names(conn, "task_runs"):
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_started_at ON task_runs(started_at)")
+
+
 def _ensure_run_partial_indexes(conn: sqlite3.Connection) -> None:
     # A legacy TEXT-PK task_runs can lack base columns (``ended_at``) that the additive pass never adds; the
     # rebuild (``_REBUILD_SPECS``) recreates the table with these indexes, so skip them here until then.
@@ -1436,6 +1444,7 @@ _REBUILD_SPECS = {
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",
+            "CREATE INDEX idx_runs_started_at ON task_runs(started_at)",
             *_RUN_PARTIAL_INDEXES,
         ),
     ),
