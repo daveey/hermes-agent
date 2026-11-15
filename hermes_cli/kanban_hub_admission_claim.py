@@ -14,10 +14,10 @@ The screen covers ready and review because a scheduled continuation can resume e
 * admit: claimed as before;
 * deny: re-placed on the worker queue (the pickup deny route, never ``machine:worker-N``) with a ``moved`` event
   citing the verdict, so it is not claimed here;
-* deny of a card that must stay (structural restriction, ``host_repo``, a hub worktree in the brief, a hub-local
-  wake_check, or no worker queue fits): the verdict carries ``kept: <reason>`` and the card is claimed as before;
-  a fleet probe under ``~/.hermes/bin`` in :data:`PORTABLE_WAKE_PROBES` (or ``kanban.placement.
-  portable_wake_probes``) is not hub-local;
+* deny of a card that must stay (structural restriction, ``host_repo``, a hub worktree in the brief, an unlocated
+  hub-local wake_check, or no worker queue fits): the verdict carries ``kept: <reason>``. A probe registered on
+  this gateway stays here independently of the ready card's execution; unknown legacy probe custody stays local.
+  A fleet probe in :data:`PORTABLE_WAKE_PROBES` (or ``kanban.placement.portable_wake_probes``) is also portable;
 * an earlier deny that left the card here (a ``kept`` that no longer holds, or none) is re-placed on the worker
   queue once it has waited ready 5 min (``kanban_worker_first_selfcheck.denied_target``), with no new judge call;
 * judge unavailable: claimed as before, warning logged, nothing recorded (judged at its next ready). Failing open
@@ -121,9 +121,11 @@ def keep_reason(conn: sqlite3.Connection, card: sqlite3.Row, fields: dict, cfg: 
     if re.search(kp.HOST_WORKTREE_PATH, text, re.IGNORECASE) or re.search(kp.LOCAL_WORKTREE_PATH, text,
                                                                            re.IGNORECASE):
         return "hub worktree path in the brief"
-    probe = _without_portable_probes(_latest_wake_check(conn, card["id"]), cfg)
-    if probe and any(re.search(p, probe, re.IGNORECASE) for p in (_HUB_PATH, kp.HOST_WORKTREE_PATH,
-                                                                   kp.LOCAL_WORKTREE_PATH)):
+    from hermes_cli.kanban_hub_probe_custody import registered_here
+    raw_probe = _latest_wake_check(conn, card["id"])
+    probe = _without_portable_probes(raw_probe, cfg)
+    if probe and not registered_here(conn, card["id"], raw_probe) and any(
+            re.search(p, probe, re.IGNORECASE) for p in (_HUB_PATH, kp.HOST_WORKTREE_PATH, kp.LOCAL_WORKTREE_PATH)):
         return "wake_check reads a hub-local path"
     return None
 
