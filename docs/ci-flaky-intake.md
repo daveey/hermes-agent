@@ -115,10 +115,11 @@ responses fail closed rather than advancing the cursor.
 Run descriptors retain branch/workflow identity for supersession, with bounded metadata
 validation. Malformed report input fails with a fixed diagnostic, not raw payload output.
 
-A done intake is reopened through the supported Board command. An archived intake is not
-reopened or replaced on the same day: undelivered occurrences retain their original observed
-day and move to the next day's intake. Until then they remain visible as pending. No retry
-threshold, cadence, red-main handling or self-heal policy changes are part of batching.
+A done or archived intake stays closed. Fresh undelivered occurrences use the same daily
+subject with the first unused `#<generation>` suffix, reusing an open generation when present.
+A lost acknowledgment is reconciled against the previous card's exact payload before any
+replacement, so closure does not duplicate delivered evidence. No retry threshold, cadence,
+red-main handling or self-heal policy changes are part of batching.
 
 Run attempts are replayed from the journal, so a run whose artifact is permanently
 unavailable (expired, invalid, missing) would otherwise log `FAILED` on every poll. Once a

@@ -90,6 +90,33 @@ def run_metadata(run: dict) -> dict:
     return data
 
 
+def _incident_destination(board, key, cached_id, payload):
+    """Resolve one daily subject, retaining exact-write recovery after closure."""
+    cards = [c for c in board.list_cards() if c.get("idempotency_key") == key or
+             (str(c.get("idempotency_key", "")).startswith(key + "#") and
+              str(c["idempotency_key"])[len(key) + 1:].isdigit())]
+    cached = board.card(cached_id) if cached_id else None
+    if cached_id:
+        if not cached or cached.get("idempotency_key") not in {c["idempotency_key"] for c in cards}:
+            raise RuntimeError("intake cached identity unavailable")
+        if payload in board.comments(cached_id):
+            return cached_id, cached["idempotency_key"], True
+    actionable = {"todo", "ready", "running", "scheduled", "blocked", "review", "triage"}
+    if any(c.get("status") not in actionable | {"done", "archived"} for c in cards):
+        raise RuntimeError("intake status unavailable")
+    opened = [c for c in cards if c.get("status") in actionable]
+    owner = cached if cached and cached.get("status") in actionable else (opened[0] if opened else None)
+    if owner:
+        return owner["id"], owner["idempotency_key"], False
+    used = {c["idempotency_key"] for c in cards}
+    base_key = key
+    generation = 0
+    while key in used:
+        generation += 1
+        key = f"{base_key}#{generation}"
+    return None, key, False
+
+
 class Journal:
     def __init__(self, path: Path, *, identity_path: Path | None = None, initialize: bool = False):
         import fcntl
@@ -342,8 +369,11 @@ class Journal:
             self.rotate(repo, "page", str(page["id"]))
             key = f"ci-flaky-intake:{repo}:{page['day']}"
             try:
-                cards = [c for c in board.list_cards() if c.get("idempotency_key") == key]
-                card = page["card"] or (cards[0]["id"] if cards else None)
+                card, key, delivered = _incident_destination(board, key, page["card"], page["payload"])
+                if delivered:
+                    self.acknowledge_page(page["id"], card)
+                    log.append(f"intake delivered {card} page={page['id']}")
+                    continue
                 # Fence before create as well as comment: either response can be lost.
                 with self.db:
                     self.db.execute("UPDATE pages SET attempted=1 WHERE id=?", (page["id"],))
@@ -357,7 +387,7 @@ class Journal:
                             "are not inventoried, and rows with owner_check or owner_check_ref had clipped closed-card "
                             "history, so check those first. Read the full durable queue before closing; "
                             "record each test's disposition and follow-up owner. No retry threshold changes.\n"
-                            "Backlog/export: see docs/ci-flaky-intake.md. New arrivals reopen a done intake.")
+                            "Backlog/export: see docs/ci-flaky-intake.md. New arrivals after closure use a new intake generation.")
                     title = f"CI flaky intake {repo} {page['day']}"
                     card = create(title, body, key, page) if create else board.create(title, body, key)
                     if card is None:
@@ -374,17 +404,8 @@ class Journal:
                     log.append(f"intake delivered {card} page={page['id']}")
                     continue
                 status = current.get("status")
-                if status == "archived":
-                    tomorrow = str(dt.date.fromisoformat(page["day"]) + dt.timedelta(days=1))
-                    with self.db:
-                        self.db.execute("UPDATE occurrences SET page=NULL,target_day=? WHERE page=? AND delivered=0",
-                                        (tomorrow, page["id"]))
-                        self.db.execute("DELETE FROM pages WHERE id=?", (page["id"],))
-                    log.append(f"FAILED intake archived; durable carry-forward day={tomorrow}")
-                    continue
-                if status == "done":
-                    board.reopen(card)
-                    status = (board.card(card) or {}).get("status")
+                # Closure raced selection: leave the page pending; the next fire
+                # selects a fresh generation after reconciling any successful write.
                 if status not in {"todo", "ready", "running", "scheduled", "blocked", "review", "triage"}:
                     raise RuntimeError("intake not actionable")
                 if page["payload"] not in board.comments(card):

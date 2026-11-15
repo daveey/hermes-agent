@@ -490,7 +490,7 @@ def test_failure_restart_immutable_pages_and_ambiguous_comment(tmp_path):
     j.close()
 
 
-def test_done_reopens_and_archive_carries_forward_without_same_day_duplicate(tmp_path, monkeypatch):
+def test_closed_intakes_preserve_history_and_deliver_to_new_generation(tmp_path, monkeypatch):
     monkeypatch.setattr(intake, "utc_day", lambda: "2026-11-13")
     j = intake.Journal(tmp_path / "queue.sqlite3")
     board = Board()
@@ -499,23 +499,18 @@ def test_done_reopens_and_archive_carries_forward_without_same_day_duplicate(tmp
     board.cards["card0"]["status"] = "done"
     record(j, run=2, count=1)
     j.deliver("o/r", board)
-    assert board.cards["card0"]["status"] == "ready"
-    assert len(board.cards) == 1
-    board.cards["card0"]["status"] = "archived"
-    record(j, run=3, count=1)
-    assert j.deliver("o/r", board)[0].startswith("FAILED")
-    j.plan_pages("o/r", j.pending("o/r"))
-    assert j.deliver("o/r", board)[0].startswith("FAILED")
-    assert len(board.cards) == 1
-    monkeypatch.setattr(intake, "utc_day", lambda: "2026-11-14")
-    j.deliver("o/r", board)
+    assert board.cards["card0"]["status"] == "done"
     assert len(board.cards) == 2
+    board.cards["card1"]["status"] = "archived"
+    record(j, run=3, count=1)
+    assert not j.deliver("o/r", board)[0].startswith("FAILED")
+    assert len(board.cards) == 3
     assert j.db.execute("SELECT sum(delivered) FROM occurrences").fetchone()[0] == 3
     assert j.db.execute("SELECT day,target_day FROM occurrences WHERE id=3").fetchone()[:] == (
-        "2026-11-13", "2026-11-14")
+        "2026-11-13", "2026-11-13")
     record(j, run=4, count=1)
     j.deliver("o/r", board)
-    assert len(board.cards) == 2
+    assert len(board.cards) == 3
     j.close()
 
 

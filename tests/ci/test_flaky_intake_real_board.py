@@ -51,7 +51,7 @@ def test_kanban_json_exposes_idempotency_key(cli):
 
 
 @pytest.mark.platforms("posix")
-def test_daily_intake_delivers_through_real_cli_and_reopens_done(cli, tmp_path):
+def test_daily_intake_delivers_through_real_cli_and_replaces_done(cli, tmp_path):
     board = fk.CliBoard([sys.executable, "-m", "hermes_cli.main"])
     journal = intake.Journal(tmp_path / "queue.sqlite3")
     tests = [f"tests/a.py::test_{i}" for i in range(30)]
@@ -69,16 +69,19 @@ def test_daily_intake_delivers_through_real_cli_and_reopens_done(cli, tmp_path):
     assert comments == payloads
     assert journal.deliver(REPO, board) == []  # replay: no duplicate card or comment
 
-    # A triaged (done) intake must not swallow a later same-day occurrence: it is reopened and receives it.
+    # Closure preserves history; fresh same-day evidence gets a new generation.
     cli("complete", card, "--summary", "triaged")
     _record(journal, 2, ["tests/b.py::test_late"])
     log = journal.deliver(REPO, board)
     assert not any(line.startswith("FAILED") for line in log), log
     assert tuple(journal.db.execute("SELECT count(*), sum(delivered) FROM occurrences").fetchone()) == (31, 31)
-    assert len(json.loads(cli("list", "--archived", "--json"))) == 1
+    cards = json.loads(cli("list", "--archived", "--json"))
+    assert len(cards) == 2
     shown = json.loads(cli("show", card, "--json"))
-    assert shown["task"]["status"] != "done"
-    bodies = [c["body"] for c in shown["comments"]]
+    assert shown["task"]["status"] == "done"
+    assert [c["body"] for c in shown["comments"]] == payloads
+    replacement = next(c["id"] for c in cards if c["id"] != card)
+    bodies = [c["body"] for c in json.loads(cli("show", replacement, "--json"))["comments"]]
     late = journal.db.execute("SELECT payload FROM pages ORDER BY id DESC LIMIT 1").fetchone()[0]
-    assert bodies[:len(payloads)] == payloads and bodies.count(late) == 1 and late not in payloads
+    assert bodies == [late] and late not in payloads
     journal.close()
