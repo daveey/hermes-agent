@@ -921,7 +921,9 @@ def _expanded_targets(target: str, variables: dict[str, list[str]]) -> Optional[
         name = match.group(1) or match.group(2)
         values = variables.get(name) or ([os.environ[name]] if name in os.environ else [])
         steps += len(values)
-        if not values or steps > _MAX_EXPANSIONS:
+        # Expansion results are data, never fresh shell syntax. Our path walker
+        # cannot preserve quoting for these characters, so retain uncertainty.
+        if not values or steps > _MAX_EXPANSIONS or any(_unresolvable(value) for value in values):
             return None
         pending.extend(word[:match.start()] + value + word[match.end():] for value in values)
     return words
