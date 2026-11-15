@@ -77,7 +77,7 @@ def submit(args):
         route = [home['gateway'], 'tasks', home['profile'] + '/' + home['board'], 'selfwork-create']
     argv = ['hermes-hub', 'request', *route, '--id', request_id, '--args-file', '-']
     try:
-        result = subprocess.run(argv, input=json.dumps(body), capture_output=True, text=True,  # windows-footgun: ok (encoding on next line)
+        result = subprocess.run(argv, input=json.dumps(body), capture_output=True, text=True,
                                 encoding='utf-8', timeout=30, check=False, env=build_subprocess_env())
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SelfWorkError('self-work transport unavailable; retry the same request, never create locally') from exc
