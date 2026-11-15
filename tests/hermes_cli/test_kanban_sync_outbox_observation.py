@@ -24,6 +24,7 @@ def test_invalid_persisted_observation_resets(memo, patch):
     rec = dict(op_id="op", since=100, seen_at=500, boot="boot", filed=False, warned_at=None)
     rec.update(patch)
     obs._path(memo).write_text(json.dumps(rec), encoding="utf-8")
+    assert obs._load(memo, 1000, "boot") is None
     assert obs.observe(memo, "op", 1000).since == 1000
 
 
