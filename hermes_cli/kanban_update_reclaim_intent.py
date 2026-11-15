@@ -15,6 +15,8 @@ from hermes_cli.kanban_core_update_requeue import CORE_UPDATE_REQUEUE_REASON
 
 TABLE = "kanban_update_reclaim_intents"
 FIELDS = ("current_run_id", "claim_lock", "worker_pid", "worker_started_at")
+# Validated explicit-operator reclaim attribution; NULL on legacy and plain updater pauses.
+ATTRIBUTION = ("urgency_source", "interrupt_target")
 
 
 def _exists(conn):
@@ -59,7 +61,8 @@ def recover_and_drain(conn):
                 continue
             row = conn.execute("SELECT * FROM tasks WHERE id=?", (intent["task_id"],)).fetchone()
             if _matching(intent, row) and row["status"] == "running":
-                kb.reclaim_task(conn, intent["task_id"], reason=CORE_UPDATE_REQUEUE_REASON)
+                kb.reclaim_task(conn, intent["task_id"], reason=CORE_UPDATE_REQUEUE_REASON,
+                                **{key: intent[key] for key in ATTRIBUTION})
             else:
                 with kb.write_txn(conn):
                     conn.execute(f"DELETE FROM {TABLE} WHERE task_id=? AND token=?",
@@ -68,7 +71,7 @@ def recover_and_drain(conn):
 
 
 @contextmanager
-def fence(conn, task_id, selected, reason):
+def fence(conn, task_id, selected, reason, attribution=None):
     """Publish before signalling; stale selection or concurrent reclaim sends no signal."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_dispatch as dispatch
@@ -87,12 +90,14 @@ def fence(conn, task_id, selected, reason):
             conn.execute(f"CREATE TABLE IF NOT EXISTS {TABLE} (task_id TEXT PRIMARY KEY "
                          "REFERENCES tasks(id) ON DELETE CASCADE, current_run_id INTEGER, claim_lock TEXT, "
                          "worker_pid INTEGER, worker_started_at TEXT, token TEXT NOT NULL, "
-                         "owner_pid INTEGER NOT NULL, owner_started_at TEXT NOT NULL)")
+                         "owner_pid INTEGER NOT NULL, owner_started_at TEXT NOT NULL, "
+                         "urgency_source TEXT, interrupt_target TEXT)")
             previous = conn.execute(f"SELECT * FROM {TABLE} WHERE task_id=?", (task_id,)).fetchone()
             valid = not (_matching(previous, row) and _owner_alive(previous))
         if valid:
-            conn.execute(f"INSERT OR REPLACE INTO {TABLE} VALUES (?,?,?,?,?,?,?,?)",
-                         (task_id, *(row[key] for key in FIELDS), token, owner_pid, owner_started_at))
+            conn.execute(f"INSERT OR REPLACE INTO {TABLE} VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (task_id, *(row[key] for key in FIELDS), token, owner_pid, owner_started_at,
+                          *((attribution or {}).get(key) for key in ATTRIBUTION)))
     if not valid:
         yield False
         return

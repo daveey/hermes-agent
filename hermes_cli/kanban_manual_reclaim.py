@@ -16,7 +16,7 @@ def reclaim_task(conn, task_id, *, reason=None, signal_fn=None, attribution=None
         return False
     if kb._sync.refuse_foreign_reclaim(conn, task_id):
         return False
-    with fence(conn, task_id, row, reason) as admitted:
+    with fence(conn, task_id, row, reason, attribution) as admitted:
         if not admitted:
             return False
         return _reclaim(conn, task_id, row, reason, signal_fn, attribution or {})

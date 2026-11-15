@@ -64,3 +64,28 @@ def test_no_intent_does_not_exempt_real_sigterm(board, monkeypatch):
         assert "failure_finalized" in {e.kind for e in kb.list_events(board, tid)}
     finally:
         dispatch._recent_worker_exits.pop(race.PID, None)
+
+
+def test_resumed_pause_keeps_explicit_operator_attribution(board, monkeypatch):
+    tid, _alive = race.running(board, monkeypatch)
+    target = "0123456789abcdef0123456789abcdef01234567"
+    settled = []
+
+    def custody(*_):
+        settled.append(True)
+        if len(settled) == 1:
+            raise RuntimeError("custody interrupted")
+        return {}
+
+    monkeypatch.setattr(kb._requeue_custody, "for_requeue", custody)
+    with pytest.raises(RuntimeError, match="custody interrupted"):
+        kb.reclaim_task(board, tid, reason=CORE_UPDATE_REQUEUE_REASON,
+                        urgency_source="explicit_operator", interrupt_target=target)
+    assert intent.task_pending(board, tid)
+    dispatch.detect_crashed_workers(board)
+    reclaimed = [e.payload for e in kb.list_events(board, tid) if e.kind == "reclaimed"]
+    assert len(reclaimed) == 1
+    assert reclaimed[0].get("urgency_source") == "explicit_operator"
+    assert reclaimed[0].get("interrupt_target") == target
+    assert kb.get_task(board, tid).status == "ready"
+    assert not intent.task_pending(board, tid)
