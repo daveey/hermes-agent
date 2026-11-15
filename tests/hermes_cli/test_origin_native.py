@@ -12,11 +12,22 @@ def scope(monkeypatch):
     monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("macbook", []))
     monkeypatch.setattr(kanban_execution_observations, "board_owner_profile", lambda path: "default")
     monkeypatch.setattr(kanban_placement_forward, "opened_board", lambda conn: "default")
+    monkeypatch.setattr(native, "_primary_scope", lambda conn: (
+        "macbook", kanban_execution_observations.board_owner_profile(None), "default"))
     return {"origin": {"gateway": "macbook", "profile": "default", "session": "chat-1"}}
 
 
-def test_transaction_and_inheritance(scope):
+def memory_tasks():
     conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, created_on TEXT, created_at INTEGER)")
+    conn.execute("CREATE TABLE kanban_sync_state (board_id TEXT, gateway_id TEXT, mode TEXT)")
+    conn.executemany("INSERT INTO tasks VALUES (?, 'macbook', 1)", [("t_root",), ("t_child",)])
+    conn.commit()
+    return conn
+
+
+def test_transaction_and_inheritance(scope):
+    conn = memory_tasks()
     conn.execute("BEGIN")
     native.record(conn, "t_root", scope, 1)
     native.record(conn, "t_child", {"creator": "t_root"}, 2)
@@ -27,7 +38,7 @@ def test_transaction_and_inheritance(scope):
 
 
 def test_missing_receipt_and_synced_ancestry_cannot_authorize(scope):
-    conn = sqlite3.connect(":memory:")
+    conn = memory_tasks()
     conn.execute("CREATE TABLE task_chat_links (task_id, chat_gateway, chat_profile, chat_session)")
     conn.execute("INSERT INTO task_chat_links VALUES ('t_fake','macbook','default','chat-1')")
     native.record(conn, "t_child", {"creator": "t_fake"}, 2)
@@ -35,7 +46,7 @@ def test_missing_receipt_and_synced_ancestry_cannot_authorize(scope):
 
 
 def test_foreign_parent_namespace_rejected(scope, monkeypatch):
-    conn = sqlite3.connect(":memory:")
+    conn = memory_tasks()
     native.record(conn, "t_root", scope, 1)
     from hermes_cli import kanban_execution_observations
     monkeypatch.setattr(kanban_execution_observations, "board_owner_profile", lambda path: "other")
@@ -75,6 +86,9 @@ def test_real_tool_creation_authorizes_native_worker_forward(tmp_path, monkeypat
     from hermes_cli import kanban_origin, kanban_db_connect as kbc
     from hermes_cli.kanban_origin_forward import authorize
     home = fixtures.make_home(tmp_path, monkeypatch)
+    from hermes_cli import kanban_db_sync as sync
+    with kbc.connect_closing() as conn:
+        sync.set_mode(conn, "primary")
     monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("here", {"here"}))
     monkeypatch.setenv("HERMES_SESSION_ID", fixtures.CHAT)
     task = fixtures.create("tool", monkeypatch, capsys)
