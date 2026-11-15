@@ -13,7 +13,7 @@ read back: pickup kept no record of why a pass skipped a candidate.
   replica, pinned ``machine:<this host>``, created elsewhere, with no live lease and not imported here, whose
   ``ready_since`` and newest move onto this host are older than ``kanban.sync.pickup_stall_seconds`` (default 600)
   gets ONE agent repair card filed
-  by this host (an open one, or one closed less than :data:`REPLACE_AFTER_SECONDS` ago, is reused). The repair is
+  by this host. An open incident is reused and repeated evidence is appended; a closed incident is replaced. The repair is
   never pinned here (:func:`alarm_placement`): this host is the one taking no Board work, so the repair is pinned
   to another active, unheld machine that can run it now, or the hub operator lane, and an open unclaimed repair
   whose pin is stranded is re-pinned. Its body carries this host's machine-local evidence (pickup skips, registry
@@ -220,19 +220,12 @@ def stalled(conn, replica, own: str, *, now: Optional[float] = None) -> list[dic
 
 
 def _covering_repair(conn, key: str, now_ms: int) -> Optional[str]:
-    """The repair already covering ``key``: an open one, or one closed less than :data:`REPLACE_AFTER_SECONDS` ago
-    (so an agent that finished one is not handed the same card on the next tick)."""
-    row = conn.execute("SELECT id, status, COALESCE(completed_at, created_at) AS closed FROM tasks "
-                       "WHERE idempotency_key >= ? AND idempotency_key < ? "
-                       "ORDER BY created_at DESC, id DESC LIMIT 1", (key, key + "\U0010ffff")).fetchone()
-    if row is None:
-        return None
-    if row["status"] not in ("done", "archived"):
-        return row["id"]
-    from hermes_cli import kanban_pickup_stall_resolve as resolve
-    if resolve.resolved_by_detector(conn, row["id"]):
-        return None  # this detector closed it once its cards left ready: a later stall is a new incident
-    return row["id"] if now_ms - int(row["closed"] or 0) * 1000 < REPLACE_AFTER_SECONDS * 1000 else None
+    """The open incident for this exact detector subject; closed cards never cover a new firing."""
+    row = conn.execute("SELECT id FROM tasks WHERE created_by = ? "
+                       "AND idempotency_key >= ? AND idempotency_key < ? "
+                       "AND status NOT IN ('done', 'archived') "
+                       "ORDER BY created_at, id LIMIT 1", (DETECTOR, key, key + "\U0010ffff")).fetchone()
+    return row["id"] if row is not None else None
 
 
 def _minutes(since_ms: int, now_ms: int) -> int:
@@ -371,17 +364,23 @@ def _create(conn, *, key: str, title: str, body: str, tenant: Optional[str], own
     machines = None if reg is None else (reg.get("machines") or {})
     assignee = _supervisor_profile()
     runs_on, why = alarm_placement(own, machines, assignee=assignee, now_ms=now_ms)
-    existing = _covering_repair(conn, key, now_ms)
-    if existing:
-        _replace_stranded(conn, existing, own, machines, runs_on, why)
-        return existing
-    # A repair closed long ago is replaced, so the key carries the creation time (create_task returns any
-    # non-archived task with an equal key, done ones included).
-    return kb.create_task(conn, title=title, body=body + f"\n\nPlaced with runs_on {runs_on}: {why}."
-                          + _tail(conn, own, howto), assignee=assignee, created_by=DETECTOR,
-                          workspace_kind="scratch",
-                          tenant=tenant, requires=list(_REQUIRES), idempotency_key=f"{key}{_now_ms()}",
-                          runs_on=runs_on, priority=priority)
+    from hermes_cli.kanban_db_comment_ids import add_comment
+    from uuid import uuid4
+    with kb.write_txn(conn):
+        existing = _covering_repair(conn, key, now_ms)
+        if existing:
+            note = f"Watcher firing:\n\n{body}"
+            if not conn.execute("SELECT 1 FROM task_comments WHERE task_id=? AND author=? AND body=? LIMIT 1",
+                                (existing, DETECTOR, note)).fetchone():
+                add_comment(conn, existing, DETECTOR, note)
+        else:
+            # Positive decimal suffix preserves the authenticated Board alarm identity contract.
+            return kb.create_task(conn, title=title, body=body + f"\n\nPlaced with runs_on {runs_on}: {why}."
+                                  + _tail(conn, own, howto), assignee=assignee, created_by=DETECTOR,
+                                  workspace_kind="scratch", tenant=tenant, requires=list(_REQUIRES),
+                                  idempotency_key=f"{key}{uuid4().int}", runs_on=runs_on, priority=priority)
+    _replace_stranded(conn, existing, own, machines, runs_on, why)
+    return existing
 
 
 # Host-wide causes: one card per host, never one per pinned card. ``hold`` is an operator's deliberate state.

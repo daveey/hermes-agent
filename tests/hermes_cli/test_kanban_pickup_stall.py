@@ -93,7 +93,7 @@ def test_the_skip_reason_is_recorded_once_per_reason_and_shown_on_the_target_hos
 
 @pytest.mark.parametrize("closed,closed_ago,want", [
     (None, 0, 1),             # open: reused
-    ("done", 60, 1),          # just finished: not handed straight back
+    ("done", 60, 2),          # a closed incident never covers a new firing
     ("done", 3601, 2),        # finished over an hour ago and still stalled: replaced
     ("archived", 3601, 2),
 ])
