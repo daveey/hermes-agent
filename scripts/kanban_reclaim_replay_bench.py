@@ -46,10 +46,22 @@ if replay:
 home = tempfile.mkdtemp(prefix="reclaim-bench-home-")
 os.environ["HERMES_HOME"] = home
 for k in list(os.environ):
-    if k.startswith("HERMES_KANBAN") or k.startswith("HERMES_SESSION"):
+    if k.startswith(("HERMES_KANBAN", "HERMES_SESSION", "HERMES_DELEGATED")):  # a delegated-child marker would stub the drain
         del os.environ[k]
 shutil.copy(src, os.path.join(home, "kanban.db"))
-Path(home, "config.yaml").write_text(f"kanban:\n  dispatch_interval_seconds: {INTERVAL}\n", encoding="utf-8")
+sync_yaml = ""
+if "--hub-sync" in sys.argv:
+    # G2e: the hub is the Board (``kanban_sync_state`` gateway ``hub``, mode ``primary``) and keeps a sync-shadow replica of
+    # its own board, so every tick's ``apply_incoming`` reads that replica. ``--hub-sync SHADOW`` plants a copy of one.
+    shadow = sys.argv[sys.argv.index("--hub-sync") + 1]
+    os.makedirs(os.path.join(home, "kanban", "sync-shadow"))
+    shutil.copy(shadow, os.path.join(home, "kanban", "sync-shadow", "default.db"))
+    _b = sqlite3.connect(os.path.join(home, "kanban.db"))
+    _b.execute("UPDATE kanban_sync_state SET gateway_id = 'hub', mode = 'primary'")
+    _b.commit()
+    _b.close()
+    sync_yaml = "  sync:\n    enabled: true\n"
+Path(home, "config.yaml").write_text(f"kanban:\n  dispatch_interval_seconds: {INTERVAL}\n{sync_yaml}", encoding="utf-8")
 sys.path.insert(0, wt)
 _orig_connect = sqlite3.connect
 
@@ -120,6 +132,13 @@ def tick():
 
 
 tick()  # warm: first tick installs triggers and imports
+if "--hub-sync" in sys.argv:
+    # The replica's history holds operator-call requests this fresh copy has never scanned: ``apply_incoming`` works through
+    # them MAX_PER_TICK at a time. Drain that backlog before measuring, so the ticks below are the steady state.
+    from hermes_cli import kanban_operator_call as _kox
+    for _ in range(200):
+        if not _kox.apply_incoming(conn):
+            break
 if "--phases" in sys.argv:
     # Dirty-tick case (G2c, t_01a1db079d8d4505): one content write before every round, then each reclaim-phase entry
     # point alone, CPU per call (``time.process_time``). Matches the G2b replay (t01a1d701_dirty.py), whose revision-
@@ -178,6 +197,10 @@ if prof is not None:
     import pstats
     prof.disable()
     pstats.Stats(prof).sort_stats("cumulative").print_stats("hermes_cli", 60)
+    if os.environ.get("BENCH_CALLERS"):  # e.g. BENCH_CALLERS='blocker_states': who calls each entry
+        pstats.Stats(prof).sort_stats("cumulative").print_callers(os.environ["BENCH_CALLERS"])
+    if os.environ.get("BENCH_CALLEES"):  # e.g. BENCH_CALLEES='dispatcher_drain|apply_incoming': who each entry spends its time in
+        pstats.Stats(prof).sort_stats("cumulative").print_callees(os.environ["BENCH_CALLEES"])
 res = {}
 for k, v in la.counters().items():
     if k.startswith("dispatch"):

@@ -282,8 +282,9 @@ def task_rows(conn, now: int, *, cache: bool = True) -> Mapping[str, TaskRows]:
             tasks, fill = _read_all(conn, cutoff), cutoff
         else:
             fill = held.cutoff
-            tasks = dict(held.tasks)
+            tasks = held.tasks   # G2e: shared as is while nothing changed (``inputs`` keeps its sorted rows per mapping)
             if changed:
+                tasks = dict(tasks)
                 fresh = _read_tasks(conn, changed)
                 for tid in changed:
                     entry = fresh.get(tid)
@@ -303,11 +304,28 @@ def inputs(conn, now: int, *, cache: bool = True) -> tuple[Frozen, Mapping[str, 
     (``ended_at >= now - lookback`` and the metadata ``LIKE``), rebuilt every call from the held rows."""
     tasks = task_rows(conn, now, cache=cache)
     bound = int(now) - _lookback()
-    asserting = sorted((r.assert_row for entry in tasks.values() for r in entry.runs
-                        if r.assert_row is not None and sql_ge(r.ended_raw, bound)), key=lambda a: a.id)
-    return Frozen(asserting), tasks
+    return Frozen(a for a, raw in _assert_rows(tasks) if sql_ge(raw, bound)), tasks
+
+
+_SORTED: tuple = (None, ())   # (the task mapping, its ``(assert row, stored ended_at)`` pairs in run-id order)
+
+
+def _assert_rows(tasks: Mapping[str, TaskRows]) -> tuple:
+    """G2e: every held assertion row of ``tasks`` sorted by run id, kept for the mapping it was built from. A pass
+    asks five times (``inputs``) and ``task_rows`` hands out the same held mapping until a task changes, so the
+    walk over every run and the sort ran once per ask instead of once per change. The window is applied per ask."""
+    global _SORTED
+    held = _SORTED
+    if held[0] is tasks:
+        return held[1]
+    pairs = tuple(sorted(((r.assert_row, r.ended_raw) for entry in tasks.values() for r in entry.runs
+                          if r.assert_row is not None), key=lambda p: p[0].id))
+    _SORTED = (tasks, pairs)
+    return pairs
 
 
 def _reset_for_tests() -> None:
+    global _SORTED
+    _SORTED = (None, ())
     with _LOCK:
         _STATES.clear()

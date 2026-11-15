@@ -405,8 +405,20 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
         return out
     db_key = str(kbc._main_db_file(conn) or id(conn))
     own = own_gateway(conn)
-    foreign = foreign_ids(conn, own)
     marks = ",".join("?" for _ in kc.SCHEDULED_ENTRY_EVENTS)
+    # G2e: a clock-only park is settled once (``_RESTORE_SEEN``) and the hub board holds ~160 of them, so the per-card
+    # read below ran 160 statements and decodes a tick to find nothing new. One batched read names each card's newest
+    # park; a card whose newest park is the settled one is skipped without reading it. A newer park is read as before.
+    newest: dict[str, int] = {}
+    for i in range(0, len(missing), 500):
+        part = missing[i:i + 500]
+        newest.update(conn.execute(
+            f"SELECT task_id, MAX(id) FROM task_events WHERE kind IN ({marks}) AND task_id IN "
+            f"({','.join('?' for _ in part)}) GROUP BY task_id", (*kc.SCHEDULED_ENTRY_EVENTS, *part)).fetchall())
+    missing = [tid for tid in missing if tid in newest and _RESTORE_SEEN.get((db_key, tid)) != newest[tid]]
+    if not missing:
+        return out
+    foreign = foreign_ids(conn, own)
     for tid in missing:
         park = conn.execute(
             f"SELECT id, payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
@@ -423,6 +435,7 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
             continue
         if conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND id > ? AND kind IN ('claimed', 'spawned') "
                         "LIMIT 1", (tid, park_id)).fetchone():
+            _RESTORE_SEEN[key] = park_id  # G2e: events never go away; only a newer park (a new id) reopens this
             continue  # a later run's park has not reached this board yet
         every = normalize_every(payload.get("check_every"))
         host = payload.get("probe_host")

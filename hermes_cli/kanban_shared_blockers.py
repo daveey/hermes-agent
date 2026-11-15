@@ -196,6 +196,14 @@ class BlockerState:
     def is_open(self) -> bool:
         return bool(self.behind) and self.asserted_at > self.cleared_at
 
+    def __deepcopy__(self, memo) -> BlockerState:
+        """G2e: ``kanban_blocker_inputs.read`` copies the whole state map on every store and hit, ~100 states of
+        eleven fields each; the generic dataclass deepcopy was a fifth of a rerun. Every field but the two
+        ``task_id -> int`` maps is an immutable scalar or tuple, so those two dicts are the only thing to copy."""
+        return BlockerState(self.blocker_id, self.blocker_provider, self.blocker_model, self.blocker_lane,
+                            self.asserted_at, self.cleared_at, self.cleared_by, self.cleared_via,
+                            self.first_cleared_at, self.reason, dict(self.behind), dict(self.probe_starts))
+
 
 def _optional_text(value) -> Optional[str]:
     return value.strip() or None if isinstance(value, str) else None
