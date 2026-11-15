@@ -17,6 +17,13 @@ import hermes_state_wake_grace as wake_grace
 from hermes_state import SessionDB
 
 
+@pytest.fixture(autouse=True)
+def isolate_host_wake(monkeypatch):
+    monkeypatch.setattr(wake_grace, "host_wake_awake_s", lambda: None)
+    yield
+    wake_grace._reset_for_tests()
+
+
 class _FakeClocks:
     """Drives the tracker's suspended-total and awake clocks."""
 
@@ -55,7 +62,8 @@ def _owner(db_path):
     return row[0] if row else None
 
 
-def test_waiter_does_not_steal_live_holders_lease_right_after_a_suspend(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fresh_process", [False, True])
+def test_waiter_does_not_steal_live_holders_lease_right_after_a_suspend(tmp_path, monkeypatch, fresh_process):
     clocks = _FakeClocks(monkeypatch)
     path = tmp_path / "state.db"
     db = SessionDB(path)
@@ -66,6 +74,9 @@ def test_waiter_does_not_steal_live_holders_lease_right_after_a_suspend(tmp_path
 
     clocks.sleep(441)  # the Mac slept; the row's wall-clock TTL ran out meanwhile
     _expire(path, holder)
+    if fresh_process:
+        wake_grace._reset_for_tests()  # waiter born after resume has no pre-sleep sample
+        monkeypatch.setattr(wake_grace, "host_wake_awake_s", lambda: clocks.awake - 10)
 
     assert not db.try_acquire_session_turn_lease("chat", waiter, ttl_seconds=300)
     assert _owner(path) == holder

@@ -13,7 +13,9 @@ never renews is reclaimed once the grace has passed; a dead holder is reclaimed 
 
 Suspend detection: the suspend-inclusive clock (``hermes_platform.quiet_clock``) minus the awake
 clock grows by exactly the suspended time, host-wide. The tracker keeps the last sample per process
-and records the awake instant at which it first saw growth. No suspend clock, no deferral.
+and records the awake instant at which it first saw growth. Darwin also supplies a native host-wide
+wake instant, so a process born after resume honours the remaining grace without a pre-sleep baseline.
+Without either signal there is no deferral.
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ from __future__ import annotations
 import threading
 import time
 from typing import Optional
+
+from hermes_platform.wake_clock import host_wake_awake_s
 
 # Longer than the refresher's default 60 s interval plus its write patience, so one post-wake tick lands.
 WAKE_GRACE_SECONDS = 90.0
@@ -49,19 +53,19 @@ def _awake_now() -> float:
 
 
 def recently_woke() -> bool:
-    """True while this host resumed from a suspend less than ``WAKE_GRACE_SECONDS`` awake seconds ago
-    (as first observed by this process)."""
+    """True within the host's native wake grace or this process's observed suspend grace."""
     global _last_total, _woke_at
     total = suspended_total_s()
-    if total is None:
-        return False
+    host_woke_at = host_wake_awake_s()
     now = _awake_now()
     with _lock:
-        if _last_total is not None and total - _last_total > _SUSPEND_STEP_SECONDS:
-            _woke_at = now
-        _last_total = total if _last_total is None else max(_last_total, total)
+        if total is not None:
+            if _last_total is not None and total - _last_total > _SUSPEND_STEP_SECONDS:
+                _woke_at = now
+            _last_total = total if _last_total is None else max(_last_total, total)
         woke_at = _woke_at
-    return woke_at is not None and now - woke_at < WAKE_GRACE_SECONDS
+    return ((host_woke_at is not None and 0 <= now - host_woke_at < WAKE_GRACE_SECONDS)
+            or (woke_at is not None and 0 <= now - woke_at < WAKE_GRACE_SECONDS))
 
 
 def lapsed_row_reclaimable(holder: str, expires_at: float, now: float) -> bool:
