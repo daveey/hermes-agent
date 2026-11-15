@@ -267,10 +267,13 @@ def test_hub_update_hold_does_not_hide_recent_pool_claims(hub):
 
 
 @pytest.mark.parametrize("transition", ["continued", "shared_blocker_wake", "clear_already_ready"])
-def test_claims_before_current_ready_episode_do_not_veto_capability_drop(hub, transition):
+def test_claims_before_current_ready_episode_do_not_veto_capability_drop(hub, monkeypatch, transition):
     from hermes_cli import kanban_label_backlog as klb
-    tid = _seed(hub.conn, claims=1)
     now = int(time.time())
+    # The ready-episode event is stamped by the event writer's clock. Pinned, it starts exactly at ``now``, so the
+    # final claim at ``now`` is inside the episode; unpinned, a second boundary before the write excluded it.
+    monkeypatch.setattr(time, "time", lambda: now)
+    tid = _seed(hub.conn, claims=1)
     with kb.write_txn(hub.conn):
         hub.conn.execute("UPDATE task_events SET created_at=? WHERE kind='claimed'", (now - 60,))
         if transition == "shared_blocker_wake":
