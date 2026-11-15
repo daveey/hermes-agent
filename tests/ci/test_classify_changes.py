@@ -28,6 +28,12 @@ pull_request_changed_files = _mod.pull_request_changed_files
 pull_request_labels = _mod.pull_request_labels
 main = _mod.main
 
+def test_allocator_module_keeps_update_pipeline_coverage():
+    lanes = classify(["hermes_cli/launch_malloc.py"])
+    assert lanes["e2e_upgrade"] is True
+    assert lanes["native_memory"] is True
+
+
 DEFAULT = {
     "python": True,
     "python_prod": True,

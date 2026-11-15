@@ -25,6 +25,10 @@ CALLER = 'native-memory-macos'
 GATE = 'All required checks pass (v2)'
 # The lane's six paths (native-memory-macos.yml push.paths; classify_changes.py NATIVE_MEMORY_PATHS).
 MEMORY_PATHS = (
+    'hermes_bootstrap.py',
+    'hermes_cli/launch_malloc.py',
+    'hermes_cli/venv_sync.py',
+    'tests/test_bootstrap_malloc.py',
     'hermes_cli/machine_memory_darwin.py',
     'hermes_cli/machine_metrics.py',
     'tests/hermes_cli/test_machine_memory_darwin.py',

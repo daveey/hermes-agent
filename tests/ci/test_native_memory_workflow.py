@@ -30,5 +30,6 @@ def test_native_memory_lane_routes_and_executes_real_tests():
     assert "taskpolicy -c utility scripts/run_tests.sh" in command
     for test in ("test_machine_memory_darwin.py", "test_machine_memory_nofork.py"):
         assert f"tests/hermes_cli/{test}" in command
+    assert "tests/test_bootstrap_malloc.py" in command
     assert "sys.platform == 'darwin'" in command
     assert "--file-retries 0" in command

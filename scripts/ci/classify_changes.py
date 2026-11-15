@@ -327,6 +327,10 @@ def hermes_state_files(files: list[str]) -> list[str]:
 # caller, their macOS-only tests and the lane's own wiring. Exact files, kept equal to the
 # standalone workflow's ``push.paths`` by tests/ci/test_native_memory_gate.py.
 NATIVE_MEMORY_PATHS = (
+    "hermes_bootstrap.py",
+    "hermes_cli/launch_malloc.py",
+    "hermes_cli/venv_sync.py",
+    "tests/test_bootstrap_malloc.py",
     "hermes_cli/machine_memory_darwin.py",
     "hermes_cli/machine_metrics.py",
     "tests/hermes_cli/test_machine_memory_darwin.py",
