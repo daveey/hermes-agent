@@ -93,6 +93,39 @@ def test_unrecorded_release_cannot_spawn_even_with_limits_disabled(kanban_home, 
         assert len(helpers._events(conn, tid, budget.EVENT)) == 1
 
 
+def test_failure_recovery_cannot_release_spend_stop_after_old_gave_up(kanban_home):
+    """A card that once exhausted its failure budget keeps ``block_kind='transient'`` and that ``gave_up`` as its
+    latest failure stop. When the spend budget later stops it, ``recompute_ready``'s agent-triage recovery must not
+    read the old ``gave_up`` as the reason it is in triage. Otherwise it promotes the card, the dispatcher's hold
+    sends it back to triage, and every tick repeats that (live: 137 ``promoted`` events in 34 min on one card)."""
+    from hermes_cli import kanban_db_dispatch as dispatch
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="Bounded work", assignee="default")
+        assert kb.claim_task(conn, tid)
+        assert dispatch._record_task_failure(conn, tid, "Worker crashed", outcome="crashed",
+                                             failure_limit=1, release_claim=True, end_run=True)
+        assert (kb.get_task(conn, tid).status, kb.get_task(conn, tid).block_kind) == ("triage", "transient")
+        assert kb.recompute_ready(conn, failure_limit=100) == 1  # the failure-budget recovery itself is unchanged
+        assert kb.get_task(conn, tid).status == "ready"
+        helpers._runs(conn, tid, budget.DEFAULT_RUNS, usage={"cache_read_tokens": 1_200_000})
+        assert budget.hold(conn, tid) == "triage"
+        promoted = len(helpers._events(conn, tid, "promoted"))
+        for _tick in range(3):
+            assert kb.recompute_ready(conn, failure_limit=100) == 0
+            assert kb.get_task(conn, tid).status == "triage"
+            assert budget.hold(conn, tid) == "triage"
+        assert len(helpers._events(conn, tid, "promoted")) == promoted
+        assert decision.pending(conn, tid)
+        # A recorded decision still releases it, and a later failure stop recovers as before.
+        assert kb.promote_task(conn, tid, actor="operator", reason="rescope")[0]
+        assert kb.get_task(conn, tid).status in ("ready", "todo")
+        assert kb.claim_task(conn, tid)
+        assert dispatch._record_task_failure(conn, tid, "Worker crashed", outcome="crashed",
+                                             failure_limit=1, release_claim=True, end_run=True)
+        assert kb.get_task(conn, tid).status == "triage"
+        assert kb.recompute_ready(conn, failure_limit=100) == 1
+
+
 def test_decomposer_cannot_release_spend_stop(kanban_home):
     from hermes_cli.kanban_decompose import list_triage_ids
     with kbc.connect_closing() as conn:

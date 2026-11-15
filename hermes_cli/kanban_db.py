@@ -1913,21 +1913,17 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
-    """Promote dependency waits and recoverable failure stops; returns the count.
-
-    Opens its own IMMEDIATE txn: call OUTSIDE any write txn. Agent-triage failure-budget
-    stops get the same recovery as legacy blocked stops; guard holds and other triage
-    reasons still need explicit resolution. ``kanban_block_routing.recovery_held`` skips a
-    sticky stop (a worker ``kanban_block`` stays blocked until ``kanban_unblock``, #28712) and
-    one at the breaker limit (``max_retries`` > ``failure_limit`` > DEFAULT_FAILURE_LIMIT; else
-    the breaker could never trip). The dependency-review release is
-    precomputed outside the txn (same skips: no GitHub reads for held cards), fenced inside.
+    """Promote dependency waits/recoverable failure stops; return count. Call OUTSIDE a write txn.
+    Opens an IMMEDIATE txn. Agent-triage failure stops recover like blocked stops; other holds need resolution.
+    ``recovery_held`` preserves sticky blocks and breaker limits (max_retries > failure_limit > default).
+    Dependency-review release is prepared outside the txn (no GitHub reads for held cards), fenced inside.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     from hermes_cli.kanban_block_routing import recovery_held
     from hermes_cli.kanban_wake_check import foreign_ids
     from hermes_cli import kanban_review_release
+    from hermes_cli import kanban_spend_decision as spend_decision
     from hermes_cli import kanban_db_graph as _graph
     promoted = 0
     remote = _sync.has_remote_parents(conn)
@@ -1948,6 +1944,10 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             # A retained worker copy may still claim ready work, but must not
             # publish a second promotion or expire the owner's missing streak.
             if task_id in copies:
+                continue
+            # A spend stop leaves only on a recorded decision (kanban_spend_decision.pending). The triage clause
+            # above would read an older ``gave_up`` as the stop: promote here, re-triage in the hold, every tick.
+            if row["status"] == "triage" and spend_decision.pending(conn, task_id):
                 continue
             cur_status = _graph.clear_found_parents(conn, row, remote=remote)  # parent_missing block, parents back: todo
             if cur_status == row["status"] and recovery_held(conn, row, failure_limit):
