@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from types import MappingProxyType
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 import json
 import time
 from hermes_cli.kanban_diagnostic_history import EventHistory
@@ -796,13 +796,14 @@ def _foreign_machines(task, cfg) -> list[str]:
             if str(l).startswith("machine:") and str(l).split(":", 1)[1] != own]
 
 
-def _episode_skip(events) -> dict:
+def _episode_skip(events) -> Mapping:
     """Payload of the current ready episode's latest ``dispatch_skipped`` (``kanban_dispatch_skip``), or {} when a
     later episode event (or none) ends it. Same episode bounds as its reader."""
+    if isinstance(events, EventHistory):
+        return events.episode_skip
     from hermes_cli.kanban_dispatch_skip import EVENT, _episode_kinds
     bounds = _episode_kinds() | {EVENT}
-    ordered = (events.quota_candidates if isinstance(events, EventHistory) else
-               sorted(events or [], key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0), reverse=True))
+    ordered = sorted(events or [], key=lambda ev: (_event_ts(ev), _task_field(ev, "id", 0) or 0), reverse=True)
     for ev in ordered:
         if _event_kind(ev) not in bounds:
             continue

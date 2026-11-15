@@ -1,5 +1,7 @@
 """P2-retained run snapshots with an exact per-read bookkeeping overlay."""
+import itertools
 import marshal
+import operator
 from types import MappingProxyType
 
 # P2 excludes these run columns. Even historical terminal runs need the overlay:
@@ -82,10 +84,13 @@ def _signatures(conn, task_ids, columns) -> dict:
     if not task_ids:
         return {}
     selected = ", ".join(("task_id", "id", *columns))
-    grouped = {}
-    for row in conn.execute(
-            f"SELECT {selected} FROM task_runs "
-            f"WHERE task_id IN ({','.join('?' for _ in task_ids)}) ORDER BY task_id, id",
-            tuple(task_ids)):
-        grouped.setdefault(row[0], []).append(tuple(row)[1:])
-    return {tid: marshal.dumps(rows, 2) for tid, rows in grouped.items()}
+    # Plain tuples, grouped in C: every GET after a bookkeeping commit reads every run of
+    # every displayed card here, and per-row Row objects were most of its cost.
+    cur = conn.cursor()
+    cur.row_factory = None
+    rows = cur.execute(
+        f"SELECT {selected} FROM task_runs "
+        f"WHERE task_id IN ({','.join('?' for _ in task_ids)}) ORDER BY task_id, id",
+        tuple(task_ids)).fetchall()
+    return {tid: marshal.dumps([row[1:] for row in group], 2)
+            for tid, group in itertools.groupby(rows, key=operator.itemgetter(0))}

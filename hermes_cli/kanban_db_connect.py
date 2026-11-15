@@ -1274,7 +1274,35 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             pass  # a read-only (delegated-child) opener: the next writer stamps; inheritance has a fallback
 
     _rebuild_drifted_tables(conn)
+    ensure_run_bookkeeping_index(conn)
     _ensure_notify_sub_triggers(conn)
+
+
+# [daveey] Covering index for the board GET's exact run-bookkeeping overlay
+# (``plugins/kanban/dashboard/board_run_history._signatures``): every refresh after a commit re-reads these
+# columns for every run of every displayed card, because P2 does not mark bookkeeping-only writes. Without
+# it each of those ~2k runs is a seek into a wide (summary/metadata) table row: 3.7 ms of SQL on the hub
+# board versus 1.3 ms from this index. Its columns are ``kanban_activity_revision.BOOKKEEPING_COLUMNS
+# ['task_runs']`` that exist in the file; ``sync_version`` appears once sync installs it, which re-runs this.
+RUN_BOOKKEEPING_INDEX = "idx_runs_task_bookkeeping"
+_RUN_BOOKKEEPING_ORDER = ("claim_lock", "claim_expires", "last_heartbeat_at", "worker_pid", "worker_started_at",
+                          "sync_version")
+
+
+def ensure_run_bookkeeping_index(conn: sqlite3.Connection) -> None:
+    """Create (or re-create for a new column set) :data:`RUN_BOOKKEEPING_INDEX`. No write when it is current."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(task_runs)")}
+    if not {"id", "task_id"} <= cols:
+        return
+    want = [c for c in _RUN_BOOKKEEPING_ORDER if c in cols]
+    ddl = f"CREATE INDEX {RUN_BOOKKEEPING_INDEX} ON task_runs(task_id, id{''.join(', ' + c for c in want)})"
+    found = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                         (RUN_BOOKKEEPING_INDEX,)).fetchone()
+    if found is not None and found[0] == ddl:
+        return
+    if found is not None:
+        conn.execute(f"DROP INDEX {RUN_BOOKKEEPING_INDEX}")
+    conn.execute(ddl)
 
 
 def _ensure_notify_sub_triggers(conn: sqlite3.Connection) -> None:

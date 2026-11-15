@@ -78,11 +78,13 @@ def _unmarked_event_marks(conn: sqlite3.Connection, row_ids: list) -> dict[str, 
     if not row_ids:
         return {}
     kinds = ",".join(["?"] * len(UNREAD_EVENT_KINDS))
+    # Correlated aggregates: one range seek per task on (kind, task_id, id). A LEFT JOIN +
+    # GROUP BY over the same index cost about 4x as much (same counts and maxima).
+    match = f"FROM task_events e WHERE e.kind IN ({kinds}) AND e.task_id = w.task_id"
     return {r[0]: (r[1], r[2]) for r in conn.execute(
         f"WITH wanted(task_id) AS (VALUES {','.join(['(?)'] * len(row_ids))}) "
-        "SELECT w.task_id, COUNT(e.id), MAX(e.id) FROM wanted w LEFT JOIN task_events e "
-        f"ON e.task_id = w.task_id AND e.kind IN ({kinds}) GROUP BY w.task_id",
-        (*row_ids, *UNREAD_EVENT_KINDS))}
+        f"SELECT w.task_id, (SELECT COUNT(*) {match}), (SELECT MAX(e.id) {match}) FROM wanted w",
+        (*row_ids, *UNREAD_EVENT_KINDS, *UNREAD_EVENT_KINDS))}
 
 
 def fresh(value):
