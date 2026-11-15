@@ -764,6 +764,16 @@ def background_user_chat_block(command: str, *, background: bool) -> Optional[st
     """
     if not background:
         return None
+    from cron.lifecycle_guard_substitutions import SubstitutionNestingLimit
+
+    try:
+        return _background_user_chat_block(command)
+    except SubstitutionNestingLimit:
+        return _blocked_json("Blocked: the substitution nesting limit was reached.", "blocked")
+
+
+def _background_user_chat_block(command: str) -> Optional[str]:
+    """Walk background commands; the public boundary converts parser exhaustion to refusal."""
     from cron.lifecycle_guard import (
         _executed_command_index, _iter_command_segments, _iter_shell_command_payloads,
     )

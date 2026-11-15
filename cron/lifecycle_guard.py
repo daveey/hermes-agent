@@ -216,6 +216,14 @@ def _segment_names_host_interpreter(tokens: list[str], killers: frozenset[str]) 
 
 
 def contains_host_interpreter_kill(text: str) -> bool:
+    """Conservatively match when substitution nesting prevents a complete scan."""
+    try:
+        return _contains_host_interpreter_kill(text)
+    except SubstitutionNestingLimit:
+        return True
+
+
+def _contains_host_interpreter_kill(text: str) -> bool:
     """Branch E entrypoint: a process killer aimed at the interpreter image hosting the gateway, or a
     name-derived PID feed into one (`pgrep python | xargs kill`, `kill $(pidof python3)`,
     `Get-Process python | Stop-Process`). Segment-tokenized, so quoted/spliced spellings and Python
@@ -416,6 +424,14 @@ def _contains_launchctl_gateway_lifecycle(normalized_text: str) -> bool:
 
 
 def contains_gateway_lifecycle_command(text: str, *, mask_heredocs: bool = True) -> bool:
+    """Return a conservative match if substitution nesting prevents a complete scan."""
+    try:
+        return _contains_gateway_lifecycle_command(text, mask_heredocs=mask_heredocs)
+    except SubstitutionNestingLimit:
+        return True
+
+
+def _contains_gateway_lifecycle_command(text: str, *, mask_heredocs: bool = True) -> bool:
     """Return True if *text* contains a gateway lifecycle command pattern. ``mask_heredocs=False``
     scans inert-looking heredoc bodies too (a session alias may shadow their consumer).
 
@@ -927,6 +943,14 @@ def _cat_relays_stdin(segment: list[str]) -> bool:
 
 
 def contains_launchctl_submit_command(command: str) -> bool:
+    """Return a conservative match if substitution nesting prevents a complete scan."""
+    try:
+        return _contains_launchctl_submit_command(command)
+    except SubstitutionNestingLimit:
+        return True
+
+
+def _contains_launchctl_submit_command(command: str) -> bool:
     """Detect an executed ``launchctl submit``/``bootstrap``, not quoted text.
 
     Label-independent by design: a NEW job's label is attacker-chosen, so a neutral name defeats any
@@ -1159,10 +1183,11 @@ def _mask_data_sink_arguments(text: str) -> str:
 def _lifecycle_command_scan_with_data_exemption(text: str, *, mask_heredocs: bool = True) -> bool:
     """Lifecycle scan exempting matches inside data arguments: cheap regex first (no-match pays
     nothing), then re-scan with data-sink arguments masked; only a surviving match blocks."""
-    if not contains_gateway_lifecycle_command(text, mask_heredocs=mask_heredocs):
+    # Keep exhaustion typed inside the walk so scan_gateway_lifecycle retains its reason.
+    if not _contains_gateway_lifecycle_command(text, mask_heredocs=mask_heredocs):
         return False
     normalized = join_line_continuations(text)
-    return contains_gateway_lifecycle_command(
+    return _contains_gateway_lifecycle_command(
         _mask_data_sink_arguments(normalized), mask_heredocs=mask_heredocs)
 
 
