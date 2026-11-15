@@ -46,6 +46,11 @@ def iter_startup_sources(command: str) -> Iterator[tuple[str, bool]]:
     """
     # Assignment names may contain shell quotes or escapes. Match only after
     # the shared segment tokenizer removes them, not against raw source text.
+    # Quote and backslash removal never create "="; only a $-form ($'\x3d')
+    # can. Without either, no tokenized word can be an assignment, so skip the
+    # extra tokenizer pass (it counts against the per-scan lexer budget).
+    if "=" not in command and "$" not in command:
+        return
     from cron.lifecycle_guard import (
         _executable_name, _executed_command_index, _iter_command_segment_views,
         _split_redirections,
