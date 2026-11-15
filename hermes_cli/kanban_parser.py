@@ -224,6 +224,10 @@ _SPECS = [
         _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
         _arg("--json", action="store_true", help="Return the owner reading (always JSON)"),
     ], help="Read-only owner continuation evidence for an origin binding (never writes)"),
+    _cmd("origin-forward", [
+        _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
+        _arg("--json", action="store_true", help="Return frozen outbound envelope (always JSON)"),
+    ], help="Authorize worker placement forwarding at the origin gateway; never a completion receipt"),
     _cmd("origin-bind", [
         _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
         _arg("--json", action="store_true", help="Return structured receipt (always JSON)"),

@@ -167,6 +167,9 @@ def kanban_command(args: argparse.Namespace) -> int:
     if action == "chat-tasks":
         from hermes_cli.kanban_chat_tasks import command
         return command(args)
+    if action == "origin-forward":
+        from hermes_cli.kanban_origin_forward_adapter import command
+        return command(args)
     if action == "origin-bind":
         from hermes_cli.kanban_origin_adapter import command
         return command(args)
@@ -263,7 +266,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review", "reopen", "resume", "quota-release", "source-release",
-    "gc", "origin-bind", "origin-create", "origin-adopt", "sync", "supervisor-requests", "spend-budget", "lanes",
+    "gc", "origin-bind", "origin-forward", "origin-create", "origin-adopt", "sync", "supervisor-requests", "spend-budget", "lanes",
 })
 
 _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
@@ -281,9 +284,10 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
         return False
     from agent.delegation_context import kanban_path_is_fenced
 
-    if action == "origin-bind":
+    if action in {"origin-bind", "origin-forward"}:
         from hermes_constants import get_hermes_home
-        return kanban_path_is_fenced(get_hermes_home() / "kanban/origin-ledger.db")
+        ledger = "origin-forward.db" if action == "origin-forward" else "origin-ledger.db"
+        return kanban_path_is_fenced(get_hermes_home() / "kanban" / ledger)
     return kanban_path_is_fenced(kb.kanban_home()) or kanban_path_is_fenced(kb.kanban_db_path())
 
 
