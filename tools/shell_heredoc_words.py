@@ -24,7 +24,7 @@ _ANSI_C_SIMPLE = {
 }
 _ANSI_C_ESCAPE_RE = re.compile(
     r"\\(?:(?P<simple>[abeEfnrtv\\'\"?])|(?P<octal>[0-7]{1,3})|x(?P<hex>[0-9A-Fa-f]{1,2})"
-    r"|u(?P<u4>[0-9A-Fa-f]{1,4})|U(?P<u8>[0-9A-Fa-f]{1,8})|c(?P<control>.))", re.DOTALL)
+    r"|u(?P<u4>[0-9A-Fa-f]{1,4})|U(?P<u8>[0-9A-Fa-f]{1,8})|c(?P<control>\\\\|.))", re.DOTALL)
 # A command substitution: ``$(`` that does not open arithmetic ``$((``.
 _COMMAND_SUBSTITUTION_RE = re.compile(r"\$\((?!\()")
 
@@ -41,13 +41,16 @@ def _decode_ansi_c(text: str) -> str:
         if match["simple"]:
             return _ANSI_C_SIMPLE[match["simple"]]
         if match["control"]:
-            return chr(ord(match["control"]) & 0x1F)
+            # A doubled backslash is one control operand, consumed as a pair.
+            return chr(ord(match["control"][0]) & 0x1F)
         code = (int(match["octal"], 8) if match["octal"] else
                 int(match["hex"] or match["u4"] or match["u8"], 16))
         try:
             return chr(code & 0xFF if match["octal"] else code)
         except (ValueError, OverflowError):
-            return match.group()
+            # Bash drops values overflowing its signed 32-bit character range.
+            # Legacy UTF-8 above Unicode's limit cannot match a str terminator.
+            return "" if code > 0x7FFFFFFF else match.group()
     # Bash truncates this ANSI-C fragment at NUL, not the concatenated shell word.
     # The caller still consumes its entire quoted span and reads subsequent fragments.
     return _ANSI_C_ESCAPE_RE.sub(replace, text).split("\0", 1)[0]
