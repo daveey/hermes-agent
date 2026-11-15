@@ -48,7 +48,9 @@ def _decode_ansi_c(text: str) -> str:
             return chr(code & 0xFF if match["octal"] else code)
         except (ValueError, OverflowError):
             return match.group()
-    return _ANSI_C_ESCAPE_RE.sub(replace, text)
+    # Bash truncates this ANSI-C fragment at NUL, not the concatenated shell word.
+    # The caller still consumes its entire quoted span and reads subsequent fragments.
+    return _ANSI_C_ESCAPE_RE.sub(replace, text).split("\0", 1)[0]
 
 
 def _quoted_end(command: str, index: int, quote: str, escapes: bool | None = None) -> int | None:
