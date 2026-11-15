@@ -236,7 +236,7 @@ gateway:
       crashed: "تعطّل (خرج العامل)؛ سيعيد المُوزّع المحاولة"
       timed_out: "انتهت المهلة؛ سيعيد المُوزّع المحاولة"
       blocked: "محجوبة؛ تحتاج إلى انتباه"
-      review_requested: "أُحيلت للمراجعة؛ اكتمل التنفيذ"
+      review_requested: "أُحيلت للمراجعة"
       changes_requested: "طلبت المراجعة تغييرات (BLOCK)؛ التنفيذ غير معتمد"
       block_loop_detected: "أُحيلت إلى الفرز بعد تكرار الحجب؛ تحتاج إلى اهتمام بالتنسيق"
       dependency_parent_unclaimed: "has a parent card waiting with no worker"

@@ -20,7 +20,8 @@ from hermes_state_runtime import list_session_admissions
 GUIDANCE = ("This is an automatic task-status notification, not a request to decompose the task again. "
             "Inspect the current board before creating follow-up tasks; do not recreate tasks or graphs that "
             "already exist.")
-_STATUS = {'completed': 'completed', 'chat_wait_unclaimed': 'is ready with no worker claiming it',
+_STATUS = {'review_requested': 'handed off for review',
+           'completed': 'completed', 'chat_wait_unclaimed': 'is ready with no worker claiming it',
            'blocked': 'blocked; needs attention'}
 
 
@@ -295,6 +296,62 @@ async def _drain(authority, row, monkeypatch):
     await execute_admission(authority, ref, claim(authority, ref, row))
     assert seen, 'the queued wake never ran as a turn'
     return seen[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('after', ['changes_requested', 'implementation_running', 'done', 'blocked',
+                                  'review', 'review_running'])
+@pytest.mark.parametrize('stage', ['fold', 'drain'])
+async def test_review_wake_uses_current_review_state_at_drain(tmp_path, monkeypatch, board, after, stage):
+    authority, adapter, source, queued, _human = await _local_chat(tmp_path, monkeypatch)
+    try:
+        tid = board('design before implementation')
+        conn = kbc.connect()
+        try:
+            assert kb.claim_task(conn, tid)
+            assert kb.request_review(conn, tid, summary='Design only; not implemented')
+            await _wake(adapter, source, tid, 'review_requested')
+            [row] = _automation(queued())
+            if after != 'review':
+                assert kb.claim_review_task(conn, tid)
+            if after in {'changes_requested', 'implementation_running'}:
+                assert kb.request_changes(conn, tid, reason='Implement the reviewed design')[0]
+                if after == 'implementation_running':
+                    assert kb.claim_task(conn, tid)
+            elif after == 'done':
+                _complete(tid, 'Review approved')
+            elif after == 'blocked':
+                _block(tid)
+            task = kb.get_task(conn, tid)
+            assert task is not None
+            status = task.status
+        finally:
+            conn.close()
+        if stage == 'fold':
+            await _wake(adapter, source, board('another card'), 'completed')
+            [folded] = _automation(queued())
+            text = folded['payload']['text']
+        else:
+            text = await _drain(authority, row, monkeypatch)
+        if after in {'review', 'review_running'}:
+            assert row['payload']['text'].removesuffix('\n\n' + GUIDANCE) in text
+            assert 'Note: an earlier wake' not in text
+        else:
+            assert f'Live status: {status}.' in text
+            assert 'Note: an earlier wake for this card said "handed off for review"' in text
+            if after == 'done':
+                assert f'[kanban] Task {tid} completed.' in text
+    finally:
+        authority.db.close()
+
+
+def test_review_wake_with_newer_running_replica_does_not_infer_run_lane(monkeypatch, board):
+    from hermes_cli import kanban_replica_freshness as fresh
+    tid = board('replica reviewer')
+    card = {'task_id': tid, 'board': '', 'kinds': ['review_requested'],
+            'text': f'[kanban] Task {tid} handed off for review.'}
+    monkeypatch.setattr(fresh, 'newer_rows', lambda *_: {tid: {'status': 'running'}})
+    assert kanban_wake_fold.refresh_card(card) == card
 
 
 @pytest.mark.asyncio

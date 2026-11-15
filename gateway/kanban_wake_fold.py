@@ -35,8 +35,9 @@ _FOLD_HEADER = ('[IMPORTANT: {count} Kanban task updates arrived while this sess
                 'is relabelled. Treat them as one batch and give one consolidated response.]')
 
 # The live statuses under which a wake's premise still holds. A kind absent here reports an outcome
-# (completed, review_requested, ...) and is never relabelled.
+# (completed, ...) and is never relabelled. Review handoffs remain pending while a reviewer runs.
 _PREMISE_HOLDS = {
+    'review_requested': frozenset({'review'}),
     'spend_budget_decision_ready': frozenset({'triage'}),
     'chat_wait_unclaimed': frozenset({'triage', 'todo', 'ready'}),
     'blocked': frozenset({'blocked', 'triage'}),
@@ -192,8 +193,13 @@ def _live_task(card):
             return None, ''
         newer = fresh.newer_rows(conn, [card['task_id']]).get(card['task_id'])
         if newer is not None and newer['status']:
+            if newer['status'] == 'running' and 'review_requested' in card.get('kinds', []):
+                return None, ''  # no replica run lane: a running reviewer may still be deciding
             summary = (newer.get('summary') or newer.get('result') or '') if newer['status'] == 'done' else ''
             return newer['status'], summary.strip()
+        if (task.status == 'running' and 'review_requested' in card.get('kinds', [])
+                and kb._retry_status_for_run(conn, card['task_id'], task.current_run_id) == 'review'):
+            return 'review', ''  # the handoff is still pending, not returned to implementation
         summary = (kb.latest_summary(conn, card['task_id']) or task.result or '') if task.status == 'done' else ''
         return task.status, summary.strip()
 

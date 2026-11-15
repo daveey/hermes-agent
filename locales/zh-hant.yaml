@@ -236,7 +236,7 @@ gateway:
       crashed: "crashed (worker exited); dispatcher will retry"
       timed_out: "timed out; dispatcher will retry"
       blocked: "blocked; needs attention"
-      review_requested: "handed off for review; the implementation is done"
+      review_requested: "handed off for review"
       changes_requested: "review requested changes (BLOCK); implementation is not approved"
       block_loop_detected: "routed to triage after repeated blocks; orchestration attention needed"
       dependency_parent_unclaimed: "has a parent card waiting with no worker"
