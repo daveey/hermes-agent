@@ -445,6 +445,44 @@ def _named_task_ids(title, request: dict, own_id: str) -> list[str]:
     return sorted({m.group(0) for m in _TASK_ID.finditer(text)} - {own_id})
 
 
+_SUCCESSOR_KEYS = ("verified_cards", "created_cards")
+_SUCCESSOR_DEPTH = 3
+
+
+def _successor_open(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when a closed card handed its work to a successor that is still open.
+
+    Cards here often complete by filing their work as new cards (``verified_cards`` / ``created_cards`` in the
+    newest ``completed`` event); such a card resolved nothing, so an ask naming it still stands. Successors are
+    followed up to ``_SUCCESSOR_DEPTH`` hops; an id this board does not hold counts as open. [daveey]
+    """
+    from hermes_cli.kanban_db import _json_dict
+
+    seen, frontier = {task_id}, [task_id]
+    for _ in range(_SUCCESSOR_DEPTH):
+        nxt: list[str] = []
+        for tid in frontier:
+            ev = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'completed' ORDER BY id DESC LIMIT 1",
+                (tid,)).fetchone()
+            payload = _json_dict(ev["payload"]) if ev is not None else {}
+            for key in _SUCCESSOR_KEYS:
+                ids = payload.get(key)
+                for sid in ids if isinstance(ids, list) else ():
+                    if isinstance(sid, str) and sid and sid not in seen:
+                        seen.add(sid)
+                        nxt.append(sid)
+        if not nxt:
+            return False
+        marks = ",".join("?" for _ in nxt)
+        rows = {r["id"]: r["status"] for r in conn.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({marks})", nxt).fetchall()}
+        if len(rows) != len(nxt) or any(s not in ("done", "archived") for s in rows.values()):
+            return True
+        frontier = nxt
+    return False
+
+
 def _action_line(request) -> str:
     return " ".join(str((request or {}).get("action") or "").split())
 
@@ -454,7 +492,8 @@ def standing_ask_error(conn: sqlite3.Connection, task_id: str, title, request) -
 
     (a) the relay / route-gap lint refuses it today (an ask filed before a rule landed is never re-linted);
     (b) it names at least one card and every named card is done or archived on this board (its premise is gone).
-    An id this board does not hold counts as open: it cannot be verified here.
+    An id this board does not hold counts as open: it cannot be verified here. A done card whose newest
+    completion handed off to a still-open successor counts as open too (``_successor_open``).
     """
     if not isinstance(request, dict):
         return None
@@ -468,6 +507,8 @@ def standing_ask_error(conn: sqlite3.Connection, task_id: str, title, request) -
     rows = {r["id"]: r["status"] for r in conn.execute(
         f"SELECT id, status FROM tasks WHERE id IN ({marks})", named).fetchall()}
     if len(rows) != len(named) or any(s not in ("done", "archived") for s in rows.values()):
+        return None
+    if any(_successor_open(conn, t) for t in named):
         return None
     closed = ", ".join(f"{t} ({rows[t]})" for t in named)
     return (NAMED_CLOSED_CODE,

@@ -90,6 +90,107 @@ def test_all_named_cards_closed_moves_card_to_triage(conn):
     assert a in ev["reason"] and b in ev["reason"]
 
 
+def _complete_with_successors(conn, tid, *, verified=(), created=()):
+    """Close ``tid`` the way a hand-off completion does: ``completed`` payload naming its successor cards."""
+    from hermes_cli import kanban_db as kb
+    payload: dict[str, object] = {"summary": "filed the implementation as new cards"}
+    if verified:
+        payload["verified_cards"] = list(verified)
+    if created:
+        payload["created_cards"] = list(created)
+    _set_status(conn, tid, "done")
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, "completed", payload)
+
+
+def _named_ask(card):
+    return _ask(f"Go or no on 2-hour batching while {card} lands the root fix. Unblock = batch; archive = drop.")
+
+
+def test_named_card_handed_off_to_open_successor_keeps_ask(conn):
+    # t_01a1df12fe6f186c: the named root-fix card completed by filing its fix as ready cards; the sweep voided
+    # David's open decision 9 s later although nothing was live.
+    from hermes_cli import kanban_db as kb
+    a = kb.create_task(conn, title="root fix")
+    b = kb.create_task(conn, title="implementation")
+    request = _named_ask(a)
+    tid = _blocked(conn, request)
+    _complete_with_successors(conn, a, verified=[b])
+    assert kb.get_task(conn, b).status == "ready"
+    assert _sweep(conn) == []
+    task = kb.get_task(conn, tid)
+    assert task.status == "blocked" and task.human_request["action"] == request["action"]
+    assert _events(conn, tid) == []
+
+
+def test_created_cards_successor_counts_too(conn):
+    from hermes_cli import kanban_db as kb
+    a = kb.create_task(conn, title="root fix")
+    b = kb.create_task(conn, title="implementation")
+    tid = _blocked(conn, _named_ask(a))
+    _complete_with_successors(conn, a, created=[b])
+    assert _sweep(conn) == [] and kb.get_task(conn, tid).status == "blocked"
+
+
+def test_successor_not_on_this_board_counts_as_open(conn):
+    from hermes_cli import kanban_db as kb
+    a = kb.create_task(conn, title="root fix")
+    tid = _blocked(conn, _named_ask(a))
+    _complete_with_successors(conn, a, verified=["t_0123456789abcdef"])
+    assert _sweep(conn) == []
+    assert kb.get_task(conn, tid).status == "blocked" and _events(conn, tid) == []
+
+
+def test_transitive_open_successor_keeps_ask(conn):
+    from hermes_cli import kanban_db as kb
+    a = kb.create_task(conn, title="root fix")
+    b = kb.create_task(conn, title="phase 1")
+    c = kb.create_task(conn, title="phase 2")
+    tid = _blocked(conn, _named_ask(a))
+    _complete_with_successors(conn, b, verified=[c])
+    _complete_with_successors(conn, a, verified=[b])
+    assert _sweep(conn) == []
+    assert kb.get_task(conn, tid).status == "blocked" and _events(conn, tid) == []
+
+
+def test_named_card_with_all_successors_closed_still_rechecks(conn):
+    from hermes_cli import kanban_db as kb
+    a = kb.create_task(conn, title="root fix")
+    b = kb.create_task(conn, title="phase 1")
+    c = kb.create_task(conn, title="phase 2")
+    tid = _blocked(conn, _named_ask(a))
+    _complete_with_successors(conn, b, verified=[c])
+    _set_status(conn, c, "archived")
+    _complete_with_successors(conn, a, verified=[b], created=[b])
+    assert _sweep(conn) == [tid]
+    (ev,) = _events(conn, tid)
+    assert ev["code"] == "named_cards_closed" and ev["named"] == [a]
+
+
+def test_successor_chain_past_depth_bound_is_not_followed(conn):
+    # Depth bound 3: A -> B -> C -> D are followed; D's own successor E is not, so an open E deep in the chain
+    # does not hold the ask, and a successor cycle cannot loop.
+    from hermes_cli import kanban_db as kb
+    a, b, c, d, e = (kb.create_task(conn, title=f"hop {i}") for i in range(5))
+    tid = _blocked(conn, _named_ask(a))
+    _complete_with_successors(conn, d, verified=[e])
+    _complete_with_successors(conn, c, verified=[d, a])
+    _complete_with_successors(conn, b, verified=[c])
+    _complete_with_successors(conn, a, verified=[b])
+    assert _sweep(conn) == [tid]
+
+
+def test_newest_completed_event_decides_successors(conn):
+    # A reopened and re-completed card: only its newest hand-off counts.
+    from hermes_cli import kanban_db as kb
+    a = kb.create_task(conn, title="root fix")
+    b = kb.create_task(conn, title="old successor")
+    tid = _blocked(conn, _named_ask(a))
+    _complete_with_successors(conn, a, verified=[b])
+    _complete_with_successors(conn, a)
+    assert _sweep(conn) == [tid]
+
+
 def test_card_cited_only_in_evidence_is_not_the_premise(conn):
     # t_01a18c0215a4efe9: "Unlock the MacBook screen" cited a done probe card as proof in evidence; the sweep
     # voided the ask while the screen was still locked. Evidence is proof, not the ask's premise.
