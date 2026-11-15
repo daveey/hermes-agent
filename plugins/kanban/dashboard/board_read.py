@@ -129,7 +129,8 @@ def diagnostics_from_inputs(inputs: Optional[tuple]) -> dict[str, list[dict]]:
     for r in rows:
         tid = r["id"]
         diags = kd.compute_task_diagnostics(
-            r, events_by_task[tid], list(runs_by_task[tid]), config=diag_config,
+            dict(zip(r.keys(), r)) if isinstance(r, sqlite3.Row) else r,
+            events_by_task[tid], list(runs_by_task[tid]), config=diag_config,
             graph=fresh(graph_by_task.get(tid)), wake_check=fresh(wake_by_task.get(tid)))
         if diags:
             out[tid] = [d.to_dict() for d in diags]

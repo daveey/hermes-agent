@@ -1,4 +1,5 @@
 """P2-retained run snapshots with an exact per-read bookkeeping overlay."""
+import marshal
 from types import MappingProxyType
 
 # P2 excludes these run columns. Even historical terminal runs need the overlay:
@@ -47,9 +48,10 @@ def retained_runs(conn, ids, prev, changed, load):
             continue
         rows = []
         for original, row in zip(before, overlay):
-            # Type-exact: 1 -> 1.0 or 0 -> False is a change the retained row must show.
+            # Same typed encoding as the signature, including signed floating zero
+            # on legacy untyped columns. Never stamp bytes for values not retained.
             updates = {key: value for key, value in zip(columns, row[2:])
-                       if (prior := original[key]) != value or type(prior) is not type(value)}
+                       if marshal.dumps(original[key], 2) != marshal.dumps(value, 2)}
             rows.append(MappingProxyType({**original, **updates}) if updates else original)
         # Read before these values, so a later write can only make the next compare miss.
         result[tid] = RunHistory(rows, signatures.get(tid, ""))
@@ -59,9 +61,9 @@ def retained_runs(conn, ids, prev, changed, load):
 
 
 class RunHistory(tuple):
-    """Retained runs of one task plus the SQL signature of their ids and bookkeeping values."""
+    """Retained runs plus the packed signature of their ids and bookkeeping values."""
 
-    signature: str
+    signature: bytes | str
 
     def __new__(cls, rows, signature):
         self = super().__new__(cls, rows)
@@ -70,12 +72,20 @@ class RunHistory(tuple):
 
 
 def _signatures(conn, task_ids, columns) -> dict:
-    """``{task_id: text}`` naming every run id and bookkeeping value, ``quote``d so type and
-    NULL-ness are exact, built in SQLite rather than by comparing each run in Python."""
+    """Exact typed run values, packed in C instead of SQL quote/concatenation.
+
+    These bytes are only compared in-process, never persisted or unmarshalled.
+    Version 2 avoids reference-identity encoding: equal values must encode equally
+    regardless of Python object sharing. It preserves SQLite NULL/int/float/text/blob,
+    including embedded NULs that SQLite quote(text) truncates.
+    """
     if not task_ids:
         return {}
-    fields = "||','||".join(f"quote({c})" for c in ("id", *columns))
-    return {r[0]: r[1] for r in conn.execute(
-        f"SELECT task_id, group_concat(sig, ';') FROM (SELECT task_id, {fields} AS sig FROM task_runs "
-        f"WHERE task_id IN ({','.join('?' for _ in task_ids)}) ORDER BY task_id, id) GROUP BY task_id",
-        tuple(task_ids))}
+    selected = ", ".join(("task_id", "id", *columns))
+    grouped = {}
+    for row in conn.execute(
+            f"SELECT {selected} FROM task_runs "
+            f"WHERE task_id IN ({','.join('?' for _ in task_ids)}) ORDER BY task_id, id",
+            tuple(task_ids)):
+        grouped.setdefault(row[0], []).append(tuple(row)[1:])
+    return {tid: marshal.dumps(rows, 2) for tid, rows in grouped.items()}

@@ -123,17 +123,19 @@ def test_untrusted_run_path_reloads(source, monkeypatch):
     assert 'task_runs' in loaded
 
 
-def test_unchanged_run_bookkeeping_is_compared_in_sql(source):
-    """Retained runs whose ids and bookkeeping are unchanged are kept without fetching and
-    comparing each run's values in Python; a bookkeeping write still reaches the run."""
+def test_unchanged_run_bookkeeping_keeps_decoded_rows(source):
+    """Only the narrow signature query runs; no second overlay/history load."""
     old = memo(source)
     _, old = refresh(source, old)  # first trusted refresh records the signature
+    retained = old['t'][4]
     statements = []
     source.set_trace_callback(statements.append)
     got, old = refresh(source, old)
     source.set_trace_callback(None)
-    overlay = [s for s in statements if 'FROM task_runs' in s and 'quote(' not in s]
-    assert overlay == [], 'unchanged bookkeeping must not be re-read value by value'
+    reads = [s for s in statements if 'FROM task_runs' in s]
+    assert len(reads) == 1
+    assert reads[0].startswith('SELECT task_id, id, ')
+    assert got[2]['t'] is retained
     source.execute("UPDATE task_runs SET worker_pid = 42")
     got, old = refresh(source, old)
     assert got[2]['t'][0]['worker_pid'] == 42

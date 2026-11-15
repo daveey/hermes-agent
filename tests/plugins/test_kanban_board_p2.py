@@ -104,7 +104,12 @@ def test_cursor_and_rows_share_a_snapshot(board, monkeypatch):
         return result
 
     monkeypatch.setattr(changes, 'changed_since', racing)
+    # Ensure the materializer runs: an unchanged commit now reuses its SQL rows.
+    with closing(kbc.connect()) as writer:
+        writer.execute('UPDATE tasks SET last_heartbeat_at=321 WHERE id=?', (child,))
+        writer.commit()
     assert get(client)[1][child]['title'] == 'child'
+    assert committed, 'the snapshot race must actually execute'
     assert get(client)[1][child]['title'] == 'raced'
 
 

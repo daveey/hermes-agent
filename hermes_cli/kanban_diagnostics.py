@@ -10,6 +10,7 @@ recovery action and auto-clears when the failure mode resolves.
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable, Optional
 import json
@@ -72,7 +73,12 @@ def _task_field(task, name, default=None):
     if task is None:
         return default
     try:
-        if hasattr(task, "keys") and name in task.keys():
+        # Immutable history mappings and ordinary dictionaries already have O(1)
+        # membership; Row.keys() allocates and linearly scans all task columns.
+        if isinstance(task, (dict, MappingProxyType)):
+            if name in task:
+                return task[name]
+        elif hasattr(task, "keys") and name in task.keys():
             return task[name]
     except Exception:
         pass
