@@ -296,6 +296,14 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
     plus the run's resolved ``run_route`` receipt (every spawn, tier off included).
     Returns the reason. Review resolution/receipt failures refuse admission rather than reusing an author pin."""
     reason = _apply_model_tier(conn, task, lane=lane, cfg=cfg)
+    # The claim-time quota governor started this card on a pool with room instead of holding it on a paced one
+    # (kanban_pace_reroute): move the run there, only when this resolution landed on the route it judged. [daveey]
+    from hermes_cli.kanban_pace_reroute import REASON as _PACED, take as _take_pace_move
+    moved = _take_pace_move(getattr(task, "id", ""), (getattr(task, "model_override", None),
+                                                      getattr(task, "provider_override", None)))
+    if moved:
+        task.model_override, task.provider_override = moved[0], moved[1]
+        reason = f"{reason}+{_PACED}:{moved[2]}"
     record_run_route(conn, task, lane=lane, reason=reason)
     return reason
 

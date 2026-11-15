@@ -144,15 +144,21 @@ def _route_providers(model: Optional[str], provider: Optional[str]) -> list[str]
     return [name] if name else []
 
 
-def candidate_providers(conn: sqlite3.Connection, task: Any, lane: str) -> list[str]:
-    """Providers the card's next run may land on; ``[]`` = unknown (the card starts)."""
+def candidate_route(conn: sqlite3.Connection, task: Any, lane: str) -> tuple[tuple, list[str]]:
+    """``((model, provider, reason), providers)``: the card's next-run route and the providers it may land on
+    (``[]`` = unknown, the card starts)."""
     from hermes_cli.kanban_model_tier import profile_route, resolve_dispatch_tier
-    model, provider, _ = resolve_dispatch_tier(conn, task, lane=lane)
+    model, provider, reason = resolve_dispatch_tier(conn, task, lane=lane)
     if not model:
         model, provider = getattr(task, "model_override", None), getattr(task, "provider_override", None)
     if not model:
         model, provider = profile_route(getattr(task, "assignee", None))
-    return _route_providers(model, provider)
+    return (model, provider, reason), _route_providers(model, provider)
+
+
+def candidate_providers(conn: sqlite3.Connection, task: Any, lane: str) -> list[str]:
+    """Providers the card's next run may land on; ``[]`` = unknown (the card starts)."""
+    return candidate_route(conn, task, lane)[1]
 
 
 def local_running(conn: sqlite3.Connection, provider: str) -> int:
@@ -299,6 +305,62 @@ def _governed(conn: sqlite3.Connection, task_id: str, lane: str, cfg: lp.PacingC
     return task, providers
 
 
+def _pace_alternate(conn: sqlite3.Connection, task: Any, lane: str, cfg: lp.PacingConfig,
+                    host: sqlite3.Connection, verdicts: list[dict]) -> Optional[tuple[str, str, str, tuple]]:
+    """``(model, provider, paced, judged)``: a route of the card's own class on a pool that is NOT ahead of pace, for a
+    card whose every candidate pool holds it (``verdicts``); ``judged`` is the ``(model, provider)`` route it moves
+    from. None keeps the hold. [daveey]
+
+    The move uses the quota-episode probe (``alternate_route``: unpinned default or strong-class routes only, the
+    worker's own billing/capability eligibility, never a mandatory or ``require_model`` card, never a walled provider)
+    with the holding pools as extra walls, so an ungoverned subscription pool (xai-oauth: Grok on the X Ultra
+    subscription) or a governed one still behind pace takes the card. A governed target is judged by this governor
+    first and only when the probe names it, so no pool is read that the card could not move to. The target must serve
+    on this host's live pool and show no quota wall: never a second wall, never a provider this host holds no
+    credential for. ``paced`` names the governed pools that would hold the card (``,``-joined). Pool workers
+    2026-11-15: Anthropic and Codex paced to one running card each while ready cards queued for hours
+    (t_01a1deaf95f5b885). Any fault keeps the hold (warned)."""
+    try:
+        route = candidate_route(conn, task, lane)[0]
+        return _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts)
+    except Exception as exc:  # health: allow BLE001 -- a failed probe keeps today's hold, never starts a paced card
+        _warn("alternate", "kanban pacing: pace alternate probe failed (%s: %s); holding", type(exc).__name__, exc)
+        return None
+
+
+def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts):
+    from hermes_cli import kanban_provider_walls as pw
+    from hermes_cli.kanban_quota_episode import alternate_route
+    if pw.requires_model(task):
+        return None
+    now = time.time()
+    paced = {v["provider"]: float(v.get("until") or now + cfg.read_interval) for v in verdicts}
+    unusable: dict[str, float] = {}
+    model, provider, reason = route
+    # A default route already moved off a wall or by its episode is still the unpinned default card.
+    reason = str(reason or "")
+    base = (model, provider, reason.split("+", 1)[0] if reason.startswith("default+") else reason)
+    deferrable = is_deferrable(conn, task, lane)
+    for _ in range(len(cfg.providers) + 4):  # every probe excludes one more provider: bounded
+        moved = alternate_route(conn, task, {**unusable, **paced}, base, now)
+        if not moved:
+            return None
+        target = pw._norm(moved[1])
+        if target in paced or target in unusable:
+            return None  # the probe ignored its walls: never trust it
+        if not pw.live_pool_serving(target, moved[0]) or pw.live_quota_wall(target, moved[0]):
+            unusable[target] = now
+            continue
+        if target in cfg.providers:
+            pace = pace_for(host, target, cfg, now)
+            limit = lp.admit_limit(pace, avg_running(target, now, cfg), deferrable=deferrable, cfg=cfg)
+            if limit is not None and local_running(host, target) >= limit:
+                paced[target] = float(pace.until or now + cfg.read_interval)
+                continue
+        return moved[0], target, ",".join(sorted(paced)), (model, provider)
+    return None
+
+
 def _stored_pace(entry: Any, now: float, cfg: lp.PacingConfig) -> Optional[lp.PoolPace]:
     """The pace a dispatcher on this home stored for one provider; None when it is absent, malformed, stamped in the
     future or older than :data:`STALE_READ_INTERVALS` read intervals."""
@@ -385,6 +447,15 @@ def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run:
         verdicts = _verdicts(conn, task, providers, lane, cfg)
         if verdicts is None:
             return False
+        moved = _pace_alternate(conn, task, lane, cfg, conn, verdicts)
+        if moved is not None:
+            # Start it on a pool with room instead of holding it; the applier moves the route after the claim.
+            from hermes_cli.kanban_pace_reroute import offer
+            if not dry_run:
+                offer(task.id, moved[3], moved[:3])
+            logger.info("kanban pacing: %s pools %s ahead of pace; starting on %s/%s", task.id, moved[2], moved[1],
+                        moved[0])
+            return False
         _record(conn, task.id, verdicts, result, dry_run=dry_run, cfg=cfg)
         return True
     except Exception as exc:  # health: allow BLE001 -- the governor fails open; a fault never holds a card
@@ -405,6 +476,8 @@ def pickup_hold(local: sqlite3.Connection, replica: sqlite3.Connection, card: An
         if judged is None:
             return None
         verdicts = _verdicts(replica, judged[0], judged[1], card["status"], cfg, host=local)
+        if verdicts is not None and _pace_alternate(replica, judged[0], card["status"], cfg, local, verdicts):
+            return None  # the local claim starts it on a pool with room (hold)
         return None if verdicts is None else ", ".join(f"{v['provider']} {v['state']}" for v in verdicts)
     except Exception as exc:  # health: allow BLE001 -- a hold prediction must never stop a pickup
         _warn("pickup", "kanban pacing: pickup hold check failed (%s: %s); copying ungoverned", type(exc).__name__, exc)
