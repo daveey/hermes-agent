@@ -85,7 +85,8 @@ def _constituents(row: dict) -> list[dict]:
 
     merged = any(row.get(k) for k in (NOTICE_PARTS, MERGED_TURN_PREFIX, MERGED_DURABLE_ROWS, "_absorbed_row_ids"))
     nid = None if spans or merged else _notice_id(row)
-    return [{"content": display, "api_content": model if nid and isinstance(model, str) else display, "notice_id": nid}]
+    # Identity governs deduplication, not custody of the opaque row's model-only bytes.
+    return [{"content": display, "api_content": model if isinstance(model, str) else display, "notice_id": nid}]
 
 
 def merge_notice_constituents(prev: dict, msg: dict) -> Optional[tuple[str, str, dict]]:
