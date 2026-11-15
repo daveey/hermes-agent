@@ -1,5 +1,4 @@
 """Crash recovery must not reuse a predecessor's now-occupied API port."""
-import os
 from pathlib import Path
 import re
 import socket
@@ -10,7 +9,7 @@ import pytest
 from tests.gateway.test_api_crash_recovery import test_api_crash_queue_and_identified_result_retry as exercise
 
 
-@pytest.mark.skipif(os.name == 'nt', reason='socket custody uses POSIX pass_fds; ordinary recovery runs everywhere')
+@pytest.mark.platforms("posix")
 @pytest.mark.parametrize('collision_restart', [1, 2])
 def test_api_recovers_while_previous_port_is_owned(tmp_path, monkeypatch, collision_restart):
     original = subprocess.Popen
