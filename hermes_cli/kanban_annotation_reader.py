@@ -95,7 +95,10 @@ class ReplicaReader:
         # hermes_hub stamps every replica task write with the server log's seq (upsert/insert) and deletes rows
         # outright, so (count, max seq, seq total) - a ~1.5 ms covering scan of replica_poll_metadata - moves on
         # every task change. Unmoved: the ~30 ms full probe (a 19k-row data scan on worker-6) is skipped.
-        seq_probe = tuple(conn.execute(_SEQ_PROBE).fetchone())
+        # A kept, fenced connection with no commits needs no inventory scan.
+        # This remains display-only: exact renewal never consumes this snapshot.
+        seq_probe = (self._seq_probe if base is not None and version == self._version
+                     else tuple(conn.execute(_SEQ_PROBE).fetchone()))
         unchanged = base is not None and (version == self._version or seq_probe == self._seq_probe)
         probe = self._probe if unchanged else tuple(conn.execute(_PROBE).fetchone())
         if probe[0] != probe[1]:

@@ -34,6 +34,7 @@ import math
 import threading
 import time
 from pathlib import Path
+from types import MappingProxyType
 
 log = logging.getLogger(__name__)
 
@@ -90,11 +91,9 @@ class _ScopeState:
     def clear(self) -> None:
         """Drop every derived view (never the lock): a failed read is never reused."""
         from hermes_cli.kanban_annotation_dependencies import DependencySelector
-        from hermes_cli.kanban_annotation_reader import ReplicaReader
-        from hermes_cli.kanban_annotation_semantic import TaskTokens
 
-        self.reader = ReplicaReader()
-        self.tokens = TaskTokens()
+        self.cursor: tuple | None = None
+        self.token_base: MappingProxyType | None = None
         self.selector = DependencySelector()
         self.memo: tuple | None = None  # (selection object, its digest)
         self.ledger_memo: tuple | None = None  # (fence, LedgerSnapshot)
@@ -117,11 +116,13 @@ def _state(scope: tuple[str, ...]) -> _ScopeState:
 
 
 def reset() -> None:
+    from hermes_cli import kanban_annotation_inventory as inventory
     from hermes_cli import kanban_annotation_local as local
 
     with _states_lock:
         _states.clear()
     local.reset()
+    inventory.reset()
 
 
 def _ledger_path() -> Path:
@@ -131,6 +132,7 @@ def _ledger_path() -> Path:
 
 
 def _origin_part(state: _ScopeState, profile: str, now: float) -> list:
+    from hermes_cli import kanban_annotation_inventory as inventory
     from hermes_cli import kanban_annotation_ledger as kal
     from hermes_cli import kanban_session_activity as ksa
 
@@ -140,11 +142,11 @@ def _origin_part(state: _ScopeState, profile: str, now: float) -> list:
     with ksa.cached_ro(Path(hub), busy_budget=0) as conn:
         conn.execute("BEGIN")
         try:
-            snap = state.reader.read(conn, hub)
+            snap, tokens, cursor, changed = inventory.read(conn, hub, state.cursor)
         finally:
             conn.rollback()
     rows = snap.rows
-    tokens = state.tokens.advance(rows)
+
     ledger_path = _ledger_path()
     if ledger_path.is_file():
         with ksa.cached_ro(ledger_path, busy_budget=0) as lconn:
@@ -169,7 +171,8 @@ def _origin_part(state: _ScopeState, profile: str, now: float) -> list:
     else:
         current, ledger_token, owner_keys = (), "absent", ()
     selection = state.selector.select(rows, tokens, snap.gateway, profile, owner_keys=owner_keys,
-                                      changed=state.tokens.changed, base=state.tokens.base)
+                                      changed=changed, base=state.token_base)
+    state.cursor, state.token_base = cursor, tokens
     if state.memo is None or state.memo[0] is not selection:
         stats["selections"] += 1
         digest = hashlib.sha256(json.dumps([[list(k), t] for k, t in selection], separators=(",", ":"),
