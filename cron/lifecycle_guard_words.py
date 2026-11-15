@@ -5,6 +5,7 @@ from collections.abc import Callable
 import re
 
 from cron.lifecycle_guard_groups import split_glued_redirections
+from cron.lifecycle_guard_lines import _expansion
 
 # Optional fd or array-element fd variable, operator, and glued target.
 REDIRECTION = re.compile(
@@ -33,6 +34,7 @@ def redirection_parts(word: str, pattern: re.Pattern[str]) -> tuple[str, str, st
 
 def tokenize_redirections(line: str, tokenize: Callable[[str], list[str]],
                           pattern: re.Pattern[str]) -> list[str]:
+
     # Encode the escape character itself too, even outside quotes. A one-pass
     # decode cannot confuse literal fragments joined by quote removal with syntax.
     marker = "\ue000"
@@ -41,7 +43,18 @@ def tokenize_redirections(line: str, tokenize: Callable[[str], list[str]],
     protected: list[str] = []
     single = double = escaped = False
     quote_marker = marker + "5" + marker
-    for ch in line:
+    end = 0
+    for pos, ch in enumerate(line):
+        if pos < end:
+            continue
+        if ch == "$" and not single and not escaped and line.startswith("${", pos):
+            # Keep nested grammar intact for the tokenizer's own frame normalizer.
+            end, span = _expansion(line, pos, in_double=double, shlex_quotes=False)
+            if any(q in span for q in "\\'\""):
+                # Quoting inside the frame still makes the word quoted.
+                protected.append(quote_marker)
+            protected.append(span.replace(marker, replacements[marker]))
+            continue
         literal = single or double or escaped
         # Mark the boundary, including empty quoted pieces. The escape marker
         # itself is encoded below, so literal input cannot synthesize this tag.

@@ -161,7 +161,7 @@ class _HereDocs:
     def __init__(self) -> None:
         self._pending: list[tuple[str, bool]] = []
         self._arith = -1
-
+        self._bracket_end = -1
         self.unbounded = False
         self.skipped = False
 
@@ -169,8 +169,11 @@ class _HereDocs:
         """Advance on the character at *pos*; when it is the newline before complete bodies,
         return the position after them, else *pos*."""
         char = text[pos]
-        if char == "(" and self._arith < 0 and text.startswith("((", pos) and (
-                word_start or text[pos - 1] == "$"):
+        if char == "[" and _arithmetic_bracket(text, pos):
+            self._bracket_end = text.find("]", pos + 1)
+        if pos <= self._bracket_end:
+            return pos
+        if char == "(" and self._arith < 0 and text.startswith("((", pos):
             self._arith = depth
         elif char == ")" and depth - 1 == self._arith:
             self._arith = -1
@@ -185,6 +188,15 @@ class _HereDocs:
             self.skipped |= end > pos
             return max(end, pos)
         return pos
+
+
+def _arithmetic_bracket(text: str, pos: int) -> bool:
+    """Legacy arithmetic expansion or an assignment subscript, not literal ``[``."""
+    if text[pos - 1:pos] == "$":
+        return True
+    end = text.find("]", pos + 1)
+    return end >= 0 and text.startswith(("=", "+="), end + 1) and bool(
+        re.search(r"(?:^|[\s;|(])[A-Za-z_][A-Za-z_0-9]*$", text[:pos]))
 
 
 def _newline_breaks(breaks: list[int] | None, text: str, start: int, end: int,

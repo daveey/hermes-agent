@@ -26,11 +26,14 @@ FRAMES = ['echo "${x:-$(BODY)}"', 'echo ${x:-"$(BODY)"}',
 
 
 @pytest.mark.parametrize("body,tail", ARITHMETIC)
+@pytest.mark.parametrize("outer", [False, True], ids=["root", "subshell"])
 @pytest.mark.parametrize("dangerous", [True, False], ids=["RUN", "clean"])
-def test_arithmetic_shift_is_not_a_heredoc(tmp_path, body, tail, dangerous):
+def test_arithmetic_shift_is_not_a_heredoc(tmp_path, body, tail, outer, dangerous):
     helpers._tree(tmp_path)
     cmd = "bash ./r.sh" if dangerous else "python3 ./clean.py"
     command = 'echo "${x:-$(' + body + '\n)}"; ' + cmd + '\n' + tail
+    if outer:
+        command = '(\n' + command + '\n)'
     assert helpers._bash_runs(tmp_path, command) is dangerous
     refused, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))
     assert refused is dangerous, reason
