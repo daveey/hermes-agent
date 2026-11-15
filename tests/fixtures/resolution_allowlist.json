@@ -1,5 +1,11 @@
 [
   {
+    "path": "tools/terminal_oom.py",
+    "symbol": "prefer_command_victim",
+    "kind": "bare_which",
+    "reason": "choom is an optional system utility, not a Hermes-managed runtime. Only wrap commands when it exists on PATH; otherwise preserve argv. Covered by tests/tools/test_terminal_oom_adj.py."
+  },
+  {
     "path": "agent/anthropic_adapter.py",
     "symbol": "<module>",
     "kind": "known_path_table"
