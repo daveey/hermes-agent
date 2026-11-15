@@ -148,12 +148,17 @@ DATA = [
 ]
 
 
+@pytest.fixture
+def big_script(tmp_path):
+    # Scanner setup must not depend on whether this Bash executes a given shape.
+    payload = tmp_path / "big.sh"
+    payload.write_text("# padding\n" * 140000 + "printf ran > marker\n", encoding="utf-8")
+
+
 def _run(tmp_path, command):
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("Bash is required for recursive index execution proof")
-    payload = tmp_path / "big.sh"
-    payload.write_text("# padding\n" * 140000 + "printf ran > marker\n", encoding="utf-8")
     subprocess.run(
         [bash, "--noprofile", "--norc"], input="a=(1)\n" + command + "\n", text=True,
         encoding="utf-8", capture_output=True, timeout=20, check=False,
@@ -163,7 +168,7 @@ def _run(tmp_path, command):
 
 
 @pytest.mark.parametrize("shape", SINKS)
-def test_separated_and_concatenated_subscripts_stay_sinks(tmp_path, shape):
+def test_separated_and_concatenated_subscripts_stay_sinks(tmp_path, big_script, shape):
     command = shape.format(p=PRODUCER)
     bash = shutil.which("bash") or "bash"
     if "printf -v" not in shape or "version 3." not in subprocess.run(
@@ -176,7 +181,7 @@ def test_separated_and_concatenated_subscripts_stay_sinks(tmp_path, shape):
 
 
 @pytest.mark.parametrize("shape", DATA)
-def test_non_subscript_words_stay_data(tmp_path, shape):
+def test_non_subscript_words_stay_data(tmp_path, big_script, shape):
     command = shape.format(p=PRODUCER)
     assert not _run(tmp_path, command)
     assert not arith_sink.substitution_in_arithmetic(

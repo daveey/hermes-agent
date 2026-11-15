@@ -6,11 +6,14 @@ referenced scripts and ``sh -c`` payloads on the raw command, so a >1 MiB data p
 inside the Python body failed closed as an oversized "script".
 """
 
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
 
 from cron.lifecycle_guard import contains_gateway_lifecycle_command_or_referenced_script as guard
+from tests.cron import heredoc_shape_corpus as proof
 
 
 def _big_file(tmp_path):
@@ -394,8 +397,9 @@ def test_untrusted_variable_assignment_does_not_hide_executed_body(tmp_path, dec
         "$CMD <<'R'\npython3 - <<'PY'\n"
         "bash -c 'hermes gateway \"restart\"'\nPY\nR\n"
     )
-    result = subprocess.run(["bash"], input=command, text=True, encoding="utf-8", capture_output=True, check=False,
-                            env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin",
+    result = subprocess.run([proof.proof_bash()], input=proof.TIMEOUT_PREAMBLE + command,
+                            text=True, encoding="utf-8", capture_output=True, check=False,
+                            env={**os.environ, "PATH": proof.proof_path(tmp_path),
                                  "MARKER": str(marker)}, timeout=10)
     assert result.returncode == 0, result.stderr
     assert marker.read_text() == "called"
@@ -421,8 +425,9 @@ def test_synthesized_mutator_cannot_change_a_trusted_shell_binding(tmp_path, mut
     transform.chmod(0o755)
     command = ("CMD=bash\n" + mutation + "\n$CMD <<'R'\npython3 - <<'PY'\n"
                "bash -c 'hermes gateway \"restart\"'\nPY\nR\n")
-    result = subprocess.run(["bash"], input=command, text=True, encoding="utf-8", capture_output=True, check=False,
-                            env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin",
+    result = subprocess.run([proof.proof_bash()], input=proof.TIMEOUT_PREAMBLE + command,
+                            text=True, encoding="utf-8", capture_output=True, check=False,
+                            env={**os.environ, "PATH": proof.proof_path(tmp_path),
                                  "MARKER": str(marker)}, timeout=10)
     assert result.returncode == 0, result.stderr
     assert marker.read_text() == "called"
@@ -446,8 +451,9 @@ def test_ssh_binding_with_unknown_expansions_can_change_remote_program(tmp_path)
     command = ('SSH="timeout 60 ssh -o A=b ${XOPTS:-} u@$IP"\n'
                '$SSH "T=$T bash -s" <<\'R\'\npython3 - <<\'PY\'\n'
                'bash -c \'hermes gateway "restart"\'\nPY\nR\n')
-    result = subprocess.run(["bash"], input=command, text=True, encoding="utf-8", capture_output=True, check=False,
-                            env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin",
+    result = subprocess.run([proof.proof_bash()], input=proof.TIMEOUT_PREAMBLE + command,
+                            text=True, encoding="utf-8", capture_output=True, check=False,
+                            env={**os.environ, "PATH": proof.proof_path(tmp_path),
                                  "MARKER": str(marker), "IP": "h", "T": "x",
                                  "XOPTS": "otherhost sed s/python3/bash/ | bash #"}, timeout=10)
     assert result.returncode == 0, result.stderr
@@ -533,8 +539,9 @@ def test_nested_stdin_hijack_walk_only_body_stays_visible(tmp_path, prefix):
     hermes.chmod(0o755)
     command = ("bash -s <<'R'\n" + prefix + "\npython3 - <<'PY'\n"
                "bash -c 'hermes gateway \"restart\"'\nPY\nR\n")
-    result = subprocess.run(["bash"], input=command, text=True, encoding="utf-8", capture_output=True, check=False,
-                            env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin",
+    result = subprocess.run([proof.proof_bash()], input=proof.TIMEOUT_PREAMBLE + command,
+                            text=True, encoding="utf-8", capture_output=True, check=False,
+                            env={**os.environ, "PATH": proof.proof_path(tmp_path),
                                  "MARKER": str(marker)}, timeout=10)
     assert marker.read_text() == "called", result.stderr
     assert guard(command, cwd=str(tmp_path)) is True
@@ -603,8 +610,9 @@ def _run_bash_marker(tmp_path, command, prefix=()):
     hermes.write_text('#!/bin/sh\nprintf called > "$MARKER"\n')
     hermes.chmod(0o755)
     result = subprocess.run(
-        [*prefix, "/bin/bash"], input=command, text=True, capture_output=True, timeout=10,
-        check=False, env={**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin", "FAKE_BIN": str(tmp_path),
+        [*prefix, proof.proof_bash()], input=proof.TIMEOUT_PREAMBLE + command,
+        text=True, encoding="utf-8", capture_output=True, timeout=10,
+        check=False, env={**os.environ, "PATH": proof.proof_path(tmp_path), "FAKE_BIN": str(tmp_path),
                           "MARKER": str(marker), "BASH_ENV": "", "ENV": ""}, cwd=tmp_path,
     )
     return marker.exists() and marker.read_text() == "called", result.stderr
@@ -710,7 +718,10 @@ def test_keyword_operands_before_parens_still_execute_scripts(tmp_path, prefix):
     big.write_text("# padding\n" * 130000 + 'hermes gateway "restart"\n')
     command = f"{prefix} ( bash {big} )"
     command += "; then :; fi" if prefix.startswith("if ") else "; wait"
-    _assert_bash_marker(tmp_path, command)
+    called, stderr = _run_bash_marker(tmp_path, command)
+    # Bash 3.2 supports only the bare `time -p` spelling in this set.
+    expected = proof.proof_bash_version() >= (4, 0) or prefix == "time -p"
+    assert called is expected, stderr
     unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
     assert unsafe is True and "scan cap" in refusal
 
@@ -824,7 +835,9 @@ def test_history_expansion_after_dash_s_runs_walk_only_body(tmp_path, opener):
     ssh.chmod(0o755)
     command = (opener + " <<'R'\n: 5 bash -s\ntimeout !!:1-3 python3 - <<'PY'\n"
                "bash -c 'hermes gateway \"restart\"'\nPY\nR\n")
-    _assert_bash_marker(tmp_path, command)
+    called, stderr = _run_bash_marker(tmp_path, command)
+    # Bash 3.2 does not expand history in this noninteractive stdin form.
+    assert called is (proof.proof_bash_version() >= (4, 0)), stderr
     assert strip_inert_heredoc_bodies(command, nested=True) == command
     assert guard(command, cwd=str(tmp_path)) is True
 
@@ -854,7 +867,9 @@ def test_keyword_led_subshells_still_execute_scripts(tmp_path, shape):
 
     assert "alias" not in str(tmp_path).lower()
     command = _keyword_led_subshell_command(tmp_path, shape)
-    _assert_bash_marker(tmp_path, command)
+    called, stderr = _run_bash_marker(tmp_path, command)
+    expected = proof.proof_bash_version() >= (4, 0) or shape != "function"
+    assert called is expected, stderr
     unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
     assert unsafe is True and refusal is not None and "scan cap" in refusal
 
@@ -920,22 +935,37 @@ def test_generated_shape_corpus_never_allows_what_bash_runs_and_main_refuses(tmp
     assert not clean, "\n".join(case.command for case in clean[:10])
     ran = {case.key for case, executed, _refused in results if executed}
     allowed = sum(not refused for _case, _executed, refused in results)
-    # Not vacuous: the history review rows run their payload on any bash, and so does the nit-2
-    # repro (`alias t='time '` then `t ( bash ./big.sh )`) in every form.
-    assert all(case.key in ran for case in review if case.payload == "history")
+    # Non-vacuity premises follow the actual shell; scanner properties above do not.
+    # The nit-2 alias-subshell repro executes in every form on both shell versions.
+    assert all((case.key in ran) == (proof.proof_bash_version() >= (4, 0))
+               for case in review if case.payload == "history")
     assert all(case.key in ran for case in session
                if case.session == "time" and case.payload == "alias-subshell")
-    assert all(case.key in ran for case in sink)  # bash runs every printed line
+    # Keep all cases in the security checks above; only real-execution premises
+    # depend on an external wrapper being installed in the restricted proof PATH.
+    def wrapper_available(case):
+        return not case.wrapper.startswith("stdbuf ") or shutil.which(
+            "stdbuf", path=proof.proof_path(tmp_path)) is not None
+
+    # Bash 3.2 on Darwin does not execute a sourced process-substitution fd.
+    missing_sinks = [case.command for case in sink if wrapper_available(case) and case.key not in ran
+                     and (sys.platform != "darwin" or proof.proof_bash_version() >= (4, 0)
+                          or case.sink != ". <(…)")]
+    assert not missing_sinks, "\n".join(missing_sinks[:10])
     assert all((case.key in ran) == (case.payload != "clean") for case in redirect
-               if case.words[0] not in corpus.REDIRECT_PLAIN_WORDS)
+               if case.words[0] not in corpus.REDIRECT_PLAIN_WORDS and wrapper_available(case)
+               and (proof.proof_bash_version() >= (4, 1) or not case.words[0].startswith("{")))
     assert all((case.key in ran) == (case.place == "operand" and case.payload == "stdin-s")
-               for case in redirect if case.words[0] in corpus.REDIRECT_PLAIN_WORDS)
+               for case in redirect if case.words[0] in corpus.REDIRECT_PLAIN_WORDS
+               and wrapper_available(case))
     # Startup-file rows need a shell that sources the test's `$HOME` files (see
     # corpus.startup_shell_prefix): every one of them must run when there is one.
     prefix, how = corpus.startup_shell_prefix()
-    missed = [case.command.split("\n", 1)[0] for case in review if case.key not in ran]
+    missed = [case.command.split("\n", 1)[0] for case in review if case.key not in ran
+              and (case.payload != "history" or proof.proof_bash_version() >= (4, 0))]
     warnings.warn(f"shape corpus: {len(cases)} cases in {elapsed:.1f}s, bash ran the payload in "
-                  f"{len(ran)}, guard allows {allowed}, 0 violations; startup shell: {how}",
+                  f"{len(ran)}, guard allows {allowed}, 0 violations; startup shell: {how}; "
+                  f"bash={proof.proof_bash()} {proof.proof_bash_version()}",
                   stacklevel=1)
     if prefix is None:
         reason = f"review rows without an execution proof on this host: {missed} ({how})"
