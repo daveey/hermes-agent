@@ -123,6 +123,52 @@ def test_retention_boundary_and_foreign_repo(tmp_path, monkeypatch, age, remaini
     journal.close()
 
 
+@pytest.mark.parametrize("page_delivered", [False, True])
+def test_retention_page_only_protection(tmp_path, monkeypatch, page_delivered):
+    """An occurrence receipt can be acknowledged independently of its page."""
+    clock = [1000000.0]
+    monkeypatch.setattr(intake.time, "time", lambda: clock[0])
+    path = tmp_path / "queue.db"
+    journal = intake.Journal(path)
+    run = {"id": 1, "head_sha": "a" * 40}
+    journal.remember_runs("o/r", [run])
+    journal.record("o/r", [(9, [{"test_id": "tests/a.py::test_a"}])], run)
+    row = journal.pending("o/r")[0]
+    journal.plan_pages("o/r", [row])
+    page = journal.db.execute("SELECT * FROM pages").fetchone()
+    journal.acknowledge(row["id"], "owner")
+    journal.finish_run("o/r", "1/1")
+    if page_delivered:
+        journal.acknowledge_page(page["id"], "owner")
+    journal.close()
+
+    clock[0] += 32 * 86400
+    journal = intake.Journal(path)
+    try:
+        # Both cases have an aged, delivered occurrence and a completed run.
+        # prune removes the run first, leaving only the pending-page fence.
+        assert tuple(journal.db.execute(
+            "SELECT delivered,retained_at,page FROM occurrences").fetchone()) == (
+                1, 1000000.0, page["id"])
+        journal.prune("o/r")
+        assert journal.db.execute("SELECT count(*) FROM runs").fetchone()[0] == 0
+        retained = journal.db.execute("SELECT id FROM occurrences").fetchall()
+        assert [r[0] for r in retained] == ([] if page_delivered else [row["id"]])
+        pages = journal.db.execute("SELECT id,payload FROM pages").fetchall()
+        assert [tuple(p) for p in pages] == (
+            [] if page_delivered else [(page["id"], page["payload"])])
+        if not page_delivered:
+            # Once the page is acknowledged, its newly refreshed receipts age
+            # normally and must not be retained forever by the page reference.
+            journal.acknowledge_page(page["id"], "owner")
+            clock[0] += 32 * 86400
+            journal.prune("o/r")
+            assert journal.db.execute("SELECT count(*) FROM occurrences").fetchone()[0] == 0
+            assert journal.db.execute("SELECT count(*) FROM pages").fetchone()[0] == 0
+    finally:
+        journal.close()
+
+
 def test_legacy_history_gets_full_retention_window(tmp_path, monkeypatch):
     path = tmp_path / "queue.db"
     with sqlite3.connect(path) as db:
