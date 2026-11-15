@@ -6,7 +6,9 @@ Mac mini on a schedule only, never on a pull request, and yield to required mini
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
+import sys
 import types
 from pathlib import Path
 
@@ -92,26 +94,61 @@ def test_session_runner_label_is_declared_for_actionlint():
     assert "hermes-mac-session" in config["self-hosted-runner"]["labels"]
 
 
-def test_login_session_marker_covers_exactly_the_three_login_dependent_functions():
-    import ast
+# The five login-session cases (three functions, one parametrized three ways), as pytest names them.
+_LOGIN_SESSION_CASES = {
+    "tests/hermes_cli/test_gateway_launchd_runtime.py::"
+    "test_gateway_job_is_a_launchd_osascript_child_that_reads_as_unsupervised",
+    *(
+        "tests/hermes_cli/test_gateway_snapshot_restore_live.py::"
+        f"test_snapshot_restore_rejoins_the_restored_authority[{case}]"
+        for case in ("standalone-resume-restored", "satellite-create-missing", "legacy-reimport-leased")
+    ),
+    "tests/hermes_cli/test_update_posix_pause.py::"
+    "test_a_launchd_job_is_paused_through_launchd_and_restarted_through_it",
+}
+_LOGIN_SESSION_FILES = sorted({case.split("::")[0] for case in _LOGIN_SESSION_CASES})
 
-    expected = {
-        ("test_gateway_launchd_runtime.py",
-         "test_gateway_job_is_a_launchd_osascript_child_that_reads_as_unsupervised"),
-        ("test_gateway_snapshot_restore_live.py", "test_snapshot_restore_rejoins_the_restored_authority"),
-        ("test_update_posix_pause.py", "test_a_launchd_job_is_paused_through_launchd_and_restarted_through_it"),
-    }
-    marked = set()
-    for path in (ROOT / "tests/hermes_cli").glob("test_*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-                ast.unparse(decorator) == "pytest.mark.macos_login_session"
-                for decorator in node.decorator_list
-            ):
-                marked.add((path.name, node.name))
-    assert marked == expected
-    assert "macos_login_session:" in (ROOT / "tests/conftest.py").read_text(encoding="utf-8")
+
+def _lane(job: str) -> tuple[set[str], str]:
+    """The files a lane imports and its ``-m`` expression, both taken from how the workflow job runs."""
+    command = _workflow()["jobs"][job]["steps"][-1]["run"]
+    selector = re.search(r"scripts/ci/list_os_marked_tests\.py (\w+)", command)
+    expression = re.search(r'-m "([^"]+)"', command)
+    assert selector and expression, command
+    listed = subprocess.run(
+        [sys.executable, "scripts/ci/list_os_marked_tests.py", selector.group(1)],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120, check=True,
+    )
+    return set(listed.stdout.split()), expression.group(1)
+
+
+def _collected(files: list[str], expression: str) -> set[str]:
+    """Node IDs pytest itself selects from *files* under *expression*, from each item's effective markers.
+
+    ``--strict-markers`` turns an unregistered ``macos_login_session`` into a collection error.
+    """
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", "--strict-markers",
+            "--rootdir", str(ROOT), "-c", str(ROOT / "pyproject.toml"), "-m", expression, *files,
+        ],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=300, check=False,
+    )
+    # 5 = every item deselected; any other non-zero exit is a collection error.
+    assert result.returncode in (0, 5), result.stdout[-3000:] + result.stderr[-3000:]
+    return {line.strip() for line in result.stdout.splitlines() if "::" in line}
+
+
+def test_login_session_cases_reach_the_session_lane_and_never_the_room_lane():
+    session_files, session_expression = _lane("macos-login-session-tests")
+    room_files, room_expression = _lane("macos-os-tests")
+    # Discovery prerequisite: a file the lane's real selector omits is never imported, so its
+    # marked cases vanish before -m sees them (e.g. a test losing the platforms() gate it keys on).
+    assert set(_LOGIN_SESSION_FILES) <= session_files, set(_LOGIN_SESSION_FILES) - session_files
+    assert _collected(_LOGIN_SESSION_FILES, session_expression) == _LOGIN_SESSION_CASES
+    in_room = _collected(sorted(room_files & set(_LOGIN_SESSION_FILES)), room_expression)
+    assert in_room, "the room lane no longer selects the other platforms() cases of these files"
+    assert not in_room & _LOGIN_SESSION_CASES
 
 
 def test_native_lane_provisions_real_tools_and_messaging_before_tests():
