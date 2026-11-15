@@ -2769,6 +2769,7 @@
                     "git_failed",
                     "git_in_progress",
                     "git_index_locked",
+                    "ref_lock_stale",
                     "git_timeout",
                     "head_moved",
                     "interrupted",

@@ -138,6 +138,7 @@ def observe(data: dict[str, Any], *, directory: Optional[Path] = None,
         path = _ledger_path(directory)
         with _locked(path):
             ledger = _load(path)
+            before = json.dumps(ledger, sort_keys=True)
             entries = ledger["entries"]
             for k in [k for k, e in entries.items() if now - e.get("seen_at", 0) > _MAX_AGE_S]:
                 del entries[k]
@@ -162,7 +163,8 @@ def observe(data: dict[str, Any], *, directory: Optional[Path] = None,
                 except Exception as exc:
                     entry["attempts"] = entry.get("attempts", 0) + 1
                     logger.warning("ref-lock alert card not filed (will retry): %s", exc, exc_info=True)
-            _store(path, ledger)
+            if json.dumps(ledger, sort_keys=True) != before:  # every finalize passes here; most change nothing
+                _store(path, ledger)
     except Exception:
         logger.warning("ref-lock alert bookkeeping failed", exc_info=True)
     return published

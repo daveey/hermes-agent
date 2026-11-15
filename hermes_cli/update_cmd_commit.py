@@ -101,6 +101,7 @@ POST_MOVE_MODULES = (
     "hermes_cli.source_check",
     "hermes_cli.update_cmd_fleet_unit_budget",
     "hermes_cli.update_serve_obligations",
+    "hermes_cli.update_ref_lock_alert",
     "pm.lock",
     "tools.environments.local",
 )

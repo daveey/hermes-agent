@@ -294,3 +294,13 @@ def test_lock_acquisition_failure_does_not_write_or_publish(tmp_path, monkeypatc
         assert alert.observe(_data("first"), directory=tmp_path) == []
     assert not (tmp_path / alert._LEDGER).exists()
     assert any(r.exc_info and "bookkeeping failed" in r.message for r in caplog.records)
+
+
+def test_unrelated_receipt_leaves_no_ledger_file(tmp_path):
+    # Every finalized receipt (refused, ok, ...) is observed; only a ref-lock stop may write state,
+    # else a bare receipt-dir listing finds a non-receipt json (test_update_contract refusal receipt).
+    data = _data("first")
+    data.pop(alert.FACT, None)
+    data["outcome"] = "refused"
+    assert alert.observe(data, directory=tmp_path) == []
+    assert not (tmp_path / alert._LEDGER).exists()
