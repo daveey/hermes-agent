@@ -126,8 +126,11 @@ def test_the_held_imports_per_tick_are_bounded(gws, monkeypatch):
     monkeypatch.setattr(kph, "FREE_PER_TICK", 2)
     held = [_held_on_board(hub, 900 - i) for i in range(3)]
     plain = support._hub_card(hub, title="plain", priority=0, runs_on=PIN)
-    got = _pickup(worker, 2)  # the card pinned here first (t_01a1d95eabbd2b9d), then at most 2 free held copies
-    assert got == [plain] + held[:2]
+    # Score order spans pinned and pool cards; holds still consume only the free allowance.
+    got = _pickup(worker, 2)
+    assert got == held[:2] + [plain]
+    assert held[2] not in got
+    assert _skip(worker.conn, plain) != "budget_exhausted"
 
 
 def test_a_capped_tick_reports_a_held_pinned_card_as_held(gws):

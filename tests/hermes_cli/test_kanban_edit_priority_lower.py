@@ -67,7 +67,7 @@ def test_lowering_with_reason_applies_and_records_reason(kanban_home, capsys):
     rc = _main(["edit", tid, "--priority", "10", "--reason", "superseded by t_x"])
     assert rc == 0, capsys.readouterr().err
     assert _priority(tid) == 10
-    assert _reprioritized(tid) == [{"priority": 10, "reason": "superseded by t_x"}]
+    assert _reprioritized(tid) == [{"priority": 10, "previous_priority": 150, "reason": "superseded by t_x"}]
 
 
 def test_blank_reason_does_not_count(kanban_home, capsys):
@@ -80,14 +80,14 @@ def test_raising_needs_no_reason(kanban_home, capsys):
     tid = _card(10)
     assert _main(["edit", tid, "--priority", "150"]) == 0
     assert _priority(tid) == 150
-    assert _reprioritized(tid) == [{"priority": 150}]
+    assert _reprioritized(tid) == [{"priority": 150, "previous_priority": 10}]
 
 
 def test_same_value_needs_no_reason(kanban_home, capsys):
     tid = _card(150)
     assert _main(["edit", tid, "--priority", "150"]) == 0
     assert _priority(tid) == 150
-    assert _reprioritized(tid) == [{"priority": 150}]
+    assert _reprioritized(tid) == [{"priority": 150, "previous_priority": 150}]
 
 
 def test_refused_lowering_leaves_operator_fields_unapplied(kanban_home, capsys):

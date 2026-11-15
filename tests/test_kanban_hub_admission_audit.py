@@ -1,7 +1,7 @@
 """Admission receipts survive tool normalization and transactional creation."""
 if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
 from dataclasses import asdict
-from unittest.mock import Mock
+import sqlite3
 
 import pytest
 
@@ -32,14 +32,18 @@ def test_created_emits_separate_admission_event(monkeypatch, receipt):
     monkeypatch.setattr(kb, "_append_event", lambda conn, tid, kind, payload:
                         events.append((kind, payload)))
     from hermes_cli import kanban_consent
-    monkeypatch.setattr(kanban_consent, "snapshot", lambda *_a: [])  # Mock conn has no board rows
-    creation.record_created(Mock(), "t_test", assignee="default", status="ready", parents=[],
-                            creator_task_id=None, tenant=None, workspace_kind="scratch",
-                            workspace_path=None, branch_name=None, project_id=None, skills=[],
-                            goal_mode=False, model_override=None, provider_override=None,
-                            created_by="test", requires=["hub:write"],
-                            placement_policy="worker-first-v1",
-                            placement_audit={"hub_admission": receipt})
+    monkeypatch.setattr(kanban_consent, "snapshot", lambda *_a: [])  # minimal connection has no consent rows
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, priority INTEGER)")
+        conn.execute("INSERT INTO tasks VALUES (?, ?)", ("t_test", 137))
+        creation.record_created(conn, "t_test", assignee="default", status="ready", parents=[],
+                                creator_task_id=None, tenant=None, workspace_kind="scratch",
+                                workspace_path=None, branch_name=None, project_id=None, skills=[],
+                                goal_mode=False, model_override=None, provider_override=None,
+                                created_by="test", requires=["hub:write"],
+                                placement_policy="worker-first-v1",
+                                placement_audit={"hub_admission": receipt})
+    assert [payload["priority"] for kind, payload in events if kind == "created"] == [137]
     assert [payload for kind, payload in events if kind == "hub_admission"] == [receipt]
 
 

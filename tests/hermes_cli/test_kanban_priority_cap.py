@@ -1,5 +1,6 @@
 """Bound escalation at input and inherited ordering; capacity advice is evidence-led."""
 import json
+import time
 
 import pytest
 
@@ -79,10 +80,29 @@ def test_inherited_priority_not_below_lane_median(conn):
 
 def test_cap_bump_heads_queue_with_free_slots(conn, monkeypatch):
     from hermes_cli import kanban_queue_position as queue
-    helpers._ready(conn, "older", priority=900, created_at=1)
+    # Comparable ready episodes: the capped bump wins on priority, not card age.
+    helpers._ready(conn, "older", priority=900, created_at=int(time.time()) - 60)
     task = helpers._ready(conn, "bumped", priority=800)
     kb.edit_task(conn, task, priority_bump=200)
     monkeypatch.setattr(queue, "_running_and_limit", lambda *_: (0, 7))
     result = queue.position(conn, kb.get_task(conn, task))
     assert result["ahead"] == 0
     assert result["running"] < result["limit"]
+
+
+def test_cap_bump_does_not_erase_an_older_ready_episodes_score(conn, monkeypatch):
+    from hermes_cli import kanban_queue_position as queue
+    from hermes_cli.kanban_admission_score import rank
+
+    older = helpers._ready(conn, "waiting", priority=900, created_at=int(time.time()) - 300)
+    task = helpers._ready(conn, "bumped", priority=800)
+    kb.edit_task(conn, task, priority_bump=200)
+    monkeypatch.setattr(queue, "_running_and_limit", lambda *_: (0, 7))
+    scored = rank(conn, [{"id": older}, {"id": task}])
+    assert [(row["id"], parts.total, parts.age_buckets) for row, parts in scored] == [
+        (older, 1025, 5), (task, 1000, 0),
+    ]
+    result = queue.position(conn, kb.get_task(conn, task))
+    assert result["ahead"] == 1
+    assert result["running"] < result["limit"]
+    assert kb.get_task(conn, task).priority == PRIORITY_CAP
