@@ -9,6 +9,7 @@ whose callers fall back to the in-repo lists on ``None``.
 from __future__ import annotations
 
 import contextvars
+import copy
 import json
 import logging
 import threading
@@ -86,8 +87,8 @@ def clear_fetch_backoff() -> None:
 def _load_catalog_config() -> dict[str, Any]:
     """Load the ``model_catalog`` config block with defaults filled in."""
     try:
-        from hermes_cli.config import load_config
-        cfg = load_config() or {}
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly() or {}
     except Exception:
         cfg = {}
     raw = cfg.get("model_catalog")
@@ -113,7 +114,7 @@ def _load_catalog_config() -> dict[str, Any]:
         "enabled": bool(raw.get("enabled", True)),
         "url": str(raw.get("url") or DEFAULT_CATALOG_URL),
         "ttl_hours": ttl_minutes / 60.0,
-        "providers": raw.get("providers") if isinstance(raw.get("providers"), dict) else {}}
+        "providers": copy.deepcopy(raw["providers"]) if isinstance(raw.get("providers"), dict) else {}}
 
 
 def _cache_path() -> Path:

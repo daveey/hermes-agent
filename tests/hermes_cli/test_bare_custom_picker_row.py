@@ -18,7 +18,7 @@ def test_bare_custom_row_survives_switching_away_from_it(monkeypatch):
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", dict)
     monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
     monkeypatch.setattr(
-        "hermes_cli.config.load_config",
+        "hermes_cli.config.load_config_readonly",
         lambda: {
             "model": {"default": "gpt-4o", "provider": "custom", "base_url": "https://www.ccsub.net/v1"}
         },
@@ -52,7 +52,7 @@ def test_bare_custom_row_config_fallback_defers_to_matching_named_entry(monkeypa
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", dict)
     monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
     monkeypatch.setattr(
-        "hermes_cli.config.load_config",
+        "hermes_cli.config.load_config_readonly",
         lambda: {
             "model": {"default": "gpt-4o", "provider": "custom", "base_url": "https://www.ccsub.net/v1"}
         },
@@ -76,7 +76,7 @@ def test_bare_custom_row_config_fallback_tolerates_legacy_scalar_model(monkeypat
     (the ConfigContext loader already tolerates it)."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", dict)
     monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
-    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"model": "gpt-4o"})
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {"model": "gpt-4o"})
 
     providers = list_authenticated_providers(
         current_provider="xai",

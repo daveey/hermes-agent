@@ -314,6 +314,22 @@ def registry_lookup(provider_id: str) -> Optional[Any]:
     return pconfig
 
 
+def name_resolves(normalized: str, aliases: dict[str, str], resolver: Callable[[str], Any]) -> bool:
+    """``resolver(normalized)`` succeeding, decided without the resolver's error path.
+
+    ``resolve_provider`` answers openrouter/custom/registered names (after aliasing) with the name and
+    raises ``Unknown provider`` for any other non-"auto" name only after building a config-validation
+    hint (~15% of a warm ``model.options``). A routability probe discards that text, so settle those
+    cases here; only "auto" still needs the resolver (it may raise ``AuthError``)."""
+    resolved = aliases.get(normalized, normalized)
+    if resolved in ("openrouter", "custom") or registry_lookup(resolved) is not None:
+        return True
+    if resolved != "auto":
+        return False
+    resolver(normalized)
+    return True
+
+
 def plugin_profile(provider: str) -> Optional[Any]:
     """The registered ``ProviderProfile`` for *provider*, or None (also when the layer is unavailable)."""
     try:

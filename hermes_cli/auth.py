@@ -260,7 +260,7 @@ from hermes_cli.config import (
 # auth_type they declare; the mirror lives in the sibling so it can be re-run after discovery.
 from hermes_cli.auth_plugin_providers import (
     canonical_registry_rows as _canonical_registry_rows, get_plugin_oauth_auth_status,
-    registry_lookup as _registry_lookup, sync_plugin_provider_registry)
+    registry_lookup as _registry_lookup, name_resolves, sync_plugin_provider_registry)
 
 PROVIDER_REGISTRY.sync_before_first_read()  # not at import: listing providers reads config
 
@@ -930,10 +930,9 @@ def is_runtime_provider_routable(provider_id: str) -> bool:
     if normalized in {"auto", "openrouter", "custom", "moa"} or normalized.startswith("custom:"):
         return True
     try:
-        resolve_provider(normalized)
+        return name_resolves(normalized, _plugin_aliases(), resolve_provider)
     except AuthError:
         return False
-    return True
 
 
 def read_credential_pool(provider_id: Optional[str] = None) -> dict[str, Any]:
@@ -1160,8 +1159,8 @@ def _config_selects_provider(normalized: str) -> bool:
     Anthropic credentials for that slot even when the main model is another provider; otherwise
     Claude Code OAuth entries get pruned by ``load_pool("anthropic")`` and MoA advisors fail with
     "no ANTHROPIC_API_KEY" while the picker says Anthropic is logged in."""
-    from hermes_cli.config import load_config
-    cfg = load_config()
+    from hermes_cli.config import load_config_readonly
+    cfg = load_config_readonly()  # read-only probe: skip the defensive deepcopy
     if _slot_selects(cfg.get("model"), normalized):
         return True
     # ``auxiliary.<task>.provider: <id>`` selects the provider for that task the same way a MoA

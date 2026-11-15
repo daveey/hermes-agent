@@ -1127,8 +1127,8 @@ def _lap_bare_custom_row(b: _PickerBuild, custom_providers: list | None) -> None
         default_model = b.current_model
     else:
         try:
-            from hermes_cli.config import load_config
-            cfg_model = load_config().get("model")
+            from hermes_cli.config import load_config_readonly
+            cfg_model = load_config_readonly().get("model")
         except Exception:  # health: allow BLE001 -- config.yaml may be user-edited or mid-migration; a read failure must degrade to "no row", never crash the picker
             cfg_model = None
         # config.model can be a bare string in older configs (see load_picker_context);

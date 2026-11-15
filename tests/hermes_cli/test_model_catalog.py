@@ -420,10 +420,10 @@ class TestRefreshCadence:
     def test_default_ttl_is_twenty_minutes_and_legacy_hours_honoured(self):
         from hermes_cli import model_catalog
 
-        with patch("hermes_cli.config.load_config", return_value={"model_catalog": {"ttl_minutes": 20}}):
+        with patch("hermes_cli.config.load_config_readonly", return_value={"model_catalog": {"ttl_minutes": 20}}):
             assert model_catalog.refresh_interval_seconds() == 20 * 60
         # A user-set legacy ttl_hours still wins while ttl_minutes sits at its default.
-        with patch("hermes_cli.config.load_config", return_value={"model_catalog": {"ttl_minutes": 20, "ttl_hours": 3}}):
+        with patch("hermes_cli.config.load_config_readonly", return_value={"model_catalog": {"ttl_minutes": 20, "ttl_hours": 3}}):
             assert model_catalog.refresh_interval_seconds() == 3 * 3600
 
     def test_refresh_catalogs_forces_every_source(self):
