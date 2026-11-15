@@ -1202,7 +1202,7 @@ def create_task(
     validate_workspace: bool = False, validate_skills: bool = False,
     human_request: Optional[dict] = None,
     origin_intent: Optional[dict] = None, chat_origin: Optional[str] = None,
-    native_origin: Optional[dict] = None,
+    native_origin: Optional[object] = None,
     requires: Optional[list[str]] = None,
     lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None, require_declaration: bool = False,
     placement_policy: Optional[str] = None,

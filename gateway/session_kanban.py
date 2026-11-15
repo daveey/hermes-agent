@@ -242,6 +242,10 @@ def bind_worker_context(frame):
             if (task is None or task.status != 'running' or task.current_run_id != context['run_id']
                     or task.claim_lock != context['claim_lock']):
                 raise RuntimeStoreError('stale_kanban_claim')
+            run = conn.execute('SELECT task_id,status,claim_lock,ended_at FROM task_runs WHERE id=?',
+                               (context['run_id'],)).fetchone()
+            if (run is None or tuple(run) != (task.id, 'running', context['claim_lock'], None)):
+                raise RuntimeStoreError('stale_kanban_claim')
             # The dispatcher's spawned worker stays the run's pid (reclaim, timeout and operator
             # kills target it; ``_watch_submitter`` ties this interpreter's life to it). The bound
             # interpreter is recorded beside it so a sweep can tell when the attempt is truly gone.
@@ -259,6 +263,8 @@ def bind_worker_context(frame):
     _watch_submitter(Path(context['db']), context['run_id'])
     os.environ.update(env)
     os.chdir(context['workspace'])
+    from agent.origin_worker_custody import from_bound_frame
+    return from_bound_frame(frame, context)
 
 
 _TURNS_DONE = threading.Event()

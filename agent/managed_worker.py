@@ -345,7 +345,7 @@ def execute(frame, channel):
         raise RuntimeError('stale_epoch')
     store = RuntimeSessionStore(rpc, scope, outbox_dir(frame['home'], scope['execution_id']), adopted)
     from gateway.session_kanban import bind_worker_context
-    bind_worker_context(frame)
+    origin_custody = bind_worker_context(frame)
     # [daveey] Capsule-required cards: bind the owner-brokered capsule now, before checkpoint recovery,
     # hooks, MCP and AIAgent import any tool (no-op without an owner-installed channel; raises otherwise).
     from agent.observation_bind import observation_bind, observation_finish, observation_revoke
@@ -400,6 +400,8 @@ def execute(frame, channel):
                 tool_complete_callback=lambda call_id, name, args, result: channel.send('tool.complete',
                                                                                          **tool_frame(call_id, name, args, result)))
             controls.agent = agent
+            if origin_custody is not None:
+                origin_custody.bind_agent(agent)
             if controls.stopped.is_set():
                 from agent.interrupt_compat import request_hard_interrupt
                 request_hard_interrupt(agent)

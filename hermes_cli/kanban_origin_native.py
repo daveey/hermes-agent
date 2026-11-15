@@ -14,10 +14,11 @@ from hermes_cli.kanban_origin_ledger import validate_binding
 
 def capture(creator_task_id, *, courier=False):
     """Use admitted in-process custody, never environment or tool arguments."""
-    if courier or creator_task_id:
-        # Worker inheritance needs independently verified claim custody. A bare
-        # HERMES_KANBAN_TASK is not a capability; refuse until that seam is bound.
+    if courier:
         return None
+    if creator_task_id:
+        from agent.origin_worker_custody import capture as capture_worker
+        return capture_worker(creator_task_id)
     from agent.origin_turn_custody import CapturedOrigin, origin
     qualified = origin()
     return CapturedOrigin(qualified) if qualified else None
@@ -96,9 +97,11 @@ def _receipt(conn, task_id):
 def record(conn, task_id, context, created_at):
     """Called inside create_task's transaction; no event or sync projection."""
     from agent.origin_turn_custody import CapturedOrigin
-    captured = context if isinstance(context, CapturedOrigin) else None
-    if captured is not None:
-        context = captured.validated()
+    from agent.origin_worker_custody import CapturedWorkerOrigin
+    if type(context) not in (CapturedOrigin, CapturedWorkerOrigin):
+        return
+    captured = context
+    context = captured.validated(conn) if type(captured) is CapturedWorkerOrigin else captured.validated()
     if context is None:
         return
     scope = _primary_scope(conn)
@@ -124,7 +127,8 @@ def record(conn, task_id, context, created_at):
                "task_record_key": f"{profile}/{board}/{task_id}"}
     validate_binding(binding)
     _install_revocation(conn)
-    if captured is not None and captured.validated() is None:
+    checked = captured.validated(conn) if type(captured) is CapturedWorkerOrigin else captured.validated()
+    if checked != context:
         return
     conn.execute("INSERT INTO origin_native_receipts VALUES (?,?,?,?)",
                  (task_id, json.dumps(binding, sort_keys=True), creator, created_at))

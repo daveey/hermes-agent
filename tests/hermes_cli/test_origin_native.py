@@ -17,6 +17,14 @@ def scope(monkeypatch):
     return {"origin": {"gateway": "macbook", "profile": "default", "session": "chat-1"}}
 
 
+@pytest.fixture
+def capability(scope, tmp_path, monkeypatch):
+    from tests.hermes_cli.origin_custody_support import interactive_capture
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    with interactive_capture(tmp_path, "chat-1") as captured:
+        yield captured
+
+
 def memory_tasks():
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, created_on TEXT, created_at INTEGER)")
@@ -26,13 +34,17 @@ def memory_tasks():
     return conn
 
 
-def test_transaction_and_inheritance(scope):
+def test_plain_mapping_is_not_a_native_capability(scope):
+    conn = memory_tasks()
+    native.record(conn, "t_root", dict(scope), 1)
+    assert native._receipt(conn, "t_root") is None
+
+
+def test_transaction_receipt_rollback(scope, capability):
     conn = memory_tasks()
     conn.execute("BEGIN")
-    native.record(conn, "t_root", scope, 1)
-    native.record(conn, "t_child", {"creator": "t_root"}, 2)
-    assert native._receipt(conn, "t_child")["origin"] == scope["origin"]
-    assert conn.execute("SELECT inherited_from FROM origin_native_receipts WHERE task_id='t_child'").fetchone()[0] == "t_root"
+    native.record(conn, "t_root", capability, 1)
+    assert native._receipt(conn, "t_root")["origin"] == scope["origin"]
     conn.rollback()
     assert native._receipt(conn, "t_root") is None
 
@@ -42,15 +54,6 @@ def test_missing_receipt_and_synced_ancestry_cannot_authorize(scope):
     conn.execute("CREATE TABLE task_chat_links (task_id, chat_gateway, chat_profile, chat_session)")
     conn.execute("INSERT INTO task_chat_links VALUES ('t_fake','macbook','default','chat-1')")
     native.record(conn, "t_child", {"creator": "t_fake"}, 2)
-    assert native._receipt(conn, "t_child") is None
-
-
-def test_foreign_parent_namespace_rejected(scope, monkeypatch):
-    conn = memory_tasks()
-    native.record(conn, "t_root", scope, 1)
-    from hermes_cli import kanban_execution_observations
-    monkeypatch.setattr(kanban_execution_observations, "board_owner_profile", lambda path: "other")
-    native.record(conn, "t_child", {"creator": "t_root"}, 2)
     assert native._receipt(conn, "t_child") is None
 
 

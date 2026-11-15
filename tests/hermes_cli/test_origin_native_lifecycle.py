@@ -20,11 +20,21 @@ def store(tmp_path, monkeypatch):
         task = kb.create_task(conn, title="native root")
         assert native._primary_scope(conn) is not None, (sync._db_key(conn), str(kb.board_own_db_path("default")),
             sync.board_mode(conn), [tuple(r) for r in conn.execute("SELECT board_id,gateway_id,mode FROM kanban_sync_state")])
-        native.record(conn, task, {"origin": origin}, 1)
+        from tests.hermes_cli.origin_custody_support import interactive_capture
+        with interactive_capture(home, fixtures.CHAT) as captured:
+            assert captured["origin"] == origin
+            native.record(conn, task, captured, 1)
         conn.commit()
         binding = native._receipt(conn, task)
         assert binding is not None
         yield home, conn, task, binding
+
+
+@pytest.fixture
+def live_origin(store):
+    from tests.hermes_cli.origin_custody_support import interactive_capture
+    with interactive_capture(store[0], fixtures.CHAT) as captured:
+        yield captured
 
 
 def test_deleted_receipt_cannot_authorize_or_inherit(store):
@@ -69,23 +79,24 @@ def test_normal_task_update_preserves_receipt(store):
 
 
 @pytest.mark.parametrize("mode", ["replica", "link", "off"])
-def test_mode_change_refuses_reads_and_new_receipts(store, mode):
+def test_mode_change_refuses_reads_and_new_receipts(store, live_origin, mode):
     _, conn, _, binding = store
+    child = kb.create_task(conn, title="untrusted")
     conn.execute("UPDATE kanban_sync_state SET mode=?", (mode,))
     conn.commit()
     assert native.lookup(binding["origin"], binding["owner"], gateway="here") is None
-    native.record(conn, "untrusted", {"origin": binding["origin"]}, 2)
-    assert native._receipt(conn, "untrusted") is None
+    native.record(conn, child, live_origin, 2)
+    assert native._receipt(conn, child) is None
 
 
-def test_shadow_copy_cannot_mint_receipt(store, tmp_path):
-    _, conn, task, binding = store
+def test_shadow_copy_cannot_mint_receipt(store, live_origin, tmp_path):
+    _, conn, task, _ = store
     path = tmp_path / "sync-shadow" / "default.db"
     path.parent.mkdir()
     with sqlite3.connect(path) as shadow:
         conn.backup(shadow)
         shadow.execute("DELETE FROM origin_native_receipts")
-        native.record(shadow, task, {"origin": binding["origin"]}, 2)
+        native.record(shadow, task, live_origin, 2)
         assert native._receipt(shadow, task) is None
 
 
