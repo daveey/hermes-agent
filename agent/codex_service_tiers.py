@@ -10,6 +10,8 @@ import logging
 import time
 from typing import Any
 
+from agent.pass_memo import PassMemo
+
 logger = logging.getLogger(__name__)
 # Token fingerprints include the origin; token refresh/account changes cannot reuse
 # an old entitlement. No raw credentials or identities are retained in this cache.
@@ -87,8 +89,23 @@ def _cyber_programs_for_model(access_token: str, base_url: str, model: str) -> f
     return None if cached is None else cached[2].get(metadata.strip_codex_context_variant_suffix(model))
 
 
+# A model-picker pass asks ``daybreak_offered``/``ultrafast_offered`` once per Codex model, and each
+# ask re-read the credential store and JWT for the same answer. Inside ``account_token_scope()`` the
+# stored-login lookup resolves once; the memo is dropped on exit, so the next request reads the
+# store again (a login, refresh, disable or logout shows on the next pass; nothing is kept by clock).
+_ACCOUNT_TOKEN_MEMO = PassMemo("codex_account_token")
+account_token_scope = _ACCOUNT_TOKEN_MEMO.scope
+
+
 def _account_catalog_token(access_token: Any) -> str | None:
     """The ChatGPT OAuth JWT that reads this account's Codex catalog, or None."""
+    if access_token is not None:  # an explicit token is never memoized
+        return _resolve_account_catalog_token(access_token)
+    return _ACCOUNT_TOKEN_MEMO.get("stored", lambda: _resolve_account_catalog_token(None))
+
+
+def _resolve_account_catalog_token(access_token: Any) -> str | None:
+    """Uncached form of :func:`_account_catalog_token`."""
     from hermes_cli.auth_constants import AuthError, _decode_jwt_claims
     # Only a ChatGPT OAuth JWT reads this catalog; a caller's pre-init key (an OpenAI API key on a
     # profile that also has one) is not this account's credential, so use the stored Codex login.

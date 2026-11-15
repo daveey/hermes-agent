@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from contextvars import copy_context
 from dataclasses import dataclass, replace
@@ -73,6 +74,18 @@ def _without_slug(rows: list[dict], slug: str) -> list[dict]:
 # ─── Public: payload builder ────────────────────────────────────────────
 
 
+def _in_profile_ids_pass(fn):
+    """Run *fn* inside one models.dev profile-id pass: the map is read once per payload, not per probe."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from agent.models_dev import profile_ids_scope
+
+        with profile_ids_scope():
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+@_in_profile_ids_pass
 def build_models_payload(
     ctx: ConfigContext, *, explicit_only: bool = False, include_unconfigured: bool = False,
     picker_hints: bool = False, canonical_order: bool = False, pricing: bool = False,
@@ -599,6 +612,13 @@ def _reasoning_catalog_reader(slug: str):
 
 
 def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None) -> None:
+    from agent.codex_service_tiers import account_token_scope
+
+    with account_token_scope():  # one stored-login read per pass, not one per Codex model
+        _apply_capabilities_rows(rows, metadata_config=metadata_config)
+
+
+def _apply_capabilities_rows(rows: list[dict], *, metadata_config: dict | None = None) -> None:
     """Attach ``{model: {fast, reasoning, ...}}`` per row. ``reasoning`` defaults True when the catalog is
     silent (the dial is a no-op on models that ignore it; hiding it from a capable model is worse). A
     serving aggregator's detail overrides models.dev (adds ``can_disable_reasoning``). ``supported_efforts``
