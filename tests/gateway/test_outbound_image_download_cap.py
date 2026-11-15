@@ -2,6 +2,7 @@
 held in memory, so it must honour ``gateway.max_inbound_media_bytes`` like the inbound path:
 an over-cap body (chunked, no Content-Length) is refused whole, and never uploaded truncated."""
 
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +16,7 @@ from gateway.config import PlatformConfig
 from gateway.platforms.base import SendResult
 
 CAP = 64 * 1024
-HUGE = CAP * 512  # 32 MiB: far more than socket buffers absorb once the client stops reading
+HUGE = CAP * 512  # 32 MiB: far larger than the fixture's explicitly bounded socket buffers
 PNG = b"\x89PNG\r\n\x1a\n"
 
 
@@ -56,18 +57,44 @@ class _ChunkedImage(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def image_host():
+def image_host(monkeypatch):
     from hermes_constants import get_hermes_home
     from tools import url_safety
 
     (get_hermes_home() / "config.yaml").write_text(
         f"gateway:\n  max_inbound_media_bytes: {CAP}\nsecurity:\n  allow_private_urls: true\n")
     url_safety._reset_allow_private_cache()
+    # sendall() counts queued kernel bytes, not bytes consumed by the adapter.
+    # Linux receive autotuning can exceed HUGE // 2 on loopback. Bound both
+    # endpoints before connect/listen so the partial-transfer oracle measures
+    # early refusal rather than host TCP tuning. Keep the real HTTP clients.
+    class ImageSocket(socket.socket):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if self.family in (socket.AF_INET, socket.AF_INET6) and self.type == socket.SOCK_STREAM:
+                self.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, CAP // 4)
+                self.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, CAP // 4)
+
+    monkeypatch.setattr(socket, "socket", ImageSocket)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _ChunkedImage)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_port}"
-    srv.shutdown()
-    url_safety._reset_allow_private_cache()
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_port}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(10)
+        assert not thread.is_alive()
+        url_safety._reset_allow_private_cache()
+
+
+@pytest.mark.parametrize("option", [socket.SO_SNDBUF, socket.SO_RCVBUF])
+def test_image_host_bounds_kernel_buffering(image_host, option):
+    # Both HTTP stacks create real sockets through this fixture. Read back the
+    # effective kernel limit (Linux doubles the requested value).
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        assert client.getsockopt(socket.SOL_SOCKET, option) <= CAP
 
 
 TEXTS: list[str] = []  # what each adapter's ``send`` (text fallback) carried
