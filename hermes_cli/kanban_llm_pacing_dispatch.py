@@ -228,15 +228,18 @@ def is_deferrable(conn: sqlite3.Connection, task: Any, lane: str) -> bool:
     return row is not None and row[0] == CONTINUATION_WOKEN_EVENT
 
 
-def _verdicts(conn, task, providers, lane, cfg) -> Optional[list[dict]]:
-    """One verdict per governed candidate provider, or None as soon as one provider admits the card."""
+def _verdicts(conn, task, providers, lane, cfg, host=None) -> Optional[list[dict]]:
+    """One verdict per governed candidate provider, or None as soon as one provider admits the card.
+    ``host``: the connection whose running cards count (default ``conn``): pickup judges a replica card against
+    this machine's own board."""
+    host = conn if host is None else host
     now = time.time()
     deferrable = is_deferrable(conn, task, lane)
     verdicts = []
     for provider in providers:
-        pace = pace_for(conn, provider, cfg, now)
+        pace = pace_for(host, provider, cfg, now)
         limit = lp.admit_limit(pace, avg_running(provider, now, cfg), deferrable=deferrable, cfg=cfg)
-        running = local_running(conn, provider)
+        running = local_running(host, provider)
         if limit is None or running < limit:
             return None
         verdicts.append({**pace.as_dict(), "limit": limit, "running": running, "deferrable": deferrable})
@@ -352,3 +355,21 @@ def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run:
         _warn("hold", "kanban pacing: governor check failed (%s: %s); dispatching ungoverned", type(exc).__name__, exc)
         logger.debug("kanban pacing: governor check failed", exc_info=True)
         return False
+
+
+def pickup_hold(local: sqlite3.Connection, replica: sqlite3.Connection, card: Any) -> Optional[str]:
+    """Pickup's read-only twin of :func:`hold`: ``"<provider> <state>, ..."`` when this machine's dispatcher would
+    pace-hold the foreign ``card`` right now, else None. The card is judged on the replica's copy, the running
+    count on ``local`` (this machine's board), so a copy that only pacing would hold is never taken into the pickup
+    window (worker-6 2026-11-15: 9 paced codex cards hid a runnable anthropic card at rank 16). Records nothing;
+    any fault returns None (fail open: the local dispatcher still decides after the copy)."""
+    try:
+        cfg = load_config()
+        judged = _governed(replica, card["id"], card["status"], cfg) if cfg.enabled else None
+        if judged is None:
+            return None
+        verdicts = _verdicts(replica, judged[0], judged[1], card["status"], cfg, host=local)
+        return None if verdicts is None else ", ".join(f"{v['provider']} {v['state']}" for v in verdicts)
+    except Exception as exc:  # health: allow BLE001 -- a hold prediction must never stop a pickup
+        _warn("pickup", "kanban pacing: pickup hold check failed (%s: %s); copying ungoverned", type(exc).__name__, exc)
+        return None

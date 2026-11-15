@@ -600,6 +600,8 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
                               profile_exists=profile_exists)
         if reason is None:
             reason = _quota_held(replica, card)
+        if reason is None:
+            reason = _paced(conn, replica, card)
         hold = kph.board_hold(replica, card) if reason is None else None
         if hold is not None:
             if held is not None and free < kph.FREE_PER_TICK and not kph.recently_copied(card["id"], hold[1]):
@@ -616,6 +618,16 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         elif reason[0] and card["id"] in mine:
             skips[card["id"]] = reason
     return picked, skips
+
+
+def _paced(conn: sqlite3.Connection, replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
+    """[daveey] ``("other", detail)`` when this machine's dispatcher would pace-hold ``card`` (provider at or over its
+    ``kanban.llm_pacing`` limit here) right now. Such a card is not offered, so it takes no pickup budget and the
+    window fills with the next cards that can run; it is offered again on the tick its limit frees
+    (t_01a1ddeb76e30be7: 9 paced codex cards hid a runnable anthropic card)."""
+    from hermes_cli.kanban_llm_pacing_dispatch import pickup_hold
+    held = pickup_hold(conn, replica, card)
+    return None if held is None else ("other", f"llm_paced: {held} (local dispatch would hold it)")
 
 
 def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
