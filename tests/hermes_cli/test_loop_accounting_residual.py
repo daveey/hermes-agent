@@ -326,3 +326,43 @@ def test_old_snapshot_keys_unchanged():
         assert key in snap
     for key in ("cpu_s", "accounted_cpu_s", "unaccounted_live_cpu_s", "exited_threads_cpu_s"):
         assert key in snap["process"]
+
+
+_C_FIXTURE = r"""
+#include <stdint.h>
+#include <string.h>
+int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buf, int size) {
+    static const uint64_t ids[2] = {0x100000005ULL, 0x200000007ULL};
+    if (flavor == 28) { memcpy(buf, ids, sizeof ids); return (int)sizeof ids; }
+    if (flavor == 15) {
+        if (arg != ids[0] && arg != ids[1]) return 0;   /* a truncated id is unknown to the kernel */
+        memset(buf, 0, 112);
+        uint64_t t[2] = {100000000ULL, 100000000ULL};
+        memcpy(buf, t, sizeof t);
+        strcpy((char *)buf + 48, arg == ids[0] ? "fixtureone" : "fixturetwo");
+        return 112;
+    }
+    return 0;
+}
+"""
+
+
+def test_darwin_proc_pidinfo_passes_64bit_thread_ids(monkeypatch, tmp_path):
+    """C fixture standing in for libproc: ids above 2**32 must reach proc_pidinfo untruncated."""
+    import ctypes
+    import shutil
+    import subprocess
+    cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+    if not cc:
+        pytest.skip("no C compiler")
+    src = tmp_path / "fx.c"
+    src.write_text(_C_FIXTURE)
+    lib_path = tmp_path / "libfx.so"
+    subprocess.run([cc, "-shared", "-fPIC", "-o", str(lib_path), str(src)], check=True)
+    real = ctypes.CDLL
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: real(str(lib_path)))
+    monkeypatch.setattr(la.os, "times", lambda: types.SimpleNamespace(user=10.0, system=10.0))
+    got = la._darwin_thread_cpu()
+    assert sorted(g[0] for g in got) == [0x100000005, 0x200000007]
+    assert sorted(g[1] for g in got) == ["fixtureone", "fixturetwo"]
+    assert all(abs(g[2] - 0.2) < 1e-9 for g in got)

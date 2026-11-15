@@ -425,17 +425,20 @@ def _darwin_thread_cpu() -> list[tuple[int, str, float]]:
                         ("sleep_time", ctypes.c_int32), ("curpri", ctypes.c_int32), ("priority", ctypes.c_int32),
                         ("maxpriority", ctypes.c_int32), ("name", ctypes.c_char * 64)]
 
+        # Explicit prototype: without it ctypes passes Python ints as 32-bit C int and truncates 64-bit thread ids.
+        lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        lib.proc_pidinfo.restype = ctypes.c_int
         pid = os.getpid()
         ids = (ctypes.c_uint64 * 1024)()
         # PROC_PIDLISTTHREADIDS (28) returns thread ids (== threading.native_id), which is what
         # PROC_PIDTHREADID64INFO (15) looks up; PROC_PIDLISTTHREADS (6) would return pthread handles.
-        got = lib.proc_pidinfo(pid, 28, 0, ids, ctypes.sizeof(ids))
+        got = lib.proc_pidinfo(pid, 28, 0, ctypes.addressof(ids), ctypes.sizeof(ids))
         if got <= 0:
             return []
         out = []
         for i in range(got // 8):
             info = _ThreadInfo()
-            if lib.proc_pidinfo(pid, 15, ids[i], ctypes.byref(info), ctypes.sizeof(info)) <= 0:  # THREADID64INFO
+            if lib.proc_pidinfo(pid, 15, ids[i], ctypes.addressof(info), ctypes.sizeof(info)) <= 0:  # THREADID64INFO
                 continue
             out.append((int(ids[i]), info.name.decode("utf-8", "replace"), (info.user + info.system) / 1e9))  # pth_*_time are already ns
         total = sum(c for _, _, c in out)
