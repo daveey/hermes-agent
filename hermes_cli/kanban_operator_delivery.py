@@ -113,6 +113,14 @@ def gated_claims(conn, task_id, text):
                              and op.get("op") == "operator" and op.get("action") == "comment")
     rest = claims - requested
     if rest:
+        # Migrated callers carry portable request history, not executor-local
+        # ledgers. Such history can require proof but never authenticate it.
+        from hermes_cli.kanban_operator_delivery_custody import requested_targets
+        requested.update(requested_targets(conn, task_id))
+        with calls._replica(conn) as rep:
+            requested.update(requested_targets(rep, task_id))
+    rest = claims - requested
+    if rest:
         own = calls._own_gateway(conn)
         with calls._replica(conn) as rep:
             for t in rest:
@@ -136,31 +144,32 @@ def _own_synced_comment(rep, target, own, task_id):
         return False
 
 
-def verify_local(conn, task_id, proof):
-    """Recheck the requesting task/run, which may precede this continuation."""
+def verify_local(conn, task_id, proof, *, admitted_run=None):
+    """Recheck task custody, retaining the original request's caller/run identity."""
     from hermes_cli import kanban_operator_call as calls
+    from hermes_cli.kanban_operator_delivery_custody import carried_request, current_run
+    run = current_run(conn, task_id)
+    if admitted_run is not None and run != admitted_run:
+        raise ValueError("completion_receipt: operator current run changed during admission")
     row = (conn.execute("SELECT * FROM operator_calls WHERE request_uid=? AND side='request'",
                         (proof["request_uid"],)).fetchone() if calls._has_log(conn) else None)
-    if row is None and calls._own_gateway(conn) not in (None, proof["caller_gateway"]):
-        from hermes_cli.kanban_operator_delivery_moved import moved_request
-        return moved_request(conn, task_id, proof)
-    run = conn.execute("SELECT uid FROM task_runs WHERE task_id=? AND uid=?",
-                       (task_id, proof["caller_run_uid"])).fetchone()
-    if row is None or row["outcome"] != "done":
+    if row is not None and row["outcome"] != "done":
         raise ValueError("completion_receipt: operator request is pending, failed or missing")
-    if (row["caller_task_id"] != task_id or proof["caller_task_id"] != task_id or run is None
-            or row["caller_run_uid"] != run[0] or proof["caller_run_uid"] != run[0]):
+    if row is None:
+        row, request = carried_request(conn, task_id, proof)
+    else:
+        event = conn.execute("SELECT payload FROM task_events WHERE uid=? AND task_id=? AND kind=?",
+                             (row["request_event_uid"], task_id, calls.REQUEST_KIND)).fetchone()
+        if event is None:
+            raise ValueError("completion_receipt: request event missing")
+        request = json.loads(event[0])
+    if (row["caller_task_id"] != task_id or proof["caller_task_id"] != task_id
+            or row["caller_run_uid"] != proof["caller_run_uid"]):
         raise ValueError("completion_receipt: operator caller/run mismatch")
-    from hermes_cli import kanban_operator_call as calls
     if (row["action"] != "comment" or row["target_task_id"] != proof["target_task_id"]
             or row["board"] != proof["board"] or calls._board_slug(conn) != proof["board"]
             or row["caller_gateway"] != proof["caller_gateway"]):
         raise ValueError("completion_receipt: operator target/board/actor mismatch")
-    event = conn.execute("SELECT payload FROM task_events WHERE uid=? AND task_id=? AND kind=?",
-                         (row["request_event_uid"], task_id, calls.REQUEST_KIND)).fetchone()
-    if event is None:
-        raise ValueError("completion_receipt: request event missing")
-    request = json.loads(event[0])
     _bind_request(request, row, proof)
     return row, request
 
@@ -206,7 +215,9 @@ def canonical_payload(evidence, uid, task, kind, gateway):
 
 def verify(conn, task_id, proof):
     from hermes_cli import kanban_operator_call as calls
-    row, local_request = verify_local(conn, task_id, proof)
+    from hermes_cli.kanban_operator_delivery_custody import current_run
+    run = current_run(conn, task_id)
+    row, local_request = verify_local(conn, task_id, proof, admitted_run=run)
     request = _canonical_event(proof["board"], row["request_event_uid"], task_id,
                                calls.REQUEST_KIND, row["caller_gateway"])
     if request != local_request:
@@ -227,6 +238,7 @@ def verify(conn, task_id, proof):
     expected = {**(result.get("operator_delivery") or {}), "result_event_uid": proof["result_event_uid"]}
     if expected != proof:
         raise ValueError("completion_receipt: exact operator result/digest mismatch")
+    return run, dict(row), local_request
 
 
 def applied_proof(conn, payload, own):

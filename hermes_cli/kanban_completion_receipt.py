@@ -113,8 +113,8 @@ def prepare(conn, task_id, metadata, *, summary=None):
             if proof:
                 if item["disposition"] != "delivered":
                     raise ValueError("completion_receipt: operator delivery requires delivered disposition")
-                verify(conn, task_id, proof)
-                checks.append((proof, "operator_delivery"))
+                admitted = verify(conn, task_id, proof)
+                checks.append(((proof, admitted), "operator_delivery"))
                 proved.add(proof["target_task_id"])
     if claims - proved:
         raise ValueError(_unproved(claims - proved))
@@ -190,7 +190,10 @@ def recheck(conn, task_id, owners):
     for ref, local in owners:
         if local == "operator_delivery":
             from hermes_cli.kanban_operator_delivery import verify_local
-            verify_local(conn, task_id, ref)
+            proof, (run, row, request) = ref
+            checked_row, checked_request = verify_local(conn, task_id, proof, admitted_run=run)
+            if dict(checked_row) != row or checked_request != request:
+                raise ValueError("completion_receipt: operator request changed during admission")
         elif local:
             _check_local(conn, task_id, ref)
         else:
