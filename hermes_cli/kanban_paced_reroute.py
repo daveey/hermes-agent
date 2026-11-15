@@ -15,7 +15,8 @@ Rule (:func:`paced_route`); anything else keeps the route, as before:
    far-wall rule of ``kanban_pin_reroute``). Mandatory pins, class selectors and ``require_model: true`` cards keep
    their route;
 3. the peer comes from the same eligibility the wall reroutes use (``alternate_route``, the review resolver's
-   independent routes, the pin's class peers) and its provider is neither held nor walled. With none, the route
+   independent routes, the pin's class peers) and its provider is neither held nor walled, and serves on this
+   host's live pool (``live_pool_serving``: never a provider this host holds no credential for). With none, the route
    stays and the governor holds it as before; a moved route is judged by the governor on its new provider.
 
 The move lives on the in-memory claimed task only (as every tier decision does); ``run_route.tier_reason`` names it
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 REASON = "paced"
 DEFAULT_REROUTE_AFTER_S = 3600.0
+_MAX_PEER_PROBES = 8  # peers refused for no live pool on this host before the route stays
 
 
 def _section(cfg: Optional[dict]) -> Any:
@@ -109,13 +111,26 @@ def _probe(conn, task, base, cfg, now):
     held = _held(cfg, now)
     if held.get(provider, -math.inf) - now <= reroute_after_seconds(cfg):
         return None  # not held (a class selector's ``auto`` never is), or its reset is near
-    if reason == "pinned":
-        moved = _pinned_peer(task, model, held, now)
-    elif reason == "default":
-        moved = _default_peer(conn, task, base, held, now)
-    else:
-        moved = _review_peer(conn, task, cfg or {}, held, now)
-    return (*moved, provider) if moved else None
+    # The peer must serve on this host's live pool: a registry route with no credential here (xai-oauth on a worker
+    # the hub relay has not minted it to) would launch a run that cannot authenticate. Each refusal excludes one more
+    # provider, so the walk is bounded. (t_01a1deaf95f5b885)
+    excluded = dict(held)
+    for _ in range(_MAX_PEER_PROBES):
+        if reason == "pinned":
+            moved = _pinned_peer(task, model, excluded, now)
+        elif reason == "default":
+            moved = _default_peer(conn, task, base, excluded, now)
+        else:
+            moved = _review_peer(conn, task, cfg or {}, excluded, now)
+        if not moved:
+            return None
+        target = pw._norm(moved[1])
+        if target in excluded:
+            return None  # the peer pick ignored its exclusions: never trust it
+        if pw.live_pool_serving(target, moved[0]):
+            return (*moved, provider)
+        excluded[target] = math.inf
+    return None
 
 
 def paced_route(conn: sqlite3.Connection, task: Any, base: tuple, *, lane: str,

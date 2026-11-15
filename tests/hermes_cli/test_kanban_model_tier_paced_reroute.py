@@ -30,7 +30,12 @@ def clock(monkeypatch):
     monkeypatch.setattr(paced.time, 'time', lambda: clock[0])
     monkeypatch.setattr(lpd.time, 'time', lambda: clock[0])
     monkeypatch.setattr(lpd, '_CACHE', {})
+    monkeypatch.setattr(walls, 'live_pool_serving', lambda provider, model=None: provider not in UNSERVED)
+    UNSERVED.clear()
     return clock
+
+
+UNSERVED: set = set()  # providers this host holds no live pool (credential) for, per test
 
 
 def _pools(clock, **states):
@@ -155,6 +160,34 @@ def test_no_unheld_unwalled_peer_keeps_the_base_route(board, clock, monkeypatch,
     with kbc.connect() as conn:
         assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*PIN, 'default')
         assert _route(conn, pin_tests._pinned_card(conn)) == (None, None, 'pinned')
+
+
+@pytest.mark.parametrize('route', ['default', 'pinned', 'review'])
+def test_a_peer_with_no_live_pool_on_this_host_is_skipped(board, clock, monkeypatch, route):
+    """t_01a1deaf95f5b885: a registry peer this host holds no credential for (xai-oauth before the hub relay mints it
+    to a worker) would launch a run that cannot authenticate. The move skips it to the next serving peer, else keeps
+    the route for the governor to hold."""
+    _deep(monkeypatch, {'llm_pacing': {'providers': ['anthropic', 'openai-codex', 'xai-oauth']}}, grok=True)
+    _pools(clock, openai_codex=('held', HELD_FAR))
+    with kbc.connect() as conn:
+        if route == 'review':
+            tid, lane, reason = pin_tests._review_card(conn), 'review', 'review_unpinned'
+            base = PIN
+        elif route == 'pinned':
+            tid, lane, reason = pin_tests._pinned_card(conn), 'ready', 'pinned'
+            base = (None, None)
+        else:
+            tid, lane, reason = kb.create_task(conn, title='d', assignee='a'), 'ready', 'default'
+            base = PIN
+        first = _route(conn, tid, lane)
+        assert first[2] == f'{reason}+paced:openai-codex' and first[1] in ('anthropic', 'xai-oauth')
+        UNSERVED.add(first[1])
+        moved = _route(conn, tid, lane)
+        assert moved[1] != first[1]
+        if moved[2] != reason:
+            assert moved[1] in ('anthropic', 'xai-oauth') and moved[2] == f'{reason}+paced:openai-codex'
+        UNSERVED.update({'anthropic', 'xai-oauth'})
+        assert _route(conn, tid, lane) == (*base, reason)
 
 
 def test_review_unpinned_on_a_held_provider_moves_to_a_free_independent_reviewer(board, clock, monkeypatch):

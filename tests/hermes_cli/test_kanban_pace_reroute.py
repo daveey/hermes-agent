@@ -19,8 +19,12 @@ from tests.hermes_cli.test_kanban_quota_episode import board as board, routing  
 
 HOUR = 3600.0
 GROK = ("grok-4.7", "xai-oauth")
+# The governor's claim-time move is judged here on its own: the resolver's far-hold move (kanban_paced_reroute, a
+# pool held with its reset more than reroute_after_s away) would otherwise move these cards first. The two composed are
+# covered by the ``resolver_first`` tests below.
 POOL_CFG = {"default_model": "gpt-6-astra", "default_provider": "openai-codex",
-            "strong_model": "class:deep", "strong_provider": "auto"}
+            "strong_model": "class:deep", "strong_provider": "auto", "llm_pacing": {"reroute_after_s": 1e12}}
+RESOLVER_CFG = {k: v for k, v in POOL_CFG.items() if k != "llm_pacing"}
 
 
 def _route(provider, model):
@@ -258,3 +262,37 @@ def test_stale_offer_is_ignored(monkeypatch):
     reroute.offer("t1", ("gpt-6-astra", "openai-codex"), ("grok-4.7", "xai-oauth", "openai-codex"))
     now[0] += reroute.TTL_SECONDS
     assert reroute.take("t1", ("gpt-6-astra", "openai-codex")) is None
+
+
+@pytest.fixture
+def resolver_first(pool, monkeypatch):
+    """The shipped default: the resolver's far-hold move (reroute_after_s 3600) runs before the governor's."""
+    monkeypatch.setattr(tier, "load_tier_config", lambda: dict(RESOLVER_CFG))
+
+
+def test_resolver_first_far_held_default_card_starts_on_grok(pool, resolver_first, monkeypatch):
+    """Both pools held 9 h: the resolver moves the default route off the held Codex pool to the first serving class
+    peer (Grok: Claude is held too); the governor then judges Grok, which it does not govern, and starts the card."""
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="routine work", assignee="a")
+        seen, result = _dispatch(conn)
+        receipt = _route_receipt(conn, tid)
+    assert seen == [(tid, *GROK)] and tid not in result.clock_held
+    assert receipt is not None and (receipt["model"], receipt["provider"]) == GROK
+    assert receipt["tier_reason"] == "default+paced:openai-codex"
+
+
+def test_resolver_first_no_grok_credential_keeps_the_hold(pool, resolver_first, monkeypatch):
+    """Neither move names a provider this host cannot serve: with no xai-oauth credential the card stays held."""
+    _, serving = pool
+    serving.discard("xai-oauth")
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="routine work", assignee="a")
+        for _ in range(2):
+            seen, result = _dispatch(conn)
+            assert seen == [] and result.clock_held[tid][0] == lp.GUARD_REASON
+        assert _route_receipt(conn, tid) is None
+        card = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        assert pd.pickup_hold(conn, conn, card) == "openai-codex held"
