@@ -95,3 +95,50 @@ def test_variable_discovery_skips_plain_text_without_tokenizing(monkeypatch):
         pytest.fail('plain masked payload must not pay for another tokenizer pass')
     monkeypatch.setattr(lifecycle_guard, '_iter_command_segments', forbidden)
     assert list(VariableCandidates().payloads('plain text\n' * 8000, None)) == []
+
+
+@pytest.mark.parametrize('executed,variable_source', [(False, True), (True, False)])
+def test_discovery_requires_execution_and_syntax(executed, variable_source):
+    from types import SimpleNamespace
+    from cron.lifecycle_guard_variables import scan_variable_payloads
+
+    def forbidden(*args):
+        pytest.fail('non-executable or quoted data reached variable discovery')
+
+    budget = SimpleNamespace(variable_candidates=SimpleNamespace(payloads=forbidden))
+    assert not scan_variable_payloads('$P', cwd=None, executed=executed,
+                                     variable_source=variable_source, budget=budget,
+                                     recurse=forbidden, source=None)
+
+
+@pytest.mark.parametrize('command', [
+    'P="big.sh"; bash > "$P"',
+    'P="$(echo hi)"; $P',
+    'P="`echo hi`"; $P',
+    'P="big.sh"; printf "%s" "$P"',
+    'echo P="bash big.sh"; $P',
+])
+def test_data_does_not_create_execution_candidates(command):
+    from cron.lifecycle_guard_variables import VariableCandidates
+
+    assert list(VariableCandidates().payloads(command, None)) == []
+
+
+def test_eval_candidate_is_the_evaluated_text():
+    from cron.lifecycle_guard_variables import VariableCandidates
+
+    assert list(VariableCandidates().payloads(
+        'P="bash big.sh"; eval "$P"', None)) == [('bash big.sh', None)]
+
+
+def test_reassignment_retains_all_execution_candidates(tmp_path):
+    (tmp_path / 'big.sh').write_text('#' + 'x' * (1024 * 1024 + 1))
+    unsafe, refusal = scan_gateway_lifecycle(
+        'P=":"; P="bash big.sh"; $P', cwd=str(tmp_path))
+    assert unsafe and refusal and 'cap' in refusal
+
+
+def test_assignment_argument_is_not_a_binding(tmp_path):
+    (tmp_path / 'big.sh').write_text('#' + 'x' * (1024 * 1024 + 1))
+    assert scan_gateway_lifecycle(
+        'echo P="bash big.sh"; $P', cwd=str(tmp_path)) == (False, None)
