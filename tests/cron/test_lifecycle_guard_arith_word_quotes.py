@@ -32,6 +32,8 @@ SINKS = [
     "let 'x=a[''$(SCRIPT)]'",
     "let 'x=a[ ''$(SCRIPT)]'",
     r'let "a[\$(SCRIPT)]=1"',
+    # Quote removal joins the dollar and parenthesis only at arithmetic evaluation.
+    'let "a[$""(SCRIPT)]=1"',
     r'let "a[\`SCRIPT\`]=1"',
     r'unset v; let "${v:-a[\$(SCRIPT)]}"',
     r"let x=a[\`SCRIPT\`]",
@@ -47,6 +49,7 @@ SINKS = [
 DATA = [
     "let '${v:-$(SCRIPT)}'",
     "let '$(SCRIPT)'",
+    'let "$""(SCRIPT)"',
     "let 'x=$(( $(SCRIPT) ))'",
     "[[ 1 -eq 1 && x == '$(SCRIPT)' ]]",
     "[[ 1 -eq '$(SCRIPT)' && 1 -eq a[1] ]]",
