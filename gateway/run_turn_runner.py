@@ -430,7 +430,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 # because LocalSessionAdapter.send publishes nothing. Preserve the stream flag
                 # so viewers do not paint accepted deltas twice.
                 payload = {"text": text, "already_streamed": already_streamed}
-                unseen = not self._publish_execution("message.interim", payload)
+                published = self._publish_execution("message.interim", payload)
+                unseen = not already_streamed and not published
             if stts is not None:
                 # Flush accepted deltas; completed commentary is a separate speech segment.
                 stts.on_delta(None)
