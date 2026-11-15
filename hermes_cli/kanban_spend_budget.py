@@ -188,7 +188,13 @@ def _window_start(conn: sqlite3.Connection, task_id: str, cut: int) -> int:
         "SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind = 'commented' AND created_at < ? "
         "AND (json_extract(payload, '$.writer_kind') = 'human' OR json_extract(payload, '$.relayed_human') IS NOT NULL)",
         (task_id, cut)).fetchone()[0]
-    return int(max(handed or 0, triaged or 0, answered or 0))
+    # A spend decision applied through the operator courier (``kanban_spend_promote``) opens the new window at the
+    # promotion itself, so its run budget counts exactly the runs after it. A plain manual promote does not.
+    promoted = conn.execute(
+        "SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind = 'promoted_manual' AND created_at < ? "
+        "AND json_valid(payload) AND json_extract(payload, '$.spend_budget.runs') IS NOT NULL",
+        (task_id, cut)).fetchone()[0]
+    return int(max(handed or 0, triaged or 0, answered or 0, promoted or 0))
 
 
 def _run_usage(conn: sqlite3.Connection, task_id: str, run_ids: list[int]) -> dict[int, dict]:

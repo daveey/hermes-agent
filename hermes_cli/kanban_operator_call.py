@@ -13,7 +13,8 @@ on a card another gateway created refuse ``foreign_card``. This module is the su
    ordinary functions on its live file and appends ``operator_call_result`` on the target card.
 3. Request side again (:func:`poll`): finds that result in the replica, finishes the request and wakes the caller.
 
-Card actions are comment, move, unblock and creator_archive (exact creator scope), plus ``label_publish`` (the
+Card actions are comment, move, unblock, creator_archive (exact creator scope) and spend_promote (only the spend
+stop's named decision card, a finite run window: ``kanban_spend_promote``), plus ``label_publish`` (the
 hub executes it with its Board admin key, after re-running its own probe of that machine, and answers on the
 requester's card). complete / archive / link / unlink / block / edit of a foreign card stay with its owner and are
 refused; so is any second op or a card the op does not name. No Board admin key is read here.
@@ -35,7 +36,7 @@ from typing import Any, Iterator, Optional
 _log = logging.getLogger(__name__)
 
 OP = "operator"
-CARD_ACTIONS = ("comment", "move", "unblock", "creator_archive")
+CARD_ACTIONS = ("comment", "move", "unblock", "creator_archive", "spend_promote")
 LABEL_PUBLISH = "label_publish"  # names a machine, not a card (kanban_operator_labels)
 ACTIONS = (*CARD_ACTIONS, LABEL_PUBLISH)
 OWNER_ONLY = ("complete", "archive", "link", "unlink", "block", "edit", "assign", "delete", "reclaim")
@@ -121,6 +122,9 @@ def normalize_op(i: int, op: dict) -> dict:
     if action == LABEL_PUBLISH:
         from hermes_cli import kanban_operator_labels as kol
         return kol.normalize(i, op)
+    if action == "spend_promote":
+        from hermes_cli import kanban_spend_promote as ksp
+        return ksp.normalize(i, op)
     if action not in ACTIONS:
         raise _err("operator_action_refused", f"op {i}: action must be one of {', '.join(ACTIONS)}")
     task_id = str(op.get("task_id") or "").strip()
@@ -331,6 +335,10 @@ def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
             why = refusal(rep, target, requester)
             if why:
                 return refuse("archive_scope", why)
+        spend_scope = None
+        if op["action"] == "spend_promote" and rep is not None:
+            from hermes_cli import kanban_spend_promote as ksp
+            spend_scope = ksp.scope_refusal(rep, target, requester, op["episode"], op["decision_comment_id"])
         human = None
         if op["action"] == "unblock" and rep is not None:
             human = rep.execute("SELECT human_request, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()
@@ -342,6 +350,8 @@ def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
         return refuse("not_foreign", f"{target} was created on this gateway")
     if status in ("done", "archived") and op["action"] != "creator_archive":
         return refuse("terminal", f"{target} is {status}")
+    if spend_scope:
+        return refuse("spend_scope", spend_scope)
     if op["action"] == "move" and status == "running":
         return refuse("running", f"{target} is running; only its own run may move it (kanban_move)")
     if alarm_scope is not None:
@@ -665,6 +675,9 @@ def _apply(conn: sqlite3.Connection, payload: dict, own: str) -> tuple[str, Opti
         return apply(conn, payload, extra)
     if task.status in ("done", "archived"):
         return "refused", f"{target} is {task.status}"
+    if action == "spend_promote":
+        from hermes_cli import kanban_spend_promote as ksp
+        return ksp.apply(conn, payload, extra)
     if action == "comment":
         if _marker(conn, target, COMMENT_MARK, uid):
             return "already_applied", None

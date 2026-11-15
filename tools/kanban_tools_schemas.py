@@ -1183,8 +1183,13 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "Op operator {action, task_id, ...} is the scoped Board-operator call for ONE card ANOTHER gateway "
         "created (the ones kanban_comment/kanban_move/kanban_unblock refuse as foreign_card): action "
         "comment {text}, move {runs_on, reason, host_reason?} (not while it runs; a machine:<X> target needs "
-        "host_reason naming state on X, else use [\"pool:worker\"]) or unblock {reason} (an agent's block "
-        "only, never one waiting on a human). That card's home gateway executes it; complete/archive/link/"
+        "host_reason naming state on X, else use [\"pool:worker\"]), unblock {reason} (an agent's block "
+        "only, never one waiting on a human) or spend_promote {runs 1-20, episode, decision_comment_id, reason}: "
+        "ONLY the decision card a spend-budget stop named (its spend_budget_decision_ready producer) releases that "
+        "triaged card with a finite window of exactly `runs` more runs (spend_budget_set + promoted_manual in one "
+        "transaction); episode = uid of the card's current spend_budget_triaged event, decision_comment_id = your "
+        "earlier operator comment on that card recording the decision. An unblock never releases a spend stop. "
+        "That card's home gateway executes it; complete/archive/link/"
         "unlink of a foreign card are refused (its owner's), one op per request, every call logged. "
         "Action label_publish {machine, labels, proof: {kind: 'hub_probe'}} (no task_id) asks the hub to ADD "
         "skill:/capability: labels to one machine's Board registry entry (never machine:*, never a removal): the "
@@ -1201,7 +1206,8 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
                 "properties": {
                     "op": {"type": "string", "enum": ["link", "unlink", "reconcile_notify", "resume", "retry_limit",
                                                          "archive", "operator"]},
-                    "action": {"type": "string", "enum": ["comment", "move", "unblock", "label_publish"],
+                    "action": {"type": "string",
+                               "enum": ["comment", "move", "unblock", "spend_promote", "label_publish"],
                                "description": "operator: what to do on the foreign card (label_publish: on a "
                                               "machine's registry labels)."},
                     "text": {"type": "string", "description": "operator comment: the comment body."},
@@ -1211,7 +1217,14 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
                     "labels": {"type": "array", "items": {"type": "string"},
                                "description": "operator label_publish: skill:/capability: labels to add."},
                     "proof": {"type": "object", "description": "operator label_publish: {kind: 'hub_probe'}."},
-                    "reason": {"type": "string", "description": "operator move/unblock: why (required)."},
+                    "reason": {"type": "string",
+                               "description": "operator move/unblock/spend_promote: why (required)."},
+                    "runs": {"type": "integer", "description": "operator spend_promote: the new window, 1-20 runs."},
+                    "episode": {"type": "string", "description": "operator spend_promote: uid of the card's current "
+                                                                 "spend_budget_triaged event."},
+                    "decision_comment_id": {"type": "integer", "description": "operator spend_promote: your earlier "
+                                                                              "operator comment on the card that "
+                                                                              "records the decision."},
                     "host_reason": {"type": "string", "description": "operator move to machine:<X>: the state on "
                                                                      "X that holds the card there (required for it)."},
                     "parent_id": {"type": "string"},
