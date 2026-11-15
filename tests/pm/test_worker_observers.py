@@ -20,16 +20,34 @@ def test_range_listener_queues_all_eight_writers_before_accept(dl_server):
     # Deliberately do not start serve_forever: a descheduled acceptor must
     # accommodate the downloader's complete fanout without a SYN retry.
     pending = []
+    accepted = []
     with type(dl_server)(("127.0.0.1", 0), dl_server.RequestHandlerClass) as listener:
+        listener.socket.settimeout(1)
         try:
             for _ in range(8):
                 connection = socket.socket()
                 pending.append(connection)
                 connection.settimeout(1)
                 connection.connect(listener.server_address)
-            assert len(pending) == 8
+                connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # Darwin can complete connect() for an overflowed queue and then
+            # reset the connection: HTTPConnection's TCP_NODELAY/send can fail
+            # with EINVAL. Require usable sockets, not just completed connects.
+            for index, connection in enumerate(pending):
+                connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                connection.sendall(bytes([index]))
+            for _ in pending:
+                connection, _ = listener.socket.accept()
+                accepted.append(connection)
+                connection.settimeout(1)
+                value = connection.recv(1)
+                assert len(value) == 1
+                connection.sendall(value)
+            assert [connection.recv(1) for connection in pending] == [
+                bytes([index]) for index in range(8)
+            ]
         finally:
-            for connection in pending:
+            for connection in pending + accepted:
                 connection.close()
 
 
