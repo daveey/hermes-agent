@@ -52,6 +52,15 @@ for the gateway, ``serve`` and the ``tui`` backend); a daemon thread then writes
 an atomic replace: role, pid, start time, process and per-thread CPU and the cumulative counters. Files of
 dead pids older than an hour are pruned. ``loop_accounting.enabled: false`` stops the writer (counters stay).
 
+**Residual.** ``snapshot()["residual"]`` splits the CPU no pass accounted per thread-name family
+(``families[f]``: ``cpu_s``, ``accounted_cpu_s``, ``unaccounted_cpu_s``; ``exited`` for threads gone since
+start; their sum matches ``process.cpu_s - process.accounted_cpu_s``). Residual scopes name the callers:
+``thread/<qualname>`` (every ``asyncio.to_thread`` / AnyIO submission), ``aux_provider/<operation>``,
+``plugin/user-terminal.sweep_jobs``, ``plugin/loop-watch.check_once`` and ``loop_cb/<callback or task
+coroutine>`` (main-loop CPU outside any pass; 64 names then ``loop_cb/other``). A scope books only the CPU
+its nested passes did not. ``loop_accounting.scopes`` / ``loop_accounting.callbacks`` (config.yaml, both
+default on) switch the instrumentation off; hub A/B cost of both on: about +0.09% of a core.
+
 **Cost.** One pass is two ``thread_time`` and two ``perf_counter`` reads, a thread-local depth and one
 uncontended lock: a few microseconds (``tests/hermes_cli/test_loop_accounting_bench.py`` pins <= 20 µs).
 """
@@ -783,14 +792,16 @@ def scope(name: str) -> Scope:
     return Scope(name)
 
 
-def _callable_name(fn: Any) -> str:
+def _callable_name(fn: Any, args: tuple = ()) -> str:
     """``module.qualname`` of what a thread pool will run (``partial`` / ``Context.run`` unwrapped)."""
     for _ in range(6):
         if isinstance(fn, functools.partial):
-            inner = fn.func
-            is_ctx_run = (getattr(inner, "__name__", None) == "run"
-                          and type(getattr(inner, "__self__", None)).__name__ == "Context")
-            fn = fn.args[0] if is_ctx_run and fn.args else inner
+            args = fn.args + args
+            fn = fn.func
+            continue
+        if (getattr(fn, "__name__", None) == "run" and type(getattr(fn, "__self__", None)).__name__ == "Context"
+                and args):
+            fn, args = args[0], args[1:]
             continue
         break
     qual = getattr(fn, "__qualname__", None) or type(fn).__name__
@@ -803,9 +814,10 @@ def _run_scoped(name: str, fn: Callable, *args: Any, **kwargs: Any) -> Any:
         return fn(*args, **kwargs)
 
 
-def scoped_call(prefix: str, fn: Callable) -> Callable:
-    """``fn`` wrapped so each call is one :class:`Scope` named ``<prefix>/<fn qualname>``."""
-    return functools.partial(_run_scoped, f"{prefix}/{_callable_name(fn)}", fn)
+def scoped_call(prefix: str, fn: Callable, args: tuple = ()) -> Callable:
+    """``fn`` wrapped so each call is one :class:`Scope` named ``<prefix>/<fn qualname>`` (``args`` are only
+    read, to name a ``Context.run(func, ...)`` submission by ``func``)."""
+    return functools.partial(_run_scoped, f"{prefix}/{_callable_name(fn, args)}", fn)
 
 
 _cb_stats: dict[str, _Stat] = {}  # callback name -> counters (at most MAX_CALLBACK_KEYS + the other bucket)
@@ -855,7 +867,7 @@ def instrument_executors() -> bool:
     orig = be.BaseEventLoop.run_in_executor
 
     def run_in_executor(self, executor, func, *args):
-        return orig(self, executor, scoped_call("thread", func), *args)
+        return orig(self, executor, scoped_call("thread", func, args), *args)
 
     run_in_executor._la_orig = orig  # type: ignore[attr-defined]
     be.BaseEventLoop.run_in_executor = run_in_executor  # type: ignore[method-assign]
@@ -864,7 +876,7 @@ def instrument_executors() -> bool:
         a_orig = at.run_sync
 
         async def run_sync(func, *args, **kwargs):
-            return await a_orig(scoped_call("thread", func), *args, **kwargs)
+            return await a_orig(scoped_call("thread", func, args), *args, **kwargs)
 
         run_sync._la_orig = a_orig  # type: ignore[attr-defined]
         at.run_sync = run_sync

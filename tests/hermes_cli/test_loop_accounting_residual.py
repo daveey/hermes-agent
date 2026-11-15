@@ -152,6 +152,22 @@ def test_executor_scopes_name_to_thread_and_anyio_functions():
     assert any(k.endswith("anyio_job") and v["runs"] == 1 and v["cpu_s"] >= 0.015 for k, v in names.items()), names
 
 
+def test_executor_scope_names_a_context_run_submission_by_its_function():
+    import contextvars
+    la.instrument_executors()
+
+    def inner_job():
+        _burn(0.01)
+
+    async def main():
+        ctx = contextvars.copy_context()
+        await asyncio.get_running_loop().run_in_executor(None, ctx.run, inner_job)
+
+    asyncio.run(main())
+    assert any(k.endswith("inner_job") for k in la.counters() if k.startswith("thread/"))
+    assert not any(k.endswith("Context.run") for k in la.counters())
+
+
 def test_executor_scope_does_not_double_count_an_accounted_route():
     la.instrument_executors()
 
