@@ -97,6 +97,35 @@ def test_a_replica_catching_up_does_not_duplicate_the_current_skip(paced_board):
         assert not skips.record(conn, tid, skips.LLM_PACED, detail="anthropic paced")
 
 
+@pytest.mark.parametrize("refresh_age", [skips.SEEN_REFRESH_SECONDS, skips.SEEN_REFRESH_SECONDS + 1])
+def test_replica_lag_keeps_current_skip_deduplicated_after_refresh(paced_board, monkeypatch, refresh_age):
+    """An expired local fast path must not re-append paced while the replica still ends at held."""
+    clock = [1_800_000_000]
+    monkeypatch.setattr(skips.time, "time", lambda: clock[0])
+    paced = {"reason": skips.LLM_PACED, "detail": "anthropic paced"}
+    held = {"reason": skips.LLM_PACED, "detail": "anthropic held", "until": clock[0] + 60}
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="replica lag past refresh", assignee="default")
+        assert skips.record(conn, tid, skips.LLM_PACED, detail="anthropic held", until=clock[0] + 60)
+        clock[0] += 1
+        assert skips.record(conn, tid, skips.LLM_PACED, detail="anthropic paced")
+        since = clock[0]
+        # Model the re-imported event history, retaining the machine-local seen table.
+        conn.execute("DELETE FROM task_events WHERE id = (SELECT max(id) FROM task_events WHERE task_id = ? "
+                     "AND kind = ?)", (tid, skips.EVENT))
+        conn.commit()
+        assert _skips(conn, tid) == [held]
+        for _ in range(3):
+            clock[0] += refresh_age  # reach the write-path recheck, without mocking _settled
+            assert not skips.record(conn, tid, skips.LLM_PACED, detail="anthropic paced")
+            assert _skips(conn, tid) == [held]
+            assert skips.latest(conn, tid) == {**paced, "at": since}
+            row = conn.execute(f"SELECT payload, since, seen_at FROM {skips.SEEN_TABLE} WHERE task_id = ?",
+                               (tid,)).fetchone()
+            assert kb._json_dict(row[0]) == paced
+            assert (row[1], row[2]) == (since, clock[0])
+
+
 # --- 2. an account with both windows null is fresh headroom --------------------------------------------------
 
 def _window(label, used, reset_in=None, *, now, scope="account"):
