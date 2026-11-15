@@ -534,6 +534,23 @@ def record_stop_reason(reason: str) -> None:
 _GIT_FILE_PERMISSION = re.compile(r"Permission denied(?! *\()|\bEACCES\b")
 
 
+def record_ref_lock_identity(output: Any) -> None:
+    """Record WHICH ref lock a ``ref_lock_stale`` failure named (path + stat generation), for the
+    two-run alert (``update_ref_lock_alert``). *output* is git's text or the failed
+    ``CalledProcessError``. Diagnostic only; never raises."""
+    try:
+        from hermes_cli.update_ref_lock_alert import FACT, lock_identity
+
+        if isinstance(output, BaseException):
+            output = getattr(output, "stderr", None) or getattr(output, "output", None) or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        if (identity := lock_identity(str(output))) is not None:
+            record_fact(FACT, identity)
+    except Exception as exc:  # pragma: no cover - additive
+        logger.debug("ref lock identity not recorded: %s", exc, exc_info=True)
+
+
 def git_error_stop_class(exc: BaseException) -> Optional[str]:
     """The closed stop token for a git ``CalledProcessError`` that is about to end the run, or None.
 
@@ -551,6 +568,8 @@ def git_output_stop_class(output: str, argv: list[str], returncode: Optional[int
     """:func:`git_error_stop_class` for a git call that returned instead of raising (``_git_run``)."""
     if "index.lock" in output and "File exists" in output:
         return "git_index_locked"  # another git (or a killed one, #132089) holds the index lock
+    if "File exists" in output and re.search(r"(?:[/\\]HEAD|[/\\]packed-refs|[/\\]refs[/\\][^\n'\"]+)\.lock", output):
+        return "ref_lock_stale"  # diagnostic only; reclamation still requires dead-owner proof
     if _GIT_FILE_PERMISSION.search(output):
         return "permission_denied"  # git may not write a file it needs (index.lock's dir, a tracked file)
     if returncode == 124 and "timed out after" in output:
@@ -706,6 +725,9 @@ def finalize_update_receipt(outcome: str, fleet: list | None = None, stop_reason
             _write_latest(payload)
         _prune_old_receipts(directory)
         _publish_shared_metrics(receipt.data)
+        from hermes_cli.update_ref_lock_alert import observe as _observe_ref_lock
+
+        _observe_ref_lock(receipt.data, directory=directory)  # best effort, never raises
         return path
     except Exception as exc:
         # Visible, not debug: a run that pulled code and left no receipt is exactly the run

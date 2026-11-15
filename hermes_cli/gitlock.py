@@ -194,8 +194,9 @@ def ref_lock_files(git_dir: Path) -> list[Path]:
 
 
 def release_dead_fetch_locks(repo_root: Path) -> list[str]:
-    """Drop the locks a killed update's fetch left, whatever their age: ``shallow.lock`` and the ref
-    locks (:func:`ref_lock_files`).
+    """Drop a killed update's shallow/ref locks, including the apply transaction's ``HEAD.lock``.
+
+    Called before fetch and apply; all candidates retain the same killed-owner and holder proofs.
 
     The update's ``git fetch`` dies with its tree (``taskkill /T /F``, the Linux parent-death signal),
     so a kill inside its ref transaction strands ``refs/remotes/origin/<branch>.lock``. Git (2.51+)
@@ -208,6 +209,7 @@ def release_dead_fetch_locks(repo_root: Path) -> list[str]:
     :func:`release_dead_index_lock`; returns the removed paths.
     """
     return _release_killed_update_locks(Path(repo_root), lambda git_dir: [git_dir / "shallow.lock",
+                                                                        git_dir / "HEAD.lock",
                                                                         *ref_lock_files(git_dir)])
 
 
