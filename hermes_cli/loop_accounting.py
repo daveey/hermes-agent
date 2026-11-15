@@ -813,7 +813,7 @@ def _callback_key(cb: Any) -> str:
             coro = get_coro()
             return f"loop_cb/{getattr(coro, '__qualname__', None) or type(coro).__name__}"
         except Exception:  # health: allow BLE001 -- a label only
-            pass
+            logger.debug("loop accounting: callback label unavailable", exc_info=True)
     return "loop_cb/" + _callable_name(cb)
 
 
@@ -890,7 +890,7 @@ def instrument_callbacks() -> bool:
             try:
                 _book_callback(_callback_key(self._callback), cpu, _perf() - w0, tid, acc0)
             except Exception:  # health: allow BLE001 -- accounting must never break a loop callback
-                pass
+                logger.debug("loop accounting: callback booking failed", exc_info=True)
 
     _run._la_orig = orig  # type: ignore[attr-defined]
     ev.Handle._run = _run  # type: ignore[method-assign]
@@ -905,8 +905,8 @@ def uninstrument() -> None:
         try:
             import anyio.to_thread as at
             at.run_sync = at.run_sync._la_orig  # type: ignore[attr-defined]
-        except Exception:  # health: allow BLE001
-            pass
+        except ImportError:  # no anyio: nothing to restore
+            logger.debug("loop accounting: anyio not restored", exc_info=True)
     if _instrumented.pop("callbacks", None):
         import asyncio.events as ev
         ev.Handle._run = ev.Handle._run._la_orig  # type: ignore[attr-defined]

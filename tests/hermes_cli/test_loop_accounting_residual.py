@@ -255,7 +255,8 @@ def test_callback_keys_are_capped_with_an_other_bucket():
             ns = {}
             exec(f"def cb_{i}(): pass", ns)
             loop.call_soon(ns[f"cb_{i}"])
-        await asyncio.sleep(0.05)
+        for _ in range(4):
+            await asyncio.sleep(0)
 
     asyncio.run(main())
     keys = [k for k in la.counters() if k.startswith("loop_cb/")]

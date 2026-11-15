@@ -182,3 +182,17 @@ def release_client(client: Any, close: Callable[[Any], None], abandoned: list[Pr
     if deferred:
         logger.info("auxiliary client close handed to %d abandoned provider daemon(s) (tcp_shutdown=%d)",
                     deferred, shutdown_count)
+
+
+def provider_worker_scope() -> Any:
+    """Loop-accounting residual scope ``aux_provider/<initiating operation>`` for a protected provider daemon
+    (run inside the daemon, whose context copy carries the relay task name; never prompt or token content).
+    A no-op context when accounting cannot load."""
+    try:
+        from agent.auxiliary_client import _RELAY_AUX_CALL_CONTEXT
+        from hermes_cli import loop_accounting
+        operation = str((_RELAY_AUX_CALL_CONTEXT.get() or {}).get("task") or "unknown")[:48]
+        return loop_accounting.scope(f"aux_provider/{operation}")
+    except Exception:  # health: allow BLE001 -- accounting must never fail a provider call
+        logger.debug("aux provider scope unavailable", exc_info=True)
+        return contextlib.nullcontext()

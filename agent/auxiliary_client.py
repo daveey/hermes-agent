@@ -39,7 +39,7 @@ from agent.errors import InvalidProviderResponseError
 from agent.auxiliary_fallback_recovery import reapply_repairs
 from agent.auxiliary_call_scope import aux_call_scope
 from agent.auxiliary_managed_local import _is_managed_local_endpoint
-from agent.aux_provider_handoff import ProviderAttempt, note_abandoned as note_abandoned_provider_call, run_in_thread
+from agent.aux_provider_handoff import ProviderAttempt, note_abandoned as note_abandoned_provider_call, provider_worker_scope, run_in_thread
 from agent.auxiliary_probe_stub import _AuxProbeClientStub
 from agent.auxiliary_reasoning_floor import remember_reasoning_floor, with_reasoning_floor
 from agent.auxiliary_profile_gates import (
@@ -435,15 +435,6 @@ def aux_stream_deadline(deadline: float | Callable[[], float | None] | None):
         _aux_stream_deadline.value = previous
 
 
-def _loop_accounting_scope(name: str):
-    """Residual CPU scope for ``name`` (a no-op context if loop accounting cannot import)."""
-    try:
-        from hermes_cli import loop_accounting
-        return loop_accounting.scope(name)
-    except Exception:  # health: allow BLE001 -- accounting must never fail a provider call
-        return contextlib.nullcontext()
-
-
 def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any], kwargs: dict[str, Any]) -> Any:
     """Run one protected provider callback in an attempt-isolated daemon thread.
 
@@ -469,13 +460,10 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
     # The daemon consumes the stream: an owner-thread-only deadline would be inert (#99692).
     provider_context = contextvars.copy_context()
     done, outcome, attempt = threading.Event(), {}, ProviderAttempt()
-
-    operation = str((_RELAY_AUX_CALL_CONTEXT.get() or {}).get("task") or "unknown")[:48]  # initiating operation only
-
     def _provider_worker() -> None:
         try:
             with (
-                _loop_accounting_scope(f"aux_provider/{operation}"),
+                provider_worker_scope(),
                 aux_progress_hook(progress_hook),
                 _aux_thread_local_hook(_aux_dispatch, dispatch_hook),
                 _aux_thread_local_hook(_aux_provider_response, provider_response_hook),
