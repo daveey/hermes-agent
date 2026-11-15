@@ -29,6 +29,28 @@ CORE_UPDATE_REQUEUE_REASON = "hermes-sync core update: restart-safe worker reque
 
 _FAILURE_KINDS = ("crashed", "timed_out", "spawn_failed", "gave_up")
 
+# Optional attribution for the explicit worker interruption route (state ``worker-core-update
+# --interrupt-worker-runs``). Routine worker updates never reclaim; legacy events without it
+# are "unknown". hermes-sync probes ``kanban reclaim --help`` for both flags before signalling.
+URGENCY_SOURCES = ("explicit_operator",)
+_HEX = frozenset("0123456789abcdef")
+
+
+def reclaim_attribution(reason, urgency_source, interrupt_target) -> dict:
+    """Validated payload fields for a reclaim: ``{}`` (legacy) or both fields; else ValueError."""
+    if urgency_source is None and interrupt_target is None:
+        return {}
+    if urgency_source is None or interrupt_target is None:
+        raise ValueError("reclaim attribution needs both --urgency-source and --interrupt-target")
+    if type(urgency_source) is not str or urgency_source not in URGENCY_SOURCES:
+        raise ValueError(f"reclaim attribution: unknown urgency source {urgency_source!r}")
+    if (type(interrupt_target) is not str or len(interrupt_target) != 40
+            or not set(interrupt_target) <= _HEX):
+        raise ValueError("reclaim attribution: --interrupt-target must be a lowercase 40-hex commit")
+    if reason != CORE_UPDATE_REQUEUE_REASON:
+        raise ValueError(f"reclaim attribution only applies to reason {CORE_UPDATE_REQUEUE_REASON!r}")
+    return {"urgency_source": urgency_source, "interrupt_target": interrupt_target}
+
 
 def is_core_update_requeue(conn: sqlite3.Connection, run) -> bool:
     """True only for a run the core updater's restart-safe requeue closed."""

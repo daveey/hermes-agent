@@ -404,7 +404,13 @@ _SPECS = [
              help="--mandatory: a far quota wall never moves this pin to a same-class peer (the card waits "
                   "for the reset). --no-mandatory lifts that. Omit to keep the card's setting."),
     ], help="Set or clear a task's model/provider override (takes effect on the next dispatch)"),
-    _cmd("reclaim", [_TASK_ID, _RECLAIM_REASON], help="Release an active worker claim on a running task"),
+    _cmd("reclaim", [
+        _TASK_ID, _RECLAIM_REASON,
+        _arg("--urgency-source", dest="urgency_source", choices=("explicit_operator",), default=None,
+             help="Attribution for an explicit core-update interruption (with --interrupt-target)"),
+        _arg("--interrupt-target", dest="interrupt_target", default=None,
+             help="40-hex minimum core target of that interruption (with --urgency-source)"),
+    ], help="Release an active worker claim on a running task"),
     _cmd("move", [
         _TASK_ID,
         _arg("--runs-on", dest="runs_on", default=None,

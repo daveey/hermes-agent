@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority, kanban_source_receipt as _sr, kanban_requeue_custody as _requeue_custody
+from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority, kanban_source_receipt as _sr, kanban_requeue_custody as _requeue_custody, kanban_core_update_requeue as _cu_requeue
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
@@ -2302,21 +2302,20 @@ def _record_reclaim(
 
 def reclaim_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None, signal_fn=None,
+    urgency_source: Optional[str] = None, interrupt_target: Optional[str] = None,
 ) -> bool:
     """Operator reclaim regardless of TTL: release the claim, restore the source
-    phase, reset the failure counter. False when not running."""
+    phase, reset the failure counter. False when not running. Bad attribution raises first."""
+    attribution = _cu_requeue.reclaim_attribution(reason, urgency_source, interrupt_target)
     row = conn.execute(
         "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
-    if not row:
-        return False
-    idle = row["status"] != "running" and row["claim_lock"] is None
-    if idle or _sync.refuse_foreign_reclaim(conn, task_id):
+    if not row or (row["status"] != "running" and row["claim_lock"] is None) or _sync.refuse_foreign_reclaim(conn, task_id):
         return False
     prev_lock = row["claim_lock"]
     termination = _terminate_reclaimed_worker(
         row["worker_pid"], prev_lock, signal_fn=signal_fn, started_at=row["worker_started_at"])
-    custody = _requeue_custody.for_requeue(conn, task_id, reason)  # core update: end plain processes, pin persisted
+    custody = {**_requeue_custody.for_requeue(conn, task_id, reason), **attribution}  # core update: end plain processes, pin persisted
     with write_txn(conn):
         retry_status = _retry_status_for_run(conn, task_id)
         cur = conn.execute(

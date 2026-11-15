@@ -856,8 +856,17 @@ def _cmd_set_model(args: argparse.Namespace) -> int:
 
 
 def _cmd_reclaim(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_core_update_requeue import reclaim_attribution
+    reason = getattr(args, "reason", None)
+    attribution = dict(urgency_source=getattr(args, "urgency_source", None),
+                       interrupt_target=getattr(args, "interrupt_target", None))
+    try:
+        reclaim_attribution(reason, **attribution)
+    except ValueError as exc:
+        print(f"kanban reclaim: refused: {exc}", file=sys.stderr)
+        return 2
     with kbc.connect_closing() as conn:
-        ok = kb.reclaim_task(conn, args.task_id, reason=getattr(args, "reason", None))
+        ok = kb.reclaim_task(conn, args.task_id, reason=reason, **attribution)
     return _ok_or_err(ok, f"cannot reclaim {args.task_id} (not running or unknown id)",
                       f"Reclaimed {args.task_id}")
 
