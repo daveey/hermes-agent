@@ -242,15 +242,37 @@ def _apply(conn: sqlite3.Connection, own: str, tid: str, audit: dict, target: Op
 
 def _self_check(conn: sqlite3.Connection, card: sqlite3.Row, own: str, cfg: dict, board: str, event_head: int,
                 counts: Counts) -> None:
-    """Re-place a judged card an earlier deny left here (``kanban_worker_first_selfcheck.denied_target``). A failure
-    skips only this card: the screen of the unjudged cards behind it must still run."""
-    from hermes_cli.kanban_worker_first_selfcheck import denied_target, log_repin
+    """Resolve a prior deny now, not after a stale-ready interval that permits an intervening claim."""
+    from hermes_cli import kanban_hub_admission_pickup as pickup
     try:
-        found = denied_target(conn, card, own, cfg, board=board)
-        if found and _replace(conn, own, card["id"], *found, expected=card, event_head=event_head):
+        prior = pickup.verdict(conn, card["id"])
+        if not prior or prior.get("admit") is not False or prior.get("forced"):
+            return
+        fields = pickup.card_fields(card, board)
+        audit = {k: v for k, v in prior.items() if k not in ("kept", "home")}
+        audit["entry"] = ENTRY
+        kept = keep_reason(conn, card, fields, cfg)
+        target = None if kept else pickup._target(fields, own, cfg, audit)
+        if target is not None:
+            reason = f"hub admission denied before claim: {str(prior.get('why') or '')[:200]}"
+            if prior.get("kept"):
+                reason += f"; kept for '{prior['kept']}', which no longer holds"
+            if not _replace(conn, own, card["id"], target, reason, expected=card, event_head=event_head):
+                counts.defer(card["id"])
+                return
+            from hermes_cli.kanban_worker_first_selfcheck import log_repin
+            log_repin(card["id"], target, reason)
             counts.repinned += 1
-            log_repin(card["id"], *found)
-    except Exception:  # health: allow BLE001 -- a backstop; the card is claimed here as before
+            return
+        audit["kept"] = kept or audit.get("home") or NO_QUEUE
+        applied = _apply(conn, own, card["id"], audit, None, expected=card, event_head=event_head)
+        if applied is None:
+            counts.defer(card["id"])
+        else:
+            counts.kept += 1
+            counts.home += "home" in audit
+    except Exception:  # health: allow BLE001 -- a denied card cannot run without a current disposition
+        counts.defer(card["id"])
         _log.warning("hub admission: denied-card self-check failed for %s", card["id"], exc_info=True)
 
 
@@ -316,16 +338,21 @@ def unjudged_claims(conn: sqlite3.Connection, own: str, *, now: Optional[float] 
     rows = conn.execute(
         "SELECT e.task_id, e.created_at, e.id FROM task_events e WHERE e.kind = 'claimed' AND e.created_at >= ? "
         "AND json_valid(e.payload) AND json_extract(e.payload, '$.holder') = ? "
-        "AND NOT EXISTS (SELECT 1 FROM task_events v WHERE v.task_id = e.task_id AND v.kind = 'hub_admission' "
-        "AND v.id < e.id) ORDER BY e.id", (max(int(gate), int(now) - window), own)).fetchall()
+        "ORDER BY e.id", (max(int(gate), int(now) - window), own)).fetchall()
     out = []
     for task_id, created_at, _id in rows:
-        created = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created' "
-                               "ORDER BY id LIMIT 1", (task_id,)).fetchone()
+        prior = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? AND id < ? "
+            "AND (kind = 'hub_admission' OR (kind = 'created' AND json_valid(payload) "
+            "AND json_type(payload, '$.hub_admission') = 'object')) ORDER BY id DESC LIMIT 1",
+            (task_id, _id)).fetchone()
         try:
-            audit = (json.loads(created[0]) or {}).get("hub_admission") if created and created[0] else None
-        except (TypeError, ValueError, AttributeError):
+            audit = json.loads(prior[1]) if prior and prior[1] else None
+            if prior and prior[0] == "created":
+                audit = audit.get("hub_admission") if isinstance(audit, dict) else None
+        except (TypeError, ValueError):
             audit = None
-        if not isinstance(audit, dict):
+        if (not isinstance(audit, dict)
+                or (audit.get("admit") is False and not audit.get("kept") and not audit.get("forced"))):
             out.append((task_id, int(created_at)))
     return out

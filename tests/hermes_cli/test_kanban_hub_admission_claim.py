@@ -254,14 +254,15 @@ def test_a_card_with_any_verdict_makes_no_model_call(gws, hub_judge, prior):
     with kb.write_txn(hub.conn):
         kb._append_event(hub.conn, tid, "hub_admission", prior)
     _tick(hub)
-    assert hub_judge.calls == [] and _holder(svc, tid) == HUB
+    assert hub_judge.calls == []
+    assert (_holder(svc, tid) == HUB) is bool(prior.get("admit") or prior.get("forced"))
 
 
 def test_a_creation_time_verdict_makes_no_model_call(gws, hub_judge):
     hub, _worker, svc = gws
     tid = _hub_card(hub, placement_audit={"hub_admission": {"admit": False, "why": "skipped", "entry": "create"}})
     _tick(hub)
-    assert hub_judge.calls == [] and _holder(svc, tid) == HUB
+    assert hub_judge.calls == [] and _holder(svc, tid) != HUB
 
 
 def test_a_non_hub_gateway_makes_no_model_call(gws, hub_judge):
