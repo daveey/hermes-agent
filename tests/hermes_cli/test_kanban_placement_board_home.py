@@ -79,3 +79,55 @@ def test_snapshot_pins_the_fallback_block(tmp_path, monkeypatch, no_kanban_overr
         (root / "config.yaml").write_text("kanban: {}\n")
         assert kp.config() is snap
         assert snap["worker_queue"] == {"worker-7": "pool:worker"}
+
+
+@pytest.mark.parametrize("broken", ["read_config_doc_readonly", "config_exists"])
+def test_unreadable_board_config_means_empty_policy(tmp_path, monkeypatch, no_kanban_override, broken):
+    """A profile with no placement block whose board-home config cannot be read gets ``{}``, not the exception."""
+    from hermes_cli import config_backend
+
+    _, profile = _homes(tmp_path, "kanban:\n  review_dispatch: true\n")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    calls: list[str] = []
+
+    def boom(*_a, **_k):
+        calls.append(broken)
+        raise OSError("board config unreadable")
+
+    monkeypatch.setattr(config_backend, broken, boom)
+    assert kp.config() == {}
+    assert calls == [broken]  # the board-home read was reached and failed, not skipped
+
+
+def test_unreadable_board_config_does_not_hide_the_profile_block(tmp_path, monkeypatch, no_kanban_override):
+    """Control: a profile's own non-empty block wins and never touches the (broken) board-home read."""
+    from hermes_cli import config_backend
+
+    _, profile = _homes(tmp_path, "kanban:\n  placement:\n    worker_queue:\n      worker-9: pool:other\n")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+
+    def boom(*_a, **_k):
+        raise OSError("board config unreadable")
+
+    monkeypatch.setattr(config_backend, "read_config_doc_readonly", boom)
+    monkeypatch.setattr(config_backend, "config_exists", boom)
+    assert kp.config() == {"worker_queue": {"worker-9": "pool:other"}}
+
+
+def test_snapshot_pins_the_empty_policy_of_an_unreadable_board_config(tmp_path, monkeypatch, no_kanban_override):
+    """Control: a snapshot taken while the board config is unreadable pins ``{}`` for the whole block."""
+    from hermes_cli import config_backend
+
+    _, profile = _homes(tmp_path, "kanban: {}\n")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    real = config_backend.read_config_doc_readonly
+
+    def boom(*_a, **_k):
+        raise OSError("board config unreadable")
+
+    monkeypatch.setattr(config_backend, "read_config_doc_readonly", boom)
+    with kp.config_snapshot() as snap:
+        assert snap == {}
+        monkeypatch.setattr(config_backend, "read_config_doc_readonly", real)
+        assert kp.config() is snap
+    assert kp.config()["worker_queue"] == {"worker-7": "pool:worker"}  # the next block loads afresh
