@@ -1368,44 +1368,10 @@ def _remove_relocated_basetemp(config) -> None:
 
 
 def _processes_with_hermes_home_under(roots) -> list[int]:
-    """PIDs (never this process) whose environment names a ``HERMES_HOME`` inside one of *roots*.
+    """PIDs belonging to this session; retain the conftest seam for callers."""
+    from tests.session_processes import processes_with_hermes_home_under
 
-    POSIX (psutil's exec-time environment; another user's processes are unreadable and skipped).
-    Windows is out of scope: no leak observed there, and SIGTERM there is TerminateProcess.
-
-    Membership is decided lexically: another process's ``HERMES_HOME`` is never resolved, because
-    the host's live gateways (the hub's ``~/.hermes/profiles/<p>``) name the real Hermes home and
-    ``realpath`` would ``lstat`` it, which the real-home I/O guard refuses. Only this session's own
-    roots are resolved, and both their given and resolved spellings are matched, so a child that
-    got either spelling of a root is still found.
-
-    """
-    if os.name != "posix":
-        return []
-    import psutil
-
-    resolved = {Path(os.path.abspath(r)) for r in roots if r} | {Path(r).resolve() for r in roots if r}
-    me = os.getpid()
-    found = []
-    for proc in psutil.process_iter():
-        if proc.pid == me:
-            continue
-        try:
-            home = proc.environ().get("HERMES_HOME")
-        except (psutil.Error, OSError):
-            continue
-        if not home:
-            continue
-        try:
-            text = os.fsdecode(home)
-        except (OSError, ValueError):
-            continue
-        if not os.path.isabs(text):  # relative to that process's cwd, not ours
-            continue
-        path = Path(os.path.normpath(text))
-        if any(path == root or path.is_relative_to(root) for root in resolved):
-            found.append(proc.pid)
-    return found
+    return processes_with_hermes_home_under(roots)
 
 
 def _reap_session_hermes_processes(config) -> list[int]:

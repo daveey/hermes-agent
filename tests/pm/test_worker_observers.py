@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 
@@ -12,6 +13,24 @@ from pm.lock import Facts
 from tests.pm._fixtures import client as client, isolated_python as isolated_python  # noqa: PLC0414 -- the self-alias is load-bearing: it suppresses F811 for the pytest fixture parameter shadowing this import
 from tests.pm._range_server import dl_server as dl_server  # noqa: PLC0414 -- the self-alias is load-bearing: it suppresses F811 for the pytest fixture parameter shadowing this import
 from tests.pm.test_worker import _node_archive
+
+
+@pytest.mark.platforms("posix")
+def test_range_listener_queues_all_eight_writers_before_accept(dl_server):
+    # Deliberately do not start serve_forever: a descheduled acceptor must
+    # accommodate the downloader's complete fanout without a SYN retry.
+    pending = []
+    with type(dl_server)(("127.0.0.1", 0), dl_server.RequestHandlerClass) as listener:
+        try:
+            for _ in range(8):
+                connection = socket.socket()
+                pending.append(connection)
+                connection.settimeout(1)
+                connection.connect(listener.server_address)
+            assert len(pending) == 8
+        finally:
+            for connection in pending:
+                connection.close()
 
 
 @pytest.mark.platforms("posix")
