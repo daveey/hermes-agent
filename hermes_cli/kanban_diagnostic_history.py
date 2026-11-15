@@ -84,6 +84,16 @@ class EventHistory(tuple):
         return next(((ev,) for ev in ordered if _event_kind(ev) in bounds), ())
 
     @cached_property
+    def episode_skip(self):
+        """``_episode_skip`` of this snapshot, read-only: its JSON payload is parsed once, not per rule."""
+        from hermes_cli.kanban_diagnostics import _event_kind, _parse_payload
+        from hermes_cli.kanban_dispatch_skip import EVENT
+        if not self.quota_candidates or _event_kind(self.quota_candidates[0]) != EVENT:
+            return MappingProxyType({})
+        payload = _parse_payload(self.quota_candidates[0])
+        return MappingProxyType(payload) if isinstance(payload, dict) else payload
+
+    @cached_property
     def latest_parking(self):
         from hermes_cli.kanban_diagnostics import _latest_parking_event
         return _latest_parking_event(tuple(self))

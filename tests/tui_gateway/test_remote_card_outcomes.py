@@ -14,7 +14,8 @@ CHAT = helpers.CHAT
 def remote(monkeypatch):
     rows = []
     def read(ids, statuses, stale_ok):
-        assert stale_ok is True
+        # Display lists stay stale-friendly; empty outcomes also confirm strict counts.
+        assert isinstance(stale_ok, bool)
         assert statuses == ksa.LISTED_STATUSES
         return list(rows)
     monkeypatch.setattr(ksa, "_remote_cards", read)

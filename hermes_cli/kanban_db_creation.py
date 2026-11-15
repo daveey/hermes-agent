@@ -2,6 +2,14 @@
 import json
 
 
+def existing_creation_key(conn, key):
+    """Legacy best-effort lookup; the caller chooses the transaction boundary."""
+    return conn.execute(
+        "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
+        "ORDER BY created_at DESC LIMIT 1", (key,),
+    ).fetchone()
+
+
 def default_ready_assignee() -> str:
     """``kanban.default_assignee`` (config) or the ``default`` profile."""
     try:
@@ -21,6 +29,16 @@ def tool_creation_audit(args: dict, *, admission=None, **effective) -> dict | No
     if admission and admission.get("hub_admission"):
         audit = {**(audit or {}), "hub_admission": admission["hub_admission"]}
     return audit
+
+
+def inherit_tool_priority(conn, args, creator_task_id):
+    """Resolve omitted worker urgency before placement/courier serialization."""
+    if creator_task_id is None or args.get("priority") is not None:
+        return args
+    from hermes_cli.kanban_admission_score import effective_priorities
+
+    # Explicit zero wins; this snapshot excludes age/class/unblock bonuses.
+    return {**args, "priority": effective_priorities(conn, [creator_task_id]).get(creator_task_id, 0)}
 
 
 def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
@@ -49,6 +67,7 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         **(placement_audit if isinstance(placement_audit, dict) else {}),
         # Final insertion policy, not a later assignment or a caller's diagnostic override.
         "placement_policy": placement_policy,
+        "priority": conn.execute("SELECT priority FROM tasks WHERE id=?", (task_id,)).fetchone()[0],
         "consent_stops": snapshot(conn, task_id, creator_task_id),
     })
     if isinstance(placement_audit, dict) and placement_audit.get("hub_admission"):

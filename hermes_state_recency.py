@@ -293,7 +293,10 @@ def _memo_rows(db, store, rank_memo, where_sql, where_clauses, params, outer_whe
         return conn.execute(ranked_query(narrowed, narrowed, seed_from, ids_head, ""),
                             narrowed_params + narrowed_params + [limit, 0]).fetchall()
 
-    def exact_ids():
+    def exact_ids(*, invalidate_candidates=False):
+        if invalidate_candidates:
+            # An in-place message edit can raise a row outside D1's cached candidates.
+            store.stale = True
         picked = _candidates(conn, store, where_clauses, params, need)
         if picked is None:
             return conn.execute(ranked_query(where_sql, outer_where, seed_from, ids_head, ""),

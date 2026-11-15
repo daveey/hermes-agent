@@ -134,7 +134,7 @@ def test_self_check_repins_a_denied_card_left_ready_on_the_hub(gws, hub_judge, p
     assert counts.repinned == 1 and hub_judge.calls == []  # no new verdict, no model call
     assert moved["runs_on"][0] == POOL and moved["previous_runs_on"] is None and moved["queued"] is True
     assert moved["self_check"] == "hub_admission_denied"
-    assert moved["reason"].startswith("dispatcher self-check: ready 180 min here after hub admission denied it")
+    assert moved["reason"].startswith("hub admission denied before claim:")
     assert "a worker with ssh + hub-admin can do it" in moved["reason"]
     assert ("no longer holds" in moved["reason"]) is (case == "stale_kept")
     assert f"repinned {tid}" in caplog.text
@@ -157,7 +157,7 @@ def _linux_only():
 
 # case -> (card kwargs, verdict overrides or a whole verdict, wake_check, waited seconds, cfg override, registry)
 _STAY = {
-    "young": ({}, {}, PROBE, 60, None, None),
+
     "kept_holds": ({}, {}, "test -f ~/.hermes/cache/ready.flag", 3 * 3600, None, None),
     "dir_workspace": ({"workspace_kind": "dir"}, {"kept": "host workspace"}, PROBE, 3 * 3600, None, None),
     "host_repo": ({"requires": ["terminal", "host_repo"]}, {"kept": "uncarried requirement"}, PROBE, 3 * 3600,
@@ -194,17 +194,18 @@ def test_self_check_leaves_other_cards_on_the_hub(gws, hub_judge, portable, monk
 
 def test_a_failed_self_check_still_screens_the_unjudged_cards(gws, hub_judge, portable, monkeypatch, caplog):
     hub, _worker, _svc = gws
-    _card(hub, wake_check=PROBE, verdict=STALE_KEPT)
+    denied = _card(hub, wake_check=PROBE, verdict=STALE_KEPT)
     hub_judge.admit_next = False
     fresh = _card(hub)
 
     def broken(*args, **kwargs):
         raise RuntimeError("registry exploded")
-    monkeypatch.setattr(selfcheck, "denied_target", broken)
+    monkeypatch.setattr(hac, "_replace", broken)
     with caplog.at_level(logging.WARNING, logger=hac.__name__):
         counts = hac.screen(hub.conn)
     assert counts.judged == 1 and counts.moved == 1 and len(_events(hub.conn, fresh, "moved")) == 1
     assert "denied-card self-check failed" in caplog.text
+    assert denied in counts.deferred_ids
 
 
 def test_self_check_repins_a_card_whose_only_verdict_is_in_its_created_payload(gws, hub_judge, portable,

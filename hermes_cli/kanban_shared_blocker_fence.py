@@ -29,14 +29,25 @@ def uid_milliseconds(identity):
     return uid.int >> 80 if uid.version == 7 else None
 
 
+# created_at is read in Python before the INSERT and the uid is minted later by
+# the AFTER INSERT trigger, so a write straddling a second boundary carries a
+# legitimate uid just past created_at's second (replay of local boards: 296 of
+# 957,626 v7 event uids, 259 within 50 ms, max 760 ms). Backfilled uids sit
+# minutes to days out (125k at >= 60 s).
+UID_STRADDLE_MS = 1000
+
+
 def consistent_uid_milliseconds(identity, seconds):
-    """UUIDv7 milliseconds only when they fall in the row's own recorded second.
+    """UUIDv7 milliseconds only when they fall in the row's own recorded second,
+    or within :data:`UID_STRADDLE_MS` after it (a write straddling the boundary).
 
     Sync backfills uid-less rows with a v7 uid stamped at backfill time, so a
-    uid whose second disagrees with the row's seconds clock is not event time.
+    uid stamped later than that is not event time.
     """
     ms = uid_milliseconds(identity)
-    return ms if ms is not None and ms // 1000 == seconds else None
+    if ms is None or type(seconds) is not int:
+        return None
+    return ms if seconds * 1000 <= ms < (seconds + 1) * 1000 + UID_STRADDLE_MS else None
 
 
 def _uid_before_check(identity, started, payload):
@@ -60,9 +71,7 @@ def fence_stale_quota_assertions(conn, states, asserting, *, now):
     after the recovery can report a genuinely new wall: ``run_due_checks`` runs
     the cheap check only while a wall is open, so it never re-opens one.
     """
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_shared_blockers import _mark_cleared, run_effect
-    from hermes_cli.kanban_shared_blocker_checks import run_identity
+    from hermes_cli.kanban_shared_blockers import _mark_cleared
 
     st = states.get('github-rest-quota')
     if st is None:
@@ -79,11 +88,10 @@ def fence_stale_quota_assertions(conn, states, asserting, *, now):
         return
     eligible = []
     for row in asserting:
-        effect, bid = run_effect(row['outcome'], row['metadata'])
-        if effect != 'assert' or bid != st.blocker_id:
+        # G2c: ``asserting`` holds ``kanban_blocker_rows.AssertRow``s, decoded once per task and run.
+        if row.effect != 'assert' or row.bid != st.blocker_id:
             continue
-        started = kb._to_epoch(row['started_at']) or 0
-        ended = kb._to_epoch(row['ended_at']) or 0
+        started, ended = row.started, row.ended
         known = in_flight.get(st.cleared_at, False)
         if known is False:
             admitted = started <= st.cleared_at        # non-check clear: unchanged
@@ -92,7 +100,7 @@ def fence_stale_quota_assertions(conn, states, asserting, *, now):
         else:
             # Snapshot absence does not prove freshness: a remote claim may not
             # have synced yet. Its portable UUID can carry earlier clock evidence.
-            identity = run_identity(conn, row['id'])
+            identity = str(row.uid or f"{row.task_id}|{started}")   # == run_identity(conn, row.id)
             admitted = started < st.cleared_at or (
                 started == st.cleared_at and (identity in known or
                     _uid_before_check(identity, started, receipts.get(st.cleared_at, {}))))

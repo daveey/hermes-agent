@@ -16,6 +16,8 @@ from hermes_cli import kanban_worker_node as node
 @pytest.fixture
 def board(tmp_path):
     conn = kbc.connect(tmp_path / 'board.db')
+    conn.close()
+    conn = kbc.connect(tmp_path / 'board.db')  # attest the existing file at open for shared memos
     try:
         yield conn
     finally:
@@ -242,8 +244,14 @@ def test_remote_archive_empty_sources_skipped_but_pending_source_retried(board, 
     assert stop_call.call_count == owner_call.call_count == 1
 
 
+_FULL_SCAN = 'SELECT t.id FROM tasks t WHERE t.status'
+_PARTIAL_SCAN = 'SELECT t.id FROM tasks t WHERE t.id IN'
+
+
 def test_candidate_memo_skips_scan_and_external_status_commit_invalidates(board):
-    from hermes_cli.kanban_idle_candidates import _on_connection as event_candidates
+    """G2c: a per-task memo. Unchanged calls run no candidate query; another connection's status commit re-reads
+    only the task it marked (the partial query), never the whole board again."""
+    from hermes_cli.kanban_idle_candidates import event_candidates
     task = kb.create_task(board, title='held history', assignee='default')
     with kbc.write_txn(board):
         board.execute("UPDATE tasks SET status = 'todo' WHERE id = ?", (task,))
@@ -253,8 +261,8 @@ def test_candidate_memo_skips_scan_and_external_status_commit_invalidates(board)
     try:
         for _ in range(20):
             assert not event_candidates(board, ('ready',), ('respawn_guarded',))
-        scans = lambda: sum(q.startswith('SELECT t.id FROM tasks t') for q in queries)
-        assert scans() == 1
+        count = lambda prefix: sum(q.startswith(prefix) for q in queries)
+        assert (count(_FULL_SCAN), count(_PARTIAL_SCAN)) == (1, 0)
         path = Path(board.execute('PRAGMA database_list').fetchone()[2])
         writer = kbc.connect(path)
         try:
@@ -263,36 +271,32 @@ def test_candidate_memo_skips_scan_and_external_status_commit_invalidates(board)
         finally:
             writer.close()
         assert event_candidates(board, ('ready',), ('respawn_guarded',))
-        assert scans() == 2
+        assert (count(_FULL_SCAN), count(_PARTIAL_SCAN)) == (1, 1)
     finally:
         board.set_trace_callback(None)
 
 
-def test_candidate_memo_survives_dispatch_connection_reopen(board, monkeypatch):
+def test_candidate_memo_survives_dispatch_connection_reopen(board):
+    """The memo is per file, not per connection: fresh dispatcher connections share it."""
     from hermes_cli import kanban_idle_candidates as candidates
-    from hermes_cli.kanban_reader_retention import reader
     path = Path(board.execute('PRAGMA database_list').fetchone()[2])
     queries = []
-    with reader(path) as observer:
-        observer.set_trace_callback(queries.append)
-    try:
-        for _ in range(3):
-            conn = kbc.connect(path)
-            conn.set_trace_callback(queries.append)
-            try:
-                assert not candidates.event_candidates(conn, ('ready',), ('respawn_guarded',))
-            finally:
-                conn.close()
-        assert sum(q.startswith('SELECT t.id FROM tasks t') for q in queries) == 1
-    finally:
-        with reader(path) as observer:
-            observer.set_trace_callback(None)
+    for _ in range(3):
+        conn = kbc.connect(path)
+        conn.set_trace_callback(queries.append)
+        try:
+            assert not candidates.event_candidates(conn, ('ready',), ('respawn_guarded',))
+        finally:
+            conn.close()
+    assert sum(q.startswith(_FULL_SCAN) for q in queries) == 1
 
 
 def test_candidate_key_failure_falls_back_to_real_query(board, monkeypatch):
     import sqlite3
     from hermes_cli import kanban_idle_candidates as candidates
-    monkeypatch.setattr(candidates.revision, 'read_key', Mock(side_effect=sqlite3.OperationalError('key unavailable')))
+    from hermes_cli import kanban_task_change
+    monkeypatch.setattr(kanban_task_change, 'changed_since',
+                        Mock(side_effect=sqlite3.OperationalError('key unavailable')))
     task = kb.create_task(board, title='candidate despite key failure', assignee='default')
     with kbc.write_txn(board):
         board.execute("UPDATE tasks SET status='ready' WHERE id=?", (task,))
@@ -362,7 +366,7 @@ def test_registry_concurrent_misses_are_single_flight(monkeypatch):
 def test_candidate_memo_bypassed_for_transactions_and_missing_triggers(board, public):
     from hermes_cli import kanban_activity_revision as revision
     from hermes_cli import kanban_idle_candidates as candidates
-    event_candidates = candidates.event_candidates if public else candidates._on_connection
+    event_candidates = candidates.event_candidates if public else candidates.candidate_task_ids
     assert not event_candidates(board, ('ready',), ('respawn_guarded',))
     board.execute('BEGIN')
     try:
@@ -374,13 +378,11 @@ def test_candidate_memo_bypassed_for_transactions_and_missing_triggers(board, pu
         board.rollback()
     assert not event_candidates(board, ('ready',), ('respawn_guarded',))
     revision.drop_triggers(board)
-    # Trace the caller connection rather than the retained reader for this check.
-    event_candidates = candidates._on_connection
     queries = []
     board.set_trace_callback(queries.append)
     try:
         for _ in range(2):
             assert not event_candidates(board, ('ready',), ('respawn_guarded',))
-        assert sum(q.startswith('SELECT t.id FROM tasks t') for q in queries) == 2
+        assert sum(q.startswith(_FULL_SCAN) for q in queries) == 2  # no coverage, no cursor: every call reads
     finally:
         board.set_trace_callback(None)

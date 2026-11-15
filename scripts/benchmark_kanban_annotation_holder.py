@@ -10,7 +10,10 @@ Two parts, both printed as one JSON document:
    rows (67% liveness-only: ``activity_at``/``activity_kind`` + observation ``task_hash`` restamp), ~7.9 changed
    session rows, then calls the real ``kanban_annotation_narrow.key`` and records its process CPU. ``--wal-mb``
    first grows the WAL to >= N MB with autocheckpoint off (card M: read cost follows the active log), else the
-   WAL is checkpointed (TRUNCATE) before the replay.
+   WAL is checkpointed (TRUNCATE) before the replay. Each window also churns a real own board and sync shadow
+   (``churn_local``: other origins' cards, run/event rows, pull stamps every window, as measured on hermes-hub, plus
+   an own substantive change at ``OWN_CHANGE_P``), so raw board/shadow revisions move on nearly every window
+   (t_01a1db1387f61a98: the key used to carry them verbatim).
 
 2. **Replay** (decision model). The C2 census stream (``c2-union.json``: per 2 s window, which components of the
    default scope's union moved) drives the holder rule: 2 s probe, refresh only when the narrow key moved and the
@@ -43,6 +46,9 @@ TIERS = {
 }
 WINDOWS = 150
 ORIGIN = ("me", "default")
+MINE = 300  # own-board cards of this profile's sessions
+LINKED_SHADOW = 100  # shadow cards linked to this origin
+OWN_CHANGE_P = 0.02  # own substantive board/shadow change per 2 s window
 
 
 STATE: dict[int, dict] = {}
@@ -131,6 +137,100 @@ def grow_wal(conn: sqlite3.Connection, path: Path, mb: int) -> int:
     return os.path.getsize(str(path) + "-wal")
 
 
+def build_local(tmp: Path, tasks: int) -> dict:
+    """A real own board (kanban_db schema + revision triggers) and a sync shadow, each with ``tasks // 4`` cards:
+    ``MINE`` owned by this profile's sessions (in its ``state.db``) and ``LINKED_SHADOW`` shadow cards linked to this
+    origin; the rest belong to other origins, as on the hub's shared default board."""
+    from hermes_cli import kanban_activity_revision as revision
+    from hermes_cli import kanban_db_connect as kdb
+    from hermes_cli.kanban_db_sync import SHADOW_DIR
+
+    n = max(tasks // 4, MINE + 10)
+    os.environ["HERMES_KANBAN_HOME"] = str(tmp)
+    board = kdb.init_db(tmp / "kanban.db")
+    bconn = sqlite3.connect(board, isolation_level=None)
+    bconn.execute("BEGIN")
+    for i in range(n):
+        sid = f"mine{i % 200}" if i < MINE else f"remote{i % 3000}"
+        bconn.execute("INSERT INTO tasks (id, title, status, session_id, created_at) VALUES (?, ?, 'running', ?, 1)",
+                      (f"b{i}", f"card {i}", sid))
+    bconn.execute("COMMIT")
+    from hermes_constants import get_hermes_home
+
+    with sqlite3.connect(get_hermes_home() / "state.db") as st:  # health: allow HX015 -- benchmark's temp HERMES_HOME
+        st.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY)")
+        st.executemany("INSERT OR IGNORE INTO sessions (id) VALUES (?)", [(f"mine{i}",) for i in range(200)])
+    st.close()
+    shadow = tmp / SHADOW_DIR / "default.db"
+    shadow.parent.mkdir(parents=True, exist_ok=True)
+    sconn = sqlite3.connect(shadow, isolation_level=None)
+    sconn.execute("PRAGMA journal_mode=WAL")
+    sconn.executescript(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, status TEXT, assignee TEXT, created_at INTEGER, "
+        "started_at INTEGER, priority INTEGER, block_kind TEXT, human_request TEXT, created_on TEXT, "
+        "lease_expires INTEGER);"
+        "CREATE TABLE task_links (parent_id TEXT, child_id TEXT);"
+        "CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, status TEXT);"
+        "CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT);"
+        "CREATE TABLE task_comments (id INTEGER PRIMARY KEY, task_id TEXT, body TEXT);"
+        "CREATE TABLE task_chat_links (uid TEXT, task_id TEXT, chat_gateway TEXT, chat_profile TEXT, "
+        "chat_session TEXT, kind TEXT, released INTEGER, created_at INTEGER);"
+        "CREATE INDEX task_chat_links_origin ON task_chat_links(chat_gateway, chat_profile, released);"
+        "CREATE TABLE kanban_sync_state (board_id TEXT PRIMARY KEY, cursor INTEGER, gateway_id TEXT, "
+        "hlc_last TEXT, mode TEXT, applying INTEGER, pending_run_uid TEXT, pulled_at REAL);")
+    revision.ensure_revision(sconn, revision.SHADOW_TABLES)
+    sconn.execute("BEGIN")
+    for i in range(n):
+        sconn.execute("INSERT INTO tasks VALUES (?, ?, 'running', 'w', 1, NULL, 0, NULL, NULL, 'owner', 0)",
+                      (f"r{i}", f"card {i}"))
+        if i < LINKED_SHADOW:
+            sconn.execute("INSERT INTO task_chat_links VALUES (?, ?, ?, ?, ?, 'created', 0, 1)",
+                          (f"u{i}", f"r{i}", ORIGIN[0], ORIGIN[1], f"mine{i % 200}"))
+    sconn.execute("INSERT INTO kanban_sync_state VALUES ('default', 0, ?, '', 'shadow', 0, NULL, ?)",
+                  (ORIGIN[0], time.time()))
+    sconn.execute("COMMIT")
+    return {"board": board, "bconn": bconn, "shadow": shadow, "sconn": sconn, "n": n}
+
+
+def local_full(local: dict) -> tuple:
+    from hermes_cli import kanban_activity_revision as revision
+    from hermes_cli import kanban_session_activity as ksa
+
+    return ("hubsig", (str(local["board"]), ksa._board_content_key(local["board"])),
+            (str(local["shadow"]), ksa._board_content_key(local["shadow"], revision.SHADOW_TABLES)))
+
+
+def churn_local(local: dict, rng: random.Random, step: int) -> int:
+    """One 2 s window of board/shadow revision churn, as measured on hermes-hub (t_01a1db1387f61a98: the default
+    shadow's revision moved on every 10 s sample, the default board's on about half): other origins' cards, run rows,
+    events and pull stamps, plus a rare own substantive change. Returns the number of own substantive changes."""
+    bconn, sconn, n = local["bconn"], local["sconn"], local["n"]
+    if rng.random() < 0.5:
+        i = rng.randrange(MINE, n)
+        bconn.execute("UPDATE tasks SET status=? WHERE id=?", (rng.choice(["running", "ready", "blocked"]), f"b{i}"))
+    bconn.execute("INSERT INTO task_events (task_id, kind, created_at) VALUES (?, 'spawned', ?)",
+                  (f"b{rng.randrange(n)}", step))
+    sconn.execute("BEGIN")
+    sconn.execute("UPDATE tasks SET status=? WHERE id=?",
+                  (rng.choice(["running", "ready", "blocked"]), f"r{rng.randrange(LINKED_SHADOW, n)}"))
+    sconn.execute("INSERT INTO task_events (task_id, kind) VALUES (?, 'spawned')", (f"r{rng.randrange(n)}",))
+    sconn.execute("UPDATE tasks SET lease_expires=? WHERE id=?", (step, f"r{rng.randrange(n)}"))
+    sconn.execute("UPDATE kanban_sync_state SET pulled_at=?", (time.time(),))
+    sconn.execute("COMMIT")
+    own = 0
+    if rng.random() < OWN_CHANGE_P:
+        own += 1
+        if rng.random() < 0.5:
+            i = rng.randrange(MINE)
+            bconn.execute("UPDATE tasks SET status=CASE status WHEN 'running' THEN 'blocked' ELSE 'running' END "
+                          "WHERE id=?", (f"b{i}",))
+        else:
+            i = rng.randrange(LINKED_SHADOW)
+            sconn.execute("UPDATE tasks SET status=CASE status WHEN 'running' THEN 'blocked' ELSE 'running' END "
+                          "WHERE id=?", (f"r{i}",))
+    return own
+
+
 def churn(conn: sqlite3.Connection, rng: random.Random, linked: int, tasks: int, sessions: int, step: int) -> dict:
     """One 2 s window of the rf2 mix. Returns what kind of change happened to linked rows."""
     kinds = {"liveness_linked": 0, "substantive_linked": 0, "unlinked": 0, "sessions": 0}
@@ -163,6 +263,7 @@ def churn(conn: sqlite3.Connection, rng: random.Random, linked: int, tasks: int,
 
 
 def scale_tier(name: str, wal_mb: int, seed: int = 7) -> dict:
+    from hermes_cli import kanban_annotation_local as own
     from hermes_cli import kanban_annotation_narrow as narrow
     from hermes_cli import kanban_session_activity as ksa
 
@@ -180,57 +281,73 @@ def scale_tier(name: str, wal_mb: int, seed: int = 7) -> dict:
     ksa._hub_db_path = lambda: hub
     narrow._ledger_path = lambda: ledger
     narrow.reset()
+    local = build_local(tmp, tasks)
+    own._shadow_gateway = lambda: ORIGIN[0]
     scope = ("home", ORIGIN[1], "kh", "hub", "mail")
-    full = ("hubsig", ("board", 1))
+    full = local_full(local)
     t0 = time.process_time()
     first = narrow.key(scope, full, [])
     cold_ms = (time.process_time() - t0) * 1000
     assert first is not None, "narrow key unavailable on a healthy store"
     rng = random.Random(seed)
     costs, moved, liveness_only_windows, liveness_moved = [], 0, 0, 0
+    raw_moved, own_changes = 0, 0
     previous = first
     for step in range(WINDOWS):
         kinds = churn(conn, rng, linked, tasks, sessions, step)
+        changed_own = churn_local(local, rng, step)
+        own_changes += changed_own
+        before_full, full = full, local_full(local)
+        raw_moved += before_full[1:] != full[1:]
         t0 = time.process_time()
         k = narrow.key(scope, full, [])
         costs.append((time.process_time() - t0) * 1000)
         assert k is not None, f"narrow key unavailable at step {step}"
         if k != previous:
             moved += 1
-        if kinds["substantive_linked"] == 0:
+        if kinds["substantive_linked"] == 0 and not changed_own:
             liveness_only_windows += 1
             liveness_moved += k != previous
         previous = k
     conn.close()
+    local["bconn"].close()
+    local["sconn"].close()
     costs.sort()
     return {"tier": name, "linked": linked, "replica_tasks": tasks, "sessions": sessions,
             "obligations": obligations, "wal_bytes": wal, "cold_ms": round(cold_ms, 3),
+            "board_cards": local["n"], "shadow_cards": local["n"], "own_cards": MINE, "linked_shadow": LINKED_SHADOW,
+            "board_or_shadow_revision_moved_windows": raw_moved, "own_substantive_changes": own_changes,
             "key_ms_mean": round(statistics.fmean(costs), 3), "key_ms_p50": round(costs[len(costs) // 2], 3),
             "key_ms_p95": round(costs[int(len(costs) * 0.95)], 3), "key_ms_max": round(costs[-1], 3),
-            "windows": WINDOWS, "key_moved_windows": moved, "windows_without_substantive_linked": liveness_only_windows,
-            "key_moved_without_substantive_linked": liveness_moved, "narrow_stats": dict(narrow.stats)}
+            "windows": WINDOWS, "key_moved_windows": moved, "windows_without_substantive": liveness_only_windows,
+            "key_moved_without_substantive": liveness_moved, "narrow_stats": dict(narrow.stats),
+            "local_stats": dict(own.stats)}
 
 
-def replay(union: dict, key_ms: float, per_refresh_ms: float, probe_ms: float, exact_move_rate: float) -> dict:
+def replay(union: dict, key_ms: float, per_refresh_ms: float, probe_ms: float, exact_move_rate: float,
+           local_move_rate: float = OWN_CHANGE_P) -> dict:
     """Holder decisions over the c2 census stream for the default scope."""
-    comps = {"hub", "ledger", "own_boards", "shadows", "freshness_bucket"}
+    # [daveey] Raw own_boards/shadows revisions and 180 s freshness buckets no longer move the key
+    # (t_01a1db1387f61a98): own content moves it at ``local_move_rate`` per window (scale part: OWN_CHANGE_P).
+    comps = {"hub", "ledger"}
     samples = union["samples"]
     last, refreshes, renews, keys, probes, pending = -1e9, 0, 0, 0, 0, False
-    exact_since = False
     for i, s in enumerate(samples):
         t = (i + 1) * 2.0
         moved = set(s["moved"].get("default", ()))
-        probes += 1
-        exact_since = exact_since or bool(moved) or random.random() < exact_move_rate
-        pending = pending or bool(moved & comps)
+        pending = pending or bool(moved & comps) or random.random() < local_move_rate
         if t - last >= 20.0:
-            refreshes, renews, last, pending, exact_since = refreshes + 1, renews + 1, t, False, False
+            refreshes, renews, last, pending = refreshes + 1, renews + 1, t, False
             continue
-        if t - last < 10.0 or not exact_since:
+        if t - last < 10.0:
             continue
-        keys += 1  # exact moved past the floor: the holder computes the narrow key
+        # Match _holder_refresh_scope: no input work inside the floor; every
+        # post-floor pass probes the narrow key, even when exact inputs are quiet.
+        # Refresh cost already includes its publication-time input/key reads.
+        probes += 1
+        keys += 1
         if pending:
-            refreshes, last, pending, exact_since = refreshes + 1, t, False, False
+            refreshes, last, pending = refreshes + 1, t, False
     elapsed = len(samples) * 2.0
     holder = (refreshes * per_refresh_ms + keys * key_ms + probes * probe_ms) / 1000 / elapsed * 100
     base_refreshes = sum(1 for _ in samples if random.random() < exact_move_rate)
@@ -270,7 +387,7 @@ def main() -> int:
     # holder-side share over the replay (calls x the largest tier's mean cost) must stay <= 0.5% of a core.
     # The total holder figure is REPORTED (``over_budget``), not gated here: the forced 20 s renewal alone costs
     # ``renewal_only_floor_pct`` at the measured per-refresh cost, so 2.4% needs per-refresh work cuts (P1).
-    bad = [s["tier"] for s in out["scale"] if s["key_moved_without_substantive_linked"]]
+    bad = [s["tier"] for s in out["scale"] if s["key_moved_without_substantive"]]
     if out.get("replay") and out["replay"]["narrow_key_pct"] > 0.5:
         bad.append("narrow_key_pct")
     if bad:

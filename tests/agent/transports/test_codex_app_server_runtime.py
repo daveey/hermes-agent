@@ -102,7 +102,8 @@ class TestCodexAppServerClose:
 
     @pytest.mark.live_system_guard_bypass
     @pytest.mark.platforms("posix")  # start_new_session/setsid is POSIX-only
-    def test_close_reaps_independent_descendant_process_group(self, tmp_path):
+    @pytest.mark.parametrize("publication", ["normal", "paused", "readiness_failure"])
+    def test_close_reaps_independent_descendant_process_group(self, tmp_path, publication):
         """A Codex-owned MCP child that calls setsid must not survive close().
 
         Killing only the app-server root lets independently grouped stdio MCP
@@ -110,14 +111,15 @@ class TestCodexAppServerClose:
         spawns a long-lived child in its own session, records its PID, and exits
         promptly on root SIGTERM; close() must still reap the child.
         """
+        import contextlib
         import os
         import stat
         import sys
-        import time
 
         import psutil
 
         from agent.transports.codex_app_server import CodexAppServerClient
+        from tests.waiting import wait_until
 
         child_pid_file = tmp_path / "child.pid"
         fake_codex = tmp_path / "fake_codex.py"
@@ -134,13 +136,18 @@ child = subprocess.Popen(
     [sys.executable, "-c", "import time; time.sleep(60)"],
     start_new_session=True,
 )
-with open(os.environ["CHILD_PID_FILE"], "w", encoding="utf-8") as fh:
+pid_path = os.environ["CHILD_PID_FILE"]
+with open(pid_path + ".pending", "w", encoding="utf-8") as fh:
+    if os.environ["PAUSE_PUBLICATION"] == "1":
+        os.kill(os.getpid(), signal.SIGSTOP)
     fh.write(str(child.pid))
 
 def _exit(_sig, _frame):
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, _exit)
+# Publish only after the complete PID is closed and graceful exit is ready.
+os.replace(pid_path + ".pending", pid_path)
 while True:
     time.sleep(1)
 """.lstrip()
@@ -149,32 +156,58 @@ while True:
 
         client = CodexAppServerClient(
             codex_bin=str(fake_codex),
-            env={"CHILD_PID_FILE": str(child_pid_file)},
+            env={
+                "CHILD_PID_FILE": str(child_pid_file),
+                "PAUSE_PUBLICATION": "0" if publication == "normal" else "1",
+            },
         )
-        try:
-            deadline = time.time() + 5
-            while not child_pid_file.exists() and time.time() < deadline:
-                time.sleep(0.05)
-            assert child_pid_file.exists(), "fake codex did not report child PID"
-            child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-            assert psutil.pid_exists(child_pid)
+        root = psutil.Process(client._proc.pid)
+        owned = []
+        expected = (
+            pytest.raises(AssertionError, match="injected readiness failure")
+            if publication == "readiness_failure" else contextlib.nullcontext()
+        )
+        with expected:
+            try:
+                if publication != "normal":
+                    wait_until(lambda: root.status() == psutil.STATUS_STOPPED,
+                               what="writer paused after opening PID file")
+                    owned = root.children(recursive=True)
+                    assert len(owned) == 1
+                    # Existence must mean the complete PID is published, not merely opened.
+                    assert not child_pid_file.exists()
+                    if publication == "readiness_failure":
+                        raise AssertionError("injected readiness failure")
+                    root.resume()
+                wait_until(child_pid_file.exists, what="fake codex published child PID")
+                child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+                owned = [psutil.Process(child_pid)]
+                assert psutil.pid_exists(child_pid)
+                assert os.getpgid(child_pid) == child_pid
+                assert os.getpgid(child_pid) != os.getpgid(root.pid)
 
-            client.close(timeout=1.0)
+                client.close(timeout=1.0)
 
-            deadline = time.time() + 5
-            while psutil.pid_exists(child_pid) and time.time() < deadline:
-                time.sleep(0.05)
-            assert not psutil.pid_exists(child_pid), (
-                "Codex app-server close() left an independently grouped "
-                f"descendant alive: pid={child_pid}"
-            )
-        finally:
-            client.close(timeout=0.1)
-            if child_pid_file.exists():
-                try:
-                    os.kill(int(child_pid_file.read_text(encoding="utf-8")), 9)
-                except ProcessLookupError:
-                    pass
+                wait_until(lambda: not psutil.pid_exists(child_pid), what=(
+                    "Codex app-server close() reaped independently grouped "
+                    f"descendant: pid={child_pid}"
+                ))
+                assert not psutil.pid_exists(child_pid)
+            finally:
+                # Freeze spawning before discovery. Never parse an unpublished PID in
+                # teardown, or rely on the close() implementation under test for cleanup.
+                with contextlib.suppress(psutil.NoSuchProcess):
+                    root.suspend()
+                    owned.extend(root.children(recursive=True))
+                    root.kill()
+                for child in owned:
+                    with contextlib.suppress(psutil.NoSuchProcess):
+                        child.kill()
+                client._proc.wait(timeout=5)
+                psutil.wait_procs(owned, timeout=5)
+                client.close(timeout=0.1)
+        assert not root.is_running()
+        assert all(not child.is_running() for child in owned)
 
     def test_close_escalates_to_tree_kill_when_root_ignores_sigterm(self, monkeypatch):
         """When the root outlives the graceful wait, close() must kill the tree AND

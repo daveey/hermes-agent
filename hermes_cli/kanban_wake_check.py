@@ -321,17 +321,26 @@ def foreign_ids(conn: sqlite3.Connection, own: Optional[str] = None) -> set[str]
     if not own:
         return set()
 
-    def scan(c: sqlite3.Connection) -> frozenset[str]:
-        rows = c.execute("SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ?", (own,))
-        return frozenset(r[0] for r in rows.fetchall())
+    sql = "SELECT id FROM tasks WHERE created_on IS NOT NULL AND created_on != ?"
 
-    # [daveey] Structural (``created_on`` is a content column, so any change moves the task-table revision):
-    # reuse the scan while the revision holds. It ran ~7 times a tick, a full ``tasks`` scan each (G2).
-    from hermes_cli.kanban_sweep_gate import memo
+    def full(c: sqlite3.Connection) -> dict[str, bool]:
+        return {r[0]: True for r in c.execute(sql, (own,)).fetchall()}
+
+    def partial(c: sqlite3.Connection, ids: list[str]) -> dict[str, bool]:
+        marks = ",".join("?" * len(ids))
+        return {r[0]: True for r in c.execute(f"SELECT id FROM tasks WHERE id IN ({marks}) AND created_on IS NOT NULL "
+                                              "AND created_on != ?", (*ids, own)).fetchall()}
+
+    # [daveey] Structural: a card's ``created_on`` is its own content column, so a change marks that card in the
+    # per-task change cursor. G2c: refresh only the marked cards; the whole-board revision moved on nearly every
+    # hub tick, and the full ``tasks`` scan (~5 ms) ran several times a tick.
+    from hermes_cli import kanban_task_memo as memo
     try:
-        return memo(f"foreign_ids:{own}", conn, scan)
+        st = memo.state("foreign_ids", conn, full=full, partial=partial, extra=own,
+                        columns={"tasks": ("created_on",)})
     except sqlite3.OperationalError:
         return set()
+    return st.view("ids", frozenset)
 
 
 def foreign_copy(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -396,8 +405,20 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
         return out
     db_key = str(kbc._main_db_file(conn) or id(conn))
     own = own_gateway(conn)
-    foreign = foreign_ids(conn, own)
     marks = ",".join("?" for _ in kc.SCHEDULED_ENTRY_EVENTS)
+    # G2e: a clock-only park is settled once (``_RESTORE_SEEN``) and the hub board holds ~160 of them, so the per-card
+    # read below ran 160 statements and decodes a tick to find nothing new. One batched read names each card's newest
+    # park; a card whose newest park is the settled one is skipped without reading it. A newer park is read as before.
+    newest: dict[str, int] = {}
+    for i in range(0, len(missing), 500):
+        part = missing[i:i + 500]
+        newest.update(conn.execute(
+            f"SELECT task_id, MAX(id) FROM task_events WHERE kind IN ({marks}) AND task_id IN "
+            f"({','.join('?' for _ in part)}) GROUP BY task_id", (*kc.SCHEDULED_ENTRY_EVENTS, *part)).fetchall())
+    missing = [tid for tid in missing if tid in newest and _RESTORE_SEEN.get((db_key, tid)) != newest[tid]]
+    if not missing:
+        return out
+    foreign = foreign_ids(conn, own)
     for tid in missing:
         park = conn.execute(
             f"SELECT id, payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
@@ -414,6 +435,7 @@ def restore_missing_checks(conn: sqlite3.Connection, *, now: Optional[int] = Non
             continue
         if conn.execute("SELECT 1 FROM task_events WHERE task_id = ? AND id > ? AND kind IN ('claimed', 'spawned') "
                         "LIMIT 1", (tid, park_id)).fetchone():
+            _RESTORE_SEEN[key] = park_id  # G2e: events never go away; only a newer park (a new id) reopens this
             continue  # a later run's park has not reached this board yet
         every = normalize_every(payload.get("check_every"))
         host = payload.get("probe_host")
@@ -879,6 +901,8 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                 kb.add_comment(conn, task_id, "kanban-dispatcher", note)
             return woke
         if rc == 1 and not output_error(out):
+            from hermes_cli.kanban_wait_baseline import record_departure
+            record_departure(conn, task_id, cmd, out)
             if dead_ancestry:
                 from hermes_cli.kanban_dead_ancestry import wake_once
                 woke = wake_once(conn, task_id, cmd, dead_ancestry)

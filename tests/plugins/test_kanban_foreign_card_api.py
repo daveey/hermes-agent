@@ -193,6 +193,11 @@ def test_ready_card_reports_local_queue_position(kanban_home, api, monkeypatch):
     _set(claimed, claim_lock="host:1", created_at=10)  # being claimed this tick: not ahead in the lane
     from hermes_cli import kanban_worker_placement as kwp
     _set(pool, placement_policy=kwp.POLICY, created_at=10)  # waits for the worker pool, not a local slot
+    # Fix the ready episode as well as card creation: real creation events use
+    # whole seconds and can otherwise straddle a clock tick during this fixture.
+    with kbc.connect_closing() as conn:
+        conn.execute("UPDATE task_events SET created_at=1000 WHERE kind='created'")
+        conn.commit()
     q = api.get(f"/api/plugins/kanban/tasks/{new}").json()["queue"]
     assert isinstance(q.pop("observed_at"), int)
     assert q == {"lane": "local", "ahead": 2, "running": 3, "limit": 6, "approximate": True, "board": "default"}

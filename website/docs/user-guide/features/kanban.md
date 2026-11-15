@@ -674,9 +674,15 @@ At `kanban.spend_budget_runs` spending runs (default 15) or
 the write lock and never under another dispatcher's live claim, moves the card
 to `triage` with a `spend_budget_triaged` event and a comment showing the spend
 (`dispatch --json` key `no_progress_held`, action `spend_budget:triage`). The
-auto-decomposer skips cards that already ran, so triage holds the card until
-someone splits, re-scopes, archives or promotes it; a promote starts a new
-budget window.
+auto-decomposer skips cards that already ran, and the stale-triage sweep cannot
+release a spend hold. Only a recorded manual promote (after splitting or
+re-scoping, if needed) or archive releases it; a promote starts a new budget
+window. Changing status or disabling the budget does not clear an existing hold.
+
+Each stop records its producer in `spend_budget_decision_ready.producer`: owning chats
+receive one Kanban notice with spend and decision options, or a card with no
+chat gets one board-supervisor decision card. The supervisor uses
+`kanban.orchestrator_profile`, falling back to `default`. No Inbox post is made.
 
 A card can carry its own limits, so a standing card meant to run indefinitely
 (an upkeep shepherd) is not sent to triage every 15 runs:
@@ -1543,19 +1549,23 @@ hermes kanban create "nightly backup audit" \
 
 The dispatcher refuses to re-spawn a ready task when it hit an auth error (401, invalid API key, unauthorized, billing) on the previous run (`blocker_auth`), or completed a run successfully within the guard window (`recent_success`), or a recent task comment links to a GitHub PR (`active_pr`). Two cooldowns hold a card without ever counting against it: `rate_limit_cooldown` after a quota-wall requeue and `infrastructure_cooldown` after the host refused to place the worker (no restart-safe systemd scope — see [Workers and systemd cgroups](#workers-and-systemd-cgroups)); both share the `HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS` window (default 300 s). Quota / rate-limit / 429 text in `last_failure_error` always takes the `rate_limit_cooldown` path, even when a later non-failure run superseded the `rate_limited` one; once the cooldown elapses the stamp is cleared and the card retries. A quota wall is never `blocker_auth` and never escalates to a human block kind, and a legacy guard-hold block on a quota error is released automatically once another card completes after it. This prevents repeat worker storms on the same bug or task while a human catches up. See the `respawn_guarded` row in the [event reference](#event-reference).
 
+The stuck detector distinguishes intentional `llm_pacing` waits and `worker_load_pressure` from unexplained zero-spawn ticks. Expected waits log `kanban dispatch held` at INFO, with provider running/limit and the next real reset (or the condition rechecked next tick); foreign `labels_mismatch` rows do not turn a fully explained local wait into a stall. A refresh deadline alone cannot justify a pacing hold: an idle zero-limit pool without a future reset remains actionable. Within one dispatcher tenure, a continuously observed card waiting for 15 minutes (or 15 minutes beyond its first real reset) emits `kanban admission prolonged` at WARNING, even if other cards start. This reports lack of admission for that card, not lack of progress by running workers. Warnings repeat at most every five minutes; a new dispatcher tenure starts a new observation window.
+
 To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` — the output lists `Guarded (<reason>): <task id>` per held card (and `respawn_guarded`, `rate_limited`, `skipped_locked`, `memory_pressure` with `--json`). The gateway's and the standalone daemon's "dispatcher stuck" warning also names what the last tick held back, e.g. `Last tick held back: active_pr=1`.
 
 `recent_success` and `active_pr` hold the **ready** lane only — they are the inputs to a review handoff, not signals against one. To have a reviewer, closer or other recovery profile pick up a card whose PR is already open, either move it to the review lane with `hermes kanban request-review <id>` (accepted from `ready` as well as `running`; the review-lane spawn is not subject to either guard) or hand the ready card to that profile with `hermes kanban assign <id> <profile>`: a handoff recorded *after* the PR comment — an operator reassign, a reviewer's changes-requested verdict, or a review reopen — lifts `active_pr` for the profile now named on the card, because that PR is exactly what it must work on. Only a change to a *different* profile counts: re-assigning the same profile, unassigning, or the dispatcher's own `kanban.default_assignee` fill-in does not lift the guard, so the assignee that opened the PR is still not re-spawned against it after a crash, reclaim or no-op reassign, and a newer PR comment posted after the handoff guards again. A deliberate re-queue after a success (drag `done→ready`, `unblock`, re-promotion) also lifts `recent_success`, so a manual re-run is never silently held for the whole window.
 
 ### LLM quota pacing (`kanban.llm_pacing`)
 
-Before claiming a ready or review card, the dispatcher checks the OAuth pool of the provider the card's next run would use (for a `class:*` selector, every provider the class may route to; the card waits only when all of them hold it). It reads each account's account-wide usage windows (`five_hour` and `seven_day` from `/api/oauth/usage`; Codex `Session`/`Weekly`) at most every `read_interval_seconds`, measures each window's burn rate from its recent samples, and compares the pool's burn with the rate that would bring every account with headroom to `target_percent` exactly at its window's reset. An account whose window has not started yet (the endpoint reports `null` for an idle `five_hour`) counts as a fresh full window.
+Before claiming a ready or review card, the dispatcher checks the OAuth pool of the provider the card's next run would use (for a `class:*` selector, every provider the class may route to; the card waits only when all of them hold it). It reads each account's account-wide usage windows (`five_hour` and `seven_day` from `/api/oauth/usage`; Codex `Session`/`Weekly`) at most every `read_interval_seconds`, measures each window's burn rate from its recent samples, and compares the pool's burn with the rate that would bring every account with headroom to `target_percent` exactly at its window's reset. An account whose window has not started yet (the endpoint reports `null` for an idle `five_hour`) counts as a fresh full window; an account read successfully with both windows `null` (idle or brand-new) counts as two. A failed usage read adds no headroom.
 
 - **open**: the pool is on or behind pace, so claims proceed (just behind pace, this host may grow only to its recent concurrency × the pace factor, at least one run).
-- **paced**: the pool is ahead of pace, so this host keeps its recent average concurrency on that provider × the pace factor. Review-lane, negative-priority and continuation-woken cards get only `deferrable_share` of that limit.
+- **paced**: the pool is ahead of pace, so this host keeps its recent average concurrency on that provider × the pace factor. Review-lane, negative-priority and continuation-woken cards get only `deferrable_share` of that limit. The final limit has a one-run floor, including deferrable work: paced pools still have headroom, and an idle host must be able to restart rather than remain at zero forever. That floor is shared with running work on the provider, not an extra slot per card; it can exceed the proportional rate at low concurrency. Known quota walls are resolved before this check, and a rerouted card is governed by its destination provider's limit.
 - **held**: every readable account is past its reserve (`reserve_five_hour_percent` / `reserve_seven_day_percent`), so no Kanban claim starts until the earliest reset frees one; the remaining headroom is left to chats, cron and notices.
 
 A held card stays `ready` and unclaimed. The dispatcher records an `llm_paced` event (providers, state, limit, running) and a `dispatch_skipped` row with reason `llm_paced`. Queue position, the chat-wait and parent-unclaimed notices, and `hermes kanban diagnostics` (`held_in_ready`) name the hold instead of "skip reason unrecorded". Raising the card's priority does not lift it. If no account can be read, the governor fails open, and mandatory model pins and ungoverned providers always start. Only Kanban dispatch consults it.
+
+A **held** pool whose reset is more than `reroute_after_s` away (or unknown) moves the route instead of holding the card for days: an unpinned default-routed card, a `review_unpinned` reviewer, or a non-mandatory concrete pin runs on another eligible route of the same routing class whose provider is neither held nor walled (the same eligibility as the quota-wall reroutes). The route reason is `default+paced:<provider>`, `review_unpinned+paced:<provider>` or `pinned+paced:<provider>`; the card row never changes, and the governor then judges the new provider as usual. Queue notes and stall notices name the move (`next run rerouted: default+paced:openai-codex -> anthropic/<model>`). A **paced** pool never moves a route, and mandatory pins, `class:*` selectors and `require_model: true` cards keep theirs. The decision reads only the pace stored in `llm_pacing.json`; it makes no usage read.
 
 | Config key | Default | What it does |
 |------------|---------|--------------|
@@ -1568,6 +1578,7 @@ A held card stays `ready` and unclaimed. The dispatcher records an `llm_paced` e
 | `kanban.llm_pacing.rate_window_seconds` | `3600` | Lookback for burn rates and this host's average concurrency. |
 | `kanban.llm_pacing.min_rate_span_seconds` | `600` | Shortest sample span a burn slope is measured over. |
 | `kanban.llm_pacing.deferrable_share` | `0.5` | Share of a paced limit that deferrable cards may use (0-1). |
+| `kanban.llm_pacing.reroute_after_s` | `3600` | A held pool whose reset is further away than this moves default, `review_unpinned` and non-mandatory pinned routes to an unheld same-class peer. |
 
 ### Dependency-review repair continuation
 

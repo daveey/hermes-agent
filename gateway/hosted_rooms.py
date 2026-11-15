@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 from contextlib import closing
 from functools import partial
 from pathlib import Path
@@ -482,13 +483,43 @@ def _connect(db_path: DbPath) -> sqlite3.Connection:
         initialize=partial(_initialize_store, db_path=path), lock_retries=_JOURNAL_MODE_LOCK_RETRIES)
 
 
+_READY_STORES: dict[Path, tuple[int, int, int]] = {}
+_READY_STORES_LOCK = threading.Lock()
+_READY_STORES_LIMIT = 128
+
+
+def _read_store_ready(conn: sqlite3.Connection, path: Path, identity: tuple[int, int]) -> bool:
+    """Memoize only proven readiness, fenced by pre-open file identity and schema cookie."""
+    current = path.stat()
+    if identity != (current.st_dev, current.st_ino):
+        return _store_ready(conn, path)
+    key = (*identity, conn.execute("PRAGMA schema_version").fetchone()[0])
+    with _READY_STORES_LOCK:
+        if _READY_STORES.get(path) == key:
+            return True
+    if not _store_ready(conn, path):
+        return False
+    with _READY_STORES_LOCK:
+        _READY_STORES[path] = key
+        if len(_READY_STORES) > _READY_STORES_LIMIT:
+            del _READY_STORES[next(iter(_READY_STORES))]
+    return True
+
+
 def _read_connection(db_path: DbPath) -> sqlite3.Connection:
     """Open the room store without steady-state journal or migration writes."""
-    path = Path(db_path)
+    path = Path(db_path).resolve()
     if not path.is_file():
         _connect(path).close()
+    # Capture before opening: replacement must never label an old connection with a new inode.
+    stat = path.stat()
     conn = open_sqlite(path)
-    if not _store_ready(conn, path):
+    try:
+        ready = _read_store_ready(conn, path, (stat.st_dev, stat.st_ino))
+    except BaseException:
+        conn.close()
+        raise
+    if not ready:
         conn.close()
         _connect(path).close()
         conn = open_sqlite(path)

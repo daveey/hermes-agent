@@ -155,11 +155,7 @@ def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[d
     pin's own provider counts as the card's (rule 1); on any other provider it only rules peers out.
     Non-allocating: reads config and the credential pool and writes nothing, so preview and admission
     decide alike."""
-    from agent.model_routing import ModelRoutingError, eligible_routes, validate_policy
-    from agent.model_routing_agent import class_requirements
-    from hermes_cli.config import is_provider_enabled
-    from hermes_cli.kanban_model_assignment import _assignee_config
-    from hermes_cli.kanban_provider_walls import active_walls, live_quota_wall
+    from hermes_cli.kanban_provider_walls import active_walls
     pinned = pin(task)
     if lane == "review" or pinned is None or is_mandatory_pin(task):
         return None
@@ -167,6 +163,18 @@ def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[d
     own = _with_known_wall(own_walls(conn, task.id, now, current), pinned, now)
     if provider not in own or own[provider][0] - now < min_wall_seconds(cfg):
         return None
+    return peer_route(task, model, {**active_walls(now=now), **{name: wall[0] for name, wall in own.items()}})
+
+
+def peer_route(task: Any, model: str, walled: dict) -> Optional[tuple[str, str]]:
+    """Rule 5: the first eligible ``(model, provider)`` of pinned *model*'s one routing class whose provider is not in
+    *walled*, is enabled, and is not quota-walled in the live pool; None when there is none. Also the peer a
+    pacing-held pin moves to (``kanban_paced_reroute``)."""
+    from agent.model_routing import ModelRoutingError, eligible_routes, validate_policy
+    from agent.model_routing_agent import class_requirements
+    from hermes_cli.config import is_provider_enabled
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from hermes_cli.kanban_provider_walls import live_quota_wall
     config = _assignee_config(getattr(task, "assignee", None)) or {}
     policy = config.get("model_routing") or {}
     try:
@@ -179,7 +187,6 @@ def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[d
     levels = [key for key, routes in policy.get("routes", {}).items() if any(r["model"] == model for r in routes)]
     if len(levels) != 1:
         return None
-    walled = {**active_walls(now=now), **{name: wall[0] for name, wall in own.items()}}
     providers = config.get("providers") or {}
     routes = eligible_routes(policy, levels[0], class_requirements(config), eligible=lambda r: (
         r["provider"] not in walled and is_provider_enabled(providers.get(r["provider"], {}))))

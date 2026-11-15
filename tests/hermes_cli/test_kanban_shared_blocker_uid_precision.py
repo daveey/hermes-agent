@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_shared_blocker_checks as checks
-from hermes_cli.kanban_shared_blocker_fence import _uid_before_check
+from hermes_cli.kanban_shared_blocker_fence import _uid_before_check, consistent_uid_milliseconds
 
 
 def _claim_uid(milliseconds, *, version=7, suffix=0):
@@ -58,6 +58,40 @@ def test_inconsistent_seconds_retain_fallback(claimed_ms, started, checked_ms):
 def test_same_second_requires_strictly_earlier_milliseconds(claimed_ms, expected, suffix):
     assert _uid_before_check(_claim_uid(claimed_ms, suffix=suffix), 1,
                              {'checked_at_ms': 1200}) is expected
+
+
+@pytest.mark.parametrize(('claimed_ms', 'seconds', 'expected'), [
+    pytest.param(1000, 1, 1000, id='first-millisecond-of-own-second'),
+    pytest.param(1999, 1, 1999, id='last-millisecond-of-own-second'),
+    pytest.param(2010, 1, 2010, id='straddle-10ms-into-next-second'),
+    pytest.param(2999, 1, 2999, id='last-straddle-millisecond'),
+    pytest.param(3000, 1, None, id='past-the-straddle-window'),
+    pytest.param(999, 1, None, id='before-own-second'),
+    pytest.param(1500, None, None, id='no-seconds'),
+    pytest.param(1500, 1.0, None, id='float-seconds'),
+    pytest.param(1500, True, None, id='bool-is-not-a-seconds-clock'),
+])
+def test_consistent_uid_milliseconds_window(claimed_ms, seconds, expected):
+    assert consistent_uid_milliseconds(_claim_uid(claimed_ms), seconds) == expected
+
+
+def test_a_straddled_claim_is_never_before_a_same_second_check():
+    # A claim uid minted in second+1 is after any check of second `started`: the fence keeps its fallback.
+    assert _uid_before_check(_claim_uid(2010), 1, {'checked_at_ms': 1999}) is False
+
+
+def test_shared_blocker_event_order_keeps_a_straddled_uid_after_its_second():
+    from hermes_cli.kanban_shared_blockers import _event_order
+    straddled = {'id': 1, 'created_at': 1, 'uid': _claim_uid(2010)}
+    in_second = {'id': 2, 'created_at': 1, 'uid': _claim_uid(1700)}
+    backfilled = {'id': 3, 'created_at': 1, 'uid': _claim_uid(3000)}
+    assert _event_order(_Row(straddled)) == (2010, 1)
+    assert _event_order(_Row(backfilled)) == (1000, 3)
+    assert _event_order(_Row(straddled)) > _event_order(_Row(in_second)) > _event_order(_Row(backfilled))
+
+
+class _Row(dict):
+    """sqlite3.Row stand-in: mapping access plus keys()."""
 
 
 @pytest.mark.platforms('posix')

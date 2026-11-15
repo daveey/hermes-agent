@@ -243,6 +243,93 @@ _NESTED_FOREIGN_SHELLS = [
     "zsh -ec 't ( bash {db} )'",
     "bash -l <<'EOF'\npython3 - <<'PY'\nprint(1)\nPY\nt ( bash {db} )\nEOF",
     "bash -l {script}",
+    "bash -l <<< 't ( bash {db} )'",
+    "bash -l < {script}",
+    "bash -l 0< {script}",
+    "bash -l 0<<< 't ( bash {db} )'",
+    "bash -l <> {script}",
+    "runuser -c 't ( bash {db} )' bob",
+    "runuser --command='t ( bash {db} )' bob",
+    "su -c 't ( bash {db} )' bob",
+    "doas -u bob -s <<'EOF'\nt ( bash {db} )\nEOF",
+    "env BASH_ENV=x bash -c 't ( bash {db} )'",
+    "BASH_ENV=x bash {script}",
+    "runuser -l bob <<'EOF'\nt ( bash {db} )\nEOF",
+    "doas -s <<'EOF'\nt ( bash {db} )\nEOF",
+    "su --command='t ( bash {db} )' bob",
+    "BASH_ENV=x bash -c 't ( bash {db} )'",
+    "BASH_ENV=x bash <<< 't ( bash {db} )'",
+    "BASH_ENV=x bash < {script}",
+    "ENV=x sh -i -c 't ( bash {db} )'",
+    # su-mode operands after the user, even past `--`, reach the shell (`bash -c CMD`).
+    "su -- bob -c 't ( bash {db} )'",
+    "runuser -- bob -c 't ( bash {db} )'",
+    "su bob -c 't ( bash {db} )'",
+    "su -lc 't ( bash {db} )' bob",
+    "su -c't ( bash {db} )' bob",
+    # getopt_long accepts unique long-option prefixes.
+    "runuser --whitelist -u bob <<< 't ( bash {db} )'",
+    "runuser --white -u bob <<< 't ( bash {db} )'",
+    "runuser --supp -u bob <<< 't ( bash {db} )'",
+    "runuser --gro -u bob <<< 't ( bash {db} )'",
+    "runuser --comm='t ( bash {db} )' bob",
+    "runuser --com 't ( bash {db} )' bob",
+    "su --sess='t ( bash {db} )' bob",
+    "doas -a style -s <<< 't ( bash {db} )'",
+    # A stdin file fed to a login-shell launcher is that shell's script (review 5903452583 B1).
+    "su -l bob < {script}",
+    "su - bob < {script}",
+    "su bob < {script}",
+    "su -l bob 0< {script}",
+    "su -l bob <> {script}",
+    "runuser -l bob < {script}",
+    "runuser - bob < {script}",
+    "doas -s < {script}",
+    "doas -u bob -s < {script}",
+    "sudo -i < {script}",
+    "sudo -s < {script}",
+    "sudo -u bob -i < {script}",
+    "ssh host < {script}",
+    "ssh -p 22 host bash -s < {script}",
+    # A compound command's stdin redirection or heredoc reaches the login shell inside it
+    # (PR #2911 review follow-up). Pre-existing: base walked none of these in nested scope.
+    "{{ su -l bob; }} < {script}",
+    "( su -l bob ) < {script}",
+    "{{ su -l bob; }} <<< 't ( bash {db} )'",
+    "( su -l bob ) <<< 't ( bash {db} )'",
+    "{{ su -l bob; }} <<'EOF'\nt ( bash {db} )\nEOF",
+    "{{ su -l bob; }} <<-EOF\n\tt ( bash {db} )\n\tEOF",
+    "if true; then su -l bob; fi < {script}",
+    "if true; then su -l bob; fi <<'EOF'\nt ( bash {db} )\nEOF",
+    "while read l; do su -l bob; done < {script}",
+    "while read l; do su -l bob; done <<'EOF'\nt ( bash {db} )\nEOF",
+    "for x in 1; do su -l bob; done < {script}",
+    "case x in x) su -l bob;; esac < {script}",
+    "{{ su -l bob; }} 0< {script}",
+    "{{ su -l bob; }} <> {script}",
+    "{{ true; {{ su -l bob; }}; }} < {script}",
+    "{{\nsu -l bob\n}} < {script}",  # the group opens lines before its redirection
+    "{{\nsu -l bob\n}} <<'EOF'\nt ( bash {db} )\nEOF",
+    "{{ bash -l; }} < {script}",
+    "{{ sudo -i; }} < {script}",
+    "{{ doas -s; }} < {script}",
+    "{{ ssh host; }} < {script}",
+    "{{ su -l bob < /dev/null; }} < {script}",  # fails closed: own redirections are not tracked
+    # A file piped into the login shell (t_01a1dae7a625be0c): base walked none of these in
+    # nested scope, and handed a piped file to `su`/`sudo`/`ssh` in no scope at all.
+    "cat {script} | su -l bob",
+    "cat {script} | {{ su -l bob; }}",
+    "cat {script} | ( su -l bob )",
+    "cat {script} |& su -l bob",
+    "cat {script} |\nsu -l bob",
+    "cat < {script} | su -l bob",
+    "cat {script} | bash -l",
+    "cat {script} | sudo -i",
+    "cat {script} | ssh host",
+    "cat {script} | {{\nsu -l bob\n}}",
+    "cat {script} | while read l; do\nsu -l bob\ndone",
+    "(\nsu -l bob\n) < {script}",
+    "while true; do\nsu -l bob\ndone < {script}",
 ]
 
 
@@ -254,7 +341,7 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     script = tmp_path / "inner.sh"
     script.write_text(f"t ( bash {live_kanban_db} )\n")
     text = shape.format(db=live_kanban_db, script=script)
-    for names in (frozenset({"zz"}), frozenset()):
+    for names in (frozenset({"zz"}), frozenset(), None):
         unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=names)
         assert unsafe is True and refusal is not None and "SQLite" in refusal, (shape, names)
 
@@ -263,13 +350,133 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "bash <<'EOF'\nt ( bash {db} )\nEOF",  # a non-login, non-interactive child inherits no aliases
     "bash -s <<'EOF'\nt ( bash {db} )\nEOF",
     "t2 ( bash {db} )",
+    "bash <<< 't ( bash {db} )'",
+    "bash < {script}",
+    "bash -l 3<<< 't ( bash {db} )'",
+    "ENV=x sh -c 't ( bash {db} )'",
+    "BASH_ENV=x sh -c 't ( bash {db} )'",
+    "OTHER=x bash -c 't ( bash {db} )'",
+    "doas python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
+    "runuser -u bob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
+    "runuser -ubob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
+    "runuser --user bob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
+    "runuser --user=bob -- python3 - <<'EOF'\nprint('t ( bash {db} )')\nEOF",
+    "runuser -u bob -- printf '%s\\n' --command='t ( bash {db} )'",
+    "runuser -u bob -- printf '%s\\n' -c 't ( bash {db} )'",
+    "runuser -u bob printf '%s\\n' --command='t ( bash {db} )'",
+    "runuser --user=bob printf '%s\\n' -c 't ( bash {db} )'",
+    "runuser --us bob -- cat <<< 't ( bash {db} )'",
+    "runuser --u=bob -- printf '%s\\\\n' -c 't ( bash {db} )'",
+    "runuser --white HOME -u bob -- cat <<< 't ( bash {db} )'",
+    "runuser --supp=root --us=bob -- cat <<< 't ( bash {db} )'",
+    # Direct-user runuser and non-shell commands read a stdin file as data.
+    "runuser -fu bob -- cat <<< 't ( bash {db} )'",
+    "runuser -f -u bob -- cat <<< 't ( bash {db} )'",
+    "runuser -u bob -- cat < {script}",
+    "runuser -fu bob -- cat < {script}",
+    "cat < {script}",
+    "sudo cat < {script}",
+    "doas cat < {script}",
+    "ssh host cat < {script}",
+    # A compound command's redirection with no login shell inside keeps the session's names.
+    "{{ cat; }} < {script}",
+    "( bash ) < {script}",
+    "{{ bash -s; }} <<< 't ( bash {db} )'",
+    "{{ cat; }} <<'EOF'\nt ( bash {db} )\nEOF",
+    "while read l; do echo \"$l\"; done < {script}",
+    "{{ su -l bob; }} 3< {script}",  # not stdin
+    # A login shell reading stdin elsewhere does not make other commands' input its own.
+    "su -l bob < /dev/null; cat < {script}",
+    "su -l bob < /dev/null; cat <<'EOF'\nt ( bash {db} )\nEOF",
+    "su -l bob -c true; {{ cat; }} < {script}",
+    # /dev/null feeds a login shell nothing.
+    "su -l bob < /dev/null",
+    "ssh host < /dev/null",
+    "{{ su -l bob; }} < /dev/null",
+    # A piped file or a multi-line group's redirection with no login shell reading it.
+    "cat {script} | cat",
+    "{{\ncat\n}} < {script}",
+    "(\ncat\n) < {script}",
+    "(\nbash\n) < {script}",
+    "{{\nbash\n}} < {script}",
+    "while true; do\nbash\ndone < {script}",
+    "cat {script}; su -l bob",
+    "su -l bob | cat {script}",
+    "cat {script} | su -l bob -c true",
 ])
 def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     """Controls: no login/interactive shell, so the session's names still decide (#2358)."""
     assert "alias" not in str(tmp_path).lower()
-    text = shape.format(db=live_kanban_db)
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(db=live_kanban_db, script=script)
     assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (
         False, None)
+
+
+@pytest.mark.parametrize("shape", [
+    "( bash ) < {script}",  # one line: refused before this change too
+    # The group spans lines (t_01a1dae7a625be0c): the session walk read one line at a time, so
+    # the closer's redirection or the pipe never reached the shell lines earlier.
+    "(\nbash\n) < {script}",
+    "{{\nbash\n}} < {script}",
+    "while true; do\nbash\ndone < {script}",
+    "if true; then\nsh\nfi < {script}",
+    "{{\ntrue\n{{\nbash\n}}\n}} < {script}",
+    "cat {script} | {{\nbash\n}}",
+    "cat {script} | while read l; do\nbash\ndone",
+    "cat {script} | (\nbash\n)",
+])
+def test_multiline_group_feeds_its_plain_shell_in_session_walk(tmp_path, live_kanban_db, shape):
+    """With unknown names the walked file's `t (` may be a subshell: refused as on one line."""
+    assert "alias" not in str(tmp_path).lower()
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(script=script)
+    unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=None)
+    assert unsafe is True and refusal is not None and "SQLite" in refusal, shape
+    assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (
+        False, None)
+
+
+@pytest.mark.parametrize("shape", [
+    "{{\ncat\n}} < {script}",
+    "(\ncat\n) < {script}",
+    "{{\nbash\n}}\ncat < {script}",  # the group closed before the redirected command
+    "{{\nbash\n}}; cat {script} | cat",
+    "cat {script} | {{\ncat\n}}\nbash",  # the pipe feeds only the group
+])
+def test_multiline_group_without_a_fed_shell_stays_allowed(tmp_path, live_kanban_db, shape):
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(script=script)
+    assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=None) == (False, None)
+
+
+@pytest.mark.parametrize("option", [
+    "--group root", "--group=root", "-g root", "-groot",
+    "--supp-group root", "--supp-group=root", "-G root", "-Groot",
+    "--whitelist-environment HOME", "--whitelist-environment=HOME", "-w HOME", "-wHOME",
+])
+@pytest.mark.parametrize("user", ["-u bob", "-ubob", "--user bob", "--user=bob", "-mu bob"])
+@pytest.mark.parametrize("first", [True, False])
+def test_runuser_value_options_preserve_direct_stdin(tmp_path, live_kanban_db, option, user, first):
+    """Option values must not hide direct-user mode: cat only receives inert input."""
+    options = f"{option} {user}" if first else f"{user} {option}"
+    text = f"runuser {options} -- cat <<< 't ( bash {live_kanban_db} )'"
+    assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (
+        False, None)
+
+
+@pytest.mark.parametrize("option", [
+    "--group", "--supp-group", "--whitelist-environment", "-g", "-G", "-w",
+    "--gr", "--supp", "--whitelist", "--w",
+])
+def test_runuser_option_value_is_not_user_switch(tmp_path, live_kanban_db, option):
+    """A flag-looking value cannot prove direct-user mode and suppress the shell walk."""
+    text = f"runuser {option} -u bob <<< 't ( bash {live_kanban_db} )'"
+    unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=frozenset({"zz"}))
+    assert unsafe and refusal is not None and "SQLite" in refusal
 
 
 @pytest.mark.parametrize("names", [frozenset(), frozenset({"zz"}), _STOCK_ALIASES])
@@ -285,6 +492,138 @@ def test_card_repro_python_body_in_login_shell_stays_allowed(tmp_path, live_kanb
     # Control: the same body with a shell `NAME (` call next to it in the login shell refuses.
     mixed = "bash -l <<'OUT'\n" + body + f"t ( bash {live_kanban_db} )\nOUT"
     unsafe, refusal = scan_gateway_lifecycle(mixed, cwd=str(tmp_path), session_aliases=names)
+    assert unsafe is True and refusal is not None and "SQLite" in refusal
+
+
+@pytest.mark.parametrize("sink,blocked", [
+    ("bash -l", True), ("zsh", True), ("ssh h", True),
+    ("bash", False), ("bash -s", False),
+    ("bash -l -c ':'", False), ("ssh h cat", False),
+])
+@pytest.mark.parametrize("printer", ["printf", "echo"])
+def test_printed_pipe_uses_consuming_shell_scope(tmp_path, live_kanban_db, sink, blocked, printer):
+    text = f"{printer} 't ( bash {live_kanban_db} )' | {sink}"
+    unsafe, refusal = scan_gateway_lifecycle(
+        text, cwd=str(tmp_path), session_aliases=frozenset({"zz"}))
+    assert unsafe is blocked
+    if blocked:
+        assert refusal is not None and "SQLite" in refusal
+
+
+@pytest.mark.parametrize("separator", [";", "&&", "||", "\n"])
+def test_unrelated_login_shell_does_not_change_printed_pipe_scope(
+    tmp_path, live_kanban_db, separator,
+):
+    text = f"printf 't ( bash {live_kanban_db} )' | bash {separator} printf ':' | bash -l"
+    assert scan_gateway_lifecycle(
+        text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (False, None)
+
+
+def test_login_shell_on_producing_side_does_not_receive_printed_text(tmp_path, live_kanban_db):
+    text = f"bash -l | printf 't ( bash {live_kanban_db} )' | bash"
+    assert scan_gateway_lifecycle(
+        text, cwd=str(tmp_path), session_aliases=frozenset({"zz"})) == (False, None)
+
+
+@pytest.mark.parametrize("shape", [
+    "printf 't ( bash {db} )' | ( bash -l )",
+    "( printf 't ( bash {db} )' ) | bash -l",
+    "printf 't ( bash {db} )' | {{ :; bash -l; }}",
+    "printf 't ( bash {db} )' |\nbash -l",
+    "printf 't ( bash {db} )' |& bash -l",
+    "printf 't ( bash {db} )' | cat | bash -l",
+])
+def test_compound_printed_pipe_keeps_nested_scope(tmp_path, live_kanban_db, shape):
+    unsafe, refusal = scan_gateway_lifecycle(
+        shape.format(db=live_kanban_db), cwd=str(tmp_path), session_aliases=frozenset({"zz"}))
+    assert unsafe is True and refusal is not None and "SQLite" in refusal
+
+
+def test_no_pipe_does_not_tokenize_printed_payloads(monkeypatch):
+    from cron.lifecycle_guard_nested_shells import _iter_nested_printed_payloads
+
+    def unexpected(command):
+        pytest.fail("no-pipe command was tokenized")
+
+    monkeypatch.setattr("cron.lifecycle_guard._iter_command_token_lists", unexpected)
+    assert list(_iter_nested_printed_payloads("printf ':'")) == []
+
+
+# PR #2928 review 5901902665 nit 1: a heredoc body is the program of the producer that owns it, so
+# what that program prints into a startup shell's stdin is walked with unknown alias names too.
+_PY_PRINTS = "print('t ( bash {db} )')\n"
+
+
+@pytest.mark.parametrize("shape,blocked", [
+    ("python3 - <<'PY' | bash -l\n" + _PY_PRINTS + "PY", True),
+    ("python3 - <<'PY' | zsh\n" + _PY_PRINTS + "PY", True),
+    ("python3 - <<'PY' | ssh h\n" + _PY_PRINTS + "PY", True),
+    ("python3 - <<'PY' | cat | bash -l\n" + _PY_PRINTS + "PY", True),
+    ("python3 - << PY |& bash -l\n" + _PY_PRINTS + "PY", True),
+    ("python3 - <<'PY' |\n" + _PY_PRINTS + "PY\nbash -l", True),
+    ("python3 - <<'PY' | bash -l\nprint(\"it's\", 't ( bash {db} )')\nPY", True),
+    ("cat <<'A'; python3 - <<'PY' | bash -l\nA\n" + _PY_PRINTS + "PY", True),
+    # A quoted `<<x` leaves openers and bodies unmatched: the line's units all get the body.
+    ("echo '<<x'; python3 - <<'PY' | bash -l\n" + _PY_PRINTS + "PY", True),
+    ("{{ python3 - <<'PY'\n" + _PY_PRINTS + "PY\n}} | bash -l", True),
+    # Controls: the body's output reaches no startup shell, or a plain one.
+    ("python3 - <<'PY' | bash\n" + _PY_PRINTS + "PY", False),
+    ("python3 - <<'PY' | bash -s\n" + _PY_PRINTS + "PY", False),
+    ("python3 - <<'PY'; printf ':' | bash -l\n" + _PY_PRINTS + "PY", False),
+    ("python3 - <<'PY' && printf ':' | bash -l\n" + _PY_PRINTS + "PY", False),
+    ("printf ':' | bash -l | python3 - <<'PY'\n" + _PY_PRINTS + "PY", False),
+    ("python3 - <<'PY' | bash -l\nprint(':')\nPY\nprintf 't ( bash {db} )' | bash", False),
+])
+def test_heredoc_producer_pipe_uses_consuming_shell_scope(tmp_path, live_kanban_db, shape, blocked):
+    unsafe, refusal = scan_gateway_lifecycle(
+        shape.format(db=live_kanban_db), cwd=str(tmp_path), session_aliases=frozenset({"zz"}))
+    assert unsafe is blocked
+    if blocked:
+        assert refusal is not None and "SQLite" in refusal
+
+
+# PR #2928 review 5901902665 nit 2: only a `{` (or `if`, loop) in command position opens a group,
+# and a list operator or line break inside a group ends the pipe there: a later login shell reads
+# the group's own stdin, not an earlier command's output.
+@pytest.mark.parametrize("shape", [
+    "echo {{ ; printf 't ( bash {db} )' | bash ; printf ':' | bash -l",
+    "echo if ; printf 't ( bash {db} )' | bash ; printf ':' | bash -l",
+    "{{ printf 't ( bash {db} )' | cat; bash -l; }}",
+    "{{ printf 't ( bash {db} )' | cat && bash -l; }}",
+    "{{ printf 't ( bash {db} )' | cat\nbash -l\n}}",
+    "( printf 't ( bash {db} )' | cat; bash -l )",
+    "{{ printf 't ( bash {db} )' | cat; bash -l; }} | cat",
+    "case x in x) printf 't ( bash {db} )' | cat; bash -l;; esac",
+    "echo case; printf 't ( bash {db} )' | bash; printf ':' | bash -l",
+    "printf 't ( bash {db} )' | case x in bash|-l) :;; esac",
+])
+def test_group_pipe_does_not_reach_later_login_shell(tmp_path, live_kanban_db, shape):
+    assert scan_gateway_lifecycle(
+        shape.format(db=live_kanban_db), cwd=str(tmp_path),
+        session_aliases=frozenset({"zz"})) == (False, None)
+
+
+@pytest.mark.parametrize("shape", [
+    "printf 't ( bash {db} )' | {{ cat; bash -l; }}",
+    "printf 't ( bash {db} )' | ( cat; bash -l )",
+    "printf 't ( bash {db} )' | {{ cat\nbash -l\n}}",
+    "{{ printf 't ( bash {db} )'; }} | bash -l",
+    "{{ printf 't ( bash {db} )' | cat; }} | bash -l",
+    "if true; then printf 't ( bash {db} )'; fi | bash -l",
+    "while :; do printf 't ( bash {db} )'; done | bash -l",
+    "for x in a; do printf 't ( bash {db} )'; done | bash -l",
+    "case x in x) printf 't ( bash {db} )';; esac | bash -l",
+    "printf 't ( bash {db} )' | if true; then bash -l; fi",
+    "printf 't ( bash {db} )' | while read -r l; do bash -l; done",
+    "printf 't ( bash {db} )' | case x in x) bash -l;; esac",
+    "case x in (x|y) case y in y) printf 't ( bash {db} )';; esac;; esac | bash -l",
+    "case esac in (x) :;; (esac) printf 't ( bash {db} )';; esac | bash -l",
+    "printf 't ( bash {db} )' | case x in\ny) :;;\nx) bash -l;;\nesac",
+    "f() {{ :; }}; {{ printf 't ( bash {db} )'; }} | bash -l",
+])
+def test_group_output_piped_to_login_shell_keeps_nested_scope(tmp_path, live_kanban_db, shape):
+    unsafe, refusal = scan_gateway_lifecycle(
+        shape.format(db=live_kanban_db), cwd=str(tmp_path), session_aliases=frozenset({"zz"}))
     assert unsafe is True and refusal is not None and "SQLite" in refusal
 
 
@@ -305,6 +644,15 @@ def test_nested_shell_input_shapes():
     assert found == []  # *walk_command* holds the segments; *command* only its heredocs
     text = "bash -l -c 'x ( y )'; bash -c 'z'"
     assert list(_iter_nested_shell_inputs(text, text, cwd="/")) == [("x ( y )", None)]
+    from cron.lifecycle_guard_nested_shells import _closes_compound
+
+    for owner in (" } <<'E'", "} <<'E'", " fi <<E", " done <<-E", " esac <<E", " <<E", "} } <<E"):
+        assert _closes_compound(owner), owner
+    for owner in ("cat <<'E'", "su -l bob <<'E'", "echo } <<E", "x=} <<E"):
+        assert not _closes_compound(owner), owner
+    # Benign input through a compound command into a login shell stays allowed.
+    benign = "{ su -l bob; } < /dev/null; { su -l bob; } <<< 'echo hi'"
+    assert list(_iter_nested_shell_inputs(benign, benign, cwd="/")) == [("echo hi", None)]
 
 
 # PR #2560 review 5897863903 B1: one script referenced both by a nested login shell and by the

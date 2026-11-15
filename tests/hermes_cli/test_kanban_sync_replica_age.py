@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from cron.restart_rerun import host_fully_awake as real_awake_probe
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
@@ -34,7 +35,9 @@ def _pt(text: str) -> float:
 
 
 @pytest.fixture(autouse=True)
-def _fresh():
+def _fresh(monkeypatch):
+    from cron import restart_rerun
+    monkeypatch.setattr(restart_rerun, "host_fully_awake", lambda: True)
     outbox_age.reset()
     yield
     outbox_age.reset()
@@ -485,6 +488,190 @@ def test_an_hour_long_stall_across_restarts_every_4_min_keeps_one_clock_and_one_
     assert _fired(host) == ["08:20 PT"]
     rec = replica_age._load_memo()[BOARD]
     assert (rec["since"], rec["open"]) == (since, True)
+
+
+@pytest.mark.parametrize("initial, dark", [(0, 25), (15, 10)])
+def test_mixed_awake_darkwake_budget(live, kanban_home, initial, dark):
+    host = Host(kanban_home, _pt("2026-11-14 08:00:00"))
+    awake = True
+    calls = []
+
+    def probe():
+        calls.append(host.mono)
+        return awake
+
+    def tick(minutes):
+        for _ in range(minutes):
+            host.mono += MIN
+            host.wall += MIN
+            replica_age.check(host.boards, now=host.mono, wall=lambda: host.wall,
+                              file_fn=host.file_fn, awake_fn=probe)
+
+    host.round(head=True)
+    host.check()
+    tick(initial)
+    awake = False
+    tick(dark)
+    assert host.cards == []
+    awake = True
+    tick(19 - initial)
+    assert host.cards == []
+    tick(2)
+    assert len(host.cards) == 1  # one by the 21st counted minute; unchanged boundary is 20
+    assert host.cards[0][0] == _pt("2026-11-14 08:00:00") + (20 + dark) * MIN
+    assert len(calls) == initial + dark + 19 - initial + 2
+
+
+def test_injected_probe_failure_reads_awake(live, kanban_home):
+    host = Host(kanban_home, _pt("2026-11-14 08:00:00"))
+    host.round(head=True)
+    host.check()
+
+    def broken():
+        raise RuntimeError("probe unavailable")
+
+    for minute in range(1, 21):
+        host.mono += MIN
+        host.wall += MIN
+        replica_age.check(host.boards, now=host.mono, wall=lambda: host.wall,
+                          file_fn=host.file_fn, awake_fn=broken)
+        assert len(host.cards) == int(minute == 20)
+
+
+def test_default_probe_non_macos_never_spawns(live, kanban_home, monkeypatch):
+    from cron import restart_rerun
+    monkeypatch.setattr(restart_rerun, "host_fully_awake", real_awake_probe)
+    monkeypatch.setattr(restart_rerun, "_on_macos", lambda: False)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("non-macOS awake probe spawned a subprocess")
+
+    monkeypatch.setattr(restart_rerun.subprocess, "run", forbidden)
+    host = Host(kanban_home, _pt("2026-11-14 08:00:00"))
+    assert host.check() == []
+    assert BOARD in replica_age._SEEN
+
+
+def test_old_memo_resumes_during_darkwake(live, kanban_home):
+    host = Host(kanban_home, _pt("2026-11-14 08:00:00"))
+    host.round(head=True)
+    host.check()
+    host.run(15 * MIN)
+    memo = replica_age._load_memo()
+    memo[BOARD].pop("last")
+    memo[BOARD].pop("excluded")
+    replica_age._memo_path().write_text(json.dumps(memo))
+    _restart()
+    host.mono += MIN
+    replica_age.check(host.boards, now=host.mono, awake_fn=lambda: False, file_fn=host.file_fn)
+    resumed = replica_age._load_memo()[BOARD]
+    assert resumed["since"] == memo[BOARD]["since"] + MIN
+    assert resumed["excluded"] == MIN
+    assert host.cards == []
+
+
+def test_real_probe_failure_reads_awake(live, kanban_home, monkeypatch):
+    from cron import restart_rerun
+    monkeypatch.setattr(restart_rerun, "host_fully_awake", real_awake_probe)
+    monkeypatch.setattr(restart_rerun, "_on_macos", lambda: True)
+
+    def unavailable(*args):
+        raise OSError("pmset unavailable")
+
+    monkeypatch.setattr(restart_rerun, "_pmset", unavailable)
+    host = Host(kanban_home, _pt("2026-11-14 08:00:00"))
+    host.round(head=True)
+    host.check()
+    host.run(19 * MIN)
+    assert host.cards == []
+    host.run(MIN)
+    assert len(host.cards) == 1
+
+
+def test_awake_probe_once_for_multiple_boards(kanban_home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(replica_age, "_mode", lambda path: "primary")
+    monkeypatch.setattr(replica_age, "_stamp", lambda slug: None)
+    boards = [(slug, kanban_home / slug) for slug in ("one", "two")]
+    replica_age.check(boards, now=1000, awake_fn=lambda: calls.append(True) or False)
+    assert calls == [True]
+    assert set(replica_age._SEEN) == {"one", "two"}
+
+
+def test_darkwake_restart_preserves_exclusion_and_telemetry(live, kanban_home, monkeypatch, caplog):
+    from cron import restart_rerun
+    monkeypatch.setattr(restart_rerun, "host_fully_awake", lambda: False)
+    host = Host(kanban_home, _pt("2026-11-14 14:52:49"))
+    host.round(head=True)
+    host.check()
+    host.run(15 * MIN)
+    rec = replica_age._load_memo()[BOARD]
+    assert rec["last"] == host.mono
+    assert rec["excluded"] == 15 * MIN
+    _restart()
+    with caplog.at_level(logging.INFO):
+        host.run(10 * MIN)
+    assert host.cards == []
+    assert replica_age._load_memo()[BOARD]["excluded"] == 25 * MIN
+    assert "excluded 960 s not fully awake" in caplog.text
+    monkeypatch.setattr(restart_rerun, "host_fully_awake", lambda: True)
+    host.run(19 * MIN)
+    assert host.cards == []
+    host.run(2 * MIN)
+    assert len(host.cards) == 1
+    assert "excluded 1500 s not fully awake" in host.cards[0][2]
+
+
+# pmset -g log, 2026-11-14 PST; source sha256
+# 2d04d37ae866af23199cb17a4c0f5e9ec1d74aa4e310ff4e0d9c72cad7d7258a.
+_DARKWAKES_1114 = [
+    ("14:58:04", 8), ("15:15:14", 2), ("15:15:32", 14), ("15:15:51", 18),
+    ("15:19:02", 20), ("15:22:53", 45), ("15:23:42", 45), ("15:25:24", 24),
+    ("15:33:21", 45), ("15:34:13", 45), ("15:42:10", 45), ("15:56:59", 45),
+    ("16:10:30", 45), ("16:11:22", 45), ("16:16:54", 45), ("16:22:58", 45),
+    ("16:37:37", 45), ("16:38:36", 45), ("16:51:44", 45), ("17:02:33", 45),
+    ("17:06:17", 45), ("17:07:07", 45), ("17:14:45", 45), ("17:20:58", 43),
+    ("17:21:49", 45), ("17:29:04", 45), ("17:30:08", 45), ("17:31:01", 45),
+    ("17:32:02", 45), ("17:39:32", 45), ("17:40:56", 45), ("17:42:10", 45),
+    ("17:43:16", 45),
+]
+
+
+def test_replay_macbook_darkwake_sleep_1114(live, kanban_home, monkeypatch):
+    from cron import restart_rerun
+    awake = False
+    monkeypatch.setattr(restart_rerun, "host_fully_awake", lambda: awake)
+    host = Host(kanban_home, _pt("2026-11-14 14:52:49"))
+    host.round(head=True)
+    host.check()
+    assert len(_DARKWAKES_1114) == 33
+    assert sum(seconds for _, seconds in _DARKWAKES_1114) == 1299
+    for at, seconds in _DARKWAKES_1114:
+        host.wall = _pt(f"2026-11-14 {at}")
+        elapsed = 7 if at == "17:43:16" else seconds
+        host.mono += elapsed
+        host.wall += elapsed
+        host.round(behind=True)
+        # Dispatcher sampling is not in pmset. Replay a sample per early round,
+        # then the known alarm check (rather than inventing late tick times).
+        if at < "17:40:56":
+            host.check()
+    host.wall = _pt("2026-11-14 17:43:23")
+    host.check()
+    print("DarkWake replay cards:", _fired(host))
+    assert host.cards == []
+    host.wall = _pt("2026-11-14 17:49:54")
+    host.mono += 38 + 45  # remainder of 17:43:16, then final DarkWake at 17:49:09
+    host.check()
+    awake = True
+    host.wall = _pt("2026-11-14 17:50:17")
+    host.check()
+    host.run(140, every=20, each=lambda: host.round(behind=True))
+    host.mono += 1
+    host.wall += 1
+    host.round(head=True)  # normal rounds resumed 141 s after full wake
+    host.check()
+    assert host.cards == []
 
 
 # --- replays of the 2026-11-12 incidents ---------------------------------------------------------------------------

@@ -65,6 +65,43 @@ def test_ready_floor_key_distinguishes_equal_values_of_other_types():
         assert (actual, type(actual)) == (expected, type(expected))
 
 
+@pytest.mark.parametrize('field', [
+    'id', 'ended_at', 'worker_pid', 'worker_started_at', 'last_heartbeat_at',
+    'claim_lock', 'summary', 'error', 'status', 'outcome', 'metadata',
+])
+@pytest.mark.parametrize('number', [0, 7, 300])
+@pytest.mark.parametrize('unused', [False, True])
+def test_ready_floor_equal_numeric_snapshots_are_behaviorally_equivalent(field, number, unused):
+    # Counter-analysis for drop-type-key: run ends are normalized to int, and
+    # grant classification uses equality, truthiness and None/True identity.
+    # Keep one history warm through int -> float -> int, not three cold caches.
+    rows = [
+        {'kind': 'unblocked', 'created_at': 10},
+        {'kind': 'claimed', 'created_at': 100, 'run_id': 7},
+        {'kind': 'released', 'created_at': 200, 'run_id': 7,
+         'payload': '{"unused_grant":true}'},
+    ]
+    history = EventHistory(rows)
+    base = {'id': 7, 'status': 'released' if unused else 'done',
+            'outcome': 'released' if unused else 'completed', 'ended_at': 300,
+            'metadata': '{"unused_grant":true}' if unused else '{}'}
+    task = {'id': 't', 'status': 'ready', 'assignee': 'worker', 'created_at': 1}
+    floors, diagnostics = [], []
+    for value in (number, float(number), number):
+        runs = (MappingProxyType(dict(base, **{field: value})),)
+        uncached = kd._last_ready_entry_ts(rows, runs)
+        cold = kd._last_ready_entry_ts(EventHistory(rows), runs)
+        warm = kd._last_ready_entry_ts(history, runs)
+        assert type(uncached) is type(cold) is type(warm) is int
+        assert warm == cold == uncached
+        floors.append(warm)
+        actual = kd.compute_task_diagnostics(task, history, list(runs), now=10000)
+        assert actual == kd.compute_task_diagnostics(task, rows, list(runs), now=10000)
+        diagnostics.append(actual)
+    assert floors[0] == floors[1] == floors[2]
+    assert diagnostics[0] == diagnostics[1] == diagnostics[2]
+
+
 def test_assigned_ready_run_mutations_change_visible_diagnostic():
     events = EventHistory([{'kind': 'unblocked', 'created_at': 10}])
     task = {'id': 't', 'status': 'ready', 'assignee': 'worker', 'created_at': 1}

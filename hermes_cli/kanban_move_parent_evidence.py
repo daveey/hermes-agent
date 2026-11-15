@@ -125,12 +125,15 @@ def owner_faulted_since(conn, task_id, since) -> bool:
     supplies the parent's result.
     """
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_core_update_requeue import requeued_run_ids
 
+    paused = requeued_run_ids(conn, task_id)
     faults = conn.execute(
-        "SELECT created_at FROM task_events WHERE task_id = ? "
+        "SELECT created_at, run_id FROM task_events WHERE task_id = ? "
         "AND kind IN ('crashed', 'reclaimed', 'timed_out')", (task_id,),
     )
-    return any((kb._to_epoch(e[0]) or 0) >= since for e in faults)
+    return any((kb._to_epoch(e["created_at"]) or 0) >= since and e["run_id"] not in paused
+               for e in faults)
 
 
 def result(conn, task_id, parent_id):

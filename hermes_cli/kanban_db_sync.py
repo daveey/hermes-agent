@@ -462,6 +462,9 @@ def apply_sync_schema_steps(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, table, column, ddl)
     for table in _UID_TABLES:
         conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
+    # task_runs.sync_version joins the board's run-bookkeeping covering index.
+    from hermes_cli.kanban_db_connect import ensure_run_bookkeeping_index
+    ensure_run_bookkeeping_index(conn)
 
 
 def live_without_install(conn: sqlite3.Connection, db_path: str) -> bool:

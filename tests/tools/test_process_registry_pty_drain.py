@@ -17,6 +17,97 @@ from ptyprocess import PtyProcess
 
 from tests.waiting import wait_until
 from tools.process_registry import ProcessRegistry
+from tools import process_registry_pty_drain as drain_module
+
+
+class ReadyWaiter:
+    def __init__(self, ready=True):
+        self.ready = ready
+        self.calls = 0
+        self.closed = False
+
+    def wait(self, timeout):
+        assert timeout == 0
+        self.calls += 1
+        # Independent finite safety cutoff: a missing production cap must fail, not hang.
+        assert self.calls <= 20, "drain did not return at its byte cap"
+        return self.ready
+
+    def close(self):
+        self.closed = True
+
+
+class ControlledPty:
+    fd = 42
+
+    def __init__(self, chunks=None):
+        self.chunks = None if chunks is None else iter(chunks)
+        self.requests = []
+
+    def read(self, size):
+        self.requests.append(size)
+        if self.chunks is None:
+            return b"x" * size
+        chunk = next(self.chunks)
+        if isinstance(chunk, BaseException):
+            raise chunk
+        return chunk
+
+
+def install_waiter(monkeypatch, waiter):
+    def open_waiter(fd):
+        assert fd == ControlledPty.fd
+        return waiter
+
+    monkeypatch.setattr(drain_module, "open_fd_waiter", open_waiter)
+
+
+@pytest.mark.parametrize("budget", [0, 1, 4095, 4096, 4097, 8193])
+def test_always_ready_drain_returns_at_cap(monkeypatch, budget):
+    waiter = ReadyWaiter()
+    pty = ControlledPty()
+    chunks = []
+    install_waiter(monkeypatch, waiter)
+
+    drain_module.drain_exited_pty(pty, chunks.append, budget)
+
+    assert sum(map(len, chunks)) == budget
+    remaining = budget
+    for size in pty.requests:
+        assert 0 < size <= min(4096, remaining)
+        remaining -= size
+    assert remaining == 0
+    assert waiter.calls == len(pty.requests)
+    assert waiter.closed
+
+
+@pytest.mark.parametrize("ending", [b"", EOFError(), OSError("closed slave")])
+def test_short_output_then_eof(monkeypatch, ending):
+    waiter = ReadyWaiter()
+    pty = ControlledPty([b"hello", ending])
+    chunks = []
+    install_waiter(monkeypatch, waiter)
+
+    drain_module.drain_exited_pty(pty, chunks.append, 10)
+
+    assert chunks == [b"hello"]
+    assert pty.requests == [10, 5]
+    assert waiter.calls == 2
+    assert waiter.closed
+
+
+def test_not_ready_returns_without_reading(monkeypatch):
+    waiter = ReadyWaiter(ready=False)
+    pty = ControlledPty([])
+    chunks = []
+    install_waiter(monkeypatch, waiter)
+
+    drain_module.drain_exited_pty(pty, chunks.append, 10)
+
+    assert chunks == []
+    assert pty.requests == []
+    assert waiter.calls == 1
+    assert waiter.closed
 
 
 @pytest.fixture

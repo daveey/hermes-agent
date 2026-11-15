@@ -215,7 +215,9 @@ def install(args) -> None:
     environment = compose_env([environment])
     exported = {}
     outputs = {f"{name}-path": str(binaries[name]) for name in public_names}
-    if "python" in names:
+    if "uv" in names:
+        # A transitive Python (e.g. node + ripgrep) does not request a uv command
+        # environment. Only the selected uv closure can supply its binary.
         # uv is PM-internal (never on a user's PATH), but the test suites this
         # toolchain serves drive real uv through shutil.which("uv").
         uv = get_package("uv").binary(store_root() / facts.get("uv")["entry"], target)

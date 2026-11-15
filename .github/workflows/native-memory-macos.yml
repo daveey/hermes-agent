@@ -15,6 +15,10 @@ on:
   push:
     branches: [main]
     paths:
+      - 'hermes_bootstrap.py'
+      - 'hermes_cli/launch_malloc.py'
+      - 'hermes_cli/venv_sync.py'
+      - 'tests/test_bootstrap_malloc.py'
       - 'hermes_cli/machine_memory_darwin.py'
       - 'hermes_cli/machine_metrics.py'
       - 'tests/hermes_cli/test_machine_memory_darwin.py'
@@ -57,6 +61,7 @@ jobs:
           export HERMES_HOME
           trap 'rm -rf "$HERMES_HOME"' EXIT
           taskpolicy -c utility scripts/run_tests.sh \
+            tests/test_bootstrap_malloc.py \
             tests/hermes_cli/test_machine_memory_darwin.py \
             tests/hermes_cli/test_machine_memory_nofork.py -j 1 --file-retries 0
         env:

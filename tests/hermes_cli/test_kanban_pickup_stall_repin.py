@@ -32,7 +32,8 @@ fleet = oc.fleet
 
 
 def _worker(name, **kw):
-    return place._worker(name, last_seen=NOW, **kw)
+    # Target-card helpers are not pooled by default; only _pooled opts into that lane.
+    return place._worker(name, last_seen=NOW, labels=["linux", *place.NEED, "capability:hub-write"], **kw)
 
 
 def _machines(**over):
@@ -350,7 +351,8 @@ def test_every_need_site_maps_access_names_to_their_attested_labels(name, label)
     assert label in rp._need({"requires": json.dumps([name]), "assignee": "default"})
     assert label in rn.required_labels({"requires": json.dumps([name]), "assignee": "default"})
     machines = {X: {**_worker(X), "labels": ["linux", label, "profile:default"]}}
-    assert kps.alarm_placement(M, machines, assignee="default", requires=(name,), now_ms=NOW)[0] == [f"machine:{X}"]
+    assert kps.alarm_placement(M, machines, assignee="default", requires=(name,), now_ms=NOW)[0] == sorted(
+        {label, "profile:default", "capability:hub-write", POOL})
 
 
 @pytest.mark.parametrize("assignee", [None, ""])
@@ -389,38 +391,46 @@ def test_the_scope_never_reads_or_writes_a_hold():
 
 @pytest.fixture
 def held(tmp_path, monkeypatch, svc):
-    """worker-1 (M) is held; the hub runs its alarm and holds the stalled cards; worker-2 is eligible now."""
+    """worker-1 is held; worker-3 runs its alarm; worker-2 is the eligible target."""
     from hermes_cli import kanban_db_dispatch as kbd
     from hermes_cli import kanban_db_sync as sync
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: None)
     sync.consume_dispatcher_wake()
     hub = support.Gateway(tmp_path, support.HUB, svc, monkeypatch, pickup="explicit")
     worker = support.Gateway(tmp_path, M, svc, monkeypatch, pickup="true")
-    # worker-2 has no hub-write, so the alarm goes to the hub lane, but the cards it lists may go to worker-2.
+    runner = support.Gateway(tmp_path, "worker-3", svc, monkeypatch, pickup="explicit")
+    # Separate the capable alarm runner from the non-pooled target worker.
     place._registry(monkeypatch, held=True, other=False, hub=place._hub())
     monkeypatch.setitem(support.MACHINES, X, {**place._worker(X), "labels": ["linux", *place.NEED]})
+    monkeypatch.setitem(support.MACHINES, "worker-3", place._worker("worker-3"))
     try:
-        a, b = stall._pinned(hub, title="a"), stall._pinned(hub, title="b")
-        hub.round()
+        # Local-move coverage: the alarm runner owns these targets, though they are pinned to M.
+        # Foreign-owned targets use the separately tested operator-call route below.
+        a, b = stall._pinned(runner, title="a"), stall._pinned(runner, title="b")
+        runner.round()
         worker.round()
         worker.enter()
         wn.pickup(worker.conn, budget=4)
         stall._age(worker, a, 900)
         stall._age(worker, b, 700)
         [alarm] = kps.sweep(worker.conn)
-        assert place._pin(worker.conn, alarm) == [f"machine:{support.HUB}"]
+        assert place._pin(worker.conn, alarm) == place.QUEUE
         worker.round()
-        hub.round()
-        hub.tick()
-        assert kb.get_task(hub.conn, alarm).status == "running"
-        unlisted = stall._pinned(hub, title="never listed")
-        hub.enter()
+        runner.round()
+        runner.tick()
+        assert kb.get_task(runner.conn, alarm).status == "running"
+        # Drain further pickup on the runner without interrupting its claimed alarm.
+        # Only worker-2 may accept the target work in the move tests below.
+        monkeypatch.setitem(support.MACHINES, "worker-3", {**support.MACHINES["worker-3"], "hold": True})
+        unlisted = stall._pinned(runner, title="never listed")
+        runner.round()
+        runner.enter()
         monkeypatch.setenv("HERMES_KANBAN_TASK", alarm)
-        monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(kb._current_run_id(hub.conn, alarm)))
+        monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(kb._current_run_id(runner.conn, alarm)))
         monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
-        yield hub, worker, alarm, (a, b), unlisted
+        yield runner, worker, alarm, (a, b), unlisted
     finally:
-        for g in (hub, worker):
+        for g in (hub, worker, runner):
             g.conn.close()
         sync.set_lease_client(None)
         wn.set_registry_fetch(None)

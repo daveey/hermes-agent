@@ -109,6 +109,13 @@ class RangeHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+class RangeHTTPServer(ThreadingHTTPServer):
+    # The downloader fans out eight connections before any need be accepted.
+    # Threading handlers do not enlarge TCPServer's default backlog of five;
+    # a descheduled acceptor can otherwise overflow it and force SYN retries.
+    request_queue_size = 16
+
+
 @pytest.fixture
 def dl_server():
     RangeHandler.payloads = {}
@@ -126,7 +133,7 @@ def dl_server():
     # queued connection to be drained in turn (plus SYN-retry backoff for
     # the overflow one) — ~3.7 s idle, and past the pause tests' 15 s poll
     # deadline on a loaded CI runner.
-    server = ThreadingHTTPServer(("127.0.0.1", 0), RangeHandler)
+    server = RangeHTTPServer(("127.0.0.1", 0), RangeHandler)
     server.daemon_threads = True
     server.block_on_close = False
     thread = threading.Thread(target=server.serve_forever, daemon=True)

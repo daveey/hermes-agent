@@ -319,8 +319,10 @@ async def _retry(authority, intent: dict, tries: int, persist: bool = False) -> 
         return 'dropped'
     if persist:
         try:
-            await asyncio.to_thread(_write, authority.db, PREFIX + intent['admission_id'],
-                                    json.dumps({**intent, 'tries': tries + 1}))
+            # Another owner may have finished and deleted the plan since our read.
+            await asyncio.to_thread(authority.db._execute_write, lambda conn: conn.execute(
+                'UPDATE state_meta SET value=? WHERE key=?',
+                (json.dumps({**intent, 'tries': tries + 1}), PREFIX + intent['admission_id'])))
         except Exception:  # health: allow BLE001 -- this process still counts; a restart may grant a few more
             logger.debug('wall-replay: could not record the tries of %s', intent['admission_id'], exc_info=True)
     _arm(authority, intent, RETRY_S, tries + 1)

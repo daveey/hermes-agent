@@ -51,7 +51,21 @@ incomplete (published total differs from the visible tail, or any field is at th
 limit) cannot prove it never cited this job; holding the row would strand every recurrence of a
 test whose old card is closed with more than three comments. Such rows are admitted with an
 `owner_check` list naming each candidate (`candidate`, `status`,
-`reason=closed_history_incomplete`) so triage checks them first. The worst case is a
+`reason=closed_history_incomplete`) so triage checks them first. Lists whose serialized JSON
+exceeds 1024 UTF-8 bytes use `owner_check_ref: {sha256, count}` instead of the inline list;
+this is not an empty inventory or an ownership decision. Full, unshortened JSON is retained
+in the journal's `owner_check_details(digest, payload)` table, committed atomically with the
+page and keyed by the SHA256 of the stored UTF-8 payload. The reference is immutable even
+if a later inventory differs. Retrieve it on the producer host before disposition:
+
+```sh
+sqlite3 -readonly "$QUEUE" "SELECT payload FROM owner_check_details WHERE digest='<owner_check_ref.sha256>';"
+```
+
+Whole-journal backups include these details; an occurrences-only export does not. Export
+`SELECT digest,payload FROM owner_check_details` alongside pages and occurrences for triage
+or rollback. Do not prune referenced details independently of their manifests.
+The worst case is a
 duplicate triage row, never a dropped occurrence. To revert to holding these rows, restore
 the `RuntimeError("closed foreign owner history unavailable")` branch in `_foreign_owner`.
 
@@ -65,15 +79,26 @@ Unattempted pages are rechecked against exact owners before each drain. Once cre
 comment delivery has been attempted, the page remains immutable so an ambiguous response
 cannot change its replay identity. A definitive `create_overlap` refusal is different:
 read back every named match, route exact-test owners through the existing owner path, and
-retry unrelated matches only with supported `distinct_from` evidence. A refusal after an
-earlier ambiguous attempt cannot dissolve that earlier page. Unreadable overlap matches
-remain retryable, never an excuse to declare unknown work distinct. The shared polling budget also stops starting new owner
+retry unrelated matches only with supported `distinct_from` evidence. After an earlier
+ambiguous attempt, successful complete board listing must first establish that the intake
+key is absent. A subsequent definitive refusal can then be reconciled; unreadable overlap
+matches retain the immutable attempted page and remain pending, never an excuse to declare
+unknown work distinct. The shared polling budget also stops starting new owner
 resolutions and page deliveries; deferred rows remain durable and the poll reports failure.
 Board/courier operations already started may still consume their existing transport timeout.
 Before GitHub discovery, a drain gets half the invocation budget and checkpoints the JSON
 cursor; a slow discovery cannot prevent already queued delivery on every invocation.
-Within a drain, ownership resolution delivers each admitted occurrence immediately in a
-bounded one-occurrence page. Half the drain window is reserved for prior attempted pages.
+Within a drain, consecutive admissions are packed by `plan_pages` into multi-row pages
+(maximum 6000 bytes), flushed after at most 16 rows, an ownership boundary, or halfway
+through the drain window (then after each subsequent admission). Occurrences are durable before ownership resolution; each batch's
+pages are committed before immediate delivery in the same drain. Pending owner resolutions
+and prior attempted pages share one FIFO ordered by durable tickets, rather than
+fixed-priority phases. Batches are also flushed before selecting a prior page.
+A slow operation may consume the remaining window, but its rotated ticket lets the other
+queue progress on the next drain, including after restart. No new external work starts at
+or after the drain deadline. If a slow owner exhausts it, the unsent pages remain
+durable and retain their batch boundaries during next-drain ownership rechecks, so that
+unrelated slow owner cannot repeatedly delay the already-admitted prefix.
 Durable FIFO tickets are assigned transactionally when occurrences, pages and run attempts
 are enqueued. Replay preserves the original ticket; attempts rotate to the tail before external
 calls, surviving process death. Older unscheduled rows are backfilled on journal open before
@@ -102,7 +127,31 @@ successful GitHub listing no longer includes such a run and it has reached the u
 `FAILED run=<k> code=<c> polls=<n> retired=unlisted` line and marked complete, matching the
 per-test producer, which dropped runs that left the lookback listing. A failed listing never
 retires anything, and a still-listed run stays `FAILED` until its data becomes readable.
-Retired runs remain queryable with `SELECT repo,key FROM runs WHERE complete=1`.
+Retired runs remain queryable with `SELECT repo,key FROM runs WHERE complete=1` until
+terminal-history retention expires.
+
+## Retention and nightly pins
+
+Each production poll prunes terminal history under the journal lock. Complete runs are
+retained for 30 days plus the discovery lookback (currently 6 hours), counted from their
+last listing or completion. Runs with undelivered occurrences are never pruned. Delivered
+occurrences are retained for the same interval after acknowledgement and until their run
+record is gone; delivered pages remain until all their occurrences have aged out. Pending
+runs, undelivered occurrences, and undelivered pages have no age limit. Terminal/orphaned
+FIFO entries are removed without renumbering any pending ticket. Legacy rows receive the
+migration time, not a guessed historical completion date. SQLite reuses freed space; no
+blocking VACUUM is performed. Export before expiry if longer audit history is needed.
+Replaying an artifact outside this retention window is not guaranteed deduplicated; do not
+use old manual reports as a replay shortcut.
+
+The nightly reporter's immutable export includes `nightly_e2e.py`, `flaky_kanban.py`,
+`flaky_intake.py`, `flaky_http.py`, `flaky_artifact.py`, and `flaky_artifact_poll.py` from
+one revision. `PIN_FILES` checks every sibling, including missing exports, and generated
+re-pin instructions name them all. `hermes_cli` is intentionally **not** a partial frozen
+export: the transport deadline and scope-heartbeat modules belong to the installed Hermes
+runtime and its transitive dependencies. The cron launcher must expose that runtime;
+verify those imports and both dispatch/report entry points when re-pinning. The pin check
+certifies sibling script bytes, not hermes_cli deployment or runtime compatibility.
 
 ## Read-only backlog and export
 
@@ -123,6 +172,24 @@ an active database file alone is not a consistent backup. Preserve the lock mark
 backup, but never replace an actively held lock inode.
 
 ## Recovery and rollback
+
+At cutover the journal may replay legacy cursor runs. Journal-mode owner delivery recognizes
+an exact test/job citation in the owner's body as well as its comments, so initial legacy
+filings do not receive redundant "Flaked again" comments. Different jobs still get comments;
+the legacy non-journal helper retains its original comment behavior.
+
+An unreadable cached local owner is evicted only when a successful complete local board
+listing (including archived cards) proves its ID absent. Normal owner discovery then runs
+again before intake admission. An inventory error, a listed but unreadable owner, or a stale
+foreign scope never proves absence. No retry count silently abandons a known OPEN owner.
+For a permanently gone cross-board/foreign cached owner, stop the producer, back up the JSON
+cursor, and verify deletion on the owning gateway/profile/board through its authoritative
+Board surface (not absence in the hub replica). Remove only that exact test's entry from
+`state['cards']` in the JSON cursor and resume the producer. This is the manual escape hatch
+for scopes the local listing cannot prove absent. Do not remove entries for merely offline
+or unreadable owners; restore read access/freshness instead. Retain the deletion evidence.
+Never edit the journal or its identity/lock files for this recovery. Rediscovery still holds
+stale/unreadable matching OPEN replica owners pending even after cache eviction.
 
 Loss of only the JSON cursor is replay-safe while the journal remains intact. Missing or
 corrupt journal state must not be treated as an empty queue. Missing queue or anchor and a

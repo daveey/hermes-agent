@@ -75,12 +75,13 @@ def test_card_specific_refusals_do_not_fence_other_candidates(gws, monkeypatch, 
 
 
 @pytest.mark.parametrize("refused_lane", ["ready", "review"])
-def test_capacity_fence_is_lane_local_and_survives_review_resume(gws, monkeypatch, refused_lane):
+def test_capacity_fence_covers_combined_ranked_pass(gws, monkeypatch, refused_lane):
+    """Ready and review rows form one ranked pass; a capacity refusal fences everything ranked after it."""
     hub, _ = gws
     hub.enter()
     ready = [kb.create_task(hub.conn, title=f"ready {p}", assignee="default", priority=p)
              for p in (900, 530, 100)]
-    review = kb.create_task(hub.conn, title="reserved review", assignee="default")
+    review = kb.create_task(hub.conn, title="ranked review", assignee="default", priority=700)
     assert kb.request_review(hub.conn, review, summary="review")
     # This exercises Board capacity, not the per-tick admission budget. Pre-admit
     # the review row so all four candidates can reach the lease boundary.
@@ -103,9 +104,10 @@ def test_capacity_fence_is_lane_local_and_survives_review_resume(gws, monkeypatc
     monkeypatch.setattr(client.HubLeaseClient, "acquire", refuse_once)
     result = hub.tick(max_in_progress=3)
     assert result.claim_deferred == [(refused, "capacity")]
+    # Combined score order: ready 900, review 700, ready 530, ready 100.
     if refused_lane == "ready":
-        assert support._spawned(result) == [review]
-        assert attempts == [ready[0], review]
+        assert support._spawned(result) == []
+        assert attempts == [ready[0]]
     else:
-        assert support._spawned(result) == ready
-        assert attempts == [ready[0], ready[1], review, ready[2]]
+        assert support._spawned(result) == [ready[0]]
+        assert attempts == [ready[0], review]

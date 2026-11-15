@@ -335,12 +335,12 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     # The hermes-hub replica (hub.db) lives under HOME, which stays real: point readers (kanban_create's overlap
     # check, wait replicas) at an empty per-test dir so the host's live cards never leak into a test. [daveey]
     monkeypatch.setenv("HERMES_HUB_STATE", str(tmp_path / "hermes-hub-state"))
+    # self_gateway reads mail identity before the replica; HOME deliberately stays real.
+    # Redirect rather than delete: absence falls back to ~/.config/hermes-mail/config.json.
+    monkeypatch.setenv("HERMES_MAIL_CONFIG", str(tmp_path / "hermes-mail.json"))
 
-    # 3. Isolate both inputs to profile/root resolution. HERMES_HOME alone
-    #    is insufficient: get_default_hermes_root() resolves the native root
-    #    too, to distinguish standard profiles from custom deployments.
-    #    Patch only the Hermes default, not HOME/Path.home(). Subprocesses need
-    #    a stable HOME. Hardcoded real-home I/O must still trip the guard.
+    # 3. Isolate HERMES_HOME and the native root used to distinguish profiles/custom deployments.
+    # Keep HOME/Path.home() stable for subprocesses; hardcoded real-home I/O must still trip the guard.
     import hermes_constants
 
     platform_default = hermes_constants._get_platform_default_hermes_home
@@ -1368,44 +1368,10 @@ def _remove_relocated_basetemp(config) -> None:
 
 
 def _processes_with_hermes_home_under(roots) -> list[int]:
-    """PIDs (never this process) whose environment names a ``HERMES_HOME`` inside one of *roots*.
+    """PIDs belonging to this session; retain the conftest seam for callers."""
+    from tests.session_processes import processes_with_hermes_home_under
 
-    POSIX (psutil's exec-time environment; another user's processes are unreadable and skipped).
-    Windows is out of scope: no leak observed there, and SIGTERM there is TerminateProcess.
-
-    Membership is decided lexically: another process's ``HERMES_HOME`` is never resolved, because
-    the host's live gateways (the hub's ``~/.hermes/profiles/<p>``) name the real Hermes home and
-    ``realpath`` would ``lstat`` it, which the real-home I/O guard refuses. Only this session's own
-    roots are resolved, and both their given and resolved spellings are matched, so a child that
-    got either spelling of a root is still found.
-
-    """
-    if os.name != "posix":
-        return []
-    import psutil
-
-    resolved = {Path(os.path.abspath(r)) for r in roots if r} | {Path(r).resolve() for r in roots if r}
-    me = os.getpid()
-    found = []
-    for proc in psutil.process_iter():
-        if proc.pid == me:
-            continue
-        try:
-            home = proc.environ().get("HERMES_HOME")
-        except (psutil.Error, OSError):
-            continue
-        if not home:
-            continue
-        try:
-            text = os.fsdecode(home)
-        except (OSError, ValueError):
-            continue
-        if not os.path.isabs(text):  # relative to that process's cwd, not ours
-            continue
-        path = Path(os.path.normpath(text))
-        if any(path == root or path.is_relative_to(root) for root in resolved):
-            found.append(proc.pid)
-    return found
+    return processes_with_hermes_home_under(roots)
 
 
 def _reap_session_hermes_processes(config) -> list[int]:

@@ -58,7 +58,8 @@ TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "st
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
 _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn", "failure_finalized", "resolved_check_broken", "resolved_check_lost")
-TERMINAL_KINDS = (*TERMINAL_KINDS, "failure_finalized")
+TERMINAL_KINDS = (*TERMINAL_KINDS, "failure_finalized", "spend_budget_decision_ready")
+_WAKE_KINDS = (*_WAKE_KINDS, "spend_budget_decision_ready")
 
 
 def diagnostic_event(ev) -> bool:
@@ -650,6 +651,12 @@ def _fmt_resolved_check_drop(ev, n) -> tuple:
     return f"⏸ {n.head} {body}", body, None
 
 
+def _fmt_spend_budget(ev, n):
+    from hermes_cli.kanban_spend_decision import notice
+    body = notice(ev.payload or {})
+    return f"⏸ {n.head} {body}", body, None
+
+
 def _fmt_request_withdrawn(ev, n):
     detail = ("the card was archived. No answer is needed for this request; "
               "this is not approval and not proof of completion.")
@@ -676,6 +683,7 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "quota_episode_notice": _fmt_quota_episode,
     "worker_repin_notice": _fmt_repin_notice,
     "dependency_parent_unclaimed": _fmt_parent_unclaimed,
+    "spend_budget_decision_ready": _fmt_spend_budget,
     "chat_wait_unclaimed": _fmt_chat_wait,
 }
 

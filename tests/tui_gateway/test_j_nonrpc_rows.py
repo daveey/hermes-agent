@@ -521,9 +521,21 @@ def _run_cell(home, peers, monkeypatch, cell, reader_defers=True):
                 "holder_cpu_s": cx.holder_cpu, "row_core": (cx.watcher_cpu + poller_cpu) / SECONDS,
                 "holder_core": cx.holder_cpu / SECONDS, "latency_s": latency,
                 "max_latency_s": max(latency.values()) if latency else None,
-                "frames_per_peer": len(peers[0].frames), "wal_bytes": wal_bytes,
+                "frames_per_peer": [len(peer.frames) for peer in peers],
+                "watcher_events_per_peer": [dict(Counter(frame["params"]["type"] for frame in peer.frames))
+                                            for peer in peers], "wal_bytes": wal_bytes,
                 "skill_roots": len(skill_roots)}
     _write_evidence(evidence)
+    # Measured chg1 + notice stream: 83 message + 2 title updates and 24 persisted
+    # notices yield 104 sessions.changed broadcasts (five notice updates coalesce
+    # with chg1 under the 2 s floor). The pre-fix reader delivers notices sooner:
+    # only three coalesce, yielding 106. The 55 activity-only commits stay silent;
+    # warm-up frames were cleared and the other watched inputs stay unchanged.
+    # All ten peers must receive the work whose CPU we charge, not just peer zero.
+    expected_frames = 104 if reader_defers else 106
+    assert len(peers) == 10, evidence
+    assert evidence["watcher_events_per_peer"] == [{"sessions.changed": expected_frames}] * 10, evidence
+    assert evidence["frames_per_peer"] == [expected_frames] * 10, evidence
     assert not ins.errors, (ins.errors, evidence)
     assert not scheduler.errors
     if cell["large_wal"]:  # the WAL stayed past 400 MiB through the measured window

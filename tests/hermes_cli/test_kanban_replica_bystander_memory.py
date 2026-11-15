@@ -388,6 +388,39 @@ def test_legacy_reader_borrows_closed_and_bulk_resolves_publications(hub, monkey
     activity._legacy_remote_links()
 
 
+@pytest.mark.parametrize('overrides,live', [
+    ({'ownership_state': 'unknown'}, True),
+    ({'created_at': None}, True),
+    ({}, False),
+    ({'created_at': []}, True),
+    ({'created_at': {}}, True),
+], ids=['ownership', 'missing-created', 'dead-scope', 'list-created', 'dict-created'])
+def test_remembered_publication_filters_each_ineligible_key(overrides, live):
+    from hermes_cli.kanban_replica_aggregates import Published, remembered_publications
+
+    eligible = {'id': 't_good', 'gateway': 'owner', 'owner_profile': 'work',
+                'board': 'build', 'created_at': 10, 'ownership_state': 'qualified'}
+    rejected = dict(eligible, id='t_bad', **overrides)
+    # A separate live scope keeps the positive control eligible in every case.
+    eligible['gateway'] = 'control'
+    scopes = {('control', 'work', 'build')}
+    if live:
+        scopes.add(('owner', 'work', 'build'))
+    good_key = ('build', 't_good', 10)
+    calls = []
+
+    class RecordingPublished(Published):
+        def lookup_many(self, keys):
+            calls.append(set(keys))
+            return super().lookup_many(keys)
+
+    moved = {'published': RecordingPublished({good_key: {'control'}}, {}),
+             'live_scopes': scopes}
+    remembered_publications(moved, [rejected, eligible])
+    assert calls == [{good_key}]
+    assert moved['published'] == {good_key: frozenset({'control'})}
+
+
 @pytest.mark.parametrize('ownership,created', [('unknown', []), ('unknown', {}), ('qualified', [])])
 def test_ineligible_remembered_publication_does_not_poison_reads(hub, monkeypatch, ownership, created):
     from hermes_cli import kanban_session_activity as activity

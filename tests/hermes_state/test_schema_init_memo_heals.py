@@ -189,6 +189,55 @@ def test_a_heal_that_fails_mid_way_rolls_back_and_is_retried_by_the_next_open(
         con.close()
 
 
+def test_throughput_settle_failure_retries_before_the_completed_heal_interval(
+        tmp_path, reconciles, monkeypatch):
+    from hermes_cli import session_throughput_revision as revision
+
+    path = tmp_path / "state.db"
+    SessionDB(db_path=path).close()
+    # Data-only damage preserves the schema memo key, but tracking needs repair.
+    with sqlite3.connect(path) as conn:
+        conn.execute("DELETE FROM throughput_anchors")
+        assert revision.read_stamp(conn) is None
+    _after_interval(monkeypatch)
+    real_install = revision._install_inner
+    real_settle = revision.settle_schema
+    results = []
+
+    def fail_install(conn):
+        raise sqlite3.OperationalError("database is locked")
+
+    def settle(conn):
+        result = real_settle(conn)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(revision, "_install_inner", fail_install)
+    monkeypatch.setattr(revision, "settle_schema", settle)
+    SessionDB(db_path=path).close()
+    assert results == [False]  # real settle_schema reports the caught install failure
+    assert reconciles["n"] == 1  # memo-hit heal, not full schema initialization
+
+    monkeypatch.setattr(revision, "_install_inner", real_install)
+    SessionDB(db_path=path).close()
+    assert results == [False]  # failures still respect the short retry backoff
+    with sqlite3.connect(path) as conn:
+        assert revision.read_stamp(conn) is None
+
+    assert _memo().HEAL_RETRY_S + 1 < _memo().HEAL_INTERVAL_S
+    _advance(monkeypatch, _memo().HEAL_RETRY_S + 1)
+    db = SessionDB(db_path=path)
+    try:
+        assert results == [False, True]  # not acknowledged as a completed interval
+        assert reconciles["n"] == 1
+        assert revision.read_stamp(db._conn) is not None
+    finally:
+        db.close()
+    _advance(monkeypatch, _memo().HEAL_RETRY_S + 1)
+    SessionDB(db_path=path).close()
+    assert results == [False, True]  # success restores the full heal interval
+
+
 def _memo():
     import hermes_state_schema_memo
 

@@ -1047,8 +1047,9 @@ def _move_checkout_to(git_cmd, branch, merge_ref, target_sha, pre_pull_sha, *, u
         if ancestry_detail:
             print(f"  {ancestry_detail}")
     print("  Resolve the Git error and re-run `hermes update`; no reset was attempted.")
-    from hermes_cli.update_receipt import git_output_stop_class
+    from hermes_cli.update_receipt import git_output_stop_class, record_ref_lock_identity
 
+    record_ref_lock_identity(detail)
     # The shared classifier: an index.lock that EXISTS is another git's; "Permission denied" on it is not.
     _record_stop(git_output_stop_class(detail, ["merge"], merge_result.returncode) or "checkout_move_failed")
     sys.exit(1)
@@ -1691,6 +1692,8 @@ def _handle_update_called_process_error(
             print(f"  Details: {e}")
             _print_called_process_error_tail(e)
         if stop := _completion_receipt.git_error_stop_class(e):
+            if stop == "ref_lock_stale":
+                _completion_receipt.record_ref_lock_identity(e)
             _record_stop(stop)
         _finalize_receipt("failed", 'Update receipt finalize failed: %s')
         sys.exit(1)

@@ -7,7 +7,7 @@ pin sweep moved 7 such hub-local cards off the hub by hand after their runs (all
 were waiting. The hub dispatcher now judges a ready, label-less hub card with no verdict before it claims it:
 admitted runs here, denied is re-placed on the worker queue (``moved``, never claimed), a denied card that
 must stay (host workspace, host_repo, a hub worktree or hub-local wake_check) runs here with ``kept``, and an
-unavailable judge fails open (claimed, no verdict, judged next time).
+unavailable judge defers unjudged cards until a later tick.
 """
 from __future__ import annotations
 
@@ -189,16 +189,18 @@ def test_the_newest_wake_check_decides(gws, hub_judge):
     assert _holder(svc, tid) != HUB and len(_events(hub.conn, tid, "moved")) == 1
 
 
-def test_a_deny_with_no_worker_queue_is_kept_and_claimed(gws, hub_judge, monkeypatch):
+def test_a_deny_with_no_worker_queue_is_deferred(gws, hub_judge, monkeypatch):
     from hermes_cli import kanban_placement as kp
     hub, _worker, svc = gws
     monkeypatch.setattr(kp, "config", lambda: {"worker_pools": {HUB: [WORKER]}})  # no worker_queue label
     hub_judge.admit_next = False
     tid = _hub_card(hub)
     _tick(hub)
-    assert _holder(svc, tid) == HUB  # never stranded
+    assert _holder(svc, tid) != HUB  # queue absence is not structural permission
     [verdict] = _events(hub.conn, tid, "hub_admission")
-    assert verdict["kept"] == hac.NO_QUEUE and _events(hub.conn, tid, "moved") == []
+    assert "kept" not in verdict and _events(hub.conn, tid, "moved") == []
+    _tick(hub)
+    assert len(hub_judge.calls) == 1 and _holder(svc, tid) != HUB
 
 
 def test_a_deny_no_worker_can_claim_is_kept_home_with_the_action_reason(gws, hub_judge, caplog):
@@ -217,7 +219,7 @@ def test_a_deny_no_worker_can_claim_is_kept_home_with_the_action_reason(gws, hub
     assert "kept=1 home=1" in caplog.text
 
 
-def test_an_unavailable_judge_fails_open_once_per_tick(gws, monkeypatch, caplog):
+def test_an_unavailable_judge_defers_once_per_tick(gws, monkeypatch, caplog):
     hub, _worker, svc = gws
     calls = []
 
@@ -230,7 +232,7 @@ def test_an_unavailable_judge_fails_open_once_per_tick(gws, monkeypatch, caplog)
         _tick(hub)
     assert len(calls) == 1  # one outage per tick, not one judge timeout per card
     for tid in tids:
-        assert _holder(svc, tid) == HUB, tid  # fail open: a judge outage never freezes the hub
+        assert _holder(svc, tid) != HUB, tid  # outage is not an admission disposition
         assert _events(hub.conn, tid, "hub_admission") == []  # no verdict: judged at its next ready
     assert "hub admission: claim screen judged=0 denied=0 moved=0 kept=0 home=0 unavailable=3" in caplog.text
 
@@ -240,7 +242,7 @@ def test_an_unavailable_verdict_is_not_recorded(gws, monkeypatch):
     monkeypatch.setattr(judge, "admit", lambda card, hub_reason=None: judge.Verdict())
     tid = _hub_card(hub)
     _tick(hub)
-    assert _holder(svc, tid) == HUB and _events(hub.conn, tid, "hub_admission") == []
+    assert _holder(svc, tid) != HUB and _events(hub.conn, tid, "hub_admission") == []
 
 
 @pytest.mark.parametrize("prior", [
@@ -254,14 +256,15 @@ def test_a_card_with_any_verdict_makes_no_model_call(gws, hub_judge, prior):
     with kb.write_txn(hub.conn):
         kb._append_event(hub.conn, tid, "hub_admission", prior)
     _tick(hub)
-    assert hub_judge.calls == [] and _holder(svc, tid) == HUB
+    assert hub_judge.calls == []
+    assert (_holder(svc, tid) == HUB) is bool(prior.get("admit") or prior.get("forced"))
 
 
 def test_a_creation_time_verdict_makes_no_model_call(gws, hub_judge):
     hub, _worker, svc = gws
     tid = _hub_card(hub, placement_audit={"hub_admission": {"admit": False, "why": "skipped", "entry": "create"}})
     _tick(hub)
-    assert hub_judge.calls == [] and _holder(svc, tid) == HUB
+    assert hub_judge.calls == [] and _holder(svc, tid) != HUB
 
 
 def test_a_non_hub_gateway_makes_no_model_call(gws, hub_judge):
@@ -394,6 +397,46 @@ def test_screen_reports_deferred_ids(gws, hub_judge):
     assert all(tid in counts.line() for tid in tids[1:]) and tids[0] not in counts.line()
 
 
+def _aged_review_card(hub, minutes):
+    """A review card whose ready/review interval began ``minutes`` ago: the aged admission score ranks it above
+    fresh higher-priority ready cards (25 points per waiting minute)."""
+    tid = _hub_card(hub, title="aged review card")
+    since = int(time.time()) - minutes * 60
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET status = 'review', created_at = ? WHERE id = ?", (since, tid))
+        hub.conn.execute("UPDATE task_events SET created_at = ? WHERE task_id = ?", (since, tid))
+    return tid
+
+
+def test_the_judge_budget_follows_the_combined_ready_and_review_score_order(gws, hub_judge):
+    """PR #3191 ranks ready and review together by the aged score; the screen used to walk the ready lane and then
+    append review, so a review card the claim pass reaches FIRST was deferred while three lower-ranked ready cards
+    spent the judge budget and were claimed (t_01a1dca84c849edc)."""
+    hub, _worker, _svc = gws
+    ready = [_hub_card(hub, title=f"ready card {i}", priority=100) for i in range(hac.MAX_JUDGED_PER_TICK)]
+    review = _aged_review_card(hub, 60)
+    hub.enter()
+    order = [row["id"] for row in hac._candidates(hub.conn)]
+    assert order[0] == review and set(order[1:]) == set(ready), order
+    _ready, _review, deferred = hac.screened_lanes(hub.conn, False, True)
+    assert hub_judge.calls[0]["card"]["title"] == "aged review card"
+    assert _events(hub.conn, review, "hub_admission") and review not in deferred
+    assert len(deferred) == 1 and deferred <= set(ready)
+
+
+def test_the_screen_skips_review_cards_when_review_dispatch_is_off(gws, hub_judge):
+    """Control: with review dispatch off the claim pass never reaches review cards, so they spend no judge call."""
+    hub, _worker, _svc = gws
+    ready = [_hub_card(hub, title=f"ready card {i}", priority=100) for i in range(hac.MAX_JUDGED_PER_TICK)]
+    review = _aged_review_card(hub, 60)
+    hub.enter()
+    _ready, review_lane, deferred = hac.screened_lanes(hub.conn, False, False)
+    assert review_lane == [] and not deferred
+    assert len(hub_judge.calls) == hac.MAX_JUDGED_PER_TICK
+    assert all(_events(hub.conn, tid, "hub_admission") for tid in ready)
+    assert _events(hub.conn, review, "hub_admission") == []
+
+
 def test_deferred_ids_appear_in_the_dispatch_result(gws, hub_judge, monkeypatch, caplog):
     """A card deferred every tick (kept edited, or a long backlog) must be visible in the tick's diagnostics:
     ``lane_candidates`` leaves it out, so the result and the log line name it (review of #1811)."""
@@ -491,10 +534,9 @@ def test_event_change_before_apply_invalidates_the_decision(gws, hub_judge, monk
 
 def test_unjudged_claims_is_empty_before_the_gate_and_ignores_later_verdicts(gws, monkeypatch):
     hub, _worker, _svc = gws
-    monkeypatch.setattr(judge, "admit", lambda card, hub_reason=None: judge.Verdict())  # outage: fail open
     early = _hub_card(hub, title="claimed before any verdict existed")
-    _tick(hub)
-    hub.round()
+    with kb.write_txn(hub.conn):
+        kb._append_event(hub.conn, early, "claimed", {"holder": HUB})
     assert hac.unjudged_claims(hub.conn, HUB) == []  # no verdict on this board yet: the gate is not live
     with kb.write_txn(hub.conn):  # a verdict recorded after the claim does not make that claim judged
         kb._append_event(hub.conn, early, "hub_admission", {"admit": True, "entry": "move"})
@@ -557,10 +599,9 @@ def test_unjudged_claims_counts_hub_claims_without_a_prior_verdict(gws, hub_judg
     judged = _hub_card(hub, title="judged")
     _tick(hub)
     assert hac.unjudged_claims(hub.conn, HUB) == []
-    monkeypatch.setattr(judge, "admit", lambda card, hub_reason=None: judge.Verdict())  # outage: fail open
     unjudged = _hub_card(hub, title="unjudged")
-    _tick(hub)
-    hub.round()  # the Board's lease ``claimed`` event (holder=hub) arrives with the next feed
+    with kb.write_txn(hub.conn):  # historical bypass, independent of the fail-closed dispatcher
+        kb._append_event(hub.conn, unjudged, "claimed", {"holder": HUB})
     assert [tid for tid, _at in hac.unjudged_claims(hub.conn, HUB)] == [unjudged]
     assert hac.unjudged_claims(hub.conn, HUB, now=time.time() + hac.WINDOW_SECONDS + 60) == []  # aged out
     assert judged != unjudged
@@ -576,15 +617,14 @@ def test_doctor_flags_unjudged_hub_claims(gws, monkeypatch, capsys):
     _tick(hub)
     hub.enter()
     assert doctor_state._check_hub_admission_claims(False).manual_issues == []
-    assert "0 hub claims of unjudged cards" in capsys.readouterr().out
-    monkeypatch.setattr(judge, "admit", lambda card, hub_reason=None: judge.Verdict())
+    assert "0 hub claims without an admission disposition" in capsys.readouterr().out
     tid = _hub_card(hub, title="claimed unjudged")
-    _tick(hub)
-    hub.round()
+    with kb.write_txn(hub.conn):  # historical claim bypass, not a supported outage route
+        kb._append_event(hub.conn, tid, "claimed", {"holder": HUB})
     hub.enter()
     found = doctor_state._check_hub_admission_claims(False)
     assert len(found.manual_issues) == 1 and tid in found.manual_issues[0], found.manual_issues
-    assert "1 hub claim(s) of unjudged cards" in capsys.readouterr().out
+    assert "1 hub claim(s) without an admission disposition" in capsys.readouterr().out
 
 
 def test_doctor_hub_claim_check_is_silent_off_the_hub(gws, monkeypatch, capsys):

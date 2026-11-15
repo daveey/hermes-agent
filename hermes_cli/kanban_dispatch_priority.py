@@ -16,6 +16,12 @@ def order_with_remote_waiters(conn: sqlite3.Connection, rows: list[sqlite3.Row])
     not yet pushed to the Board. The Board still authorizes every actual claim.
     """
     try:
+        from hermes_cli.kanban_admission_score import rank
+
+        return [row for row, _parts in rank(conn, rows)]
+    except (sqlite3.Error, OSError, ValueError):
+        _LOG.warning("could not score dispatch candidates; using priority ordering", exc_info=True)
+    try:
         return _order_with_remote_waiters(conn, rows)
     except Exception:  # health: allow BLE001 -- advisory replica reads must never stop local dispatch
         _LOG.warning("could not read replica priority graph; using local ordering", exc_info=True)

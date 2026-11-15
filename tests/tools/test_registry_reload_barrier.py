@@ -38,8 +38,16 @@ def register(ctx):
             raise RuntimeError("reload failed on purpose")
 
     def handler(args, **kwargs):
+        if gate.hold_handler:
+            gate.handler_entered.set()
+            gate.handler_release.wait(30)
         gate.calls.append(dict(args))
         return json.dumps({{"ok": True, "host": args.get("host")}})
+
+    def observe(tool_name="", args=None, **kwargs):
+        gate.observed.append((tool_name, dict(args or {{}})))
+
+    ctx.register_hook("post_tool_call", observe)
 
     ctx.register_tool({TOOL!r}, {TOOLSET!r}, {{
         "name": {TOOL!r}, "description": "probe",
@@ -56,9 +64,14 @@ def gate(monkeypatch):
     module.entered = threading.Event()
     module.release = threading.Event()
     module.calls = []
+    module.observed = []
+    module.hold_handler = False
+    module.handler_entered = threading.Event()
+    module.handler_release = threading.Event()
     monkeypatch.setitem(sys.modules, GATE, module)
     yield module
     module.release.set()
+    module.handler_release.set()
 
 
 @pytest.fixture
@@ -119,6 +132,28 @@ def test_tool_call_during_force_reload_waits_and_runs_once(manager, gate):
     assert not reload_thread.is_alive() and "error" not in reload_box, reload_box
     assert call_box.get("value") == {"ok": True, "host": "mini"}, call_box
     assert gate.calls == [{"host": "mini"}]
+
+
+def test_post_tool_call_of_a_call_that_ends_mid_reload_reaches_the_plugin_hook(manager, gate):
+    """A call that started before a force reload and returns while the pass holds the hook registry
+    empty still reaches the plugin's post_tool_call observer, once the pass re-registers it
+    (self-heal agent-42414133d9: a hub mods-reload of the coach plugin landed between a chat's
+    `gh pr view` call and its result; the coach never saw the read and flagged the reply that
+    reported it as an unread PR-state claim)."""
+    gate.hold_handler = True
+    call_thread, call_box = _start(_tool_call)
+    assert gate.handler_entered.wait(20), "the tool handler never started"
+    reload_thread, reload_box = _reload_held_open(manager, gate)
+
+    gate.handler_release.set()  # the handler returns now, mid-reload
+    call_thread.join(0.5)
+    gate.release.set()
+    reload_thread.join(20)
+    call_thread.join(20)
+    assert not reload_thread.is_alive() and "error" not in reload_box, reload_box
+    assert call_box.get("value") == {"ok": True, "host": "mini"}, call_box
+    assert gate.calls == [{"host": "mini"}]
+    assert [a for t, a in gate.observed if t == TOOL] == [{"host": "mini"}], gate.observed
 
 
 def test_direct_dispatch_during_force_reload_waits(manager, gate):

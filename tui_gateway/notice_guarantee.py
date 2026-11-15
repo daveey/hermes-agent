@@ -58,8 +58,10 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
+from tui_gateway.kanban_notice_session_store import notice_writer, reader_of
 from tui_gateway.wake_slots import WakeSlots
 
 logger = logging.getLogger(__name__)
@@ -115,6 +117,7 @@ def candidates(db: Any, now: float, only: Optional[set[str]] = None) -> list[dic
     from tui_gateway.notice_candidates import rows as candidate_rows
     from tui_gateway.notice_fanout import _decode
     sql = _CANDIDATES_SQL.format(last_active=_sql_session_last_active("s"))
+    db = reader_of(db)  # the kept handle: a stable cache key (``notice_candidates`` keys on the reader object)
     if only is not None:
         ids = sorted(only)
         if not ids:
@@ -177,17 +180,19 @@ def _claim(db: Any, cand: dict, now: float) -> bool:
     meta = {**cand["meta"], "closeout": {"state": "claimed", "at": now, "pid": os.getpid(),
                                          "attempts": _attempts(cand["meta"]) + 1,
                                          **({"busy_attempts": busy} if busy else {})}}
-    return db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
-                              (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"])) == 1
+    with notice_writer(db) as wdb:
+        return wdb._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
+                                   (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"])) == 1
 
 
 def _stamp(db: Any, msg_id: int, verdict: str, **extra: Any) -> None:
     from tui_gateway.notice_fanout import _decode
-    row = db._read_one("SELECT display_metadata FROM messages WHERE id = ?", (msg_id,))
-    meta = _decode(row["display_metadata"] if row else None)
-    meta["closeout"] = {**(meta.get("closeout") or {}), **extra, "state": verdict}
-    db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ?",
-                       (json.dumps(meta, ensure_ascii=False), msg_id))
+    with notice_writer(db) as wdb:
+        row = wdb._read_one("SELECT display_metadata FROM messages WHERE id = ?", (msg_id,))
+        meta = _decode(row["display_metadata"] if row else None)
+        meta["closeout"] = {**(meta.get("closeout") or {}), **extra, "state": verdict}
+        wdb._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ?",
+                            (json.dumps(meta, ensure_ascii=False), msg_id))
 
 
 def _this_gateway() -> str:
@@ -266,10 +271,11 @@ def superseded(cand: dict) -> bool:
 def _supersede(db: Any, cand: dict, now: float) -> str:
     """Stamp the notice ``superseded`` (compare-and-swap like a claim) and refresh the chat's outcome."""
     meta = {**cand["meta"], "closeout": {"state": "superseded", "at": now, "pid": os.getpid()}}
-    if db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
-                          (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"])) != 1:
-        return "skipped:claimed"
-    _refresh(db, cand["sid"])
+    with notice_writer(db) as wdb:
+        if wdb._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
+                               (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"])) != 1:
+            return "skipped:claimed"
+        _refresh(wdb, cand["sid"])
     return "superseded"
 
 
@@ -288,7 +294,8 @@ def _spawn(job: Callable[[], Any]) -> None:
 def _refresh(db: Any, sid: str) -> bool:
     """Refresh one chat's outcome; True when it refreshed (``refresh_outcomes_quietly`` logs and swallows a failure)."""
     import hermes_state_outcome as _outcome
-    return _outcome.refresh_outcomes_quietly([sid], "notice", db=db) > 0
+    with notice_writer(db) as wdb:
+        return _outcome.refresh_outcomes_quietly([sid], "notice", db=wdb) > 0
 
 
 def _retry_at(sid: str, now: float) -> float:
@@ -358,19 +365,20 @@ def _refresh_once(db: Any, cand: dict, branch: str, seen: set) -> str:
         return "skipped:refreshed"
     from hermes_state_outcome import get_outcome
 
-    refreshed = _refresh(db, cand["sid"])
-    outcome = get_outcome(cand["sid"], db=db) if refreshed else None
-    if branch == "human" and outcome and outcome.get("reason") == "notice_tail":
-        # No owning decision/wait accounted for this intentionally passive notice.
-        # Preserve the preceding turn instead of manufacturing an obligation for
-        # an incidental recipient. Other outcomes need no metadata write.
-        meta = {**cand["meta"], "outcome_informational": True}
-        changed = db._write_rowcount(
-            "UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
-            (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"]))
-        if changed != 1:
-            return "skipped:changed"
-        refreshed = _refresh(db, cand["sid"])
+    with notice_writer(db) as wdb:  # one writer borrow for the refresh, its readback and the marker
+        refreshed = _refresh(wdb, cand["sid"])
+        outcome = get_outcome(cand["sid"], db=wdb) if refreshed else None
+        if branch == "human" and outcome and outcome.get("reason") == "notice_tail":
+            # No owning decision/wait accounted for this intentionally passive notice.
+            # Preserve the preceding turn instead of manufacturing an obligation for
+            # an incidental recipient. Other outcomes need no metadata write.
+            meta = {**cand["meta"], "outcome_informational": True}
+            changed = wdb._write_rowcount(
+                "UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
+                (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"]))
+            if changed != 1:
+                return "skipped:changed"
+            refreshed = _refresh(wdb, cand["sid"])
     if refreshed:
         _refreshed.add(key)
     return f"refreshed:{branch}"
@@ -423,9 +431,10 @@ def _give_up(db, cand: dict) -> str:
     Without the stamp the same row was retried and logged on every pass forever (349 warnings in one window). [daveey]"""
     try:
         meta = {**cand["meta"], "closeout": {"state": "error", "at": time.time(), "pid": os.getpid()}}
-        db._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
-                           (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"]))
-        _refresh(db, cand["sid"])
+        with notice_writer(db) as wdb:
+            wdb._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
+                                (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"]))
+            _refresh(wdb, cand["sid"])
     except Exception:
         logger.debug("notice guarantee: could not stamp %s as error", cand["sid"], exc_info=True)
     return "error"
@@ -433,9 +442,18 @@ def _give_up(db, cand: dict) -> str:
 
 @contextlib.contextmanager
 def _profile_store(profile: Optional[str]) -> Iterator[Any]:
+    """The launch profile's shared writable store; a foreign profile's kept read-only store (no per-pass writer
+    open or schema reconcile: that store belongs to its own gateway). Notice writes and refreshes borrow the
+    shared writer through ``notice_writer``. [daveey]"""
     from tui_gateway import server
-    with server._profile_db({"profile": profile} if profile else None, writer=True) as db:
-        yield db
+    home = server._profile_home(profile) if profile else None
+    if home is None:
+        with server._profile_db(None, writer=True) as db:
+            yield db
+        return
+    from tui_gateway.kanban_notice_session_store import profile_store
+    with profile_store(Path(home) / "state.db") as store:
+        yield store
 
 
 def _stores() -> Iterator[Any]:

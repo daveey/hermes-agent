@@ -39,8 +39,18 @@ def test_executed_arithmetic_substitutions_are_sinks(tmp_path, shape):
     script = tmp_path / "payload.sh"
     script.write_text(f"touch '{marker}'\nprintf 0\n", encoding="utf-8")
     command = shape.replace("SCRIPT", str(script))
+    execution_command = command
+    if shape == "a['$(bash SCRIPT)']=1":
+        # Bash 3.2 expands this quoted subscript in explicit arithmetic, but
+        # rejects it in bare assignment. Bash 5.2 does the reverse. Exercise
+        # the executing context on each, while guarding the bare form below
+        # unconditionally (guard policy cannot depend on the host's Bash).
+        execution_command = (
+            'if (( BASH_VERSINFO[0] == 3 )); then '
+            f'(( {command} )); else {command}; fi'
+        )
     result = subprocess.run(
-        [bash, "--noprofile", "--norc", "-c", command], cwd=tmp_path,
+        [bash, "--noprofile", "--norc", "-c", execution_command], cwd=tmp_path,
         env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True,
         encoding="utf-8", timeout=10, check=False,
     )

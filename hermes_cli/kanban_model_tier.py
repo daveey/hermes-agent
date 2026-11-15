@@ -339,7 +339,9 @@ def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
         moved = _review_off_wall(conn, task, base, load_tier_config() if cfg is None else cfg)
         if moved:
             return moved[0], moved[1], f'{base[2]}+wall:{moved[2]}'
-    return base
+    # No wall, but the route's pool is pacing-held for longer than reroute_after_s: an unheld class peer runs it.
+    from hermes_cli.kanban_paced_reroute import paced_route
+    return paced_route(conn, task, base, lane=lane, cfg=load_tier_config() if cfg is None else cfg) or base
 
 
 def _review_off_wall(conn, task, base, cfg):

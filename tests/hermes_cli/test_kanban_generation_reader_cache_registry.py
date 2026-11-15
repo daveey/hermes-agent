@@ -1,7 +1,10 @@
 """Reader eviction registration must not own retired plugin instances."""
 import gc
 import sqlite3
+import types
 import weakref
+
+import pytest
 
 from hermes_cli import kanban_generation as kg
 
@@ -151,13 +154,57 @@ def test_slotted_instance_bound_method_stays_registered_while_owner_lives(tmp_pa
     assert len(kg._reader_caches) == 0
 
 
+def test_module_owned_callback_is_not_retained(monkeypatch):
+    monkeypatch.setattr(kg, "_reader_caches", type(kg._reader_caches)())
+    module = types.ModuleType("ephemeral_reader_cache")
+    calls = []
+
+    class ModuleCallback:
+        # Model a module-owned extension function (e.g. len): __self__ is a
+        # module, there is no __func__, and the callable supports weakrefs.
+        # Unlike len, this fixture has no immortal builtins-module reference.
+        def __init__(self, owner):
+            self.__self__ = owner
+
+        def __call__(self, path):
+            calls.append(path)
+
+    callback = ModuleCallback(module)
+    assert callback.__self__ is module
+    with pytest.raises(TypeError):
+        weakref.WeakMethod(callback)
+    ref = weakref.ref(callback)
+    kg.register_reader_cache(callback)
+    assert list(kg._reader_caches) == [callback]
+    next(iter(kg._reader_caches))("board.db")
+    assert calls == ["board.db"]
+
+    del callback
+    gc.collect()
+    # Keep the module alive: callback death must not depend on owner death or
+    # registry pruning. In particular, assert this before reading the registry.
+    assert ref() is None
+    assert module.__name__ == "ephemeral_reader_cache"
+    assert list(kg._reader_caches) == []
+
+
 def test_builtin_bound_method_stays_registered_while_owner_lives(monkeypatch):
     monkeypatch.setattr(kg, "_reader_caches", type(kg._reader_caches)())
     evicted = []
-    kg.register_reader_cache(evicted.append)
+    callback = evicted.append
+    with pytest.raises(TypeError):
+        weakref.ref(evicted)
+    ref = weakref.ref(callback)
+    kg.register_reader_cache(callback)
+    del callback
     gc.collect()
+    assert ref() is not None
     assert list(kg._reader_caches) == [evicted.append]
+    next(iter(kg._reader_caches))("board.db")
+    assert evicted == ["board.db"]
     assert kg.unregister_reader_cache(evicted.append) is True
+    gc.collect()
+    assert ref() is None
     assert len(kg._reader_caches) == 0
 
 

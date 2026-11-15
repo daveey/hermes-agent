@@ -1,0 +1,27 @@
+"""Pickup alarm source exclusion, matching the Board's pickup_alarm.ts contract. [daveey]
+
+The Board stamps created_on from the authenticated gateway and fences changes to
+these detector identity fields. No caller-supplied list of excluded machines is used.
+Before that authoritative creation is pulled, missing provenance fails closed.
+"""
+from __future__ import annotations
+
+import re
+from typing import Any, Mapping
+
+# The resource-admission observer shares the detector identity and pool producer.
+_KEY = re.compile(r"(?:pickup-stall:([a-z0-9][a-z0-9-]{0,63}):[A-Za-z0-9._-]+|"
+                  r"worker-resources-unknown:([a-z0-9][a-z0-9-]{0,63})):([1-9][0-9]*)")
+
+
+def refusal(card: Mapping[str, Any], machine: str) -> str | None:
+    """Refuse the source or malformed detector-like rows; ordinary cards are unchanged."""
+    key = card.get("idempotency_key")
+    detector = card.get("created_by") == "pickup-stall-detector"
+    if not detector and not (isinstance(key, str) and key.startswith(("pickup-stall:", "worker-resources-unknown:"))):
+        return None
+    match = _KEY.fullmatch(key) if isinstance(key, str) else None
+    source = (match[1] or match[2]) if match else None
+    if not detector or source is None or source != card.get("created_on"):
+        return "pickup_stall_provenance"
+    return "pickup_stall_source" if source == machine else None

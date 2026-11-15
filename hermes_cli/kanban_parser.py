@@ -200,6 +200,14 @@ _BOARD_SPECS = [
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
     _cmd("init", help="Create kanban.db if missing (idempotent)"),
+    _cmd("selfwork-forward", [
+        _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
+        _arg("--json", action="store_true", help="Return structured authorization (always JSON)"),
+    ], help="Authorize worker self-work forwarding through its accepted origin"),
+    _cmd("selfwork-create", [
+        _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
+        _arg("--json", action="store_true", help="Return structured intake receipt (always JSON)"),
+    ], help="Receive authenticated self-work at its configured intake home"),
     _cmd("origin-create", [
         _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
         _arg("--json", action="store_true", help="Return structured pending creation (always JSON)"),
@@ -281,6 +289,8 @@ _SPECS = [
         _arg("--frees", dest="admission_frees", help="Single-line frees: claim"),
         _arg("--triage", action="store_true",
              help="Park in triage — a specifier will flesh out the spec and promote to todo"),
+        _arg("--self-work", type=json.loads, metavar="JSON",
+             help="Versioned Hermes self-maintenance declaration (repository, area, kind); omit for product work."),
         _arg("--idempotency-key",
              help="Dedup key. If a non-archived task with this key exists, "
                   "its id is returned instead of creating a duplicate."),
@@ -394,7 +404,13 @@ _SPECS = [
              help="--mandatory: a far quota wall never moves this pin to a same-class peer (the card waits "
                   "for the reset). --no-mandatory lifts that. Omit to keep the card's setting."),
     ], help="Set or clear a task's model/provider override (takes effect on the next dispatch)"),
-    _cmd("reclaim", [_TASK_ID, _RECLAIM_REASON], help="Release an active worker claim on a running task"),
+    _cmd("reclaim", [
+        _TASK_ID, _RECLAIM_REASON,
+        _arg("--urgency-source", dest="urgency_source", choices=("explicit_operator",), default=None,
+             help="Attribution for an explicit core-update interruption (with --interrupt-target)"),
+        _arg("--interrupt-target", dest="interrupt_target", default=None,
+             help="40-hex minimum core target of that interruption (with --urgency-source)"),
+    ], help="Release an active worker claim on a running task"),
     _cmd("move", [
         _TASK_ID,
         _arg("--runs-on", dest="runs_on", default=None,
@@ -562,6 +578,7 @@ _SPECS = [
         *_WAKE_CHECK_ARGS(),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
+        _arg("--seen", dest="seen_comment_id", type=int, help="Newest comment id read; otherwise refuse foreign comments from the last 60 minutes."),
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
         _TASK_IDS,
     ], help="Return blocked/scheduled/triage tasks to ready, or todo while parents remain open"),
@@ -598,6 +615,7 @@ _SPECS = [
         _json_flag(),
     ], help="Operator-only (hub, Board admin key): free workspace_source custody held by a dead or disabled holder"),
     _cmd("promote", [
+        _arg("--seen", dest="seen_comment_id", type=int, help="Newest comment id read; otherwise refuse foreign comments from the last 60 minutes."),
         _TASK_ID,
         _arg("reason", nargs="*", help="Audit-trail reason (recorded on the task_events row)"),
         _bulk_ids("promote"),

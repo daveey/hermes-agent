@@ -91,6 +91,31 @@ afterEach(() => {
 })
 
 describe('qualified task routes', () => {
+  it('routes a drawer foreign_card 409 to its owner without losing profile or board', async () => {
+    registry('local', 'hub')
+    await bind(({ path, opts }) => path.includes('/comments') && opts?.connectionId !== 'hub'
+      ? new Error('HTTP 409: {"detail":"foreign_card: t_drawer was created on hub and lives there; this gateway has only a replica copy. kanban_supervisor_request hub-comment"}')
+      : { ok: true })
+    calls = []
+    await expect(api.addComment('t_drawer', 'Already answered, here is more context', { gateway: 'local', profile: 'research', board: 'ops' })).resolves.toEqual({ ok: true })
+    expect(calls).toEqual([
+      { path: '/tasks/t_drawer/comments?board=ops', opts: { connectionId: 'local', profile: 'research', method: 'POST', body: { author: 'desktop', body: 'Already answered, here is more context' } } },
+      { path: '/tasks/t_drawer/comments?board=ops', opts: { connectionId: 'hub', profile: 'research', method: 'POST', body: { author: 'desktop', body: 'Already answered, here is more context' } } }
+    ])
+  })
+
+  it('explains an unreachable foreign owner without worker-only instructions', async () => {
+    registry('local')
+    await bind(({ path }) => path.includes('/comments')
+      ? new Error('HTTP 409: foreign_card: t_unreachable was created on worker-8 and lives there; kanban_supervisor_request hub-comment')
+      : { ok: true })
+    calls = []
+    const result = api.addComment('t_unreachable', 'context', { gateway: 'local', profile: 'default', board: 'default' })
+    await expect(result).rejects.toThrow('Your comment was not saved. Connect to that gateway')
+    await expect(result).rejects.not.toThrow(/kanban_supervisor_request|hub-comment/)
+    expect(calls).toHaveLength(1)
+  })
+
   it('keeps the delayed dispatcher nudge on the immutable owner profile and board', async () => {
     await bind(() => board({ ready: [] }))
     const owner = { gateway: 'nudge-owner', profile: 'work', board: 'ops' }

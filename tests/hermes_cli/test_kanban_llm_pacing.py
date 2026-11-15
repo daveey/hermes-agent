@@ -1,8 +1,10 @@
 """LLM quota pacing governor: pool math and Kanban dispatch admission (t_01a1d975f57bb7b8). [daveey]"""
 from __future__ import annotations
 
+import ast
 import pathlib
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -151,6 +153,7 @@ def _opus_card(conn, title="work", **kw):
 def test_pool_ahead_of_pace_defers_spawns(paced_board, monkeypatch):
     _write_cfg(paced_board)
     _usage(monkeypatch, 70, 6 * DAY)  # 70% in the week's first day: ~490% projected at reset
+    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
     with kbc.connect() as conn:
         tid = _opus_card(conn)
         seen, result = _dispatch(conn)
@@ -181,6 +184,47 @@ def test_held_pool_names_the_reset_and_repeats_no_event(paced_board, monkeypatch
         events = [e.payload for e in kb.list_events(conn, tid) if e.kind == pd.EVENT_KIND]
     assert len(events) == 1 and events[0]["providers"][0]["state"] == lp.HELD
     assert abs(result.clock_held[tid][1] - (time.time() + 9 * HOUR)) < 120
+
+
+@pytest.mark.parametrize("persisted", [True, False], ids=["shared-state", "memory-only"])
+def test_dispatch_reuses_usage_until_read_interval_expires(paced_board, monkeypatch, persisted):
+    monkeypatch.setenv("HOME", str(paced_board.parent))
+    monkeypatch.setattr(pd, "_CLASS_CACHE", {})
+    monkeypatch.setattr(pd, "_WARNED", {})
+    interval = 60
+    _write_cfg(paced_board, llm_pacing={"enabled": True, "read_interval_seconds": interval,
+                                      "providers": ["anthropic"]})
+    assert pd.load_config().read_interval == interval
+    start = time.time()
+    clock = SimpleNamespace(now=start)
+    monkeypatch.setattr(pd, "time", SimpleNamespace(time=lambda: clock.now, monotonic=lambda: clock.now))
+    path = paced_board / ("shared" if persisted else "unavailable") / "llm_pacing.json"
+    if persisted:
+        path.parent.mkdir()
+    # A failed shared-state save must not defeat the in-process read budget.
+    monkeypatch.setattr(pd, "state_path", lambda: path)
+    reads = []
+
+    def read(provider, now):
+        reads.append((provider, now))
+        used = 90 if len(reads) == 1 else 5
+        return [_r("account", lp.SEVEN_DAY, used, 6 * DAY, now)]
+
+    monkeypatch.setattr(pd, "read_pool", read)
+    with kbc.connect() as conn:
+        tid = _opus_card(conn)
+        for offset in (0, 1, interval - 1):
+            clock.now = start + offset
+            seen, result = _dispatch(conn)
+            assert reads == [("anthropic", start)]
+            assert seen == []
+            assert (tid, lp.GUARD_REASON) in result.respawn_guarded
+        assert path.exists() is persisted
+        # Expiry is measured from the producer read, not the latest cache hit.
+        clock.now = start + interval
+        seen, _ = _dispatch(conn)
+        assert reads == [("anthropic", start), ("anthropic", start + interval)]
+        assert seen == [tid]
 
 
 def test_governor_off_is_todays_behaviour(paced_board, monkeypatch):
@@ -223,10 +267,73 @@ def test_ungoverned_provider_is_not_throttled(paced_board, monkeypatch):
 
 
 def test_only_kanban_dispatch_consults_the_governor():
-    """Chats, cron and notice delivery never import it: only the dispatcher's claim path does."""
+    """Chats, cron and notice delivery never hold a card on it, read usage through it or write its state: only the
+    dispatcher's claim path does. The one other reader is the stall notice (``kanban_parent_unclaimed``,
+    t_01a1db9d9538716b), and it may take only the read-only view of the stored pace (``NOTICE_VIEW``)."""
     root = pathlib.Path(pd.__file__).resolve().parents[1]
     users = sorted(str(p.relative_to(root)) for top in ("agent", "gateway", "cron", "hermes_cli", "tui_gateway")
                    if (root / top).is_dir() for p in (root / top).rglob("*.py")
                    if "kanban_llm_pacing" in p.read_text(encoding="utf-8", errors="ignore"))
-    assert users == ["hermes_cli/kanban_db_dispatch.py", "hermes_cli/kanban_llm_pacing.py",
-                     "hermes_cli/kanban_llm_pacing_dispatch.py"]
+    assert users == ["hermes_cli/kanban_db_dispatch.py", "hermes_cli/kanban_dispatch_maintenance.py",
+                     "hermes_cli/kanban_llm_pacing.py", "hermes_cli/kanban_llm_pacing_dispatch.py",
+                     "hermes_cli/kanban_paced_reroute.py",
+                     "hermes_cli/kanban_parent_unclaimed.py", "hermes_cli/kanban_worker_node.py"]
+    assert _governor_names(root / "hermes_cli/kanban_dispatch_maintenance.py") == {
+        "kanban_llm_pacing_dispatch": {"refresh_pools"}}
+    assert _governor_names(root / "hermes_cli/kanban_parent_unclaimed.py") == NOTICE_VIEW
+    assert _governor_names(root / "hermes_cli/kanban_worker_node.py") == PICKUP_VIEW
+    assert _governor_names(root / "hermes_cli/kanban_paced_reroute.py") == REROUTE_VIEW
+
+
+# What the stall notice may take from the governor: no hold(), no usage read, no state write.
+NOTICE_VIEW = {"kanban_llm_pacing_dispatch": {"admission", "admission_skip", "paced_pools"}}
+# Worker pickup (t_01a1ddeb76e30be7) predicts the claim-time hold on the replica's copy, so a card dispatch would
+# hold takes no pickup budget: its one entry point holds nothing, records no card event and fails open.
+PICKUP_VIEW = {"kanban_llm_pacing_dispatch": {"pickup_hold"}}
+# The route resolver moves a route off a far held pool (t_01a1e026c2ba361b): the stored holds only, no usage read.
+REROUTE_VIEW = {"kanban_llm_pacing_dispatch": {"held_pools"}}
+
+
+def _governor_names(path: pathlib.Path) -> dict[str, set[str]]:
+    """Each governor module ``path`` imports, with every name it imports from it or reads off it as ``alias.name``.
+    A dotted ``import`` of one, or its alias used any other way (passed on, stored), is listed as such."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    aliases: dict[str, str] = {}
+    names: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if "kanban_llm_pacing" in alias.name:
+                    names.setdefault(alias.name, set()).add("<module import>")
+        elif isinstance(node, ast.ImportFrom) and "kanban_llm_pacing" in (node.module or ""):
+            names.setdefault(node.module.rsplit(".", 1)[-1], set()).update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if "kanban_llm_pacing" in alias.name:
+                    aliases[alias.asname or alias.name] = alias.name
+                    names.setdefault(alias.name, set())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in aliases and isinstance(node.ctx, ast.Load):
+            parent = parents.get(node)
+            names[aliases[node.id]].add(parent.attr if isinstance(parent, ast.Attribute) and parent.value is node
+                                        else "<bare module use>")
+    return names
+
+
+@pytest.mark.parametrize("source, seen", [
+    ("from hermes_cli import kanban_llm_pacing_dispatch as p\np.admission(p.paced_pools(c, t))\np.admission_skip(a)\n",
+     NOTICE_VIEW),
+    ("from hermes_cli import kanban_llm_pacing_dispatch as p\np.paced_pools(c, t)\np.hold(c, r, 'ready', x)\n",
+     {"kanban_llm_pacing_dispatch": {"paced_pools", "hold"}}),
+    ("from hermes_cli import kanban_llm_pacing_dispatch as p\nkeep(p)\n", {"kanban_llm_pacing_dispatch": {"<bare module use>"}}),
+    ("from hermes_cli.kanban_llm_pacing_dispatch import read_pool\n", {"kanban_llm_pacing_dispatch": {"read_pool"}}),
+    ("import hermes_cli.kanban_llm_pacing_dispatch\n", {"hermes_cli.kanban_llm_pacing_dispatch": {"<module import>"}}),
+    ("from hermes_cli import kanban_llm_pacing as lp\nlp.admit_limit(x)\n", {"kanban_llm_pacing": {"admit_limit"}}),
+])
+def test_the_notice_view_pin_sees_every_way_to_reach_the_governor(tmp_path, source, seen):
+    """The pin above holds only if ``_governor_names`` reports a hold(), a usage read, the module passed on or a
+    dotted import; anything beyond the allowed view must differ from ``NOTICE_VIEW``."""
+    module = tmp_path / "notice.py"
+    module.write_text(source, encoding="utf-8")
+    assert _governor_names(module) == seen

@@ -91,10 +91,10 @@ def test_successful_schedule_and_unblock_write_exactly_one_comment_each(kanban_h
         task = kb.get_task(conn, tid)
         assert task.status == "ready"
         kb.claim_task(conn, tid)
-    assert _cli("schedule", tid, "waiting", "on", "the", "soak", "--clock-only") == 0
+    assert _cli("schedule", tid, "waiting", "on", "the", "cooldown", "--clock-only") == 0
     with kbc.connect() as conn:
         assert kb.get_task(conn, tid).status == "scheduled"
-        assert _comments(conn, tid) == ["UNBLOCK: ask moved to t_feedface", "SCHEDULED: waiting on the soak"]
+        assert _comments(conn, tid) == ["UNBLOCK: ask moved to t_feedface", "SCHEDULED: waiting on the cooldown"]
         kinds = [r[0] for r in conn.execute(
             "SELECT kind FROM task_events WHERE task_id = ? AND kind IN ('commented', 'scheduled', 'unblocked') "
             "ORDER BY id", (tid,))]

@@ -117,4 +117,6 @@ def all_clock_held(results: Iterable[Any]) -> bool:
     ran = [res for res in results if res is not None and not res.skipped_locked and not res.skipped_owned]
     if not ran or not any(res.clock_held for res in ran):
         return False
-    return all(not res.spawned and len(res.clock_held) == res.lane_candidates for res in ran)
+    # Pacing also records refresh deadlines here; only its typed verdict can prove a real hold.
+    # The expected-hold monitor handles pacing separately, including bounded starvation diagnostics.
+    return all(not res.spawned and not res.llm_paced and len(res.clock_held) == res.lane_candidates for res in ran)

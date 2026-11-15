@@ -20,6 +20,7 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_worker_node as wn
 from tests.hermes_cli import test_kanban_worker_node as support
+from tests.hermes_cli import test_kanban_pickup_alarm_placement as place
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 
 HELD, FREE = "worker-6", "worker-1"
@@ -33,6 +34,7 @@ def _machines(t0: float, *, free_pickup="explicit", held=True) -> dict:
             "hold_reason": "worker-core-rollout: aaaaaaaaaaaa -> bbbbbbbbbbbb; drain only; release by 23:59Z"} \
         if held else {"hold": False}
     return {
+        "worker-3": place._worker("worker-3"),
         "hub": {"name": "hub", "state": "active", "labels": ["linux"], "pinned_only": False, "max_card_runs": None,
                 "hold": False},
         HELD: {"name": HELD, "state": "active", "labels": LABELS, "pinned_only": False, "max_card_runs": 10,
@@ -120,7 +122,7 @@ def test_t3_one_alarm_after_the_threshold_for_a_default_card_only_the_held_creat
     assert f"held {HELD}" in alarm["title"] and tid in alarm["title"]
     assert f"- {tid} (" in alarm["body"] and "default placement" in alarm["body"]
     assert alarm["human_request"] is None
-    assert json.loads(alarm["runs_on"]) == [f"machine:{FREE}"]  # never on the held machine
+    assert json.loads(alarm["runs_on"]) == place.QUEUE  # source exclusion keeps it off the held machine
     assert alarm["idempotency_key"].startswith(f"pickup-stall:{HELD}:held-default:")
     from hermes_cli import kanban_pickup_stall_repin as repin
     held.round()  # the alarm runs elsewhere: it and the target are read from the Board replica, as there

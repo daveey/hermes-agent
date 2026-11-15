@@ -174,7 +174,7 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 # past them and they can't wedge a later completed/blocked event behind an unclaimed row.
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
                         "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed",
-                        "chat_wait_unclaimed", "request_withdrawn", "failure_finalized", "resolved_check_broken",
+                        "chat_wait_unclaimed", "spend_budget_decision_ready", "request_withdrawn", "failure_finalized", "resolved_check_broken",
                         "resolved_check_lost")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
@@ -611,7 +611,13 @@ def _kb_completed(task, payload: dict, title: str) -> str:
 
 
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
+def _kb_spend_budget(task, payload, title):
+    from hermes_cli.kanban_spend_decision import notice
+    return ": " + notice(payload)
+
+
 _KANBAN_EVENT_FORMATTERS = {
+    "spend_budget_decision_ready": ("⏸", _kb_spend_budget),
     "request_withdrawn": ("ℹ", lambda t, p, title: " request withdrawn: the card was archived. "
                          "No answer is needed for this request; this is not approval and not proof of completion."),
     "resolved_check_broken": ("⏸", lambda t, p, title: " blocked"),  # body rendered by block_notice in the formatter

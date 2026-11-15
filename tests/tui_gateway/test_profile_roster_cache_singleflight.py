@@ -189,6 +189,52 @@ def test_invalidate_during_a_fill_is_not_joined_or_stored():
     assert _fill("/p", ("A",), lambda: pytest.fail("must hit")) == {"v": "after"}
 
 
+@pytest.mark.parametrize("signature, expected_runs", [(("A",), 1), (("B",), 2)])
+def test_miss_resuming_after_completed_fill_rechecks_signature(signature, expected_runs):
+    observed, release = threading.Event(), threading.Event()
+
+    class PausedMiss(dict):
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            if threading.current_thread().name == "stale-reader" and not observed.is_set():
+                observed.set()
+                assert release.wait(5)
+            return value
+
+    memo, flights, runs = PausedMiss(), {}, []
+
+    def compute():
+        runs.append(1)
+        return {"v": 1}
+
+    def copier(value):
+        assert cache._FLIGHT_LOCK.acquire(blocking=False), "copier ran under flight lock"
+        cache._FLIGHT_LOCK.release()
+        return dict(value)
+
+    def fill(sig):
+        return cache._cached(memo, flights, "/p", sig, compute, copier)
+
+    threads, results, errors = _threads(1, lambda: fill(signature))
+    thread = threads[0]
+    thread.name = "stale-reader"
+    thread.start()
+    try:
+        assert observed.wait(5)
+        assert fill(("A",)) == {"v": 1}
+        assert runs == [1] and not flights
+    finally:
+        release.set()
+        thread.join(10)
+    assert not thread.is_alive()
+    assert not errors
+    assert results == [{"v": 1}]
+    assert len(runs) == expected_runs
+    results[0]["extra"] = True
+    assert memo["/p"] == (signature, {"v": 1})
+    assert not flights
+
+
 def test_late_caller_after_fill_hits_the_memo():
     gate = _Gate()
     gate.release.set()

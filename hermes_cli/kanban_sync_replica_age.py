@@ -11,14 +11,18 @@ dead or stuck loop too. Per board in mode ``primary`` or ``shadow`` it keeps ``(
 for the replica's ``pulled_at`` (``_pulled_replica`` stamps it only when a pull reached the feed head). A missing or
 unreadable replica counts as a stamp that has not advanced. When the stamp has not advanced for
 :data:`REPLICA_STALE_S` of monotonic time an incident opens and files ONE card through the outbox alarm's report
-path (comment at most hourly on an open card, a new card once it is done). Monotonic time stands still while a Mac
-sleeps, so a laptop's sleep never counts. The incident ends (one INFO line) when the stamp advances.
+path (comment at most hourly on an open card, a new card once it is done). Monotonic time stops in sleep but runs
+in macOS DarkWake. Each check samples cron.restart_rerun.host_fully_awake once: when False, the interval since
+each board's previous observation is excluded and no card is filed. This sampled rule also excludes an idle
+lid-closed Mac on AC with an external display, and an idle lid-open Mac on battery; counting resumes when someone
+is active. Non-macOS and probe failures read awake. The incident ends when the stamp advances.
 
 The observation is also kept in ``.replica-age.json`` beside ``.sync-state.json`` (with the boot id), so a gateway
 restart resumes the same awake clock and open incident: on 2026-11-13 the hub restarted its gateway 148 times
 (median 4.2 min apart) and an in-memory clock never reached the bound (t_01a1d5ead18cf1c3). Monotonic time is shared
-by every process of one boot and stops in sleep (Linux CLOCK_MONOTONIC, macOS), so a resumed clock still never counts
-sleep; another boot, or a span of over :data:`REPLICA_STALE_S` with no observation, starts afresh.
+by every process of one boot. The last observation and excluded seconds persist too, so a same-boot restart
+continues excluding DarkWake; another boot, or a span of over :data:`REPLICA_STALE_S` between processes with no
+observation, starts afresh. Old records resume with last=seen_at and excluded=0.
 
 One check covers every shape: rounds ending behind, rounds failing, no rounds at all (a dead loop or a give-up),
 and a missing replica. The card names the host, board, stamp (PT), awake minutes, the last round's outcome, the
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import socket
 import sqlite3
@@ -57,6 +62,8 @@ class _Seen:
     stamp: Optional[float]  # the replica's last pulled_at (None: no readable replica yet)
     since: float  # monotonic time the stamp was first seen (or the first observation)
     open: bool = False  # an incident is open (its card filed)
+    last: float = 0.0  # monotonic time of the previous observation
+    excluded: float = 0.0  # observed time not fully awake
 
 
 @dataclass
@@ -125,18 +132,31 @@ def _core_sha() -> Optional[str]:
 
 def check(boards: list[tuple[str, Path]], *, now: float, wall: Callable[[], float] = time.time,
           file_fn: Optional[Callable[[str, str, str], Optional[str]]] = None,
-          board_status: Optional[Callable[[str, list[str]], dict[str, str]]] = None) -> list[str]:
+          board_status: Optional[Callable[[str, list[str]], dict[str, str]]] = None,
+          awake_fn: Optional[Callable[[], bool]] = None) -> list[str]:
     """One observation of every board (``now``: monotonic). Returns the card ids it filed or commented. Never
     raises."""
+    awake = fully_awake(awake_fn)
     out: list[str] = []
     for slug, path in boards:
         try:
-            tid = _check_board(slug, path, now, wall, file_fn or report, board_status or _board_status)
+            tid = _check_board(slug, path, now, wall, file_fn or report, board_status or _board_status, awake)
             if tid:
                 out.append(tid)
         except Exception:  # health: allow BLE001 -- an alert must never break the dispatcher tick
             log.warning("kanban sync: replica freshness check failed for %s", slug, exc_info=True)
     return out
+
+
+def fully_awake(awake_fn: Optional[Callable[[], bool]] = None) -> bool:
+    """Shared fail-awake probe policy for both sync alarms; sample once per entry call."""
+    try:
+        if awake_fn is None:
+            from cron.restart_rerun import host_fully_awake
+            awake_fn = host_fully_awake
+        return awake_fn()
+    except Exception:  # health: allow BLE001 -- a broken probe must not suppress a real stall
+        return True
 
 
 def _boot_id() -> Optional[str]:
@@ -196,11 +216,14 @@ def _resume(slug: str, now: float) -> Optional[_Seen]:
     try:
         stamp = None if rec.get("stamp") is None else float(rec["stamp"])
         since, seen_at = float(rec["since"]), float(rec["seen_at"])
+        last = float(rec.get("last", seen_at))
+        excluded = float(rec.get("excluded", 0))
     except (KeyError, TypeError, ValueError):
         return None
-    if not since <= seen_at <= now or now - seen_at > REPLICA_STALE_S:
+    if (not since <= last <= seen_at <= now or now - seen_at > REPLICA_STALE_S
+            or not math.isfinite(excluded) or excluded < 0):
         return None
-    return _Seen(stamp, since, bool(rec.get("open")))
+    return _Seen(stamp, since, bool(rec.get("open")), last, excluded)
 
 
 def _remember(slug: str, seen: Optional[_Seen], now: float) -> None:
@@ -210,12 +233,14 @@ def _remember(slug: str, seen: Optional[_Seen], now: float) -> None:
         if seen is None or boot is None:
             memo.pop(slug, None)
         else:
-            memo[slug] = {"stamp": seen.stamp, "since": seen.since, "open": seen.open, "seen_at": now, "boot": boot}
+            memo[slug] = {"stamp": seen.stamp, "since": seen.since, "open": seen.open, "seen_at": now, "boot": boot,
+                          "last": seen.last, "excluded": seen.excluded}
 
     _save_memo(update)
 
 
-def _check_board(slug: str, path: Path, now: float, wall: Callable[[], float], file_fn, board_status) -> Optional[str]:
+def _check_board(slug: str, path: Path, now: float, wall: Callable[[], float], file_fn, board_status,
+                 awake: bool = True) -> Optional[str]:
     if _mode(path) not in ("primary", "shadow"):
         with _LOCK:
             known = _SEEN.pop(slug, None)  # detached or unsynced: nothing to judge, and a later attach starts afresh
@@ -235,9 +260,14 @@ def _check_board(slug: str, path: Path, now: float, wall: Callable[[], float], f
             if seen is not None and seen.open:
                 log.info("kanban sync: %s replica reached the feed head again at %s after %.0f awake min; "
                          "incident over", slug, _pt(stamp), (now - seen.since) / 60)
-            seen = _SEEN[slug] = _Seen(stamp, now)
+            seen = _SEEN[slug] = _Seen(stamp, now, last=now)
+        if not awake:
+            delta = max(0.0, now - seen.last)
+            seen.since += delta
+            seen.excluded += delta
+        seen.last = now
         elapsed = now - seen.since
-        due = elapsed >= REPLICA_STALE_S and not seen.open
+        due = awake and elapsed >= REPLICA_STALE_S and not seen.open
         if due:
             seen.open = True
         rnd = _ROUNDS.get(slug)
@@ -256,8 +286,8 @@ def _telemetry(slug: str, seen: _Seen, elapsed: float, now: float) -> None:
         return
     _TELEMETRY_AT[slug] = now
     log.info("kanban sync: replica freshness %s: stamp %s, not advanced for %.0f awake s (alarm at %.0f s), "
-             "incident %s", slug, _pt(seen.stamp) if seen.stamp else "none", elapsed, REPLICA_STALE_S,
-             "open" if seen.open else "none")
+             "incident %s, excluded %.0f s not fully awake", slug, _pt(seen.stamp) if seen.stamp else "none",
+             elapsed, REPLICA_STALE_S, "open" if seen.open else "none", seen.excluded)
 
 
 def _outcome(rnd: Optional[_Round], now: float, first_seen_wall: float) -> str:
@@ -299,7 +329,8 @@ def _detail(slug: str, path: Path, seen: _Seen, elapsed: float, rnd: Optional[_R
     stamp = (f"replica last at the feed head {_pt(seen.stamp)}" if seen.stamp is not None
              else "no readable replica (sync-shadow) on disk")
     parts = [f"host {socket.gethostname()} (gateway {_gateway(path)}), board `{slug}`: {stamp}",
-             f"not at the feed head for {elapsed / 60:.0f} awake min (bound {REPLICA_STALE_S / 60:.0f})",
+             f"not at the feed head for {elapsed / 60:.0f} awake min (bound {REPLICA_STALE_S / 60:.0f}), "
+             f"excluded {seen.excluded:.0f} s not fully awake",
              _outcome(rnd, now, wall_now - elapsed)]
     down = runstate._read(runstate.path())
     if down and down.get("running") is False:

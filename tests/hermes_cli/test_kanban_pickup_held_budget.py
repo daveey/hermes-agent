@@ -11,6 +11,7 @@ from hermes_cli import kanban_worker_node as wn
 from hermes_cli.kanban_db_connect import write_txn
 from hermes_cli.kanban_db_events import append_event
 from tests.hermes_cli import test_kanban_worker_node as support
+from tests.hermes_cli.test_kanban_pickup_stall import alarm_worker_pool
 
 svc = support.svc
 gws = support.gws
@@ -125,8 +126,11 @@ def test_the_held_imports_per_tick_are_bounded(gws, monkeypatch):
     monkeypatch.setattr(kph, "FREE_PER_TICK", 2)
     held = [_held_on_board(hub, 900 - i) for i in range(3)]
     plain = support._hub_card(hub, title="plain", priority=0, runs_on=PIN)
-    got = _pickup(worker, 2)  # the card pinned here first (t_01a1d95eabbd2b9d), then at most 2 free held copies
-    assert got == [plain] + held[:2]
+    # Score order spans pinned and pool cards; holds still consume only the free allowance.
+    got = _pickup(worker, 2)
+    assert got == held[:2] + [plain]
+    assert held[2] not in got
+    assert _skip(worker.conn, plain) != "budget_exhausted"
 
 
 def test_a_capped_tick_reports_a_held_pinned_card_as_held(gws):

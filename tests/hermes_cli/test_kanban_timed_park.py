@@ -65,7 +65,7 @@ def test_scheduled_until_marker_sets_the_wake_and_the_dispatcher_wakes_it(kanban
     stamp = datetime.fromtimestamp(wake, tz=UTC).isoformat().replace("+00:00", "Z")
     with kbc.connect_closing() as conn:
         tid = _running(conn)
-        assert kb.block_task(conn, tid, reason=f"SCHEDULED_UNTIL={stamp} — soak ends", kind="needs_input", clock_only=True)
+        assert kb.block_task(conn, tid, reason=f"SCHEDULED_UNTIL={stamp} — rate-limit cooldown ends", kind="needs_input", clock_only=True)
         assert kb.get_task(conn, tid).status == "scheduled"
         assert _last(conn, tid, "scheduled")["wake_at"] == wake
         assert kc.wake_due_continuations(conn, now=wake - 1) == []
@@ -90,7 +90,7 @@ def test_kanban_schedule_marker_becomes_a_real_timer(kanban_home: Path) -> None:
         assert kc.wake_due_continuations(conn, now=due) == [tid]
         # No marker -> the default wait, never "forever" (a deleted cron stranded cards). [daveey]
         tid2 = _running(conn)
-        assert kb.schedule_task(conn, tid2, reason="soak window", clock_only=True)
+        assert kb.schedule_task(conn, tid2, reason="rate-limit cooldown", clock_only=True)
         assert _last(conn, tid2, "scheduled")["wake_at"] >= int(time.time()) + ktp.DEFAULT_WAKE_SECONDS - 5
         assert kc.wake_due_continuations(conn, now=int(time.time()) + 3600) == []
         assert kc.wake_due_continuations(conn, now=int(time.time()) + 10**7) == [tid2]

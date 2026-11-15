@@ -42,7 +42,7 @@ def _triage(conn):
 
 
 def _park(conn, tid, op, surface):
-    args = {"reason": "soak window", "clock_only": True, "awaiting": {"kind": "clock"}}
+    args = {"reason": "rate-limit cooldown", "clock_only": True, "awaiting": {"kind": "clock"}}
     if op == "block":
         args["kind"] = "time"
     if surface == "db":
@@ -54,7 +54,7 @@ def _park(conn, tid, op, surface):
         return True
     parser = argparse.ArgumentParser()
     cli.build_parser(parser.add_subparsers(dest="command"))
-    argv = ["kanban", op, tid, "soak window", "--clock-only", "--awaiting", '{"kind":"clock"}']
+    argv = ["kanban", op, tid, "rate-limit cooldown", "--clock-only", "--awaiting", '{"kind":"clock"}']
     if op == "block":
         argv += ["--kind", "time"]
     return cli.kanban_command(parser.parse_args(argv)) == 0
@@ -116,7 +116,7 @@ def test_terminal_and_review_parks_stay_refused(board, op, status):
 def test_stale_run_cannot_park_triage(board, op):
     tid = _triage(board)
     kwargs = {"kind": "time"} if op == "block" else {}
-    assert not getattr(kb, op + "_task")(board, tid, reason="soak", clock_only=True,
+    assert not getattr(kb, op + "_task")(board, tid, reason="rate-limit cooldown", clock_only=True,
                                           expected_run_id=999, **kwargs)
     assert kb.get_task(board, tid).status == "triage"
     assert kb.get_task(board, tid).consecutive_failures == 2

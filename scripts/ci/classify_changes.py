@@ -311,6 +311,8 @@ HERMES_STATE_IMPORTS = (
     "hermes_cli/timefmt.py",
     "hermes_constants.py",
     "hermes_dir_acl.py",
+    "hermes_platform/__init__.py",
+    "hermes_platform/wake_clock.py",
     "hermes_startup_watchdog.py",
     "utils.py",
 )
@@ -330,6 +332,10 @@ def hermes_state_files(files: list[str]) -> list[str]:
 # caller, their macOS-only tests and the lane's own wiring. Exact files, kept equal to the
 # standalone workflow's ``push.paths`` by tests/ci/test_native_memory_gate.py.
 NATIVE_MEMORY_PATHS = (
+    "hermes_bootstrap.py",
+    "hermes_cli/launch_malloc.py",
+    "hermes_cli/venv_sync.py",
+    "tests/test_bootstrap_malloc.py",
     "hermes_cli/machine_memory_darwin.py",
     "hermes_cli/machine_metrics.py",
     "tests/hermes_cli/test_machine_memory_darwin.py",
@@ -387,6 +393,7 @@ _UPDATE_PIPELINE = (
     "hermes_cli/venv_sync.py",  # completion obligation + launch-time tail
     "hermes_cli/_launch_template.py",  # venv_sync's relaunch prefix text
     "hermes_cli/launch_probe.py",  # venv_sync's bounded launch-time currency probe
+    "hermes_cli/launch_malloc.py",  # venv_sync's launch-time allocator environment
     "hermes_cli/source_",  # source_completion/_build/_releases/_check/_stamp
     "hermes_cli/_launchers.py",
     "hermes_cli/release_channels.py",

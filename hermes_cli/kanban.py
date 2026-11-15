@@ -169,7 +169,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_origin_adapter import command
         return command(args)
 
-    if action in {"origin-create", "origin-adopt", "ownership-snapshot"}:
+    if action in {"origin-create", "origin-adopt", "ownership-snapshot", "selfwork-create", "selfwork-forward"}:
         from hermes_cli.kanban_origin_owner import command
         return command(args)
 
@@ -386,10 +386,12 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if body_error:
         return _err(body_error, 2)
 
+    from hermes_cli.kanban_selfwork import SelfWorkError, contract
     try:
+        self_work = contract(getattr(args, "self_work", None))
         ws_kind, ws_path = _parse_workspace_flag(args.workspace)
         branch_name = _parse_branch_flag(getattr(args, "branch", None))
-    except argparse.ArgumentTypeError as exc:
+    except (argparse.ArgumentTypeError, ValueError) as exc:
         return _err(f"kanban: {exc}", 2)
     if branch_name and ws_kind != "worktree":
         return _err("kanban: --branch is only valid with --workspace worktree", 2)
@@ -402,17 +404,17 @@ def _cmd_create(args: argparse.Namespace) -> int:
         return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "
                     "use 1 to trip on the first failure.", 2)
     in_worker = bool(os.environ.get("HERMES_KANBAN_TASK")) and is_dispatcher_owned_worker_context()
+    if self_work is not None:
+        from hermes_cli.kanban_selfwork_outbound import cli_command
+        return cli_command(args, body=body, workspace_kind=ws_kind, workspace_path=ws_path,
+                           max_runtime=max_runtime, branch_name=branch_name)
     # An agent shelling out to the CLI from a chat (terminal / execute_code) owns the
     # card just like the kanban_create tool would: stamp its session so the Desktop
     # session's task list shows it. Workers' cards inherit their creator task's session.
     # The desktop/TUI key (HERMES_SESSION_KEY) is what the session's notify poller
     # listens on, so it wins over HERMES_SESSION_ID; plain shells have neither. [daveey]
-    session_id = None
-    session_key = "" if in_worker else os.environ.get("HERMES_SESSION_KEY", "").strip()
-    if not in_worker:
-        from tools.kanban_tools import _persisted_session_id
-        session_id = (_persisted_session_id(session_key)
-                      or _persisted_session_id(os.environ.get("HERMES_SESSION_ID")))
+    from hermes_cli.kanban_cli_body import session_identity
+    session_key, session_id = session_identity(in_worker)
     idem_key = getattr(args, "idempotency_key", None)
     # [daveey] Bind cards made for a chat on another gateway ($HERMES_ORIGIN_SESSION / --origin-session),
     # validated before the card exists. See hermes_cli/kanban_origin.py.
@@ -477,6 +479,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
                 admission_class=getattr(args, "admission_class", "normal"),
                 admission_frees=getattr(args, "admission_frees", None),
+                self_work=self_work,
                 parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
                 idempotency_key=idem_key,
                 max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
@@ -502,7 +505,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing, MachinePinRefused,
                 AskFilingRefused) as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
-        except (PinProviderUnresolvedError, ModelProviderMismatchError, AdmissionMetadataError) as exc:
+        except (PinProviderUnresolvedError, ModelProviderMismatchError, AdmissionMetadataError, SelfWorkError) as exc:
             return _err(f"kanban: {exc}", 2)
         if not idem_hit:
             after_create(conn, task_id)  # records an accepted --distinct-from override on the new card
@@ -853,8 +856,17 @@ def _cmd_set_model(args: argparse.Namespace) -> int:
 
 
 def _cmd_reclaim(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_core_update_requeue import reclaim_attribution
+    reason = getattr(args, "reason", None)
+    attribution = dict(urgency_source=getattr(args, "urgency_source", None),
+                       interrupt_target=getattr(args, "interrupt_target", None))
+    try:
+        reclaim_attribution(reason, **attribution)
+    except ValueError as exc:
+        print(f"kanban reclaim: refused: {exc}", file=sys.stderr)
+        return 2
     with kbc.connect_closing() as conn:
-        ok = kb.reclaim_task(conn, args.task_id, reason=getattr(args, "reason", None))
+        ok = kb.reclaim_task(conn, args.task_id, reason=reason, **attribution)
     return _ok_or_err(ok, f"cannot reclaim {args.task_id} (not running or unknown id)",
                       f"Reclaimed {args.task_id}")
 
@@ -1487,24 +1499,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                                         or f"cannot schedule {tid}"), conn=conn)
 
 
-def _cmd_unblock(args: argparse.Namespace) -> int:
-    from hermes_cli.kanban_cli_actor import cli_actor
-    if os.environ.get("HERMES_KANBAN_TASK"):
-        return _err("kanban unblock is orchestrator-only; workers must hand off their assigned task")
-    ids, rc = _require_ids(args, _REASON_FLAG_HINT)
-    if rc:
-        return rc
-    reason = _stripped_or_none(getattr(args, "reason", None))
-    author = _profile_author() if reason else None
-    suffix = f": {reason}" if reason else ""
-    with kbc.connect_closing() as conn:
-        rc = _ids_error(ids, _REASON_FLAG_HINT, conn)
-        if rc:
-            return rc
-        op = _commented(reason, author, "UNBLOCK", lambda tid, comment: kb.unblock_task(conn, tid, comment=comment, event_extra={"actor": cli_actor()}))
-        from hermes_cli.kanban_shared_blockers import unblock_verdict
-        return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}; {unblock_verdict(conn, tid)}",
-                           lambda tid: kb.unblock_refusal(conn, tid) or f"cannot unblock {tid} (not blocked/scheduled?)", conn=conn)
+from hermes_cli.kanban_cli_release import cmd_unblock as _cmd_unblock
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
@@ -1572,35 +1567,7 @@ def _cmd_reopen_review(args: argparse.Namespace) -> int:
                            lambda tid: f"cannot reopen {tid} (not in review?)", conn=conn)
 
 
-def _cmd_promote(args: argparse.Namespace) -> int:
-    reason = _joined_words(args.reason)
-    author = _profile_author()
-    # Dedupe while preserving order; positional task_id always first.
-    ids = list(dict.fromkeys(_bulk_ids(args)))
-    dry_run = bool(args.dry_run)
-
-    results: list[dict[str, object]] = []
-    with kbc.connect_closing() as conn:
-        for tid in ids:
-            ok, err = kb.promote_task(conn, tid, actor=author, reason=reason, dry_run=dry_run)
-            results.append({"task_id": tid, "promoted": ok, "dry_run": dry_run,
-                            "reason": reason, "error": err})
-
-    failed = [r for r in results if not r["promoted"]]
-    if getattr(args, "json", False):
-        # Single-id stays a flat object for back-compat; bulk emits a list.
-        _print_json(results[0] if len(results) == 1 else results)
-        return 0 if not failed else 1
-
-    tag = " (dry)" if dry_run else ""
-    label = "Would promote" if dry_run else "Promoted"
-    suffix = f": {reason}" if reason else ""
-    for r in results:
-        if r["promoted"]:
-            print(f"{label} {r['task_id']} -> ready{tag}{suffix}")
-        else:
-            print(f"cannot promote {r['task_id']}: {r['error']}", file=sys.stderr)
-    return 0 if not failed else 1
+from hermes_cli.kanban_cli_release import cmd_promote as _cmd_promote
 
 
 def _cmd_archive(args: argparse.Namespace) -> int:

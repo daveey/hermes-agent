@@ -33,6 +33,7 @@ import {
 } from '@hermes/plugin-sdk'
 
 // Native completion notification.
+import { commentOnOwner } from './comment-route'
 import {
   bindCompletionNotify,
   type CompletionEvent,
@@ -1383,9 +1384,11 @@ export const addComment = (id: string, body: string, owner?: TaskOwner) => {
     })
   }
 
-  const [path, opts] = forTask(id, `/tasks/${id}/comments`, {}, captured)
+  return commentOnOwner(id, captured, target => {
+    const [path, opts] = forTask(id, `/tasks/${id}/comments`, {}, target)
 
-  return call(path, { ...opts, method: 'POST', body: { author: 'desktop', body } })
+    return call(path, { ...opts, method: 'POST', body: { author: 'desktop', body } })
+  })
 }
 
 export const reassignTask = (id: string, profile: string, owner?: TaskOwner) => {

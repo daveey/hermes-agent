@@ -439,7 +439,10 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None, may_pull=True):
                     reply = hub.repin(board, task_id=row["id"], expected_revision=row["sync_version"], runs_on=labels)
                     queue.clear_streak(gateway, row["id"])
                     try:
-                        _record_repin(conn, row["id"], gateway, labels, reply, reason=why)
+                        host_reason = (f"machine:{gateway} holds the creator-owned task record and origin-local "
+                                       f"coordination authority for this fail-closed return: {why}"
+                                       if refusals is _origin_refused else None)
+                        _record_repin(conn, row["id"], gateway, labels, reply, reason=why, host_reason=host_reason)
                     except sqlite3.Error:
                         logger.warning("repinned %s on the Board but could not record it locally", row["id"],
                                        exc_info=True)
@@ -625,7 +628,7 @@ def _remember_refusal(refusals, key, revision, exc):
         del refusals[next(iter(refusals))]
 
 
-def _record_repin(conn, task_id, gateway, labels, reply, *, reason=None):
+def _record_repin(conn, task_id, gateway, labels, reply, *, reason=None, host_reason=None):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_move as km
     from hermes_cli.kanban_worker_repin import REPINNED_EVENT_FLAG
@@ -638,7 +641,8 @@ def _record_repin(conn, task_id, gateway, labels, reply, *, reason=None):
         kb._append_event(conn, task_id, km.MOVED_EVENT, {
             "from_machine": gateway, "runs_on": labels,
             "reason": reason or "applied the run's kanban_move as the creator repin",
-            "queued": True, REPINNED_EVENT_FLAG: True, "board_version": version})
+            "queued": True, REPINNED_EVENT_FLAG: True, "board_version": version,
+            **({"host_reason": host_reason} if host_reason else {})})
 
 
 def acknowledged_outbox(row, task):

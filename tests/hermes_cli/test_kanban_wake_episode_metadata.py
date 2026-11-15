@@ -88,7 +88,7 @@ def test_probe_less_park_keeps_payload_and_clears_peer_probe(parked):
         base.result(parked, 0)
         home.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
         assert kb.claim_task(home, tid, claimer="worker") is not None
-        assert kb.schedule_task(home, tid, reason="SCHEDULED_UNTIL=2026-09-13T00:00:00Z soak", clock_only=True)
+        assert kb.schedule_task(home, tid, reason="SCHEDULED_UNTIL=2026-09-13T00:00:00Z rate-limit cooldown", clock_only=True)
         rows = _rows(home, tid)
         scheduled = [p for k, p in rows if k == "scheduled"][-1]
         assert "_wake_episode_v1" not in scheduled

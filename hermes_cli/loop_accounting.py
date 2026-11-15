@@ -52,6 +52,15 @@ for the gateway, ``serve`` and the ``tui`` backend); a daemon thread then writes
 an atomic replace: role, pid, start time, process and per-thread CPU and the cumulative counters. Files of
 dead pids older than an hour are pruned. ``loop_accounting.enabled: false`` stops the writer (counters stay).
 
+**Residual.** ``snapshot()["residual"]`` splits the CPU no pass accounted per thread-name family
+(``families[f]``: ``cpu_s``, ``accounted_cpu_s``, ``unaccounted_cpu_s``; ``exited`` for threads gone since
+start; their sum matches ``process.cpu_s - process.accounted_cpu_s``). Residual scopes name the callers:
+``thread/<qualname>`` (every ``asyncio.to_thread`` / AnyIO submission), ``aux_provider/<operation>``,
+``plugin/user-terminal.sweep_jobs``, ``plugin/loop-watch.check_once`` and ``loop_cb/<callback or task
+coroutine>`` (main-loop CPU outside any pass; 64 names then ``loop_cb/other``). A scope books only the CPU
+its nested passes did not. ``loop_accounting.scopes`` / ``loop_accounting.callbacks`` (config.yaml, both
+default on) switch the instrumentation off; hub A/B cost of both on: about +0.09% of a core.
+
 **Cost.** One pass is two ``thread_time`` and two ``perf_counter`` reads, a thread-local depth and one
 uncontended lock: a few microseconds (``tests/hermes_cli/test_loop_accounting_bench.py`` pins <= 20 µs).
 """
@@ -64,6 +73,8 @@ import functools
 import json
 import logging
 import os
+import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -362,7 +373,9 @@ def accounted(name: str, *, rows: bool = False) -> Callable[[Callable], Callable
 def counters() -> dict[str, dict[str, Any]]:
     """A copy of the cumulative counters, by pass name."""
     with _lock:
-        return {name: st.as_dict() for name, st in _stats.items()}
+        out = {name: st.as_dict() for name, st in _stats.items()}
+        out.update({name: st.as_dict() for name, st in _cb_stats.items()})
+        return out
 
 
 def _clk_tck() -> float:
@@ -386,6 +399,56 @@ def _proc_stat_cpu(path: str, hz: float) -> Optional[tuple[str, float]]:
     return comm, (int(fields[11]) + int(fields[12])) / hz
 
 
+_FAMILY_SUFFIX = re.compile(r"([_\-\s]\d+|[_\-\s]?0x[0-9a-fA-F]+|[_\-\s][0-9a-fA-F]{8,})+$")
+_FAMILY_TARGET = re.compile(r"\s*\(.*\)\s*$")
+
+
+def family_of(name: Optional[str]) -> str:
+    """Thread-name family: trailing ``_N`` / ``-N`` / `` N`` / hex handle suffixes and a ``(target)`` tail are
+    stripped (``asyncio_3`` -> ``asyncio``, ``Thread-7 (run)`` -> ``Thread``, ``AnyIO worker thread`` stays)."""
+    name = (name or "?").strip() or "?"
+    name = _FAMILY_TARGET.sub("", name) or name
+    return _FAMILY_SUFFIX.sub("", name) or name
+
+
+def _darwin_thread_cpu() -> list[tuple[int, str, float]]:
+    """(native id, name, CPU seconds) of every thread of this process via ``proc_pidinfo`` (libproc). [] on any
+    failure; a total above the process CPU (a time-unit surprise) is discarded rather than reported."""
+    try:
+        import ctypes
+        import ctypes.util
+        lib = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True)
+
+        class _ThreadInfo(ctypes.Structure):
+            _fields_ = [("user", ctypes.c_uint64), ("system", ctypes.c_uint64), ("cpu_usage", ctypes.c_int32),
+                        ("policy", ctypes.c_int32), ("run_state", ctypes.c_int32), ("flags", ctypes.c_int32),
+                        ("sleep_time", ctypes.c_int32), ("curpri", ctypes.c_int32), ("priority", ctypes.c_int32),
+                        ("maxpriority", ctypes.c_int32), ("name", ctypes.c_char * 64)]
+
+        # Explicit prototype: without it ctypes passes Python ints as 32-bit C int and truncates 64-bit thread ids.
+        lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        lib.proc_pidinfo.restype = ctypes.c_int
+        pid = os.getpid()
+        ids = (ctypes.c_uint64 * 1024)()
+        # PROC_PIDLISTTHREADIDS (28) returns thread ids (== threading.native_id), which is what
+        # PROC_PIDTHREADID64INFO (15) looks up; PROC_PIDLISTTHREADS (6) would return pthread handles.
+        got = lib.proc_pidinfo(pid, 28, 0, ctypes.addressof(ids), ctypes.sizeof(ids))
+        if got <= 0:
+            return []
+        out = []
+        for i in range(got // 8):
+            info = _ThreadInfo()
+            if lib.proc_pidinfo(pid, 15, ids[i], ctypes.addressof(info), ctypes.sizeof(info)) <= 0:  # THREADID64INFO
+                continue
+            out.append((int(ids[i]), info.name.decode("utf-8", "replace"), (info.user + info.system) / 1e9))  # pth_*_time are already ns
+        total = sum(c for _, _, c in out)
+        if total > (os.times().user + os.times().system) * 1.25 + 1.0:
+            return []
+        return out
+    except Exception:  # health: allow BLE001 -- best effort; no per-thread counters is a documented state
+        return []
+
+
 def thread_cpu() -> list[dict[str, Any]]:
     """Every live thread of this process: native id, name and CPU seconds (user + system), plus the CPU its
     outermost accounted passes took. Linux reads ``/proc/self/task``; elsewhere only live accounted threads are
@@ -393,7 +456,7 @@ def thread_cpu() -> list[dict[str, Any]]:
     names = {t.native_id: t.name for t in threading.enumerate() if t.native_id is not None}
     with _lock:
         _fold_exited()
-        accounted_by = dict(_thread_accounted)
+        accounted_by = _copy_accounted()
     out: list[dict[str, Any]] = []
     hz = _clk_tck()
     task_dir = "/proc/self/task"
@@ -408,7 +471,12 @@ def thread_cpu() -> list[dict[str, Any]]:
         comm, cpu = got
         out.append({"tid": tid, "name": names.get(tid, comm), "cpu_s": round(cpu, 3),
                     "accounted_cpu_s": round(accounted_by.get(tid, 0.0), 6)})
-    if not tids:  # no procfs: list live accounted threads only (exited ones fold in snapshot())
+    if not tids and sys.platform == "darwin":
+        for tid, name, cpu in _darwin_thread_cpu():
+            out.append({"tid": tid, "name": names.get(tid) or name or "?", "cpu_s": round(cpu, 3),
+                        "accounted_cpu_s": round(accounted_by.get(tid, 0.0), 6)})
+        tids = [t["tid"] for t in out]
+    if not tids:  # no per-thread counters: list live accounted threads only (exited ones fold in snapshot())
         for tid, acc in sorted(accounted_by.items()):
             if tid not in names:
                 continue
@@ -439,11 +507,13 @@ def snapshot() -> dict[str, Any]:
         live_tids = {t.native_id for t in threading.enumerate() if t.native_id is not None}
     with _lock:
         _fold_exited()
+        by_tid = _copy_accounted()
         if live_tids:
-            for tid in [tid for tid in _thread_accounted if tid not in live_tids]:
-                _state["exited_accounted"] = _state.get("exited_accounted", 0.0) + _thread_accounted.pop(tid)
-        accounted_total = sum(_thread_accounted.values()) + _state.get("exited_accounted", 0.0)
-        accounted_live = sum(_thread_accounted.get(t["tid"], 0.0) for t in threads)
+            for tid in [tid for tid in by_tid if tid not in live_tids]:
+                _state["exited_accounted"] = _state.get("exited_accounted", 0.0) + by_tid.pop(tid)
+                _thread_accounted.pop(tid, None)
+        accounted_total = sum(by_tid.values()) + _state.get("exited_accounted", 0.0)
+        accounted_live = sum(by_tid.get(t["tid"], 0.0) for t in threads)
     process_cpu = times.user + times.system
     return {
         "version": SCHEMA_VERSION,
@@ -462,8 +532,43 @@ def snapshot() -> dict[str, Any]:
             "unaccounted_live_cpu_s": round(max(0.0, live - accounted_live), 3) if procfs else None,
         },
         "threads": threads,
+        "residual": _residual(threads, process_cpu, accounted_total, procfs),
         "loops": counters(),
     }
+
+
+def _residual(threads: list[dict[str, Any]], process_cpu: float, accounted_total: float,
+              have_cpu: bool) -> dict[str, Any]:
+    """CPU no accounting scope owns, per thread-name family. ``families[f].unaccounted_cpu_s`` is that family's
+    thread CPU minus the CPU its outermost scopes accounted (clamped at 0, so never negative); ``exited`` holds
+    the threads gone since start (process CPU not on a live thread, against the accounted CPU they folded in).
+    Note: ``process.accounted_cpu_s`` now also counts the thread/aux/plugin/loop_cb scopes, so
+    ``process.unaccounted_*`` is not like-for-like with snapshots written before the residual scopes existed."""
+    out: dict[str, Any] = {"available": have_cpu, "families": {}, "exited": None,
+                           "process_unaccounted_cpu_s": round(max(0.0, process_cpu - accounted_total), 3),
+                           "unaccounted_cpu_s": None}
+    if not have_cpu:
+        return out
+    fams: dict[str, dict[str, Any]] = {}
+    live = 0.0
+    for t in threads:
+        cpu = t["cpu_s"] or 0.0
+        live += cpu
+        f = fams.setdefault(family_of(t["name"]), {"threads": 0, "cpu_s": 0.0, "accounted_cpu_s": 0.0})
+        f["threads"] += 1
+        f["cpu_s"] += cpu
+        f["accounted_cpu_s"] += t["accounted_cpu_s"]
+    with _lock:
+        exited_acc = _state.get("exited_accounted", 0.0)
+    exited = {"cpu_s": max(0.0, process_cpu - live), "accounted_cpu_s": exited_acc}
+    total = 0.0
+    for f in list(fams.values()) + [exited]:
+        f["unaccounted_cpu_s"] = max(0.0, f["cpu_s"] - f["accounted_cpu_s"])
+        total += f["unaccounted_cpu_s"]
+        for k in ("cpu_s", "accounted_cpu_s", "unaccounted_cpu_s"):
+            f[k] = round(f[k], 6)
+    out.update(families=fams, exited=exited, unaccounted_cpu_s=round(total, 6))
+    return out
 
 
 def _role_guess() -> str:
@@ -558,10 +663,27 @@ def interval_s() -> float:
     return max(value, 0.05)
 
 
+def scopes_enabled() -> bool:
+    """``loop_accounting.scopes`` as read by :func:`instrument` (default on until instrumented)."""
+    return bool(_state.get("scopes", True))
+
+
+def _copy_accounted() -> dict[int, float]:
+    """Copy of ``_thread_accounted``; callback hooks insert into it lock-free, so retry a racing resize."""
+    for _ in range(5):
+        try:
+            return dict(_thread_accounted)
+        except RuntimeError:  # dictionary changed size during iteration
+            continue
+    return {}
+
+
 def _writer(stop: threading.Event, period: float) -> None:
     writes = 0
     while not stop.wait(period):
         try:
+            if scopes_enabled():
+                instrument_plugins()
             write_snapshot()
             if writes % 10 == 0:
                 prune()
@@ -578,6 +700,10 @@ def start(role: str) -> bool:
     if not enabled():
         return False
     period = interval_s()  # a config read: never under _lock, which every pass exit on every thread takes
+    try:
+        instrument()
+    except Exception:  # health: allow BLE001 -- accounting must never be what ends a boot
+        logger.debug("loop accounting: instrumentation failed", exc_info=True)
     with _lock:
         thread = _state.get("thread")
         if thread is not None and thread.is_alive() and _state.get("pid") == os.getpid():
@@ -621,7 +747,266 @@ def reset() -> None:
         _stats.clear()
         _thread_accounted.clear()
         _exited_tids.clear()
+        _cb_stats.clear()
+        _cb_cache.clear()
         _state.pop("exited_accounted", None)
+
+
+# -- residual scopes and instrumentation ----------------------------------------------------------------------
+
+MAX_CALLBACK_KEYS = 64  # distinct main-loop callback names; later ones fold into ``loop_cb/other``
+CALLBACK_OTHER = "loop_cb/other"
+
+
+class Scope:
+    """A residual scope (a context manager): books the CPU this thread spent inside it that no pass or scope
+    nested in it already accounted, under ``name``. Unlike :class:`Pass` it never hides a nested pass: the
+    nested pass keeps its own name and CPU, this scope gets only the rest, and the thread's ``accounted_cpu_s``
+    gets the sum once (so a route running inside an AnyIO worker scope is not counted twice)."""
+
+    __slots__ = ("_acc0", "_c0", "_gen", "_tid", "_w0", "name", "skipped")
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.skipped = False
+
+    def skip(self) -> None:
+        self.skipped = True
+
+    def __enter__(self) -> Scope:
+        self._tid = _own_tid()
+        self._acc0 = _thread_accounted.get(self._tid, 0.0)
+        self._gen = _fork["gen"]
+        self._w0 = _perf()
+        self._c0 = _thread_time()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._gen == _fork["gen"]:
+            cpu = _thread_time() - self._c0
+            wall = _perf() - self._w0
+        else:
+            cpu = _thread_time() - _fork["c0"]
+            wall = _perf() - _fork["w0"]
+        tid = self._tid
+        with _lock:
+            inner = max(0.0, _thread_accounted.get(tid, 0.0) - self._acc0)
+            own = max(0.0, cpu - inner)
+            st = _stat(self.name)
+            st.runs += 1
+            st.skips += bool(self.skipped)
+            if exc_type is not None:
+                st.error(getattr(exc_type, "__name__", None))
+            st.cpu_s += own
+            st.cpu_max_s = max(st.cpu_max_s, own)
+            st.wall_s += wall
+            st.last_at = time.time()
+            if getattr(_local, "depth", 0) <= 0:
+                _add_accounted(tid, own)
+
+
+def scope(name: str) -> Scope:
+    """A residual scope of ``name``; see :class:`Scope`."""
+    return Scope(name)
+
+
+def _callable_name(fn: Any, args: tuple = ()) -> str:
+    """``module.qualname`` of what a thread pool will run (``partial`` / ``Context.run`` unwrapped)."""
+    for _ in range(6):
+        if isinstance(fn, functools.partial):
+            args = fn.args + args
+            fn = fn.func
+            continue
+        if (getattr(fn, "__name__", None) == "run" and type(getattr(fn, "__self__", None)).__name__ == "Context"
+                and args):
+            fn, args = args[0], args[1:]
+            continue
+        break
+    qual = getattr(fn, "__qualname__", None) or type(fn).__name__
+    mod = getattr(fn, "__module__", None) or ""
+    return f"{mod}.{qual}" if mod else str(qual)
+
+
+def _run_scoped(name: str, fn: Callable, *args: Any, **kwargs: Any) -> Any:
+    with Scope(name):
+        return fn(*args, **kwargs)
+
+
+def scoped_call(prefix: str, fn: Callable, args: tuple = ()) -> Callable:
+    """``fn`` wrapped so each call is one :class:`Scope` named ``<prefix>/<fn qualname>`` (``args`` are only
+    read, to name a ``Context.run(func, ...)`` submission by ``func``)."""
+    return functools.partial(_run_scoped, f"{prefix}/{_callable_name(fn, args)}", fn)
+
+
+_cb_stats: dict[str, _Stat] = {}  # callback name -> counters (at most MAX_CALLBACK_KEYS + the other bucket)
+_cb_cache: dict[Any, _Stat] = {}  # code object -> its counters: the hot path never builds a name twice
+_CB_CACHE_MAX = 4096
+
+
+def _callback_stat(cb: Any) -> _Stat:
+    """The counters of the callback ``cb`` (a task step is named by its coroutine, anything else by its
+    qualname). Hot path: one dict lookup keyed by the code object."""
+    owner = getattr(cb, "__self__", None)
+    get_coro = getattr(owner, "get_coro", None)
+    name = None
+    if get_coro is not None:
+        coro = get_coro()
+        code = getattr(coro, "cr_code", None) or getattr(coro, "gi_code", None)
+        name = getattr(coro, "__qualname__", None)
+    else:
+        code = getattr(getattr(cb, "__func__", cb), "__code__", None)
+    st = _cb_cache.get(code) if code is not None else None
+    if st is not None:
+        return st
+    key = "loop_cb/" + (name or _callable_name(cb))
+    with _lock:
+        st = _cb_stats.get(key)
+        if st is None:
+            if len(_cb_stats) >= MAX_CALLBACK_KEYS:
+                key = CALLBACK_OTHER
+            st = _cb_stats.get(key)
+            if st is None:
+                st = _cb_stats[key] = _Stat()
+        if code is not None and len(_cb_cache) < _CB_CACHE_MAX:
+            _cb_cache[code] = st
+    return st
+
+
+_instrumented: dict[str, Any] = {}
+
+
+def instrument_executors() -> bool:
+    """Name the submitted function of every ``loop.run_in_executor`` (so ``asyncio.to_thread``) and
+    ``anyio.to_thread.run_sync`` call as a residual scope ``thread/<qualname>``. Idempotent."""
+    if _instrumented.get("executors"):
+        return False
+    _instrumented["executors"] = True
+    import asyncio.base_events as be
+    orig = be.BaseEventLoop.run_in_executor
+
+    def run_in_executor(self, executor, func, *args):
+        return orig(self, executor, scoped_call("thread", func, args), *args)
+
+    run_in_executor._la_orig = orig  # type: ignore[attr-defined]
+    be.BaseEventLoop.run_in_executor = run_in_executor  # type: ignore[method-assign]
+    try:
+        import anyio.to_thread as at
+        a_orig = at.run_sync
+
+        async def run_sync(func, *args, **kwargs):
+            return await a_orig(scoped_call("thread", func, args), *args, **kwargs)
+
+        run_sync._la_orig = a_orig  # type: ignore[attr-defined]
+        at.run_sync = run_sync
+    except Exception:  # health: allow BLE001 -- no anyio: only the asyncio executors are named
+        logger.debug("loop accounting: anyio not instrumented", exc_info=True)
+    return True
+
+
+def instrument_callbacks() -> bool:
+    """Attribute event-loop callback CPU outside any pass/scope to the callback or task coroutine that burned
+    it (``loop_cb/<qualname>``, at most ``MAX_CALLBACK_KEYS`` names then ``loop_cb/other``). Idempotent."""
+    if _instrumented.get("callbacks"):
+        return False
+    _instrumented["callbacks"] = True
+    import asyncio.events as ev
+    orig = ev.Handle._run
+
+    def _run(self):
+        tid = _native_id()
+        acc0 = _thread_accounted.get(tid, 0.0)
+        c0 = _thread_time()
+        try:
+            return orig(self)
+        finally:
+            cpu = _thread_time() - c0
+            try:
+                st = _callback_stat(self._callback)
+                own = cpu - (_thread_accounted.get(tid, 0.0) - acc0)
+                st.runs += 1
+                if own > 0.0:
+                    # Lock-free: only this thread writes its own entry (the snapshot only pops dead tids).
+                    st.cpu_s += own
+                    st.cpu_max_s = max(st.cpu_max_s, own)
+                    if getattr(_local, "depth", 0) <= 0:
+                        _thread_accounted[tid] = _thread_accounted.get(tid, 0.0) + own
+            except Exception:  # health: allow BLE001 -- accounting must never break a loop callback
+                logger.debug("loop accounting: callback booking failed", exc_info=True)
+
+    _run._la_orig = orig  # type: ignore[attr-defined]
+    ev.Handle._run = _run  # type: ignore[method-assign]
+    return True
+
+
+def uninstrument() -> None:
+    """Undo :func:`instrument_executors` / :func:`instrument_callbacks` (tests)."""
+    if _instrumented.pop("executors", None):
+        import asyncio.base_events as be
+        be.BaseEventLoop.run_in_executor = be.BaseEventLoop.run_in_executor._la_orig  # type: ignore[attr-defined]
+        try:
+            import anyio.to_thread as at
+            at.run_sync = at.run_sync._la_orig  # type: ignore[attr-defined]
+        except ImportError:  # no anyio: nothing to restore
+            logger.debug("loop accounting: anyio not restored", exc_info=True)
+    if _instrumented.pop("callbacks", None):
+        import asyncio.events as ev
+        ev.Handle._run = ev.Handle._run._la_orig  # type: ignore[attr-defined]
+
+
+# Plugin call sites (hermes-mods plugins; core cannot import them): found in ``sys.modules`` by file suffix and
+# wrapped in place. (file suffix, class or None, function, scope name)
+_PLUGIN_SITES = (
+    ("plugins/user-terminal/__init__.py", None, "sweep_jobs", "plugin/user-terminal.sweep_jobs"),
+    ("plugins/loop-watch/watch.py", "LoopWatch", "check_once", "plugin/loop-watch.check_once"),
+)
+
+
+def wrap_function(owner: Any, attr: str, name: str) -> bool:
+    """Replace ``owner.attr`` (module or class) with a wrapper running each call in :class:`Scope` ``name``.
+    False when already wrapped or missing."""
+    fn = getattr(owner, attr, None)
+    if fn is None or getattr(fn, "_la_scope", None) == name:
+        return False
+
+    @functools.wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with Scope(name):
+            return fn(*args, **kwargs)
+
+    wrapped._la_scope = name  # type: ignore[attr-defined]
+    setattr(owner, attr, wrapped)
+    return True
+
+
+def instrument_plugins() -> int:
+    """Wrap the known plugin call sites in every loaded plugin module (re-run by the snapshot writer, so a
+    plugin loaded after boot is picked up). Returns how many were wrapped now."""
+    n = 0
+    for mod in list(sys.modules.values()):
+        path = (getattr(mod, "__file__", None) or "").replace(os.sep, "/")
+        if not path:
+            continue
+        for suffix, cls, fn, name in _PLUGIN_SITES:
+            if path.endswith(suffix):
+                try:
+                    n += wrap_function(getattr(mod, cls) if cls else mod, fn, name)
+                except Exception:  # health: allow BLE001 -- a plugin without the symbol is simply not named
+                    logger.debug("loop accounting: plugin site %s not wrapped", name, exc_info=True)
+    return n
+
+
+def instrument() -> None:
+    """Install the residual instrumentation: ``loop_accounting.scopes`` (default on: executor and plugin
+    scopes) and ``loop_accounting.callbacks`` (main-loop callback attribution; default per the hub A/B)."""
+    _state["scopes"] = bool(_setting("scopes", True))
+    if _state["scopes"]:
+        instrument_executors()
+        instrument_plugins()
+    if _setting("callbacks", CALLBACKS_DEFAULT):
+        instrument_callbacks()
+
+
+CALLBACKS_DEFAULT = True
 
 
 def _after_fork_child() -> None:
@@ -629,6 +1014,8 @@ def _after_fork_child() -> None:
     _lock = threading.Lock()
     _stats.clear()
     _thread_accounted.clear()
+    _cb_stats.clear()
+    _cb_cache.clear()
     _started_at = time.time()
     _state.pop("exited_accounted", None)
     _state.update(thread=None, stop=None, pid=os.getpid(), role=None)

@@ -11,7 +11,8 @@ guessed a quota wall and parked the card. The tick logs had rotated, so the real
   row the tick passed over: ``skipped_ineligible``, ``capsule_refused``, ``no_progress_held``,
   ``per_profile_capped``, ``claim_deferred`` (Board lease refusals and this host's admission-gate refusals, told
   apart by the deferral's ``origin``), ``owner_down``, ``pinned_quota_wall`` and ``llm_paced``.
-  A (reason, detail) the episode already holds adds nothing; a new one appends. At most :data:`MAX_PER_EPISODE` per
+  A (reason, detail) the episode already holds adds nothing, unless the newest row is a timed hold (``until``)
+  it replaces (:func:`_supersedes_timed`); a new one appends. At most :data:`MAX_PER_EPISODE` per
   episode, so two dispatchers that disagree cannot grow a card's history without bound.
 * :func:`pinned_quota_hold` holds a fresh card (no run yet) on the ready lane whose explicit pin's provider pool
   is quota-walled right now (``kanban_provider_walls.live_quota_wall``): its first worker would exit 75 into
@@ -155,6 +156,16 @@ def _write_seen(conn: sqlite3.Connection, task_id: str, anchor: str, payload: di
          int(time.time())))
 
 
+def _supersedes_timed(skips: list[dict[str, Any]], key: tuple[Any, Any, Any], current: bool) -> bool:
+    """A seen ``key`` replaces a newest row that carries ``until``: append it again. Readers of the event log
+    (``kanban_diagnostics``) drop a timed hold once its ``until`` passes, so without a newer row a card the dispatcher
+    still holds (paced -> held until T -> paced) read as stranded past T (PR #3058 review). Bounded: once the
+    untimed key is newest again, a repeat of the timed key (already held) appends nothing, so a paced/held flap adds
+    one row; :data:`MAX_PER_EPISODE` caps any other flap. Not when ``key`` is already this host's current skip: that
+    is a replica that has not pulled this host's row back yet, not a change. [daveey]"""
+    return bool(skips) and skips[0].get("until") is not None and _skip_key(skips[0]) != key and not current
+
+
 def record(conn: sqlite3.Connection, task_id: str, reason: str, *, detail: Any = None,
            until: Optional[float] = None, extra: Optional[dict[str, Any]] = None) -> bool:
     """Append the skip unless the episode already holds the same (reason, detail); True when it appended. Either
@@ -177,11 +188,11 @@ def record(conn: sqlite3.Connection, task_id: str, reason: str, *, detail: Any =
         # Keys this host recorded count too: a pickup copy re-imported from a replica that has not pulled this
         # host's just-pushed skip back yet reads as missing it for a tick or two (hub 2026-11-12).
         keys = {_skip_key(s) for s in skips} | (seen["keys"] if seen else set())
-        append = key not in keys and len(skips) < MAX_PER_EPISODE
+        current = seen is not None and _skip_key(seen["payload"]) == key
+        append = (key not in keys or _supersedes_timed(skips, key, current)) and len(skips) < MAX_PER_EPISODE
         if append:
             kb._append_event(conn, task_id, EVENT, payload)
             keys.add(key)
-        current = seen is not None and _skip_key(seen["payload"]) == key
         if seen is None or not current or append or time.time() - seen["seen_at"] >= SEEN_REFRESH_SECONDS:
             since = seen["since"] if seen is not None and current else int(time.time())
             _write_seen(conn, task_id, anchor, payload, keys, since)
@@ -327,6 +338,19 @@ def is_ordering(skip: Optional[dict[str, Any]]) -> bool:
     deferral, or the assignee's per-profile cap (a slot wait among that profile's own cards)."""
     return bool(skip) and ((skip.get("reason") == "claim_deferred" and skip.get("detail") == "capacity")
                            or skip.get("reason") == "per_profile_capped")
+
+
+# The details a skip carries when it says only that the machine which recorded it cannot lease the card: the Board's
+# eligibility refusals for that machine (``kanban_worker_node.eligible``) and its own unreachable Board. A tuple, not
+# a set: a synced payload's detail may be any JSON value.
+_RECORDER_ONLY = ("labels_mismatch", "pinned_only", "held", "offline")
+
+
+def recorder_cannot_lease(skip: dict[str, Any]) -> bool:
+    """True when ``skip`` says only that the machine which recorded it cannot lease the card. It is no verdict on
+    the machines that can, so a notice may still name what holds them (``kanban_parent_unclaimed``,
+    t_01a1db9d9538716b); any other skip came from a dispatcher able to lease the card, and its verdict stands."""
+    return skip.get("reason") in ("skipped_ineligible", "claim_deferred") and skip.get("detail") in _RECORDER_ONLY
 
 
 def advice(skip: dict[str, Any], *, now: Optional[float] = None) -> str:

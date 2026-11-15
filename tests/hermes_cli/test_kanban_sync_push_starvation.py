@@ -34,10 +34,12 @@ conn = reserve_fixtures.conn  # a primary board as gateway "hub" (dispatch_tick 
 
 
 @pytest.fixture(autouse=True)
-def _fresh_loop_state():
+def _fresh_loop_state(monkeypatch):
     """Backlog flags and outbox-age verdicts are process-wide (the sync loop's): no test inherits another's."""
     backlog.reset()
     outbox_age.reset()
+    from cron import restart_rerun
+    monkeypatch.setattr(restart_rerun, "host_fully_awake", lambda: True)
     yield
     backlog.reset()
     outbox_age.reset()
@@ -531,6 +533,7 @@ def test_a_good_round_with_an_old_unanswered_op_warns_once_per_window(live, kanb
     _age_rows(live, minutes=11)
     ok = [ksc.RoundResult(board=BOARD, mode="primary")]
     clock = [1000.0]
+    assert outbox_age.after_round(ok, [(BOARD, path)], mono=lambda: clock[0] - 600) == []
     with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_sync_outbox_age"):
         assert outbox_age.after_round(ok, [(BOARD, path)], mono=lambda: clock[0]) == [BOARD]
         clock[0] += 60
@@ -543,7 +546,8 @@ def test_a_good_round_with_an_old_unanswered_op_warns_once_per_window(live, kanb
     assert outbox_age.after_round(ok, [(BOARD, path)], mono=lambda: clock[0] + 9999) == []
 
 
-def test_the_dispatcher_files_one_card_per_stalled_outbox_incident(live, kanban_home):
+def test_the_dispatcher_files_one_card_per_stalled_outbox_incident(live, kanban_home, monkeypatch):
+    monkeypatch.setattr(outbox_age.replica_age, "check", lambda *a, **kw: [])
     path = kanban_home / "kanban.db"
     kb.create_task(live, title="stuck")
     _age_rows(live, minutes=30)
@@ -560,7 +564,9 @@ def test_the_dispatcher_files_one_card_per_stalled_outbox_incident(live, kanban_
         return outbox_age.check(mono=lambda: clock[0], file_fn=file_fn, boards=boards)
 
     assert tick() == []  # no round has completed in this process: nothing known about the loop
-    outbox_age.after_round([ksc.RoundResult(board=BOARD, mode="primary")], boards)
+    outbox_age.after_round([ksc.RoundResult(board=BOARD, mode="primary")], boards, mono=lambda: clock[0])
+    for _ in range(9):
+        assert tick() == []
     assert tick() == ["t_card1"]
     assert tick() == []  # the same incident files once
     with kbc.write_txn(live):
@@ -568,6 +574,8 @@ def test_the_dispatcher_files_one_card_per_stalled_outbox_incident(live, kanban_
     assert tick() == []  # answered: the incident ends
     kb.create_task(live, title="stuck again")
     _age_rows(live, minutes=30)
+    for _ in range(10):
+        assert tick() == []  # replacement identity gets its own awake observation
     assert tick() == ["t_card2"]
     assert "30 min" in filed[0]
 
@@ -584,7 +592,7 @@ def test_a_round_stuck_past_the_window_counts_as_a_live_loop(live, kanban_home):
     assert outbox_age.check(mono=lambda: 300.0, file_fn=lambda s, d: filed.append(d), boards=boards) == []
     outbox_age.reset()
     outbox_age.round_started(mono=lambda: 0.0)
-    outbox_age.check(mono=lambda: outbox_age.STALE_S + 1, file_fn=lambda s, d: filed.append(d) or "t_x",
+    outbox_age.check(mono=lambda: 900.0, file_fn=lambda s, d: filed.append(d) or "t_x",
                      boards=boards)
     assert len(filed) == 1
 

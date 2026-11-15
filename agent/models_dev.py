@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from utils import atomic_json_write, atomic_write_text
 
+from agent.pass_memo import PassMemo
+
 from hermes_constants import openrouter_variant_base
 
 import requests
@@ -152,9 +154,20 @@ PROVIDER_TO_MODELS_DEV: dict[str, str] = {
 _MODELS_DEV_TO_PROVIDER: Optional[dict[str, list[str]]] = None
 
 
+# A picker pass asks for the profile id map ~430 times (every capability probe). Inside
+# ``profile_ids_scope()`` it is read once; the memo is dropped on exit, so the next pass sees any
+# registration, plugin install or home change (no cross-pass cache to invalidate).
+_PROFILE_IDS_MEMO = PassMemo("models_dev_profile_ids")
+profile_ids_scope = _PROFILE_IDS_MEMO.scope
+
+
 def _profile_models_dev_ids() -> dict[str, str]:
     """``{name: models_dev_id}`` declared by registered provider profiles the static map lacks.
-    Read at lookup time (never merged into ``PROVIDER_TO_MODELS_DEV``)."""
+    Read at lookup time (never merged into ``PROVIDER_TO_MODELS_DEV``). Callers get a fresh dict."""
+    return dict(_PROFILE_IDS_MEMO.get("ids", _read_profile_models_dev_ids))
+
+
+def _read_profile_models_dev_ids() -> dict[str, str]:
     from providers import list_providers
     return {p.name: p.models_dev_id for p in list_providers()
             if p.models_dev_id and p.name not in PROVIDER_TO_MODELS_DEV}

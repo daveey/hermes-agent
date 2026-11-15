@@ -3536,6 +3536,24 @@ dashboard:
 - `ws_orphan_activity_stale_s` (default `600`) — how long a detached **running** turn's activity clock (the same clock the `agent.turn_liveness` watchdog samples: API waits, stream tokens, tool heartbeats) must be idle before the orphan reaper interrupts it. A client-absent turn that is still actively producing keeps running to completion detached — closing the laptop, backgrounding the mobile app, or a desktop update no longer cancels healthy long turns; only a genuinely wedged turn is interrupted. Set `0` to interrupt at the grace window regardless of activity (old behavior).
 - `startup_orphan_sweep` (default `true`) — the WS-orphan reap timer above is in-process, so a gateway restart (update, crash, systemd) before it fires leaves the session row open forever — phantom "active" work in `/resume` and dashboards. On every gateway boot — both the stdio TUI (`entry.main`) and the desktop/dashboard WebSocket sidecar (`handle_ws`) — rows with source `tui` / `desktop` / `subagent` / `unknown` (a row the token-accounting guard had to materialize itself) whose start time **and** newest message are both older than the session TTL (`HERMES_TUI_SESSION_TTL_S`, default 6 hours) are closed with `end_reason: startup_orphan_reap`. Messaging-platform sessions (Telegram, Discord, …) are never touched, live in-memory sessions (a client that already resumed) are excluded, and swept sessions remain resumable.
 
+## Hermes self-work spot checks
+
+`kanban.self_work.sample_rate` sets the fraction of ordinary merged Hermes fixes
+selected for post-merge verification (default `0.2`). Set it to `1.0` to restore
+100% selection, or `0.0` to select only mandatory checks. Values must be finite
+numbers between 0 and 1; booleans and strings are rejected.
+
+Selection uses a stable, seeded hash of the canonical repository and full landed
+commit SHA, so retries, overlapping sweeps and different workers do not reroll.
+Dispatcher, credential, quota/pacing and money paths, and incomplete or unknown
+diffs, are always selected regardless of this setting. This does not relax CI
+or pre-merge review: only proven ordinary test-only or guard-comment wording
+diffs qualify for automated scope review. Other changes retain independent
+review. Checks do not create further checks; gaps return to the original owner.
+
+The trusted shipping/sweep consumer must be installed alongside this policy;
+these helpers alone do not change card creation or authorize a merge.
+
 ## Kanban shared blocker recovery
 
 `kanban.shared_blocker_checks` maps canonical blocker IDs to trusted, read-only

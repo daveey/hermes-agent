@@ -26,6 +26,7 @@ from hermes_state_common import (
 from hermes_state_compaction_display import later_tool_copy_ids, not_a_later_tool_copy_sql
 from hermes_state_detached_results import SessionDetachedResultsMixin
 from hermes_state_todo import SessionTodoResultMixin
+from hermes_state_wake_grace import stale_turn_lease
 from hermes_state_stored_reads import SessionStoredReadsMixin
 from hermes_state_identity import (
     _absorbed_uids_json, _restore_identity_columns, _stable_tool_key, _tool_call_uid_map, _tool_call_uid_or_none, _tool_call_uids_json, _uid_list)
@@ -120,7 +121,6 @@ def _stale_holder(row, now: float) -> bool:
     """A lock/lease row whose holder is expired or a provably dead local process."""
     from hermes_state import _compression_lock_holder_process_is_dead
     return float(row["expires_at"]) <= now or _compression_lock_holder_process_is_dead(row["holder"])
-
 
 class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, SessionStoredReadsMixin):
     """Message append/replace/rewind, reactions, resume conversations, replay dedupe (detached results: the base)."""
@@ -257,9 +257,8 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
                         "WHERE conversation_id = ? AND holder = ?",
                         (now + max(0.1, float(turn_lease_ttl_seconds)), conversation_id, turn_lease_holder))
             elif lease is not None:
-                if not _stale_holder(lease, now):
-                    raise SessionTurnLeaseLostError(
-                        f"Session has an active turn lease; refusing transcript mutation for {session_id!r}")
+                if not stale_turn_lease(lease, now):  # post-wake grace included (hermes_state_wake_grace)
+                    raise SessionTurnLeaseLostError(f"Session has an active turn lease; refusing transcript mutation for {session_id!r}")
                 # Same reclaim rule as acquisition; deleting also fences a stale late flush after the mutation.
                 conn.execute("DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
                     (conversation_id, lease["holder"]))

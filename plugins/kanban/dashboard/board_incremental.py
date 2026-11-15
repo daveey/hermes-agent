@@ -10,6 +10,7 @@ The caller holds one read snapshot around the change cursor and this materializa
 from __future__ import annotations
 
 import functools
+import marshal
 import sqlite3
 from dataclasses import asdict
 from typing import Callable, Optional
@@ -45,8 +46,48 @@ def done_epoch(row) -> Optional[int]:
 def _fetch(conn, filters: dict, ids: list) -> dict:
     if not ids:
         return {}
-    rows = kanban_db.list_task_rows(conn, extra_where=f"id IN ({_ph(ids)})", extra_params=tuple(ids), **filters)
+    # Keyed by ID, so any cheap order will do: the default dispatch order evaluates a
+    # recursive effective-priority subquery per row (most of this read's cost).
+    rows = kanban_db.list_task_rows(conn, extra_where=f"id IN ({_ph(ids)})", extra_params=tuple(ids),
+                                    order_by="created", **filters)
     return {kanban_db._lossy_text(r["id"]): r for r in rows}
+
+
+def _bookkeeping_overlay(conn, filters: dict, pcards: dict, changed: list, retained: Optional[dict]) -> dict:
+    """``{task id: current row}`` for displayed and marked IDs, re-reading whole rows only when needed.
+
+    Under a trusted P2 cursor an unmarked task can only have moved in its
+    ``BOOKKEEPING_COLUMNS`` (claim, lease, heartbeat and sync clocks): every other column write
+    marks it. So one narrow indexed read of those columns, compared typed (``marshal``: 1, 1.0
+    and True differ) with the retained row, decides which unmarked rows are still exact; marked,
+    moved or missing rows are read in full. Without retained rows (the first delta after a full
+    read built by an older materializer) every row is read in full, as before.
+    """
+    from hermes_cli.kanban_activity_revision import BOOKKEEPING_COLUMNS
+
+    changed_set = set(changed)
+    want = sorted(changed_set | set(pcards))
+    keep = [tid for tid in pcards if tid not in changed_set]
+    if retained is None or not keep or any(tid not in retained for tid in keep):
+        return _fetch(conn, filters, want)
+    keys = tuple(retained[keep[0]].keys())
+    cols = [c for c in keys if c in BOOKKEEPING_COLUMNS["tasks"]]
+    if any(tuple(retained[tid].keys()) != keys for tid in keep):
+        return _fetch(conn, filters, want)
+    at = [keys.index(c) for c in cols]
+    narrow = {kanban_db._lossy_text(r[0]): tuple(r)[1:] for r in kanban_db.list_task_rows(
+        conn, columns=", ".join(("id", *cols)), extra_where=f"id IN ({_ph(keep)})", extra_params=tuple(keep),
+        order_by="created", **filters)}
+    by_id, reread = {}, set(changed)
+    for tid in keep:
+        row = retained[tid]
+        now = narrow.get(tid)
+        if now is not None and marshal.dumps(now, 2) == marshal.dumps(tuple(row[i] for i in at), 2):
+            by_id[tid] = row
+        else:
+            reread.add(tid)
+    by_id.update(_fetch(conn, filters, sorted(reread)))
+    return by_id
 
 
 def _rollups(conn, ids) -> dict[str, dict]:
@@ -224,7 +265,9 @@ def delta(conn, filters: dict, done_limit, diagnostic_inputs: Callable, prev: di
     if len(changed) > MAX_CHANGED:
         return None
     pcards = {t.id: (t, f, e) for t, f, e in prev["cards"]}
-    by_id = _fetch(conn, filters, sorted(set(changed) | set(pcards)))
+    retained_rows = ({kanban_db._lossy_text(r["id"]): r for r in prev["diag_inputs"][0]}
+                     if prev.get("diag_inputs") else None)
+    by_id = _bookkeeping_overlay(conn, filters, pcards, changed, retained_rows)
     if set(pcards) - set(changed) - set(by_id):
         return None
     done = _done_window(inc, by_id, changed, cap)

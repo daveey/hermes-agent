@@ -272,9 +272,9 @@ class RankMemo:
             self.entries.popitem(last=False)
         return entry
 
-    def cached_previews(self, ids: list) -> list:
+    def cached_previews(self, generation: int, ids: list) -> list:
         with self.lock:
-            if not self.preview_ok:
+            if generation != self.generation or not self.preview_ok:
                 return []
             out = []
             for sid in ids:
@@ -329,7 +329,7 @@ def ranked_ids(conn, memo: RankMemo, key: tuple, need: int, exact_ids, restricte
     reason = memo.advance(conn)
     entry = memo.entries.get(key) if reason is None else None
     if entry is None:
-        rows = exact_ids()
+        rows = exact_ids(invalidate_candidates=reason in ("lowered", "untrusted"))
         if memo.clock is not None:
             memo.put(key, rows)
         _account(f"fallback/{reason or 'no_entry'}")
@@ -372,7 +372,7 @@ def project(conn, memo: RankMemo, ids_rows: list, select_head: str, prompt_join:
     # The cached (revision, raw) rides on the page row itself: one PK join per row, no second json_each to
     # join against (an unindexed CTE join was quadratic on a 2000-row tree page).
     use_cache = preview_sql in select_head
-    cached = {c[0]: (c[1], c[2]) for c in memo.cached_previews([r[0] for r in ids_rows])} if use_cache else {}
+    cached = {c[0]: (c[1], c[2]) for c in memo.cached_previews(generation, [r[0] for r in ids_rows])} if use_cache else {}
     page = json.dumps([[r[0], r[3], *cached.get(r[0], (None, None))] for r in ids_rows])
     head = select_head
     if use_cache:

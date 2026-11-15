@@ -1227,6 +1227,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     # Same ordering rule as the ``tasks`` indexes above: index after column.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run ON task_events(run_id, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_kind_task_id ON task_events(kind, task_id, id)")
+    conn.execute(_EVENT_BLOCKER_ASSERT_INDEX.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1))
 
     if _table_exists(conn, "kanban_notify_subs"):
         notify_cols = _column_names(conn, "kanban_notify_subs")
@@ -1273,7 +1274,35 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             pass  # a read-only (delegated-child) opener: the next writer stamps; inheritance has a fallback
 
     _rebuild_drifted_tables(conn)
+    ensure_run_bookkeeping_index(conn)
     _ensure_notify_sub_triggers(conn)
+
+
+# [daveey] Covering index for the board GET's exact run-bookkeeping overlay
+# (``plugins/kanban/dashboard/board_run_history._signatures``): every refresh after a commit re-reads these
+# columns for every run of every displayed card, because P2 does not mark bookkeeping-only writes. Without
+# it each of those ~2k runs is a seek into a wide (summary/metadata) table row: 3.7 ms of SQL on the hub
+# board versus 1.3 ms from this index. Its columns are ``kanban_activity_revision.BOOKKEEPING_COLUMNS
+# ['task_runs']`` that exist in the file; ``sync_version`` appears once sync installs it, which re-runs this.
+RUN_BOOKKEEPING_INDEX = "idx_runs_task_bookkeeping"
+_RUN_BOOKKEEPING_ORDER = ("claim_lock", "claim_expires", "last_heartbeat_at", "worker_pid", "worker_started_at",
+                          "sync_version")
+
+
+def ensure_run_bookkeeping_index(conn: sqlite3.Connection) -> None:
+    """Create (or re-create for a new column set) :data:`RUN_BOOKKEEPING_INDEX`. No write when it is current."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(task_runs)")}
+    if not {"id", "task_id"} <= cols:
+        return
+    want = [c for c in _RUN_BOOKKEEPING_ORDER if c in cols]
+    ddl = f"CREATE INDEX {RUN_BOOKKEEPING_INDEX} ON task_runs(task_id, id{''.join(', ' + c for c in want)})"
+    found = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+                         (RUN_BOOKKEEPING_INDEX,)).fetchone()
+    if found is not None and found[0] == ddl:
+        return
+    if found is not None:
+        conn.execute(f"DROP INDEX {RUN_BOOKKEEPING_INDEX}")
+    conn.execute(ddl)
 
 
 def _ensure_notify_sub_triggers(conn: sqlite3.Connection) -> None:
@@ -1356,6 +1385,14 @@ _RUN_PARTIAL_INDEXES = (
     "CREATE INDEX idx_runs_rate_limited ON task_runs(ended_at) WHERE outcome = 'rate_limited'",
     "CREATE INDEX idx_runs_blocker_assert ON task_runs(ended_at) WHERE metadata LIKE '%\"blocker_id\"%'",
 )
+# [daveey] The same for task_events: ``kanban_shared_blockers._unblocked_since_assertion`` asks, per ready card
+# behind a blocker per tick, for the board's assertions at or after the card's unblock second. Without this
+# index that read walked every blocked/scheduled event (~19k of ~886k on the hub board, ~18-60 ms per call);
+# ~1k of them carry a blocker id. Its WHERE is repeated verbatim by that query, which names it (INDEXED BY).
+_EVENT_BLOCKER_ASSERT_INDEX = (
+    "CREATE INDEX idx_events_blocker_assert ON task_events(created_at) WHERE kind IN "
+    "('blocked', 'scheduled', 'continued', 'block_loop_detected') AND payload LIKE '%\"blocker_id\"%'"
+)
 
 
 def _ensure_run_partial_indexes(conn: sqlite3.Connection) -> None:
@@ -1377,6 +1414,7 @@ _REBUILD_SPECS = {
             "CREATE INDEX idx_events_task ON task_events(task_id, created_at)",
             "CREATE INDEX idx_events_run ON task_events(run_id, id)",
             "CREATE INDEX idx_events_kind_task_id ON task_events(kind, task_id, id)",
+            _EVENT_BLOCKER_ASSERT_INDEX,
         ),
     ),
     "task_comments": (

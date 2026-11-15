@@ -15,9 +15,9 @@ SCOPE = helpers.SCOPE
 def gate(world, monkeypatch):
     state = {"key": "K1", "calls": 0}
 
-    def narrow_now(scope, full, fp):
+    def narrow_now(scope, full):
         state["calls"] += 1
-        return state["key"] if fp is not None else None
+        return state["key"]
 
     monkeypatch.setattr(host, "_narrow_now", narrow_now)
     helpers._poll()
@@ -110,11 +110,17 @@ def test_own_mutation_bypasses_narrow_gate(world, gate):
     assert host._holder_refresh_scope(SCOPE)
 
 
-def test_unmoved_inputs_skip_narrow_key(world, gate):
-    calls = gate["calls"]
+def test_unmoved_inputs_answered_by_narrow_key_alone(world, gate, monkeypatch):
+    """Past the floor the narrow key alone answers: the exact fingerprint (waiting-input probes) is not read."""
+    monkeypatch.setattr(host, "fingerprint", lambda *a: pytest.fail("a known narrow key needs no exact fingerprint"))
     helpers._advance(world, 12)
     assert not host._holder_refresh_scope(SCOPE)
-    assert gate["calls"] == calls  # exact fingerprint equal: no narrow read at all
+
+
+def test_unknown_narrow_key_falls_back_to_exact(world, gate):
+    gate["key"] = None
+    helpers._advance(world, 12)
+    assert not host._holder_refresh_scope(SCOPE)  # exact fingerprint unchanged: still no refresh
 
 
 def test_floor_skips_narrow_key(world, gate):

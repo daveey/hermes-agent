@@ -158,6 +158,13 @@ REDIRECT_PREFIXES = (
 # Prefixes above that are ordinary words, not redirections: bash runs ./restart.sh only when one
 # is an operand of `bash -s` (elsewhere it is the command word or the script operand).
 REDIRECT_PLAIN_WORDS = frozenset({"{a[x", "{a[1 2]}"})
+# Substitution-bearing words exercise the same independent places/wrappers/nestings/targets.
+SUBSTITUTION_PREFIXES = (
+    '2>$(echo /dev/null)', '2>/dev/$(echo null)', '2>&$((1+1))',
+    '{a[$((1+1))]}>/dev/null', '{a[$(echo 1)]}>/dev/null',
+    '{a[`echo 1`]}>/dev/null', '2>`echo /dev/null`',
+    '2>$(echo "$(echo /dev/null)")',
+)
 REDIRECT_PLACES = ("lead", "wrapped", "operand")
 REDIRECT_TARGETS = {
     "operand": ("bash", "./restart.sh"),
@@ -314,7 +321,8 @@ def generate_full_corpus() -> list[Case]:
         cases.setdefault(key, Case(key, command, "bash", (), "sink", wrapper, nesting,
                                    f"{consumer}-{line}", sink=sink))
     for prefix, place, wrapper, nesting, target in itertools.product(
-            REDIRECT_PREFIXES, REDIRECT_PLACES, WRAPPERS, REDIRECT_NESTINGS, REDIRECT_TARGETS):
+            (*REDIRECT_PREFIXES, *SUBSTITUTION_PREFIXES), REDIRECT_PLACES, WRAPPERS,
+            REDIRECT_NESTINGS, REDIRECT_TARGETS):
         command = build_redirect_command(prefix, place, wrapper, nesting, target)
         key = hashlib.sha1(command.encode()).hexdigest()[:16]
         cases.setdefault(key, Case(key, command, "bash", (prefix,), "redirect", wrapper, nesting,
@@ -360,6 +368,35 @@ def generate_cases(size: int = SAMPLE_SIZE) -> list[Case]:
     return [case for case in full if case.key in chosen]
 
 
+def proof_bash() -> str:
+    """Use the requested PATH Bash, including for nested shells in the proof."""
+    return shutil.which("bash") or "/bin/bash"
+
+
+@functools.cache
+def proof_bash_version() -> tuple[int, int]:
+    result = subprocess.run(
+        [proof_bash(), "--noprofile", "--norc", "-c",
+         'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
+        capture_output=True, text=True, encoding="utf-8", timeout=10, check=True,
+    )
+    major, minor = result.stdout.split(".")
+    return int(major), int(minor)
+
+
+def proof_path(root: Path) -> str:
+    return f"{root}:{Path(proof_bash()).parent}:/usr/bin:/bin"
+
+
+# These fixtures use only `timeout SECONDS COMMAND...`. The subprocess timeout
+# remains the hard bound; this function supplies the wrapper's stdin/argv behavior
+# on hosts without GNU timeout. Export it for the nested Bash history proofs.
+TIMEOUT_PREAMBLE = (
+    'if ! command -v timeout >/dev/null 2>&1; then\n'
+    'timeout() { shift; "$@"; }; export -f timeout\nfi\n'
+)
+
+
 def prepare(root: Path) -> dict[str, str]:
     """Fake ``hermes``/``ssh`` bin, a ``$HOME`` and ``./rc`` that rewrite stdin, ``./big.sh`` and
     the session snapshots; return the env."""
@@ -376,7 +413,7 @@ def prepare(root: Path) -> dict[str, str]:
         (root / f"session-{session}.sh").write_text(f"{aliases}\nshopt -s expand_aliases\n")
     (root / "evil").mkdir(exist_ok=True)
     evil_python = root / "evil" / "python3"
-    evil_python.write_text('#!/bin/sh\nexec /bin/bash "$@"\n')
+    evil_python.write_text(f'#!/bin/sh\nexec {shlex.quote(proof_bash())} "$@"\n')
     hermes = root / "hermes"
     hermes.write_text('#!/bin/sh\nprintf called > "$MARKER"\n')
     ssh = root / "ssh"
@@ -386,7 +423,7 @@ def prepare(root: Path) -> dict[str, str]:
     sudo.write_text('#!/bin/sh\nexec "$@"\n')  # no privilege change: runs its operand
     for tool in (hermes, ssh, sudo, evil_python):
         tool.chmod(0o755)
-    return {"PATH": f"{root}:/usr/bin:/bin", "FAKE_BIN": str(root), "HOME": str(home),
+    return {"PATH": proof_path(root), "FAKE_BIN": str(root), "HOME": str(home),
             "BASH_ENV": "", "ENV": str(home / ".profile"), "LANG": "C.UTF-8"}
 
 
@@ -407,7 +444,7 @@ def bash_runs_payload(root: Path, env: dict[str, str], case: Case,
     marker = root / "markers" / case.key
     marker.parent.mkdir(exist_ok=True)
     try:
-        subprocess.run([*prefix, "/bin/bash"], input=bash_input(case), text=True,
+        subprocess.run([*prefix, proof_bash()], input=TIMEOUT_PREAMBLE + bash_input(case), text=True,
                        capture_output=True, timeout=20, check=False, cwd=root,
                        env={**env, "MARKER": str(marker)})
     except subprocess.TimeoutExpired:
@@ -460,7 +497,7 @@ def startup_shell_prefix() -> tuple[tuple[str, ...] | None, str]:
         for how, prefix in _startup_prefixes():
             ran.unlink(missing_ok=True)
             try:
-                result = subprocess.run([*prefix, "/bin/bash", "-l", "-s"], input=probe, text=True,
+                result = subprocess.run([*prefix, proof_bash(), "-l", "-s"], input=probe, text=True,
                                         capture_output=True, timeout=20, check=False, env=env)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 notes.append(f"{how}: {exc}")

@@ -1135,7 +1135,7 @@ def _classify_dead_worker(
     """
     log = (_kb.read_worker_log(task_id, tail_bytes=None, board=board) or "") if task_id and run_id else None
     exited = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id, log=log)
-    failure = _worker_scope.read_failure(task_id, run_id, log or "", pid=pid, started_at=_worker_scope.run_started_at(conn, run_id),
+    failure = _worker_scope.read_run_failure(conn, task_id, run_id, log or "", pid=pid,
                                          exit_code=0 if exited.kind == "clean_exit" else None) if task_id else None  # rc 0 skips the kernel log
     if failure:
         kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
@@ -2213,16 +2213,13 @@ def _dispatch_once_locked(
             + _kb._sync.held_elsewhere_sql(conn) + " GROUP BY assignee"
         ):
             per_profile_running[prow["assignee"]] = int(prow["n"])
-    # Review-lane reservation: the ready loop runs first and would otherwise
-    # consume the ENTIRE shared budget, starving reviews under a sustained ready
-    # backlog. When spawnable review work exists and there is any budget, hold
-    # one slot back.
-    ready_budget = spawn_budget
-    if spawn_budget is not None and spawn_budget > 0 and _any_spawnable_review(
-        conn, review_rows,
-        per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
-    ):
-        ready_budget = max(spawn_budget - 1, 0)
+    # One scoring order across both lanes: reserving the only slot for review
+    # indefinitely starves ready work. Aging protects either lane without an
+    # unconditional partition; pool and per-profile gates remain authoritative.
+    from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
+
+    lane_by_id = {row["id"]: "review" for row in review_rows}
+    rows = order_with_remote_waiters(conn, ready_rows + review_rows)
     lane_kwargs: dict[str, Any] = dict(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
@@ -2230,48 +2227,24 @@ def _dispatch_once_locked(
     )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
-    next_ready = 0
-
-    def _run_ready(limit: Optional[int]) -> None:
-        # Resume after review unless Board capacity refused a higher-priority row. A slot can free mid-pass;
-        # retry from DISPATCH_ORDER next tick rather than hand it to whichever lower row we reach afterward.
-        nonlocal spawned, next_ready
-        while next_ready < len(ready_rows):
-            if limit is not None and spawned >= limit:
-                return
-            row = ready_rows[next_ready]
-            next_ready += 1
-            if not pool_admits(result, row):  # normal row, regular pool spent: no lease, no locked census
-                continue
-            row_assignee = row["assignee"]
-            if not row_assignee:
-                row_assignee = _kbda.fill_default_assignee(conn, row["id"], default_assignee, result, dry_run=dry_run)
-                if not row_assignee:
-                    continue
-            if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
-                spawned += pool_take(result, row)
-            elif (row["id"], "capacity") in result.claim_deferred:
-                next_ready = len(ready_rows)  # also fence the post-review resume in this tick
-
-    _run_ready(ready_budget)
-
-    # A review agent (sdlc-review) approves (→ done) or requests changes
-    # (→ ready/todo). Review spawns share max_spawn with ready tasks. The loop
-    # checks the FULL shared ``spawn_budget`` — the reservation above caps the
-    # ready lane, it grants no extra capacity here.
-    for row in review_rows:
+    for row in rows:
         if spawn_budget is not None and spawned >= spawn_budget:
             break
-        if not row["assignee"]:
-            result.skipped_unassigned.append(row["id"])
+        if not pool_admits(result, row):
             continue
-        if pool_admits(result, row) and _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
+        lane = lane_by_id.get(row["id"], "ready")
+        row_assignee = row["assignee"]
+        if not row_assignee:
+            if lane != "ready":
+                result.skipped_unassigned.append(row["id"])
+                continue
+            row_assignee = _kbda.fill_default_assignee(conn, row["id"], default_assignee, result, dry_run=dry_run)
+            if not row_assignee:
+                continue
+        if _dispatch_lane_task(conn, row, row_assignee, result, lane=lane, **lane_kwargs):
             spawned += pool_take(result, row)
         elif (row["id"], "capacity") in result.claim_deferred:
-            break  # preserve priority within the review lane too
-    # The review reservation is only a hold: a slot no review took (its claim deferred, guarded, capped) goes
-    # back to the ready rows still waiting this tick.
-    _run_ready(spawn_budget)
+            break  # a mid-pass slot release must not reward a lower-ranked row
     return result
 
 

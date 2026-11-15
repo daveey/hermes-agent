@@ -375,6 +375,8 @@ class GatewayKanbanWatchersMixin:
             # broken PATH, missing venv, or credential loss.
             bad_ticks = 0
             last_warn_at = 0
+            from hermes_cli.kanban_dispatch_expected_holds import ExpectedHoldMonitor
+            hold_monitor = ExpectedHoldMonitor()
             external_hold: Optional[tuple[str, str]] = None  # (principal, since) while an external drain holds
             results: Optional[list] = None
             dispatcher = _KanbanDispatcher(_kb, settings)
@@ -445,8 +447,9 @@ class GatewayKanbanWatchersMixin:
                         # Intentional claim-quiet defer of every local candidate: explains zero spawns, only
                         # while nothing else (guards, ownership, caps, ineligibility) holds work back.
                         clocked = clocked or _kbd.all_quiet_deferred(res for _slug, res in (results or []))
-                        bad_ticks = (bad_ticks + 1 if ready_pending and not any_spawned and not capped and not clocked
-                                     else 0)
+                        expected = hold_monitor.observe(results or [], time.time(), logger.log)
+                        bad_ticks = (bad_ticks + 1 if ready_pending and not any_spawned and
+                                     not capped and not clocked and not expected else 0)
                     from hermes_cli import kanban_hub_cpu_alert  # one card per stale-advisory incident [daveey]
                     await _to_thread_process_service(kanban_hub_cpu_alert.check)
                     from hermes_cli import kanban_sync_outbox_age  # one card per stalled-outbox incident [daveey]

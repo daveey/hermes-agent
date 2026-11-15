@@ -10,6 +10,7 @@ whose process died, so a concurrent job's kill is not pinned on the command.
 """
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
 from typing import Optional
@@ -36,6 +37,13 @@ def run_scope_cgroup() -> Optional[Path]:
     except OSError:
         pass
     return None
+
+
+def prefer_command_victim(argv: list[str]) -> list[str]:
+    """Raise only the child's OOM priority, without preexec_fn in our threaded host."""
+    if run_scope_cgroup() is not None and (choom := shutil.which("choom")):
+        return [choom, "-n", "1000", "--", *argv]
+    return argv
 
 
 def oom_kills(cgroup: Optional[Path]) -> Optional[int]:

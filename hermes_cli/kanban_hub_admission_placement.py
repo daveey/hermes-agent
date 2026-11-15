@@ -550,7 +550,8 @@ def pool_route(args, cfg, gateway, audit, requires, *, queue=True, machine_ok=No
         # It stays home; ``requires`` stays as declared (the hub:write the deny route adds is for workers).
         out = {"where": "local", "why": f"hub admission denied, but the text {coordination.ACTION_REASON} "
                                         "no pool worker is attested for, so it stays here",
-               "hub_admission": {**audit, "home": coordination.ACTION_REASON}}
+               "hub_admission": {**audit, "home": coordination.ACTION_REASON,
+                                 "kept": coordination.ACTION_REASON}}
         declared = args.get("requires")
         if declared:
             # The declared list, normalized: a decision card's raw view can carry a bare string.

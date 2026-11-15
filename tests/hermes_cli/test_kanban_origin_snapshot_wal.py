@@ -70,6 +70,31 @@ def test_existing_rollback_journal_snapshot_is_upgraded_on_the_next_save(home):
     assert activity._remote_snapshot() == [card()]
 
 
+@pytest.mark.parametrize('error_type', [sqlite3.OperationalError, KeyboardInterrupt])
+def test_wal_setup_failure_closes_connection_before_reraise(home, monkeypatch, error_type):
+    from hermes_cli import kanban_session_activity_origin_snapshot as snapshot
+
+    retained = []  # Keep the actual connection alive so GC cannot hide a missing close.
+    failure = error_type('WAL setup failed')
+
+    def fail_wal(conn):
+        retained.append(conn)
+        assert conn.execute('SELECT 1').fetchone() == (1,)
+        raise failure
+
+    monkeypatch.setattr(snapshot, '_use_wal', fail_wal)
+    try:
+        with pytest.raises(error_type) as raised:
+            snapshot.remote_snapshot([card()])
+        assert raised.value is failure
+        assert len(retained) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match='closed database'):
+            retained[0].execute('SELECT 1')
+    finally:
+        for conn in retained:
+            conn.close()
+
+
 def guard_spy(monkeypatch):
     from hermes_cli import kanban_lockguard
     seen = []

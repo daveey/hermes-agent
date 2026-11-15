@@ -54,8 +54,8 @@ def test_wake_after_screen_waits_for_next_judged_pass(gws, hub_judge, monkeypatc
             kb._append_event(hub.conn, tid, "hub_admission", {"admit": True, "entry": "claim"})
     real_screen = hac.safe_screen
 
-    def screen_then_wake(conn):
-        deferred = real_screen(conn)
+    def screen_then_wake(conn, lanes=None):
+        deferred = real_screen(conn, lanes)
         _deliver(conn, tid, state, now, kind)
         return deferred
 
@@ -87,16 +87,22 @@ def test_screened_lanes_preserves_dispatch_controls(monkeypatch, dry_run, mode, 
         calls.append(lane)
         return [{"id": lane}, {"id": "prior"}, {"id": "new"}]
 
-    def screen(conn):
+    def screen(conn, lanes=None):
         calls.append("screen")
+        screened_rows.append(lanes)
         return frozenset({"new"})
 
+    screened_rows = []
     monkeypatch.setattr(queries, "lane_rows", rows)
     monkeypatch.setattr(sync, "board_mode", lambda conn: mode)
     monkeypatch.setattr(hac, "safe_screen", screen)
     ready, review, deferred = hac.screened_lanes(None, dry_run, review_enabled, {"prior"})
     screened = not dry_run and mode == "primary"
     assert calls == ["ready"] + (["review"] if review_enabled else []) + (["screen"] if screened else [])
+    # The screen judges the frozen lanes in the claim pass's combined order: review only when it dispatches.
+    frozen = [{"id": "ready"}, {"id": "prior"}, {"id": "new"}]
+    frozen += [{"id": "review"}, {"id": "prior"}, {"id": "new"}] if review_enabled else []
+    assert screened_rows == ([frozen] if screened else [])
     assert deferred == ({"prior", "new"} if screened else {"prior"})
     assert ready == [{"id": "ready"}] + ([] if screened else [{"id": "new"}])
     assert review == ([{"id": "review"}] + ([] if screened else [{"id": "new"}]) if review_enabled else [])
@@ -116,9 +122,10 @@ def test_review_wake_preserves_screen_outcomes(gws, hub_judge, monkeypatch, outc
     elif outcome == "unavailable":
         monkeypatch.setattr(judge, "admit", lambda card: judge.Verdict())
     elif outcome == "budget":
-        monkeypatch.setattr(hac, "safe_screen", lambda conn: hac.screen(conn, budget=0).deferred_ids)
+        monkeypatch.setattr(hac, "safe_screen", lambda conn, lanes=None: hac.screen(
+            conn, budget=0, lanes=lanes).deferred_ids)
     result = helpers._tick(hub)
-    assert (helpers._holder(svc, tid) == helpers.HUB) == (outcome in {"keep", "unavailable"})
+    assert (helpers._holder(svc, tid) == helpers.HUB) == (outcome == "keep")
     verdicts = helpers._events(hub.conn, tid, "hub_admission")
     if outcome == "keep":
         assert verdicts[0]["kept"] == "wake_check reads a hub-local path"

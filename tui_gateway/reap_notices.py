@@ -21,6 +21,8 @@ import threading
 import time
 from typing import Any, Callable, Iterable, Optional
 
+from tui_gateway.kanban_notice_session_store import NoticeSessionStore, notice_writer
+
 logger = logging.getLogger(__name__)
 
 RETRY_WINDOW_S = 24 * 3600.0  # children reaped longer ago than this are not re-offered
@@ -60,6 +62,17 @@ def killed_subagents(db: Any, swept: Iterable[str]) -> list[dict]:
             for r in db._read_all(sql, tuple(ids)) if r["last_role"] in ("tool", "user")]
 
 
+def _delivered(db: Any, tip: str, notice_id: str) -> bool:
+    """True when the parent lineage already holds ``notice_id``, read on the kept read-only store. Only a
+    :class:`NoticeSessionStore` is asked; any other handle answers the same question inside ``record_kanban_notice``."""
+    if not isinstance(db, NoticeSessionStore):
+        return False
+    from hermes_state_common import _NOTICE_BY_ID_SQL
+    from hermes_state_notice_keys import existing_notice
+    with db._read_ctx() as conn:
+        return existing_notice(conn, tip, notice_id, [], _NOTICE_BY_ID_SQL) is not None
+
+
 def _deliver(db: Any, child: dict) -> tuple[str, Optional[str]]:
     """Write one child's notice to its parent's live tip. ``("written"|"present"|"busy"|"error", tip)``; never
     raises. ``busy`` = the parent refused because a turn (or a compression) owns it right now."""
@@ -71,7 +84,10 @@ def _deliver(db: Any, child: dict) -> tuple[str, Optional[str]]:
                 f"{child['id']}); its result never came back. Check what it got done and redo or re-delegate the rest.")
         metadata = {"notice_id": f"subagent-killed:{child['id']}", "display_text": text,
                     "subagent_killed": child["id"]}
-        _row, inserted = db.record_kanban_notice(tip, text, metadata)
+        if _delivered(db, tip, metadata["notice_id"]):  # a kept reader answers "already told": no writer borrow
+            return "present", tip
+        with notice_writer(db) as wdb:
+            _row, inserted = wdb.record_kanban_notice(tip, text, metadata)
     except (SessionTurnLeaseLostError, CompressionSessionClosedError):
         return "busy", tip
     except Exception:
@@ -80,11 +96,19 @@ def _deliver(db: Any, child: dict) -> tuple[str, Optional[str]]:
     return ("written" if inserted else "present"), tip
 
 
+def _refresh_parents(db: Any, parents: list[str]) -> None:
+    """Refresh the told parents' outcomes through the writer (no writer borrow when nobody was told)."""
+    if not parents:
+        return
+    from hermes_state_outcome import refresh_outcomes_quietly
+    with notice_writer(db) as wdb:
+        refresh_outcomes_quietly(parents, "reap", db=wdb)
+
+
 def notify_parents_of_killed_subagents(db: Any, swept: Iterable[str]) -> list[str]:
     """Append one notice per killed child to its parent's tip and refresh that parent. Returns the parents
     notified. Never raises. A parent mid-turn refuses the row: one INFO line, and the sweeper's
     :func:`retry_pending_killed_notices` delivers it once the turn ends."""
-    from hermes_state_outcome import refresh_outcomes_quietly
     notified: list[str] = []
     try:
         children = killed_subagents(db, swept)
@@ -98,7 +122,7 @@ def notify_parents_of_killed_subagents(db: Any, swept: Iterable[str]) -> list[st
                         tip, child["id"])
         elif result == "written":
             notified.append(tip)
-    refresh_outcomes_quietly(notified, "reap", db=db)
+    _refresh_parents(db, notified)
     if notified:
         logger.info("orphan reap: told %d parent chat(s) their subagent was stopped mid-work: %s",
                     len(notified), ", ".join(notified))
@@ -126,7 +150,6 @@ def retry_pending_killed_notices(db: Any, *, now: Optional[float] = None) -> lis
     lineage does not have it yet (the inline write found the parent busy). Returns the parents newly told. A
     still-busy parent is skipped quietly; ``OVERDUE_S`` after the reap it logs one WARNING per child. Already
     delivered children cost one lineage read (no write lock). Never raises."""
-    from hermes_state_outcome import refresh_outcomes_quietly
     if db is None:
         return []
     now = time.time() if now is None else now
@@ -154,5 +177,5 @@ def retry_pending_killed_notices(db: Any, *, now: Optional[float] = None) -> lis
             _overdue_warned.add(child["id"])
         logger.warning("killed-subagent notice for child %s to parent %s overdue %dm: %s", child["id"], tip,
                        age // 60, "parent busy (a turn is running in it)" if result == "busy" else "write failed")
-    refresh_outcomes_quietly(notified, "reap", db=db)
+    _refresh_parents(db, notified)
     return notified

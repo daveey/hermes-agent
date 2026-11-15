@@ -4,16 +4,25 @@ Incident (2026-11-12, David-MBP, t_01a1d36ddcea59fe): 1747 local edits waited up
 with ``attempts=0``, because the sync round was stuck draining a pull backlog before its push. ``sync status``
 showed only a count, nothing alerted, and the stall surfaced only as downstream "ready with no worker" notices.
 
-Three readers of one number, the age of the oldest pending op:
+Wall age remains diagnostic; alarms require a continuously observed sendable identity:
 
 - ``hermes kanban sync status`` prints it (``oldest_pending_age_s``; every pending row).
 - The sync loop logs a WARNING (:func:`after_round`, at most once per :data:`STALE_S` per board) when a round
-  succeeded and an unanswered op is still older than :data:`STALE_S`.
-- The dispatcher tick (:func:`check`) files ONE card per incident on the default board when the same op is that old
+  succeeded and the same unanswered op has been observed for :data:`STALE_S` awake seconds.
+- The dispatcher tick (:func:`check`) files ONE card per incident on the default board when that same op is observed
+  for :data:`STALE_S` awake seconds
   and this process's sync loop is not failing (its last round succeeded, or a round has run for over
   :data:`STALE_S`, which is the stuck-round shape of the incident). The incident ends when the op is answered; the
   next one comments on the open card (at most hourly) or opens a new card once that card is done. A failing, stalled
   or stopped loop is the replica-freshness check's (``kanban_sync_replica_age``), which the same tick runs next.
+
+Observations persist in each board's ``.outbox-age.json`` sidecar. A same-boot restart resumes them;
+another boot, unreadable/no sendable op, identity change, or >600 awake seconds without observation resets them.
+Both entry paths share the observation and report wall age, observed-awake age and op_id, never payloads.
+Both sample the shared cron host_fully_awake probe once: a False sample excludes the interval since
+the previous observation and suppresses warnings/cards. DarkWake advances monotonic time but is not
+fully awake. This also excludes an idle lid-closed Mac on AC with an external display and an idle
+lid-open Mac on battery, until someone is active. Non-macOS and probe failures read awake.
 
 "Unanswered" = pending with no ``retry_after``: the Board never told us to wait. A row the Board deferred
 (``storage_error``, ``depends_on_rejected``) retries on its own backoff and logs its own reason; counting it would
@@ -29,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_sync_replica_age as replica_age  # the same tick's replica-freshness alarm
+from hermes_cli import kanban_sync_outbox_observation as observation
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +51,7 @@ _COMMENT_EVERY = 3600
 _LOCK = threading.Lock()
 _LAST_OK: dict[str, bool] = {}  # board slug -> this process's last completed round for it succeeded
 _ROUND_STARTED: list[Optional[float]] = [None]  # monotonic start of the loop's round in progress
-_WARNED_AT: dict[str, float] = {}
-_FILED: set[str] = set()
+
 _NEXT_CHECK: list[float] = [0.0]
 
 
@@ -84,18 +93,39 @@ def sendable_age_s(conn: sqlite3.Connection, path: Path, now: Optional[float] = 
     return _since(min(ages), now) if ages else None
 
 
-def _age(path: Path) -> Optional[float]:
+def _sample(path: Path) -> Optional[tuple[str, float]]:
+    """Oldest sendable unanswered identity and wall age; unknown reads reset observation."""
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_sync_backlog as backlog
     if not Path(path).exists():
-        return None  # never create a board file just to read its outbox
+        return None
     try:
         with kbc.connect_closing(path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' "
+                "AND (retry_after IS NULL OR retry_after <= ?) ORDER BY created_at, rowid", (int(time.time()),))]
             if backlog.behind(path):
-                return sendable_age_s(conn, path)
-            return oldest_pending_age_s(conn, unanswered=True)
-    except (sqlite3.Error, OSError):
+                rows, _ = backlog.sendable_before_head(conn, _NoBoardReads(), "", rows, backlog.evidence(path))
+            row = next((r for r in rows if r["retry_after"] is None), None)
+            return (row["op_id"], _since(row["created_at"])) if row else None
+    except (sqlite3.Error, OSError, ValueError, TypeError):
         return None
+
+
+def _age(path: Path) -> Optional[float]:
+    sample = _sample(path)
+    return sample[1] if sample else None
+
+
+def _observed(path: Path, mono, age, awake=True):
+    sample = _sample(path)
+    # Retain the age injection seam for callers suppressing outbox observations.
+    if age is not _age and age(path) is None:
+        sample = None
+    now = mono()  # sample and timestamp under the same observation lock
+    seen = observation.observe(path, sample[0] if sample else None, now, awake=awake)
+    return seen, sample[1] if sample else None, now
 
 
 def round_started(mono: Callable[[], float] = time.monotonic) -> None:
@@ -105,9 +135,11 @@ def round_started(mono: Callable[[], float] = time.monotonic) -> None:
 
 
 def after_round(results: Iterable[Any], boards: Iterable[tuple[str, Path]], *,
-                mono: Callable[[], float] = time.monotonic, age: Callable[[Path], Optional[float]] = _age) -> list[str]:
-    """Record each board's round outcome and WARN when a good round left an unanswered op older than
-    :data:`STALE_S`. Returns the boards warned about. Never raises."""
+                mono: Callable[[], float] = time.monotonic, age: Callable[[Path], Optional[float]] = _age,
+                awake_fn: Optional[Callable[[], bool]] = None) -> list[str]:
+    """Record round outcome and WARN after :data:`STALE_S` observed-awake seconds for one sendable op.
+    Returns the boards warned about. Never raises."""
+    awake = replica_age.fully_awake(awake_fn)
     warned: list[str] = []
     try:
         paths = dict(boards)
@@ -118,19 +150,25 @@ def after_round(results: Iterable[Any], boards: Iterable[tuple[str, Path]], *,
                 _LAST_OK[r.board] = not r.error
         replica_age.note_round(results, mono=mono)  # the replica-freshness card names the last round's outcome
         for r in results:
-            if r.error or r.board not in paths:
+            if r.board not in paths:
                 continue
-            seconds = age(paths[r.board])
-            if seconds is None or seconds < STALE_S:
-                _WARNED_AT.pop(r.board, None)
-                continue
-            now = mono()
-            if now - _WARNED_AT.get(r.board, now - STALE_S) < STALE_S:
-                continue
-            _WARNED_AT[r.board] = now
-            warned.append(r.board)
-            log.warning("kanban sync: %s: a local edit has waited %.0f s in the outbox although this round succeeded "
-                        "(the Board has not seen it; `hermes kanban sync status` shows the outbox)", r.board, seconds)
+            path = paths[r.board]
+            with observation.LOCK:
+                if r.error:
+                    observation.observe(path, None, mono())
+                    continue
+                seen, seconds, now = _observed(path, mono, age, awake)
+                if not awake or seen is None or now - seen.since < STALE_S:
+                    continue
+                if seen.warned_at is not None and now - seen.warned_at < STALE_S:
+                    continue
+                seen.warned_at = now
+                observation.remember(path, seen)
+                warned.append(r.board)
+                log.warning("kanban sync: %s: op %s has waited %.0f wall s / %.0f observed-awake s in the "
+                            "outbox, excluded %.0f s not fully awake, although this round succeeded "
+                            "(`hermes kanban sync status` shows the outbox)",
+                            r.board, seen.op_id, seconds, now - seen.since, seen.excluded)
     except Exception:  # health: allow BLE001 -- an alarm must never stop the sync loop
         log.warning("kanban sync: outbox age check failed", exc_info=True)
     return warned
@@ -144,7 +182,8 @@ def _loop_healthy(slug: str, now: float) -> bool:
 
 def check(*, mono: Callable[[], float] = time.monotonic, file_fn: Optional[Callable[[str, str], Optional[str]]] = None,
           boards: Optional[list[tuple[str, Path]]] = None,
-          age: Callable[[Path], Optional[float]] = _age) -> list[str]:
+          age: Callable[[Path], Optional[float]] = _age,
+          awake_fn: Optional[Callable[[], bool]] = None) -> list[str]:
     """One dispatcher-tick observation (at most every :data:`CHECK_EVERY_S`): the outbox, then each replica's
     freshness (``kanban_sync_replica_age.check``). Returns the card ids filed or commented. Never raises."""
     try:
@@ -161,26 +200,30 @@ def check(*, mono: Callable[[], float] = time.monotonic, file_fn: Optional[Calla
     except Exception:  # health: allow BLE001 -- an alert must never break the dispatcher tick
         log.warning("kanban: sync outbox age check failed", exc_info=True)
         return []
-    return _check_outbox(boards, now, file_fn, age) + replica_age.check(boards, now=now)
+    awake = replica_age.fully_awake(awake_fn)
+    return _check_outbox(boards, mono, file_fn, age, awake) + replica_age.check(
+        boards, now=now, awake_fn=lambda: awake)
 
 
-def _check_outbox(boards: list[tuple[str, Path]], now: float, file_fn, age) -> list[str]:
+def _check_outbox(boards: list[tuple[str, Path]], mono, file_fn, age, awake=True) -> list[str]:
     try:
         out = []
         for slug, path in boards:
-            seconds = age(path) if _loop_healthy(slug, now) else None
-            if seconds is None or seconds < STALE_S:
-                # Answered, or the loop is failing: incident over here. A failing, stalled or stopped loop is
-                # alarmed by the replica-freshness check (kanban_sync_replica_age.check, run right after this).
-                _FILED.discard(slug)
-                continue
-            if slug in _FILED:
-                continue
-            _FILED.add(slug)
-            tid = (file_fn or report)(slug, f"board `{slug}`: the oldest unanswered outbox op is {seconds / 60:.0f} "
-                                            f"min old while this host's sync loop is not failing")
-            if tid:
-                out.append(tid)
+            with observation.LOCK:
+                # Observe even before loop health is established: a stuck first round
+                # must not acquire an extra ten-minute delay. Replica-age covers failure.
+                seen, seconds, now = _observed(path, mono, age, awake)
+                if not awake or not _loop_healthy(slug, now) or seen is None or now - seen.since < STALE_S or seen.filed:
+                    continue
+                detail = (f"board `{slug}`: oldest sendable unanswered op `{seen.op_id}`; "
+                          f"wall age {seconds / 60:.0f} min; observed-awake age {now - seen.since:.0f} s; "
+                          f"excluded {seen.excluded:.0f} s not fully awake "
+                          "while this host's sync loop is not failing")
+                tid = (file_fn or report)(slug, detail)
+                if tid:
+                    seen.filed = True
+                    observation.remember(path, seen)
+                    out.append(tid)
         return out
     except Exception:  # health: allow BLE001 -- an alert must never break the dispatcher tick
         log.warning("kanban: sync outbox age check failed", exc_info=True)
@@ -217,7 +260,8 @@ def _report(conn: sqlite3.Connection, slug: str, detail: str, *, key: str = KEY,
             kb.add_comment(conn, row[0], author, f"Again: {detail}")
         return row[0]
     body = body or (
-        "A local edit on this host has waited over 10 minutes in the Kanban sync outbox, so the Board (and every "
+        "The same sendable local edit on this host has been observed for 10 awake minutes in the Kanban sync "
+        "outbox, so the Board (and every "
         "worker leasing from it) has not seen it, although the sync loop is not failing.\n\n"
         f"{detail}\n\n"
         "Check: `hermes kanban sync status` (cursor, pending, oldest_pending_age_s) and agent.log `kanban sync:` "
@@ -225,7 +269,7 @@ def _report(conn: sqlite3.Connection, slug: str, detail: str, *, key: str = KEY,
         "(`hermes_cli/kanban_sync_backlog.py`), so an old op means push is not reached or not accepted. Done when "
         "the op is answered and the cause is fixed (precedent: t_01a1d36ddcea59fe)."
     )
-    tid = kb.create_task(conn, title=title or f"Kanban sync: {slug} outbox holds a local edit unsent for over 10 min",
+    tid = kb.create_task(conn, title=title or f"Kanban sync: {slug} outbox holds a local edit unsent for 10 awake min",
                          body=body, assignee="default", created_by=author, priority=50,
                          idempotency_key=None if row else key)
     if row:  # the previous card is finished: the key now names this one (newest wins)
@@ -239,7 +283,7 @@ def reset() -> None:
     with _LOCK:
         _LAST_OK.clear()
         _ROUND_STARTED[0] = None
-    _WARNED_AT.clear()
-    _FILED.clear()
+
     _NEXT_CHECK[0] = 0.0
     replica_age.reset()
+    observation.reset()

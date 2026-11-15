@@ -729,7 +729,7 @@ def _check_host_loop_leases(should_fix: bool, f: Finding) -> None:
 
 @doctor_check("")  # best-effort: a busy or missing board must never break doctor
 def _check_hub_admission_claims(should_fix: bool, f: Finding) -> None:
-    """On the hub: its claims of cards with no hub-admission verdict in the last week (should be 0). [daveey]"""
+    """On the hub: claims lacking an admission or explicit keep in the last week (should be 0). [daveey]"""
     import sqlite3
     from contextlib import closing
     from hermes_cli import kanban_placement as kp
@@ -746,11 +746,11 @@ def _check_hub_admission_claims(should_fix: bool, f: Finding) -> None:
         found = unjudged_claims(conn, row[0])
     days = WINDOW_SECONDS // 86400
     if not found:
-        return check_ok(f"Kanban: 0 hub claims of unjudged cards in the last {days} days")
+        return check_ok(f"Kanban: 0 hub claims without an admission disposition in the last {days} days")
     ids = ", ".join(tid for tid, _at in found[:10])
-    check_warn(f"Kanban: {len(found)} hub claim(s) of unjudged cards in the last {days} days", f"({ids})")
-    f.manual_issues.append(f"The hub claimed {len(found)} card(s) with no hub_admission verdict (the claim screen "
-                           f"failed open on a judge outage, or it is not deployed): {ids}")
+    check_warn(f"Kanban: {len(found)} hub claim(s) without an admission disposition in the last {days} days", f"({ids})")
+    f.manual_issues.append(f"The hub claimed {len(found)} card(s) with no hub_admission verdict or a deny without "
+                           f"an explicit keep (inspect the latest pre-claim disposition): {ids}")
 
 
 @doctor_check("")  # best-effort: profile enumeration must never break doctor

@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG
+from hermes_cli.launch_malloc import server_argv as server_process_argv
 
 try:  # ``resource`` is POSIX-only (and unavailable on Windows).
     import resource as _resource
@@ -167,19 +168,6 @@ def apply_malloc_arena_max(config: Mapping[str, Any] | None = None) -> bool:
     except Exception:
         logger.debug("Could not cap malloc arenas", exc_info=True)
         return False
-
-
-def server_process_argv(argv: list[str]) -> bool:
-    """True when *argv* (``sys.argv[1:]``) launches a long-lived server: ``serve``, ``dashboard`` or a
-    foreground ``gateway`` (``gateway`` / ``gateway run``)."""
-    from hermes_cli._parser import command_argv
-
-    args = command_argv(argv)
-    if not args:
-        return False
-    if args[0] in ("serve", "dashboard"):
-        return True
-    return args[0] == "gateway" and (len(args) == 1 or args[1] == "run" or args[1].startswith("-"))
 
 
 __all__ = [

@@ -94,9 +94,9 @@ _SINK_SHAPES = {
     "printf-long-precision": f"printf '%.{_LONG_ZEROS}4s %s' bashrc {{big}} | bash\n",  # `bash`
     # Kept from the old opener peel (fails closed): a leading `in` is not read as the command.
     "echo-after-in": "for w\nin echo bash {big}; do :; done | bash\n",
-    # Nit 3 (intended, fails closed): any later pipe word counts as the shell, a grep pattern too.
-    "pipe-grep-bash": "python3 - <<'PY' | grep bash\n" + _PRINT + "PY\n",
-    "pipe-grep-c-bash": "echo bash {big} | grep -c bash\n",
+    # A data sink's pattern masked away must not hide a real pipe into a shell after it.
+    "pipe-grep-then-bash": "python3 - <<'PY' | grep bash | bash\n" + _PRINT + "PY\n",
+    "pipe-awk-bash": "echo bash {big} | awk bash\n",  # awk is not a data sink: fails closed
 }
 
 
@@ -172,6 +172,10 @@ _NO_SINK_SHAPES = {
     "printf-format-no-sink": "printf '%s %s' bash {big}\n",
     "printf-star-width-no-sink": "printf '%*s %s' 5 bash {big}\n",
     "printf-b-hex-no-sink": "printf '%b %s' 'ba\\x73h' {big}\n",
+    # Was nit 3's deliberate false sink: `| grep bash` reads `bash` as a pattern, which grep only
+    # prints (self-heal lifecycleguard-f82a8e8dd311; the regex alone still says sink, see below).
+    "pipe-grep-bash": "python3 - <<'PY' | grep bash\n" + _PRINT + "PY\n",
+    "pipe-grep-c-bash": "echo bash {big} | grep -c bash\n",
 }
 
 

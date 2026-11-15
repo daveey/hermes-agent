@@ -71,6 +71,38 @@ def test_session_teardown_skips_a_live_gateway_on_the_real_hermes_home_without_t
         live.wait(timeout=5)
 
 
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("denied", [PermissionError(13, "force permission denied (originated from sysctl(KERN_PROCARGS2) -> errno 0)"), psutil.AccessDenied(123)])
+def test_session_scan_continues_after_psutil_wrapped_access_denied(monkeypatch, tmp_path, denied):
+    def inaccessible():
+        raise SystemError("<built-in function proc_environ> returned a result with an exception set") from denied
+
+    processes = [SimpleNamespace(pid=-1, environ=inaccessible),
+                 SimpleNamespace(pid=-2, environ=lambda: {"HERMES_HOME": str(tmp_path / "owned")}),
+                 SimpleNamespace(pid=-3, environ=lambda: {"HERMES_HOME": str(tmp_path.parent / "foreign")})]
+    monkeypatch.setattr(psutil, "process_iter", lambda: iter(processes))
+    assert suite_conftest._processes_with_hermes_home_under([tmp_path]) == [-2]
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("cause,message", [
+    (None, "<built-in function proc_environ> returned a result with an exception set"),
+    (ValueError("bad buffer"), "<built-in function proc_environ> returned a result with an exception set"),
+    (PermissionError(13, "unrelated"), "<built-in function proc_environ> returned a result with an exception set"),
+    (psutil.AccessDenied(123), "different C extension failure"),
+])
+def test_session_scan_does_not_hide_other_system_errors(monkeypatch, tmp_path, cause, message):
+    error = SystemError(message)
+
+    def broken():
+        raise error from cause
+
+    monkeypatch.setattr(psutil, "process_iter", lambda: iter([SimpleNamespace(pid=-1, environ=broken)]))
+    with pytest.raises(SystemError) as caught:
+        suite_conftest._processes_with_hermes_home_under([tmp_path])
+    assert caught.value is error
+
+
 def _environ_home(pid):
     try:
         return psutil.Process(pid).environ().get("HERMES_HOME")

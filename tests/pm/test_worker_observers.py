@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 
@@ -12,6 +13,42 @@ from pm.lock import Facts
 from tests.pm._fixtures import client as client, isolated_python as isolated_python  # noqa: PLC0414 -- the self-alias is load-bearing: it suppresses F811 for the pytest fixture parameter shadowing this import
 from tests.pm._range_server import dl_server as dl_server  # noqa: PLC0414 -- the self-alias is load-bearing: it suppresses F811 for the pytest fixture parameter shadowing this import
 from tests.pm.test_worker import _node_archive
+
+
+@pytest.mark.platforms("posix")
+def test_range_listener_queues_all_eight_writers_before_accept(dl_server):
+    # Deliberately do not start serve_forever: a descheduled acceptor must
+    # accommodate the downloader's complete fanout without a SYN retry.
+    pending = []
+    accepted = []
+    with type(dl_server)(("127.0.0.1", 0), dl_server.RequestHandlerClass) as listener:
+        listener.socket.settimeout(1)
+        try:
+            for _ in range(8):
+                connection = socket.socket()
+                pending.append(connection)
+                connection.settimeout(1)
+                connection.connect(listener.server_address)
+                connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # Darwin can complete connect() for an overflowed queue and then
+            # reset the connection: HTTPConnection's TCP_NODELAY/send can fail
+            # with EINVAL. Require usable sockets, not just completed connects.
+            for index, connection in enumerate(pending):
+                connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                connection.sendall(bytes([index]))
+            for _ in pending:
+                connection, _ = listener.socket.accept()
+                accepted.append(connection)
+                connection.settimeout(1)
+                value = connection.recv(1)
+                assert len(value) == 1
+                connection.sendall(value)
+            assert [connection.recv(1) for connection in pending] == [
+                bytes([index]) for index in range(8)
+            ]
+        finally:
+            for connection in pending + accepted:
+                connection.close()
 
 
 @pytest.mark.platforms("posix")

@@ -26,13 +26,15 @@ def has_task_with_prefix(conn: sqlite3.Connection, prefix: str) -> bool:
     return conn.execute("SELECT 1 FROM tasks WHERE id GLOB ? LIMIT 1", (prefix + "*",)).fetchone() is not None
 
 
-def hub_replica_lookup(ref: str) -> tuple[str, tuple]:
+def hub_replica_lookup(ref: str, after_seq: int | None = None) -> tuple[str, tuple]:
     """``(sql, params)`` finding ``ref`` among the hub replica's task keys (``[profile/]board/<id>``): the key's last
-    segment equals a full id, or starts with a short-form ref."""
+    segment equals a full id, or starts with a short-form ref. ``after_seq`` narrows it to rows written after that
+    feed ``seq`` (``kanban_board_replica_refs`` re-checks a known-absent ref against only the rows a pull added)."""
+    newer, extra = ("", ()) if after_seq is None else (" AND seq > ?", (after_seq,))
     if is_prefix_ref(ref):
-        return "SELECT 1 FROM replica WHERE coll = 'tasks' AND key GLOB ? LIMIT 1", (f"*/{ref}*",)
-    return ("SELECT 1 FROM replica WHERE coll = 'tasks' AND substr(key, -?) = ? LIMIT 1",
-            (len(ref) + 1, "/" + ref))
+        return f"SELECT 1 FROM replica WHERE coll = 'tasks' AND key GLOB ?{newer} LIMIT 1", (f"*/{ref}*", *extra)
+    return (f"SELECT 1 FROM replica WHERE coll = 'tasks' AND substr(key, -?) = ?{newer} LIMIT 1",
+            (len(ref) + 1, "/" + ref, *extra))
 
 
 def _missing_task_refs(conn: sqlite3.Connection, refs: Iterable[str]) -> list[str]:

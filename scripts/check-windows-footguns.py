@@ -34,6 +34,7 @@ Suppress an intentional use (e.g. tests or platform-gated code) with:
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import re
 import subprocess
@@ -140,6 +141,14 @@ class Footgun:
     # the regex can't fully distinguish (e.g. open() where mode may contain
     # "b" for binary, or the line may have `encoding=` elsewhere).
     post_filter: Callable[..., Any] | None = None
+    # Optional (match_keyword, exempt_keyword) pair. When the line-based hit
+    # is a keyword argument ``match_keyword`` of a call (found by parsing the
+    # file), the hit is dropped if that SAME call also passes
+    # ``exempt_keyword`` as a direct keyword, on any of its lines. Lets the
+    # text=True rule see ``encoding=`` on a continuation line of a
+    # multi-line call without a suppression marker; keywords of nested or
+    # enclosing calls, string contents and ``**kwargs`` never excuse a hit.
+    call_keyword_exempt: tuple[str, str] | None = None
 
 
 # A real open() mode. The regex stops at the first comma, so
@@ -447,6 +456,9 @@ FOOTGUNS: list[Footgun] = [
             # rule focused on the actual footgun.
             and _is_likely_subprocess_call(line)
         ),
+        # encoding= on a continuation line of the same call is not a
+        # footgun (it used to need a `# windows-footgun: ok` marker).
+        call_keyword_exempt=("text", "encoding"),
     ),
     Footgun(
         name="bare Path.read_text()/write_text() without encoding=",
@@ -688,6 +700,39 @@ def _call_closes_on_line(line: str, open_paren_end: int) -> bool:
     return False
 
 
+_UNPARSED = object()
+
+
+def _parse_module(text: str) -> ast.AST | None:
+    try:
+        return ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _call_keyword_exempt(tree: ast.AST | None, lineno: int, pair: tuple[str, str]) -> bool:
+    """True when every call passing keyword ``pair[0]`` on line ``lineno``
+    also passes ``pair[1]`` as its own direct keyword (on any line).
+
+    Keyword attribution comes from the parsed call, so an ``encoding=`` of a
+    nested or enclosing call, inside a string, or hidden in ``**kwargs``
+    never excuses a hit. An unparseable file never exempts.
+    """
+    if tree is None:
+        return False
+    match_kw, exempt_kw = pair
+    found = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not any(k.arg == match_kw and k.value.lineno == lineno for k in node.keywords):
+            continue
+        found = True
+        if not any(k.arg == exempt_kw for k in node.keywords):
+            return False
+    return found
+
+
 def _looks_like_string_literal(line: str, match: re.Match) -> bool:
     """Heuristic: is the ``text=True`` match inside a string literal?
 
@@ -803,6 +848,7 @@ def scan_file(path: Path, footguns: list[Footgun]) -> list[tuple[int, str, Footg
     # triple-quote we see; we don't try to handle nested or f-string cases.
     in_triple: str | None = None  # None, "'''", or '"""'
 
+    tree: Any = _UNPARSED
     for i, line in enumerate(text.splitlines(), start=1):
         # Update triple-quote state based on this line's occurrences.
         code_for_scan = line
@@ -861,6 +907,11 @@ def scan_file(path: Path, footguns: list[Footgun]) -> list[tuple[int, str, Footg
                         continue
                 except (IndexError, AttributeError):
                     # Post-filter assumed a named group that isn't there — skip.
+                    continue
+            if fg.call_keyword_exempt is not None:
+                if tree is _UNPARSED:
+                    tree = _parse_module(text)
+                if _call_keyword_exempt(tree, i, fg.call_keyword_exempt):
                     continue
             matches.append((i, line.rstrip(), fg))
     return matches

@@ -245,11 +245,11 @@ POOL_CARRIED_OPTIONS = ("pin_mandatory",)
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
                    "goal_max_turns", "completion_contract", "idempotency_key", "requires", "triage", "review_required",
-                   "distinct_from", "distinct_reason", "admission_class", "admission_frees")
+                   "distinct_from", "distinct_reason", "admission_class", "admission_frees", "self_work")
 IDENTITY_OPTIONS = ("idempotency_key", "distinct_from", "distinct_reason")
 # Of those, the ones an older client (no --option) cannot express at all: the card stays local.
 LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage", "review_required", *IDENTITY_OPTIONS,
-                    "admission_class", "admission_frees")
+                    "admission_class", "admission_frees", "self_work")
 HELP_CACHE_SECONDS = 600
 # Profile tools (``requires`` entries) a target can satisfy when it does not publish its profiles'
 # tools: what the hub's default profile has. host_repo never travels: it means a checkout on THIS host.
@@ -678,6 +678,10 @@ HOME_GATEWAY_MARKERS = (
 # Kanban/scratch artifact that exists here, keeps the card. ``a`` ('this host' names the creating worker) keeps it.
 # ``b`` (hub or fleet state), ``c`` (Mac work) and ``d`` (a tool every pool worker carries) queue it for the pool,
 # with :data:`HOME_CLASS_LABELS`. Operator ``extra_home_markers`` still keep it.
+# Generic systemctl/journalctl, gateway restart and config phrases remain class b even on a worker: they do not
+# identify whose unit/config is intended. Say 'this host' to bind worker-self work (class a); do not infer custody
+# from the command alone. The follow-up live-window audit found no worker-self unit/config request to justify
+# another implicit class-a phrase.
 HOME_MARKER_CLASSES = {
     HOST_WORKTREE_PATH: "worktree", LOCAL_WORKTREE_PATH: "worktree", HERMES_STATE_PATH: "state-path",
     r"\bthis host\b": "a",
@@ -922,6 +926,12 @@ def carried_options(args: dict) -> dict:
     for k in CARRIED_OPTIONS:
         v = args.get(k)
         if k in IDENTITY_OPTIONS:
+            continue
+        if k == "self_work":
+            from hermes_cli.kanban_selfwork import contract
+            declaration = contract(v)
+            if declaration is not None:
+                out[k] = declaration
             continue
         if v in (None, "", [], False):
             continue
@@ -1268,7 +1278,7 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     """Queue on ``target``; a fatal refusal must not fall back to a second local card."""
     c = _Cfg(config() if cfg is None else cfg)
     carried = hub_carries_options(hub_cli)
-    if not carried and any(args.get(k) not in (None, "", []) for k in IDENTITY_OPTIONS):
+    if not carried and any(args.get(k) not in (None, "", []) for k in (*IDENTITY_OPTIONS, "self_work")):
         return {"ok": False, "fatal": True, "error": "create identity requires hermes-hub create-task --option"}
     try:
         options = carried_options(args) if carried else {}

@@ -20,6 +20,7 @@ from tests.hermes_cli import test_kanban_worker_node as support
 WORKER = support.WORKER
 svc = support.svc
 gws = support.gws
+alarm_worker_pool = base.alarm_worker_pool
 
 
 def _registry(**fields):

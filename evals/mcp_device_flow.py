@@ -120,7 +120,9 @@ def run_cli(repo, mode):
         oauth = {"flow": "device", "cimd": False, "scope": "fixture.read", "timeout": 15}
         if mode == "preregistered":
             oauth.update(client_id="fixture-client", client_secret="fixture-client-secret")
-        config = {"mcp_servers": {"fixture": {"url": base + "/mcp", "auth": "oauth", "oauth": oauth}}}
+        # Detached default-plugin installs can outlive the CLI and race home cleanup.
+        config = {"security": {"allow_lazy_installs": False},
+                  "mcp_servers": {"fixture": {"url": base + "/mcp", "auth": "oauth", "oauth": oauth}}}
         (home / "config.yaml").write_text(json.dumps(config))
         previous = {}
         if mode == "persistence":

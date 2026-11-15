@@ -20,17 +20,24 @@ _log = logging.getLogger(__name__)
 
 
 def _ahead(conn: sqlite3.Connection, task) -> int:
-    """Unclaimed ready cards of the same assignee the dispatcher reaches first, in its own lane order
-    (``DISPATCH_ORDER``: effective priority, then cards others wait on, then age). Worker-first cards wait for the
-    pool, not a local slot, so they are not ahead."""
+    """Approximate combined-lane score position among unclaimed cards of this assignee.
+
+    Worker-first cards wait for the pool, not a local slot. Other eligibility
+    gates remain advisory here rather than running network-bearing preclaim checks.
+    """
     from hermes_cli.kanban_admission_pools import lane_rows
+    from hermes_cli.kanban_admission_score import rank
+    from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
     from hermes_cli.kanban_worker_placement import POLICY
     eligible = {r[0] for r in conn.execute(
-        "SELECT id FROM tasks WHERE status = 'ready' AND claim_lock IS NULL AND assignee IS ? "
+        "SELECT id FROM tasks WHERE status IN ('ready', 'review') AND claim_lock IS NULL AND assignee IS ? "
         "AND (placement_policy IS NOT ? OR id = ?)",
         (task.assignee, POLICY, task.id),
     ).fetchall()}
-    ids = [r[0] for r in lane_rows(conn, "ready") if r[0] in eligible]
+    rows = list(lane_rows(conn, "ready"))
+    if review_dispatch_enabled():
+        rows.extend(lane_rows(conn, "review"))
+    ids = [r["id"] for r, _parts in rank(conn, rows) if r["id"] in eligible]
     return ids.index(task.id) if task.id in ids else len(ids)
 
 
@@ -82,13 +89,14 @@ def draining(entry: Optional[dict[str, Any]], *, now: Optional[float] = None) ->
     return {"until_ms": int(until)} if isinstance(until, (int, float)) and until > 0 else {}
 
 
-def placement(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]]:
+def placement(conn: sqlite3.Connection, task_id: str, *, backlog: bool = True) -> Optional[dict[str, Any]]:
     """For a card whose ``runs_on`` this machine does not satisfy, on a synced board with a readable machine
     registry: ``{"lane": "unplaceable", runs_on, missing, machines}`` when no known machine satisfies it (``missing``
     = labels no machine carries; empty when each exists but none carries them all), else ``{"lane": "machine",
     runs_on, machines}`` naming the machines that can lease it. None otherwise (no labels, sync off, registry
     unknown, or this machine fits): an unknown registry never reads as unplaceable. [daveey] t_01a1a521638d0a78
-    (runs_on ["hermes-hub"], no machine carries it) sat ready for days reading as a local slot wait."""
+    (runs_on ["hermes-hub"], no machine carries it) sat ready for days reading as a local slot wait.
+    Set ``backlog=False`` for the same placement verdict without ranking the label queue."""
     labels = _runs_on(conn, task_id)
     if not labels:
         return None
@@ -122,10 +130,11 @@ def placement(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]
             until = [d["until_ms"] for d in drains.values() if "until_ms" in d]
             if until:
                 place["drain_until_ms"] = max(until)
-        from hermes_cli import kanban_label_backlog as klb
-        backlog = klb.read(conn, task_id, labels, machines=klb.available(labels, machines))
-        if backlog.get("ahead") or klb.busy(backlog):
-            place["backlog"] = backlog
+        if backlog:
+            from hermes_cli import kanban_label_backlog as klb
+            queue = klb.read(conn, task_id, labels, machines=klb.available(labels, machines))
+            if queue.get("ahead") or klb.busy(queue):
+                place["backlog"] = queue
         return place
     every = set().union(*carried.values())
     return {"lane": "unplaceable", "runs_on": labels, "missing": [lb for lb in labels if lb not in every],
@@ -166,7 +175,27 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
         released = covers_latest(conn, task.id)
         if released:
             place["quota_released"] = {k: released.get(k) for k in ("reason", "via", "actor", "until")}
+        rerouted = _paced_reroute(conn, task)
+        if rerouted:
+            place["reroute"] = rerouted
     return place
+
+
+def _paced_reroute(conn: sqlite3.Connection, task) -> Optional[str]:
+    """The next run's move off a pacing-held pool (``kanban_paced_reroute.route_words``), else None. Advisory."""
+    try:
+        from hermes_cli.kanban_paced_reroute import route_words
+        return route_words(conn, task)
+    except Exception:  # health: allow BLE001 -- an advisory route note must never fail the read
+        _log.debug("kanban queue position: paced reroute unavailable for %s", task.id, exc_info=True)
+        return None
+
+
+def reroute_prefix(place: Optional[dict[str, Any]]) -> str:
+    """``"next run rerouted: default+paced:openai-codex -> anthropic/<model>; "`` for a place whose card runs off a
+    pacing-held pool, else ``""``: queue notes and stall notices name the move, not only the held pool."""
+    rerouted = (place or {}).get("reroute")
+    return f"next run rerouted: {rerouted}; " if rerouted else ""
 
 
 def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:
@@ -286,6 +315,8 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
     for, so "ready, no run" never reads as stuck. [daveey] kanban-7d720d4ab8: a chat saw only a null
     ``queue_reason`` for a card waiting on a full hub, called it stuck and ran its work in a subagent."""
     words = _describe_lane(place)
+    if words:
+        words = reroute_prefix(place) + words
     released = (place or {}).get("quota_released")
     if words and isinstance(released, dict):
         words = (f"quota hold released ({released.get('reason') or 'no reason'}, via {released.get('via')}); "

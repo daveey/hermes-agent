@@ -52,7 +52,7 @@ def note_unplaceable(conn: sqlite3.Connection, task_id: str) -> None:
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_queue_position as kqp
     try:
-        place = kqp.placement(conn, task_id)
+        place = kqp.placement(conn, task_id, backlog=False)
     except Exception:  # health: allow BLE001 -- the event is advisory; the skip itself already happened
         kb._log.debug("kanban dispatch: unplaceable check failed for %s", task_id, exc_info=True)
         return

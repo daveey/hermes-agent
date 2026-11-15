@@ -95,8 +95,12 @@ def _cached(cache: dict, flights: dict, key: Any, signature: Optional[tuple], co
         return copier(hit[1])
     me = threading.get_ident()
     with _FLIGHT_LOCK:
+        # A fill may have stored and retired since our unlocked miss.
+        hit = cache.get(key)
         flight = flights.get(key)
-        if flight is not None and flight.owner == me:
+        if hit is not None and hit[0] == signature:
+            lead = False  # Copy only after releasing the lock, just like the fast hit.
+        elif flight is not None and flight.owner == me:
             flight = None  # re-entered from our own fill: never wait on ourselves
             lead = False
         elif flight is not None and flight.signature == signature:
@@ -105,6 +109,8 @@ def _cached(cache: dict, flights: dict, key: Any, signature: Optional[tuple], co
         else:
             flight = flights[key] = _Flight(signature, me)
             lead = True
+    if hit is not None and hit[0] == signature:
+        return copier(hit[1])
     if flight is None:
         return compute()
     if not lead:

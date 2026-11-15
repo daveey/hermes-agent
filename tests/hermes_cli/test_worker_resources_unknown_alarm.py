@@ -19,6 +19,7 @@ from hermes_cli import worker_compute_capacity as capacity
 from hermes_cli import worker_resource_admission as admission
 from hermes_cli import worker_resources_unknown_alarm as alarm
 from tests.hermes_cli import test_kanban_worker_node as support
+from tests.hermes_cli.test_kanban_pickup_stall import alarm_worker_pool
 
 WORKER = support.WORKER
 svc = support.svc

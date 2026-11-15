@@ -13,7 +13,7 @@ import itertools
 import logging
 import os
 import re
-import shlex
+import shlex  # unused here; tests reach shlex.shlex through lifecycle_guard.shlex
 import stat
 import sys
 from pathlib import Path
@@ -22,15 +22,15 @@ from typing import Callable, Iterator, Optional
 from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_shadow_consumers
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import (
-    heredoc_scripts, iter_script_segment_contexts, join_continued_lines,
-    protect_redirection_ampersands, restore_redirection_ampersands, split_glued_redirections)
-from cron.lifecycle_guard_lines import (  # newlines outside quotes, word-start `#` comments
-    _split_logical_lines, join_line_continuations, strip_shell_comments,
-)
-
+    heredoc_scripts, iter_script_segment_contexts, join_continued_lines)
+from cron.lifecycle_guard_words import REDIRECTION as _REDIRECTION
+from cron.lifecycle_guard_words import redirection_parts, tokenize_redirections
+from cron.lifecycle_guard_lines import join_line_continuations
 # Lines a printer may print, walked as the sink's command (moved out for FILE_LINES).
 from cron.lifecycle_guard_printf import printed_argument_lines as _printed_argument_lines
 from cron.lifecycle_guard_printf import with_escapes_decoded as _with_escapes_decoded
+from cron.lifecycle_guard_substitutions import SubstitutionNestingLimit
+from cron.lifecycle_guard_tokens import _iter_command_token_lists, _shlex_tokens
 # How `uv [global options] run [options] <command>` reads its argv.
 from cron.lifecycle_guard_uv import _uv_run_command_indices
 
@@ -372,10 +372,6 @@ _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Python program runners whose file operand (or stdin) is scanned as Python source.
 _PYTHON_RUNNER_RE = re.compile(r"^(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?$|^py(?:\.exe)?$")
 _PYTHON_SOURCE_SUFFIXES = (".py", ".pyw")
-# A redirection word: optional fd or `{NAME}` (NAME may be an array element, `{a[1]}`),
-# operator, optional glued target (`<f`, `0<f`, `2>>log`, `{fd}>&2`, `{a[1]}>/dev/null`).
-_REDIRECTION = re.compile(
-    r"^(\d*|\{[A-Za-z_][A-Za-z0-9_]*(?:\[.+?\])?\})(<<<|<<-|<<|<>|<&|>&|>>|>\||&>>|&>|<|>)(.*)$", re.DOTALL)
 
 # Bound the walk: a pathological token run must not spin here.
 _MAX_PREFIX_PEELS = 8
@@ -511,6 +507,7 @@ class _LifecycleScanBudget:
         "alias_names",
         "aliases_defined",
         "bytes_remaining",
+        "integer_context",
         "lines_remaining",
         "mask_heredocs",
         "overrun",
@@ -546,6 +543,7 @@ class _LifecycleScanBudget:
             and all(isinstance(name, str) for name in session_aliases) else None)
         # Sticky: some walked text may define or enable an alias (see `note_aliases`).
         self.aliases_defined = False
+        self.integer_context = False  # Sticky possible integer attributes across recursive text.
         # False when a session alias may shadow a heredoc consumer, wrapper or shell name
         # (`alias python3=bash`): then no heredoc body is provably inert, so none is masked.
         self.mask_heredocs = not _session_aliases_shadow_consumers(session_aliases)
@@ -710,16 +708,6 @@ def _refuse_unreadable(budget: _LifecycleScanBudget, path: Path, reason: str) ->
 
 # --- shell tokenization -----------------------------------------------------------------------
 
-def _shlex_tokens(line: str) -> list[str]:
-    """POSIX-tokenize a shell line; only word-start `#` comments. A redirection's
-    ``&`` stays in its word, never a background operator. Raises ValueError."""
-    lexer = shlex.shlex(protect_redirection_ampersands(strip_shell_comments(line)),
-                        posix=True, punctuation_chars=";&|()")
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    return [restore_redirection_ampersands(token) for token in lexer]
-
-
 def _split_segments(tokens: list[str], *, keep_controls: bool = False) -> Iterator[list[str]]:
     """Yield non-empty runs of *tokens* between control-operator tokens; with *keep_controls* each
     control token is also yielded as its own segment so the line can be rebuilt in order."""
@@ -737,66 +725,17 @@ def _split_segments(tokens: list[str], *, keep_controls: bool = False) -> Iterat
         yield segment
 
 
-def _iter_command_token_lists(command: str) -> Iterator[list[str]]:
-    """Yield the shell tokens of each logical line; a line shlex rejects (unbalanced quotes) falls
-    back to per-physical-line tokenization. An unquoted ``<``/``>`` glued to a word starts a word
-    of its own (``python3 -<f.py``), as in the shell."""
-    for line in _split_logical_lines(strip_shell_comments(command).replace("\\\n", "")):
-        try:
-            tokens = _shlex_tokens(split_glued_redirections(line))
-        except ValueError:
-            for physical_line in line.splitlines():
-                try:
-                    yield _shlex_tokens(split_glued_redirections(physical_line))
-                except ValueError:
-                    continue
-            continue
-        yield tokens
-
-
 def _iter_command_segments(command: str) -> Iterator[list[str]]:
     """Yield shell-tokenized command segments per logical line (see ``_iter_command_token_lists``)."""
     for tokens in _iter_command_token_lists(command):
         yield from _split_segments(tokens)
 
 
-# Reserved words that may lead a segment before the command it runs or the `(` that opens a
-# command list: `if (cd x && ./y)`, `then x`, `! x`, `time -p x`, `{ x; }`, `coproc NAME { x; }`,
-# `function NAME ( … )`. `fi`/`done`/`}` close a list and run nothing.
-_RESERVED_PREFIX_WORDS = frozenset({
-    "if", "then", "else", "elif", "do", "while", "until", "!", "time", "coproc", "in", "{",
-    "function",
-})
-_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
 def _peel_reserved_words(segment: list[str]) -> int:
-    """Index of the first word of *segment* past its leading reserved words and their operands
-    (bash's ``time [-p] [--]``, ``coproc NAME`` before a compound command, ``function NAME``).
+    """Shared keyword walk for command lists, printers and arithmetic name consumers."""
+    from tools.shell_command_position import peel_reserved_words
 
-    The one keyword walk shared by the ``(`` classifier and the executed-command scan, so the two
-    cannot disagree about what a leading keyword hides. An ordinary command's argument named
-    ``time`` is not a keyword: only words before the first non-keyword are peeled."""
-    index = 0
-    while index < len(segment) and segment[index] in _RESERVED_PREFIX_WORDS:
-        word = segment[index]
-        index += 1
-        if index >= len(segment):
-            break
-        if word == "time":
-            if segment[index] == "-p":
-                index += 1
-            if index < len(segment) and segment[index] == "--":
-                index += 1
-        elif word == "function":
-            # `function NAME ( … )` defines (does not run) NAME; its body is a command list.
-            index += 1
-        elif word == "coproc" and _SHELL_NAME.fullmatch(segment[index]) and (
-            index + 1 == len(segment) or segment[index + 1] == "{"
-        ):
-            # `coproc NAME ( … )` / `coproc NAME { …; }`; `coproc cmd args` runs cmd itself.
-            index += 1
-    return index
+    return peel_reserved_words(segment)
 
 
 def _opens_call_arguments(segment: list[str]) -> bool:
@@ -922,24 +861,31 @@ def _runs_under_uv(segment: list[str], index: int) -> bool:
 
 
 def _split_redirections(arguments: list[str]) -> tuple[list[str], list[str]]:
-    """``(arguments without redirections, files redirected to stdin)``. A heredoc, here-string or
-    descriptor duplication is stripped but feeds no file; ``<`` and ``<>`` on fd 0 do."""
+    """Strip redirections and follow opened inputs through ordered fd copies/moves to stdin."""
     kept: list[str] = []
-    stdin: list[str] = []
+    opened: dict[str, str] = {}
     index = 0
     while index < len(arguments):
-        match = _REDIRECTION.match(arguments[index])
+        match = redirection_parts(arguments[index], _REDIRECTION)
         index += 1
         if match is None:
             kept.append(arguments[index - 1])
             continue
-        fd, operator, target = match.groups()
+        fd, operator, target = match
         if not target and index < len(arguments):
             target = arguments[index]
             index += 1
-        if operator in ("<", "<>") and fd in ("", "0") and target:
-            stdin.append(target)
-    return kept, stdin
+        fd = fd or ("0" if operator.startswith("<") else "1")
+        source = target.removesuffix("-")
+        provenance = opened.get(source) if operator in ("<&", ">&") else None
+        opened.pop(fd, None)  # Every redirection replaces the destination's old binding.
+        if operator in ("<", "<>") and target:
+            opened[fd] = target
+        elif provenance is not None:
+            opened[fd] = provenance
+        if operator in ("<&", ">&") and target.endswith("-"):
+            opened.pop(source, None)  # A move copies first, then closes its source.
+    return kept, [opened["0"]] if "0" in opened else []
 
 
 def _cat_operands(segment: Optional[list[str]]) -> list[str]:
@@ -963,11 +909,11 @@ def _cat_relays_stdin(segment: list[str]) -> bool:
         if index is not None and (name := _executable_name(view[index])) in ("cat", "tee"):
             words, arguments = iter(view[index + 1 :]), []
             for word in words:
-                match = _REDIRECTION.match(word)
+                match = redirection_parts(word, _REDIRECTION)
                 if match is None:
                     arguments.append(word)
                     continue
-                fd, operator, target = match.groups()
+                fd, operator, target = match
                 target = target or next(words, "")
                 if fd in ("", "0") and operator.startswith("<") and (operator, target) != ("<&", "0"):
                     return False  # `cat < x`, `cat <<< x`, `cat <&3` read their own stdin
@@ -1026,7 +972,7 @@ def _peel_external_time(segment: list[str], index: int) -> int:
 
 def _command_segment_views(segment: list[str]) -> list[list[str]]:
     """*segment* as written, then without its leading reserved words when it has any, then each
-    of those with its command-position redirections moved to the end (see
+    of those with its command-position redirections moved just after the executable (see
     ``_hoist_command_redirections``). Callers read every view, so peeling only ever ADDS a
     reference. Without the peeled view `time ./x.sh`, `if true; then ./x.sh; fi` and
     `{ ./x.sh; }` read the keyword as the command and never open ``./x.sh``; without the hoisted
@@ -1043,9 +989,9 @@ def _command_segment_views(segment: list[str]) -> list[list[str]]:
 
 def _hoist_command_redirections(segment: list[str]) -> list[str]:
     """*segment* with each redirection that sits where the command word is read (before it, or
-    glued to it: `< f.py python3`, `sudo < f.sh bash`, `python3<f.py`) moved to the end, where the
-    stdin scan reads it. A shell applies a simple command's redirections wherever they appear,
-    so this is the same command. Only the command position is split: an argument such as
+    glued to it: `< f.py python3`, `sudo < f.sh bash`, `python3<f.py`) moved just after the
+    executable, before any later redirections. Keep their left-to-right binding order while
+    exposing the command. Only the command position is split: an argument such as
     ``bash -c 'python3<f.py'`` may be quoted program text, and its payload is re-scanned whole."""
     tokens = list(segment)
     moved: list[str] = []
@@ -1062,7 +1008,7 @@ def _hoist_command_redirections(segment: list[str]) -> list[str]:
             # `python3<f.py`: a word is the command up to its first `<`/`>`.
             glued = min((p for p in (word.find("<"), word.find(">")) if p >= 0), default=-1)
             if glued < 0:
-                break
+                return tokens[:index + 1] + moved + tokens[index + 1:]
             tokens[index: index + 1] = [word[:glued], word[glued:]]
             index += 1
             width = _redirection_width(tokens[index])
@@ -1074,10 +1020,10 @@ def _hoist_command_redirections(segment: list[str]) -> list[str]:
 def _redirection_width(word: str) -> int:
     """Words a redirection starting at *word* spans: 1 with a glued target (``<f``), 2 when the
     target is the next word (``< f``), 0 when *word* is not a redirection."""
-    match = _REDIRECTION.match(word)
+    match = redirection_parts(word, _REDIRECTION)
     if match is None:
         return 0
-    return 1 if match.group(3) else 2
+    return 1 if match[2] else 2
 
 
 def _iter_command_segment_views(command: str) -> Iterator[list[str]]:
@@ -1182,7 +1128,7 @@ def _mask_data_sink_arguments(text: str) -> str:
             lines_out.append(line)
             continue
         try:
-            tokens = _shlex_tokens(line)
+            tokens = tokenize_redirections(line, _shlex_tokens, _REDIRECTION)
         except ValueError:
             lines_out.append(line)
             continue
@@ -1723,8 +1669,13 @@ def _contains_unsafe_gateway_action(
     from cron.lifecycle_guard_nested_shells import (
         collect_nested_shell_inputs, shell_scope, unvisited_scopes)
 
+    from cron.lifecycle_guard_output import iter_printed_shell_payloads, quote_scope
+
+    session_payloads = list(itertools.chain(_iter_shell_command_payloads(walk_command),
+        (text for text, _raw in iter_printed_shell_payloads(
+            walk_command, include_quoted=covered_quote_scope != quote_scope(cwd, executed, budget)))))
     nested_texts, nested_scripts = collect_nested_shell_inputs(
-        command, walk_command, cwd=cwd, budget=budget)
+        command, walk_command, cwd=cwd, budget=budget, session_payloads=session_payloads)
     from cron.lifecycle_guard_output import iter_recursive_payloads
 
     for payload, nested, covered in iter_recursive_payloads(
@@ -1733,8 +1684,12 @@ def _contains_unsafe_gateway_action(
         if recurse(payload, cwd, executed, source, nested=nested, covered_quotes=covered):
             return True
 
-    for script_path, candidate_executed, python_source in _walk_candidates(
-            command, walk_command, cwd=cwd, executed=executed, budget=budget):
+    # A nested shell's script may be a path the ordinary candidates never name: a stdin file
+    # redirected into `su -l bob`, `doas -s`, `sudo -i` or `ssh host` (review 5903452583 B1). It
+    # comes from the executed view, so it is executed, and is walked first in both scopes.
+    nested_only = ((path, executed, False) for path in sorted(nested_scripts))
+    for script_path, candidate_executed, python_source in itertools.chain(nested_only, _walk_candidates(
+            command, walk_command, cwd=cwd, executed=executed, budget=budget)):
         # Do not touch a FileProvider path even to discover whether the file is hydrated.
         if _on_cloud_path(script_path):
             if candidate_executed:
@@ -1827,6 +1782,9 @@ def scan_gateway_lifecycle(
             read_remote_script=read_remote_script, source=source,
         )
         return unsafe, budget.refusal if unsafe else None
+    except SubstitutionNestingLimit:
+        # Retrying the direct scanner would hit the same parser limit again.
+        return True, 'the substitution nesting limit was reached'
     except Exception:
         logger.warning(
             "lifecycle guard referenced-script walk failed; "

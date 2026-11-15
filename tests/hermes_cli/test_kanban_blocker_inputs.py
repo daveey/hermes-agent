@@ -12,15 +12,21 @@ from tests.hermes_cli import test_kanban_shared_blockers as helpers
 kanban_home = helpers.kanban_home
 
 
-def test_real_due_pass_reads_assertion_cohort_once(kanban_home):
+def test_real_due_pass_reads_assertion_cohort_once(kanban_home, monkeypatch):
     with kbc.connect_closing() as conn:
         helpers._blocked_behind(conn, 'quota', blocker_id='github-rest-quota')
         now = blockers.blocker_states(conn)['github-rest-quota'].asserted_at + 1
-        queries = []
+        queries, cohorts = [], []
+        real = checks._read_assertion_tokens
+
+        def spy(*args, **kwargs):
+            cohorts.append(1)
+            return real(*args, **kwargs)
+        monkeypatch.setattr(checks, '_read_assertion_tokens', spy)
         conn.set_trace_callback(queries.append)
         checks.run_due_checks(conn, cfg={'kanban': {'shared_blocker_checks': {'github-rest-quota': ''}}}, now=now)
-        cohort = [q for q in queries if 'ORDER BY ended_at, id' in q]
-        assert len(cohort) == 1
+        # G2c: the cohort comes from the decoded assertion rows (``kanban_blocker_rows``), derived once a pass.
+        assert len(cohorts) == 1
         events = [q for q in queries if "SELECT payload FROM task_events WHERE kind='shared_blocker_check'" in q]
         assert len(events) == 1
 

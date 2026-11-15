@@ -768,6 +768,11 @@ def _emit_post_tool_call_hook(
     fields are derived from the result only past that gate when status is None."""
     if _post_tool_call_hook_suppressed.get():
         return
+    # [daveey] A call that started before a plugin force reload can return while the pass holds the
+    # hook registry empty; emitting then drops the observation for good (self-heal agent-42414133d9:
+    # the coach never saw a `gh pr view` that ended mid mods-reload). Wait the pass out, as dispatch
+    # does before resolving; never on an event-loop thread (see tools/registry_reload.py).
+    wait_for_reload_off_loop()
     try:
         from hermes_cli.lifecycle import has_hook, invoke_hook
         if not has_hook("post_tool_call"):

@@ -307,10 +307,13 @@ def _cites_job(text: str, url: str) -> bool:
     Workers often write "run <run url> ... job 123202653589" instead of the job URL
     (t_01a1858daf93c588 did), and that is the same job.
     """
-    if url in text:
+    def exact_url(value: str) -> bool:
+        return re.search(r"(?<![\w/])" + re.escape(value) + r"(?![\w/#?%=&+\-])", text) is not None
+
+    if exact_url(url):
         return True
     m = _GH_JOB_URL.fullmatch(url)
-    return bool(m) and m.group(1) in text and re.search(rf"(?<!\d){m.group(2)}(?!\d)", text) is not None
+    return bool(m) and exact_url(m.group(1)) and re.search(rf"\bjob\s+`?{m.group(2)}(?!\w)", text) is not None
 
 
 def _existing_cards(board: Board, run_url: str, test_id: str) -> tuple[list[dict], list[dict]]:
@@ -378,8 +381,10 @@ def file_cards(entries: Iterable[dict[str, str]], *, run_url: str, branch: str, 
         recorded_generation = (known or {}).get("generation", 0)
         owner = ctx.resolve(known) if known else None
         if on_unowned is not None and known and (owner is None or owner.get("status") is None):
-            log.append(f"FAILED {test_id}: cached owner unreadable; durable retry pending")
-            continue
+            if not ctx.cached_owner_absent(known):
+                log.append(f"FAILED {test_id}: cached owner unreadable; durable retry pending")
+                continue
+            del state["cards"][test_id]
         if owner is not None and owner.get("status") not in CLOSED | {None}:
             log.append(_append(ctx, owner, recorded_generation))
             continue
@@ -429,8 +434,20 @@ class _Flake:
         self.comment = f"Flaked again: `{test_id}` in {run_url} (branch `{branch}`)." + (
             f"\n\n```\n{excerpt[-1500:]}\n```" if excerpt else "")
 
+    def cached_owner_absent(self, ref: dict[str, Any]) -> bool:
+        """Only a complete local inventory proves a cached owner is gone.
+
+        Replica absence or repeated read failures are not deletion receipts.
+        Other boards require operator reconciliation on their owning scope.
+        """
+        if ref.get("gateway") not in (None, "", "local", self.self_gw):
+            return False
+        if ref.get("board") not in (None, "", "default"):
+            return False
+        return not any(c.get("id") == ref.get("card") for c in self.board.list_cards())
+
     def noted(self, comments: Iterable[str]) -> bool:
-        return any(self.run_url in c and self.test_id in c for c in comments)
+        return any(_cites_job(c, self.run_url) and _mentions(c, self.test_id) for c in comments)
 
     def resolve(self, ref: dict[str, Any]) -> dict[str, Any] | None:
         """``ref`` (an overlap match or a state entry) read from its owner: this board, another board here, or
@@ -455,6 +472,10 @@ class _Flake:
 
     def deliver(self, card: dict[str, Any]) -> tuple[bool | None, str]:
         """Comment ``card`` and read the comment back. ``(True, how)``, ``(False, why)`` or ``(None, pending)``."""
+        # Legacy owners put the initial job receipt in the body, not a comment.
+        current = self.resolve(card) if self.require_fresh else None
+        if current is not None and self.noted([str(current.get("body") or "")]):
+            return True, "already noted in owner body for this job"
         if card.get("gateway"):
             if self.relay is None:
                 return False, "no hermes-hub relay on this host"
@@ -552,21 +573,58 @@ def _complete_foreign_history(owner: dict[str, Any]) -> bool:
 def drain_intake(journal: Journal, repo: str, board: Board, state: dict, relay: HubRelay | None,
                  *, deadline: float | None = None) -> list[str]:
     log = []
+    # Retain retry batch boundaries when rechecking never-attempted pages. A slow
+    # unrelated owner must not repeatedly consume the budget before this prefix
+    # can be sent. Ticket ordering remains unchanged.
+    retry_groups = dict(journal.db.execute(
+        "SELECT o.id,o.page FROM occurrences o JOIN pages p ON p.id=o.page "
+        "WHERE o.repo=? AND p.attempted=0 AND p.delivered=0", (repo,)))
     journal.recheck_unattempted(repo)
-    # Reserve half the remaining drain window for already-attempted pages. Resolve
-    # and deliver one occurrence at a time: a later slow owner cannot strand a
-    # whole newly resolved prefix behind the deadline on every invocation.
+    # Flush admissions early enough to leave time for their first delivery. This
+    # is a batch boundary, not a priority phase that can starve either queue.
     now = time.monotonic()
-    resolve_deadline = None if deadline is None else now + max(0, deadline - now) / 2
-    old_pages = {r[0] for r in journal.db.execute(
+    batch_deadline = None if deadline is None else now + max(0, deadline - now) / 2
+    # Both queues already share durable tickets. Merge them before external work:
+    # a slow first operation can overrun any reserved phase budget. Rotation before
+    # each attempt gives the other queue its turn even across process restarts.
+    pending = {str(row["id"]): row for row in journal.pending(repo)}
+    old_pages = {str(r[0]) for r in journal.db.execute(
         "SELECT id FROM pages WHERE repo=? AND delivered=0", (repo,))}
+    work = [(kind, item) for kind, item in journal.db.execute(
+        "SELECT kind,item FROM scheduling WHERE repo=? ORDER BY ticket,kind,item", (repo,))
+        if (kind == "occurrence" and item in pending) or (kind == "page" and item in old_pages)]
     def create(title, body, key, page):
         return _create_intake(journal, repo, board, state, relay, title, body, key, page, deadline)
-    for row in journal.pending(repo):
-        if resolve_deadline is not None and time.monotonic() >= resolve_deadline:
+    batch, owner_checks = [], {}
+    def flush():
+        try:
+            journal.plan_pages(repo, batch, owner_check=owner_checks)
+        except ValueError:
+            # An oversized owner inventory must not poison the valid prefix.
+            for row in batch:
+                try:
+                    journal.plan_pages(repo, [row], owner_check=owner_checks)
+                except ValueError:
+                    log.append(f"FAILED intake_page_oversize occurrence={row['id']}; durable retry pending")
+        page_ids = {journal.db.execute("SELECT page FROM occurrences WHERE id=?", (row["id"],)).fetchone()[0]
+                    for row in batch}
+        batch.clear()
+        owner_checks.clear()
+        return journal.deliver(repo, board, deadline=deadline, create=create, page_ids=page_ids)
+    previous_group = None
+    for kind, item in work:
+        group = retry_groups.get(pending[item]["id"]) if kind == "occurrence" else None
+        if kind == "page" or group != previous_group:
+            log += flush()
+        previous_group = group
+        if deadline is not None and time.monotonic() >= deadline:
             log.append("FAILED intake_budget; durable retry pending")
             break
-        journal.rotate(repo, "occurrence", str(row["id"]))
+        if kind == "page":
+            log += journal.deliver(repo, board, deadline=deadline, create=create, page_ids={int(item)})
+            continue
+        row = pending[item]
+        journal.rotate(repo, "occurrence", item)
         meta = json.loads(row["metadata"])
         url = f"https://github.com/{repo}/actions/runs/{meta['run_id']}/job/{meta['job_id']}"
         notes: dict[str, list[dict[str, str]]] = {}
@@ -574,16 +632,21 @@ def drain_intake(journal: Journal, repo: str, board: Board, state: dict, relay: 
             lines = file_cards([meta], run_url=url, branch=meta["head_sha"], board=board, state=state,
                                relay=relay, on_unowned=lambda: "queued", owner_notes=notes)
         except (RuntimeError, subprocess.TimeoutExpired):
+            log += flush()
             log.append(f"FAILED {meta['test_id']}: owner delivery unavailable; durable retry pending")
             continue
         if lines == ["queued"]:
-            journal.plan_pages(repo, [row], owner_check={row["id"]: notes.get(meta["test_id"], [])})
-            page_id = journal.db.execute("SELECT page FROM occurrences WHERE id=?", (row["id"],)).fetchone()[0]
-            log += journal.deliver(repo, board, deadline=deadline, create=create, page_ids={page_id})
-        elif lines and not any(line.startswith("FAILED") for line in lines):
-            journal.acknowledge(row["id"], json.dumps(state["cards"][meta["test_id"]], sort_keys=True))
+            batch.append(row)
+            owner_checks[row["id"]] = notes.get(meta["test_id"], [])
+            if len(batch) >= 16 or (batch_deadline is not None and time.monotonic() >= batch_deadline):
+                log += flush()
+        else:
+            log += flush()
+            if lines and not any(line.startswith("FAILED") for line in lines):
+                journal.acknowledge(row["id"], json.dumps(state["cards"][meta["test_id"]], sort_keys=True))
         log += lines
-    return log + journal.deliver(repo, board, deadline=deadline, create=create, page_ids=old_pages)
+    log += flush()
+    return log
 
 
 def _create_intake(journal, repo, board, state, relay, title, body, key, page, deadline):
@@ -608,11 +671,10 @@ def _create_intake(journal, repo, board, state, relay, title, body, key, page, d
                                 distinct_reason="Daily intake only admits unowned occurrences; "
                                 "read-back overlap matches do not own any test in this manifest.")
         except CreateRefused as refused:
-            # A previous lost create response cannot be disproved by this later refusal.
-            if page["attempted"] or not contexts:
+            # deliver() proved the key absent before calling us. Keep the old
+            # ambiguity fence until every overlap match has also been read back.
+            if not contexts:
                 raise
-            with journal.db:
-                journal.db.execute("UPDATE pages SET attempted=0 WHERE id=?", (page["id"],))
             fresh = [m for m in refused.matches if m.get("id") and m["id"] not in distinct]
             if not fresh:
                 raise
@@ -622,8 +684,9 @@ def _create_intake(journal, repo, board, state, relay, title, body, key, page, d
                     raise RuntimeError("intake_budget")
                 owner = contexts[0].resolve(match)
                 if owner is None or owner.get("status") not in OPEN | CLOSED:
-                    # Definitive refusal, so a later drain may safely recheck this page.
-                    journal.unplan_page(page["id"])
+                    # Preserve earlier ambiguity when match readback is unavailable.
+                    if not page["attempted"]:
+                        journal.unplan_page(page["id"])
                     raise RuntimeError("intake overlap owner unreadable") from None
                 owners.append(owner)
             exact = [(ctx, owner) for ctx in contexts for owner in owners if _overlap_owns(ctx, owner)]
@@ -1030,6 +1093,7 @@ def _run_intake(args: argparse.Namespace, board: Board, relay: HubRelay, journal
         journal.record(args.repo, [(int(match.group(2)), entries)], {"id": run_id, "head_sha": args.branch})
         log = []
     log += drain_intake(journal, args.repo, board, state, relay, deadline=deadline)
+    journal.prune(args.repo)
     save_state(args.state, state)
     for line in log:  # silent when nothing flaked (no-agent cron delivers stdout)
         print(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}")

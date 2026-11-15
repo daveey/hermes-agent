@@ -853,14 +853,23 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "Defaults to HERMES_TENANT env if set."
         )),
         "priority": _prop("integer", (
-                "Dispatcher tiebreaker. Higher = picked sooner "
-                "when multiple ready tasks share an assignee."
+                "Urgency, capped at 1000; readiness aging also affects dispatch order. "
+                "When omitted by a worker, inherits its card's effective priority "
+                "(including dependency donation and urgency floors, excluding age/class bonuses). "
+                "An explicit zero overrides inheritance. Generated review, sweep and test-gap cards "
+                "should omit this field rather than use a flat 1000. Preserve explicit user urgency; "
+                "do not invent top-priority defaults in generated child briefs or p1000 titles."
         )),
         "admission_class": {
             "type": "string", "enum": ["normal", "capacity", "urgent"],
             "description": "Hub admission class; default normal. Capacity requires admission_frees.",
         },
         "admission_frees": _prop("string", "One-line frees: claim naming capacity this work restores."),
+        "self_work": _prop("object", "Versioned Hermes self-maintenance declaration: version=1, repository "
+                           "(hermes-core/hermes-state/hermes-mods), area (canonical subsystem key), kind "
+                           "(sweep/test-gap/ci-flake/guard/post-merge). Exactly these four fields. Open "
+                           "same-area owners are reused within a UTC day at the configured intake home. "
+                           "Omit for product work."),
         "workspace_kind": {
             "type": "string",
             "enum": ["scratch", "dir", "worktree"],
@@ -1063,6 +1072,7 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
+        "seen_comment_id": _prop("integer", "Newest comment id read on this card. Without it, foreign-session comments in the last 60 minutes refuse manual release with unread_comments; read the listing before retrying."),
     },
     ["task_id"],
 )

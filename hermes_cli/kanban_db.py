@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority, kanban_source_receipt as _sr, kanban_requeue_custody as _requeue_custody
+from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority, kanban_source_receipt as _sr, kanban_requeue_custody as _requeue_custody, kanban_core_update_requeue as _cu_requeue
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
@@ -1182,6 +1182,7 @@ def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str
 
 
 from hermes_cli.kanban_db_creation import default_ready_assignee as _default_ready_assignee
+from hermes_cli.kanban_selfwork import admitted_contract
 
 
 @publication_scope
@@ -1207,6 +1208,7 @@ def create_task(
     placement_checked: bool = False,
     insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None, placement_audit: Optional[dict] = None,
     admission_class: str = "normal", admission_frees: Optional[str] = None,
+    self_work: Optional[dict] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1231,6 +1233,7 @@ def create_task(
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
+    self_work = admitted_contract(conn, self_work)
     validate_admission_class(admission_class, admission_frees)
     validate_creation(placement_policy, runs_on=runs_on, workspace_kind=workspace_kind,
                       workspace_path=workspace_path, project=project_id,
@@ -1295,12 +1298,8 @@ def create_task(
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
     # race may insert twice, the next lookup stabilises on the newest.
     if idempotency_key:
-        row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? "
-            "AND status != 'archived' "
-            "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
-        ).fetchone()
-        if row:
+        from hermes_cli.kanban_db_creation import existing_creation_key
+        if row := existing_creation_key(conn, idempotency_key):
             return row["id"]
 
     if validate_workspace and workspace_kind == "worktree" and not project_id:
@@ -1913,21 +1912,17 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
-    """Promote dependency waits and recoverable failure stops; returns the count.
-
-    Opens its own IMMEDIATE txn: call OUTSIDE any write txn. Agent-triage failure-budget
-    stops get the same recovery as legacy blocked stops; guard holds and other triage
-    reasons still need explicit resolution. ``kanban_block_routing.recovery_held`` skips a
-    sticky stop (a worker ``kanban_block`` stays blocked until ``kanban_unblock``, #28712) and
-    one at the breaker limit (``max_retries`` > ``failure_limit`` > DEFAULT_FAILURE_LIMIT; else
-    the breaker could never trip). The dependency-review release is
-    precomputed outside the txn (same skips: no GitHub reads for held cards), fenced inside.
+    """Promote dependency waits/recoverable failure stops; return count. Call OUTSIDE a write txn.
+    Opens an IMMEDIATE txn. Agent-triage failure stops recover like blocked stops; other holds need resolution.
+    ``recovery_held`` preserves sticky blocks and breaker limits (max_retries > failure_limit > default).
+    Dependency-review release is prepared outside the txn (no GitHub reads for held cards), fenced inside.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     from hermes_cli.kanban_block_routing import recovery_held
     from hermes_cli.kanban_wake_check import foreign_ids
     from hermes_cli import kanban_review_release
+    from hermes_cli import kanban_spend_decision as spend_decision
     from hermes_cli import kanban_db_graph as _graph
     promoted = 0
     remote = _sync.has_remote_parents(conn)
@@ -1948,6 +1943,10 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             # A retained worker copy may still claim ready work, but must not
             # publish a second promotion or expire the owner's missing streak.
             if task_id in copies:
+                continue
+            # A spend stop leaves only on a recorded decision (kanban_spend_decision.pending). The triage clause
+            # above would read an older ``gave_up`` as the stop: promote here, re-triage in the hold, every tick.
+            if row["status"] == "triage" and spend_decision.pending(conn, task_id):
                 continue
             cur_status = _graph.clear_found_parents(conn, row, remote=remote)  # parent_missing block, parents back: todo
             if cur_status == row["status"] and recovery_held(conn, row, failure_limit):
@@ -2303,21 +2302,20 @@ def _record_reclaim(
 
 def reclaim_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None, signal_fn=None,
+    urgency_source: Optional[str] = None, interrupt_target: Optional[str] = None,
 ) -> bool:
     """Operator reclaim regardless of TTL: release the claim, restore the source
-    phase, reset the failure counter. False when not running."""
+    phase, reset the failure counter. False when not running. Bad attribution raises first."""
+    attribution = _cu_requeue.reclaim_attribution(reason, urgency_source, interrupt_target)
     row = conn.execute(
         "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
-    if not row:
-        return False
-    idle = row["status"] != "running" and row["claim_lock"] is None
-    if idle or _sync.refuse_foreign_reclaim(conn, task_id):
+    if not row or (row["status"] != "running" and row["claim_lock"] is None) or _sync.refuse_foreign_reclaim(conn, task_id):
         return False
     prev_lock = row["claim_lock"]
     termination = _terminate_reclaimed_worker(
         row["worker_pid"], prev_lock, signal_fn=signal_fn, started_at=row["worker_started_at"])
-    custody = _requeue_custody.for_requeue(conn, task_id, reason)  # core update: end plain processes, pin persisted
+    custody = {**_requeue_custody.for_requeue(conn, task_id, reason), **attribution}  # core update: end plain processes, pin persisted
     with write_txn(conn):
         retry_status = _retry_status_for_run(conn, task_id)
         cur = conn.execute(
@@ -3256,54 +3254,7 @@ def request_changes(
 _PROMOTABLE_STATUSES = ("todo", "blocked", "triage")
 
 
-def promote_task(
-    conn: sqlite3.Connection, task_id: str, *, actor: str, reason: Optional[str] = None,
-    dry_run: bool = False,
-) -> tuple[bool, Optional[str]]:
-    """Operator promotion ``todo``/``blocked``/``triage`` -> ``ready`` with an
-    audit event. ``triage`` is the supported exit for a card a block loop
-    escalated (or any triage card a human has already specified) without
-    running the specifier/decomposer. [daveey]
-    Refused while a parent is unfinished; ``dry_run`` only validates.
-    Returns ``(ok, reason)``."""
-    cur_status = _task_status(conn, task_id)
-    if cur_status is None:
-        return False, f"task {task_id} not found"
-
-    if cur_status not in _PROMOTABLE_STATUSES:
-        return False, (
-            f"task {task_id} is {cur_status!r}; promote only applies to "
-            f"'todo', 'blocked' or 'triage'"
-        )
-
-    # No override: claim_task demotes ready -> todo on an undone parent whichever
-    # writer set 'ready', so a forced promotion would only report a success the
-    # first claim silently reverts (#106195). The dependency itself is the knob.
-    unsatisfied = [pid for pid, st in parent_states(conn, task_id) if st not in ("done", "archived")]
-    if unsatisfied:
-        return False, (
-            f"unsatisfied parent dependencies: {', '.join(unsatisfied)} "
-            f"(the ready -> running claim re-checks parents, so promotion cannot "
-            f"bypass them; complete the parents or drop the link with "
-            f"`hermes kanban unlink <parent_id> {task_id}`)"
-        )
-
-    if dry_run:
-        return True, None
-
-    with write_txn(conn):
-        upd = conn.execute(
-            "UPDATE tasks SET status = 'ready' "
-            "WHERE id = ? AND status IN ('todo', 'blocked', 'triage')", (task_id,),
-        )
-        if upd.rowcount != 1:
-            return False, f"task {task_id} status changed during promotion"
-        _append_event(conn, task_id, "promoted_manual", {
-            "actor": actor, "reason": reason,
-            **({"from_status": cur_status} if cur_status != "todo" else {}),
-        })
-
-    return True, None
+from hermes_cli.kanban_db_promote import promote_task
 
 
 def _reclaim_dangling_run(

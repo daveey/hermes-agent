@@ -198,9 +198,11 @@ def _park_in_review(conn: sqlite3.Connection, title: str, assignee: str) -> str:
     return tid
 
 
-def test_review_lane_gets_reserved_slot_under_ready_backlog(
-    kanban_home, all_assignees_spawnable, monkeypatch,
+@pytest.mark.parametrize("review_priority,ready_priority,review_spawns", [(900, 100, True), (0, 500, False)])
+def test_review_and_ready_share_one_ranked_budget(
+    kanban_home, all_assignees_spawnable, monkeypatch, review_priority, ready_priority, review_spawns,
 ):
+    """No reserved review slot: ready and review rows compete by the same admission score."""
     import hermes_cli.config as cfgmod
     monkeypatch.setattr(
         cfgmod, "load_config",
@@ -209,17 +211,19 @@ def test_review_lane_gets_reserved_slot_under_ready_backlog(
 
     spawns: list = []
     with kbc.connect() as conn:
-        for title in ("ready-1", "ready-2", "ready-3"):
-            kb.create_task(conn, title=title, assignee="alice")
+        ready_ids = [kb.create_task(conn, title=t, assignee="alice", priority=ready_priority)
+                     for t in ("ready-1", "ready-2", "ready-3")]
         review_id = _park_in_review(conn, "review-me", "reviewer")
+        conn.execute("UPDATE tasks SET priority=? WHERE id=?", (review_priority, review_id))
+        conn.commit()
         res = kbd.dispatch_once(
             conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=2,
         )
 
     spawned_ids = [s[0] for s in res.spawned]
-    # Budget 2: one ready + the reserved review slot — never 2×ready.
     assert len(spawned_ids) == 2
-    assert review_id in spawned_ids
+    assert (review_id in spawned_ids) is review_spawns
+    assert sum(t in ready_ids for t in spawned_ids) == (1 if review_spawns else 2)
 
 
 def _guard_review_row(conn: sqlite3.Connection, review_id: str) -> dict:
@@ -267,10 +271,10 @@ def test_unspawnable_review_does_not_reserve_the_only_ready_slot(
     assert [task_id for task_id, *_ in res.spawned] == [ready_id]
 
 
-def test_unguarded_review_reserves_the_only_ready_slot(
+def test_urgent_review_wins_the_only_shared_slot(
     kanban_home, all_assignees_spawnable, monkeypatch,
 ):
-    """A dispatchable review card still receives the single shared slot."""
+    """A dispatchable urgent review wins by score, not an unconditional reservation."""
     import hermes_cli.config as cfgmod
 
     monkeypatch.setattr(
@@ -282,6 +286,8 @@ def test_unguarded_review_reserves_the_only_ready_slot(
     with kbc.connect() as conn:
         kb.create_task(conn, title="ready-now", assignee="alice")
         review_id = _park_in_review(conn, "review-now", "reviewer")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET priority=900 WHERE id=?", (review_id,))
         res = kbd.dispatch_once(
             conn, spawn_fn=_fake_spawn_factory(spawns), max_in_progress=1,
         )

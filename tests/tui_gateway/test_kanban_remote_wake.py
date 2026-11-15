@@ -102,7 +102,17 @@ def _one_pass(monkeypatch, wake_verdict="started", row_lands=True):
     monkeypatch.setattr(ku, "wake_turn", wake)
     monkeypatch.setattr(ku, "_spawn_thread", lambda job: (job(), "dispatched")[1])
     stop = threading.Event()
-    monkeypatch.setattr(ku, "sweep_once", lambda *a, **k: stop.set() or [])
+    monkeypatch.setattr(ku, "sweep_once", lambda *a, **k: [])
+    host_pass = ku.host_pass
+
+    def one_host_pass(*args, **kwargs):
+        try:
+            return host_pass(*args, **kwargs)
+        finally:
+            # Empty local sweeps may be skipped; stop at the host boundary.
+            stop.set()
+
+    monkeypatch.setattr(ku, "host_pass", one_host_pass)
     ku._loop(stop)
     return wakes
 
@@ -316,7 +326,17 @@ def _one_pass_live(monkeypatch, admit, row_lands=False):
     monkeypatch.setattr(ku, "wake_turn", wake)
     monkeypatch.setattr(ku, "_spawn_thread", lambda job: (job(), "dispatched")[1])
     stop = threading.Event()
-    monkeypatch.setattr(ku, "sweep_once", lambda *a, **k: stop.set() or [])
+    monkeypatch.setattr(ku, "sweep_once", lambda *a, **k: [])
+    host_pass = ku.host_pass
+
+    def one_host_pass(*args, **kwargs):
+        try:
+            return host_pass(*args, **kwargs)
+        finally:
+            # Empty local sweeps may be skipped; stop at the host boundary.
+            stop.set()
+
+    monkeypatch.setattr(ku, "host_pass", one_host_pass)
     ku._loop(stop)
     return wakes
 

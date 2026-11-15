@@ -36,7 +36,9 @@ def test_route_read_failure_preserves_order(parked, spool_home, monkeypatch, lat
         patcher.setattr(db, '_read_ctx', fail_once)
         recovered, blocked = shutdown_flush.recover_pending_spool(db)
     assert recovered == 1
-    assert 's' in blocked
+    # The failed lookup only knew s; holding a later row must also mark its
+    # destination so the live writer knows tip still has spool custody.
+    assert blocked == {'s', 'tip'}
     assert [m['content'] for m in db.get_messages('tip')] == ['summary']
     assert [m['content'] for m in db.get_messages('unrelated')] == ['independent']
     remaining = helpers._spool_files()

@@ -265,7 +265,7 @@ def _parked(conn, *, wake_check=None):
         assert ktp.park(conn, tid, reason="SCHEDULED_UNTIL=2026-11-10T17:07:04Z wait", requested_kind="time",
                         source_status="running", wake_check=wake_check, check_every=300,
                         awaiting={"kind": "external", "ref": "build 559", "why": "flag file"} if wake_check
-                        else {"kind": "clock", "why": "a soak window"},
+                        else {"kind": "clock", "why": "rate-limit cooldown"},
                         clock_only=not wake_check)
     return tid
 
@@ -500,6 +500,39 @@ def test_terminal_hold_still_orders_one_second_by_a_consistent_uid_clock():
                  "created_at INTEGER)")
     conn.execute("INSERT INTO task_events VALUES (1, ?, 't', 'reopened', '{}', 500)", (_v7_at(500_700),))
     conn.execute("INSERT INTO task_events VALUES (2, ?, 't', 'completed', '{}', 500)", (_v7_at(500_200),))
+    assert ktg.terminal_hold(conn, "t") is None
+
+
+@pytest.mark.parametrize("straddler,other,held", [
+    pytest.param("completed", "reopened", 1, id="straddled-terminal-after-same-second-reopen"),
+    pytest.param("reopened", "completed", None, id="straddled-reopen-after-same-second-terminal"),
+])
+def test_terminal_hold_trusts_a_uid_minted_just_past_the_rows_second(straddler, other, held):
+    """created_at is read before the INSERT and the uid is minted by the AFTER INSERT trigger, so a write straddling
+    the boundary carries a uid ~10 ms into second+1. It is still event time: the straddler (arrived first, id 1) is
+    the later event of second 500, not sorted at 500.000 before the reopen/terminal minted at 500.700."""
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, uid TEXT, task_id TEXT, kind TEXT, payload TEXT, "
+                 "created_at INTEGER)")
+    conn.execute("INSERT INTO task_events VALUES (1, ?, 't', ?, '{}', 500)", (_v7_at(501_010), straddler))
+    conn.execute("INSERT INTO task_events VALUES (2, ?, 't', ?, '{}', 500)", (_v7_at(500_700), other))
+    hold = ktg.terminal_hold(conn, "t")
+    assert (hold and hold["id"]) == held
+
+
+@pytest.mark.parametrize("uid_ms", [502_000, 509_000, 900_123])
+def test_terminal_hold_distrusts_a_uid_past_the_straddle_window(uid_ms):
+    """A uid stamped a full second or more past created_at's second is a backfill, not event time: the terminal that
+    arrived first falls back to 500.000 and the in-second reopen (500.700) stays later, so there is no hold."""
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, uid TEXT, task_id TEXT, kind TEXT, payload TEXT, "
+                 "created_at INTEGER)")
+    conn.execute("INSERT INTO task_events VALUES (1, ?, 't', 'completed', '{}', 500)", (_v7_at(uid_ms),))
+    conn.execute("INSERT INTO task_events VALUES (2, ?, 't', 'reopened', '{}', 500)", (_v7_at(500_700),))
     assert ktg.terminal_hold(conn, "t") is None
 
 

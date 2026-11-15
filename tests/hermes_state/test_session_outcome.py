@@ -694,6 +694,62 @@ def test_busy_card_read_cannot_derive_done(db, board, monkeypatch, verdict, prio
         assert (out["kind"], out["reason"]) == ("unresolved", "card_read_failed")
 
 
+@pytest.mark.parametrize("status", ["triage", "running", "blocked"])
+@pytest.mark.parametrize("declared", [False, True])
+def test_empty_card_list_cannot_override_open_counts(db, board, monkeypatch, status, declared):
+    turn(db)
+    if declared:
+        so.declare_outcome("chat", {"kind": "done", "summary": SUMMARY}, db=db)
+    add_card(board, "t_01a1d0b341560679", "chat", status,
+             HUMAN_REQUEST if status == "blocked" else None)
+    # Counts retain an open obligation while the independently cached list misses it.
+    assert ksa.active_task_counts().get("chat", 0) + ksa.blocked_task_counts().get("chat", 0) == 1
+    monkeypatch.setattr(ksa, "session_tasks", lambda *a, **kw: [])
+    out = so.derive_outcome("chat", db=db)
+    assert (out["kind"], out.get("reason")) == ("unresolved", "card_read_failed")
+
+
+def test_empty_card_list_checks_compression_ancestor_counts(db, board, monkeypatch):
+    turn(db)
+    db.end_session("chat", "compression")
+    db.create_session("tip", source="desktop", parent_session_id="chat")
+    db.append_message("tip", role="assistant", content=SUMMARY)
+    add_card(board, "t_01a1d0b341560679", "chat", "triage")
+    monkeypatch.setattr(ksa, "session_tasks", lambda *a, **kw: [])
+    out = so.derive_outcome("tip", db=db)
+    assert (out["kind"], out.get("reason")) == ("unresolved", "card_read_failed")
+
+
+def test_stale_empty_remote_projection_is_not_completion(db, monkeypatch):
+    turn(db)
+    scope = ksa._origin_scope()
+    card = {"id": "t_01a1d0b341560679", "key": "worker-4/default/default/t_01a1d0b341560679",
+            "gateway": "worker-4", "profile": "default", "board": "default", "session": "chat",
+            "status": "triage", "title": "remote work", "unfinished": True}
+    monkeypatch.setattr(ksa, "_links_cache", {scope: (0, scope, ("old",), [], [])})
+    monkeypatch.setattr(ksa, "_links_fingerprint", lambda: ("new",))
+    monkeypatch.setattr(ksa, "_project_remote_links", lambda: [card])
+    monkeypatch.setattr(ksa, "_refresh_links_in_background", lambda scope: None)
+    monkeypatch.setattr(ksa, "_remote_cards", lambda ids, statuses, stale_ok: ksa._remote_links(stale_ok))
+    # Exercise the real stale-list/strict-count paths, not a mocked empty task API.
+    assert ksa.session_tasks(["chat"], stale_ok=True) == []
+    out = so.derive_outcome("chat", db=db)
+    assert (out["kind"], out.get("reason")) == ("unresolved", "card_read_failed")
+    assert ksa.active_task_counts()["chat"] == 1
+    assert so.derive_outcome("chat", db=db)["kind"] == "waiting"
+
+
+def test_empty_counts_failure_is_not_completion(db, monkeypatch):
+    turn(db)
+
+    def unreadable():
+        raise sqlite3.OperationalError("counts unavailable")
+
+    monkeypatch.setattr(ksa, "active_task_counts", unreadable)
+    out = so.derive_outcome("chat", db=db)
+    assert (out["kind"], out.get("reason")) == ("unresolved", "card_read_failed")
+
+
 def test_same_unfinished_reply_with_the_card_counted_is_waiting(db, board):
     add_card(board, "t_01a1c7b8ebe8316f", "chat", "ready")
     so.register_outcome_judge(lambda sid, text: True)

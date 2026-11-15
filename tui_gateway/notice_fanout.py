@@ -29,6 +29,7 @@ import json
 import logging
 import re
 import sqlite3
+from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,25 @@ def _changed_tasks(conn: sqlite3.Connection, ident: str) -> list[str]:
     return list(dict.fromkeys(str(r[0]) for r in rows))
 
 
+def _board_idle(ident: str) -> bool:
+    """True when the board's newest ``task_events`` id equals the durable cursor: nothing happened since the last
+    pass, so the per-pass board connect (schema prepare, 121 of the pass's 647 profile samples) and the fan-out are
+    skipped. Read through the shared retained reader. The cursor IS the effective key (a changed board, or any
+    unknown (no cursor, unreadable board), runs the full pass, which seeds or advances it). [daveey]"""
+    from hermes_cli.kanban_reader_retention import reader
+    from tui_gateway import notice_fanout_state as state
+    try:
+        since = state.get_cursor(ident)
+        if since is None:
+            return False
+        with reader(Path(ident)) as ro:
+            top = ro.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
+        return int(top) == since
+    except Exception:  # health: allow BLE001 -- an unreadable board is not idle; the full pass decides
+        logger.debug("card-change idle check unavailable for %s", ident, exc_info=True)
+        return False
+
+
 def apply_card_change(db: Any, tip: str, chat_id: str, task_id: str, status: str) -> Optional[str]:
     """One linked chat's share of a card change: stale notices when the card is not blocked, then a refresh.
     Returns why the chat was skipped, else None."""
@@ -182,17 +202,32 @@ def apply_card_change(db: Any, tip: str, chat_id: str, task_id: str, status: str
     return None
 
 
-def _fan_out_change(conn: sqlite3.Connection, _kb: Any, session_db: Callable, slug: str, tid: str) -> list[dict]:
-    task = _kb.get_task(conn, tid)
-    status = str(getattr(task, "status", "") or "")
+def _fan_out_changes(conn: sqlite3.Connection, _kb: Any, session_db: Callable, slug: str, tids: list[str]) -> list[dict]:
+    """Every linked chat's share of this pass's changed cards on one board. A chat linked to several changed cards
+    is opened once: each card marks its stale notices, then the outcome is refreshed ONCE (it derives from current
+    state, so one refresh after all marks equals one per card; a busy hub's shepherd chat was refreshed per card,
+    the dominant cost of the pass: H2 profile, 2026-11-15)."""
+    by_chat: dict[str, list[tuple[str, str]]] = {}
+    for tid in tids:
+        task = _kb.get_task(conn, tid)
+        status = str(getattr(task, "status", "") or "")
+        for chat in _linked_chats(conn, tid, getattr(task, "session_id", None)):
+            by_chat.setdefault(chat, []).append((tid, status))
     out = []
-    for chat in _linked_chats(conn, tid, getattr(task, "session_id", None)):
+    for chat, cards in by_chat.items():
         with session_db(chat) as (db, tip):
             if db is None:
                 continue
-            skipped = apply_card_change(db, tip, chat, tid, status)
-        out.append({"board": slug, "task_id": tid, "chat_id": chat, "session_id": tip, "status": status,
-                    "skipped": skipped})
+            skipped = chat_skip_reason(db, chat)
+            if skipped is None:
+                for tid, status in cards:
+                    if status != "blocked":
+                        with contextlib.suppress(Exception):
+                            mark_stale_blocked_notices(db, tip, tid)
+                from hermes_state_outcome import refresh_outcomes_quietly
+                refresh_outcomes_quietly([tip], "card_change", db=db)
+        out += [{"board": slug, "task_id": tid, "chat_id": chat, "session_id": tip, "status": status,
+                 "skipped": skipped} for tid, status in cards]
     return out
 
 
@@ -247,10 +282,11 @@ def card_change_pass(*, session_db: Optional[Callable] = None, slugs: Optional[I
     done: list[dict] = []
     for slug in (list(slugs) if slugs is not None else ku._board_slugs(_kb)):
         try:
+            ident = str(_kb.kanban_db_path(slug).resolve())
+            if _board_idle(ident):
+                continue
             with contextlib.closing(_kbc.connect(board=slug)) as conn:
-                ident = str(_kb.kanban_db_path(slug).resolve())
-                for tid in _changed_tasks(conn, ident):
-                    done += _fan_out_change(conn, _kb, session_db, slug, tid)
+                done += _fan_out_changes(conn, _kb, session_db, slug, _changed_tasks(conn, ident))
         except Exception:
             logger.warning("card-change outcome pass failed on board %s", slug, exc_info=True)
     try:

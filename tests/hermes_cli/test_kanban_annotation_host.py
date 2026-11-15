@@ -48,6 +48,7 @@ def world(tmp_path, monkeypatch):
     now["calls"] = calls
     conn = _board(tmp_path / "kanban.db", [("t1", "running", "s1"), ("t2", "blocked", "s1"), ("t3", "ready", "s2")])
     now["conn"] = conn
+    _sessions(["s1", "s2", "s3"])  # this profile's chats: the holder's narrow key counts only their cards
     ksa._reset_cache_for_tests()
     yield now
     conn.close()
@@ -61,6 +62,18 @@ def _board(path: Path, rows) -> sqlite3.Connection:
     revision.ensure_revision(conn, revision.LOCAL_TABLES)
     conn.executemany("INSERT INTO tasks VALUES (?, ?, ?)", rows)
     return conn
+
+
+def _sessions(ids) -> None:
+    """Sessions of this origin profile (its ``state.db``)."""
+    from hermes_constants import get_hermes_home
+
+    db = get_hermes_home() / "state.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY)")
+        conn.executemany("INSERT OR IGNORE INTO sessions (id) VALUES (?)", [(i,) for i in ids])
+    conn.close()
 
 
 def _advance(world, seconds):

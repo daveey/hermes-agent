@@ -678,7 +678,7 @@ def test_block_loop_owner_input_keeps_decision_wording():
 
 # ---------------------------------------------------------------------------
 # Handoffs that hand a decision back to the origin must wake it, not only ping
-# it: `review_requested` (implementation done, waiting for a reviewer) and
+# it: `review_requested` (handoff pending, including design review) and
 # `block_loop_detected` (routed to triage) are terminal kinds just like
 # `blocked`.
 # ---------------------------------------------------------------------------
@@ -737,6 +737,8 @@ def test_review_requested_wakes_the_origin_session(tmp_path, monkeypatch):
 
     wake = _wake_text(adapter)
     assert tid in wake
+    assert "the implementation is done" not in wake
+    assert "handed off for review." in wake
     assert "PR ready: https://example.invalid/pr/7" in wake, (
         "the worker's handoff must ride the wake turn like it does for "
         "`completed`, otherwise the woken reviewer has to re-read the board"

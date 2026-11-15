@@ -8,8 +8,13 @@ class SubscriptionQuotaUnavailable(ModelRoutingError):
 
     status_code = 429
 
-    def __init__(self, provider, model, resets_at):
+    def __init__(self, provider, model, resets_at, pool_resets_at=None):
         self.provider, self.model, self.resets_at = provider, model, resets_at
+        # [daveey] ``resets_at`` is the nearest account's reset (the message, every waiter); ``pool_resets_at``
+        # is when at least half the pool can serve again, which is what hold-or-move decisions read
+        # (``model_routing_walls.decision_reset``). Hub 11-14: one 5 h-window account of seven made a
+        # 10-156 h wall read as a 1.5 h one.
+        self.pool_resets_at = resets_at if pool_resets_at is None else pool_resets_at
         message = f"Subscription quota unavailable for {provider}/{model}; resets at {resets_at}"
         self.body = {"error": {"type": "rate_limit_error", "message": message, "resets_at": resets_at}}
         super().__init__(message)
@@ -98,8 +103,14 @@ def quota_unavailable(pool, model):
     """Only a known cooldown is quota evidence; empty/dead OAuth pools are not."""
     room, waits = _quota_scan(pool, model)
     if waits and not room:
-        return SubscriptionQuotaUnavailable(pool.provider, model, min(waits))
+        return SubscriptionQuotaUnavailable(pool.provider, model, min(waits), half_pool_reset(waits))
     return None
+
+
+def half_pool_reset(waits):
+    """The reset by which at least half of the walled accounts behind *waits* can serve again."""
+    ordered = sorted(waits)
+    return ordered[(len(ordered) + 1) // 2 - 1]
 
 
 def quota_room(pool, model):

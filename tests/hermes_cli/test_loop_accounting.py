@@ -94,6 +94,15 @@ def test_record_and_span_errors_carry_a_kind_or_count_as_unknown():
     assert la.counters()["span"]["error_kinds"] == {la.ERROR_KIND_UNKNOWN: 1}
 
 
+@pytest.mark.parametrize("error", [True, False], ids=["error", "no-error"])
+def test_span_close_counts_explicit_error_kind_only_for_errors(error):
+    assert la.span_close(la.span_open("explicit-kind"), error=error, error_kind="ValueError") is True
+    c = la.counters()["explicit-kind"]
+    assert c["runs"] == 1
+    assert c["errors"] == int(error)
+    assert c["error_kinds"] == ({"ValueError": 1} if error else {})
+
+
 def test_snapshot_carries_error_kinds_next_to_errors():
     with pytest.raises(OperationalError):
         with la.pass_("snap"):

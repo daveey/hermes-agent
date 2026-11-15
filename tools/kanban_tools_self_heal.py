@@ -172,12 +172,14 @@ def handle_unblock(args: dict, **kw) -> str:
                     from hermes_cli.kanban_cli_actor import tool_actor
                     ok = kb.unblock_task(conn, tid, precondition=precondition, event_extra={
                         "actor": tool_actor(worker_task=env_tid), "repair_task_id": source, "via": via})
-                    kt._check(ok, f"could not unblock {tid} (missing-parent repair grant no longer holds)")
+                    kt._check(ok, kb.unblock_refusal(conn, tid) or
+                              f"could not unblock {tid} (missing-parent repair grant no longer holds)")
                     _log_requeue(conn, kb, tid, env_tid, via, source)
                     return kt._ok(task_id=tid, via=via, shared_blocker_verdict=unblock_verdict(conn, tid),
                                   **kt._fields(kb.get_task(conn, tid), ("status",)))
                 ok = kb.unblock_task(conn, tid, precondition=precondition)
-                kt._check(ok, f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
+                kt._check(ok, kb.unblock_refusal(conn, tid) or
+                          f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
                 _log_requeue(conn, kb, tid, env_tid, via, source)
                 return kt._ok(task_id=tid, via=via, shared_blocker_verdict=unblock_verdict(conn, tid),
                                   **kt._fields(kb.get_task(conn, tid), ("status",)))
@@ -190,10 +192,17 @@ def handle_unblock(args: dict, **kw) -> str:
         asked: dict = {}
 
         def note_request(current) -> None:
+            from gateway.session_context import get_session_env
+            from hermes_cli.kanban_release_comments import check, UnreadComments
+            try:
+                check(current, tid, session=get_session_env("HERMES_SESSION_ID", ""),
+                      seen=args.get("seen_comment_id"), board=args.get("board"))
+            except UnreadComments as exc:
+                raise kt._Reject(str(exc), "unread_comments") from exc
             asked["human"] = cw.had_human_request(current, tid)  # unblock_task clears human_request
 
         kt._check(kb.unblock_task(conn, tid, precondition=note_request),
-                  f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
+                  kb.unblock_refusal(conn, tid) or f"could not unblock {tid} (not blocked/triage/scheduled, or unknown)")
         try:
             raised = cw.raise_for_human_go(conn, tid) if asked.get("human") else None
         except Exception:  # health: allow BLE001 -- the unblock already committed; the raise is advisory

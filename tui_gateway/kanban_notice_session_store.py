@@ -53,3 +53,23 @@ def session_store(path: Path, sid: str) -> Iterator[tuple[Optional[NoticeSession
     with read_only(path) as reader:
         store = NoticeSessionStore(reader, path)
         yield (store, store.get_compression_tip(sid) or sid) if store.get_session(sid) else (None, None)
+
+
+def reader_of(db: Any) -> Any:
+    """The kept read-only handle behind a :class:`NoticeSessionStore`, else *db* itself. Caches keyed on the reader
+    (``notice_candidates``) must see the same object every pass, not a fresh facade. [daveey]"""
+    return db._reader if isinstance(db, NoticeSessionStore) else db
+
+
+@contextlib.contextmanager
+def profile_store(path: Path) -> Iterator[Optional[NoticeSessionStore]]:
+    """The store of a foreign profile's ``state.db`` at *path* for a notice pass: the kept read-only handle, with
+    no writer open and no schema reconcile per pass; writes go through :func:`notice_writer`. ``None`` when the
+    file does not exist (a pass never creates another profile's store)."""
+    if not path.is_file():
+        yield None
+        return
+    from hermes_state_kept_reader import read_only
+
+    with read_only(path) as reader:
+        yield NoticeSessionStore(reader, path)

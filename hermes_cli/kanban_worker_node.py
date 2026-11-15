@@ -269,6 +269,9 @@ def effective_labels(entry: Optional[Mapping[str, Any]], name: str) -> set[str]:
 
 def eligible(card: Mapping[str, Any], me: str, machines: Mapping[str, Mapping[str, Any]]) -> Optional[str]:
     """None when this machine may ask for the card's lease, else the Board's refusal reason it would get."""
+    from hermes_cli.kanban_pickup_alarm_identity import refusal
+    if reason := refusal(card, me):
+        return reason
     entry = machines.get(me) or {}
     if entry.get("hold"):
         return "held"
@@ -434,10 +437,18 @@ def local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
         return out
     own = _own(conn)
     rows = conn.execute(
-        "SELECT id, runs_on, created_on, workspace_kind FROM tasks WHERE status = ? AND claim_lock IS NULL "
-        "AND (runs_on IS NOT NULL OR (created_on IS NOT NULL AND created_on != ?))", (status, own)).fetchall()
+        "SELECT id, runs_on, created_on, created_by, idempotency_key, workspace_kind FROM tasks "
+        "WHERE status = ? AND claim_lock IS NULL "
+        "AND (runs_on IS NOT NULL OR (created_on IS NOT NULL AND created_on != ?) "
+        "OR created_by = 'pickup-stall-detector' OR idempotency_key LIKE 'pickup-stall:%' "
+        "OR idempotency_key LIKE 'worker-resources-unknown:%')",
+        (status, own)).fetchall()
     if not rows:
         return out
+    from hermes_cli.kanban_pickup_alarm_identity import refusal
+    for row in rows:
+        if reason := refusal(dict(row), own):
+            out[row["id"]] = reason
     reg = registry()
     if not reg:
         return out
@@ -570,12 +581,10 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     review_enabled = review_dispatch_enabled()
     from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
     listed = candidates(replica, own)
-    # Apply the executor's authoritative local graph before spending the import
-    # budget, just as dispatch does after pickup. Keep review ahead of ready. Within a lane, cards pinned here go
-    # first: only this machine can run them, pool cards have other takers (worker-1 2026-11-14: a pinned card
-    # waited budget_exhausted ~6 h behind pool cards, t_01a1d95eabbd2b9d). Stable: each group keeps its order.
-    listed = [row for lane in ("review", "ready") for row in sorted(order_with_remote_waiters(
-        conn, [row for row in listed if row["status"] == lane]), key=lambda row: row["id"] not in mine)]
+    # Rank the current ready/review episode before spending the import budget.
+    # A hard pinned-first partition would starve pool work on a busy executor;
+    # source-aware aging must compare both groups. Eligibility stays authoritative.
+    listed = order_with_remote_waiters(conn, listed)
     skips: dict[str, tuple[str, Optional[str]]] = {
         tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
     picked: list[str] = []
@@ -591,6 +600,8 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
                               profile_exists=profile_exists)
         if reason is None:
             reason = _quota_held(replica, card)
+        if reason is None:
+            reason = _paced(conn, replica, card)
         hold = kph.board_hold(replica, card) if reason is None else None
         if hold is not None:
             if held is not None and free < kph.FREE_PER_TICK and not kph.recently_copied(card["id"], hold[1]):
@@ -607,6 +618,16 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         elif reason[0] and card["id"] in mine:
             skips[card["id"]] = reason
     return picked, skips
+
+
+def _paced(conn: sqlite3.Connection, replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
+    """[daveey] ``("other", detail)`` when this machine's dispatcher would pace-hold ``card`` (provider at or over its
+    ``kanban.llm_pacing`` limit here) right now. Such a card is not offered, so it takes no pickup budget and the
+    window fills with the next cards that can run; it is offered again on the tick its limit frees
+    (t_01a1ddeb76e30be7: 9 paced codex cards hid a runnable anthropic card)."""
+    from hermes_cli.kanban_llm_pacing_dispatch import pickup_hold
+    held = pickup_hold(conn, replica, card)
+    return None if held is None else ("other", f"llm_paced: {held} (local dispatch would hold it)")
 
 
 def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:

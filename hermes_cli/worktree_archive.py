@@ -78,7 +78,7 @@ def _env(cwd, index: Optional[str] = None, *, budget=None) -> dict:
 
 
 def _run(args, cwd, env, timeout: float = 300, stdin_text: Optional[str] = None):
-    return subprocess.run(["git", *args], cwd=str(cwd), env=env, capture_output=True, text=True,  # windows-footgun: ok -- encoding passed on the next line
+    return subprocess.run(["git", *args], cwd=str(cwd), env=env, capture_output=True, text=True,
                           encoding="utf-8", errors="surrogateescape", timeout=timeout,
                           input=stdin_text, stdin=None if stdin_text is not None else subprocess.DEVNULL,
                           check=False)

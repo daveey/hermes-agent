@@ -5,7 +5,9 @@ substitutions, so a substitution's OUTPUT inside arithmetic is shell code wherev
 substitution sits: ``x=$(( 1 + $(echo 'a[$(bash F)]') ))`` runs ``bash F``
 (t_01a1d6ae05c19594). Arithmetic contexts covered: ``$(( ))``, ``(( ))`` (``for ((``
 too), ``$[ ]``, ``let``, ``[[ … -eq … ]]`` (any of the six integer operators), an array
-subscript (``a[…]=``, ``${a[…]}``), a ``${x:offset:length}`` substring, and any
+subscript (``a[…]=``, ``a=([…]=value)``, ``${a[…]}``, and quoted variable names
+passed to builtins such as ``unset``/``printf -v``/``test -v``), a ``${x:offset:length}``
+substring, and any
 ``declare/local/typeset/readonly/export -i`` integer assignment (coarse: any substitution
 then counts). ``[ … -eq … ]``/``test`` are not arithmetic and stay out.
 
@@ -20,6 +22,9 @@ from __future__ import annotations
 import bisect
 import re
 
+from tools.shell_command_position import QuotedNameClassifier
+from tools.shell_let_word import hidden_let_end
+
 # `$(date +%s)` prints only digits: the one producer whose output arithmetic may hold.
 DATE_PRODUCER_BODY = r"""[ \t]*date[ \t]+(?:\+%s|'\+%s'|"\+%s")[ \t]*\)"""
 _DATE_PRODUCER_RE = re.compile(DATE_PRODUCER_BODY)
@@ -32,6 +37,9 @@ _PATTERN_TOKEN_RE = re.compile(_TOKENS + r"|/", re.DOTALL)
 # Inside `let` the list operators end the arithmetic too; elsewhere skipping them keeps the scan
 # of a long script fast.
 _LET_TOKEN_RE = re.compile(_TOKENS + r"|[;&|\n]", re.DOTALL)
+# Unquoted command frames also see list operators: each starts a new simple command,
+# so a quoted builtin target is classified from its own command, not the frame start.
+_SEPARATOR_TOKEN_RE = _LET_TOKEN_RE
 _INT_OPERATOR_RE = re.compile(r"(?<![\w-])-(?:eq|ne|lt|le|gt|ge)(?![\w-])")
 _INTEGER_DECLARATION_RE = re.compile(
     r"(?<![\w.-])(?:declare|typeset|local|readonly|export)(?:[ \t]+[-+][A-Za-z]+)*"
@@ -39,7 +47,13 @@ _INTEGER_DECLARATION_RE = re.compile(
 _PARAM_NAME_RE = re.compile(r"[#!]?(?:[A-Za-z_]\w*|\d+|[@*#?$!-])")
 _COMMENT_PRECEDERS = frozenset(" \t\n;&|(")
 
-# Frame kinds. A frame is [kind, closer, depth, in_double_quotes].
+# Characters that cannot end a variable name or an expansion: a quoted `[` after one
+# (or after a quote concatenation ending in one) never names an array subscript.
+_NOT_NAME_END = frozenset(" \t\n[],:=./+%^~")
+
+# Frames are [kind, closer, depth, in_double_quotes]; command frames also carry the
+# source start of their current simple command (so outer quotes cannot change nested
+# command position) and that command's incremental quoted-word classifier.
 _CMD, _ARITH, _PARAM = "cmd", "arith", "param"
 _PARAM_ARITH = "param_arith"  # parameter word feeding an arithmetic evaluator
 _PARAM_PATTERN = "param_pattern"  # only its replacement feeds the evaluator
@@ -60,12 +74,15 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
     operators = [m.start() for m in _INT_OPERATOR_RE.finditer(command)]
     pending = []
     backtick_open = False
-    stack: list[list] = [[_CMD, None, 0, False]]
+    stack: list[list] = [[_CMD, None, 0, False, 0, None]]
     pos, end = 0, len(command)
     command_tokens = _TOKEN_RE if "<<" in command else _NO_HEREDOC_TOKEN_RE
     while pos < end:
-        tokens = _LET_TOKEN_RE if stack[-1][1] == "let" else command_tokens
-        tokens = {_PARAM_PATTERN: _PATTERN_TOKEN_RE}.get(stack[-1][0], tokens)
+        top = stack[-1]
+        if top[1] == "let" or (top[0] == _CMD and not top[3]):
+            tokens = _SEPARATOR_TOKEN_RE
+        else:
+            tokens = _PATTERN_TOKEN_RE if top[0] == _PARAM_PATTERN else command_tokens
         match = tokens.search(command, pos)
         if match is None:
             break
@@ -73,41 +90,26 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
         pos = match.end()
         top = stack[-1]
         kind, quoted = top[0], top[3]
-        if token == "`":
-            if kind in (_ARITH, _PARAM_ARITH):
-                return True  # legacy command substitution feeds arithmetic too
-            backtick_open = not backtick_open
-            continue
-        if token[0] == "\\":
-            if _escaped_opener(command, token, start) and _subscript_word_before(command, stack, pos):
+        if token in ("`", "$(", "$((", "$[", "${"):
+            pos, sink = _expansion_token(command, token, pos, stack, date_exempt)
+            if sink:
                 return True
+            backtick_open ^= token == "`"
             continue
-        if token == '"':
-            if quoted and command[start - 1] == "$" and _subscript_word_before(command, stack, pos):
-                return True  # `"$"(…)`: the `$` joins a later `(` after quote removal
-            top[3] = not quoted
-            continue
-        skipped = _skip_data(command, token, start, pos, quoted, stack, pending,
-                             date_exempt, _depth)
+        skipped = _word_token(command, token, start, pos, stack)
+        if skipped is None:
+            skipped = _skip_data(command, token, start, pos, quoted, stack, pending,
+                                 date_exempt, _depth)
         if skipped is not None:
             if skipped < 0:
                 return True
+            if token == "\n" and kind == _CMD:
+                top[4] = skipped  # heredoc bodies end their command line too
             pos = skipped
             continue
-        if token == "$((":
-            stack.append([_ARITH, "))", 0, False])
-            continue
-        if token == "$(":
-            if kind in (_ARITH, _PARAM_ARITH) and not (
-                    date_exempt and _DATE_PRODUCER_RE.match(command, pos)):
-                return True
-            stack.append([_CMD, ")", 0, False])
-            continue
-        if token == "$[":
+
+        if token == "[" and quoted and kind == _CMD and _quoted_subscript_sink(command, start, top):
             stack.append([_ARITH, "]", 0, False])
-            continue
-        if token == "${":
-            pos = _open_parameter(command, pos, stack)
             continue
         if quoted:
             continue  # inside "…" only expansions (handled above) matter
@@ -121,6 +123,39 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
     return backtick_open or any(frame[3] for frame in stack)
 
 
+def _quoted_subscript_sink(command: str, start: int, top: list) -> bool:
+    """Whether the double-quoted ``[`` at *start* opens a builtin's array subscript.
+
+    Linear overall: only a ``[`` that can follow a name is classified, by one
+    incremental classifier per simple command (see ``QuotedNameClassifier``).
+    A quoted element of a compound array literal, ``a=("x[…]")``, is a plain value.
+    """
+    if top[1] == "array":
+        return False
+    index = start - 1
+    while index >= top[4] and command[index] in "\"'":
+        index -= 1
+    if index < top[4] or command[index] in _NOT_NAME_END:
+        return False
+    if top[5] is None or top[5].base != top[4]:
+        top[5] = QuotedNameClassifier(top[4])
+    return top[5].classify(command, start)
+
+
+def _compound_assignment_before(command: str, start: int) -> bool:
+    """Whether ``name=`` or ``name+=`` (a word of its own) ends just before *start*."""
+    index = start - 1
+    if index < 0 or command[index] != "=":
+        return False
+    index -= 1
+    if index >= 0 and command[index] == "+":
+        index -= 1
+    name_end = index
+    while index >= 0 and (command[index].isalnum() or command[index] == "_"):
+        index -= 1
+    return index < name_end and (index < 0 or command[index] in " \t\n\r\f\v;({")
+
+
 def _quick_result(command: str, depth: int) -> bool | None:
     if depth >= 32:
         return True
@@ -131,7 +166,7 @@ def _quick_result(command: str, depth: int) -> bool | None:
         return False
     if "$(" not in command and not any(mark in command for mark in ("'", '"', "`", "\\")):
         return False
-    if "$(" in command and _INTEGER_DECLARATION_RE.search(command):
+    if ("$(" in command or "`" in command) and _INTEGER_DECLARATION_RE.search(command):
         return True
     return None
 
@@ -205,6 +240,27 @@ def _span_substitutes(span: str, date_exempt: bool) -> bool:
                for m in re.finditer(r"\$\(", span))  # `$((` too: it may be `$( (…)…)`
 
 
+def _word_token(command, token, start, pos, stack) -> int | None:
+    """Word-level tokens: a ``let`` spelled with quotes or escapes, a backslash escape, a
+    double quote. Return where scanning resumes, -1 for a sink, None for other tokens."""
+    top = stack[-1]
+    quoted = top[3]
+    hidden_let = top[0] == _CMD and not quoted and hidden_let_end(command, token, start)
+    if hidden_let:
+        stack.append([_ARITH, "let", 0, False, hidden_let])
+        return hidden_let
+    if token[0] == "\\":
+        if _escaped_opener(command, token, start) and _subscript_word_before(command, stack, pos):
+            return -1
+        return pos
+    if token == '"':
+        if quoted and command[start - 1] == "$" and _subscript_word_before(command, stack, pos):
+            return -1  # `"$"(…)`: the `$` joins a later `(` after quote removal
+        top[3] = not quoted
+        return pos
+    return None
+
+
 def _skip_data(command, token, start, pos, quoted, stack, pending, date_exempt, depth) -> int | None:
     """Skip literal spans; None means a normal token, -1 means fail closed."""
     kind = stack[-1][0]
@@ -276,7 +332,6 @@ def _quote_close(command: str, pos: int, *, ansi: bool) -> int | None:
     return None
 
 
-
 def _parameter_token(token, start, pos, stack) -> int:
     if stack[-1][0] == _PARAM_PATTERN and token == "/":
         stack[-1][0] = _PARAM_ARITH
@@ -285,6 +340,28 @@ def _parameter_token(token, start, pos, stack) -> int:
     # Parentheses and brackets are literal parameter-word text, not closers
     # for enclosing arithmetic. Only } ends this lexical frame.
     return pos
+
+
+def _expansion_token(command, token, pos, stack, date_exempt) -> tuple[int, bool]:
+    """Open an expansion frame, or flag a producer whose output is arithmetic."""
+    if token == "`":
+        if stack[-1][0] in (_ARITH, _PARAM_ARITH):
+            return pos, True
+        if stack[-1][1] == "`":
+            stack.pop()
+        else:
+            stack.append([_CMD, "`", 0, False, pos, None])
+        return pos, False
+    if token == "$(":
+        if stack[-1][0] in (_ARITH, _PARAM_ARITH) and not (
+                date_exempt and _DATE_PRODUCER_RE.match(command, pos)):
+            return pos, True
+        stack.append([_CMD, ")", 0, False, pos, None])
+    elif token == "${":
+        pos = _open_parameter(command, pos, stack)
+    else:  # $(( or $[
+        stack.append([_ARITH, "))" if token == "$((" else "]", 0, False])
+    return pos, False
 
 
 def _open_parameter(command: str, pos: int, stack: list[list]) -> int:
@@ -329,8 +406,15 @@ def _cmd_token(command, token, start, pos, stack, closes, operators) -> int:
     if token == "((":
         stack.append([_ARITH, "))", 0, False])
         return pos
+    if token in (";", "&", "|", "\n"):
+        # `>&`, `<&`, `&>` and `>|` are redirections, not list operators.
+        if not ((token in "&|" and command[start - 1:start] in ("<", ">"))
+                or (token == "&" and command[pos:pos + 1] == ">")):
+            stack[-1][4] = pos
+        return pos
     if token == "(":
-        stack.append([_CMD, ")", 0, False])
+        closer = "array" if _compound_assignment_before(command, start) else ")"
+        stack.append([_CMD, closer, 0, False, pos, None])
         return pos
     if token == ")":
         if len(stack) > 1:
@@ -343,7 +427,8 @@ def _cmd_token(command, token, start, pos, stack, closes, operators) -> int:
         if operator < len(operators) and operators[operator] < close:
             stack.append([_ARITH, "]]", 0, False, pos])
         return pos
-    if token == "[" and start > 0 and (command[start - 1].isalnum() or command[start - 1] == "_"):
+    if token == "[" and (stack[-1][1] == "array" or (
+            start > 0 and (command[start - 1].isalnum() or command[start - 1] == "_"))):
         stack.append([_ARITH, "]", 0, False])  # `a[…]=` subscript
     return pos
 

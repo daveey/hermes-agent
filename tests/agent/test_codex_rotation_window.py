@@ -112,6 +112,44 @@ def test_proven_weekly_reopen_logs_and_rotation_still_excludes_failure(tmp_path,
     assert next(e for e in pool.entries() if e.id == "A").last_status == "exhausted"
 
 
+@pytest.mark.parametrize("other_walled", [False, True])
+def test_rotation_exclusion_precedes_resync_and_quota_probe(tmp_path, monkeypatch, other_walled):
+    pool, rows, reset = _pool(tmp_path, monkeypatch, other_walled=other_walled)
+    resynced = []
+    probed = []
+    real_resync = pool._resync_stale_entry
+
+    def resync(entry):
+        resynced.append(entry.id)
+        return real_resync(entry)
+
+    def respond(request):
+        probed.append(next(row["id"] for row in rows
+                           if request.headers["Authorization"] == f"Bearer {row['access_token']}"))
+        # An open short window does not reopen either weekly-walled row.
+        return httpx.Response(200, json={"rate_limit": {"primary_window": {
+            "used_percent": 0, "reset_at": reset - 5 * 86400}}})
+
+    monkeypatch.setattr(pool, "_resync_stale_entry", resync)
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(auth_codex, "_codex_http_client", lambda **kwargs: httpx.Client(transport=transport))
+    available, pending = pool._available_entries(clear_expired=True, exclude_id="C")
+    assert resynced == ["A", "B"]
+    assert probed == (["B"] if other_walled else [])
+    assert [entry.id for entry in available] == (["A"] if other_walled else ["A", "B"])
+    assert pending == []
+
+    # Non-vacuity: the same excluded row really reaches both boundaries without exclusion.
+    resynced.clear()
+    probed.clear()
+    auth_codex._codex_quota_probe_cache.clear()
+    available, pending = pool._available_entries(clear_expired=True)
+    assert resynced == ["A", "B", "C"]
+    assert probed == (["B", "C"] if other_walled else ["C"])
+    assert [entry.id for entry in available] == (["A"] if other_walled else ["A", "B"])
+    assert pending == []
+
+
 def test_explicit_reset_resync_logs_early_lift(tmp_path, monkeypatch, caplog):
     pool, _, reset = _pool(tmp_path, monkeypatch)
     assert _rotate(pool, reset).id == "B"

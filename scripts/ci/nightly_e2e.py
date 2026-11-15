@@ -717,7 +717,8 @@ def _settle_error(
 
 
 DEFAULT_CORE = Path.home() / ".hermes" / "hermes-agent"
-PIN_FILES = ("nightly_e2e.py", "flaky_kanban.py")
+PIN_FILES = ("nightly_e2e.py", "flaky_kanban.py", "flaky_intake.py", "flaky_http.py",
+             "flaky_artifact.py", "flaky_artifact_poll.py")
 
 
 def _pin_git(core: Path, *args: str) -> bytes:
@@ -739,7 +740,8 @@ def check_pin(board: Any, state: dict[str, Any], *, core: Path, now: float) -> s
         path = f"scripts/ci/{name}"
         content = _pin_git(core, "show", f"{main}:{path}")
         blobs.append(_pin_git(core, "rev-parse", f"{main}:{path}").decode().strip())
-        if hashlib.sha256((running.parent / name).read_bytes()).digest() != hashlib.sha256(content).digest():
+        deployed = running.parent / name
+        if not deployed.is_file() or hashlib.sha256(deployed.read_bytes()).digest() != hashlib.sha256(content).digest():
             changed = int(_pin_git(core, "log", "-1", "--format=%ct", main, "--", path))
             if now - changed > 2 * 3600:
                 stale.append(name)
@@ -749,11 +751,13 @@ def check_pin(board: Any, state: dict[str, Any], *, core: Path, now: float) -> s
     body = (
         f"Nightly reporter pin `{running.parent.name}` lags main `{main}`. "
         f"Files changed more than 2 h ago: {', '.join(stale)}.\n\n"
-        f"On hermes-hub, export BOTH scripts/ci/nightly_e2e.py and scripts/ci/flaky_kanban.py "
+        f"On hermes-hub, export ALL sibling scripts ({', '.join(PIN_FILES)}) "
         f"from `{main}` in `{core}` to `~/.hermes/lib/nightly-e2e/{main[:12]}/` "
         "using git show <sha>:scripts/ci/<file>. Point SCRIPT in BOTH "
         "`~/.hermes/scripts/nightly_e2e_dispatch.py` and `~/.hermes/scripts/nightly_e2e_report.py` "
-        "there. Verify both pinned SHA-256 hashes against main and the real report cron is ok and silent. "
+        "there. Verify every pinned SHA-256 hash against main and the real report cron is ok and silent. "
+        "Use the installed Hermes runtime for hermes_cli (deadline transport and scope heartbeat helpers); "
+        "do not export a partial hermes_cli package. Verify those imports under the cron launcher. "
         "Do not move the live core checkout."
     )
     # Separate from run cards: a green nightly must not imply that the deployment drift is repaired.

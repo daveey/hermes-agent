@@ -174,6 +174,19 @@ def test_a_message_delete_falls_back(db, monkeypatch):
     assert rows == _exact(db, monkeypatch)
 
 
+@pytest.mark.parametrize("untrusted", [False, True])
+def test_timestamp_raise_rebuilds_candidate_cache_after_reset(db, monkeypatch, untrusted):
+    _seed(db, 400)
+    assert "s0000" not in _ids(_page(db))
+    if untrusted:
+        _write(db, f"DROP TRIGGER {memo.PREFIX}messages_move")
+    _write(db, "UPDATE messages SET timestamp = ? WHERE session_id = 's0000'", (_BASE + 90_000,))
+    rows, delta = _outcome(lambda: _page(db))
+    assert set(delta) == {"fallback/untrusted" if untrusted else "fallback/lowered"}
+    assert _ids(rows)[0] == "s0000"
+    assert rows == _exact(db, monkeypatch)
+
+
 def test_a_message_rewind_falls_back(db, monkeypatch):
     _seed(db, 40)
     _page(db)
@@ -245,6 +258,25 @@ def test_preview_follows_a_hidden_flag_a_redaction_and_a_first_message(db, monke
     got = {r["id"]: r["preview"] for r in rows}
     assert (got["s0019"], got["s0018"], got["empty"]) == ("redacted", "later", "first!")
     assert rows == _exact(db, monkeypatch)
+
+
+def test_old_snapshot_does_not_project_a_newer_first_message(db, monkeypatch):
+    _seed(db, 5)
+    _write(db, "DELETE FROM messages WHERE session_id = 's0004'")
+    before = _page(db)
+    assert before[0]["preview"] == ""
+    original = memo.project
+
+    def interleave(conn, rank, *args):
+        monkeypatch.setattr(memo, "project", original)
+        with SessionDB(db_path=db.db_path) as newer:
+            _write(newer, "INSERT INTO messages (session_id, role, content, timestamp)"
+                          " VALUES ('s0004', 'user', 'first!', ?)", (_BASE + 5,))
+            assert _page(newer)[0]["preview"] == "first!"
+        return original(conn, rank, *args)
+
+    monkeypatch.setattr(memo, "project", interleave)
+    assert _page(db) == before
 
 
 def test_a_stale_snapshot_never_installs_a_preview(db):

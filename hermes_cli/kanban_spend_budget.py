@@ -277,14 +277,25 @@ def hold(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_wake_check import foreign_copy
 
-    lim = limits() if lim is None else lim
-    board = lim
-    lim = card_limits(conn, task_id, board)
-    if not lim.runs and not lim.cache_read_tokens:
-        return None
+    from hermes_cli import kanban_spend_decision as decision
+
     if foreign_copy(conn, task_id):
         return None  # a worker-node copy: its home board owns the decision
     now = int(time.time()) if now is None else int(now)
+    if decision.pending(conn, task_id):
+        with kb.write_txn(conn):
+            if decision.pending(conn, task_id):
+                cur = conn.execute("UPDATE tasks SET status='triage' WHERE id=? AND status IN ('ready','review') "
+                             "AND current_run_id IS NULL AND " + _UNCLAIMED, (task_id, now))
+                if cur.rowcount == 1:
+                    kb._append_event(conn, task_id, "spend_budget_held", {
+                        "status": "triage", "reason": decision.unblock_refusal(conn, task_id)})
+                decision.safe_ensure_producer(conn, task_id)
+                return "triage"
+    board = limits() if lim is None else lim
+    lim = card_limits(conn, task_id, board)
+    if not lim.runs and not lim.cache_read_tokens:
+        return None
     if over(spend(conn, task_id, as_of=now + 1), lim) is None:
         return None  # cheap read on every tick; the write lock is taken only for a card over budget
     with kb.write_txn(conn):
@@ -309,6 +320,7 @@ def hold(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
             "runs_with_usage": spent.reported, "cost_usd": spent.cost_usd, "override": override,
             "limits": {"runs": lim.runs, "cache_read_tokens": lim.cache_read_tokens}, "reason": note})
         kb.add_comment(conn, task_id, AUTHOR, _comment(task_id, note), system=True)
+        decision.safe_ensure_producer(conn, task_id)
     logger.info("kanban: spend budget sent %s to triage (%s: %d runs, %s cache-read)", task_id, which,
                 spent.runs, _m(spent.tokens["cache_read_tokens"]))
     return "triage"

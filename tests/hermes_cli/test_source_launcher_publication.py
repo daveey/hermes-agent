@@ -22,7 +22,7 @@ BOOT_FILES = (
     "hermes_agent/compat/moves.py",
     "pm/environments.py", "pm/filesystem.py", "pm/paths.py", "hermes_cli/runtime_state.py",
     "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py",
-    "hermes_cli/venv_sync.py", "hermes_cli/steward.py",
+    "hermes_cli/venv_sync.py", "hermes_cli/steward.py", "hermes_cli/launch_malloc.py",
     "hermes_cli/stderr_timestamp.py",
     "scripts/hermes-gateway",
 )

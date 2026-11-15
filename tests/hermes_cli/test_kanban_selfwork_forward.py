@@ -1,0 +1,231 @@
+"""Authorization uses accepted local custody, never replica chat links."""
+import copy
+import io
+import json
+import sqlite3
+from types import SimpleNamespace
+
+import pytest
+
+from hermes_cli import kanban_origin_ledger as ledger
+from hermes_cli import kanban_selfwork_forward as forward
+from hermes_cli import kanban_sync_client as sync
+
+
+@pytest.fixture
+def case(tmp_path, monkeypatch):
+    origin = {'gateway': 'origin-gw', 'profile': 'default', 'session': 'chat'}
+    creator = {'gateway': 'owner-gw', 'profile': 'default', 'board': 'work', 'task_id': 'task'}
+    home = {'gateway': 'home-gw', 'profile': 'default', 'board': 'intake'}
+    binding = {'binding_id': 'binding', 'version': 1, 'publication_version': 1,
+               'owner': creator, 'origin': origin, 'task_record_key': 'default/work/task'}
+    replica = tmp_path / 'replica.db'
+    with sqlite3.connect(replica) as conn:
+        conn.execute('CREATE TABLE replica (gw TEXT,coll TEXT,key TEXT,version INTEGER,data TEXT)')
+        task = {**creator, 'id': 'task', 'status': 'running', 'origin_bindings': [binding]}
+        conn.execute('INSERT INTO replica VALUES (?,?,?,?,?)',
+                     ('owner-gw', 'tasks', binding['task_record_key'], 1, json.dumps(task)))
+    path = tmp_path / 'kanban/origin-ledger.db'
+    assert ledger.accept_binding(path=path, replica=replica, binding=binding, request_id='binding-request',
+                                 sender='gw:owner-gw', gateway='origin-gw', profile='default',
+                                 resolve_session=lambda s: s)['status'] == 'accepted'
+    config = {'kanban': {'self_work': {'home': home}}}
+    monkeypatch.setattr(forward.owner, '_runtime', lambda: (config, 'origin-gw', 'default', tmp_path))
+    monkeypatch.setattr(forward.time, 'time', lambda: 100)
+    lease = {'task_id': 'task', 'run_uid': 'run', 'holder': 'worker-gw', 'expires': 101000}
+    page = {'head': 1, 'table': 'leases', 'rows': [lease], 'more': False, 'next': 'task'}
+    calls = []
+
+    def snapshot(board, table, after):
+        calls.append((board, table, after))
+        return copy.deepcopy(page)
+
+    monkeypatch.setattr(sync, 'load_identity', lambda: SimpleNamespace(gateway='origin-gw'))
+    def hub(identity, **kwargs):
+        assert identity.gateway == 'origin-gw'
+        return SimpleNamespace(snapshot_page=snapshot)
+    monkeypatch.setattr(sync, 'Hub', hub)
+    request = {'id': 'forward-request', 'from': 'gw:worker-gw', 'to_gw': 'origin-gw',
+               'coll': 'sessions', 'key': 'default/chat', 'action': 'selfwork-forward',
+               'args': {'origin': origin, 'creator': {**creator, 'run_uid': 'run'},
+                        'create': {'title': 'Improve', 'self_work': {
+                            'version': 1, 'repository': 'hermes-core', 'area': 'test', 'kind': 'sweep'}}}}
+    return SimpleNamespace(request=request, path=path, page=page, lease=lease, calls=calls,
+                           home=home, binding=binding, config=config)
+
+
+def test_reject_mismatched_enrollment(case, monkeypatch):
+    monkeypatch.setattr(sync, 'load_identity', lambda: SimpleNamespace(gateway='foreign'))
+    with pytest.raises(ValueError, match='self_work_route_mismatch'):
+        forward.receive(case.request)
+
+
+def test_reject_invalid_declaration(case):
+    case.request['args']['create']['self_work'] = {'area': 'test'}
+    with pytest.raises(ValueError):
+        forward.receive(case.request)
+    assert not case.calls
+
+
+@pytest.mark.parametrize('kind', ['cursor', 'duplicate', 'unsorted'])
+def test_reject_malformed_inventory(case, kind):
+    if kind == 'cursor':
+        case.page['next'] = 'wrong'
+    elif kind == 'duplicate':
+        case.page['rows'].append(copy.deepcopy(case.lease))
+    else:
+        case.page['rows'].insert(0, {**case.lease, 'task_id': 'zzz'})
+    with pytest.raises(ValueError, match='self_work_lease_invalid'):
+        forward.receive(case.request)
+
+
+def test_command_offline_is_pending(case, monkeypatch, capsys):
+    def offline():
+        raise sync.SyncUnavailable('offline')
+    monkeypatch.setattr(sync, 'load_identity', offline)
+    monkeypatch.setattr(forward.sys, 'stdin', io.StringIO(json.dumps(case.request)))
+    forward.command(SimpleNamespace(request_file='-'))
+    assert json.loads(capsys.readouterr().out)['status'] == 'pending'
+
+
+def test_accept_journal_and_expired_replay(case, monkeypatch):
+    result = forward.receive(case.request)
+    assert result['code'] == 'self_work_forward_authorized'
+    assert result['handoff_complete'] is False
+    downstream = result['downstream']
+    assert downstream['key'] == 'default/intake'
+    assert downstream['args']['origin'] == case.request['args']['origin']
+    assert downstream['args']['create']['session_id'] == 'chat'
+    assert downstream['args']['create']['board'] == 'intake'
+    with sqlite3.connect(case.path) as conn:
+        evidence = json.loads(conn.execute('SELECT evidence_json FROM selfwork_forward_admissions').fetchone()[0])
+    assert evidence['binding'] == case.binding
+    assert evidence['lease'] == case.lease
+    monkeypatch.setattr(forward.time, 'time', lambda: 200)
+    assert forward.receive(case.request) == result
+    assert case.calls == [('work', 'leases', '')]
+
+
+@pytest.mark.parametrize('field,value', [('task_id', 'other'), ('run_uid', 'other'),
+                                         ('holder', 'owner-gw'), ('expires', 100000),
+                                         ('expires', float('inf')), ('expires', '101000'),
+                                         ('expires', True)])
+def test_bad_lease(case, field, value):
+    case.lease[field] = value
+    with pytest.raises(ValueError, match='self_work_lease_invalid'):
+        forward.receive(case.request)
+
+
+@pytest.mark.parametrize('change', [{'rows': None}, {'more': 1}, {'head': True}, {'table': 'tasks'},
+                                    {'more': True, 'next': ''}, {'rows': [{}]},
+                                    {'more': True}, {'rows': []}])
+def test_bad_pages(case, change):
+    case.page.update(change)
+    with pytest.raises(ValueError, match='self_work_lease_invalid'):
+        forward.receive(case.request)
+    assert len(case.calls) <= forward._MAX_PAGES
+
+
+@pytest.mark.parametrize('sql', [
+    'DELETE FROM origin_receipts', 'DELETE FROM origin_obligations',
+    'UPDATE origin_obligations SET released=1',
+    "UPDATE origin_obligations SET binding_hash='forged'",
+    "UPDATE origin_receipts SET receipt_json='{}'",
+])
+def test_no_local_authority(case, sql):
+    with sqlite3.connect(case.path) as conn:
+        conn.execute(sql)
+    with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
+        forward.receive(case.request)
+    assert not case.calls
+
+
+@pytest.mark.parametrize('field', ['gateway', 'profile', 'board', 'task_id'])
+def test_exact_creator(case, field):
+    case.request['args']['creator'][field] = 'wrong'
+    with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
+        forward.receive(case.request)
+
+
+def test_transaction_rechecks_obligation(case, monkeypatch):
+    real = forward._lease
+    def release(*args):
+        evidence = real(*args)
+        with sqlite3.connect(case.path) as conn:
+            conn.execute('UPDATE origin_obligations SET released=1')
+        return evidence
+    monkeypatch.setattr(forward, '_lease', release)
+    with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
+        forward.receive(case.request)
+
+
+@pytest.mark.parametrize('change', ['envelope', 'home', 'route'])
+def test_replay_conflicts(case, change):
+    forward.receive(case.request)
+    if change == 'envelope':
+        case.request['args']['create']['title'] = 'changed'
+    elif change == 'home':
+        case.home['board'] = 'changed'
+    else:
+        case.request['key'] = 'default/other'
+    with pytest.raises(ValueError, match='self_work_(forward_conflict|route_mismatch)'):
+        forward.receive(case.request)
+    assert len(case.calls) == 1
+
+
+def test_offline_closed(case, monkeypatch):
+    def offline():
+        raise sync.SyncUnavailable('offline')
+    monkeypatch.setattr(sync, 'load_identity', offline)
+    with pytest.raises(ValueError, match='self_work_lease_unavailable'):
+        forward.receive(case.request)
+
+
+@pytest.mark.parametrize('field,value', [('from', 'user:worker-gw'), ('to_gw', 'other'),
+                                         ('coll', 'tasks'), ('action', 'create'), ('key', 'other/chat')])
+def test_route(case, field, value):
+    case.request[field] = value
+    with pytest.raises(ValueError, match='self_work_route_mismatch'):
+        forward.receive(case.request)
+
+
+@pytest.mark.parametrize('changed_head', [False, True])
+def test_pagination(case, monkeypatch, changed_head):
+    def snapshot(board, table, after):
+        if not after:
+            return {**case.page, 'rows': [{**case.lease, 'task_id': 'another'}],
+                    'more': True, 'next': 'another'}
+        assert after == 'another'
+        return {**case.page, 'head': 2 if changed_head else 1}
+    monkeypatch.setattr(sync, 'Hub', lambda *a, **k: SimpleNamespace(snapshot_page=snapshot))
+    if changed_head:
+        with pytest.raises(ValueError, match='self_work_lease_invalid'):
+            forward.receive(case.request)
+    else:
+        assert forward.receive(case.request)['status'] == 'accepted'
+
+
+def test_page_bound(case, monkeypatch):
+    calls = []
+    def snapshot(board, table, after):
+        calls.append(after)
+        cursor = f'other-{len(calls):03d}'
+        return {**case.page, 'rows': [{**case.lease, 'task_id': cursor}],
+                'more': True, 'next': cursor}
+    monkeypatch.setattr(sync, 'Hub', lambda *a, **k: SimpleNamespace(snapshot_page=snapshot))
+    with pytest.raises(ValueError, match='self_work_lease_invalid'):
+        forward.receive(case.request)
+    assert len(calls) == forward._MAX_PAGES
+
+
+def test_cli_dispatch(case, monkeypatch, capsys):
+    from hermes_cli.kanban import kanban_command
+    monkeypatch.setattr(forward.sys, 'stdin', io.StringIO(json.dumps(case.request)))
+    assert kanban_command(SimpleNamespace(kanban_action='selfwork-forward', request_file='-', json=True)) == 0
+    assert json.loads(capsys.readouterr().out)['code'] == 'self_work_forward_authorized'
+
+
+def test_command_stdin(case, monkeypatch, capsys):
+    monkeypatch.setattr(forward.sys, 'stdin', io.StringIO(json.dumps(case.request)))
+    assert forward.command(SimpleNamespace(request_file='-', json=True)) == 0
+    assert json.loads(capsys.readouterr().out)['status'] == 'accepted'

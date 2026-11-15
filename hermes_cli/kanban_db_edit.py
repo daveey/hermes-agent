@@ -79,9 +79,8 @@ def edit_task(
             (*params, task_id),
         )
         if priority is not None:
-            payload: dict = {"priority": priority}
+            payload: dict = {"priority": priority, "previous_priority": previous_priority}
             if priority_bump is not None:
-                payload["previous_priority"] = previous_priority
                 payload["relative_bump"] = priority_bump
                 payload["applied_delta"] = priority - previous_priority
             if priority_reason and priority_reason.strip():

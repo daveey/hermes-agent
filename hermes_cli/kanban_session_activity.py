@@ -419,14 +419,19 @@ def replica_task_resolution(ids: list[str], now: float | None = None) -> tuple[s
     if path is None or not ids:  # sync_enabled never raises: an unreadable config reads as sync off (standalone)
         return set(), not ids or not _board_sync_enabled()
     try:
-        conn = _open_ro(path)
-        try:
-            offline = _meta_float(conn, "offline_since")
-            synced = max(filter(None, (_meta_float(conn, "last_ok"), _meta_float(conn, "last_digest"))), default=None)
-            from hermes_cli.kanban_prose_refs import hub_replica_lookup
-            found = {tid for tid in ids if conn.execute(*hub_replica_lookup(tid)).fetchone()}
-        finally:
-            conn.close()
+        from hermes_cli.kanban_board_replica_refs import hub_tasks_found, with_reader
+
+        def read(conn: sqlite3.Connection) -> tuple:
+            conn.execute("BEGIN")  # one snapshot: the task-row probe must describe the rows the lookups read
+            try:
+                offline = _meta_float(conn, "offline_since")
+                synced = max(filter(None, (_meta_float(conn, "last_ok"), _meta_float(conn, "last_digest"))),
+                             default=None)
+                return offline, synced, hub_tasks_found(conn, path, ids)
+            finally:
+                conn.execute("ROLLBACK")
+
+        offline, synced, found = with_reader(path, read)  # kept reader: ~2 ms an open on every board GET
     except sqlite3.Error:
         return set(), False
     now = time.time() if now is None else now

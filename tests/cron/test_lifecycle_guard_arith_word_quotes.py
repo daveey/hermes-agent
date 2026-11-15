@@ -32,6 +32,8 @@ SINKS = [
     "let 'x=a[''$(SCRIPT)]'",
     "let 'x=a[ ''$(SCRIPT)]'",
     r'let "a[\$(SCRIPT)]=1"',
+    # Quote removal joins the dollar and parenthesis only at arithmetic evaluation.
+    'let "a[$""(SCRIPT)]=1"',
     r'let "a[\`SCRIPT\`]=1"',
     r'unset v; let "${v:-a[\$(SCRIPT)]}"',
     r"let x=a[\`SCRIPT\`]",
@@ -47,6 +49,7 @@ SINKS = [
 DATA = [
     "let '${v:-$(SCRIPT)}'",
     "let '$(SCRIPT)'",
+    'let "$""(SCRIPT)"',
     "let 'x=$(( $(SCRIPT) ))'",
     "[[ 1 -eq 1 && x == '$(SCRIPT)' ]]",
     "[[ 1 -eq '$(SCRIPT)' && 1 -eq a[1] ]]",
@@ -85,20 +88,8 @@ def test_quoted_word_arithmetic_subscripts_are_sinks(tmp_path, shape):
     assert output_reaches_shell(command)
 
 
-# The guard does not yet follow a script behind an escaped backtick inside a
-# double-quoted `let` operand (t_01a1db0c38d72914); the scanner above already flags
-# that sink.
-_GUARD_GAPS = {
-    r'let "a[\`SCRIPT\`]=1"': "t_01a1db0c38d72914",
-}
-
-
 @pytest.mark.platforms("posix")
-@pytest.mark.parametrize("shape", [
-    pytest.param(shape, marks=pytest.mark.xfail(strict=True, reason=_GUARD_GAPS[shape]))
-    if shape in _GUARD_GAPS else shape
-    for shape in SINKS
-])
+@pytest.mark.parametrize("shape", SINKS)
 def test_lifecycle_guard_scans_the_quoted_subscript_payload(tmp_path, shape):
     script = tmp_path / "payload.sh"
     script.write_text("# padding\n" * 150000, encoding="utf-8")  # past the scan cap

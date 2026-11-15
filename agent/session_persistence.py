@@ -103,6 +103,12 @@ def _override_replaces_content(msg: dict, content: Any, override: Any) -> bool:
 def _content_with_turn_override(msg: dict, content: Any, override: Any) -> Any:
     """Replace only the absorbed current turn, leaving unanswered history intact. The join matches
     ``_merge_consecutive_users``; a row that no longer holds the prefix takes the plain override."""
+    from agent.agent_runtime_helpers_user_rows import NOTICE_TURN_OVERRIDE
+
+    # An identified notice already has a clean constituent in the composite.
+    # Reappending its identical persist override would resurrect the duplicate.
+    if msg.get(NOTICE_TURN_OVERRIDE) == (override, content):
+        return content
     prefix = msg.get(MERGED_TURN_PREFIX)
     if isinstance(content, str) and isinstance(override, str) and isinstance(prefix, str):
         if content == prefix or content.startswith(prefix + "\n\n"):

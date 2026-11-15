@@ -81,6 +81,16 @@ class _GuardMixin:
     """Lift the OFD guard immediately before the real close (see ``hermes_state_lockguard.release``);
     a connection that is garbage-collected unclosed releases through its finalizer instead."""
 
+    def __init__(self, database, *args, **kwargs):
+        from hermes_cli.kanban_generation import _file_identity, _path
+        path = _path(database)
+        before = _file_identity(path) if path is not None else None
+        super().__init__(database, *args, **kwargs)
+        # Attest at open, including connect_tracked's composed factory. Never
+        # infer this at first memo use: the pathname may already be replaced.
+        after = _file_identity(path) if path is not None else None
+        self._hermes_open_identity = before if before == after else None
+
     _hermes_lockguard: Optional[dict] = None
     _hermes_lockguard_finalizer: Any = None
 
