@@ -1,4 +1,8 @@
 """G2b follow-up: one live config read per validated input read, same alias freshness."""
+import sqlite3
+
+import pytest
+
 from hermes_cli import kanban_blocker_inputs as inputs
 from hermes_cli import kanban_db_connect as kbc
 from tests.hermes_cli import test_kanban_shared_blockers as helpers
@@ -67,8 +71,48 @@ def test_replaced_config_during_compute_reaches_the_next_read(kanban_home, monke
         assert exercise() == ('second', True)
 
 
-def test_no_snapshot_post_check_reads_live(kanban_home, monkeypatch):
-    """Without a held snapshot the compute may have taken one from a newer live config."""
+@pytest.mark.parametrize('nested_read', [False, True], ids=['held-snapshot', 'cleared-snapshot'])
+def test_alias_edit_after_read_only_transaction_is_not_cached(monkeypatch, nested_read):
+    """A nested transactional read drops the snapshot, not the caller's held config."""
+    cfg = {'kanban': {'shared_blocker_aliases': {}}}
+    _loader(monkeypatch, [cfg])
+    conn = sqlite3.connect(':memory:')
+    computations = []
+    try:
+        @inputs.input_pass
+        def exercise():
+            def compute():
+                held = inputs.config()
+                conn.execute('BEGIN')
+                try:
+                    if nested_read:
+                        assert inputs.read('nested', conn, 10, lambda: 'nested') == 'nested'
+                finally:
+                    conn.rollback()
+                # No writes: DB identity cannot mask an incorrect alias cache key.
+                assert conn.total_changes == 0
+                held['kanban']['shared_blocker_aliases'] = {'a': 'b'}
+                computations.append('first')
+                return held['kanban']['shared_blocker_aliases'].get('a', 'a')
+
+            first = inputs.read('outer', conn, 10, compute)
+            cfg['kanban']['shared_blocker_aliases'] = {}
+
+            def recompute():
+                computations.append('second')
+                return inputs.config()['kanban']['shared_blocker_aliases'].get('a', 'a')
+
+            second = inputs.read('outer', conn, 10, recompute)
+            return first, second
+
+        assert exercise() == ('b', 'a')
+        assert computations == ['first', 'second']
+    finally:
+        conn.close()
+
+
+def test_snapshot_taken_during_compute_reaches_the_next_read(kanban_home, monkeypatch):
+    """A snapshot acquired during compute carries the newer live aliases."""
     held = [{'kanban': {'shared_blocker_aliases': {}}}]
     _loader(monkeypatch, held)
     with kbc.connect_closing() as conn:
