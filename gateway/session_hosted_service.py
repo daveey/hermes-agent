@@ -141,7 +141,10 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
     def bindings(self):
         with self.authority.db._read_ctx() as conn:
             owned = {r[0][len(_OWNER):] for r in conn.execute(
-                'SELECT key FROM state_meta WHERE key LIKE ?', (_OWNER + '%',))}
+                # Both ownership writers use this exact prefix, as do all authorization reads.
+                # The binary PK range avoids LIKE's unrelated-metadata scan and ASCII folding.
+                'SELECT key FROM state_meta WHERE key >= ? AND key < ?',
+                (_OWNER, 'gateway.hosted.owner.v1;'))}
         return tuple(b for b in super().bindings() if b.room_id in owned)
 
     def _turn_lock(self, profile):
