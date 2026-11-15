@@ -544,6 +544,19 @@ canonical_method("worker.turnLease", params=WorkerTurnLeaseParams, result=Worker
                  doc="Fresh owner-fenced exact-holder turn lease expiry; never a persistence receipt.")
 
 
+class WorkerNativeOriginParams(WorkerTurnLeaseParams):
+    pass
+
+
+class WorkerNativeOriginResult(WorkerTurnLeaseResult):
+    source: str | None
+    assignment_lineage: list[str]
+
+
+canonical_method("worker.nativeOrigin", params=WorkerNativeOriginParams, result=WorkerNativeOriginResult,
+                 doc="Fresh owner-fenced lease, consistent creation source and execution publication lineage.")
+
+
 class WorkerPersistParams(WorkerScopeParams):
     epoch: int
     sequence: int

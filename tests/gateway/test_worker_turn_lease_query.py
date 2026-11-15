@@ -89,10 +89,11 @@ def test_fresh_query_observes_refresh_release_and_expiry_without_receipts(worker
     ({'holder': None}, 'invalid_params'),
     ({'sequence': 1}, 'invalid_params'),
 ])
-def test_query_rejects_invalid_scope(worker, changes, reason):
+@pytest.mark.parametrize('method', ['worker.turnLease', 'worker.nativeOrigin'])
+def test_query_rejects_invalid_scope(worker, changes, reason, method):
     from hermes_state_runtime import RuntimeStoreError
     with pytest.raises(RuntimeStoreError, match=f'^{reason}$'):
-        worker.rpc('worker.turnLease', **(dict(worker.store.scope, holder='holder') | changes))
+        worker.rpc(method, **(dict(worker.store.scope, holder='holder') | changes))
 
 
 @pytest.mark.parametrize(('sql', 'reason'), [
@@ -101,47 +102,51 @@ def test_query_rejects_invalid_scope(worker, changes, reason):
     ("UPDATE worker_executions SET status='unknown'", 'stale_generation'),
     ("UPDATE worker_executions SET status='terminal'", 'stale_generation'),
 ])
-def test_query_refuses_freshly_invalidated_execution(worker, sql, reason):
+@pytest.mark.parametrize('method', ['worker.turnLease', 'worker.nativeOrigin'])
+def test_query_refuses_freshly_invalidated_execution(worker, sql, reason, method):
     from hermes_state_runtime import RuntimeStoreError
     assert worker.store.try_acquire_session_turn_lease('owned', 'holder')
     assert worker.store.session_turn_lease_expires_at('owned', 'holder') is not None
     worker.db._write_sql(sql)
     with pytest.raises(RuntimeStoreError, match=f'^{reason}$'):
-        worker.store.session_turn_lease_expires_at('owned', 'holder')
+        worker.rpc(method, **worker.store.scope, holder='holder')
 
 
-def test_query_refuses_new_owner_epoch(worker):
+@pytest.mark.parametrize('method', ['worker.turnLease', 'worker.nativeOrigin'])
+def test_query_refuses_new_owner_epoch(worker, method):
     from hermes_state_runtime import RuntimeStoreError
     assert worker.store.try_acquire_session_turn_lease('owned', 'holder')
     begin_runtime_epoch(worker.db, instance_id='replacement')
     with pytest.raises(RuntimeStoreError, match='^stale_epoch$'):
-        worker.store.session_turn_lease_expires_at('owned', 'holder')
+        worker.rpc(method, **worker.store.scope, holder='holder')
 
 
-def test_query_refuses_superseded_serving_connection(worker):
+@pytest.mark.parametrize('method', ['worker.turnLease', 'worker.nativeOrigin'])
+def test_query_refuses_superseded_serving_connection(worker, method):
     from hermes_state_runtime import RuntimeStoreError
     assert worker.store.try_acquire_session_turn_lease('owned', 'holder')
     # Caller and DB agree, but this not-yet-retired connection belongs to the old owner.
     worker.authority.epoch -= 1
     with pytest.raises(RuntimeStoreError, match='^stale_epoch$'):
-        worker.store.session_turn_lease_expires_at('owned', 'holder')
+        worker.rpc(method, **worker.store.scope, holder='holder')
 
 
-def test_query_requires_live_producer_and_capability(worker):
+@pytest.mark.parametrize('method', ['worker.turnLease', 'worker.nativeOrigin'])
+def test_query_requires_live_producer_and_capability(worker, method):
     from dataclasses import replace
     from hermes_state_runtime import RuntimeStoreError
     actor = worker.connection.actor
     worker.connection.actor = replace(actor, capabilities=frozenset({'session:control'}))
     with pytest.raises(RuntimeStoreError, match='^permission_denied$'):
-        worker.store.session_turn_lease_expires_at('owned', 'holder')
+        worker.rpc(method, **worker.store.scope, holder='holder')
     worker.connection.actor = replace(actor, subject='other-principal')
     with pytest.raises(RuntimeStoreError, match='^permission_denied$'):
-        worker.store.session_turn_lease_expires_at('owned', 'holder')
+        worker.rpc(method, **worker.store.scope, holder='holder')
     worker.connection.actor = actor
     worker.child.terminate()
     worker.child.wait(timeout=5)
     with pytest.raises(RuntimeStoreError, match='^worker_not_live$'):
-        worker.store.session_turn_lease_expires_at('owned', 'holder')
+        worker.rpc(method, **worker.store.scope, holder='holder')
 
 
 def test_query_does_not_touch_pending_or_failure_and_propagates_unavailable(worker):
@@ -237,6 +242,7 @@ def test_query_sql_has_no_writes_and_does_not_change_revision(worker, monkeypatc
     assert statements
     assert all(sql.lstrip().split()[0].upper() in {'SELECT', 'ROLLBACK'} for sql in statements)
     assert statements[-1] == 'ROLLBACK'
+    assert not any('worker_receipts' in sql.lower() for sql in statements)
     assert db.get_session('owned')['runtime_revision'] == revision
 
 

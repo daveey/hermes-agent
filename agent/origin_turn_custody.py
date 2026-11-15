@@ -48,6 +48,10 @@ def origin():
             or getattr(agent, "_active_session_turn_lease_holder", None) != lease.holder
             or getattr(agent, "_persist_disabled", False)):
         return None
+    from agent.origin_managed_custody import _ManagedCustody
+    capability = getattr(agent, '_native_origin_managed_custody', None)
+    if type(capability) is _ManagedCustody:
+        return capability.origin(value)
     sid = getattr(agent, "session_id", None)
     try:
         if Path(db.db_path).resolve() != home / "state.db":

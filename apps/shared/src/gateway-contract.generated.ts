@@ -5234,6 +5234,22 @@ export interface WorkerTurnLeaseParams {
 export interface WorkerTurnLeaseResult {
   expires_at: number | null
 }
+export interface WorkerNativeOriginParams {
+  profile_id: string
+  session_id: string
+  execution_id: string
+  generation: number
+  pid: number
+  birth: number
+  secret: string
+  epoch: number
+  holder: string
+}
+export interface WorkerNativeOriginResult {
+  expires_at: number | null
+  source: string | null
+  assignment_lineage: string[]
+}
 export interface WorkerPersistParams {
   profile_id: string
   session_id: string
@@ -7364,6 +7380,8 @@ export interface CanonicalRpcMethods {
   'shell.exec': { params: CanonicalShellExecParams; result: ShellExecResult }
   /** Adopt a registered execution after verifying the live producer claim. */
   'worker.adopt': { params: WorkerScopeParams; result: WorkerExecution }
+  /** Fresh owner-fenced lease, consistent creation source and execution publication lineage. */
+  'worker.nativeOrigin': { params: WorkerNativeOriginParams; result: WorkerNativeOriginResult }
   /** Sequence-fenced typed persistence write from an adopted worker. */
   'worker.persist': { params: WorkerPersistParams; result: WorkerPersistResult }
   /** Register a compute worker execution on an idle session. */
@@ -7424,6 +7442,7 @@ export const CANONICAL_RPC_METHODS = [
   'session.transcript',
   'shell.exec',
   'worker.adopt',
+  'worker.nativeOrigin',
   'worker.persist',
   'worker.register',
   'worker.turnLease'

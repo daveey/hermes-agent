@@ -789,7 +789,27 @@ def _worker_assignment(conn, execution_id, session_id, generation):
     return row
 
 
-def worker_turn_lease(db, *, epoch, execution_id, session_id, generation, holder):
+def _worker_publication_lineage(conn, execution_id, session_id):
+    """Only this execution's committed owner publications authorize physical rotation."""
+    rows = conn.execute("SELECT result_json FROM worker_receipts WHERE execution_id=? "
+        "AND json_extract(result_json,'$.worker_assignment.parent') IS NOT NULL "
+        "ORDER BY sequence LIMIT 257", (execution_id,)).fetchall()
+    if len(rows) > 256:
+        raise RuntimeStoreError('permission_denied')
+    lineage = []
+    for row in rows:
+        assignment = json.loads(row[0])['worker_assignment']
+        if not lineage:
+            lineage.append(assignment['parent'])
+        if assignment['parent'] != lineage[-1] or assignment['session_id'] in lineage:
+            raise RuntimeStoreError('permission_denied')
+        lineage.append(assignment['session_id'])
+    if lineage and lineage[-1] != session_id:
+        raise RuntimeStoreError('permission_denied')
+    return lineage or [session_id]
+
+
+def worker_turn_lease(db, *, epoch, execution_id, session_id, generation, holder, native_origin=False):
     """Fresh assignment and exact-holder lease in one read transaction; no replay receipts."""
     _text(holder)
     with db._read_ctx() as conn:
@@ -806,7 +826,15 @@ def worker_turn_lease(db, *, epoch, execution_id, session_id, generation, holder
             lease = conn.execute(
                 'SELECT expires_at FROM session_turn_leases WHERE conversation_id=? AND holder=?',
                 (db._session_turn_lease_key_on_conn(conn, session_id), holder)).fetchone()
-            return {'expires_at': float(lease[0]) if lease else None}
+            result: dict = {'expires_at': float(lease[0]) if lease else None}
+            if native_origin:
+                from hermes_cli.kanban_session_provenance import session_creation_source
+                lineage = _worker_publication_lineage(conn, execution_id, session_id)
+                root_source = session_creation_source(dict(_session(conn, lineage[0])))
+                current_source = session_creation_source(dict(_session(conn, session_id)))
+                result.update(source=current_source if current_source == root_source else None,
+                              assignment_lineage=lineage)
+            return result
         finally:
             if began and conn.in_transaction:
                 conn.execute('ROLLBACK')

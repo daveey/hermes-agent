@@ -50937,6 +50937,101 @@
         "title": "WorkerExecution",
         "type": "object"
       },
+      "WorkerNativeOriginParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "execution_id": {
+            "title": "Execution Id",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "pid": {
+            "title": "Pid",
+            "type": "integer"
+          },
+          "birth": {
+            "title": "Birth",
+            "type": "number"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          },
+          "epoch": {
+            "title": "Epoch",
+            "type": "integer"
+          },
+          "holder": {
+            "title": "Holder",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "session_id",
+          "execution_id",
+          "generation",
+          "pid",
+          "birth",
+          "secret",
+          "epoch",
+          "holder"
+        ],
+        "title": "WorkerNativeOriginParams",
+        "type": "object"
+      },
+      "WorkerNativeOriginResult": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "assignment_lineage": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Assignment Lineage",
+            "type": "array"
+          }
+        },
+        "required": [
+          "expires_at",
+          "source",
+          "assignment_lineage"
+        ],
+        "title": "WorkerNativeOriginResult",
+        "type": "object"
+      },
       "WorkerPersistParams": {
         "additionalProperties": false,
         "properties": {
@@ -52145,6 +52240,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/WorkerExecution"
+        }
+      }
+    },
+    {
+      "name": "worker.nativeOrigin",
+      "summary": "Fresh owner-fenced lease, consistent creation source and execution publication lineage.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/WorkerNativeOriginParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/WorkerNativeOriginResult"
         }
       }
     },

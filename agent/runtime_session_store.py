@@ -604,6 +604,12 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
         self._session(session_id)
         return self._apply('turn.renew', {'holder': holder, 'ttl_seconds': ttl_seconds})['value']
 
+    def native_origin_observation(self, session_id, holder):
+        """Fresh owner-classified source and publication lineage, never the write journal."""
+        with self.lock:
+            self._session(session_id)
+            return self.rpc('worker.nativeOrigin', **self.scope, holder=holder)
+
     def session_turn_lease_expires_at(self, session_id, holder):
         """Observe current owner authority, never replay a journaled lease receipt."""
         with self.lock:

@@ -400,6 +400,9 @@ def execute(frame, channel):
                 tool_complete_callback=lambda call_id, name, args, result: channel.send('tool.complete',
                                                                                          **tool_frame(call_id, name, args, result)))
             controls.agent = agent
+            if origin_custody is None:
+                from agent.origin_managed_custody import bind_adopted_agent
+                bind_adopted_agent(agent, store, home=frame['home'], scope=scope)
             if origin_custody is not None:
                 origin_custody.bind_agent(agent)
             if controls.stopped.is_set():
