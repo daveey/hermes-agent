@@ -1,5 +1,7 @@
 """Native bootstrap regression coverage for the exec-time allocator policy (#3122)."""
 
+if not __name__.startswith("tests."): raise ImportError("Use scripts/run_tests.sh; unittest discovery bypasses test isolation")  # unittest-discovery guard
+
 import json
 import os
 from pathlib import Path
