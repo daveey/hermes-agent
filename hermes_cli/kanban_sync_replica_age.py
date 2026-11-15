@@ -136,13 +136,7 @@ def check(boards: list[tuple[str, Path]], *, now: float, wall: Callable[[], floa
           awake_fn: Optional[Callable[[], bool]] = None) -> list[str]:
     """One observation of every board (``now``: monotonic). Returns the card ids it filed or commented. Never
     raises."""
-    try:
-        if awake_fn is None:
-            from cron.restart_rerun import host_fully_awake
-            awake_fn = host_fully_awake
-        awake = awake_fn()
-    except Exception:  # health: allow BLE001 -- a broken probe must not suppress a real stall
-        awake = True
+    awake = fully_awake(awake_fn)
     out: list[str] = []
     for slug, path in boards:
         try:
@@ -152,6 +146,17 @@ def check(boards: list[tuple[str, Path]], *, now: float, wall: Callable[[], floa
         except Exception:  # health: allow BLE001 -- an alert must never break the dispatcher tick
             log.warning("kanban sync: replica freshness check failed for %s", slug, exc_info=True)
     return out
+
+
+def fully_awake(awake_fn: Optional[Callable[[], bool]] = None) -> bool:
+    """Shared fail-awake probe policy for both sync alarms; sample once per entry call."""
+    try:
+        if awake_fn is None:
+            from cron.restart_rerun import host_fully_awake
+            awake_fn = host_fully_awake
+        return awake_fn()
+    except Exception:  # health: allow BLE001 -- a broken probe must not suppress a real stall
+        return True
 
 
 def _boot_id() -> Optional[str]:

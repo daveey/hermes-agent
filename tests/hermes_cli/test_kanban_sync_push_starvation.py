@@ -34,10 +34,12 @@ conn = reserve_fixtures.conn  # a primary board as gateway "hub" (dispatch_tick 
 
 
 @pytest.fixture(autouse=True)
-def _fresh_loop_state():
+def _fresh_loop_state(monkeypatch):
     """Backlog flags and outbox-age verdicts are process-wide (the sync loop's): no test inherits another's."""
     backlog.reset()
     outbox_age.reset()
+    from cron import restart_rerun
+    monkeypatch.setattr(restart_rerun, "host_fully_awake", lambda: True)
     yield
     backlog.reset()
     outbox_age.reset()

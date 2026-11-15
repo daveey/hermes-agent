@@ -19,6 +19,10 @@ Wall age remains diagnostic; alarms require a continuously observed sendable ide
 Observations persist in each board's ``.outbox-age.json`` sidecar. A same-boot restart resumes them;
 another boot, unreadable/no sendable op, identity change, or >600 awake seconds without observation resets them.
 Both entry paths share the observation and report wall age, observed-awake age and op_id, never payloads.
+Both sample the shared cron host_fully_awake probe once: a False sample excludes the interval since
+the previous observation and suppresses warnings/cards. DarkWake advances monotonic time but is not
+fully awake. This also excludes an idle lid-closed Mac on AC with an external display and an idle
+lid-open Mac on battery, until someone is active. Non-macOS and probe failures read awake.
 
 "Unanswered" = pending with no ``retry_after``: the Board never told us to wait. A row the Board deferred
 (``storage_error``, ``depends_on_rejected``) retries on its own backoff and logs its own reason; counting it would
@@ -114,13 +118,13 @@ def _age(path: Path) -> Optional[float]:
     return sample[1] if sample else None
 
 
-def _observed(path: Path, mono, age):
+def _observed(path: Path, mono, age, awake=True):
     sample = _sample(path)
     # Retain the age injection seam for callers suppressing outbox observations.
     if age is not _age and age(path) is None:
         sample = None
     now = mono()  # sample and timestamp under the same observation lock
-    seen = observation.observe(path, sample[0] if sample else None, now)
+    seen = observation.observe(path, sample[0] if sample else None, now, awake=awake)
     return seen, sample[1] if sample else None, now
 
 
@@ -131,9 +135,11 @@ def round_started(mono: Callable[[], float] = time.monotonic) -> None:
 
 
 def after_round(results: Iterable[Any], boards: Iterable[tuple[str, Path]], *,
-                mono: Callable[[], float] = time.monotonic, age: Callable[[Path], Optional[float]] = _age) -> list[str]:
+                mono: Callable[[], float] = time.monotonic, age: Callable[[Path], Optional[float]] = _age,
+                awake_fn: Optional[Callable[[], bool]] = None) -> list[str]:
     """Record round outcome and WARN after :data:`STALE_S` observed-awake seconds for one sendable op.
     Returns the boards warned about. Never raises."""
+    awake = replica_age.fully_awake(awake_fn)
     warned: list[str] = []
     try:
         paths = dict(boards)
@@ -151,8 +157,8 @@ def after_round(results: Iterable[Any], boards: Iterable[tuple[str, Path]], *,
                 if r.error:
                     observation.observe(path, None, mono())
                     continue
-                seen, seconds, now = _observed(path, mono, age)
-                if seen is None or now - seen.since < STALE_S:
+                seen, seconds, now = _observed(path, mono, age, awake)
+                if not awake or seen is None or now - seen.since < STALE_S:
                     continue
                 if seen.warned_at is not None and now - seen.warned_at < STALE_S:
                     continue
@@ -160,8 +166,9 @@ def after_round(results: Iterable[Any], boards: Iterable[tuple[str, Path]], *,
                 observation.remember(path, seen)
                 warned.append(r.board)
                 log.warning("kanban sync: %s: op %s has waited %.0f wall s / %.0f observed-awake s in the "
-                            "outbox although this round succeeded (`hermes kanban sync status` shows the outbox)",
-                            r.board, seen.op_id, seconds, now - seen.since)
+                            "outbox, excluded %.0f s not fully awake, although this round succeeded "
+                            "(`hermes kanban sync status` shows the outbox)",
+                            r.board, seen.op_id, seconds, now - seen.since, seen.excluded)
     except Exception:  # health: allow BLE001 -- an alarm must never stop the sync loop
         log.warning("kanban sync: outbox age check failed", exc_info=True)
     return warned
@@ -175,7 +182,8 @@ def _loop_healthy(slug: str, now: float) -> bool:
 
 def check(*, mono: Callable[[], float] = time.monotonic, file_fn: Optional[Callable[[str, str], Optional[str]]] = None,
           boards: Optional[list[tuple[str, Path]]] = None,
-          age: Callable[[Path], Optional[float]] = _age) -> list[str]:
+          age: Callable[[Path], Optional[float]] = _age,
+          awake_fn: Optional[Callable[[], bool]] = None) -> list[str]:
     """One dispatcher-tick observation (at most every :data:`CHECK_EVERY_S`): the outbox, then each replica's
     freshness (``kanban_sync_replica_age.check``). Returns the card ids filed or commented. Never raises."""
     try:
@@ -192,21 +200,24 @@ def check(*, mono: Callable[[], float] = time.monotonic, file_fn: Optional[Calla
     except Exception:  # health: allow BLE001 -- an alert must never break the dispatcher tick
         log.warning("kanban: sync outbox age check failed", exc_info=True)
         return []
-    return _check_outbox(boards, mono, file_fn, age) + replica_age.check(boards, now=now)
+    awake = replica_age.fully_awake(awake_fn)
+    return _check_outbox(boards, mono, file_fn, age, awake) + replica_age.check(
+        boards, now=now, awake_fn=lambda: awake)
 
 
-def _check_outbox(boards: list[tuple[str, Path]], mono, file_fn, age) -> list[str]:
+def _check_outbox(boards: list[tuple[str, Path]], mono, file_fn, age, awake=True) -> list[str]:
     try:
         out = []
         for slug, path in boards:
             with observation.LOCK:
                 # Observe even before loop health is established: a stuck first round
                 # must not acquire an extra ten-minute delay. Replica-age covers failure.
-                seen, seconds, now = _observed(path, mono, age)
-                if not _loop_healthy(slug, now) or seen is None or now - seen.since < STALE_S or seen.filed:
+                seen, seconds, now = _observed(path, mono, age, awake)
+                if not awake or not _loop_healthy(slug, now) or seen is None or now - seen.since < STALE_S or seen.filed:
                     continue
                 detail = (f"board `{slug}`: oldest sendable unanswered op `{seen.op_id}`; "
-                          f"wall age {seconds / 60:.0f} min; observed-awake age {now - seen.since:.0f} s "
+                          f"wall age {seconds / 60:.0f} min; observed-awake age {now - seen.since:.0f} s; "
+                          f"excluded {seen.excluded:.0f} s not fully awake "
                           "while this host's sync loop is not failing")
                 tid = (file_fn or report)(slug, detail)
                 if tid:

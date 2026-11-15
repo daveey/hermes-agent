@@ -3,11 +3,14 @@
 Like replica-age, resume within one boot only across bounded observation gaps.
 No op (including an unreadable outbox) ends the observation. Wall age is diagnostic,
 never a substitute for observing the same op. The caller serializes read/observe/claim.
+seen_at is also the last sample: not-fully-awake intervals shift since and accumulate excluded.
+Old records resume with excluded=0. warned_at is an absolute monotonic timestamp, not shifted since.
 """
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 from dataclasses import asdict, dataclass
@@ -30,6 +33,7 @@ class Observation:
     boot: Optional[str]
     filed: bool = False
     warned_at: Optional[float] = None
+    excluded: float = 0.0
 
 
 def _path(path: Path) -> Path:
@@ -44,7 +48,8 @@ def _load(path: Path, now: float, boot: Optional[str]) -> Optional[Observation]:
                 and 0 <= seen.since <= seen.seen_at <= now
                 and now - seen.seen_at <= MAX_GAP_S
                 and type(seen.filed) is bool
-                and (seen.warned_at is None or seen.since <= seen.warned_at <= seen.seen_at)):
+                and math.isfinite(seen.excluded) and seen.excluded >= 0
+                and (seen.warned_at is None or 0 <= seen.warned_at <= seen.seen_at)):
             return seen
     except (OSError, ValueError, TypeError):
         pass
@@ -64,7 +69,7 @@ def remember(path: Path, seen: Optional[Observation]) -> None:
         log.debug("kanban sync: cannot persist outbox observation at %s", target, exc_info=True)
 
 
-def observe(path: Path, op_id: Optional[str], now: float) -> Optional[Observation]:
+def observe(path: Path, op_id: Optional[str], now: float, *, awake: bool = True) -> Optional[Observation]:
     key = str(path.resolve())
     boot = replica_age._boot_id()
     seen = _SEEN.get(key)
@@ -77,6 +82,10 @@ def observe(path: Path, op_id: Optional[str], now: float) -> Optional[Observatio
     if (seen is None or seen.op_id != op_id or seen.boot != boot
             or not seen.seen_at <= now or now - seen.seen_at > MAX_GAP_S):
         seen = Observation(op_id, now, now, boot)
+    if not awake:
+        delta = now - seen.seen_at
+        seen.since += delta
+        seen.excluded += delta
     seen.seen_at = now
     _SEEN[key] = seen
     remember(path, seen)

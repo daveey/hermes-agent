@@ -16,7 +16,9 @@ live = fixtures.live
 def host(live, kanban_home, monkeypatch):
     alarm.reset()
     backlog.reset()
-    clock = SimpleNamespace(wall=10000.0, mono=100.0)
+    from cron import restart_rerun
+    clock = SimpleNamespace(wall=10000.0, mono=100.0, awake=True)
+    monkeypatch.setattr(restart_rerun, "host_fully_awake", lambda: clock.awake)
     monkeypatch.setattr(alarm.time, "time", lambda: clock.wall)
     monkeypatch.setattr(alarm.replica_age, "check", lambda *a, **kw: [])
     path = kanban_home / "kanban.db"
@@ -52,6 +54,23 @@ def _advance(host, seconds):
 
 
 @pytest.mark.parametrize("entry", ["after", "check"])
+def test_darkwake_never_counts_then_awake_stall_alarms(host, entry, caplog):
+    host.after()
+    host.clock.awake = False
+    for _ in range(25):
+        _advance(host, 60)
+        assert getattr(host, entry)() == []
+    host.clock.awake = True
+    for _ in range(9):
+        _advance(host, 60)
+        assert getattr(host, entry)() == []
+    _advance(host, 60)
+    assert getattr(host, entry)() == (["default"] if entry == "after" else ["t_alarm"])
+    text = caplog.text if entry == "after" else host.calls[0]
+    assert "excluded 1500 s not fully awake" in text
+
+
+@pytest.mark.parametrize("entry", ["after", "check"])
 def test_same_op_alarms_only_after_600_awake_seconds(host, entry, caplog):
     assert host.after() == []
     _advance(host, 599)
@@ -63,6 +82,96 @@ def test_same_op_alarms_only_after_600_awake_seconds(host, entry, caplog):
     text = caplog.text if entry == "after" else host.calls[0]
     op_id = host.conn.execute("SELECT op_id FROM kanban_sync_outbox ORDER BY created_at, rowid").fetchone()[0]
     assert op_id in text and "wall" in text and "observed-awake" in text
+
+
+@pytest.mark.parametrize("entry", ["after", "check"])
+def test_mixed_awake_darkwake_restart_keeps_budget(host, entry):
+    from hermes_cli import kanban_sync_outbox_observation as obs
+    import json
+    host.after()
+    _advance(host, 300)
+    getattr(host, entry)()
+    host.clock.awake = False
+    for _ in range(10):
+        _advance(host, 60)
+        assert getattr(host, entry)() == []
+    record = json.loads(obs._path(host.path).read_text())
+    assert record["excluded"] == 600
+    alarm.reset()
+    _advance(host, 60)
+    assert host.after() == []
+    record = json.loads(obs._path(host.path).read_text())
+    assert record["excluded"] == 660
+    host.clock.awake = True
+    _advance(host, 299)
+    assert getattr(host, entry)() == []
+    _advance(host, 60)
+    assert getattr(host, entry)() == (["default"] if entry == "after" else ["t_alarm"])
+
+
+def test_warned_incident_survives_long_darkwake_restart(host):
+    from hermes_cli import kanban_sync_outbox_observation as obs
+    host.after()
+    _advance(host, 600)
+    assert host.after() == ["default"]
+    assert host.check() == ["t_alarm"]
+    host.clock.awake = False
+    for _ in range(15):
+        _advance(host, 60)
+        assert host.after() == []
+    alarm.reset()
+    _advance(host, 60)
+    assert host.after() == []
+    seen = obs._SEEN[str(host.path.resolve())]
+    assert seen.excluded == 960
+    assert seen.filed is True
+    assert host.clock.mono - seen.since == 600
+
+
+@pytest.mark.parametrize("entry", ["after", "check"])
+def test_injected_probe_failure_reads_awake_once(host, entry):
+    calls = []
+    def broken():
+        calls.append(True)
+        raise OSError("probe failure")
+    host.after()
+    _advance(host, 600)
+    kwargs = {"mono": lambda: host.clock.mono, "awake_fn": broken}
+    if entry == "after":
+        result = alarm.after_round([SimpleNamespace(board="default", error=None, behind=False)],
+                                   [("default", host.path)], **kwargs)
+    else:
+        result = alarm.check(boards=[("default", host.path)], file_fn=lambda *a: "t_alarm", **kwargs)
+    assert result == (["default"] if entry == "after" else ["t_alarm"])
+    assert calls == [True]
+
+
+def test_dispatcher_samples_once_and_shares_probe_with_replica(host, monkeypatch):
+    calls, replica_samples = [], []
+    def awake():
+        calls.append(True)
+        return False
+    def replica(boards, *, now, awake_fn):
+        replica_samples.append(awake_fn())
+        return []
+    monkeypatch.setattr(alarm.replica_age, "check", replica)
+    assert alarm.check(boards=[("default", host.path), ("other", host.path)],
+                       mono=lambda: host.clock.mono, awake_fn=awake) == []
+    assert calls == [True]
+    assert replica_samples == [False]
+
+
+def test_alternating_entrypoints_exclude_interval_only_once(host):
+    from hermes_cli import kanban_sync_outbox_observation as obs
+    host.after()
+    host.clock.awake = False
+    for _ in range(15):
+        _advance(host, 60)
+        assert host.after() == []
+        assert host.check() == []
+    seen = obs._SEEN[str(host.path.resolve())]
+    assert seen.excluded == 900
+    assert host.clock.mono - seen.since == 0
 
 
 @pytest.mark.parametrize("change", ["identity", "ack", "held", "retry", "unreadable"])

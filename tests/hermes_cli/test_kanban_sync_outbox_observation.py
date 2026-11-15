@@ -19,6 +19,7 @@ def memo(tmp_path, monkeypatch):
     {"boot": "other"}, {"since": -1}, {"since": 501}, {"seen_at": 1001},
     {"seen_at": 399}, {"since": float("nan")}, {"filed": "false"},
     {"warned_at": 9999}, {"warned_at": "bad"}, {"op_id": []},
+    {"excluded": -1}, {"excluded": float("nan")}, {"excluded": float("inf")}, {"excluded": "bad"},
 ])
 def test_invalid_persisted_observation_resets(memo, patch):
     rec = dict(op_id="op", since=100, seen_at=500, boot="boot", filed=False, warned_at=None)
@@ -53,3 +54,10 @@ def test_write_failure_preserves_in_memory_budget(memo, monkeypatch):
     monkeypatch.setattr(type(memo), "write_text", denied)
     assert obs.observe(memo, "op", 100).since == 100
     assert obs.observe(memo, "op", 700).since == 100
+
+
+def test_old_memo_resumes_excluding_from_last_observation(memo):
+    rec = dict(op_id="op", since=100, seen_at=500, boot="boot", filed=False, warned_at=None)
+    obs._path(memo).write_text(json.dumps(rec), encoding="utf-8")
+    seen = obs.observe(memo, "op", 600, awake=False)
+    assert (seen.since, seen.seen_at, seen.excluded) == (200, 600, 100)
