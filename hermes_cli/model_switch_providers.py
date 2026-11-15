@@ -212,9 +212,11 @@ def picker_build_scope():
     if _POOL_STATE_MEMO.get() is not None:
         yield
         return
+    from hermes_cli.auth_pool_read_scope import auth_pool_read_scope
     token = _POOL_STATE_MEMO.set({})
     try:
-        yield
+        with auth_pool_read_scope():
+            yield
     finally:
         _POOL_STATE_MEMO.reset(token)
 
