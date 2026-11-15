@@ -115,11 +115,41 @@ def _run(tmp_path, shape):
     return command, marker.exists(), result
 
 
+# Bash 3.2 preserves Unicode escapes literally and rejects this parameter subscript
+# before evaluating its quoted substitution. These remain scanner sinks: the guard
+# must conservatively cover newer Bash even when the local shell treats them as data.
+BASH32_DATA = {
+    r"$'le\u0000ignored't 'a[$(SCRIPT)]=1'": (127, "command not found"),
+    r"$'le\U00000000ignored't 'a[$(SCRIPT)]=1'": (127, "command not found"),
+    r"$'\u006cet' 'a[$(SCRIPT)]=1'": (127, "command not found"),
+    r"a=(1); echo ${a[ \let '$(SCRIPT)' ]} 2>/dev/null": (1, "arithmetic operator"),
+}
+
+
+@pytest.fixture(scope="module")
+def bash_version():
+    bash = shutil.which("bash")
+    assert bash is not None, "Bash required for execution proof"
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c",
+         'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
+        env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True,
+        encoding="utf-8", timeout=10, check=True,
+    )
+    return result.stdout
+
+
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("shape", SINKS)
-def test_hidden_let_subscripts_are_sinks(tmp_path, shape):
+def test_hidden_let_subscripts_are_sinks(tmp_path, shape, bash_version):
     command, ran, result = _run(tmp_path, shape)
-    assert ran, (result.returncode, result.stderr)
+    if bash_version == "3.2" and shape in BASH32_DATA:
+        status, diagnostic = BASH32_DATA[shape]
+        assert not ran, (result.returncode, result.stderr)
+        assert result.returncode == status
+        assert diagnostic in result.stderr
+    else:
+        assert ran, (result.returncode, result.stderr)
     assert substitution_in_arithmetic(command, date_exempt=True)
     assert output_reaches_shell(command)
 
