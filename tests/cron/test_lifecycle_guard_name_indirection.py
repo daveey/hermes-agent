@@ -69,7 +69,8 @@ SHAPES = [
 # Bash versions that stop a shape before evaluating its subscript, as (exit status, stderr
 # fragment). These remain scanner sinks: the guard must conservatively cover every Bash even when
 # the local shell treats a shape as data. Bash 3.2 (macOS /bin/bash) has no `test -v`/`[[ -v ]]`
-# and rejects subscripted `printf -v` names; Bash 5.3 no longer runs a substitution found in an
+# and rejects subscripted `printf -v` names, namerefs, associative arrays, case/@Q indirect
+# operators and subscripted `unset` of a scalar; Bash 5.3 no longer runs a substitution found in an
 # `unset` subscript.
 BASH_DATA = {
     "3.2": {
@@ -87,6 +88,16 @@ BASH_DATA = {
         "x='a[$(SCRIPT)]'; printf -v 'a[x]' 1": (2, "not a valid identifier"),
         "x='a[$(SCRIPT)]'; builtin test -v 'a[x]'": (2, "-v: unary operator expected"),
         "x='a[$(SCRIPT)]'; command printf -v 'a[x]' 1": (2, "not a valid identifier"),
+        r'x="a[\$(SCRIPT)]"; printf -v "$x" 1': (2, "not a valid identifier"),
+        r'x="a[\$(SCRIPT)]"; test -v "$x"': (2, "-v: unary operator expected"),
+        r'x="a[\$(SCRIPT)]"; [[ -v $x ]]': (2, "conditional binary operator expected"),
+        r'x="a[\$(SCRIPT)]"; declare -n r="$x"; echo $r': (0, "-n: invalid option"),
+        **{f"x='a[$(SCRIPT)]'; echo ${{!x{operator}}}": (1, "bad substitution")
+           for operator in ('^', '^^', ',', ',,', '@Q')},
+        **{f"x='a[$(SCRIPT)]'; a=1; {unset} \"$x\"": (1, "not an array variable")
+           for unset in ('unset', 'unset -v')},
+        **{f"x='a[$(SCRIPT)]'; declare -A a; {unset} \"$x\"": (0, "-A: invalid option")
+           for unset in ('unset', 'unset -v')},
     },
     "5.3": {
         r"declare -a a=([0]=1); unset a[\$\(SCRIPT\)]": (1, "arithmetic syntax error"),
