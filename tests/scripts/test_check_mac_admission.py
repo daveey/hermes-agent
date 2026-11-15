@@ -96,7 +96,7 @@ def test_git_snapshot_push_refuses_before_historical_checker(tmp_path, caller, h
     argv = (["bash", "-c", shlex.join(push)] if caller == "terminal" else
             [sys.executable, "-c", "import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:]))", *push])
     result = _run(argv, repo, env)
-    refused = host == "Darwin" and candidate
+    refused = host == "Darwin"
     assert (result.returncode != 0) == refused, result.stdout + result.stderr
     assert ("pool worker" in result.stderr) == refused
     assert sentinel.exists() == (candidate and not refused)
