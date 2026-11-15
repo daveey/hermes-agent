@@ -435,6 +435,47 @@ def test_warm_observation_transactions_prune_historical_known_states(tmp_path):
     assert persisted == history  # pruning the warm cache must preserve insert-only ledger history
 
 
+def test_relevant_row_evicted_after_in_place_gateway_rename(tmp_path):
+    target, stable = _relevant(0), _relevant(1)
+    stable["task"]["sessions"].append(dict(stable["task"]["sessions"][0], gw="otherbox"))
+    replica = _hub(tmp_path, [target, stable])
+    ledger = tmp_path / "remote-notices.db"
+    remote._reset_for_tests()
+    first = obs.observe(replica, ledger, NOW)
+    assert {key for _gw, key, _state in first} == {target["key"], stable["key"]}
+    (flight,) = obs._retained.values()
+    assert len(flight.decoded) == 2 and len(flight.lane.table) == 0
+    inode = replica.stat().st_ino
+    with sqlite3.connect(ledger) as conn:
+        before = conn.execute("SELECT source, ref, state, first_seen FROM observations ORDER BY ref").fetchall()
+    assert len(before) == 2
+    with sqlite3.connect(replica) as conn:
+        rows = conn.execute("SELECT * FROM replica ORDER BY key").fetchall()
+        conn.execute("UPDATE meta SET v = 'otherbox' WHERE k = 'gateway'")
+        conn.execute("UPDATE meta SET v = '101' WHERE k IN ('cursor', 'head')")
+    assert replica.stat().st_ino == inode
+    with sqlite3.connect(replica) as conn:
+        assert conn.execute("SELECT * FROM replica ORDER BY key").fetchall() == rows
+
+    fresh = obs.observe(replica, ledger, NOW + 5)
+    expected = {ident: at for ident, at in first.items() if ident[1] == stable["key"]}
+    assert fresh == expected, "renamed gateway must not return the now-bystander decoded row"
+    assert fresh.first_seen == {ident: first.first_seen[ident] for ident in expected}
+    assert next(iter(obs._retained.values())) is flight  # exercise warm eviction, not a cold reconstruction
+    assert {ident[2] for ident in flight.decoded} == {stable["key"]}
+    assert len(flight.lane.table) == 1 and flight.lane.me == "otherbox"
+    assert obs.observe(replica, ledger, NOW + 10) == expected
+    # Returning to the original name must restore relevance without inventing a new terminal observation.
+    with sqlite3.connect(replica) as conn:
+        conn.execute("UPDATE meta SET v = 'macbook' WHERE k = 'gateway'")
+        conn.execute("UPDATE meta SET v = '102' WHERE k IN ('cursor', 'head')")
+    restored = obs.observe(replica, ledger, NOW + 15)
+    assert restored == first and restored.first_seen == first.first_seen
+    with sqlite3.connect(ledger) as conn:
+        assert conn.execute(
+            "SELECT source, ref, state, first_seen FROM observations ORDER BY ref").fetchall() == before
+
+
 def test_bystander_linked_after_an_in_place_gateway_rename_is_observed(tmp_path):
     # The replica's meta.gateway changes in place: a row that was a bystander for the old name and is linked to the
     # new one must be re-classified at once (as main decodes every row), not stay compact until its seq moves.
