@@ -227,6 +227,21 @@ def test_alternate_probe_fault_keeps_the_hold(pool, monkeypatch):
     assert seen == [] and result.clock_held[tid][0] == lp.GUARD_REASON
 
 
+@pytest.mark.parametrize("config", [{}, {**POOL_CFG, "default_model_profiles": ["other"]}], ids=["tier-off", "out-of-scope"])
+def test_profile_fallback_route_keeps_the_hold(pool, monkeypatch, config):
+    """A route the tier resolver did not choose (tier off, or a profile outside its scope) falls back to the profile's
+    own route, which the route applier never persists: a pace move there would be dropped after releasing the hold and
+    the card would launch on the paced profile route (review 5912306106). It keeps the hold."""
+    monkeypatch.setattr(tier, "load_tier_config", lambda: config)
+    monkeypatch.setattr(tier, "profile_route", lambda *_: ("gpt-6-astra", "openai-codex"))
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="routine work", assignee="a")
+        seen, result = _dispatch(conn)
+        assert tier.owner_model_pin(conn, kb.get_task(conn, tid)) == (None, None)
+    assert seen == [] and result.clock_held[tid][0] == lp.GUARD_REASON
+
+
 def test_offer_applies_only_to_the_route_it_judged():
     reroute.clear()
     reroute.offer("t1", ("gpt-6-astra", "openai-codex"), ("grok-4.7", "xai-oauth", "openai-codex"))

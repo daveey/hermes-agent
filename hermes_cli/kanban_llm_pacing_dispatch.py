@@ -144,16 +144,19 @@ def _route_providers(model: Optional[str], provider: Optional[str]) -> list[str]
     return [name] if name else []
 
 
-def candidate_route(conn: sqlite3.Connection, task: Any, lane: str) -> tuple[tuple, list[str]]:
+def candidate_route(conn: sqlite3.Connection, task: Any, lane: str) -> tuple[Optional[tuple], list[str]]:
     """``((model, provider, reason), providers)``: the card's next-run route and the providers it may land on
-    (``[]`` = unknown, the card starts)."""
+    (``[]`` = unknown, the card starts). The route is None when the tier resolver chose none (tier off, a profile
+    outside its scope): the card then launches on its own pin or profile route, which the route applier never
+    rewrites, so no pace move can apply to it (review 5912306106). [daveey]"""
     from hermes_cli.kanban_model_tier import profile_route, resolve_dispatch_tier
     model, provider, reason = resolve_dispatch_tier(conn, task, lane=lane)
+    route = (model, provider, reason) if model else None
     if not model:
         model, provider = getattr(task, "model_override", None), getattr(task, "provider_override", None)
     if not model:
         model, provider = profile_route(getattr(task, "assignee", None))
-    return (model, provider, reason), _route_providers(model, provider)
+    return route, _route_providers(model, provider)
 
 
 def candidate_providers(conn: sqlite3.Connection, task: Any, lane: str) -> list[str]:
@@ -327,6 +330,8 @@ def _pace_alternate(conn: sqlite3.Connection, task: Any, lane: str, cfg: lp.Paci
     (t_01a1deaf95f5b885). Any fault keeps the hold (warned)."""
     try:
         route = candidate_route(conn, task, lane)[0]
+        if route is None:
+            return None  # a pin/profile fallback route is launched as is: holding is the only safe answer
         return _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts)
     except Exception as exc:  # health: allow BLE001 -- a failed probe keeps today's hold, never starts a paced card
         _warn("alternate", "kanban pacing: pace alternate probe failed (%s: %s); holding", type(exc).__name__, exc)
