@@ -364,7 +364,9 @@ def accounted(name: str, *, rows: bool = False) -> Callable[[Callable], Callable
 def counters() -> dict[str, dict[str, Any]]:
     """A copy of the cumulative counters, by pass name."""
     with _lock:
-        return {name: st.as_dict() for name, st in _stats.items()}
+        out = {name: st.as_dict() for name, st in _stats.items()}
+        out.update({name: st.as_dict() for name, st in _cb_stats.items()})
+        return out
 
 
 def _clk_tck() -> float:
@@ -718,7 +720,8 @@ def reset() -> None:
         _stats.clear()
         _thread_accounted.clear()
         _exited_tids.clear()
-        _cb_keys.clear()
+        _cb_stats.clear()
+        _cb_cache.clear()
         _state.pop("exited_accounted", None)
 
 
@@ -805,37 +808,38 @@ def scoped_call(prefix: str, fn: Callable) -> Callable:
     return functools.partial(_run_scoped, f"{prefix}/{_callable_name(fn)}", fn)
 
 
-def _callback_key(cb: Any) -> str:
+_cb_stats: dict[str, _Stat] = {}  # callback name -> counters (at most MAX_CALLBACK_KEYS + the other bucket)
+_cb_cache: dict[Any, _Stat] = {}  # code object -> its counters: the hot path never builds a name twice
+_CB_CACHE_MAX = 4096
+
+
+def _callback_stat(cb: Any) -> _Stat:
+    """The counters of the callback ``cb`` (a task step is named by its coroutine, anything else by its
+    qualname). Hot path: one dict lookup keyed by the code object."""
     owner = getattr(cb, "__self__", None)
     get_coro = getattr(owner, "get_coro", None)
+    name = None
     if get_coro is not None:
-        try:
-            coro = get_coro()
-            return f"loop_cb/{getattr(coro, '__qualname__', None) or type(coro).__name__}"
-        except Exception:  # health: allow BLE001 -- a label only
-            logger.debug("loop accounting: callback label unavailable", exc_info=True)
-    return "loop_cb/" + _callable_name(cb)
-
-
-_cb_keys: set = set()
-
-
-def _book_callback(key: str, cpu: float, wall: float, tid: int, acc0: float) -> None:
+        coro = get_coro()
+        code = getattr(coro, "cr_code", None) or getattr(coro, "gi_code", None)
+        name = getattr(coro, "__qualname__", None)
+    else:
+        code = getattr(getattr(cb, "__func__", cb), "__code__", None)
+    st = _cb_cache.get(code) if code is not None else None
+    if st is not None:
+        return st
+    key = "loop_cb/" + (name or _callable_name(cb))
     with _lock:
-        own = max(0.0, cpu - max(0.0, _thread_accounted.get(tid, 0.0) - acc0))
-        if key not in _cb_keys:
-            if len(_cb_keys) >= MAX_CALLBACK_KEYS:
+        st = _cb_stats.get(key)
+        if st is None:
+            if len(_cb_stats) >= MAX_CALLBACK_KEYS:
                 key = CALLBACK_OTHER
-            else:
-                _cb_keys.add(key)
-        st = _stat(key)
-        st.runs += 1
-        st.cpu_s += own
-        st.cpu_max_s = max(st.cpu_max_s, own)
-        st.wall_s += wall
-        st.last_at = time.time()
-        if own > 0.0 and getattr(_local, "depth", 0) <= 0:
-            _add_accounted(tid, own)
+            st = _cb_stats.get(key)
+            if st is None:
+                st = _cb_stats[key] = _Stat()
+        if code is not None and len(_cb_cache) < _CB_CACHE_MAX:
+            _cb_cache[code] = st
+    return st
 
 
 _instrumented: dict[str, Any] = {}
@@ -881,14 +885,21 @@ def instrument_callbacks() -> bool:
     def _run(self):
         tid = _native_id()
         acc0 = _thread_accounted.get(tid, 0.0)
-        w0 = _perf()
         c0 = _thread_time()
         try:
             return orig(self)
         finally:
             cpu = _thread_time() - c0
             try:
-                _book_callback(_callback_key(self._callback), cpu, _perf() - w0, tid, acc0)
+                st = _callback_stat(self._callback)
+                own = cpu - (_thread_accounted.get(tid, 0.0) - acc0)
+                st.runs += 1
+                if own > 0.0:
+                    # Lock-free: only this thread writes its own entry (the snapshot only pops dead tids).
+                    st.cpu_s += own
+                    st.cpu_max_s = max(st.cpu_max_s, own)
+                    if getattr(_local, "depth", 0) <= 0:
+                        _thread_accounted[tid] = _thread_accounted.get(tid, 0.0) + own
             except Exception:  # health: allow BLE001 -- accounting must never break a loop callback
                 logger.debug("loop accounting: callback booking failed", exc_info=True)
 
@@ -972,7 +983,8 @@ def _after_fork_child() -> None:
     _lock = threading.Lock()
     _stats.clear()
     _thread_accounted.clear()
-    _cb_keys.clear()
+    _cb_stats.clear()
+    _cb_cache.clear()
     _started_at = time.time()
     _state.pop("exited_accounted", None)
     _state.update(thread=None, stop=None, pid=os.getpid(), role=None)
