@@ -9,6 +9,7 @@ resolved once; everything below the home is still opened without following links
 """
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -145,6 +146,57 @@ def test_canonical_resolves_only_the_home_prefix(linked_home, tmp_path):
     other = tmp_path / "alias" / "x"
     assert sa._canonical(other) == other
     assert sa._canonical(Path("relative") / "path") == Path("relative") / "path"
+
+
+@pytest.mark.parametrize("operation", ["canonical", "scan"])
+def test_home_retargeted_between_stat_and_resolve_is_not_accepted(
+    linked_home, tmp_path, monkeypatch, operation,
+):
+    link, real = linked_home
+    tail = Path("kanban") / "workspaces" / "tree"
+    (real / tail).mkdir(parents=True)
+    foreign = tmp_path / "foreign-home"
+    (foreign / tail).mkdir(parents=True)
+    (foreign / tail / "secret.txt").write_text("must not be read")
+    spelled = link / tail
+    realpath = os.path.realpath
+    original = Path(realpath(real)) / tail
+    foreign_root = Path(realpath(foreign)) / tail
+    # Control: the stable operator-owned home link remains supported.
+    assert sa._canonical(spelled) == original
+    assert sa._scan(spelled).keys() == {"."}
+    assert real.stat().st_ino != foreign.stat().st_ino
+    retargeted = []
+
+    def retarget_at_resolve(path, *args, **kwargs):
+        # _canonical has already stat'ed this ancestor and matched its inode
+        # to the trusted home. Change the real link, not either stat result.
+        if Path(path) == link:
+            assert not retargeted
+            link.unlink()
+            link.symlink_to(foreign.name)
+            retargeted.append(path)
+        return realpath(path, *args, **kwargs)
+
+    # Keep the seam module-local: the test home-I/O guard also calls realpath
+    # during stat, and must retain the real resolver and all its protections.
+    archive_os = SimpleNamespace(**vars(os))
+    archive_os.path = SimpleNamespace(**vars(os.path))
+    archive_os.path.realpath = retarget_at_resolve
+    with monkeypatch.context() as patch:
+        patch.setattr(sa, "os", archive_os)
+        if operation == "canonical":
+            result = sa._canonical(spelled)
+            assert result != foreign_root, "retargeted home must not accept a foreign root"
+            assert result == spelled
+        else:
+            # The unchanged spelling still contains a symlink: the downstream
+            # no-follow walk must refuse it rather than scan foreign content.
+            with pytest.raises(sa.ArchiveRefused):
+                sa._scan(spelled)
+    assert retargeted == [link]
+    assert link.resolve() == foreign_root.parents[2]
+    assert (foreign / tail / "secret.txt").read_text() == "must not be read"
 
 
 def test_scan_reads_the_same_tree_through_either_spelling(linked_home):
