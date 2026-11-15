@@ -260,16 +260,37 @@ def park_state(conn: sqlite3.Connection, task_id: str) -> dict:
 
     marks = ",".join("?" for _ in SCHEDULED_ENTRY_EVENTS)
     event = conn.execute(
-        f"SELECT kind, payload, created_at FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
+        f"SELECT kind, payload, created_at, id, run_id FROM task_events WHERE task_id = ? AND kind IN ({marks}) "
         "ORDER BY id DESC LIMIT 1", (task_id, *SCHEDULED_ENTRY_EVENTS),
     ).fetchone()
-    if event is None:
+    if event is None or _park_spent(conn, task_id, int(event[3]), event[4]):
+        # No park, or only a spent one: a feed page can bring a remote run's ``scheduled`` row before the
+        # ``continued`` event that carries its wake (t_01a1df6a505bf42f). [daveey]
         last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ?", (task_id,)).fetchone()
         parked_at = int(last[0]) if last and last[0] else int(time.time())
-        return {"payload": {}, "parked_at": parked_at, "timed": False}
+        return {"payload": {}, "parked_at": parked_at, "timed": False, "event_id": None,
+                "superseded": event is not None}
     timed = pending_wake_payload(event[0], event[1])
     return {"payload": timed if timed is not None else kb._json_dict(event[1]),
-            "parked_at": int(event[2]), "timed": timed is not None}
+            "parked_at": int(event[2]), "timed": timed is not None, "event_id": int(event[3]),
+            "superseded": False}
+
+
+# A ``scheduled`` card whose only parking event is spent waits this long after its last event for the park that
+# put it there to be imported, then wakes (a lost park event must not strand it). Feed pages land seconds apart.
+SUPERSEDED_PARK_GRACE_SECONDS = 3600
+
+
+def _park_spent(conn: sqlite3.Connection, task_id: str, event_id: int, run_id: Optional[int]) -> bool:
+    """True when the parking event ``event_id`` already ended: its wake fired here, or a later run claimed the
+    card. Such a park never holds the card again; a ``scheduled`` row after it belongs to a newer park whose event
+    has not reached this board yet. The parking run's own claim, imported after its park, does not count, the
+    rule ``kanban_wake_check.restore_missing_checks`` applies to the probe. [daveey]"""
+    return conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND id > ? AND (kind = ? OR (kind IN ('claimed', 'spawned') "
+        "AND (run_id IS NULL OR ? IS NULL OR run_id != ?))) LIMIT 1",
+        (task_id, event_id, CONTINUATION_WOKEN_EVENT, run_id, run_id),
+    ).fetchone() is not None
 
 
 def pending_wake(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
@@ -311,7 +332,8 @@ def _wake_parks(conn: sqlite3.Connection, now: Optional[int]) -> tuple[list[str]
         tid = row[0]
         if tid in copies:
             continue
-        payload = pending_wake(conn, tid)
+        park = park_state(conn, tid)
+        payload = park["payload"] if park["timed"] else None
         if payload is None:
             # Invariant: every scheduled card has a wake or becomes blocked. [daveey]
             if not _enforce_wake_invariant(conn, tid, row[1], now, woken):
@@ -325,6 +347,8 @@ def _wake_parks(conn: sqlite3.Connection, now: Optional[int]) -> tuple[list[str]
         resume = payload.get("resume_status") if payload.get("resume_status") in ("ready", "review") else "ready"
         with kb.write_txn(conn):
             from hermes_cli.kanban_terminal_guard import skip_wake
+            if park_state(conn, tid).get("event_id") != park.get("event_id"):
+                continue  # the park moved or was spent since the read above: the next tick reads it again
             if skip_wake(conn, tid, CONTINUATION_WOKEN_EVENT, wake_at=wake_at):
                 continue  # a stale copy: the card completed after it parked (t_01a1c7b27ca3b496) [daveey]
             landing = kb._landing_status_after_parents(conn, tid)
@@ -352,6 +376,9 @@ def missing_wake(conn: sqlite3.Connection, task_id: str, *, park: Optional[dict]
     park = park_state(conn, task_id) if park is None else park
     if park["timed"]:
         return None
+    if park.get("superseded"):  # its own park is still on the way: a late backstop, never the spent one's wake
+        return {"parked_at": park["parked_at"], "wake_at": park["parked_at"] + SUPERSEDED_PARK_GRACE_SECONDS,
+                "reason": None, "park_missing": True}
     payload, parked_at = park["payload"], park["parked_at"]
     reason = payload.get("reason") if isinstance(payload.get("reason"), str) else None
     return {"parked_at": parked_at, "wake_at": implied_wake(payload, parked_at), "reason": reason}
@@ -359,8 +386,9 @@ def missing_wake(conn: sqlite3.Connection, task_id: str, *, park: Optional[dict]
 
 def blocks_for_human(park: dict, block_kind: Optional[str]) -> bool:
     """True when :func:`_enforce_wake_invariant` moves this park to ``blocked`` instead of waking
-    it: no timed wake and a human ``block_kind``. Displays read this, not their own rule. [daveey]"""
-    return not park["timed"] and block_kind in HUMAN_BLOCK_KINDS
+    it: no timed wake and a human ``block_kind``. Displays read this, not their own rule. A card whose park is
+    still being imported is not judged by a block kind left from before it ran. [daveey]"""
+    return not park["timed"] and not park.get("superseded") and block_kind in HUMAN_BLOCK_KINDS
 
 
 def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int, woken: list) -> bool:
@@ -392,6 +420,9 @@ def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int,
         return False
     with kb.write_txn(conn):
         from hermes_cli.kanban_terminal_guard import skip_wake
+        again = park_state(conn, tid)
+        if (again.get("event_id"), again.get("superseded")) != (park.get("event_id"), park.get("superseded")):
+            return False  # a park arrived (or was spent) since the read above: the next tick reads it
         if skip_wake(conn, tid, CONTINUATION_WOKEN_EVENT, wake_at=info["wake_at"]):
             return False
         landing = kb._landing_status_after_parents(conn, tid)
@@ -399,8 +430,9 @@ def _enforce_wake_invariant(conn, tid: str, block_kind: Optional[str], now: int,
             "UPDATE tasks SET status = ?, current_run_id = NULL WHERE id = ? AND status = 'scheduled'",
             (landing, tid))
         if cur.rowcount == 1:
+            extra = {"park_missing": True} if info.get("park_missing") else {}
             kb._append_event(conn, tid, CONTINUATION_WOKEN_EVENT, {
-                "status": landing, "wake_at": info["wake_at"], "implied_wake": True})
+                "status": landing, "wake_at": info["wake_at"], "implied_wake": True, **extra})
             woken.append(tid)
     return cur.rowcount == 1
 
