@@ -112,7 +112,7 @@ class RangeHandler(BaseHTTPRequestHandler):
 class RangeHTTPServer(ThreadingHTTPServer):
     # The downloader fans out eight connections before any need be accepted.
     # Threading handlers do not enlarge TCPServer's default backlog of five;
-    # a descheduled acceptor can otherwise overflow it on Darwin (EINVAL).
+    # a descheduled acceptor can otherwise overflow it and force SYN retries.
     request_queue_size = 16
 
 
