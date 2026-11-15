@@ -163,6 +163,49 @@ def test_condition_met_precedence_uses_event_order(board, monkeypatch, newer):
     assert _probe(board, owner, until="review")[0] == 1
 
 
+@pytest.mark.parametrize("event_kind", ["scheduled", "continued"])
+@pytest.mark.parametrize("matching", [False, True])
+def test_park_baseline_requires_generated_command(board, monkeypatch, event_kind, matching):
+    from hermes_cli.kanban_wait_baseline import park_status
+
+    owner, producer = _park(board, monkeypatch, "blocked")
+    park = [e for e in kb.list_events(board, owner) if e.kind == "scheduled"][-1].payload
+    assert park["awaiting"]["auto_card_probe"] is True
+    assert park["awaiting"]["observed"] == f"{producer} blocked"
+    if not matching:
+        # Still probes the same card, but is an explicit command, not the generated one.
+        park["wake_check"] += " --until blocked"
+    with kb.write_txn(board):
+        kb._append_event(board, owner, event_kind, park)
+    db_path = board.execute("PRAGMA database_list").fetchone()[2]
+    assert park_status(owner, db_path, producer) == ((True, "blocked") if matching else (False, None))
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_cli_reused_generated_record_with_explicit_command(board, monkeypatch, matching):
+    from hermes_cli.kanban_wait_baseline import park_status
+
+    owner, producer = _park(board, monkeypatch, "blocked")
+    park = [e for e in kb.list_events(board, owner) if e.kind == "scheduled"][-1].payload
+    # JSON awaiting is a supported CLI input. Normalization preserves the generated marker
+    # even when a caller reuses the record with a different explicit wake command.
+    cmd = park["wake_check"] + ("" if matching else " --until blocked")
+    args = argparse.Namespace(awaiting=json.dumps(park["awaiting"]), awaiting_why=None,
+                              reason="waiting for producer", wake_check=cmd)
+    record, fields = cli._cli_awaiting(args, cli._cli_wake_check(args))
+    assert record["auto_card_probe"] is True
+    assert fields[0] == cmd
+    owner = kb.create_task(board, title="waiter reusing generated metadata")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", owner)
+    assert kb.schedule_task(board, owner, reason=args.reason, awaiting=record, wake_check=fields[0])
+    saved = [e for e in kb.list_events(board, owner) if e.kind == "scheduled"][-1].payload
+    assert saved["awaiting"]["observed"] == f"{producer} blocked"
+    assert saved["wake_check"] == cmd
+    db_path = board.execute("PRAGMA database_list").fetchone()[2]
+    assert park_status(owner, db_path, producer) == ((True, "blocked") if matching else (False, None))
+    assert _probe(board, owner)[0] == (1 if matching else 0)
+
+
 def test_stale_result_cannot_retire_baseline(board, monkeypatch):
     owner, producer = _park(board, monkeypatch, "blocked")
     state = wake.get_state(board, owner)
