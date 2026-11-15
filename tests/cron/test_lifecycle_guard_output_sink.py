@@ -6,6 +6,7 @@ an interpreter string literal. The shape corpus (``heredoc_shape_corpus``, ``s_p
 "sink"``) crosses every sink with every wrapper and nesting form under real bash.
 """
 
+import cProfile
 import shutil
 import subprocess
 import time
@@ -217,11 +218,23 @@ def test_sink_regex_is_linear_on_masked_newline_runs():
 
 
 def test_large_no_sink_heredoc_scan_stays_fast(tmp_path):
-    body = "".join(f"x{i} = {i}\n" for i in range(8000))
-    command = "python3 - <<'PY'\n" + body + "PY\n"
-    started = time.monotonic()
-    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
-    assert time.monotonic() - started < 5.0
+    # Wall time includes unrelated suite scheduling (reported 15.8s on a loaded
+    # runner, 4.3s on retry). Count work instead: eight times the input must stay
+    # near eight times the calls, with an absolute budget to catch extra passes.
+    # Count builtin calls too; cProfile does NOT count work inside a C regex, so
+    # test_sink_regex_is_linear_on_masked_newline_runs remains a separate guard.
+    calls = []
+    for lines in (1000, 8000):
+        body = "".join(f"x{i} = {i}\n" for i in range(lines))
+        command = "python3 - <<'PY'\n" + body + "PY\n"
+        with cProfile.Profile() as profile:
+            assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+        count = sum(entry.callcount for entry in profile.getstats())
+        # Baseline ~2370 calls/line; allow implementation/interpreter variation,
+        # not a second traversal. No elapsed-time deadline is widened or mocked.
+        assert count < 3000 * lines + 100_000, (lines, count)
+        calls.append(count)
+    assert calls[1] < 9 * calls[0], calls
 
 
 def test_producer_reading_an_oversized_data_file_under_a_sink_fails_closed(tmp_path):
