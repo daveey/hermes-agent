@@ -169,9 +169,10 @@ class _HereDocs:
         """Advance on the character at *pos*; when it is the newline before complete bodies,
         return the position after them, else *pos*."""
         char = text[pos]
-        if char == "[" and _arithmetic_bracket(text, pos):
-            self._bracket_end = text.find("]", pos + 1)
         if pos <= self._bracket_end:
+            return pos
+        if char == "[" and _arithmetic_bracket(text, pos):
+            self._bracket_end = _bracket_end(text, pos)
             return pos
         if char == "(" and self._arith < 0 and text.startswith("((", pos):
             self._arith = depth
@@ -190,11 +191,33 @@ class _HereDocs:
         return pos
 
 
+def _bracket_end(text: str, pos: int) -> int:
+    """Find the balanced closing bracket, ignoring quoted or escaped brackets."""
+    depth = 1
+    pos += 1
+    while pos < len(text):
+        char = text[pos]
+        if char == "\\":
+            pos += 2
+            continue
+        if char in "'\"`":
+            pos = _quoted_end(text, pos + 1, char, escapes=char != "'")
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if not depth:
+                return pos
+        pos += 1
+    return -1
+
+
 def _arithmetic_bracket(text: str, pos: int) -> bool:
     """Legacy arithmetic expansion or an assignment subscript, not literal ``[``."""
     if text[pos - 1:pos] == "$":
         return True
-    end = text.find("]", pos + 1)
+    end = _bracket_end(text, pos)
     return end >= 0 and text.startswith(("=", "+="), end + 1) and bool(
         re.search(r"(?:^|[\s;|(])[A-Za-z_][A-Za-z_0-9]*$", text[:pos]))
 
