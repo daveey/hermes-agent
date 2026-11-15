@@ -105,6 +105,48 @@ def test_missing_imported_comment_is_not_acknowledged_by_colliding_id(board, por
     assert ok, output
 
 
+@pytest.mark.parametrize("entry", ["promote", "unblock", "tool"])
+@pytest.mark.parametrize("portable", [False, True])
+@pytest.mark.parametrize("sibling_session", ["peer-session", "reader", None])
+@pytest.mark.parametrize("sibling_portable", [True, False])
+def test_partial_sync_cannot_reuse_acknowledged_sibling(
+        board, entry, portable, sibling_session, sibling_portable, capsys, monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: 1794700000)
+    enable_sync(board)
+    read_id = imported(board, 800001, portable=sibling_portable, suffix="read", session=sibling_session)
+    payload = {"comment_id": 800002, "author": "default", "writer_session": "peer-session"}
+    if portable:
+        payload["comment_uid"] = "remote-comment-unread"
+    change = sync.RemoteChange(3, "task_events", "remote-event-unread", "upsert",
+                              {"task_id": board, "kind": "commented",
+                               "created_at": int(time.time()) - 180,
+                               "payload": json.dumps(payload)}, 1, "", "peer")
+    with kbc.connect_closing() as conn:
+        assert sync.apply_remote_changes(conn, [change], new_cursor=3, observers=False).applied == 1
+    before = snapshot(board)
+    ok, output = release(board, entry, capsys, read_id)
+    assert not ok and "Comment data unavailable" in output, output
+    assert snapshot(board) == before
+    restored = imported(board, 800002, portable=portable, suffix="unread")
+    ok, output = release(board, entry, capsys, read_id)
+    assert not ok and "do not release unread" in output, output
+    ok, output = release(board, entry, capsys, restored)
+    assert ok, output
+
+
+@pytest.mark.parametrize("candidates,missing", [
+    ({1: [1], 2: [1]}, {1, 2}),
+    ({1: [1, 2], 2: [1]}, set()),  # Reassign the first event, rather than greedily fail.
+    ({1: [1], 2: [1], 3: [1, 2, 3]}, {1, 2, 3}),  # Equal totals do not prove Hall coverage.
+    ({1: [], 2: [2]}, {1}),  # Missing unrelated history does not poison a complete component.
+    ({1: [1, 2], 2: [2, 3], 3: [1]}, set()),
+])
+def test_event_coverage_requires_injective_matching(candidates, missing):
+    from hermes_cli.kanban_release_comments import _missing_coverage
+    resolved = {eid: [{"id": rid} for rid in rows] for eid, rows in candidates.items()}
+    assert _missing_coverage(resolved) == missing
+
+
 def test_writer_stamps_actual_comment_uid(board):
     enable_sync(board)
     cid = comment(board)

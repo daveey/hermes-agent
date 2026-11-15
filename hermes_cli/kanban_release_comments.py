@@ -35,11 +35,16 @@ def check(conn, tid, *, session, seen=None, verb="unblock", board=None):
     if not events:
         return
     rows = conn.execute("SELECT * FROM task_comments WHERE task_id=? ORDER BY id", (tid,)).fetchall()
+    all_events = conn.execute(
+        "SELECT * FROM task_events WHERE task_id=? AND kind='commented'", (tid,),
+    ).fetchall()
+    resolved = {e["id"]: _resolve(rows, e, json.loads(e["payload"] or "{}")) for e in all_events}
+    missing = _missing_coverage(resolved)
     comments = []
     for event in events:
         payload = json.loads(event["payload"])
-        candidates = _resolve(rows, event, payload)
-        if not candidates:
+        candidates = resolved[event["id"]]
+        if event["id"] in missing:
             # A partial sync must not turn missing comment data into permission.
             comments.append(_listing(None, "Comment data unavailable; wait for sync and read again. --seen cannot "
                                      "acknowledge missing data.", event, payload))
@@ -55,6 +60,56 @@ def check(conn, tid, *, session, seen=None, verb="unblock", board=None):
     newest = max((r["id"] for r in comments if r["id"] is not None), default=seen or 0)
     command += [verb, tid, "--seen", str(newest)]
     raise UnreadComments(comments, shlex.join(command))
+
+
+def _missing_coverage(resolved):
+    """Reject ambiguous components without distinct rows for every event.
+
+    Own/old events still consume rows: filtering them before matching lets their
+    rows stand in for a missing foreign comment. Matching proves completeness,
+    not identity, so the caller still lists *all* plausible legacy candidates.
+    """
+    by_row = {}
+    for eid, rows in resolved.items():
+        for row in rows:
+            by_row.setdefault(row["id"], set()).add(eid)
+    remaining, missing = set(resolved), set()
+    while remaining:
+        component, pending = set(), {next(iter(remaining))}
+        while pending:
+            eid = pending.pop()
+            component.add(eid)
+            for row in resolved[eid]:
+                pending.update(by_row[row["id"]] - component)
+        remaining -= component
+        owners = {}
+        if not all(_match(eid, resolved, owners) for eid in component):
+            missing.update(component)
+    return missing
+
+
+def _match(start, resolved, owners):
+    """Iterative augmenting path; no recursion limit for large comment threads."""
+    pending, visited_rows = [start], set()
+    previous: dict[int, tuple[int, int] | None] = {start: None}
+    for eid in pending:
+        for row in resolved[eid]:
+            rid = row["id"]
+            if rid in visited_rows:
+                continue
+            visited_rows.add(rid)
+            owner = owners.get(rid)
+            if owner is None:
+                while True:
+                    owners[rid] = eid
+                    step = previous[eid]
+                    if step is None:
+                        return True
+                    eid, rid = step
+            if owner not in previous:
+                previous[owner] = (eid, rid)
+                pending.append(owner)
+    return False
 
 
 def _listing(cid, body, event, payload):
