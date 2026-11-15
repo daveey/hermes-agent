@@ -550,8 +550,13 @@ def _iter_nested_shell_inputs(
         return
     from tools.shell_heredoc import iter_heredoc_bodies
 
+    from cron.lifecycle_guard import _command_segment_views, _iter_segment_contexts
+
+    # Contextual segments resolve process-substitution file feeds into redirections.
+    # Flat command views retain only the substitution placeholder, losing that file.
     classified = [(view, _nested_shell_input(view))
-                  for view in _iter_command_segment_views(walk_command)]
+                  for segment, _call_argument, _piped in _iter_segment_contexts(walk_command)
+                  for view in _command_segment_views(segment)]
     # Such a shell inside a compound command reads that command's stdin redirections and
     # heredocs (`{ su -l bob; } < f`, `( su -l bob ) <<< T`, `if …; then su -l bob; fi <<E`).
     # Where the group opens is not tracked (it may be lines earlier), nor whether the shell's own
