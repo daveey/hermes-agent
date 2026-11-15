@@ -1628,14 +1628,14 @@ def _apply_monitor_gate(
     """
     from cron.monitor import check_monitor, job_has_monitor
 
+    job.pop("_monitor_change_id", None)  # only this tick's offered generation may be acknowledged
     if not job_has_monitor(job):
         return None, extra_prompt, None
     _mon = check_monitor(job)
     _mon_now = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
     header = _job_doc_header(job_name, job_id, _mon_now, "monitor")
     if not _mon.ok:
-        # Source failure is an ERROR, never a change: alert so a broken monitor can't silently
-        # stop watching. Stored hash untouched.
+        # Source failure is an ERROR, never a change: alert (a broken monitor can't go quiet).
         logger.error("Job '%s': monitor source failed: %s", job_id, _mon.error)
         # [daveey] Pre-agent: booked last_error_kind="gate", so the next good gate tick (which proves
         # the source works again) clears a streak made only of these.
@@ -1657,6 +1657,7 @@ def _apply_monitor_gate(
         ), extra_prompt, None
     # Changed (or first run): pass monitor output through the runtime-data seam. Keep any manual
     # per-run prompt separate: it remains user input and is therefore still strict-scanned.
+    job["_monitor_change_id"] = _mon.change_id
     return None, extra_prompt, _mon.context_block
 
 
@@ -2794,9 +2795,6 @@ def run_job(
     cancel_event: Optional[_CancelEventLike] = None, execution_id: Optional[str] = None,
 ) -> tuple[bool, str, str, Optional[str]]:
     """Execute a single cron job. Returns (success, full_output_doc, final_response, error).
-    ``defer_agent_teardown``: if a list, the live agent is appended instead of torn down; the caller
-    MUST call ``_teardown_cron_agent(agent)`` AFTER delivery (a torn-down async client can't
-    deliver). ``extra_prompt``: per-fire context, never persisted.
 
     ``defer_agent_teardown``: when a caller passes a list, ``run_job`` skips the agent's async-resource
     teardown (``agent.close()`` + ``cleanup_stale_async_clients()``) in its ``finally`` block and instead
@@ -2857,6 +2855,8 @@ def run_job(
             agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
             worker_state=_worker_state)
         final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
+        from cron.monitor_outbox import acknowledge_success
+        acknowledge_success(job, result, final_response, _cron_failure_marker_error)
         if (setup.fallback_notice and final_response.strip() and not _is_cron_silence_response(final_response)
                 and _cron_failure_marker_error(final_response) is None):
             # Pre-agent provider switch (#74349) rides with the delivered report; silence and the

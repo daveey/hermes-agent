@@ -101,13 +101,14 @@ def test_cron_stdout_preserves_identity_and_masks_adjacent_token(tmp_path, monke
     script = scripts / "synthetic_monitor.py"
     # A real child emits JSON; resolution, capture, redaction and context stay real.
     script.write_text("import json\nprint(json.dumps(" + repr({"key": identity, "credential": token, "message": "\n" + token}) + "))\n")
-    snapshots = []
-    # Only replace persistence: no cron job store or production monitor is touched.
-    monkeypatch.setattr("cron.monitor._persist_monitor_state", lambda *args: snapshots.append(args))
-    outcome = check_monitor({"id": "synthetic-monitor", "monitor_script": script.name, "interpreter": sys.executable})
+    from cron import jobs
+    # The job store lives in the isolated home: no production monitor is touched.
+    job = jobs.create_job(prompt="Watch", schedule="every 5m", monitor_script=script.name,
+                          interpreter=sys.executable)
+    outcome = check_monitor(job)
     assert outcome.ok, outcome.error
     assert outcome.changed
-    result = json.loads(snapshots[0][2])
+    result = json.loads(jobs.get_job(job["id"])["monitor_state"]["pending_changes"][0]["new"])
     assert result["key"] == identity
     # The JSON key-name pass may mask "credential" first; either way the token body is gone.
     assert token not in result["credential"]

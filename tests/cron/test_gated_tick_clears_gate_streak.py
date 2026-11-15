@@ -133,7 +133,10 @@ def test_real_monitor_script_failure_then_recovery_heals_end_to_end(monkeypatch)
     _bypass_gate(monkeypatch)
     job_id, _slot = _due_agent_job("watcher")
     J.update_job(job_id, {"monitor_script": "watch.py"})
-    assert check_monitor(_stored(job_id)).changed  # first run seeds the stored hash
+    from cron.monitor_outbox import acknowledge
+    seeded = check_monitor(_stored(job_id))
+    assert seeded.changed and seeded.change_id  # first run stages the baseline
+    assert acknowledge(job_id, seeded.change_id)  # as a successful agent run would
 
     from contextlib import asynccontextmanager
     from hermes_cli import gateway_client

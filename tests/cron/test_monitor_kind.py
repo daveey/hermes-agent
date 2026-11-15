@@ -323,6 +323,78 @@ def test_monitor_script_uses_configured_interpreter(hermes_env, monkeypatch):
     assert "1" in observed["prompts"][0]
 
 
+@pytest.mark.parametrize("baseline", [True, False])
+def test_pre_agent_quota_failure_retries_then_suppresses(hermes_env, monkeypatch, baseline):
+    import time
+    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+    from cron import jobs, scheduler
+
+    job = _make_monitor_job(hermes_env, "echo 'state A'\n")
+    observed = {}
+    _install_agent_stubs(monkeypatch, observed)
+    if not baseline:
+        assert scheduler.run_job(job)[0]
+        _write_script(hermes_env, "mon.sh", "echo 'state B'\n")
+    construct = scheduler._construct_cron_agent
+
+    def refused(*args, **kwargs):
+        raise SubscriptionQuotaUnavailable("anthropic", "test", time.time() + 3600)
+
+    monkeypatch.setattr(scheduler, "_construct_cron_agent", refused)
+    assert not scheduler.run_job(job)[0]
+    pending = jobs.get_job(job["id"])["monitor_state"]["pending_changes"]
+    assert len(pending) == 1
+    # Source errors cannot acknowledge the pending generation either.
+    _write_script(hermes_env, "mon.sh", "exit 3\n")
+    assert not scheduler.run_job(job)[0]
+    assert jobs.get_job(job["id"])["monitor_state"]["pending_changes"] == pending
+    _write_script(hermes_env, "mon.sh", "echo 'state A'\n" if baseline else "echo 'state B'\n")
+    monkeypatch.setattr(scheduler, "_construct_cron_agent", construct)
+    assert scheduler.run_job(job)[0]
+    assert pending[0]["id"] in observed["prompts"][-1]
+    if not baseline:
+        assert "-state A" in observed["prompts"][-1]
+        assert "+state B" in observed["prompts"][-1]
+    assert "no_change" in scheduler.run_job(job)[1]
+
+
+@pytest.mark.parametrize("result", [
+    {"final_response": "[CRON_FAILURE]\nsource analysis failed", "completed": True},
+    {"final_response": "partial", "completed": False},
+    {"final_response": "partial", "completed": False, "turn_exit_reason": "max_iterations_reached(1/1)"},
+    {"final_response": "partial", "completed": True, "interrupted": True},
+    {"final_response": "", "completed": True},
+    {"final_response": "[SILENT]", "failed": True},
+])
+def test_unsuccessful_agent_retains_original_generation(hermes_env, monkeypatch, result):
+    from cron import jobs, scheduler
+
+    job = _make_monitor_job(hermes_env, "echo 'state A'\n")
+    _install_agent_stubs(monkeypatch, {})
+    monkeypatch.setattr(scheduler, "_run_agent_with_watchdog", lambda *a, **kw: dict(result, messages=[]))
+    scheduler.run_job(job)
+    pending = jobs.get_job(job["id"])["monitor_state"]["pending_changes"]
+    assert len(pending) == 1
+    scheduler.run_job(job)
+    [retained] = jobs.get_job(job["id"])["monitor_state"]["pending_changes"]
+    assert retained == dict(pending[0], attempts=2)  # same generation, re-offered
+
+
+@pytest.mark.parametrize("answer", ["agent done", "[SILENT]"])
+def test_success_consumes_pending_generation(hermes_env, monkeypatch, answer):
+    from cron import jobs, scheduler
+
+    job = _make_monitor_job(hermes_env, "echo 'state A'\n")
+    _install_agent_stubs(monkeypatch, {})
+    monkeypatch.setattr(scheduler, "_run_agent_with_watchdog", lambda *a, **kw: {
+        "final_response": answer, "completed": True, "messages": []})
+    assert scheduler.run_job(job)[0]
+    state = jobs.get_job(job["id"])["monitor_state"]
+    assert state["pending_changes"] == []
+    assert state["last_output_hash"]
+    assert "no_change" in scheduler.run_job(job)[1]
+
+
 def test_unchanged_output_suppresses_agent_run(hermes_env, monkeypatch):
     from cron.jobs import get_job
     from cron.scheduler import SILENT_MARKER, run_job

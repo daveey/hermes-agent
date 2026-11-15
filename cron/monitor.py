@@ -3,11 +3,14 @@
 A monitor job attaches a cheap source (``monitor_script`` / ``monitor_url``) to an LLM cron job.
 Each tick runs the source FIRST and hashes its EXACT output bytes (no timestamp/whitespace
 normalization — scripts must emit stable output) against the hash from the last agent-triggering
-tick: unchanged → agent run suppressed (silent ``no_change`` run); changed/first run → a "MONITOR
-CHANGE DETECTED" block (capped unified diff + new output) is injected into the prompt; source
-failure → an ERROR, never a change, and the stored hash is left untouched. State:
-``job["monitor_state"]`` in jobs.json (hash + last_changed_at) and
-``OUTPUT_DIR/<job_id>/monitor_last_output.txt`` (for the diff).
+tick: unchanged → agent run suppressed (silent ``no_change`` run); changed/first run → the
+observation is staged as a pending generation (``cron.monitor_outbox``) and a "MONITOR CHANGE
+DETECTED" block (capped unified diff + new output + stable change id) is injected into the prompt.
+The generation stays pending, and is re-offered with the same diff, until a successful agent run
+acknowledges it (at-least-once). Source failure → an ERROR, never a change, nothing staged.
+State: ``job["monitor_state"]`` in jobs.json (acknowledged snapshot + hash and the pending
+generations, written atomically together). ``OUTPUT_DIR/<job_id>/monitor_last_output.txt`` is
+read only to migrate legacy hash-only state.
 """
 
 from __future__ import annotations
@@ -40,6 +43,8 @@ class MonitorOutcome:
     first_run: bool = False
     context_block: Optional[str] = None
     error: Optional[str] = None
+    change_id: Optional[str] = None
+    attempt: int = 0
 
 
 def hash_monitor_output(output: str) -> str:
@@ -63,27 +68,6 @@ def _snapshot_path(job_id: str):
     from cron.jobs import _job_output_dir
 
     return _job_output_dir(job_id) / _SNAPSHOT_FILENAME
-
-
-def _read_last_output(job_id: str) -> str:
-    try:
-        path = _snapshot_path(job_id)
-        if path.exists():
-            return path.read_text(encoding="utf-8-sig")
-    except Exception as exc:
-        logger.warning("Monitor: failed to read last output for %r: %s", job_id, exc)
-    return ""
-
-
-def _write_last_output(job_id: str, output: str) -> None:
-    try:
-        from cron.jobs import _ensure_cron_dir
-
-        path = _snapshot_path(job_id)
-        _ensure_cron_dir(path.parent)
-        path.write_text(output, encoding="utf-8")
-    except Exception as exc:
-        logger.warning("Monitor: failed to persist last output for %r: %s", job_id, exc)
 
 
 def _fetch_monitor_url(url: str) -> tuple[bool, str]:
@@ -155,24 +139,29 @@ def job_has_monitor(job: dict) -> bool:
 def check_monitor(job: dict) -> MonitorOutcome:
     """Run the monitor source and decide whether the agent should run.
 
-    On change (or first run) the new hash + snapshot are persisted BEFORE the agent runs — detection
-    time is the state boundary, so a failed agent run doesn't re-alert on the same content forever.
-    On failure nothing is persisted.
+    A changed observation (or the first baseline) is staged as a pending generation in
+    ``cron.monitor_outbox`` and offered to the agent with a stable change id; it stays pending,
+    and is re-offered unchanged, until a successful agent run acknowledges it. A source failure
+    stages nothing; corrupt or missing outbox state fails visibly as a source error.
     """
     job_id = str(job.get("id") or "")
     ok, output = _run_monitor_source(job)
     if not ok:
         return MonitorOutcome(ok=False, error=output)
 
-    new_hash = hash_monitor_output(output)
-    raw_state = job.get("monitor_state")
-    last_hash = raw_state.get("last_output_hash") if isinstance(raw_state, dict) else None
+    from cron.monitor_outbox import stage
 
-    if last_hash is not None and new_hash == last_hash:
+    try:
+        pending = stage(job_id, output)
+    except (OSError, ValueError) as exc:
+        return MonitorOutcome(ok=False, error=f"monitor outbox: {exc}")
+    if pending is None:
         return MonitorOutcome(ok=True, changed=False)
-
-    first_run = last_hash is None
-    old_output = "" if first_run else _read_last_output(job_id)
+    first_run = pending["first_run"]
+    old_output, output = pending["old"], pending["new"]
+    if pending["attempts"] > 1:
+        logger.warning("Monitor %s: re-offering unacknowledged change %s (attempt %d)",
+                       job_id, pending["id"], pending["attempts"])
 
     shown_output = output
     if len(shown_output) > MAX_OUTPUT_CHARS:
@@ -193,23 +182,6 @@ def check_monitor(job: dict) -> MonitorOutcome:
             f"### Diff (previous → current)\n\n```diff\n{diff}\n```\n\n" + current
         )
 
-    _persist_monitor_state(job_id, new_hash, output)
-    return MonitorOutcome(ok=True, changed=True, first_run=first_run, context_block=context_block)
-
-
-def _persist_monitor_state(job_id: str, new_hash: str, output: str) -> None:
-    from cron.jobs import _hermes_now, update_job
-
-    _write_last_output(job_id, output)
-    try:
-        update_job(
-            job_id,
-            {
-                "monitor_state": {
-                    "last_output_hash": new_hash,
-                    "last_changed_at": _hermes_now().isoformat(),
-                }
-            },
-        )
-    except Exception as exc:
-        logger.warning("Monitor: failed to persist state for %r: %s", job_id, exc)
+    context_block += f"\n\nMonitor change id: {pending['id']} (at-least-once delivery)."
+    return MonitorOutcome(ok=True, changed=True, first_run=first_run, context_block=context_block,
+                          change_id=pending["id"], attempt=pending["attempts"])
