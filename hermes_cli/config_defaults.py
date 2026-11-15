@@ -1880,8 +1880,8 @@ DEFAULT_CONFIG = {
         # cron.scheduler.DEFAULT_FAILURE_REPEAT_ALERT_HOURS.
         "failure_repeat_alert_hours": 6,
     },
-    # Kanban coordination: one dispatcher per board reclaims, promotes, and spawns workers.
     "kanban": {
+        "self_work": {"sample_rate": 0.2},  # Reversible spot checks; risky/unknown diffs always selected. [daveey]
         "wake_check_stale_hours": 48,  # Reconsider a never-passing probe; same-probe re-parks retain age.
         # Central sync (core patch 0193): true = boards opened afterwards get sync tables + outbox triggers. [daveey]
         "sync": {"enabled": False},
