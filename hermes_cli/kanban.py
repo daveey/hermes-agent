@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import json
 
 from hermes_cli.kanban_published_worktree import publication_scope
@@ -140,6 +141,14 @@ def _check_dispatcher_presence(hermes_home: Optional[Path] = None) -> tuple[bool
 
 # --- Command dispatch ---
 
+_ORIGIN_COMMANDS = {
+    "chat-tasks": "hermes_cli.kanban_chat_tasks",
+    "origin-forward": "hermes_cli.kanban_origin_forward_adapter",
+    "origin-bind": "hermes_cli.kanban_origin_adapter",
+    **dict.fromkeys(("origin-create", "origin-adopt", "ownership-snapshot", "selfwork-create", "selfwork-forward", "selfwork-producer"),
+                    "hermes_cli.kanban_origin_owner"),
+}
+
 def kanban_command(args: argparse.Namespace) -> int:
     """Entry point from ``hermes kanban …``; returns a shell-style exit code."""
     action = getattr(args, "kanban_action", None)
@@ -164,19 +173,8 @@ def kanban_command(args: argparse.Namespace) -> int:
 
     # Origin obligations are profile-local, not current-board state; do not
     # auto-initialize a board or route by a worker's inherited board override.
-    if action == "chat-tasks":
-        from hermes_cli.kanban_chat_tasks import command
-        return command(args)
-    if action == "origin-forward":
-        from hermes_cli.kanban_origin_forward_adapter import command
-        return command(args)
-    if action == "origin-bind":
-        from hermes_cli.kanban_origin_adapter import command
-        return command(args)
-
-    if action in {"origin-create", "origin-adopt", "ownership-snapshot", "selfwork-create", "selfwork-forward", "selfwork-producer"}:
-        from hermes_cli.kanban_origin_owner import command
-        return command(args)
+    if module := _ORIGIN_COMMANDS.get(action):
+        return importlib.import_module(module).command(args)
 
     # `boards …` manages board metadata and the current-board pointer itself, so it must ignore
     # the `--board` routing override (else `--board beta boards show` reports beta).

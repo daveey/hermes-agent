@@ -101,6 +101,15 @@ def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional
     return {"session_id": session_id, "origin_profile": None}
 
 
+def _forwarding_fields(conn, origin_gateway, creator_task_id, self_gw, run_id_fn) -> dict:
+    """Kwargs that forward a qualified foreign origin to the placement target; empty when the origin is local."""
+    if not origin_gateway or origin_gateway == self_gw:
+        return {}
+    from hermes_cli.kanban_placement_provenance import forwarding_authority
+    return {"origin_gateway": origin_gateway, **forwarding_authority(
+        conn, creator_task_id, run_id_fn(creator_task_id) if creator_task_id else None, self_gw=self_gw)}
+
+
 def _placement_refused(pin: str, why: str, *, hub_admission=None, remedy=None) -> str:
     """[daveey] A caller-pinned gateway cannot be honoured: say so instead of creating the card here.
 

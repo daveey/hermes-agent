@@ -26,7 +26,7 @@ from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kan
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _create_session_id, _placement_origin, _placement_refused, _runs_where,
                                           _effective_board_args, _origin_enrollment, _landing_placement, _pinned_note,
-                                          _admission_refused, _effective_requires, _with_admission)
+                                          _admission_refused, _effective_requires, _with_admission, _forwarding_fields)
 # SSRF-checked capped download lives in a sibling; tests monkeypatch it on this module.
 from tools.kanban_tools_attach_url import _download_url_with_cap, _store_attachment
 from tools.kanban_tools_db_hint import generic_tool_error
@@ -1489,11 +1489,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
             return (tool_error(stranded, rejection="sync_not_running"), None) if stranded else (None, local)
         self_gw = reg.self_gateway() or "local"
         cfg = kp.config()
-        forwarding = {}
-        if origin_gateway and origin_gateway != self_gw:
-            from hermes_cli.kanban_placement_provenance import forwarding_authority
-            forwarding = {"origin_gateway": origin_gateway, **forwarding_authority(
-                conn, creator_task_id, _worker_run_id(creator_task_id) if creator_task_id else None, self_gw=self_gw)}
+        forwarding = _forwarding_fields(conn, origin_gateway, creator_task_id, self_gw, _worker_run_id)
         placed = kp.create_remote(view, target=target, origin_session=session_id,
                                   origin_profile=origin_profile or current_profile_name("default") or "default",
                                   self_gw=self_gw, cfg=cfg, hub_cli=reg.hub_cli_path(cfg.get("hub_cli")), **forwarding)

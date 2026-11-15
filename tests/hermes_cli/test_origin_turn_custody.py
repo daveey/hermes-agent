@@ -68,56 +68,81 @@ def test_admitted_capture_and_copied_thread_context(admitted):
     assert copied.run(native.capture, None) is None
 
 
-@pytest.mark.parametrize("change", ["expired", "holder", "session", "db", "released", "pid", "delegated",
-                                    "home", "profile", "gateway", "custom_profile", "persist_disabled",
-                                    "noncanonical_db", "source", "interrupt", "nonfinite_expiry"])
+def _holder(agent, db, lease, mp):
+    db.release_session_turn_lease("chat-1", lease.holder)
+    db.acquire_session_turn_lease("chat-1", "other", ttl_seconds=60)
+
+
+def _session(agent, db, lease, mp):
+    db.create_session("other", source="desktop")
+    agent.session_id = "other"
+
+
+def _profile(name):
+    def mutate(agent, db, lease, mp):
+        from hermes_cli import profiles
+        mp.setattr(profiles, "get_active_profile_name", lambda: name)
+    return mutate
+
+
+def _gateway(agent, db, lease, mp):
+    from hermes_cli import kanban_origin
+    mp.setattr(kanban_origin, "gateway_names", lambda: ("other", []))
+
+
+def _pid(agent, db, lease, mp):
+    from agent import origin_turn_custody as custody
+    mp.setattr(custody.os, "getpid", lambda: -1)
+
+
+def _set(obj_name, attr, value):
+    def mutate(agent, db, lease, mp):
+        setattr({"agent": agent, "lease": lease}[obj_name], attr, value)
+    return mutate
+
+
+def _patch_db(attr, value):
+    def mutate(agent, db, lease, mp):
+        mp.setattr(db, attr, value)
+    return mutate
+
+
+_MUTATIONS = {
+    "expired": _patch_db("session_turn_lease_expires_at", lambda *a: 0),
+    "holder": _holder,
+    "session": _session,
+    "db": _set("agent", "_session_db", object()),
+    "home": lambda agent, db, lease, mp: mp.setenv("HERMES_HOME", str(db.db_path.parent / "other-home")),
+    "profile": _profile("other"),
+    "custom_profile": _profile("custom"),
+    "gateway": _gateway,
+    "persist_disabled": _set("agent", "_persist_disabled", True),
+    "source": _patch_db("get_session", lambda sid: {"source": "kanban"}),
+    "interrupt": _set("lease", "interrupt_message", "revoked"),
+    "nonfinite_expiry": _patch_db("session_turn_lease_expires_at", lambda *a: float("nan")),
+    "released": lambda agent, db, lease, mp: lease.release(),
+    "pid": _pid,
+}
+
+
+@pytest.mark.parametrize("change", [*_MUTATIONS, "noncanonical_db", "delegated"])
 def test_custody_revalidated(admitted, monkeypatch, change):
     from agent import origin_turn_custody as custody
     from agent.delegation_context import delegated_child_context
     agent, db, lease = admitted
     with custody.scope(lease):
         assert native.capture(None) is not None
-        if change == "expired":
-            monkeypatch.setattr(db, "session_turn_lease_expires_at", lambda *a: 0)
-        elif change == "holder":
-            db.release_session_turn_lease("chat-1", lease.holder)
-            db.acquire_session_turn_lease("chat-1", "other", ttl_seconds=60)
-        elif change == "session":
-            db.create_session("other", source="desktop")
-            agent.session_id = "other"
-        elif change == "db":
-            agent._session_db = object()
-        elif change == "home":
-            monkeypatch.setenv("HERMES_HOME", str(db.db_path.parent / "other-home"))
-        elif change in ("profile", "custom_profile"):
-            from hermes_cli import profiles
-            monkeypatch.setattr(profiles, "get_active_profile_name",
-                                lambda: "custom" if change == "custom_profile" else "other")
-        elif change == "gateway":
-            from hermes_cli import kanban_origin
-            monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("other", []))
-        elif change == "persist_disabled":
-            agent._persist_disabled = True
-        elif change == "noncanonical_db":
+        if change == "noncanonical_db":
             with monkeypatch.context() as patch:
                 patch.setattr(db, "db_path", db.db_path.parent / "shadow.db")
                 assert native.capture(None) is None
             return
-        elif change == "source":
-            monkeypatch.setattr(db, "get_session", lambda sid: {"source": "kanban"})
-        elif change == "interrupt":
-            lease.interrupt_message = "revoked"
-        elif change == "nonfinite_expiry":
-            monkeypatch.setattr(db, "session_turn_lease_expires_at", lambda *a: float("nan"))
-        elif change == "released":
-            lease.release()
-        elif change == "pid":
-            monkeypatch.setattr(custody.os, "getpid", lambda: -1)
-        elif change == "delegated":
+        if change == "delegated":
             with delegated_child_context():
                 assert native.capture(None) is None
             assert native.capture(None) is not None
             return
+        _MUTATIONS[change](agent, db, lease, monkeypatch)
         assert native.capture(None) is None
 
 
