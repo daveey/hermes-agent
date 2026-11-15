@@ -46,6 +46,19 @@ def test_unknown_or_different_probe_custody_keeps_the_local_guard(gws, payload):
     assert not registered_here(hub.conn, tid, probe)
 
 
+@pytest.mark.parametrize("own", [None, ""])
+def test_missing_local_identity_cannot_establish_custody(gws, monkeypatch, own):
+    from hermes_cli import kanban_wake_check
+    from hermes_cli.kanban_hub_probe_custody import registered_here
+    hub, _worker, _svc = gws
+    tid = claim._hub_card(hub)
+    probe = "test -f ~/.hermes/cache/ready.flag"
+    with kb.write_txn(hub.conn):
+        kb._append_event(hub.conn, tid, "scheduled", {"wake_check": probe, "probe_host": own})
+    monkeypatch.setattr(kanban_wake_check, "own_gateway", lambda _conn: own)
+    assert not registered_here(hub.conn, tid, probe)
+
+
 def test_a_later_park_cannot_borrow_an_older_probe_host(gws):
     from hermes_cli.kanban_hub_probe_custody import registered_here
     hub, _worker, _svc = gws
