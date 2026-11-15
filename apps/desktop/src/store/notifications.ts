@@ -1,6 +1,7 @@
 import { atom } from 'nanostores'
 
 import { translateNow } from '@/i18n'
+import { errorDiagnostic, errorField } from '@/lib/error-diagnostic'
 import { isOutOfSyncRpcParams } from '@/lib/gateway-rpc'
 import { servedByHermesCloud } from '@/lib/hermes-cloud-host'
 import { isTimeoutError } from '@/lib/with-timeout'
@@ -257,13 +258,15 @@ function summarizeErrorMessage(message: string, fallback: string) {
 // assistant row or an unknown id is stale for another reason. Every other invalid_params keeps the
 // generic toast.
 function staleRewindRefusal(error: unknown): 'compacted' | 'stale' | null {
-  const data = error && typeof error === 'object' ? (error as { data?: unknown }).data : undefined
+  const data = errorField(error, 'data')
 
   if (!data || typeof data !== 'object') {
     return null
   }
 
-  const { detail, field, reason } = data as { detail?: unknown; field?: unknown; reason?: unknown }
+  const detail = errorField(data, 'detail')
+  const field = errorField(data, 'field')
+  const reason = errorField(data, 'reason')
 
   if (reason !== 'invalid_params' || field !== 'target_message_id') {
     return null
@@ -276,9 +279,9 @@ function staleRewindRefusal(error: unknown): 'compacted' | 'stale' | null {
 // (gateway/session_policy_credentials.py): `data.reason` on an RPC error, or the bare code a deferred
 // pick's refusal event carries.
 function isLaunchCredentialsRefusal(error: unknown): boolean {
-  const data = error && typeof error === 'object' ? (error as { data?: { reason?: unknown } }).data : undefined
+  const data = errorField(error, 'data')
 
-  if (data && typeof data === 'object' && data.reason === 'launch_credentials_unavailable') {
+  if (errorField(data, 'reason') === 'launch_credentials_unavailable') {
     return true
   }
 
@@ -312,11 +315,13 @@ export function readableError(
     }
   }
 
-  const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback
+  const diagnostic = errorDiagnostic(error, fallback)
+  const raw = diagnostic.text
   const unwrapped = raw.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1] ?? raw
   const cleaned = cleanErrorText(unwrapped)
   const rawDetail = cleaned.match(/"detail"\s*:\s*"([^"]+)"/)?.[1] ?? cleaned
-  const classified = summarizeErrorMessage(rawDetail, fallback)
+  const coded = diagnostic.codes ? summarizeErrorMessage(diagnostic.codes, fallback) : undefined
+  const classified = coded && coded.category !== 'unclassified' ? coded : summarizeErrorMessage(rawDetail, fallback)
   const plain = classified.category === 'unclassified' ? objectDetailMessage(rawDetail) : undefined
   const detail = plain ?? rawDetail
   const summary = plain ? summarizeErrorMessage(plain, fallback) : classified
@@ -381,8 +386,7 @@ function logErrorToDesktopLog(error: unknown, fallback: string): void {
   try {
     const label: string = new URLSearchParams(window.location.search).get('win') ?? 'main'
 
-    const raw: string =
-      error instanceof Error ? (error.stack ?? error.message) : typeof error === 'string' ? error : fallback
+    const raw: string = error instanceof Error ? (error.stack ?? error.message) : errorDiagnostic(error, fallback).text
 
     window.hermesDesktop?.logLine?.(`[renderer error:${label}] ${fallback}: ${raw}`)
   } catch {
@@ -407,7 +411,7 @@ export function notifyError(
       // A caller that can fire again for the same cause names its toast, so the repeat replaces it.
       id: options.id,
       kind: 'error',
-      title: fallback,
+      title: readable.message === fallback ? undefined : fallback,
       message: readable.message,
       detail: readable.detail
     },
