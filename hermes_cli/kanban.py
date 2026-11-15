@@ -169,7 +169,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_origin_adapter import command
         return command(args)
 
-    if action in {"origin-create", "origin-adopt", "ownership-snapshot"}:
+    if action in {"origin-create", "origin-adopt", "ownership-snapshot", "selfwork-create", "selfwork-forward"}:
         from hermes_cli.kanban_origin_owner import command
         return command(args)
 
@@ -386,10 +386,12 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if body_error:
         return _err(body_error, 2)
 
+    from hermes_cli.kanban_selfwork import SelfWorkError, contract
     try:
+        self_work = contract(getattr(args, "self_work", None))
         ws_kind, ws_path = _parse_workspace_flag(args.workspace)
         branch_name = _parse_branch_flag(getattr(args, "branch", None))
-    except argparse.ArgumentTypeError as exc:
+    except (argparse.ArgumentTypeError, ValueError) as exc:
         return _err(f"kanban: {exc}", 2)
     if branch_name and ws_kind != "worktree":
         return _err("kanban: --branch is only valid with --workspace worktree", 2)
@@ -402,17 +404,17 @@ def _cmd_create(args: argparse.Namespace) -> int:
         return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "
                     "use 1 to trip on the first failure.", 2)
     in_worker = bool(os.environ.get("HERMES_KANBAN_TASK")) and is_dispatcher_owned_worker_context()
+    if self_work is not None:
+        from hermes_cli.kanban_selfwork_outbound import cli_command
+        return cli_command(args, body=body, workspace_kind=ws_kind, workspace_path=ws_path,
+                           max_runtime=max_runtime, branch_name=branch_name)
     # An agent shelling out to the CLI from a chat (terminal / execute_code) owns the
     # card just like the kanban_create tool would: stamp its session so the Desktop
     # session's task list shows it. Workers' cards inherit their creator task's session.
     # The desktop/TUI key (HERMES_SESSION_KEY) is what the session's notify poller
     # listens on, so it wins over HERMES_SESSION_ID; plain shells have neither. [daveey]
-    session_id = None
-    session_key = "" if in_worker else os.environ.get("HERMES_SESSION_KEY", "").strip()
-    if not in_worker:
-        from tools.kanban_tools import _persisted_session_id
-        session_id = (_persisted_session_id(session_key)
-                      or _persisted_session_id(os.environ.get("HERMES_SESSION_ID")))
+    from hermes_cli.kanban_cli_body import session_identity
+    session_key, session_id = session_identity(in_worker)
     idem_key = getattr(args, "idempotency_key", None)
     # [daveey] Bind cards made for a chat on another gateway ($HERMES_ORIGIN_SESSION / --origin-session),
     # validated before the card exists. See hermes_cli/kanban_origin.py.
@@ -477,6 +479,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
                 admission_class=getattr(args, "admission_class", "normal"),
                 admission_frees=getattr(args, "admission_frees", None),
+                self_work=self_work,
                 parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
                 idempotency_key=idem_key,
                 max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
@@ -502,7 +505,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         except (CapabilityMismatchError, UnknownSkillError, RequiresDeclarationMissing, MachinePinRefused,
                 AskFilingRefused) as exc:
             return _err(f"kanban: {exc.code}: {exc}", 2)
-        except (PinProviderUnresolvedError, ModelProviderMismatchError, AdmissionMetadataError) as exc:
+        except (PinProviderUnresolvedError, ModelProviderMismatchError, AdmissionMetadataError, SelfWorkError) as exc:
             return _err(f"kanban: {exc}", 2)
         if not idem_hit:
             after_create(conn, task_id)  # records an accepted --distinct-from override on the new card

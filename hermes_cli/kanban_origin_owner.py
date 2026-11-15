@@ -15,7 +15,7 @@ from pathlib import Path
 from hermes_cli.kanban_origin_adapter import _gateway
 
 
-def _dispatch_owner_tool(name, args, intent):
+def _dispatch_owner_tool(name, args, intent, selfwork_context=None):
     """The validated courier selects Kanban explicitly, independent of chat defaults.
 
     Keep registry availability checks (including delegated-child fences) and the
@@ -27,10 +27,11 @@ def _dispatch_owner_tool(name, args, intent):
     with scoped_kanban_toolset_selection(['kanban']):
         if not registry.get_definitions({name}, quiet=True):
             return {'status': 'pending', 'code': 'kanban_tool_unavailable', 'handoff_complete': False}
-        return _dispatch_result(registry.dispatch(name, args, origin_intent=intent))
+        private = {'selfwork_intent': {**intent, **selfwork_context}} if selfwork_context else {}
+        return _dispatch_result(registry.dispatch(name, args, origin_intent=intent, **private))
 
 
-def receive(request: dict) -> dict:
+def receive(request: dict, *, selfwork_context=None) -> dict:
     from hermes_cli.profiles import get_active_profile_name
     from tools import kanban_tools  # built-in self-registration
 
@@ -83,7 +84,7 @@ def receive(request: dict) -> dict:
             or ('board' in create and create['board'] != board)):
         raise ValueError('origin_request_invalid')
     args = {**create, 'board': board}
-    return _dispatch_owner_tool('kanban_create', args, intent)
+    return _dispatch_owner_tool('kanban_create', args, intent, selfwork_context)
 
 
 def _dispatch_result(raw_result):
@@ -129,6 +130,12 @@ def snapshot_command(args) -> int:
 
 
 def command(args) -> int:
+    if args.kanban_action == 'selfwork-forward':
+        from hermes_cli.kanban_selfwork_forward import command as forward_command
+        return forward_command(args)
+    if args.kanban_action == 'selfwork-create':
+        from hermes_cli.kanban_selfwork_receiver import command as intake_command
+        return intake_command(args)
     if args.kanban_action == 'ownership-snapshot':
         return snapshot_command(args)
     try:

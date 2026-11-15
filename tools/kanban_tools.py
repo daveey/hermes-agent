@@ -237,7 +237,8 @@ def _kanban_handler(tool_name: str, *, classify_rejections: bool = False) -> Cal
                     return _tag_rejection(e.args[0], e.rejection or "invalid_args")
                 return e.args[0]
             except Exception as e:
-                if tool_name in {"kanban_create", "kanban_origin_adopt"} and kw.get("origin_intent") is not None:
+                if tool_name in {"kanban_create", "kanban_origin_adopt"} and (
+                        kw.get("origin_intent") is not None or kw.get("selfwork_intent") is not None):
                     from hermes_cli.kanban_origin import OriginError
                     if isinstance(e, OriginError):
                         return tool_error(str(e), code=e.code, handoff_complete=False)
@@ -1551,6 +1552,8 @@ def _handle_create(args: dict, **kw) -> str:
         "kanban_create",
         args if args.get("placement") == "local" and not args.get("origin_session") else None)
     title = _require_text(args, "title")
+    from hermes_cli.kanban_selfwork import contract
+    self_work = contract(args.get("self_work"))
     assignee = args.get("assignee") or _persisted_identity()
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
     # even for a dispatcher-spawned creator (reusing the parent's path would let a child
@@ -1574,62 +1577,56 @@ def _handle_create(args: dict, **kw) -> str:
     # Trusted courier context is not an LLM argument. The owner adapter validates
     # its route; the DB validates/persists its immutable creation intent.
     origin_intent = kw.get("origin_intent")
+    if self_work is not None and origin_intent is None and kw.get("selfwork_intent") is None:
+        from hermes_cli.kanban_selfwork_outbound import submit
+        return json.dumps(submit(args))
+    selfwork_intent = kw.get("selfwork_intent")
+    courier_intent = selfwork_intent if selfwork_intent is not None else origin_intent
     try:
-        origin = (None if origin_intent is not None
+        origin = (None if courier_intent is not None
                   else kanban_origin.resolve(args.get("origin_session")))
     except kanban_origin.OriginError as exc:
         return tool_error(f"{exc.code}: {exc}")
     human_action_now = _parse_bool_arg(args, "human_action_now")
     with _board(args.get("board")) as (kb, conn):
+        args = _effective_board_args(args, courier_intent)
+        from hermes_cli.kanban_selfwork_owner import replay, snapshot
+        request_args = snapshot(args)
+        replayed = replay(conn, args, courier_intent, origin_intent=origin_intent)
+        if replayed is not None:
+            return replayed
         _check(*create_ask_check(conn, args, str(assignee)))  # ask line, then its filing probe [daveey]
-        args = _effective_board_args(args, origin_intent)
-        # Never infer approval from prose or silently turn a human gate into
-        # dispatchable work. Ask the creator to distinguish a future dependency
-        # from a human action that can actually be taken while parents are open.
-        if args.get("initial_status") == "blocked" and not human_action_now:
-            open_parents = [pid for pid in (parents or [])
-                            if (parent := kb.get_task(conn, pid)) and parent.status != "done"]
-            _check(not open_parents,
-                   "initial_status='blocked' with unfinished parents requires an immediate "
-                   "human action. For 'after X, then Y', keep parents and omit initial_status "
-                   "so the task waits in todo; the worker must request any required approval "
-                   "when it becomes due, never assume approval. For an external/time condition, "
-                   "use kanban_schedule with wake_check (clock_only for a pure time wait). "
-                   "If a human really can act now despite the unfinished parents, set "
-                   "human_action_now=true and explain that present action in body. Nothing changed.",
-                   rejection="invalid_args")
+        _ca.validate_immediate_human_action(conn, args, parents, human_action_now)
         self_tid = (os.environ.get("HERMES_KANBAN_TASK")
-                    if origin_intent is None and _is_dispatcher_owned_worker() else None)
+                    if courier_intent is None and _is_dispatcher_owned_worker() else None)
         self_task = kb.get_task(conn, self_tid) if self_tid else None
         args = inherit_tool_priority(conn, args, self_tid if self_task is not None else None)
-        session_id = _create_session_id(args, origin_intent, self_task)
-        if project_id is None and workspace_kind is None and workspace_path is None:
-            if self_task is not None and self_task.project_id:
-                project_id, project_source_task_id = self_task.project_id, self_task.id
+        session_id = _create_session_id(args, courier_intent, self_task)
+        project_id, project_source_task_id = _ca.inherited_project(project_id, workspace_kind, workspace_path, self_task)
         marker_placement, place_origin = None, {"session_id": session_id}
         # Placement on a synced board: ``runs_on`` labels, and a pin to an enrolled machine that advertises
         # pickup becomes ``runs_on=[machine:<name>]`` (created here, run there through the Board lease). Any
         # other pin, a routed gateway included, falls through to the gateway route below. [daveey]
         from hermes_cli import kanban_sync_runstate as _runstate  # runs_on rows need this host's sync [daveey]
         try:
-            runs_on = _runstate.explicit_runs_on(conn, args.get("runs_on"), courier=origin_intent is not None)
+            runs_on = _runstate.explicit_runs_on(conn, args.get("runs_on"), courier=courier_intent is not None)
         except ValueError as exc:
             sync_down = isinstance(exc, _runstate.SyncNotRunning)
             return tool_error(str(exc), **({"rejection": "sync_not_running"} if sync_down else {}))
         pinned_machine = None
-        if runs_on is None and origin_intent is None:
+        if runs_on is None and courier_intent is None:
             runs_on = _runstate.placement_runs_on(conn, args.get("placement"))
             if runs_on is not None:
                 pinned_machine = str(args.get("placement")).strip()
                 args = {**args, "placement": "local", "runs_on": runs_on}
         # [daveey] Refuse a second owner: open cards on every board/gateway, not this chat's links.
         refused, after_create = kanban_overlap.check(conn, {**args, "assignee": str(assignee)},
-                                                     courier=origin_intent is not None,
+                                                     courier=courier_intent is not None,
                                                      title=str(title).strip(), session_id=session_id,
                                                      self_tid=self_tid, parents=parents)
         if refused:
             return refused
-        if origin_intent is None and origin is None:
+        if courier_intent is None and origin is None:
             check_tool_create(args.get("requires"), workspace_kind=workspace_kind, project_id=project_id,
                               skills=skills, assignee=str(assignee))  # before placement routes it away [daveey]
             # Default placement: no local-only need -> the card runs on the routed gateway. [daveey]
@@ -1641,23 +1638,23 @@ def _handle_create(args: dict, **kw) -> str:
                 return remote
             if marker_placement and marker_placement.get("runs_on") and runs_on is None:
                 runs_on = marker_placement["runs_on"]
-        elif origin_intent is None and args.get("placement"):
+        elif courier_intent is None and args.get("placement"):
             # An origin-bound card is created here by design, so a pin to another gateway cannot be honoured.
             from hermes_cli import kanban_capability_registry as _reg
             from hermes_cli import kanban_placement as _kp
             _pin = _kp.explicit_foreign_pin(args, _reg.self_gateway())
             if _pin:
                 return _placement_refused(_pin, "an origin-bound card is created on this gateway")
-        marker_placement, runs_on = _landing_placement(conn, args, origin, origin_intent, marker_placement, runs_on,
+        marker_placement, runs_on = _landing_placement(conn, args, origin, courier_intent, marker_placement, runs_on,
                                                        title=title, assignee=assignee, skills=skills, project_id=project_id)
         _admission_refused(marker_placement)  # raises the typed refusal for a denied hub pin
         try:
-            new_tid = kb.create_task(
-                conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
-                parents=tuple(parents), tenant=(args.get("tenant") if origin_intent is not None
-                                               else args.get("tenant") or os.environ.get("HERMES_TENANT")),
+            creation_options = dict(
+                title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
+                parents=tuple(parents), tenant=_ca.effective_tenant(args, courier_intent),
                 priority=_opt_int(args.get("priority"), 0),
                 admission_class=args.get("admission_class", "normal"), admission_frees=args.get("admission_frees"),
+                self_work=self_work,
                 workspace_kind=workspace_kind, workspace_path=workspace_path, project_id=project_id,
                 # Board-project inheritance must read the board this call opened, not the
                 # session's current board.
@@ -1676,19 +1673,25 @@ def _handle_create(args: dict, **kw) -> str:
                                                 if pinned_machine else args,
                                                 admission=marker_placement, assignee=str(assignee),
                                                 skills=skills, project_id=project_id),
-                require_declaration=origin_intent is None and declaration_required(),  # couriers exempt [daveey]
+                require_declaration=courier_intent is None and declaration_required(),  # couriers exempt [daveey]
                 model_override=model_override, provider_override=provider_override, pin_mandatory=pin_mandatory,
                 goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
                 review_required=review_required,
                 completion_contract=args.get("completion_contract"),
                 initial_status=str(args.get("initial_status") or "running"),
                 human_request=kb.redact_review_value(args.get("human_request")),
-                created_by=_persisted_identity(), session_id=session_id,
+                created_by=(selfwork_intent['sender'] if selfwork_intent is not None else _persisted_identity()), session_id=session_id,
                 origin_intent=origin_intent, chat_origin=origin.ref if origin else args.get("origin_session"),
                 # Reject a worktree path the dispatcher could never resolve now, to the
                 # creator, instead of burning spawn retries on it later. [daveey]
                 validate_workspace=True, validate_skills=True,
                 insert_guard=after_create.guard)  # re-checks overlap under the write lock [daveey]
+            if self_work is not None:
+                from hermes_cli.kanban_selfwork_owner import create
+                return create(conn, creation_options, after_create=after_create,
+                              marker_placement=marker_placement, place_origin=place_origin, request=request_args,
+                              intent=courier_intent)
+            new_tid = kb.create_task(conn, **creation_options)
         except kanban_overlap.OverlapRefused as exc:  # landed under the write lock after the first check
             return exc.settle()
         landed = _fields(kb.get_task(conn, new_tid), _ca.CREATED_FIELDS)

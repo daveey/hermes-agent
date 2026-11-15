@@ -2,6 +2,14 @@
 import json
 
 
+def existing_creation_key(conn, key):
+    """Legacy best-effort lookup; the caller chooses the transaction boundary."""
+    return conn.execute(
+        "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
+        "ORDER BY created_at DESC LIMIT 1", (key,),
+    ).fetchone()
+
+
 def default_ready_assignee() -> str:
     """``kanban.default_assignee`` (config) or the ``default`` profile."""
     try:

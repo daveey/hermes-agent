@@ -245,11 +245,11 @@ POOL_CARRIED_OPTIONS = ("pin_mandatory",)
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
                    "goal_max_turns", "completion_contract", "idempotency_key", "requires", "triage", "review_required",
-                   "distinct_from", "distinct_reason", "admission_class", "admission_frees")
+                   "distinct_from", "distinct_reason", "admission_class", "admission_frees", "self_work")
 IDENTITY_OPTIONS = ("idempotency_key", "distinct_from", "distinct_reason")
 # Of those, the ones an older client (no --option) cannot express at all: the card stays local.
 LEGACY_UNCARRIED = ("model", "provider", "goal_mode", "triage", "review_required", *IDENTITY_OPTIONS,
-                    "admission_class", "admission_frees")
+                    "admission_class", "admission_frees", "self_work")
 HELP_CACHE_SECONDS = 600
 # Profile tools (``requires`` entries) a target can satisfy when it does not publish its profiles'
 # tools: what the hub's default profile has. host_repo never travels: it means a checkout on THIS host.
@@ -927,6 +927,12 @@ def carried_options(args: dict) -> dict:
         v = args.get(k)
         if k in IDENTITY_OPTIONS:
             continue
+        if k == "self_work":
+            from hermes_cli.kanban_selfwork import contract
+            declaration = contract(v)
+            if declaration is not None:
+                out[k] = declaration
+            continue
         if v in (None, "", [], False):
             continue
         if k in ("goal_mode", "triage", "review_required"):
@@ -1272,7 +1278,7 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     """Queue on ``target``; a fatal refusal must not fall back to a second local card."""
     c = _Cfg(config() if cfg is None else cfg)
     carried = hub_carries_options(hub_cli)
-    if not carried and any(args.get(k) not in (None, "", []) for k in IDENTITY_OPTIONS):
+    if not carried and any(args.get(k) not in (None, "", []) for k in (*IDENTITY_OPTIONS, "self_work")):
         return {"ok": False, "fatal": True, "error": "create identity requires hermes-hub create-task --option"}
     try:
         options = carried_options(args) if carried else {}

@@ -865,6 +865,11 @@ KANBAN_CREATE_SCHEMA = _schema(
             "description": "Hub admission class; default normal. Capacity requires admission_frees.",
         },
         "admission_frees": _prop("string", "One-line frees: claim naming capacity this work restores."),
+        "self_work": _prop("object", "Versioned Hermes self-maintenance declaration: version=1, repository "
+                           "(hermes-core/hermes-state/hermes-mods), area (canonical subsystem key), kind "
+                           "(sweep/test-gap/ci-flake/guard/post-merge). Exactly these four fields. Open "
+                           "same-area owners are reused within a UTC day at the configured intake home. "
+                           "Omit for product work."),
         "workspace_kind": {
             "type": "string",
             "enum": ["scratch", "dir", "worktree"],

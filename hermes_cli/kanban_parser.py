@@ -200,6 +200,14 @@ _BOARD_SPECS = [
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
     _cmd("init", help="Create kanban.db if missing (idempotent)"),
+    _cmd("selfwork-forward", [
+        _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
+        _arg("--json", action="store_true", help="Return structured authorization (always JSON)"),
+    ], help="Authorize worker self-work forwarding through its accepted origin"),
+    _cmd("selfwork-create", [
+        _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
+        _arg("--json", action="store_true", help="Return structured intake receipt (always JSON)"),
+    ], help="Receive authenticated self-work at its configured intake home"),
     _cmd("origin-create", [
         _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
         _arg("--json", action="store_true", help="Return structured pending creation (always JSON)"),
@@ -281,6 +289,8 @@ _SPECS = [
         _arg("--frees", dest="admission_frees", help="Single-line frees: claim"),
         _arg("--triage", action="store_true",
              help="Park in triage — a specifier will flesh out the spec and promote to todo"),
+        _arg("--self-work", type=json.loads, metavar="JSON",
+             help="Versioned Hermes self-maintenance declaration (repository, area, kind); omit for product work."),
         _arg("--idempotency-key",
              help="Dedup key. If a non-archived task with this key exists, "
                   "its id is returned instead of creating a duplicate."),

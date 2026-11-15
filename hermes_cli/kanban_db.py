@@ -1182,6 +1182,7 @@ def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str
 
 
 from hermes_cli.kanban_db_creation import default_ready_assignee as _default_ready_assignee
+from hermes_cli.kanban_selfwork import admitted_contract
 
 
 @publication_scope
@@ -1207,6 +1208,7 @@ def create_task(
     placement_checked: bool = False,
     insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None, placement_audit: Optional[dict] = None,
     admission_class: str = "normal", admission_frees: Optional[str] = None,
+    self_work: Optional[dict] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1231,6 +1233,7 @@ def create_task(
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
+    self_work = admitted_contract(conn, self_work)
     validate_admission_class(admission_class, admission_frees)
     validate_creation(placement_policy, runs_on=runs_on, workspace_kind=workspace_kind,
                       workspace_path=workspace_path, project=project_id,
@@ -1295,12 +1298,8 @@ def create_task(
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
     # race may insert twice, the next lookup stabilises on the newest.
     if idempotency_key:
-        row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? "
-            "AND status != 'archived' "
-            "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
-        ).fetchone()
-        if row:
+        from hermes_cli.kanban_db_creation import existing_creation_key
+        if row := existing_creation_key(conn, idempotency_key):
             return row["id"]
 
     if validate_workspace and workspace_kind == "worktree" and not project_id:
