@@ -33,6 +33,7 @@ __all__ = ["paced_board"]
 
 def test_paced_after_an_expired_held_row_is_recorded_again(paced_board, monkeypatch):
     """Reviewer repro: pool reads paced -> held (reset now+60) -> paced; diagnostics an hour past the reset."""
+    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
     _config(paced_board, kanban={"llm_pacing": {"read_interval_seconds": 0}})
     phase, reset = ["paced"], [0.0]
 
@@ -64,6 +65,7 @@ def test_paced_after_an_expired_held_row_is_recorded_again(paced_board, monkeypa
 def test_a_flapping_hold_appends_at_most_one_row_per_expiry(paced_board, monkeypatch):
     """held <-> paced flaps do not refill the episode: once ``paced`` is newest, a later ``held`` (a key the episode
     holds) appends nothing, so the newest row stays the untimed ``paced`` one."""
+    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
     _config(paced_board, kanban={"llm_pacing": {"read_interval_seconds": 0}})
     phase = ["paced"]
 
