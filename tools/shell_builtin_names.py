@@ -24,6 +24,18 @@ def _ansi_escape(match: re.Match) -> str:
 
 
 def _word(text: str, pos: int, conditional: bool, cache: dict) -> tuple[str, int]:
+    # Cache failures too: outer tokens can revisit an unfinished operand. Never
+    # repeat a whole failed boundary walk for every later quote in the command.
+    key = (pos, conditional, "literal-word")
+    if key not in cache:
+        cache[key] = None
+        cache[key] = _read_word(text, pos, conditional, cache)
+    if cache[key] is None:
+        raise ValueError("unclassified literal word")
+    return cache[key]
+
+
+def _read_word(text: str, pos: int, conditional: bool, cache: dict) -> tuple[str, int]:
     """Remove lexical quotes, leaving real expansions opaque to name classification."""
     pieces = []
     while pos < len(text) and text[pos] not in _BREAKS:

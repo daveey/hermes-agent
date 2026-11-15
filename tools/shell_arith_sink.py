@@ -117,6 +117,10 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
         if quoted:
             continue  # inside "…" only expansions (handled above) matter
         if kind == _CMD:
+            if (start, "case-pattern") in literal_cache:
+                if token == ")":
+                    top[4] = pos
+                continue
             pos = _cmd_token(command, token, start, pos, stack, closes, operators)
         elif kind == _ARITH:
             pos = _arith_token(command, token, pos, stack)

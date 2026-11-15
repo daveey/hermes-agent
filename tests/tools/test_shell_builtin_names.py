@@ -126,6 +126,94 @@ def test_uncertain_prefix_has_bounded_scan_work(monkeypatch, opener, closer):
     substitution_in_arithmetic(command, date_exempt=True)
 
 
+CASE_BODIES = [
+    "ca\\\nse x in x) :;; esac",
+    "case x i\\\nn x) :;; esac",
+    "case x in x) :;; e\\\nsac",
+    "case \\\nx in x) :;; esac",
+    "case x in x) printf x;; esac",
+    "case x in (x) printf x;; esac",
+    "case x in x|esac) printf x;; esac",
+    "case esac in (esac) printf x;; esac",
+    "case x in x) case y in (y) printf x;; esac;; esac",
+    "case x in x) printf '%s' case esac;; esac",
+    "case x in x) printf '%s' 'case ) esac';; esac",
+    "case x in 'a)'|x) printf x;; esac",
+    "case x in a\\)|x) printf x;; esac",
+    "case x in x) printf x;& y) :;; esac",
+    "case x in x) printf x;;& y) :;; esac",
+    "case x in x) # ) case esac\n printf x;; esac",
+    "printf '%s' case esac",
+    "time case x in x) :;; esac",
+    "time -p case x in x) :;; esac",
+    "time { case x in x) :;; esac; }",
+    "coproc case x in x) :;; esac; wait",
+    "case x in $'\\')') :;; esac",
+    "case x in x) echo $'\\'';; esac",
+    "echo $'\\''",
+    "cat <<E\ncase\nE\n:",
+    "case x in x) cat <<E\nesac ) case\nE\n;; esac",
+]
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("body", CASE_BODIES)
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_case_boundary_preserves_suffix_marker(tmp_path, body, wrapped):
+    prefix = '"$(' + body + ')"' if wrapped else '$(' + body + ')'
+    test_literal_builtin_name_marker(tmp_path, "a=(1); unset " + prefix + " 'a[$(P)]'", True)
+
+
+@pytest.mark.parametrize("body", CASE_BODIES)
+@pytest.mark.parametrize("suffix", ["'a[$(date +%s)]'", "'plain'", "'a[0]=literal[$(P)]'"])
+def test_case_boundary_retains_date_and_non_subscript_data(body, suffix):
+    assert not substitution_in_arithmetic('unset "$(' + body + ')" ' + suffix, date_exempt=True)
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("body", [
+    "case x in x) :;; esac",
+    "case x i\\\nn x) :;; esac",
+    "case x in x) :;; e\\\nsac",
+])
+@pytest.mark.parametrize("suffix,expected", [
+    ("'a[$(P)]'", True), ("'plain'", False),
+    ("'a[0]=literal[`P`]'", False), ("'plain`P`'", False),
+    ("'a[$(date +%s)]'", False),
+])
+def test_backtick_case_prefix_controls(tmp_path, body, suffix, expected):
+    test_literal_builtin_name_marker(tmp_path, 'a=(1); unset "`' + body + '`" ' + suffix, expected)
+
+
+@pytest.mark.parametrize("body", CASE_BODIES + [
+    "case x in @(x|y)) :;; esac",
+    "case x in (@(x|+(y|z))) :;; esac",
+])
+def test_case_boundary_masks_whole_substitution(body):
+    from tools.shell_prefix_expansions import mask_prefix_expansions
+
+    assert mask_prefix_expansions('$(' + body + ') after') == '__expansion__ after'
+
+
+def test_failed_word_boundary_is_not_retried(monkeypatch):
+    from tools import shell_builtin_names as names
+
+    original = names._read_word
+    calls = 0
+
+    def counted(*args):
+        nonlocal calls
+        calls += 1
+        return original(*args)
+
+    monkeypatch.setattr(names, "_read_word", counted)
+    cache = {}
+    for _ in range(100):
+        with pytest.raises(ValueError):
+            names._word('"$(case x nope ' + 'x' * 1000, 0, False, cache)
+    assert calls == 1
+
+
 def test_nested_expansions_share_linear_boundary_scan(monkeypatch):
     from tools import shell_prefix_expansions as expansions
 

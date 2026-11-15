@@ -8,9 +8,7 @@ can conservatively classify the target as arithmetic.
 
 from __future__ import annotations
 
-import re
-
-_CASE_WORD = re.compile(r"(?<![\w])case(?![\w])")
+from tools.shell_case_words import CaseWords, opaque_end
 
 
 def _comment_end(text: str, pos: int, quoted: str) -> int | None:
@@ -26,9 +24,17 @@ def _expansion_end(text: str, start: int, closer: str, cache: dict | None = None
     if cache is not None and key in cache:
         return cache[key]
     pos, quote = start, ""
+    words = CaseWords()
+    pending = []
     while pos < len(text):
         char = text[pos]
+        opaque = opaque_end(text, pos, words, pending) if not quote else None
+        if opaque is not None:
+            pos = opaque
+            continue
         if char == "\\" and quote != "'":
+            if text[pos + 1:pos + 2] != "\n":
+                words.fragment("__quoted__")
             pos += 2
             continue
         if quote == "'":
@@ -36,14 +42,22 @@ def _expansion_end(text: str, start: int, closer: str, cache: dict | None = None
                 quote = ""
             pos += 1
             continue
+        if not quote and char.isspace():
+            words.flush()
+        if not quote and char in ";&|()\n":
+            operator = next((op for op in (";;&", ";;", ";&") if text.startswith(op, pos)), char)
+            if words.punctuation(operator):
+                if cache is not None:
+                    cache[(pos, "case-pattern")] = pos + 1
+                pos += 1
+                continue
+            if len(operator) > 1:
+                pos += len(operator)
+                continue
         if char == closer and not quote:
             if cache is not None:
                 cache[key] = pos + 1
             return pos + 1
-        if not quote and _CASE_WORD.match(text, pos):
-            # A case-pattern ')' is not a frame closer; fail closed on grammar
-            # this lexical masker cannot classify rather than lose the builtin.
-            raise ValueError("case grammar in expansion")
         comment_end = _comment_end(text, pos, quote)
         if comment_end is not None:
             pos = comment_end
@@ -51,13 +65,17 @@ def _expansion_end(text: str, start: int, closer: str, cache: dict | None = None
         nested = _opener(text, pos, quote)
         if nested is not None:
             width, end = nested
+            words.fragment("__expansion__")
             pos = _expansion_end(text, pos + width, end, cache)
             continue
         if char in "\"'" and (not quote or char == quote):
+            words.fragment("__quoted__")
             quote = "" if quote else char
         elif not quote and char == "(" and closer == ")":
             pos = _expansion_end(text, pos + 1, ")", cache)
             continue
+        elif not quote and not char.isspace() and char not in ";&|()":
+            words.fragment(char)
         pos += 1
     raise ValueError("unterminated expansion")
 
