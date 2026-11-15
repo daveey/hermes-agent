@@ -308,6 +308,8 @@ HERMES_STATE_IMPORTS = (
     "hermes_cli/timefmt.py",
     "hermes_constants.py",
     "hermes_dir_acl.py",
+    "hermes_platform/__init__.py",
+    "hermes_platform/wake_clock.py",
     "hermes_startup_watchdog.py",
     "utils.py",
 )
