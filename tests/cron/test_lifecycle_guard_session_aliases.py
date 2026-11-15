@@ -824,6 +824,10 @@ _MULTI_HOP_DATA_CONSUMERS = [
     "ssh -p 22 h1 \"ssh -J j h2 'timeout 20 python3 -'\" < {py}",
     "ssh h1 \"ssh h2 'ssh h3 python3 -'\" < {py}",
     "ssh h1 'ssh h2 cat' < {script}",
+    # OpenSSH resumes option parsing after the destination (review 5911427581 B1).
+    "ssh h1 'ssh h2 -p 22 python3 -' < {py}",
+    "ssh h1 -T 'ssh h2 -o BatchMode=yes -T python3 -' < {py}",
+    "ssh h1 'ssh h2 -- python3 -' < {py}",
     "ssh h1 \"ssh h2 python3 -\" <<'PY'\n" + _PY_TAKEOVER + "PY",
 ]
 
@@ -855,6 +859,13 @@ _MULTI_HOP_SHELLS = [
     "ssh h1 'sudo -i' < {script}",  # other hops are still not modelled: fail closed
     "ssh h1 'ssh h2 su -l bob' < {script}",
     "ssh h1 \"ssh h2 'ssh h3 \\\"ssh h4 'ssh h5 python3 -'\\\"'\" < {script}",  # hop cap: closed
+    # Options after the destination are still ssh's own (review 5911427581 B1): the remote
+    # command starts at the first operand after them; none left = a login shell.
+    "ssh h1 'ssh h2 -p 22 sh -s' < {script}",
+    "ssh h1 'ssh h2 -T' < {script}",
+    "ssh h1 'ssh h2 -o BatchMode=yes -p22 -T bash' < {script}",
+    "ssh h1 -T < {script}",
+    "ssh h1 -p 22 -- < {script}",
 ]
 
 

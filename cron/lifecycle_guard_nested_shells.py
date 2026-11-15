@@ -308,7 +308,11 @@ def _shell_input(
         from tools.shell_heredoc import _SSH_VALUE_OPTIONS
 
         _options, host = _option_words(arguments, frozenset(_SSH_VALUE_OPTIONS))
-        return ("stdin", None) if _remote_reads_stdin(arguments[host + 1:], hops) else None
+        # OpenSSH resumes getopt after the destination (`ssh h -p 22 sh -s`, `ssh h -T`), so
+        # options there are ssh's own and the remote command starts at the next operand.
+        remote = arguments[host + 1:]
+        _options, command = _option_words(remote, frozenset(_SSH_VALUE_OPTIONS))
+        return ("stdin", None) if _remote_reads_stdin(remote[command:], hops) else None
     if name not in _SHELL_EXECUTABLES:
         return None
     options_end = _shell_options_end(arguments, name)[0]
