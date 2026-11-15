@@ -14,16 +14,22 @@ def _transport(conn, bound):
     return artifacts.bounded_transport(hub, bound), sync._state(conn)["board_id"]
 
 
-def verify(conn, task_id, snapshot, bound):
-    """Incoming manifest wins over stale host selections; revision0 uses exact predecessor."""
+def verify(conn, task_id, snapshot, bound, *, predecessor_run_uid=None):
+    """Incoming manifest wins over stale host selections; revision0 uses exact predecessor.
+
+    The resolver passes the predecessor it already proved under ``bound``; recovering it
+    here is the fallback for direct callers and is capped by the same budget.
+    """
     try:
         if snapshot.manifest_value is not None:
             entries = snapshot.manifest().artifacts
         else:
-            from dataclasses import asdict
-            from hermes_cli import kanban_source_registration as registration
-            previous = registration.predecessor_for_grant(conn, task_id, snapshot.grant, asdict(snapshot.custody))
-            entries = artifacts.selected(conn, task_id, previous.run_uid) or []
+            if predecessor_run_uid is None:
+                from dataclasses import asdict
+                from hermes_cli import kanban_source_registration as registration
+                predecessor_run_uid = registration.predecessor_for_grant(
+                    conn, task_id, snapshot.grant, asdict(snapshot.custody), bound=bound).run_uid
+            entries = artifacts.selected(conn, task_id, predecessor_run_uid) or []
         if not entries:
             return
         hub, board = _transport(conn, bound)

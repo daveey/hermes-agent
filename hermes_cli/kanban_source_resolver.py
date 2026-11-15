@@ -30,6 +30,8 @@ class ResolvedSource:
     mode: str  # holder_reuse | return_home | materialized
     repository: Optional[str] = None
     source_kind: Optional[str] = None
+    # A premanifest resume's recovered predecessor, so artifact verification reuses its bounded proof.
+    predecessor_run_uid: Optional[str] = None
 
     def event_payload(self, *, holder: Optional[str], run_uid: Optional[str]) -> dict:
         return {"hostname": socket.gethostname(), "holder": holder, "run_uid": run_uid, "repository": self.repository,
@@ -190,9 +192,10 @@ def resolve_source_workspace(conn: sqlite3.Connection, task: Any, snapshot: Sour
         from hermes_cli.kanban_source_artifact_launch import verify
         from hermes_cli.kanban_source_launch import AttachRefused
         try:
-            verify(conn, task.id, snapshot, bound)
+            verify(conn, task.id, snapshot, bound, predecessor_run_uid=resolved.predecessor_run_uid)
         except AttachRefused as exc:
             raise WorkspaceSourceRefusal("source_identity_refused", exc.detail) from exc
+    bound.left()  # succeed only inside the budget, including a zero-artifact premanifest recovery
     return resolved
 
 
@@ -209,11 +212,12 @@ def _resolve_source_workspace(conn, task, snapshot, *, me, cfg, bound, lookup):
         from hermes_cli import kanban_source_registration as registration
         from hermes_cli.kanban_source_launch import AttachRefused
         try:
-            previous = registration.predecessor_for_grant(conn, task.id, snapshot.grant, asdict(custody))
+            previous = registration.predecessor_for_grant(conn, task.id, snapshot.grant, asdict(custody), bound=bound)
         except AttachRefused as exc:
             raise WorkspaceSourceRefusal("source_identity_refused", exc.detail) from exc
         return ResolvedSource(path=previous.path, branch=previous.branch, commit=None,
-                              manifest_revision=0, mode="resume", source_kind="scratch_external")
+                              manifest_revision=0, mode="resume", source_kind="scratch_external",
+                              predecessor_run_uid=previous.run_uid)
     if custody is not None and custody.source_holder == me:
         local = _local_holder_copy(bound, task, manifest, cfg)
         if local is not None:

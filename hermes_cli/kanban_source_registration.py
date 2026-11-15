@@ -15,6 +15,7 @@ from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_source_board as board
 from hermes_cli import kanban_source_launch as launch
 from hermes_cli import kanban_workspace_source as ws
+from hermes_cli.kanban_source_publish import _Deadline
 
 
 def _refuse(detail: str) -> NoReturn:
@@ -34,32 +35,70 @@ def _current(conn, task_id):
     return int(row[0]), uid, machine
 
 
-def _local_path(conn, task_id, path):
-    dest = Path(path).resolve()
+def _source_owner(conn, task_id, path) -> str | None:
+    """Another live task whose durable source observation names ``path``.
+
+    Scratch registration keeps ``tasks.workspace_path`` at the scratch cwd, so the external
+    worktree's owner is only in the local source journal. A definitely refused observation
+    attached nothing and owns nothing; pending, attached and retained ones keep the path.
+    """
+    try:
+        row = conn.execute("SELECT r.task_id FROM kanban_source_runs r JOIN tasks t ON t.id = r.task_id "
+                           "WHERE r.path = ? AND r.task_id != ? AND r.state != 'refused' "
+                           "AND t.status NOT IN ('done', 'archived') LIMIT 1", (path, task_id)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row[0] if row else None
+
+
+def _owned_elsewhere(conn, task_id, path) -> None:
     from hermes_cli.kanban_source_resolver import _occupied_by_other_task
-    if _occupied_by_other_task(conn, task_id, str(dest)) is not None:
+    if _occupied_by_other_task(conn, task_id, path) is not None or _source_owner(conn, task_id, path) is not None:
         _refuse("source belongs to another active task")
+
+
+def _git(bound, path, *args):
+    """Read-only git, capped by the caller's materialize budget when one is given."""
+    if bound is None:
+        return launch._git(str(path), *args)
+    out = bound.git(path, *args, check=False)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+class _BudgetDeadline(_Deadline):
+    """The resolver's materialize budget in the publisher's proof-deadline shape."""
+
+    def __init__(self, bound):
+        self.bound = bound
+
+    def left(self, cap: float = 60.0) -> float:
+        return min(self.bound.left(), cap)
+
+
+def _local_path(conn, task_id, path, bound=None):
+    dest = Path(path).resolve()
+    _owned_elsewhere(conn, task_id, str(dest))
     if not (dest / ".git").is_file():
         _refuse("source must be a linked worktree (git -C <configured clone> worktree add), not a clone")
-    branch = launch._git(str(dest), "symbolic-ref", "-q", "--short", "HEAD")
+    branch = _git(bound, dest, "symbolic-ref", "-q", "--short", "HEAD")
     task = conn.execute("SELECT branch_name FROM tasks WHERE id=?", (task_id,)).fetchone()
     expected = (task[0] or "").strip() if task else ""
     if branch != (expected or f"wt/{task_id}"):
         _refuse(f"worktree branch {branch or '(detached)'} is not this task's branch {expected or f'wt/{task_id}'}")
     registered = False
     for clone in ws.settings().clones.values():
-        listing = launch._git(str(clone), "worktree", "list", "--porcelain")
+        listing = _git(bound, clone, "worktree", "list", "--porcelain")
         if listing and any(line == f"worktree {dest}" for line in listing.splitlines()):
             registered = True
     if not registered:
         _refuse("worktree is not a linked worktree of any clone in kanban.workspace_source.clones")
-    head = launch._git(str(dest), "rev-parse", "--verify", "HEAD")
+    head = _git(bound, dest, "rev-parse", "--verify", "HEAD")
     if not head:
         _refuse("worktree has no readable HEAD")
     return str(dest), branch, head
 
 
-def recover_local(conn: sqlite3.Connection, task_id: str, identity: dict) -> board.AttachedRun:
+def recover_local(conn: sqlite3.Connection, task_id: str, identity: dict, *, bound=None) -> board.AttachedRun:
     """Locate exact durable observation; never use custody.attached_run_uid or latest sorting."""
     machine = sync._state(conn)["gateway_id"]
     if not isinstance(identity, dict) or identity.get("task_id") != task_id or identity.get("machine") != machine:
@@ -74,16 +113,21 @@ def recover_local(conn: sqlite3.Connection, task_id: str, identity: dict) -> boa
     run = board.attached_run(conn, rows[0][0])
     if run is None or run.machine != machine or run.source_protocol != 2 or run.manifest_revision != 0 or not run.path:
         _refuse("observation is not this machine's premanifest protocol-2 source")
-    _local_path(conn, task_id, run.path)
-    validate_identity(run)
+    _local_path(conn, task_id, run.path, bound)
+    validate_identity(run, bound=bound)
     return run
 
 
-def source_identity(path: str, source_kind: str) -> dict:
-    """Reuse publisher clone proof; bind a local observation to its repository and common-dir."""
+def source_identity(path: str, source_kind: str, *, bound=None) -> dict:
+    """Reuse publisher clone proof; bind a local observation to its repository and common-dir.
+
+    With ``bound`` (the resolver's materialize budget) every proof call is capped by what is left of it, and a
+    spent budget raises the resolver's ``materialize_timeout`` rather than an identity refusal.
+    """
     from hermes_cli import kanban_source_publish as publish
     try:
-        clone = publish.prove_origin(path, ws.settings())
+        clone = publish.prove_origin(path, ws.settings(),
+                                     deadline=_BudgetDeadline(bound) if bound is not None else None)
     except publish.PublishRefused as exc:
         _refuse(f"source repository proof failed: {exc}")
     return identity_from_clone(clone, source_kind)
@@ -101,12 +145,12 @@ def match_manifest(identity: dict, manifest: dict) -> None:
         _refuse("source repository or kind differs from manifest")
 
 
-def validate_identity(run: board.AttachedRun, *, current=None) -> dict:
+def validate_identity(run: board.AttachedRun, *, current=None, bound=None) -> dict:
     expected_kind = (run.manifest or {}).get("source_kind") or (run.source_identity or {}).get("source_kind", "scratch_external")
     if not run.path:
         _refuse("source observation has no path")
     if current is None:
-        current = source_identity(run.path, expected_kind)
+        current = source_identity(run.path, expected_kind, bound=bound)
     if run.source_identity != current:
         _refuse("source repository, common-dir or kind changed since observation")
     if run.manifest:
@@ -134,6 +178,8 @@ def _persist_observation(conn, run: board.AttachedRun, *, predecessor=None) -> b
             _initial_lane(conn, run.task_id, run.run_id)
         prior = board.attached_run(conn, run.run_id)
         if prior is None:
+            # Recheck ownership under the writer lock so two registrations of one path serialize here.
+            _owned_elsewhere(conn, run.task_id, run.path)
             board.record_run(conn, run, allow_nested=True)
             prior = run
         fields = ("task_id", "run_uid", "machine", "path", "branch", "mode", "source_protocol", "manifest_revision",
@@ -174,6 +220,8 @@ def register_initial(conn: sqlite3.Connection, task_id: str, source_path: str, *
     A tool surface passes its dispatcher-bound run; the observation transaction
     rechecks that the same run is still current, so the binding holds to commit.
     """
+    if not ws.settings().enabled:
+        raise launch.AttachRefused("source_disabled", "kanban.workspace_source is disabled on this host")
     run_id, uid, machine = _current(conn, task_id)
     if expected_run_id is not None and run_id != expected_run_id:
         _refuse("caller run is not the task's current run")
@@ -196,7 +244,8 @@ def register_initial(conn: sqlite3.Connection, task_id: str, source_path: str, *
     return board.attached_run(conn, run_id)
 
 
-def predecessor_for_grant(conn: sqlite3.Connection, task_id: str, grant: dict, custody: dict) -> board.AttachedRun:
+def predecessor_for_grant(conn: sqlite3.Connection, task_id: str, grant: dict, custody: dict, *,
+                          bound=None) -> board.AttachedRun:
     """Read-only recovery, bound to the exact current grant and its retained custody."""
     _run_id, uid, machine = _current(conn, task_id)
     if not isinstance(grant, dict):
@@ -211,7 +260,7 @@ def predecessor_for_grant(conn: sqlite3.Connection, task_id: str, grant: dict, c
     if (custody.get("source_protocol") != 2 or custody.get("manifest_revision") != 0
             or custody.get("source_holder") != machine or custody.get("state") != "retained"):
         _refuse("not same-holder retained premanifest custody")
-    previous = recover_local(conn, task_id, grant.get("source_predecessor"))
+    previous = recover_local(conn, task_id, grant.get("source_predecessor"), bound=bound)
     if custody.get("retained_run_uid") != previous.run_uid:
         _refuse("grant predecessor does not match retained custody")
     if previous.run_uid == uid:
