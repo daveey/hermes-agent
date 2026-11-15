@@ -828,6 +828,9 @@ _MULTI_HOP_DATA_CONSUMERS = [
     "ssh h1 'ssh h2 -p 22 python3 -' < {py}",
     "ssh h1 -T 'ssh h2 -o BatchMode=yes -T python3 -' < {py}",
     "ssh h1 'ssh h2 -- python3 -' < {py}",
+    # A -c payload whose own stdin reader is a data consumer stays data.
+    "ssh h1 \"ssh h2 'bash -c \\\"python3 -\\\"'\" < {py}",
+    "ssh h1 'bash -c \"exec python3 -\"' < {py}",
     "ssh h1 \"ssh h2 python3 -\" <<'PY'\n" + _PY_TAKEOVER + "PY",
 ]
 
@@ -866,6 +869,15 @@ _MULTI_HOP_SHELLS = [
     "ssh h1 'ssh h2 -o BatchMode=yes -p22 -T bash' < {script}",
     "ssh h1 -T < {script}",
     "ssh h1 -p 22 -- < {script}",
+    # A shell's -c payload is followed too: a payload that runs a stdin-reading shell
+    # executes the file (review 5911756789 B1), on the first hop and on later ones.
+    "ssh h1 'bash -c bash' < {script}",
+    "ssh h1 \"ssh h2 'bash -c bash'\" < {script}",
+    "ssh h1 \"ssh h2 'sh -c sh'\" < {script}",
+    "ssh h1 \"ssh h2 'bash -c \\\"exec bash\\\"'\" < {script}",
+    "ssh h1 \"ssh h2 'bash -c \\\"bash -c sh\\\"'\" < {script}",
+    "ssh h1 \"ssh h2 'sh -c \\\"ssh h3\\\"'\" < {script}",
+    "ssh h1 \"ssh h2 'bash -c \\\"python3 -; sh\\\"'\" < {script}",
 ]
 
 

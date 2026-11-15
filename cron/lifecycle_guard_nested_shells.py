@@ -232,7 +232,12 @@ def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
         index = _executed_command_index(view)
         name = _executable_name(view[index]) if index is not None else None
         if index is not None and name in _SHELL_EXECUTABLES:
-            if _shell_inputs(_split_redirections(view[index + 1:])[0], name)[0] == "stdin":
+            kind, value = _shell_inputs(_split_redirections(view[index + 1:])[0], name)
+            if kind == "stdin":
+                return True
+            # A -c payload inherits the stdin: follow it like a hop (`bash -c bash`,
+            # `sh -c "exec sh"`; review 5911756789 B1), under the same depth cap.
+            if kind == "payload" and _remote_reads_stdin([value or ""], hops + 1):
                 return True
             continue
         if _nested_shell_input(view, hops=hops + 1) is not None:
