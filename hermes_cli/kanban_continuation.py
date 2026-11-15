@@ -119,7 +119,8 @@ def continue_task(
     limit = max_continuations if max_continuations is not None else max_consecutive_continuations()
     now = int(time.time())
     from hermes_cli import kanban_park_pin as kpp
-    pin = kpp.plan(conn, task_id, checkpoint)  # git reads stay outside the write txn
+    from hermes_cli import kanban_continue_archive
+    pin = kanban_continue_archive.plan(conn, task_id, checkpoint)  # remote reads outside write txn
     with kb.write_txn(conn):
         row = conn.execute(
             "SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,),
