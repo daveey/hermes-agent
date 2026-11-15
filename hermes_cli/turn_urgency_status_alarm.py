@@ -84,7 +84,7 @@ def _health(home, now):
              and cache.get('board') == 'default'
              and isinstance(cache.get('source_revision'), str) and bool(cache['source_revision'].strip())
              and observed is not None and _finite_clock(until)
-             and observed <= now < until <= observed + 120
+             and observed < until <= observed + 120
              and isinstance(cache.get('owners'), list) and len(cache['owners']) <= 4096)
     if valid:
         for owner in cache['owners']:
@@ -92,16 +92,16 @@ def _health(home, now):
                     or not all(isinstance(owner.get(k), str) and owner[k].strip()
                                for k in ('task_id', 'source', 'ref', 'head'))
                     or owner['source'] not in ('core-lane', 'state-turn')
-                    or not _finite_clock(owner.get('expires_at')) or owner['expires_at'] <= now):
+                    or not _finite_clock(owner.get('expires_at')) or owner['expires_at'] < until):
                 valid = False
                 break
     success = _clock(status.get('last_success_at'), now)
     first = _clock(status.get('first_failure_at'), now)
     # A started/in-flight tick does not invalidate a previous fresh observation.
-    if valid:
+    if valid and now < until:
         return True, observed, None
-    # A cache published before a status-write crash is still a successful observation.
-    successes = [value for value in (success, observed) if value is not None]
+    # Only structurally valid publications prove success, even after expiry.
+    successes = [value for value in (success, observed if valid else None) if value is not None]
     since = max(successes) if successes else first
     error = status.get('last_error')
     if not isinstance(error, str) or not error:

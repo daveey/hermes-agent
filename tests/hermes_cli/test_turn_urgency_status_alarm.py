@@ -134,6 +134,22 @@ def test_cache_publish_crash_does_not_roll_back_success(rig):
     assert alarm.sweep(conn, now=1600.125)
 
 
+@pytest.mark.parametrize('bad', [{'owners': [{}]}, {'version': 2},
+                                {'valid_until': 9999999999}, {'source_revision': ''}])
+def test_invalid_publications_cannot_reset_grace(rig, bad):
+    conn, home = rig
+    first = 1000.125
+    for elapsed in (0, 300, 599.999, 600):
+        cache(home, first + elapsed)
+        path = home / 'cache/kanban-turn-urgency.json'
+        doc = json.loads(path.read_text())
+        doc.update(bad)
+        path.write_text(json.dumps(doc))
+        result = alarm.sweep(conn, now=first + elapsed)
+        assert bool(result) == (elapsed == 600)
+    assert len(cards(conn)) == 1
+
+
 def test_second_recovery_inside_hour_is_not_lost(rig):
     conn, home = rig
     status(home, 1000.125)
