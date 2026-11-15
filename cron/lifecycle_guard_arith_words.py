@@ -50,7 +50,10 @@ def _integer_declaration(arguments: list[str]) -> bool:
 def _name_taking_mode(name: str, arguments: list[str]) -> bool:
     return name in {"unset", "read", "mapfile", "readarray"} or (
         name in {"test", "[", "printf"} and "-v" in arguments
-    ) or (name == "wait" and "-p" in arguments)
+    ) or (name == "wait" and "-p" in arguments) or (
+        name in _INTEGER_DECLARERS
+        and any("[" in argument.split("=", 1)[0] for argument in arguments)
+    )
 
 
 def _arithmetic_operands(segment: list[str]) -> Iterator[str]:
@@ -82,6 +85,11 @@ def _recursive_arithmetic_segment(segment: list[str]) -> bool:
 
     words = segment[guard._peel_reserved_words(segment):]
     index = guard._executed_command_index(words)
+    # A compound initializer is segmented as `a+=`, `[x]=1`; its indexed
+    # member is an arithmetic site too. Do not inspect ordinary command argv.
+    prefix = words if index is None else words[:index + 1]
+    if any(re.match(r"(?:[A-Za-z_]\w*)?\[.*\]\+?=", word) for word in prefix):
+        return True
     if index is None:
         return False
     name = guard._executable_name(words[index])
@@ -89,7 +97,8 @@ def _recursive_arithmetic_segment(segment: list[str]) -> bool:
     # NAME subscripts recursively evaluate variables just like explicit arithmetic.
     # A plain NAME does not: `read x` must not activate earlier data assignments.
     return name == "let" or (
-        name == "[[" and any(token in _INT_OPERATORS for token in arguments)
+        name == "[[" and (any(token in _INT_OPERATORS for token in arguments)
+                          or ("-v" in arguments and any("[" in token for token in arguments)))
     ) or (
         _name_taking_mode(name, arguments) and any("[" in token for token in arguments)
     )
@@ -106,6 +115,32 @@ def _indirect_assignment_words(segment: list[str]) -> Iterator[str]:
         yield from words[:index]
         if guard._executable_name(words[index]) in _INTEGER_DECLARERS:
             yield from words[index + 1:]
+
+
+def _implicit_arithmetic_expansion(command: str) -> bool:
+    """Recognize active legacy arithmetic, parameter indices and substring offsets.
+
+    This is only a context prefilter, not an evaluator. Preserve shell quoting so
+    literal examples in printf/echo do not activate unrelated data assignments.
+    """
+    tokens = re.compile(r'''\\.|'|"|\$\$|\$\[|\$\{[#!]?(?:[A-Za-z_]\w*|\d+|[@*#?$!-])(?:\[|:(?![-=?+]))''')
+    quoted = False
+    pos = 0
+    while match := tokens.search(command, pos):
+        token = match.group()
+        pos = match.end()
+        if token.startswith("\\") or token == "$$":
+            continue
+        if token == '"':
+            quoted = not quoted
+        elif token == "'" and not quoted:
+            close = command.find("'", pos)
+            if close < 0:
+                return True  # uncertain shell syntax: fail towards scanning
+            pos = close + 1
+        elif token.startswith("$"):
+            return True
+    return False
 
 
 def iter_arithmetic_word_payloads(command: str) -> Iterator[str]:
@@ -125,7 +160,7 @@ def iter_arithmetic_word_payloads(command: str) -> Iterator[str]:
     # Arithmetic recursively evaluates variable values. Recover earlier dequoted
     # assignments too, not just the word at the evaluation site. Preserve argv
     # boundaries so a quoted shell program or echo argument is not an assignment.
-    recursive_text = "((" in command or any(
+    recursive_text = "((" in command or _implicit_arithmetic_expansion(command) or any(
         _recursive_arithmetic_segment(segment) for segment in segments
     )
     for segment in segments:
