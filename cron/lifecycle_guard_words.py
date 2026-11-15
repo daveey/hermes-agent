@@ -15,10 +15,12 @@ class ShellWord(str):
     """A decoded word plus the redirection parsed before quoted punctuation is decoded."""
 
     redirection: tuple[str, str, str] | None
+    quoted: bool
 
-    def __new__(cls, text: str, redirection: tuple[str, str, str] | None):
+    def __new__(cls, text: str, redirection: tuple[str, str, str] | None, *, quoted: bool = False):
         word = super().__new__(cls, text)
         word.redirection = redirection
+        word.quoted = quoted
         return word
 
 
@@ -38,8 +40,14 @@ def tokenize_redirections(line: str, tokenize: Callable[[str], list[str]],
     replacements = {ch: f"{marker}{index}{marker}" for index, ch in enumerate(alphabet)}
     protected: list[str] = []
     single = double = escaped = False
+    quote_marker = marker + "5" + marker
     for ch in line:
         literal = single or double or escaped
+        # Mark the boundary, including empty quoted pieces. The escape marker
+        # itself is encoded below, so literal input cannot synthesize this tag.
+        if not escaped and (ch == "\\" and not single
+                            or ch == "'" and not double or ch == '"' and not single):
+            protected.append(quote_marker)
         if escaped:
             escaped = False
         elif ch == "\\" and not single:
@@ -55,7 +63,11 @@ def tokenize_redirections(line: str, tokenize: Callable[[str], list[str]],
 
     words: list[str] = []
     for token in tokenize(split_glued_redirections("".join(protected))):
+        tags = list(re.finditer(marker + r"([0-5])" + marker, token))
+        quoted = any(match[1] == "5" for match in tags)
+        token = re.sub(marker + r"([0-5])" + marker,
+                       lambda m: "" if m[1] == "5" else m[0], token)
         match = pattern.match(token)
         parts = (restore(match[1]), restore(match[2]), restore(match[3])) if match else None
-        words.append(ShellWord(restore(token), parts))
+        words.append(ShellWord(restore(token), parts, quoted=quoted))
     return words

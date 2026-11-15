@@ -342,22 +342,38 @@ class _PrintedUnit:
 def _case_word_role(cases: dict[int, str], depth: int, word: str) -> Optional[str]:
     """Keep case subjects/pattern punctuation out of command and group tracking."""
     phase = cases.get(depth)
+    syntax = not getattr(word, "quoted", False)
     if phase == "subject":
         cases[depth] = "header"
-    elif phase == "header" and word == "in":
+    elif phase == "header" and syntax and word == "in":
         cases[depth] = "pattern"
-    elif phase in ("pattern", "pattern-word") and word == ")":
+    elif phase in ("pattern", "pattern-word") and syntax and word == ")":
         cases[depth] = "body"
         return "arm"
-    elif phase == "pattern" and word == "(":
+    elif phase == "pattern" and syntax and word == "(":
         cases[depth] = "pattern-word"
-    elif phase == "body" and word == ";;":
+    elif phase == "body" and syntax and word == ";;":
         cases[depth] = "pattern"
-    elif phase == "pattern" and word == "esac":
+    elif phase == "pattern" and syntax and word == "esac":
         return "end"
     if phase in ("subject", "header", "pattern", "pattern-word"):
         return "data"
     return None
+
+
+def _printed_word_role(word: str, command_position: bool) -> tuple[str, bool]:
+    """Only lexical shell syntax changes compound depth or command position."""
+    if getattr(word, "quoted", False):
+        return "word", False
+    if word in _PIPE_OPERATORS or word in _LIST_OPERATORS or word in ("(", ")"):
+        role = ("pipe" if word in _PIPE_OPERATORS else "list"
+                if word in _LIST_OPERATORS else "open" if word == "(" else "close")
+        return role, True
+    if command_position and word in _GROUP_OPEN_WORDS:
+        return "open", word in _COMMAND_PREFIX_WORDS
+    if command_position and word in _GROUP_CLOSE_WORDS:
+        return "close", False
+    return "word", command_position and word in _COMMAND_PREFIX_WORDS
 
 
 def _printed_pipeline_units(command: str) -> list[_PrintedUnit]:
@@ -388,7 +404,8 @@ def _printed_pipeline_units(command: str) -> list[_PrintedUnit]:
                 command_position = True
             for token in tokens:
                 words = re.findall(r"\|&|&&|\|\||;;|[;&|()]", token) if (
-                    token and set(token) <= _CONTROL_CHARS) else [token]
+                    token and not getattr(token, "quoted", False)
+                    and set(token) <= _CONTROL_CHARS) else [token]
                 for word in words:
                     case_role = _case_word_role(cases, depth, word)
                     if case_role == "arm":
@@ -400,17 +417,7 @@ def _printed_pipeline_units(command: str) -> list[_PrintedUnit]:
                     if case_role == "data":
                         unit.events.append(("data", word))
                         continue
-                    if word in _PIPE_OPERATORS or word in _LIST_OPERATORS or word in ("(", ")"):
-                        role = ("pipe" if word in _PIPE_OPERATORS else "list"
-                                if word in _LIST_OPERATORS else "open" if word == "(" else "close")
-                        command_position = True
-                    elif command_position and word in _GROUP_OPEN_WORDS:
-                        role, command_position = "open", word in _COMMAND_PREFIX_WORDS
-                    elif command_position and word in _GROUP_CLOSE_WORDS:
-                        role, command_position = "close", False
-                    else:
-                        role = "word"
-                        command_position = command_position and word in _COMMAND_PREFIX_WORDS
+                    role, command_position = _printed_word_role(word, command_position)
                     if role == "close":
                         cases.pop(depth, None)
                     depth = depth + 1 if role == "open" else max(0, depth - (role == "close"))
