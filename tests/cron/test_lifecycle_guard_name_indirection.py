@@ -1,4 +1,7 @@
 """Bash name operands and recursively evaluated assignment values must be scanned."""
+import shutil
+import subprocess
+
 import pytest
 
 from cron.lifecycle_guard import scan_gateway_lifecycle
@@ -49,13 +52,81 @@ SHAPES = [
     "x='a[$(SCRIPT)]'; command printf -v 'a[x]' 1",
 ]
 
+# Bash versions that stop a shape before evaluating its subscript, as (exit status, stderr
+# fragment). These remain scanner sinks: the guard must conservatively cover every Bash even when
+# the local shell treats a shape as data. Bash 3.2 (macOS /bin/bash) has no `test -v`/`[[ -v ]]`
+# and rejects subscripted `printf -v` names; Bash 5.3 no longer runs a substitution found in an
+# `unset` subscript.
+BASH_DATA = {
+    "3.2": {
+        "x='a[$(SCRIPT)]'; [[ -v a[x] ]]": (2, "conditional binary operator expected"),
+        "test -v 'a[$(SCRIPT)]'": (2, "-v: unary operator expected"),
+        r"test -v a[\$\(SCRIPT\)]": (2, "-v: unary operator expected"),
+        "[ -v 'a[$(SCRIPT)]' ]": (2, "-v: unary operator expected"),
+        "printf -v 'a[$(SCRIPT)]' 1": (2, "not a valid identifier"),
+        r"printf -v a[\$\(SCRIPT\)] 1": (2, "not a valid identifier"),
+        r"builtin printf -v a[\$\(SCRIPT\)] 1": (2, "not a valid identifier"),
+        r"command test -v a[\$\(SCRIPT\)]": (2, "-v: unary operator expected"),
+        r"if test -v a[\$\(SCRIPT\)]; then :; fi": (0, "-v: unary operator expected"),
+        "x='a[$(SCRIPT)]'; test -v 'a[x]'": (2, "-v: unary operator expected"),
+        r"x=a[\$\(SCRIPT\)]; [ -v 'a[x]' ]": (2, "-v: unary operator expected"),
+        "x='a[$(SCRIPT)]'; printf -v 'a[x]' 1": (2, "not a valid identifier"),
+        "x='a[$(SCRIPT)]'; builtin test -v 'a[x]'": (2, "-v: unary operator expected"),
+        "x='a[$(SCRIPT)]'; command printf -v 'a[x]' 1": (2, "not a valid identifier"),
+    },
+    "5.3": {
+        r"declare -a a=([0]=1); unset a[\$\(SCRIPT\)]": (1, "arithmetic syntax error"),
+    },
+}
+
+
+@pytest.fixture(scope="module")
+def bash_version():
+    bash = shutil.which("bash")
+    assert bash is not None, "Bash required for execution proof"
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c",
+         'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
+        env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True,
+        encoding="utf-8", timeout=10, check=True,
+    )
+    return result.stdout
+
+
+def _run_bash_result(tmp_path, command):
+    """``_run_bash`` that also returns Bash's result, to pin why a data shape did not run."""
+    bash = shutil.which("bash")
+    assert bash is not None, "Bash required for execution proof"
+    marker = tmp_path / "ran"
+    script = tmp_path / "payload.sh"
+    script.write_text(f"touch '{marker}'\nprintf 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c", command], cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True,
+        encoding="utf-8", timeout=10, check=False,
+    )
+    return marker.exists(), script, result
+
+
+def test_bash_data_shapes_are_scanned_shapes():
+    for data in BASH_DATA.values():
+        assert set(data) <= set(SHAPES)
+
 
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("shape", SHAPES)
-def test_name_and_indirection_scripts_are_scanned(tmp_path, shape):
+def test_name_and_indirection_scripts_are_scanned(tmp_path, shape, bash_version):
     command = shape.replace("SCRIPT", str(tmp_path / "payload.sh"))
-    ran, script = _run_bash(tmp_path, command)
-    assert ran, "Bash must execute the harmless marker script"
+    ran, script, result = _run_bash_result(tmp_path, command)
+    data = BASH_DATA.get(bash_version, {})
+    if shape in data:
+        status, diagnostic = data[shape]
+        assert not ran, (result.returncode, result.stderr)
+        assert result.returncode == status
+        assert diagnostic in result.stderr
+    else:
+        assert ran, ("Bash must execute the harmless marker script", result.returncode, result.stderr)
     script.write_text("hermes gateway restart\n", encoding="utf-8")
     assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (True, None)
     script.write_text("echo hello\n", encoding="utf-8")
