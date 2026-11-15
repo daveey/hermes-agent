@@ -1,6 +1,7 @@
 """Unread-thread policy for manual release surfaces, never autonomous DB callers. [daveey]"""
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import time
@@ -24,26 +25,57 @@ class UnreadComments(Exception):
 
 def check(conn, tid, *, session, seen=None, verb="unblock", board=None):
     """Called under the status writer's lock; exceptions leave events/comments unchanged."""
-    rows = conn.execute(
-        "SELECT c.id, c.body, e.created_at, json_extract(e.payload, '$.writer_session') AS writer "
-        "FROM task_events e JOIN task_comments c ON c.task_id=e.task_id "
-        "AND c.id=json_extract(e.payload, '$.comment_id') "
-        "WHERE e.task_id=? AND e.kind='commented' "
-        "AND coalesce(json_extract(e.payload, '$.writer_session'), '') != '' "
-        "AND json_extract(e.payload, '$.writer_session') != ? "
-        "AND ((? IS NOT NULL AND c.id > ?) OR (? IS NULL AND e.created_at >= ?)) "
-        "ORDER BY c.id", (tid, session or "", seen, seen, seen, int(time.time()) - 3600),
+    events = conn.execute(
+        "SELECT * FROM task_events WHERE task_id=? AND kind='commented' "
+        "AND coalesce(json_extract(payload, '$.writer_session'), '') != '' "
+        "AND json_extract(payload, '$.writer_session') != ? "
+        "AND (? IS NOT NULL OR created_at >= ?)",
+        (tid, session or "", seen, int(time.time()) - 3600),
     ).fetchall()
-    if not rows:
+    if not events:
         return
-    comments = [{"id": r["id"], "writer_session": r["writer"],
-                 "time": datetime.fromtimestamp(r["created_at"], UTC).isoformat(),
-                 "body": r["body"][:300]} for r in rows]
+    rows = conn.execute("SELECT * FROM task_comments WHERE task_id=? ORDER BY id", (tid,)).fetchall()
+    comments = []
+    for event in events:
+        payload = json.loads(event["payload"])
+        candidates = _resolve(rows, event, payload)
+        if not candidates:
+            # A partial sync must not turn missing comment data into permission.
+            comments.append(_listing(None, "Comment data unavailable; wait for sync and read again. --seen cannot "
+                                     "acknowledge missing data.", event, payload))
+        for row in candidates:
+            if seen is None or row["id"] > seen:
+                comments.append(_listing(row["id"], row["body"], event, payload))
+    if not comments:
+        return
+    comments = list({(r["id"], r["writer_session"]): r for r in comments}.values())
     command = ["hermes", "kanban"]
     if board:
         command += ["--board", board]
-    command += [verb, tid, "--seen", str(max(r["id"] for r in rows))]
+    newest = max((r["id"] for r in comments if r["id"] is not None), default=seen or 0)
+    command += [verb, tid, "--seen", str(newest)]
     raise UnreadComments(comments, shlex.join(command))
+
+
+def _listing(cid, body, event, payload):
+    return {"id": cid, "writer_session": payload["writer_session"],
+            "time": datetime.fromtimestamp(event["created_at"], UTC).isoformat(), "body": body[:300]}
+
+
+def _resolve(rows, event, payload):
+    """Never compare a wire-local integer with a receiver's watermark.
+
+    Legacy synced events have no portable reference. Require acknowledgement of
+    every plausible same-time/author row rather than guess among collisions.
+    The timestamp tolerance covers the writer crossing a second between inserts;
+    body length cannot disambiguate because add_comment strips stored text.
+    """
+    if payload.get("comment_uid"):
+        return [r for r in rows if "uid" in r.keys() and r["uid"] == payload["comment_uid"]]
+    if rows and "uid" not in rows[0].keys():  # never-synced board: IDs are local
+        return [r for r in rows if r["id"] == payload.get("comment_id")]
+    return [r for r in rows if abs(r["created_at"] - event["created_at"]) <= 1
+            and (not payload.get("author") or r["author"] == payload["author"].strip())]
 
 
 def cli_guard(args, tid, verb):
