@@ -4,8 +4,51 @@ import shutil
 import sqlite3
 from contextlib import closing
 
+import pytest
+
 from gateway import hosted_rooms as rooms
 from gateway import hosted_rooms_legacy_import as legacy
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+def test_readiness_exception_closes_open_connection(tmp_path, monkeypatch, error_type):
+    db = tmp_path / "store.db"
+    rooms._connect(db).close()
+    retained = []
+    failure = error_type("readiness failed")
+
+    def fail_readiness(conn, path, identity):
+        retained.append(conn)
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+        raise failure
+
+    monkeypatch.setattr(rooms, "_read_store_ready", fail_readiness)
+    try:
+        with pytest.raises(error_type) as raised:
+            rooms._read_connection(db)
+        assert raised.value is failure
+        assert len(retained) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            retained[0].execute("SELECT 1")
+    finally:
+        for conn in retained:
+            conn.close()
+
+
+def test_ready_connection_remains_usable_by_caller(tmp_path, monkeypatch):
+    db = tmp_path / "store.db"
+    rooms._connect(db).close()
+    retained = []
+    original = rooms._read_store_ready
+
+    def check_readiness(conn, path, identity):
+        retained.append(conn)
+        return original(conn, path, identity)
+
+    monkeypatch.setattr(rooms, "_read_store_ready", check_readiness)
+    with closing(rooms._read_connection(db)) as conn:
+        assert retained == [conn]
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
 
 
 def trace_reads(monkeypatch):
