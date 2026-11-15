@@ -192,7 +192,8 @@ def test_dispatch_reuses_usage_until_read_interval_expires(paced_board, monkeypa
     monkeypatch.setattr(pd, "_CLASS_CACHE", {})
     monkeypatch.setattr(pd, "_WARNED", {})
     interval = 60
-    _write_cfg(paced_board, llm_pacing={"enabled": True, "read_interval_seconds": interval})
+    _write_cfg(paced_board, llm_pacing={"enabled": True, "read_interval_seconds": interval,
+                                      "providers": ["anthropic"]})
     assert pd.load_config().read_interval == interval
     start = time.time()
     clock = SimpleNamespace(now=start)
@@ -273,9 +274,11 @@ def test_only_kanban_dispatch_consults_the_governor():
     users = sorted(str(p.relative_to(root)) for top in ("agent", "gateway", "cron", "hermes_cli", "tui_gateway")
                    if (root / top).is_dir() for p in (root / top).rglob("*.py")
                    if "kanban_llm_pacing" in p.read_text(encoding="utf-8", errors="ignore"))
-    assert users == ["hermes_cli/kanban_db_dispatch.py", "hermes_cli/kanban_llm_pacing.py",
-                     "hermes_cli/kanban_llm_pacing_dispatch.py", "hermes_cli/kanban_parent_unclaimed.py",
-                     "hermes_cli/kanban_worker_node.py"]
+    assert users == ["hermes_cli/kanban_db_dispatch.py", "hermes_cli/kanban_dispatch_maintenance.py",
+                     "hermes_cli/kanban_llm_pacing.py", "hermes_cli/kanban_llm_pacing_dispatch.py",
+                     "hermes_cli/kanban_parent_unclaimed.py", "hermes_cli/kanban_worker_node.py"]
+    assert _governor_names(root / "hermes_cli/kanban_dispatch_maintenance.py") == {
+        "kanban_llm_pacing_dispatch": {"refresh_pools"}}
     assert _governor_names(root / "hermes_cli/kanban_parent_unclaimed.py") == NOTICE_VIEW
     assert _governor_names(root / "hermes_cli/kanban_worker_node.py") == PICKUP_VIEW
 

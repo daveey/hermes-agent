@@ -9,9 +9,8 @@ before any claim (:func:`hold`). Pool math and the incident are in ``kanban_llm_
 * Each governed provider's OAuth pool is read (``/api/oauth/usage``, read-only) at most every
   ``read_interval`` seconds per Hermes home; samples and this host's running count on the provider are kept in
   ``<kanban home>/llm_pacing.json`` for burn rates and average concurrency.
-* Only Kanban dispatch consults this module: chats, cron and notice delivery never do. The one reader outside the
-  claim path is :func:`paced_pools`, the stall notices' view of the pace this home stored: it reads usage never,
-  writes nothing and holds nothing.
+* Dispatcher maintenance refreshes configured pools even with zero admissions; the claim path shares its interval.
+* The read-only notice reader :func:`paced_pools` reads usage never, writes nothing and holds nothing.
 * Any read or resolve fault starts the card (fail open, warned once per interval).
 * ``kanban.llm_pacing.enabled: false`` restores the ungoverned behaviour.
 """
@@ -33,8 +32,8 @@ READ_DEADLINE_SECONDS = 10.0
 EVENT_KIND = "llm_paced"
 ADMISSION_REASON = "llm_pacing"  # the ``admission.reason`` of a stall notice for a pool the governor holds
 EVENT_REPEAT_SECONDS = 3600
-# A stored pace older than this many read intervals is no read: a dispatcher on this home replaces it every interval
-# while any governed card passes it, so a gap this long means nothing has judged the pool since.
+# A stored pace older than this many read intervals is no read: maintenance replaces it each interval,
+# even without admissions, so a gap this long means this home has stopped observing the pool.
 STALE_READ_INTERVALS = 3
 _STATE_FILE = "llm_pacing.json"
 _CACHE: dict[str, tuple[float, lp.PoolPace]] = {}
@@ -209,6 +208,22 @@ def pace_for(conn: sqlite3.Connection, provider: str, cfg: lp.PacingConfig, now:
     pace = _refresh(conn, provider, cfg, now)
     _CACHE[provider] = (now, pace)
     return pace
+
+
+def refresh_pools(conn: sqlite3.Connection) -> None:
+    """Refresh configured pools before admission, even on an idle/capped home.
+
+    Reuse the admission reader's memory/shared usage budget, including failures.
+    """
+    try:
+        cfg = load_config()
+        if not cfg.enabled:
+            return
+        now = time.time()
+        for provider in cfg.providers:
+            pace_for(conn, provider, cfg, now)
+    except Exception as exc:  # health: allow BLE001 -- observation failure must never stop dispatch
+        _warn("refresh", "kanban pacing: periodic refresh failed (%s); continuing dispatch", exc)
 
 
 def avg_running(provider: str, now: float, cfg: lp.PacingConfig) -> float:

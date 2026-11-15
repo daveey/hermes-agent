@@ -47,6 +47,8 @@ def test_far_wall_reroutes_before_pacing_and_destination_limits_claims(
         return lp.PoolPace(provider, destination if provider == 'anthropic' else lp.HELD, 0.15)
 
     monkeypatch.setattr(pd, 'pace_for', pace_for)
+    # Observe claim routing, not the independent all-provider maintenance read.
+    monkeypatch.setattr(pd, 'refresh_pools', lambda conn: None)
     with kbc.connect() as conn:
         ids = [kb.create_task(conn, title=f'fresh default {i}', assignee='a') for i in range(2)]
         seen = []
