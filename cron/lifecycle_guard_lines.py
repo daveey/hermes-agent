@@ -160,25 +160,15 @@ class _HereDocs:
 
     def __init__(self) -> None:
         self._pending: list[tuple[str, bool]] = []
-        self._arith = -1
-        self._bracket_end = -1
         self.unbounded = False
         self.skipped = False
 
-    def bodies_end(self, text: str, pos: int, depth: int, *, word_start: bool) -> int:
-        """Advance on the character at *pos*; when it is the newline before complete bodies,
-        return the position after them, else *pos*."""
+    def bodies_end(self, text: str, pos: int, *, arithmetic: bool) -> int:
+        """Skip complete bodies at a shell newline, never at an arithmetic newline."""
         char = text[pos]
-        if pos <= self._bracket_end:
+        if arithmetic:
             return pos
-        if char == "[" and _arithmetic_bracket(text, pos):
-            self._bracket_end = _bracket_end(text, pos)
-            return pos
-        if char == "(" and self._arith < 0 and text.startswith("((", pos):
-            self._arith = depth
-        elif char == ")" and depth - 1 == self._arith:
-            self._arith = -1
-        elif char == "<" and self._arith < 0 and text[pos - 1] != "<":
+        if char == "<" and text[pos - 1] != "<":
             delimiter = _heredoc_delimiter(text, pos)
             if delimiter is not None:
                 self._pending.append(delimiter)
@@ -200,8 +190,16 @@ def _bracket_end(text: str, pos: int) -> int:
         if char == "\\":
             pos += 2
             continue
-        if char in "'\"`":
-            pos = _quoted_end(text, pos + 1, char, escapes=char != "'")
+        if char in "$`":
+            end, span = _expansion(text, pos, in_double=False, shlex_quotes=False)
+            if span:
+                pos = end
+                continue
+        if char == '"':
+            pos, _ = _double_span(text, pos + 1, shlex_quotes=False)
+            continue
+        if char == "'":
+            pos = _quoted_end(text, pos + 1, char, escapes=False)
             continue
         if char == "[":
             depth += 1
@@ -213,13 +211,50 @@ def _bracket_end(text: str, pos: int) -> int:
     return -1
 
 
-def _arithmetic_bracket(text: str, pos: int) -> bool:
-    """Legacy arithmetic expansion or an assignment subscript, not literal ``[``."""
-    if text[pos - 1:pos] == "$":
+class _ArithmeticContext:
+    """Shared shell-data state; expansions are still walked in their own command frames."""
+
+    def __init__(self) -> None:
+        self.bracket_end = -1
+        self._paren = self._compound = self._compound_at = -1
+        self.declaration = False
+
+    def word(self, text: str, pos: int, *, at_command: bool) -> bool:
+        if at_command:
+            self.declaration = _plain_word(text, pos) in {
+                "declare", "typeset", "local", "export", "readonly",
+            }
+        match = re.match(r"[A-Za-z_][A-Za-z_0-9]*(?=\[|\+?=)", text[pos:])
+        if match is None or not (at_command or self.declaration):
+            return False
+        end = pos + match.end()
+        if text[end] == "[":
+            bracket = _bracket_end(text, end)
+            if bracket < 0 or not text.startswith(("=", "+="), bracket + 1):
+                return False
+            self.bracket_end = bracket
+            end = bracket + 1
+        if text.startswith(("=(", "+=("), end):
+            self._compound_at = end + (2 if text[end] == "+" else 1)
         return True
-    end = _bracket_end(text, pos)
-    return end >= 0 and text.startswith(("=", "+="), end + 1) and bool(
-        re.search(r"(?:^|[\s;|(])[A-Za-z_][A-Za-z_0-9]*$", text[:pos]))
+
+    def contains(self, text: str, pos: int, depth: int) -> bool:
+        if pos <= self.bracket_end:
+            return True
+        if text.startswith("$[", pos):
+            self.bracket_end = _bracket_end(text, pos + 1)
+            return self.bracket_end >= pos
+        if pos == self._compound_at:
+            self._compound = depth
+        if text.startswith("((", pos) and self._paren < 0:
+            self._paren = depth
+        active = self._paren >= 0 or self._compound >= 0
+        if text[pos] == ")":
+            if depth - 1 == self._paren:
+                self._paren = -1
+            if depth - 1 == self._compound:
+                self._compound = -1
+        return active
 
 
 def _newline_breaks(breaks: list[int] | None, text: str, start: int, end: int,
@@ -254,10 +289,12 @@ def _walk_command_span(text: str, start: int, shlex_quotes: bool,
     parts = ["$("]
     cases = _CaseClauses()
     docs = _HereDocs()
+    math = _ArithmeticContext()
     at_command = True
     while pos < len(text):
         char = text[pos]
-        end = pos if fallback else docs.bodies_end(text, pos, depth, word_start=word_start)
+        arithmetic = math.contains(text, pos, depth)
+        end = pos if fallback else docs.bodies_end(text, pos, arithmetic=arithmetic)
         if docs.unbounded:
             # Unknown delimiter: body words cannot safely open case clauses.
             cases = _CaseClauses()
@@ -266,7 +303,7 @@ def _walk_command_span(text: str, start: int, shlex_quotes: bool,
             pos = end
             at_command = word_start = True
             continue
-        if char == "#" and word_start:
+        if char == "#" and word_start and not arithmetic:
             end = text.find("\n", pos)
             end = len(text) if end < 0 else end
             parts.append(text[copied:pos])
@@ -276,8 +313,11 @@ def _walk_command_span(text: str, start: int, shlex_quotes: bool,
                 parts.append(text[pos:end].rstrip("\r").rstrip("\\"))
             pos = copied = end
             continue
-        if word_start and char not in _WORD_BREAKS and not (fallback or docs.unbounded):
-            at_command = cases.word(_plain_word(text, pos), depth, at_command=at_command)
+        if (word_start and char not in _WORD_BREAKS
+                and not (arithmetic or fallback or docs.unbounded)):
+            assignment = math.word(text, pos, at_command=at_command)
+            at_command = cases.word(_plain_word(text, pos), depth, at_command=at_command) or (
+                at_command and assignment)
         if char == "\\":
             if text[pos + 1:pos + 2] != "\n":
                 word_start = False
@@ -302,23 +342,23 @@ def _walk_command_span(text: str, start: int, shlex_quotes: bool,
             pos = copied = end
             word_start = False
             continue
-        skip = cases.clause_end(text, pos, depth)
+        skip = 0 if arithmetic else cases.clause_end(text, pos, depth)
         if skip:
             pos += skip
             at_command = word_start = True
             continue
         if char == "\n" and breaks is not None:
             breaks.append(_out_len(parts) + pos - copied)
-        elif char in "()" and cases.pattern_paren(char, depth):
+        elif char in "()" and not arithmetic and cases.pattern_paren(char, depth):
             at_command = True  # after a pattern's `)` its command list follows
-        elif char == "(":
+        elif char == "(" and pos > math.bracket_end:
             depth += 1
-        elif char == ")":
+        elif char == ")" and pos > math.bracket_end:
             depth -= 1
             if not depth:
                 pos += 1
                 break
-        if char in _COMMAND_BREAKS:
+        if char in _COMMAND_BREAKS and not arithmetic:
             at_command = True
         word_start = char in _WORD_BREAKS
         pos += 1
