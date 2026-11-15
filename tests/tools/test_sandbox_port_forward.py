@@ -25,10 +25,19 @@ def local_relay(monkeypatch):
         streams._forwards.pop((id(env), "127.0.0.1", port)).close()
 
 
-def _closed_port() -> int:
+@pytest.fixture
+def closed_port():
+    # Bound but not listening: connections fail without releasing the port for
+    # another parallel test's one-shot server to inherit before our probe.
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        yield s.getsockname()[1]
+
+
+def test_closed_port_is_reserved_until_the_probe_finishes(closed_port):
+    with socket.socket() as contender:
+        with pytest.raises(OSError):
+            contender.bind(("127.0.0.1", closed_port))
 
 
 def _one_shot_server(reply: bytes, *, read_request: bool = False) -> int:
@@ -37,11 +46,16 @@ def _one_shot_server(reply: bytes, *, read_request: bool = False) -> int:
     srv.listen(1)
 
     def serve():
-        conn, _ = srv.accept()
-        with conn, srv:
-            if read_request:
-                conn.recv(65536)
-            conn.sendall(reply)
+        with srv:
+            while True:
+                conn, _ = srv.accept()
+                with conn:
+                    # A parallel test may probe a previously free port. An empty
+                    # connection is not our HTTP request and must not consume it.
+                    if read_request and not conn.recv(65536):
+                        continue
+                    conn.sendall(reply)
+                    return
     threading.Thread(target=serve, daemon=True).start()
     return srv.getsockname()[1]
 
@@ -57,13 +71,13 @@ def _relay(local_port: int, request: bytes = b"") -> bytes:
         return b"".join(chunks)
 
 
-def test_only_a_connection_that_never_reaches_its_target_counts_as_a_forward_failure(local_relay):
+def test_only_a_connection_that_never_reaches_its_target_counts_as_a_forward_failure(local_relay, closed_port):
     env = object()
     live = _one_shot_server(b"devtools")
     local_relay.append((env, live))
     assert _relay(streams.forward_port(env, live)) == b"devtools"
 
-    dead = _closed_port()  # Chromium died: nothing listens on its DevTools port any more
+    dead = closed_port  # Chromium died: nothing listens on its DevTools port any more
     local_relay.append((env, dead))
     assert _relay(streams.forward_port(env, dead)) == b""
 
@@ -73,6 +87,20 @@ def test_only_a_connection_that_never_reaches_its_target_counts_as_a_forward_fai
 
 
 _NOT_FOUND = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+
+
+def test_an_empty_port_probe_cannot_consume_the_http_reply(local_relay):
+    """Another test's stale closed-port probe can land on our newly bound port."""
+    env = object()
+    target = _one_shot_server(_NOT_FOUND, read_request=True)
+    local_relay.append((env, target))
+    with socket.create_connection(("127.0.0.1", target), timeout=10) as probe:
+        probe.shutdown(socket.SHUT_WR)
+        # EOF orders the probe before the real request, without scheduling sleeps.
+        while probe.recv(65536):
+            pass
+    assert _relay(streams.forward_port(env, target), b"GET /missing HTTP/1.1\r\n\r\n") == _NOT_FOUND
+    assert streams.forward_failures(env, target) == 0
 
 
 def test_a_404_on_the_old_browser_path_counts_as_a_forward_failure(local_relay):
