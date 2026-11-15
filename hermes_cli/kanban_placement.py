@@ -1274,9 +1274,13 @@ def remote_body(args: dict, *, self_gw: str, target: str, carried: bool = False)
 
 def create_remote(args: dict, *, target: str, origin_session: Optional[str], origin_profile: str,
                   self_gw: str, cfg: Optional[dict] = None, hub_cli: str = "hermes-hub",
-                  transport_key: Optional[str] = None) -> dict:
+                  transport_key: Optional[str] = None, origin_gateway: Optional[str] = None,
+                  creator: Optional[dict] = None, run_uid: Optional[str] = None) -> dict:
     """Queue on ``target``; a fatal refusal must not fall back to a second local card."""
     c = _Cfg(config() if cfg is None else cfg)
+    foreign_origin = bool(origin_gateway and origin_gateway != self_gw)
+    if foreign_origin and (not origin_session or not creator or not run_uid):
+        return {"ok": False, "fatal": True, "error": "foreign origin requires creator owner and run authority"}
     carried = hub_carries_options(hub_cli)
     if not carried and any(args.get(k) not in (None, "", []) for k in (*IDENTITY_OPTIONS, "self_work")):
         return {"ok": False, "fatal": True, "error": "create identity requires hermes-hub create-task --option"}
@@ -1287,7 +1291,7 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     transport_args = {**args, "idempotency_key": transport_key} if transport_key else args
     rid = request_id(self_gw, transport_args, origin_session or "", options)
     prior = remote_state(rid)
-    if prior in ("queued", "sent", "done") and not options.get("idempotency_key"):
+    if prior in ("queued", "sent", "done") and not options.get("idempotency_key") and not foreign_origin:
         # Content-addressed retries need no send. Explicit keys must let the courier compare
         # the complete envelope: the same key can also name changed or formerly dropped metadata.
         return {"ok": True, "request_id": rid, "queued_only": False, "retry": True}
@@ -1299,6 +1303,14 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
     if origin_session:
         argv += ["--origin-session", origin_session, "--origin-profile", origin_profile,
                  "--creator-session", c.creator_session(target)]
+        if foreign_origin:
+            argv += ["--origin-gateway", origin_gateway, "--creator-run", run_uid]
+            for field, flag in (("gateway", "gateway"), ("profile", "profile"),
+                                ("board", "board"), ("task_id", "task")):
+                value = creator.get(field)
+                if not isinstance(value, str) or not value:
+                    return {"ok": False, "fatal": True, "error": "foreign origin creator identity incomplete"}
+                argv += ["--creator-" + flag, value]
     else:
         argv += ["--origin-session", ""]
     rc, out, err = hub_runner(argv)
@@ -1306,7 +1318,7 @@ def create_remote(args: dict, *, target: str, origin_session: Optional[str], ori
         return {"ok": True, "request_id": rid, "queued_only": False, "retry": prior is not None}
     if rc == 3:  # hub unreachable after the liveness check: queued, sent on the next sync (durable)
         return {"ok": True, "request_id": rid, "queued_only": prior != "done", "retry": prior is not None}
-    return {"ok": False, "request_id": rid, "rc": rc, "fatal": "request_id_conflict" in (err or out),
+    return {"ok": False, "request_id": rid, "rc": rc, "fatal": foreign_origin or "request_id_conflict" in (err or out),
             "error": (err or out)[-400:]}
 
 
