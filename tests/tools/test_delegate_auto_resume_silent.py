@@ -149,6 +149,7 @@ def test_a_spawn_with_a_waiting_childs_exact_goal_is_refused_until_it_is_stopped
     assert json.loads(delegate_task(action="stop", subagent_id=sid, parent_agent=parent))["status"] == "dismissed"
     with patch("run_agent.AIAgent", side_effect=_ScriptedModel()):
         again = json.loads(delegate_task(goal="write the parser", background=True, parent_agent=parent))
+        _until_completion(again["delegation_id"])
     assert again.get("status") == "dispatched" and sid not in again["subagent_ids"], again
 
 
@@ -162,6 +163,7 @@ def test_the_duplicate_guard_is_off_without_auto_resume(tmp_path):
     (get_hermes_home() / "config.yaml").write_text(json.dumps({"delegation": {"auto_resume": False}}))
     with patch("run_agent.AIAgent", side_effect=_ScriptedModel()):
         out = json.loads(delegate_task(goal="write the parser", background=True, parent_agent=parent))
+        _until_completion(out["delegation_id"])
     assert out.get("status") == "dispatched", out
 
 
@@ -274,6 +276,7 @@ def test_turning_auto_resume_off_still_reports_a_promised_child_once_and_the_gua
                  "WHERE subagent_id=?", (time.time() - 7 * 3600, sid))
     with patch("run_agent.AIAgent", side_effect=_ScriptedModel()):  # past its deadline, before any tick settled it
         again = json.loads(delegate_task(goal="write the parser", background=True, parent_agent=parent))
+        _until_completion(again["delegation_id"])
     assert again.get("status") == "dispatched", again
     (get_hermes_home() / "config.yaml").write_text(json.dumps({"delegation": {"auto_resume": False}}))
     dispatched = []
