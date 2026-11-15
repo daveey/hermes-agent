@@ -1731,8 +1731,11 @@ def _contains_unsafe_gateway_action(
     from cron.lifecycle_guard_nested_shells import (
         collect_nested_shell_inputs, shell_scope, unvisited_scopes)
 
+    from cron.lifecycle_guard_output import iter_printed_shell_payloads, quote_scope
+
     session_payloads = list(itertools.chain(_iter_shell_command_payloads(walk_command),
-                                            _iter_printed_shell_payloads(walk_command)))
+        (text for text, _raw in iter_printed_shell_payloads(
+            walk_command, include_quoted=covered_quote_scope != quote_scope(cwd, executed, budget)))))
     nested_texts, nested_scripts = collect_nested_shell_inputs(
         command, walk_command, cwd=cwd, budget=budget, session_payloads=session_payloads)
     from cron.lifecycle_guard_output import iter_recursive_payloads
