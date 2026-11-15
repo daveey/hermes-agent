@@ -7,32 +7,20 @@ from __future__ import annotations
 
 from contextlib import closing
 import json
-import os
 import sqlite3
 
 from hermes_cli.kanban_origin_ledger import validate_binding
 
 
 def capture(creator_task_id, *, courier=False):
-    """Trusted ambient context, never the tool's session/origin arguments."""
-    if courier:
+    """Use admitted in-process custody, never environment or tool arguments."""
+    if courier or creator_task_id:
+        # Worker inheritance needs independently verified claim custody. A bare
+        # HERMES_KANBAN_TASK is not a capability; refuse until that seam is bound.
         return None
-    worker = os.environ.get("HERMES_KANBAN_TASK")
-    if worker:
-        return {"creator": worker} if creator_task_id == worker else None
-    if creator_task_id:
-        return None
-    from gateway.session_context import get_session_env
-    from hermes_cli.kanban_origin import gateway_names
-    from hermes_cli.profiles import get_active_profile_name
-    from hermes_cli.kanban_session_provenance import _local_session_sources, _INTERACTIVE_SOURCES
-    from hermes_cli.kanban_placement import is_placeholder_session
-    sid = get_session_env("HERMES_SESSION_ID")
-    gateway, profile = gateway_names()[0], get_active_profile_name()
-    if (not gateway or profile == "custom" or not sid or is_placeholder_session(sid)
-            or _local_session_sources([sid]).get(sid) not in _INTERACTIVE_SOURCES):
-        return None
-    return {"origin": {"gateway": gateway, "profile": profile, "session": sid}}
+    from agent.origin_turn_custody import CapturedOrigin, origin
+    qualified = origin()
+    return CapturedOrigin(qualified) if qualified else None
 
 
 def _primary_scope(conn):
@@ -107,6 +95,10 @@ def _receipt(conn, task_id):
 
 def record(conn, task_id, context, created_at):
     """Called inside create_task's transaction; no event or sync projection."""
+    from agent.origin_turn_custody import CapturedOrigin
+    captured = context if isinstance(context, CapturedOrigin) else None
+    if captured is not None:
+        context = captured.validated()
     if context is None:
         return
     scope = _primary_scope(conn)
@@ -132,6 +124,8 @@ def record(conn, task_id, context, created_at):
                "task_record_key": f"{profile}/{board}/{task_id}"}
     validate_binding(binding)
     _install_revocation(conn)
+    if captured is not None and captured.validated() is None:
+        return
     conn.execute("INSERT INTO origin_native_receipts VALUES (?,?,?,?)",
                  (task_id, json.dumps(binding, sort_keys=True), creator, created_at))
 

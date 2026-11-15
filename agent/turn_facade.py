@@ -141,7 +141,8 @@ class TurnFacadeMixin:
 
             # Keep the ContextVar scope local (agent tokens may be observed from another thread).
             # A host that owns this thread (Hermes Console) may cancel the turn cross-thread.
-            with bind_subagent_parent(self), scoped_runtime_main({}), track_in_interrupt_scope(self):
+            from agent.origin_turn_custody import scope as origin_custody_scope
+            with bind_subagent_parent(self), scoped_runtime_main({}), track_in_interrupt_scope(self), origin_custody_scope(lease):
                 try:
                     if lease is not None:
                         lease.start()

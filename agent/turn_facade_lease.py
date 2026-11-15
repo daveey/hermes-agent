@@ -173,6 +173,7 @@ class DurableTurnLease:
         A DELETE that loses the state.db write lock is not a failure yet: the store marks the holder
         abandoned (so this process's next turn can take the row) and a daemon thread retries the
         DELETE until the lease would have expired anyway, so other processes are not kept waiting."""
+        self.stop_refresher()  # Revoke copied in-process custody even if DELETE is deferred.
         from hermes_state_errors import classify_persistence_error
         from agent.runtime_session_store import is_retired_generation_error
         agent = self.agent

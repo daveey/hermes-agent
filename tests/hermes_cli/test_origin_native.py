@@ -72,13 +72,13 @@ def test_capture_ambient_interactive_only(scope, monkeypatch):
     monkeypatch.setattr(session_context, "get_session_env", lambda name: "chat-1")
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     monkeypatch.setattr(kanban_session_provenance, "_local_session_sources", lambda sids: {"chat-1": "desktop"})
-    assert native.capture(None) == scope
+    assert native.capture(None) is None  # Classification alone is not custody.
     assert native.capture(None, courier=True) is None
     assert native.capture("t_forged") is None
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_worker")
     assert native.capture(None) is None
     assert native.capture("t_other") is None
-    assert native.capture("t_worker") == {"creator": "t_worker"}
+    assert native.capture("t_worker") is None
 
 
 def test_real_tool_creation_authorizes_native_worker_forward(tmp_path, monkeypatch, capsys):
@@ -91,7 +91,27 @@ def test_real_tool_creation_authorizes_native_worker_forward(tmp_path, monkeypat
         sync.set_mode(conn, "primary")
     monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("here", {"here"}))
     monkeypatch.setenv("HERMES_SESSION_ID", fixtures.CHAT)
-    task = fixtures.create("tool", monkeypatch, capsys)
+    from agent.origin_turn_custody import scope as custody_scope
+    from agent.turn_facade_lease import admit_durable_turn_lease
+    from hermes_state import SessionDB
+    from types import SimpleNamespace
+    db = SessionDB(home / "state.db")
+    agent = SimpleNamespace(_session_db=db, session_id=fixtures.CHAT, _persist_disabled=False,
+                            _interrupt_requested=False, _emit_status=lambda *a: None,
+                            _touch_activity=lambda *a: None)
+    monkeypatch.setattr("agent.turn_liveness.resolve_turn_liveness_settings", lambda cfg: (None, 1.0))
+    lease = admit_durable_turn_lease(agent, session_id=fixtures.CHAT, relay_turn_id="native-create",
+        task_context={"platform": "desktop", "session_id": fixtures.CHAT}, conversation_history=[]).lease
+    assert lease is not None
+    try:
+        lease.start()
+        with custody_scope(lease):
+            task = fixtures.create("tool", monkeypatch, capsys)
+    finally:
+        lease.stop_refresher()
+        lease.join_threads()
+        lease.release()
+        db.close()
     with kbc.connect_closing() as conn:
         binding = native._receipt(conn, task)
     assert binding is not None
