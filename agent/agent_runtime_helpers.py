@@ -36,7 +36,7 @@ from agent.retry_utils import LIVE_RETRY_WAIT_CAP_S, parse_retry_after_seconds, 
 from agent.message_metadata import MERGED_TURN_PREFIX
 from agent.turn_context import drop_stale_api_content
 from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER
-from agent.agent_runtime_helpers_user_rows import _remember_own_row, keep_one_notice_row
+from agent.agent_runtime_helpers_user_rows import _count_unnamed_row, _remember_own_row, keep_one_notice_row
 from agent.primary_runtime_snapshot import _build_primary_runtime_snapshot
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
 logger = logging.getLogger(__name__)
@@ -498,26 +498,6 @@ def _remember_absorbed_row(survivor: dict[str, Any], dropped: dict[str, Any], *,
         record_absorbed_message(survivor, dropped)
 
 
-def _count_unnamed_row(survivor: dict[str, Any], retired: dict[str, Any]) -> None:
-    """On a reload without row ids nothing names *retired*'s durable row once the repair takes the dict
-    out of the list, so *survivor* counts it. A dict that counts rows was loaded too: a merge may have
-    popped its marker since. Call before the merge rewrites the survivor: *retired*'s own fields are
-    recorded so the commit can name its row."""
-    from agent.context_compressor import _DB_PERSISTED_MARKER
-    from agent.conversation_compression_archive import (
-        OWN_ROW, RETIRED_DURABLE_ROWS, UNNAMED_DURABLE_ROWS, retired_row_payload)
-
-    def loaded(message: dict[str, Any]) -> bool:
-        return bool(message.get(_DB_PERSISTED_MARKER) or message.get(UNNAMED_DURABLE_ROWS))
-
-    if loaded(survivor) and loaded(retired) and not isinstance(retired.get("_row_id"), int):
-        survivor[UNNAMED_DURABLE_ROWS] = int(survivor.get(UNNAMED_DURABLE_ROWS) or 0) + 1
-        # A previously folded dict already records its original row. The transfer in
-        # _remember_absorbed_row retires that record; its synthetic text/calls never existed in storage.
-        if not any(row.get(OWN_ROW) for row in retired.get(RETIRED_DURABLE_ROWS) or ()):
-            survivor.setdefault(RETIRED_DURABLE_ROWS, []).append(retired_row_payload(retired))
-
-
 def _retire_dropped_row(kept: list[dict], dropped: dict[str, Any], leading: list[dict]) -> None:
     """A durable row the repair drops was still handed to the caller, so the survivor before it stands
     for it. Left unnamed, an in-place compaction takes it for a row another surface appended and
@@ -682,6 +662,14 @@ def _merge_consecutive_users(messages: list[dict]) -> tuple[list[dict], int]:
             merged_content = (
                 (prev_content + "\n\n" + new_content) if prev_content and new_content else (prev_content or new_content)
             )
+            from agent.agent_runtime_helpers_user_rows import NOTICE_TURN_OVERRIDE, _notice_id, merge_notice_constituents
+
+            prev.pop(NOTICE_TURN_OVERRIDE, None)
+            notice_merge = merge_notice_constituents(prev, msg)
+            if notice_merge is not None:
+                merged_content = notice_merge[0]
+                if _notice_id(msg) is not None:
+                    prev[NOTICE_TURN_OVERRIDE] = (new_content, merged_content)
             had_api_sidecar = "api_content" in prev
             # Read before the marker is popped below. An unpersisted turn folded in ends the claim:
             # the dict no longer stands for durable rows only.
@@ -696,6 +684,9 @@ def _merge_consecutive_users(messages: list[dict]) -> tuple[list[dict], int]:
                 prev[MERGED_TURN_PREFIX] = prev_content
             # Merged content invalidates the api_content sidecar; drop it so replay cannot use stale bytes.
             drop_stale_api_content(prev)
+            if notice_merge is not None:
+                prev["api_content"], prev["display_metadata"] = notice_merge[1:]
+                prev.pop(_DB_PERSISTED_MARKER, None)
             # A display-marker row (e.g. a model-switch marker persisted as role=user on
             # purpose, #48338) merging with a plain user row must not bury the plain row's
             # addressable identity: keeping the marker's display_kind hides the merged pair

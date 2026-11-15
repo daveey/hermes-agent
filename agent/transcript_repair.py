@@ -327,7 +327,32 @@ def _rewrite_row(
         [*(serialized[column] for column in _OWNED_COLUMNS), serialized["content"], serialized["display_metadata"],
          int(target_row["id"]), session_id],
     )
+    _rewrite_notice_constituents(conn, session_id, target_row, serialized)
     _restore_display_index(conn, session_id, target_row, serialized, old_identity, old_peer_ids)
+
+
+def _rewrite_notice_constituents(conn, session_id, target_row, serialized) -> None:
+    """A notice fold owns its paired display/model projection, not other metadata writers' keys."""
+    import json
+
+    from agent.agent_runtime_helpers_user_rows import NOTICE_PARTS, _constituents
+
+    metadata = json.loads(serialized["display_metadata"] or "{}")
+    if not isinstance(metadata, dict) or not metadata.get(NOTICE_PARTS):
+        return
+    candidate = {"content": serialized["content"], "display_metadata": metadata}
+    if serialized["api_content"] is not None:
+        candidate["api_content"] = serialized["api_content"]
+    if not any(part["notice_id"] for part in _constituents(candidate)):
+        return
+    # Only this repair-owned key follows the composite. Reactions/backfills remain
+    # outside the ownership digest and must not be overwritten by a stale live copy.
+    conn.execute(
+        "UPDATE messages SET api_content = ?, display_metadata = json_set("
+        "COALESCE(display_metadata, '{}'), ?, json(?)) WHERE id = ? AND session_id = ?",
+        (serialized["api_content"], f"$.{NOTICE_PARTS}", json.dumps(metadata[NOTICE_PARTS]),
+         int(target_row["id"]), session_id),
+    )
 
 
 def _restore_display_index(
