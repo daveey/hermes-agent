@@ -24,8 +24,8 @@ def _startup_variable(shell: str, arguments: list[str]) -> str | None:
         elif word == "--interactive":
             interactive = True
         elif not word.startswith("--"):
-            if word.startswith("-") and "i" in word[1:]:
-                interactive = True
+            if "i" in word[1:]:
+                interactive = word.startswith("-")
             for flag in word[1:]:
                 if flag in "oO":
                     value = arguments[index] if index < len(arguments) else ""
@@ -44,8 +44,8 @@ def iter_startup_sources(command: str) -> Iterator[tuple[str, bool]]:
     stay identical. Prefix assignments are conservative across wrappers; inherited
     process environment is deliberately not consulted for remote commands.
     """
-    if "BASH_ENV=" not in command and "ENV=" not in command:
-        return
+    # Assignment names may contain shell quotes or escapes. Match only after
+    # the shared segment tokenizer removes them, not against raw source text.
     from cron.lifecycle_guard import (
         _executable_name, _executed_command_index, _iter_command_segment_views,
         _split_redirections,

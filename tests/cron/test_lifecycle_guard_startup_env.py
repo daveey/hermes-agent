@@ -10,6 +10,12 @@ from cron.lifecycle_guard import scan_gateway_lifecycle
 
 SHAPES = [
     "BASH_ENV=start.sh bash -c true",
+    "BASH_ENV=start.sh bash -i +i -c true",
+    "BASH_ENV=start.sh bash -i +i -i +i -c true",
+    "env 'BASH_ENV'=start.sh bash -c true",
+    "env BASH_ENV''=start.sh bash -c true",
+    "env BA\\SH_ENV=start.sh bash -c true",
+    "env 'ENV'=start.sh bash --posix -ic true",
     "env BASH_ENV=./start.sh bash -c true",
     "BASH_ENV='start.sh' command bash -c true",
     "env -i PATH=/usr/bin:/bin BASH_ENV=start.sh bash -c true",
