@@ -31,7 +31,9 @@ def iter_recursive_payloads(command, nested_texts, *, cwd, executed, budget, cov
     """
     from cron import lifecycle_guard as guard
 
-    budget.integer_context = budget.integer_context or may_set_integer_attributes(command)
+    budget.integer_context = budget.integer_context or may_set_integer_attributes(
+        command, aliases_defined=budget.aliases_defined,
+    )
     for payload in nested_texts:
         yield payload, True, None, True
     for payload in guard._iter_shell_command_payloads(command):

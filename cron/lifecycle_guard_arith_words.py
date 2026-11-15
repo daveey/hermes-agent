@@ -155,11 +155,13 @@ def _implicit_arithmetic_expansion(command: str) -> bool:
     return False
 
 
-def may_set_integer_attributes(command: str) -> bool:
+def may_set_integer_attributes(command: str, *, aliases_defined: bool = False) -> bool:
     """Conservative attribute hint, including declarations without a substitution."""
     from cron import lifecycle_guard as guard
 
-    if not any(hint in command for hint in (*_INTEGER_DECLARERS, "source", ".", "$", "`")):
+    if not aliases_defined and not any(
+        hint in command for hint in (*_INTEGER_DECLARERS, "source", ".", "$", "`")
+    ):
         return False
     for segment in guard._iter_command_segments(command):
         if _INTEGER_DECLARATION_RE.search(" ".join(segment)):
@@ -185,7 +187,12 @@ def may_set_integer_attributes(command: str) -> bool:
             and not _ASSIGNMENT_WORD_RE.match(words[index])
         ):
             return True
-        if name in _INTEGER_DECLARERS and any(
+        # With aliases in walked text, a plain command name may hide a declarer.
+        # Its invocation can supply -i even when the alias value does not. Keep
+        # no-i/+i data controls; unknown expanded options fail towards scanning.
+        if aliases_defined and _integer_declaration(words[index + 1:]):
+            return True
+        if (name in _INTEGER_DECLARERS or aliases_defined) and any(
             ("$" in word or "`" in word) and not _ASSIGNMENT_WORD_RE.match(word)
             for word in words[index + 1:]
         ):

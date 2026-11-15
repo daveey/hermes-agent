@@ -9,6 +9,11 @@ from cron.lifecycle_guard import scan_gateway_lifecycle
 
 
 SHAPES = [
+    "shopt -s expand_aliases\nalias d='declare'\no=-i\nd $o x\nx=a[\\$\\(SCRIPT\\)]",
+    "shopt -s expand_aliases\nalias d='declare'\neval 'd -i x'\nx=a[\\$\\(SCRIPT\\)]",
+    "shopt -s expand_aliases\nalias d='declare'\nd -i x\nx=a[\\$\\(SCRIPT\\)]",
+    "shopt -s expand_aliases\nalias d='typeset'\nd -i x\nx=a[\\$\\(SCRIPT\\)]",
+    "shopt -s expand_aliases\nalias d='builtin declare'\nd -xi x\nx=a[\\$\\(SCRIPT\\)]",
     "shopt -s expand_aliases\nalias d='declare -i'\nd x\nx=a[\\$\\(SCRIPT\\)]",
     "shopt -s expand_aliases\nalias d='typeset -i'\nd x\nx=a[\\$\\(SCRIPT\\)]",
     r'let "a[\`SCRIPT\`]=1"',
@@ -28,6 +33,8 @@ SHAPES = [
     r". ./decl.sh; eval 'x=a[\$\(SCRIPT\)]'",
 ]
 CONTROLS = [
+    "shopt -s expand_aliases\nalias d='declare'\nd +i x\nx=a[\\$\\(SCRIPT\\)]",
+    "shopt -s expand_aliases\nalias d='typeset'\nd x\nx=a[\\$\\(SCRIPT\\)]",
     "shopt -s expand_aliases\nalias d='declare'\nd x\nx=a[\\$\\(SCRIPT\\)]",
     "shopt -s expand_aliases\nalias d='declare +i'\nd x\nx=a[\\$\\(SCRIPT\\)]",
     r"eval 'x=a[\$\(SCRIPT\)]'",
