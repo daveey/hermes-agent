@@ -294,13 +294,18 @@ def _record(conn: sqlite3.Connection, task_id: str, verdicts: list[dict], result
 
 def _governed(conn: sqlite3.Connection, task_id: str, lane: str, cfg: lp.PacingConfig) -> Optional[tuple[Any, list[str]]]:
     """``(task, providers)`` for a card the governor judges on ``lane``; None when it starts regardless: no such card,
-    a mandatory pin, an unknown route or a provider the governor does not govern."""
+    a mandatory pin, an unknown route or no provider the governor governs.
+
+    A class route judges only its governed pools: an ungoverned pool in the same class (xai-oauth: Grok on the X Ultra
+    subscription) no longer exempts the card, which would start it ungoverned and let the class allocator hand it to
+    a paced Claude/Codex pool. When every governed pool holds it, :func:`_pace_alternate` moves it to the ungoverned
+    pool if that one serves here. [daveey] (t_01a1deaf95f5b885)"""
     from hermes_cli import kanban_db as kb
     task = kb.get_task(conn, task_id)
     if task is None or int(getattr(task, "model_pin_mandatory", 0) or 0):
         return None
-    providers = candidate_providers(conn, task, lane)
-    if not providers or any(p not in cfg.providers for p in providers):
+    providers = [p for p in candidate_providers(conn, task, lane) if p in cfg.providers]
+    if not providers:
         return None
     return task, providers
 

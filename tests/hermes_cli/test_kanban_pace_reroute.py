@@ -96,6 +96,47 @@ def test_default_card_on_paced_codex_takes_the_open_claude_pool_first(pool, monk
     assert receipt["tier_reason"] == "default+paced:openai-codex"
 
 
+@pytest.fixture
+def strong_pattern(pool, monkeypatch):
+    """Cards titled ``security ...`` take the strong tier: ``class:deep``/``auto`` (reason ``pattern:security``)."""
+    config, _ = pool
+    monkeypatch.setattr(tier, "load_tier_config", lambda: {**POOL_CFG, "default_model_keep_patterns": ["security"]})
+    monkeypatch.setattr("hermes_cli.config_effective.load_user_config_effective", lambda *_a, **_k: config)
+
+
+def test_strong_class_card_moves_to_grok_not_a_paced_pool(pool, strong_pattern, monkeypatch):
+    """A class card whose class also holds an ungoverned subscription pool (xai-oauth) is still judged on its governed
+    pools: otherwise it starts ungoverned and the class allocator may hand it to a paced Claude/Codex pool."""
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="security work", assignee="a")
+        seen, result = _dispatch(conn)
+        receipt = _route_receipt(conn, tid)
+    assert seen == [(tid, *GROK)]
+    assert tid not in result.clock_held
+    assert receipt["provider"] == "xai-oauth" and receipt["model"] == "grok-4.7"
+    assert receipt["tier_reason"] == "pattern:security+paced:anthropic,openai-codex"
+
+
+def test_strong_class_card_with_an_open_governed_pool_starts_unmoved(pool, strong_pattern, monkeypatch):
+    _pools(monkeypatch, {"anthropic": 5, "openai-codex": 99})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="security work", assignee="a")
+        seen, result = _dispatch(conn)
+        assert _paced_events(conn, tid) == []
+    assert seen == [(tid, "class:deep", "auto")] and tid not in result.clock_held
+
+
+def test_strong_class_card_without_grok_credential_waits(pool, strong_pattern, monkeypatch):
+    _, serving = pool
+    serving.discard("xai-oauth")
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="security work", assignee="a")
+        seen, result = _dispatch(conn)
+    assert seen == [] and result.clock_held[tid][0] == lp.GUARD_REASON
+
+
 def test_no_grok_credential_on_this_host_keeps_the_hold(pool, monkeypatch):
     _, serving = pool
     serving.discard("xai-oauth")
