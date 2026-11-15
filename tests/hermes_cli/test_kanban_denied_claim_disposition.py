@@ -113,7 +113,7 @@ def test_detector_creation_fallback(gws, kept):
 
 
 @pytest.mark.parametrize("prior", [True, False])
-def test_denied_without_queue_or_structural_keep_is_deferred(gws, hub_judge, monkeypatch, prior):
+def test_denied_without_queue_or_structural_keep_is_deferred(gws, hub_judge, monkeypatch, prior, caplog):
     from hermes_cli import kanban_hub_admission_pickup as pickup
     hub, _worker, svc = gws
     tid = support._hub_card(hub)
@@ -124,6 +124,7 @@ def test_denied_without_queue_or_structural_keep_is_deferred(gws, hub_judge, mon
     support._tick(hub)
     assert support._holder(svc, tid) != support.HUB
     assert not any(event.get("kept") for event in support._events(hub.conn, tid, "hub_admission"))
+    assert "denied-card self-check failed" not in caplog.text
 
 
 def test_failed_screen_defers_candidates_instead_of_claiming_denies(gws, monkeypatch):
@@ -153,6 +154,44 @@ def test_judge_outage_defers_all_unjudged_candidates(gws, monkeypatch):
     support._tick(hub)
     assert all(support._holder(svc, tid) != support.HUB for tid in tids)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("body", ["Portable repo work", "Finish ~/code/_wt/local-only"])
+def test_prior_deny_changed_during_disposition_is_not_claimed(gws, hub_judge, monkeypatch, body):
+    hub, _worker, svc = gws
+    tid = support._hub_card(hub, body=body)
+    deny(hub, tid)
+    original = hac.keep_reason
+
+    def changed(conn, card, fields, cfg):
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "commented", {"author": "concurrent editor"})
+        return original(conn, card, fields, cfg)
+
+    monkeypatch.setattr(hac, "keep_reason", changed)
+    support._tick(hub)
+    assert support._holder(svc, tid) != support.HUB
+    assert not support._events(hub.conn, tid, "moved")
+    assert not support._events(hub.conn, tid, "hub_admission")[-1].get("kept")
+
+
+@pytest.mark.parametrize("labels,audit,eligible", [
+    (["machine:elsewhere"], {"admit": False}, False),
+    (["machine:hub"], {"admit": False, "forced": True}, False),
+    (["machine:hub"], {"admit": True}, False),
+    (["machine:hub"], None, False),
+    (["machine:hub"], {"admit": False}, True),
+])
+def test_only_unforced_denied_own_pin_enters_screen(gws, labels, audit, eligible):
+    from hermes_cli import kanban_worker_node as wn
+    hub, _worker, _svc = gws
+    tid = support._hub_card(hub)
+    with kb.write_txn(hub.conn):
+        wn.set_runs_on(hub.conn, tid, labels)
+        if audit is not None:
+            kb._append_event(hub.conn, tid, "hub_admission", audit)
+    row = hub.conn.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
+    assert hac._eligible(hub.conn, row) is eligible
 
 
 def test_create_home_override_is_explicit_keep():
