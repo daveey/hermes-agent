@@ -38,13 +38,21 @@ def check(conn, tid, *, session, seen=None, verb="unblock", board=None):
     all_events = conn.execute(
         "SELECT * FROM task_events WHERE task_id=? AND kind='commented'", (tid,),
     ).fetchall()
+    from hermes_cli import kanban_comment_transcript_proof as proof
     local_runs = _local_writer_runs(conn, tid)
+    transcripts = {}
     resolved = {}
     for event in all_events:
         payload = json.loads(event["payload"] or "{}")
         writer = (payload.get("writer_run_id"), payload.get("writer_run_uid"))
         local_writer = all(isinstance(v, (int, str)) for v in writer) and writer in local_runs
         resolved[event["id"]] = _resolve(rows, event, payload, local_writer=local_writer)
+        session_id = payload.get("writer_session")
+        if (not resolved[event["id"]] and not payload.get("comment_uid")
+                and isinstance(session_id, str) and session_id):
+            if session_id not in transcripts:
+                transcripts[session_id] = proof.messages(session_id)
+            resolved[event["id"]] = proof.resolve(rows, event, payload, transcripts[session_id], board=board)
     missing = _missing_coverage(resolved)
     comments = []
     for event in events:
