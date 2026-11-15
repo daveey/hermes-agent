@@ -5,9 +5,10 @@ import shlex
 from collections.abc import Iterator
 
 from cron.lifecycle_guard_groups import (
-    protect_redirection_ampersands, restore_redirection_ampersands, split_glued_redirections,
+    protect_redirection_ampersands, restore_redirection_ampersands,
 )
 from cron.lifecycle_guard_lines import _split_logical_lines, strip_shell_comments
+from cron.lifecycle_guard_words import REDIRECTION, tokenize_redirections
 from cron.lifecycle_guard_substitutions import (
     MAX_SUBSTITUTION_DEPTH, SubstitutionNestingLimit, normalize_ansi_c_quotes, separate_substitutions,
 )
@@ -58,11 +59,11 @@ def _iter_raw_token_lists(command: str) -> Iterator[list[str]]:
     """Preserve the original logical/physical-line fallback without rewriting."""
     for line in _split_logical_lines(command):
         try:
-            tokens = _shlex_tokens(split_glued_redirections(line))
+            tokens = tokenize_redirections(line, _shlex_tokens, REDIRECTION)
         except ValueError:
             for physical_line in line.splitlines():
                 try:
-                    yield _shlex_tokens(split_glued_redirections(physical_line))
+                    yield tokenize_redirections(physical_line, _shlex_tokens, REDIRECTION)
                 except ValueError:
                     continue
             continue

@@ -6,6 +6,10 @@ import re
 
 from cron.lifecycle_guard_groups import split_glued_redirections
 
+# Optional fd or array-element fd variable, operator, and glued target.
+REDIRECTION = re.compile(
+    r"^(\d*|\{[A-Za-z_][A-Za-z0-9_]*(?:\[.+?\])?\})(<<<|<<-|<<|<>|<&|>&|>>|>\||&>>|&>|<|>)(.*)$", re.DOTALL)
+
 
 class ShellWord(str):
     """A decoded word plus the redirection parsed before quoted punctuation is decoded."""

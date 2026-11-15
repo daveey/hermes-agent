@@ -23,6 +23,7 @@ from cron.lifecycle_guard_aliases import _may_define_alias, _session_aliases_sha
 from cron.lifecycle_guard_groups import CONTROL_CHARS as _CONTROL_CHARS
 from cron.lifecycle_guard_groups import (
     heredoc_scripts, iter_script_segment_contexts, join_continued_lines)
+from cron.lifecycle_guard_words import REDIRECTION as _REDIRECTION
 from cron.lifecycle_guard_words import redirection_parts, tokenize_redirections
 from cron.lifecycle_guard_lines import join_line_continuations
 # Lines a printer may print, walked as the sink's command (moved out for FILE_LINES).
@@ -371,10 +372,6 @@ _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Python program runners whose file operand (or stdin) is scanned as Python source.
 _PYTHON_RUNNER_RE = re.compile(r"^(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?$|^py(?:\.exe)?$")
 _PYTHON_SOURCE_SUFFIXES = (".py", ".pyw")
-# A redirection word: optional fd or `{NAME}` (NAME may be an array element, `{a[1]}`),
-# operator, optional glued target (`<f`, `0<f`, `2>>log`, `{fd}>&2`, `{a[1]}>/dev/null`, `&>f`).
-_REDIRECTION = re.compile(
-    r"^(\d*|\{[A-Za-z_][A-Za-z0-9_]*(?:\[.+?\])?\})(<<<|<<-|<<|<>|<&|>&|>>|>\||&>>|&>|<|>)(.*)$", re.DOTALL)
 
 # Bound the walk: a pathological token run must not spin here.
 _MAX_PREFIX_PEELS = 8
