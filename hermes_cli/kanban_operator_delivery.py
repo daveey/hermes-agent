@@ -137,11 +137,15 @@ def _own_synced_comment(rep, target, own, task_id):
 
 
 def verify_local(conn, task_id, proof):
-    """Recheck the same-run request under the completion transaction."""
-    row = conn.execute("SELECT * FROM operator_calls WHERE request_uid=? AND side='request'",
-                       (proof["request_uid"],)).fetchone()
-    run = conn.execute("SELECT r.uid FROM task_runs r JOIN tasks t ON t.current_run_id=r.id WHERE t.id=?",
-                       (task_id,)).fetchone()
+    """Recheck the requesting task/run, which may precede this continuation."""
+    from hermes_cli import kanban_operator_call as calls
+    row = (conn.execute("SELECT * FROM operator_calls WHERE request_uid=? AND side='request'",
+                        (proof["request_uid"],)).fetchone() if calls._has_log(conn) else None)
+    if row is None and calls._own_gateway(conn) not in (None, proof["caller_gateway"]):
+        from hermes_cli.kanban_operator_delivery_moved import moved_request
+        return moved_request(conn, task_id, proof)
+    run = conn.execute("SELECT uid FROM task_runs WHERE task_id=? AND uid=?",
+                       (task_id, proof["caller_run_uid"])).fetchone()
     if row is None or row["outcome"] != "done":
         raise ValueError("completion_receipt: operator request is pending, failed or missing")
     if (row["caller_task_id"] != task_id or proof["caller_task_id"] != task_id or run is None
