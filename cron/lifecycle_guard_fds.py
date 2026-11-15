@@ -148,6 +148,7 @@ def carry_exec_descriptors(
     Each script gets its own table, so heredoc bodies cannot rebind their enclosing script.
     """
     table: _Table = {}
+    list_parent: _Table = {}  # Parent state before the current AND/OR list.
     nesting: list[str] = []  # open compound commands; persists across lines
     for tokens in lines:
         pieces: list[tuple[list[str], str, str]] = []  # (segment, control before, control after)
@@ -161,6 +162,8 @@ def carry_exec_descriptors(
                 segment.append(token)
         variants: list[list[list[str]]] = []
         for segment, before, after in pieces:
+            if not nesting and before in ("", ";", "&"):
+                list_parent = dict(table)
             start = _command_start(segment, nesting, pattern)
             redirects = _exec_redirections(segment[start:], pattern)
             if redirects is not None:
@@ -184,6 +187,10 @@ def carry_exec_descriptors(
                 nesting.append("sub")
             elif after == ")" and nesting and nesting[-1] == "sub":
                 nesting.pop()
+            if after == "&":
+                # & backgrounds the whole AND/OR list, not only its last command.
+                # Its earlier certain closes/rebinds cannot change the parent's fds.
+                _merge(table, list_parent)
         for index in range(max((len(v) for v in variants), default=1)):
             out: list[str] = []
             for (_, _, after), options in zip(pieces, variants):
