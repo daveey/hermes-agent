@@ -58,6 +58,29 @@ def test_messaging_route_never_publishes_the_boundary():
     assert published == [('message.delta', {'text': 'hello'})]
 
 
+@pytest.mark.parametrize('already_streamed', [True, False])
+def test_local_interim_seals_the_reply_with_its_actual_stream_state(already_streamed):
+    published = []
+    turn = _turn(Platform.LOCAL, published)
+    turn._ctx._status_adapter = None
+    _, delta, interim, _ = turn._setup_stream_consumer('cli')
+    if already_streamed:
+        delta('answer')
+    interim('answer', already_streamed=already_streamed)
+    expected = [('message.delta', {'text': 'answer'})] if already_streamed else []
+    assert published == expected + [('message.interim', {'text': 'answer', 'already_streamed': already_streamed})]
+
+
+@pytest.mark.parametrize('already_streamed', [True, False])
+def test_messaging_interim_does_not_publish_a_local_seal(already_streamed):
+    published = []
+    turn = _turn(Platform.TELEGRAM, published)
+    turn._ctx._status_adapter = None
+    _, _, interim, _ = turn._setup_stream_consumer('telegram')
+    interim('answer', already_streamed=already_streamed)
+    assert published == []
+
+
 def test_turn_sinks_publish_and_restore_on_the_shared_agent():
     from gateway import local_viewer_events
     published = []

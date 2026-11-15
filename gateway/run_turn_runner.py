@@ -425,13 +425,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             if not ctx._run_still_current():
                 return
             unseen = False
-            if local_viewer_route and not already_streamed and str(text or "").strip():
-                # LocalSessionAdapter.send publishes nothing, so unstreamed commentary handed to the
-                # consumer would be recorded as delivered while no viewer saw it. A codex app-server
-                # final that arrives with no deltas then suppresses the reply (message.complete "").
-                # Publish the in-process TUI's message.interim contract instead, and count the text
-                # as delivered only when a viewer or observer actually took it.
-                payload = {"text": text, "already_streamed": False}
+            if local_viewer_route and str(text or "").strip():
+                # Seal streamed commentary in place; unstreamed commentary needs its text too
+                # because LocalSessionAdapter.send publishes nothing. Preserve the stream flag
+                # so viewers do not paint accepted deltas twice.
+                payload = {"text": text, "already_streamed": already_streamed}
                 unseen = not self._publish_execution("message.interim", payload)
             if stts is not None:
                 # Flush accepted deltas; completed commentary is a separate speech segment.

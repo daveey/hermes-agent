@@ -23,16 +23,18 @@ REWRITE = "Your api key is [REDACTED]."
 
 class _StreamedAgent(_RecordingAgent):
     transformed = True
+    reused = False
 
     def run_conversation(self, message, **kwargs):
         if self.transformed:
             return {"final_response": REWRITE, "messages": [], "response_transformed": True,
                     "pre_transform_response": RAW}
-        return {"final_response": RAW, "messages": []}
+        return {"final_response": RAW, "messages": [], "response_reused": self.reused}
 
 
-def _settle(platform, transformed):
+def _settle(platform, transformed, *, reused=False):
     _StreamedAgent.transformed = transformed
+    _StreamedAgent.reused = reused
     ctx = TurnContext(
         source=SessionSource(platform=platform, chat_id="sid", user_id="u"),
         message="show me the config", history=[], session_id="sid", session_key="key", user_config={},
@@ -63,3 +65,16 @@ def test_a_streamed_local_turn_completes_with_the_transformed_final():
 def test_the_stream_stays_the_delivery_without_a_local_rewrite(platform, transformed):
     # An unrewritten streamed reply is already on screen; a messaging turn's chat holds its own copy.
     assert _settle(platform, transformed)["text"] is None
+
+
+def test_a_streamed_local_reused_reply_completes_with_its_captured_final():
+    complete = _settle(Platform.LOCAL, transformed=False, reused=True)
+    assert complete["text"] == RAW
+    assert complete["content"] == RAW
+    assert complete["response_reused"] is True
+
+
+def test_a_messaging_reused_reply_keeps_adapter_delivery_unchanged():
+    complete = _settle(Platform.TELEGRAM, transformed=False, reused=True)
+    assert complete["text"] is None and complete["content"] is None
+    assert "response_reused" not in complete
