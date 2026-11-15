@@ -137,3 +137,90 @@ def test_non_mapping_kanban_section_does_not_crash_derivation(kanban_home, monke
         with kbc.connect_closing() as conn:
             assert blockers.blocker_states(conn) == {}
         assert inputs._aliases({'kanban': section}) == {}
+
+
+def _backend_down(monkeypatch):
+    from hermes_cli import config
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+
+    def down(*_args, **_kwargs):
+        raise ConfigBackendUnavailable('down')
+    monkeypatch.setattr(config, 'load_config_readonly', down)
+    monkeypatch.setattr(config, 'load_config', down)
+
+
+def _count_hold_reads(monkeypatch):
+    """Reads of the pass snapshot made by the hold decision's own helper (state derivation and alias
+    normalization read it for themselves)."""
+    import sys
+    real, reads = inputs.config, []
+
+    def spy():
+        if sys._getframe(1).f_code.co_name == '_hold_config':
+            reads.append(1)
+        return real()
+    monkeypatch.setattr(inputs, 'config', spy)
+    return reads
+
+
+def test_hold_config_reads_once_and_returns_that_read(kanban_home, monkeypatch):
+    cfg = {'kanban': {}}
+    calls = _counting_config(monkeypatch, cfg)
+    assert blockers._hold_config() is cfg
+    assert len(calls) == 1, len(calls)
+
+
+def test_hold_decision_makes_exactly_one_hold_config_read(kanban_home, monkeypatch):
+    """A successful hold decision shares one read between the checks lookup and the probe interval:
+    ``calls`` being non-empty (as above) would also pass with two or three reads."""
+    with kbc.connect_closing() as conn:
+        tids = [helpers._legacy_blocked_behind(conn, f'wall {i}', blocker_id='test-wall') for i in range(2)]
+        st = blockers.blocker_states(conn)['test-wall']
+        now = min(st.behind.values()) + 1
+        _counting_config(monkeypatch, {'kanban': {'shared_blocker_checks': {'test-wall': 'exit 1'}}})
+        monkeypatch.setattr(blockers, 'probe_interval_seconds', lambda c=None: 777)
+        reads = _count_hold_reads(monkeypatch)
+        assert blockers._shared_blocker_hold(conn, tids[1], now=now) == ('test-wall', None, min(st.behind.values()) + 777)
+        assert len(reads) == 1, len(reads)
+        # The early return (registered wall honours the operator's release) takes the same single read.
+        assert helpers.kb.unblock_task(conn, tids[0]) and helpers.kb.claim_task(conn, tids[0])
+        assert helpers.kb.unblock_task(conn, tids[1])
+        reads.clear()
+        assert blockers._shared_blocker_hold(conn, tids[1], now=now + 1) is None
+        assert len(reads) == 1, len(reads)
+
+
+def test_hold_decision_falls_back_when_config_backend_is_unavailable(kanban_home, monkeypatch):
+    """A down config backend must not escape the hold decision: the readers take their own fallbacks
+    (no registered checks, the interval reader gets ``None``), exactly as before the shared read."""
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+
+    def outcome(fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ConfigBackendUnavailable as exc:   # a value, so a leaked backend error fails an assertion below
+            return f'raised {exc!r}'
+    with kbc.connect_closing() as conn:
+        tids = [helpers._legacy_blocked_behind(conn, f'wall {i}', blocker_id='test-wall') for i in range(2)]
+        st = blockers.blocker_states(conn)['test-wall']
+        now = min(st.behind.values()) + 1
+        healthy = {'kanban': {'shared_blocker_checks': {'test-wall': 'exit 1'}}}
+        _counting_config(monkeypatch, healthy)
+        seen = []
+        monkeypatch.setattr(blockers, 'probe_interval_seconds', lambda c=None: seen.append(c) or 777)
+        due = min(st.behind.values()) + 777
+        assert outcome(blockers._shared_blocker_hold, conn, tids[1], now=now) == ('test-wall', None, due)
+        assert seen == [healthy]
+        # Down: the same decision, with the interval reader falling back on its own load.
+        seen.clear()
+        _backend_down(monkeypatch)
+        assert outcome(blockers._shared_blocker_hold, conn, tids[1], now=now) == ('test-wall', None, due)
+        assert seen == [None]
+        assert outcome(blockers.shared_blocker_guard, conn, tids[1], now=now) == blockers.GUARD_REASON
+        assert outcome(blockers._hold_config) is None
+        # Checks cannot be listed either, so a registered wall's operator-release exemption does not apply.
+        assert helpers.kb.unblock_task(conn, tids[0]) and helpers.kb.claim_task(conn, tids[0])
+        assert helpers.kb.unblock_task(conn, tids[1])
+        assert outcome(blockers._shared_blocker_hold, conn, tids[1], now=now + 1) == ('test-wall', tids[0], 0)
+        _counting_config(monkeypatch, healthy)
+        assert outcome(blockers._shared_blocker_hold, conn, tids[1], now=now + 1) is None
