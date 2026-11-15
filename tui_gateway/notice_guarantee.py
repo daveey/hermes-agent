@@ -125,7 +125,8 @@ def candidates_sql(db: Any) -> str:
     """The indexed form when the store has ``idx_messages_kanban_notice`` (a build older than this one, or a
     store not yet reconciled by a writer, does not: the legacy form is the same rows, only slower)."""
     try:
-        has = db._read_one("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_messages_kanban_notice'")
+        with db._read_ctx() as conn:
+            has = any(r[1] == 'idx_messages_kanban_notice' for r in conn.execute('PRAGMA index_list(messages)'))
     except Exception:  # health: allow BLE001 -- the legacy scan is always correct
         return _CANDIDATES_SQL
     return _CANDIDATES_INDEXED_SQL if has else _CANDIDATES_SQL

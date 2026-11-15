@@ -334,7 +334,7 @@ def test_remote_pending_inputs_stay_hot(monkeypatch, tmp_path):
     from tui_gateway import kanban_replica_observer as observer
     ledger = tmp_path / 'ledger.db'
     with contextlib.closing(sqlite3.connect(ledger)) as conn:
-        conn.execute('CREATE TABLE notices(delivered INTEGER)')
+        conn.execute('CREATE TABLE notices(delivered INTEGER, holder_pid INTEGER)')
         conn.commit()
     monkeypatch.setattr(kanban_origin, '_hub_db', lambda: tmp_path / 'hub.db')
     monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: ['me'])
@@ -343,7 +343,7 @@ def test_remote_pending_inputs_stay_hot(monkeypatch, tmp_path):
     monkeypatch.setattr(remote, 'ledger_path', lambda: ledger)
     remote._woken.clear()
     base = gates.probe('remote_notices')
-    assert not base.pending and base.key[1] == 'me' and base.key[2] == ('fp', 1)
+    assert not base.pending and base.key[1] == 'me' and isinstance(base.key[2], str)  # a content digest, not the replica counter
     monkeypatch.setattr(remote, '_sweep_snapshot', lambda p, me: ([{'key': 'a'}], {}))
     assert gates.probe('remote_notices').pending  # even delivered terminal cards are hot
     monkeypatch.setattr(remote, '_sweep_snapshot', lambda p, me: ([], {}))
@@ -353,9 +353,9 @@ def test_remote_pending_inputs_stay_hot(monkeypatch, tmp_path):
     finally:
         remote._woken.clear()
     with contextlib.closing(sqlite3.connect(ledger)) as conn:
-        conn.execute('INSERT INTO notices(delivered) VALUES (0)')
+        conn.execute('INSERT INTO notices(delivered, holder_pid) VALUES (0, 123)')
         conn.commit()
-    assert gates.probe('remote_notices').pending  # undelivered ledger row: stale-claim recovery
+    assert gates.probe('remote_notices').pending  # a HELD undelivered ledger row: stale-claim recovery
     monkeypatch.setattr(observer, 'fingerprint', lambda p: None)
     assert gates.probe('remote_notices').pending  # unknown replica state
     monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: [''])
@@ -369,7 +369,7 @@ def test_remote_each_key_component_moves_the_key_independently(monkeypatch, tmp_
     from tui_gateway import kanban_replica_observer as observer
     ledger = tmp_path / 'ledger.db'
     with contextlib.closing(sqlite3.connect(ledger)) as conn:
-        conn.execute('CREATE TABLE notices(delivered INTEGER)')
+        conn.execute('CREATE TABLE notices(delivered INTEGER, holder_pid INTEGER)')
         conn.execute('INSERT INTO notices(delivered) VALUES (1)')
         conn.commit()
     state = {'fp': ('fp', 1), 'me': 'me', 'ledger': ledger}
@@ -382,8 +382,11 @@ def test_remote_each_key_component_moves_the_key_independently(monkeypatch, tmp_
     base = gates.probe('remote_notices')
     assert not base.pending
     assert gates.probe('remote_notices').key == base.key  # stable
-    state['fp'] = ('fp', 2)
-    assert gates.probe('remote_notices').key != base.key
+    state['fp'] = ('fp', 2)  # the replica's commit counter churns on every sync: it is NOT a key component
+    assert gates.probe('remote_notices').key == base.key
+    monkeypatch.setattr(remote, '_sweep_snapshot', lambda p, me: ([('gw', 'k', {'status': 'done'}, [])], {}))
+    assert gates.probe('remote_notices').key != base.key  # a swept card's content moves it
+    monkeypatch.setattr(remote, '_sweep_snapshot', lambda p, me: ([], {}))
     state['fp'] = ('fp', 1)
     state['me'] = 'you'
     assert gates.probe('remote_notices').key != base.key
@@ -576,7 +579,7 @@ def test_guarantee_store_appearing_or_vanishing_moves_the_key(store, tmp_path, m
 
 
 # ----------------------------------------------------------- board components move key independently
-def test_notices_second_board_change_moves_key_and_new_subscription_goes_hot():
+def test_notices_second_board_change_moves_key_and_new_subscription_goes_hot(tmp_path, monkeypatch):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_db_notify as notify
@@ -584,6 +587,10 @@ def test_notices_second_board_change_moves_key_and_new_subscription_goes_hot():
     with contextlib.closing(kbc.connect()) as conn:
         kb.create_task(conn, title='default board exists', assignee='w')
     create_board('second')
+    from hermes_state import SessionDB
+    chat_db = SessionDB(tmp_path / 'chat-state.db')
+    chat_db.create_session('chat', 'desktop')  # an existing chat: a sub whose chat is in no store is an orphan (inert)
+    monkeypatch.setattr(gates, '_profile_paths', lambda every_store=True: [chat_db.db_path])
     base = gates.probe('notices')
     assert not base.pending and len(base.key) == 2
     with contextlib.closing(kbc.connect(board='second')) as conn:

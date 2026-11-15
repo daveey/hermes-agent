@@ -122,24 +122,25 @@ def _subscribe(chat="chat", done=True):
     return tid
 
 
-def test_notice_for_a_live_chat_is_not_pending_until_the_chat_unloads(db):
+def test_notice_for_a_live_chat_is_not_pending_until_the_chat_unloads(db, monkeypatch):
     """A chat unloading with a pending notice: the sweep skips live chats, so the notice waits on the live set."""
-    _subscribe("chat")
-    assert gates.probe("notices", live={"chat"}).pending is False
+    monkeypatch.setattr(gates, "_profile_paths", lambda every_store=True: [db.db_path])
+    _subscribe(CHAT)
+    assert gates.probe("notices", live={CHAT}).pending is False
     assert gates.probe("notices", live=set()).pending is True
     ran = []
-    for live in ({"chat"}, {"chat"}, set(), set()):
+    for live in ({CHAT}, {CHAT}, set(), set()):
         gates.run("notices", lambda: ran.append(1) or [], live=live)
     assert len(ran) == 3  # first live pass, the unload, and the unloaded notice stays hot (never stamped)
 
 
 def test_inflight_claim_on_a_live_chat_stays_pending(db):
-    tid = _subscribe("chat")
+    tid = _subscribe(CHAT)
     with contextlib.closing(kbc.connect()) as conn:
         conn.execute("UPDATE kanban_notify_subs SET inflight_from=1, inflight_pid=1, inflight_start=1, inflight_at=1 "
                      "WHERE task_id=?", (tid,))
         conn.commit()
-    assert gates.probe("notices", live={"chat"}).pending is True
+    assert gates.probe("notices", live={CHAT}).pending is True
 
 
 def test_board_writes_do_not_move_the_notices_key(db):
