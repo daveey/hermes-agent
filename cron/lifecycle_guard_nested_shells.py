@@ -10,7 +10,7 @@ import contextlib
 import itertools
 import re
 import shlex
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -446,12 +446,28 @@ def _printed_pipeline_units(command: str) -> list[_PrintedUnit]:
     return [unit for unit in units if unit.events]
 
 
-def _unit_feeds_nested_stdin(unit: _PrintedUnit) -> tuple[bool, bool]:
-    """``(printed text, heredoc body output)``: whether a pipe in *unit* feeds a startup shell's
-    stdin, and whether a heredoc-owning producer upstream of that pipe feeds it. A list operator
-    or line break ends a pipe inside a group: what follows reads the group's stdin (nit 2)."""
+def _reads_nested_stdin(words: list[str]) -> bool:
+    """Whether the command *words* starts a shell holding its own aliases that reads stdin."""
     from cron.lifecycle_guard import _command_segment_views
 
+    return any(_nested_shell_input(view) == ("stdin", None) for view in _command_segment_views(words))
+
+
+def pipe_feeds_consumer(command: str, reads: Callable[[list[str]], bool]) -> bool:
+    """Whether a pipe in *command* feeds a command whose words satisfy *reads*, including a
+    command inside a compound command the pipe feeds (``| { echo x; bash; }``, ``| ( :; bash )``,
+    ``| while read l; do bash; done``): every command there reads the compound's stdin."""
+    return "|" in command and any(_unit_feeds_nested_stdin(unit, reads)[0]
+                                  for unit in _printed_pipeline_units(command))
+
+
+def _unit_feeds_nested_stdin(
+    unit: _PrintedUnit, reads: Callable[[list[str]], bool] = _reads_nested_stdin,
+) -> tuple[bool, bool]:
+    """``(printed text, heredoc body output)``: whether a pipe in *unit* feeds a command *reads*
+    accepts (by default a startup shell reading stdin), and whether a heredoc-owning producer
+    upstream of that pipe feeds it. A list operator or line break ends a pipe inside a group:
+    what follows reads the group's stdin (nit 2)."""
     feeds = feeds_body = False
     piped = carried = own_body = False
     frames: list[list[bool]] = []  # [piped, carried, holds a body] at each open group
@@ -466,8 +482,7 @@ def _unit_feeds_nested_stdin(unit: _PrintedUnit) -> tuple[bool, bool]:
                 for frame in frames:
                     frame[2] = True
             continue
-        if words and piped and any(_nested_shell_input(view) == ("stdin", None)
-                                   for view in _command_segment_views(words)):
+        if words and piped and reads(words):
             feeds = True
             feeds_body = feeds_body or carried
         words = []

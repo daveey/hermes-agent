@@ -532,7 +532,29 @@ def output_reaches_shell(command: str) -> bool:
     # The regex sees a substitution only in command position; inside arithmetic bash also runs
     # code from its output wherever it sits (`$(( 1 + $(…) ))`, `a[$(…)]`; t_01a1d6ae05c19594).
     return (sink.search(command) is not None
-            or substitution_in_arithmetic(command, date_exempt=date_exempt))
+            or substitution_in_arithmetic(command, date_exempt=date_exempt)
+            or _grouped_pipe_reaches_shell(command, sink))
+
+
+# A shell word the pipe alternative of ``_SHELL_SINK_TEMPLATE`` looks for (cheap pre-filter).
+_SINK_SHELL_WORD_RE = re.compile(rf"{_WORD_START}{_SINK_SHELLS}{_WORD_END}")
+
+
+def _grouped_pipe_reaches_shell(command: str, sink: re.Pattern[str]) -> bool:
+    """Whether a pipe feeds a compound command holding a sink past a list operator or line
+    break: every command in ``| { echo x; bash; }``, ``| ( :; bash -l )`` or ``| while read l;
+    do bash; done`` reads the pipe, yet the pipe alternative stops at the first ``;``. Each
+    command reading the pipe is matched as if piped into directly (``| bash``). Text the
+    printed-unit walk cannot tokenize fails closed (t_01a1e0990275c62b)."""
+    if "|" not in command or not _SINK_SHELL_WORD_RE.search(command):
+        return False
+    from cron.lifecycle_guard_nested_shells import pipe_feeds_consumer
+
+    try:
+        return pipe_feeds_consumer(
+            command, lambda words: sink.search("| " + " ".join(words)) is not None)
+    except ValueError:
+        return True
 
 
 def _nonreading_shell_unit(unit: str, functions: set[str]) -> bool:
