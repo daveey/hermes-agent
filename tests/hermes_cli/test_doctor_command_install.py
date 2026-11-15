@@ -49,6 +49,7 @@ def _pm_source(project, home):
         "pm/environments.py", "pm/filesystem.py", "hermes_cli/runtime_state.py",
         "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py",
         "hermes_cli/venv_sync.py", "hermes_cli/steward.py", "hermes_cli/stderr_timestamp.py",
+        "hermes_cli/launch_malloc.py",
     ):
         target = project / relative
         target.parent.mkdir(parents=True, exist_ok=True)
