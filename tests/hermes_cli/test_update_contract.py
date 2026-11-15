@@ -152,11 +152,27 @@ def test_admission_nix_refuses(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_refusal_receipt_written_as_refused(tmp_path, monkeypatch):
+@pytest.mark.parametrize("sidecar_first", [True, False])
+def test_refusal_receipt_written_as_refused(tmp_path, monkeypatch, sidecar_first):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     import hermes_cli.update_receipt as ur
 
-    monkeypatch.setattr(ur, "_receipt_dir", lambda: tmp_path / "receipts")
+    directory = tmp_path / "receipts"
+    directory.mkdir()
+    # Ref-lock alert bookkeeping shares the directory but is not an update receipt.
+    sidecar = directory / "ref_lock_alerts.json"
+    sidecar.write_text(json.dumps({"entries": {}}))
+    monkeypatch.setattr(ur, "_receipt_dir", lambda: directory)
+    original_glob = Path.glob
+
+    def ordered_glob(path, pattern, **kwargs):
+        paths = list(original_glob(path, pattern, **kwargs))
+        if path == directory:
+            paths.sort(key=lambda p: p == sidecar, reverse=sidecar_first)
+        return iter(paths)
+
+    # Directory enumeration order is unspecified; exercise either sidecar position.
+    monkeypatch.setattr(Path, "glob", ordered_glob)
 
     record_refusal_receipt(
         UpdateRefusal(
@@ -165,9 +181,8 @@ def test_refusal_receipt_written_as_refused(tmp_path, monkeypatch):
             update_command="docker pull nousresearch/hermes-agent:latest",
         )
     )
-    receipts = list((tmp_path / "receipts").glob("*.json"))
-    receipts = [p for p in receipts if p.name != "latest.json"]
-    assert receipts, "a refusal receipt must be written"
+    receipts = list(directory.glob("update_*.json"))
+    assert len(receipts) == 1, "exactly one refusal receipt must be written"
     data = json.loads(receipts[0].read_text())
     assert data["outcome"] == "refused"
     assert data["stop_reason"] == "image-marker"
