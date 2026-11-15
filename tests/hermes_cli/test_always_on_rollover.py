@@ -9,8 +9,10 @@ only once it is idle.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
+import socket
 import subprocess
 import time
 import types
@@ -125,18 +127,59 @@ def test_proxy_holds_a_client_while_no_backend_answers_then_splices_it(home):
     assert asyncio.run(scenario()) == b"pong:ping"
 
 
-def test_proxy_closes_a_client_only_after_the_hold(home):
-    async def scenario():
-        ro.write_active(socket_free_port())
-        proxy = ro.Proxy(hold_s=0.5)
-        front = await asyncio.start_server(proxy.handle, "127.0.0.1", 0)
-        reader, _writer = await asyncio.open_connection("127.0.0.1", front.sockets[0].getsockname()[1])
-        started = time.monotonic()
-        data = await asyncio.wait_for(reader.read(10), 5)
-        front.close()
-        return data, time.monotonic() - started
+@pytest.fixture(params=[False, True], ids=["uncontended", "port-takeover"])
+def backend_port_contender(request, monkeypatch):
+    """Try a real silent listener in the gap after the active port is published."""
+    real_write_active = ro.write_active
+    with socket.socket() as contender:
+        def publish(port):
+            real_write_active(port)
+            if request.param:
+                try:
+                    contender.bind(("127.0.0.1", port))
+                except OSError as exc:
+                    assert exc.errno == errno.EADDRINUSE
+                else:
+                    contender.listen(1)  # A successful TCP connect must not be mistaken for refusal.
 
-    data, elapsed = asyncio.run(scenario())
+        monkeypatch.setattr(ro, "write_active", publish)
+        yield
+
+
+def test_proxy_closes_a_client_only_after_the_hold(home, backend_port_contender):
+    async def scenario(dead_port):
+        ro.write_active(dead_port)
+        proxy = ro.Proxy(hold_s=0.5)
+        handlers = []
+        clients = []
+
+        def handle(reader, writer):
+            clients.append(writer)
+            handlers.append(asyncio.create_task(proxy.handle(reader, writer)))
+
+        front = await asyncio.start_server(handle, "127.0.0.1", 0)
+        writer = None
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", front.sockets[0].getsockname()[1])
+            started = time.monotonic()
+            data = await asyncio.wait_for(reader.read(10), 5)
+            return data, time.monotonic() - started
+        finally:
+            front.close()
+            closing = [front.wait_closed()]
+            if writer is not None:
+                clients.append(writer)
+            for client in clients:
+                client.close()
+                closing.append(client.wait_closed())
+            for task in handlers:
+                task.cancel()
+            await asyncio.wait_for(asyncio.gather(*handlers, *closing, return_exceptions=True), 5)
+
+    # Bind without listening: connections refuse, but nobody (including the frontend) can take the port.
+    with socket.socket() as dead:
+        dead.bind(("127.0.0.1", 0))
+        data, elapsed = asyncio.run(scenario(dead.getsockname()[1]))
     assert data == b"" and elapsed >= 0.4
 
 
