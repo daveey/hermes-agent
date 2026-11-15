@@ -5,20 +5,38 @@ for the gateway/control plane. All boards/profiles in this user manager share
 one pool. The gateway itself is deliberately not moved into the pool.
 """
 from functools import lru_cache
+import logging
+import socket
 import subprocess
+import time
+
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
 def configure_pool():
     """Set runtime properties; only cache success, never launch unbounded on failure."""
-    try:
-        subprocess.run(
-            ['systemctl', '--user', 'set-property', '--runtime', 'hermes-kanban.slice',
-             'MemoryHigh=70%', 'MemoryMax=80%'], check=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
-    except (OSError, subprocess.SubprocessError) as exc:
-        from tools.process_registry import RestartSafeScopeUnavailable
-        raise RestartSafeScopeUnavailable(f'Kanban aggregate memory budget unavailable: {exc}') from exc
+    for attempt, delay in enumerate((1, 3, None), start=1):
+        try:
+            subprocess.run(
+                ['systemctl', '--user', 'set-property', '--runtime', 'hermes-kanban.slice',
+                 'MemoryHigh=70%', 'MemoryMax=80%'], check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
+            return
+        except (OSError, subprocess.SubprocessError) as exc:
+            stderr = getattr(exc, 'stderr', None) or ''
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode('utf-8', errors='replace')
+            message = (
+                f'Kanban aggregate memory budget unavailable on {socket.gethostname()}: '
+                f'returncode={getattr(exc, "returncode", None)}; stderr={stderr[:500]}; {exc}'
+            )
+            logger.warning('%s (attempt %s/3)', message, attempt)
+            if delay is None:
+                from tools.process_registry import RestartSafeScopeUnavailable
+                raise RestartSafeScopeUnavailable(message) from exc
+            time.sleep(delay)
 
 
 def bounded_scope(argv, *, task_id=None, board=None):
