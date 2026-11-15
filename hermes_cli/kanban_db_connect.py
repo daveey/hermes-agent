@@ -1396,11 +1396,25 @@ _EVENT_BLOCKER_ASSERT_INDEX = (
 )
 
 
+_RUN_STARTED_INDEX = (
+    "CREATE INDEX idx_runs_started_at ON task_runs(started_at) "
+    "WHERE (started_at+0 IS NULL OR started_at+0 IS NOT NULL)"
+)
+
+
 def _ensure_run_started_index(conn: sqlite3.Connection) -> None:
-    # Board-wide MAX(started_at) must not scan history on every starvation pick.
+    # The tautology admits every storage class, but only the starvation query
+    # spells it: other run readers must not acquire a new implicit scan order.
     # Legacy TEXT-PK tables may lack this column until the rebuild below.
     if "started_at" in _column_names(conn, "task_runs"):
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_started_at ON task_runs(started_at)")
+        existing = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_runs_started_at'"
+        ).fetchone()
+        if existing is not None and existing[0] == _RUN_STARTED_INDEX:
+            return
+        if existing is not None:
+            conn.execute("DROP INDEX idx_runs_started_at")
+        conn.execute(_RUN_STARTED_INDEX)
 
 
 def _ensure_run_partial_indexes(conn: sqlite3.Connection) -> None:
@@ -1444,7 +1458,7 @@ _REBUILD_SPECS = {
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",
-            "CREATE INDEX idx_runs_started_at ON task_runs(started_at)",
+            _RUN_STARTED_INDEX,
             *_RUN_PARTIAL_INDEXES,
         ),
     ),

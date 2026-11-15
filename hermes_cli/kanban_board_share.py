@@ -110,7 +110,12 @@ def _scored(conn, rows: list, now: float) -> list[Candidate]:
 
 def _served_at(conn) -> int:
     """The board's latest worker start (0 if none): the floor of its cards' cross-board age."""
-    row = conn.execute("SELECT MAX(started_at) FROM task_runs").fetchone()
+    # The always-true expression opts only this reader into the partial index.
+    # Without the index this remains a valid scan, including legacy NULL rows.
+    row = conn.execute(
+        "SELECT MAX(started_at) FROM task_runs "
+        "WHERE (started_at+0 IS NULL OR started_at+0 IS NOT NULL)"
+    ).fetchone()
     return int(row[0] or 0) if row is not None else 0
 
 

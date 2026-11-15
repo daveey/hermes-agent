@@ -10,6 +10,53 @@ from hermes_cli import kanban_db_connect as kbc
 
 
 INDEX = "idx_runs_started_at"
+PREDICATE = "(started_at+0 IS NULL OR started_at+0 IS NOT NULL)"
+MAX_SQL = f"SELECT MAX(started_at) FROM task_runs WHERE {PREDICATE}"
+
+
+@pytest.mark.parametrize("analyze", [False, True])
+def test_index_is_only_eligible_for_explicit_starvation_predicate(analyze):
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(kb.SCHEMA_SQL)
+        kbc._migrate_add_optional_columns(conn)
+        conn.executemany("INSERT INTO task_runs(task_id,status,started_at) VALUES (?, 'done', ?)",
+                         [(f"t{i % 10}", 1000-i) for i in range(1000)])
+        if analyze:
+            conn.execute("ANALYZE")
+        forced = f"SELECT started_at FROM task_runs INDEXED BY {INDEX}"
+        for suffix in ("", " WHERE started_at < 5", " WHERE started_at >= 5",
+                       " WHERE started_at IS NULL", " WHERE started_at IS NOT NULL",
+                       " WHERE task_id='t1' AND started_at >= 5", " ORDER BY started_at"):
+            with pytest.raises(sqlite3.OperationalError, match="no query solution"):
+                conn.execute(forced + suffix).fetchall()
+        assert conn.execute(forced + f" WHERE {PREDICATE}").fetchall()
+        plan = str([tuple(r) for r in conn.execute("EXPLAIN QUERY PLAN " + MAX_SQL)])
+        assert f"COVERING INDEX {INDEX}" in plan
+
+
+def test_upgrade_global_experimental_index_and_settled_noop():
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE task_runs (started_at INTEGER)")
+        conn.execute(f"CREATE INDEX {INDEX} ON task_runs(started_at)")
+        kbc._ensure_run_started_index(conn)
+        assert PREDICATE in _index_sql(conn)
+        cookie = conn.execute("PRAGMA schema_version").fetchone()[0]
+        kbc._ensure_run_started_index(conn)
+        assert conn.execute("PRAGMA schema_version").fetchone()[0] == cookie
+
+
+def test_served_at_missing_index_and_null_fallback():
+    from hermes_cli.kanban_board_share import _served_at
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE task_runs (started_at INTEGER)")
+        assert _served_at(conn) == 0
+        conn.executemany("INSERT INTO task_runs VALUES (?)", [(None,), (12,), (-5,)])
+        assert _served_at(conn) == 12
+        kbc._ensure_run_started_index(conn)
+        assert _served_at(conn) == 12
 
 
 def _index_sql(conn):
@@ -63,8 +110,10 @@ def test_indexed_max_matches_scan_including_storage_classes(values):
         for analyze in (False, True):
             if analyze:
                 conn.execute("ANALYZE")
-            assert tuple(conn.execute("SELECT MAX(started_at), typeof(MAX(started_at)) FROM task_runs").fetchone()) == before
-            plan = str([tuple(r) for r in conn.execute("EXPLAIN QUERY PLAN SELECT MAX(started_at) FROM task_runs")])
+            assert tuple(conn.execute(
+                "SELECT MAX(started_at), typeof(MAX(started_at)) FROM task_runs WHERE " + PREDICATE
+            ).fetchone()) == before
+            plan = str([tuple(r) for r in conn.execute("EXPLAIN QUERY PLAN " + MAX_SQL)])
             assert f"COVERING INDEX {INDEX}" in plan
 
 
@@ -77,6 +126,7 @@ def test_max_vm_work_is_bounded_with_real_history():
                          [(f"task-{i % 1000}", i % 19999) for i in range(80000)])
         steps = []
         conn.set_progress_handler(lambda: steps.append(1) or 0, 1)
-        assert conn.execute("SELECT MAX(started_at) FROM task_runs").fetchone()[0] == 19998
+        from hermes_cli.kanban_board_share import _served_at
+        assert _served_at(conn) == 19998
         conn.set_progress_handler(None, 0)
         assert len(steps) < 100, len(steps)
