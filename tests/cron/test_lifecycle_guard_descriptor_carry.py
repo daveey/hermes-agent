@@ -72,6 +72,34 @@ def files(tmp_path) -> dict[str, str]:
         "exec 3<{sh}; bash -s <&3 '0<&-'",
         "exec 3<{sh}; bash -s <&3 '0>/dev/null'",
         "exec 3<{sh}; bash 1>&3 <&1",
+        # Leading-redirection and wrapped `exec` still keep their redirections.
+        "3<{sh} exec; bash <&3",
+        "<{sh} exec; bash <&0",
+        "command exec 3<{sh}; bash <&3",
+        "command -p exec 3<{sh}; bash <&3",
+        "builtin exec 3<{sh}; bash <&3",
+        "builtin -- exec 3<{sh}; bash <&3",
+        "3<{sh} command exec; bash <&3",
+        # A conditional close or rebind keeps the earlier dangerous open as an alternative.
+        "exec 3<{sh}; if false; then exec 3<&-; fi; bash <&3",
+        "exec 3<{sh}; if false; then exec 3<{clean_sh}; fi; bash <&3",
+        "exec 3<{sh}; false && exec 3<&-; bash <&3",
+        "exec 3<{sh}; true || exec 3<{clean_sh}; bash <&3",
+        "exec 3<{sh}; while false; do exec 3<&-; done; bash <&3",
+        "exec 3<{sh}; {{ exec 3<&-; }}; bash <&3",
+        "exec 3<{sh}; case x in y) exec 3<&- ;; esac; bash <&3",
+        "exec 3<{sh}; if x; then exec 4<&3-; fi; bash <&3",
+        "exec 3<{sh}; if x; then exec 3<&-; fi; exec 4<&3; bash <&4",
+        "exec 3<{sh}; if x; then exec 3<{clean_sh}; fi; if y; then exec 3<&-; fi; bash <&3",
+        "exec 3<{clean_sh}; if x; then exec 3<{sh}; fi; if y; then exec 3<&-; fi; bash <&3",
+        "exec 3<{sh}; time if false; then exec 3<&-; fi; bash <&3",
+        "exec 3<{sh}; function f {{ exec 3<&-; }}; bash <&3",
+        # Distinct alternatives must not evict a reachable dangerous middle target.
+        "exec 3<{clean_sh}; "
+        + "".join("if x; then exec 3<{clean_sh}." + str(i) + "; fi; " for i in range(8))
+        + "if x; then exec 3<{sh}; fi; "
+        + "".join("if x; then exec 3<{clean_sh}." + str(i) + "; fi; " for i in range(8, 40))
+        + "bash <&3",
     ],
 )
 def test_descriptor_fed_script_is_scanned(files, template):
@@ -109,7 +137,19 @@ def test_descriptor_fed_script_is_scanned(files, template):
         "exec 3<{sh}; bash 3<&3- <&3",
         "exec 3<{sh}; bash 3>&- <&3",
         "exec 3<{sh}; bash '<&3'",
-        "exec '3<{sh}'; bash <&3", 
+        "exec '3<{sh}'; bash <&3",
+        "command exec 3<{clean_sh}; bash <&3",
+        "command -v exec 3<{sh}; bash <&3",
+        "command exec 3<{sh} true; bash <&3",
+        "builtin exec 3<{sh} true; bash <&3",
+        "echo exec 3<{sh}; bash <&3",
+        "3<{clean_sh} exec; bash <&3",
+        # An unconditional close/rebind after a conditional one wins.
+        "exec 3<{sh}; if x; then exec 3<{clean_sh}; fi; exec 3<&-; bash <&3",
+        "exec 3<{sh}; if x; then :; fi; exec 3<{clean_sh}; bash <&3",
+        "exec 3<{sh}; if x; then :; fi; command exec 3<&-; bash <&3",
+        "if x; then exec 3<{clean_sh}; fi; bash <&3",
+        "exec 3<{clean_sh}; if x; then exec 3<{clean_sh}; fi; bash <&3",
     ],
 )
 def test_unread_or_clean_descriptor_stays_allowed(files, template):
