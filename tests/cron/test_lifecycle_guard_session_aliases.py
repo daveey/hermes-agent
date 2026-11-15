@@ -529,6 +529,9 @@ def test_heredoc_producer_pipe_uses_consuming_shell_scope(tmp_path, live_kanban_
     "{{ printf 't ( bash {db} )' | cat\nbash -l\n}}",
     "( printf 't ( bash {db} )' | cat; bash -l )",
     "{{ printf 't ( bash {db} )' | cat; bash -l; }} | cat",
+    "case x in x) printf 't ( bash {db} )' | cat; bash -l;; esac",
+    "echo case; printf 't ( bash {db} )' | bash; printf ':' | bash -l",
+    "printf 't ( bash {db} )' | case x in bash|-l) :;; esac",
 ])
 def test_group_pipe_does_not_reach_later_login_shell(tmp_path, live_kanban_db, shape):
     assert scan_gateway_lifecycle(
@@ -545,6 +548,13 @@ def test_group_pipe_does_not_reach_later_login_shell(tmp_path, live_kanban_db, s
     "if true; then printf 't ( bash {db} )'; fi | bash -l",
     "while :; do printf 't ( bash {db} )'; done | bash -l",
     "for x in a; do printf 't ( bash {db} )'; done | bash -l",
+    "case x in x) printf 't ( bash {db} )';; esac | bash -l",
+    "printf 't ( bash {db} )' | if true; then bash -l; fi",
+    "printf 't ( bash {db} )' | while read -r l; do bash -l; done",
+    "printf 't ( bash {db} )' | case x in x) bash -l;; esac",
+    "case x in (x|y) case y in y) printf 't ( bash {db} )';; esac;; esac | bash -l",
+    "case esac in (x) :;; (esac) printf 't ( bash {db} )';; esac | bash -l",
+    "printf 't ( bash {db} )' | case x in\ny) :;;\nx) bash -l;;\nesac",
     "f() {{ :; }}; {{ printf 't ( bash {db} )'; }} | bash -l",
 ])
 def test_group_output_piped_to_login_shell_keeps_nested_scope(tmp_path, live_kanban_db, shape):
