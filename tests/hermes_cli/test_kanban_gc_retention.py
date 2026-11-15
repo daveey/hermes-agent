@@ -13,9 +13,25 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_ops
 
 @pytest.fixture
-def board(tmp_path, monkeypatch):
+def host_inventory_tripwire(monkeypatch):
+    """Removing fixture isolation must fail even on an otherwise quiet host."""
+    import psutil
+
+    def unexpected_inventory():
+        pytest.fail("retention fixture attempted unrelated host process discovery")
+
+    monkeypatch.setattr(psutil, "process_iter", unexpected_inventory)
+
+
+@pytest.fixture
+def board(tmp_path, monkeypatch, host_inventory_tripwire):
+    import psutil
+
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    # These fixtures create no external jobs. Keep real GC/veto logic, but do
+    # not inspect unrelated host cwds (including deleted real-home workspaces).
+    monkeypatch.setattr(psutil, "process_iter", lambda: iter(()))
     return tmp_path
 
 def _done_task_with_old_event(conn):
