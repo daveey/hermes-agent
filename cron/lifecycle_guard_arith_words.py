@@ -59,7 +59,8 @@ def _name_taking_mode(name: str, arguments: list[str]) -> bool:
         name in {"test", "[", "printf"} and "-v" in arguments
     ) or (name == "wait" and "-p" in arguments) or (
         name in _INTEGER_DECLARERS
-        and any("[" in argument.split("=", 1)[0] for argument in arguments)
+        and (any(any(c in argument.split("=", 1)[0] for c in "[$") for argument in arguments)
+             or any(argument.startswith("-") and "n" in argument[1:] for argument in arguments))
     )
 
 
@@ -102,12 +103,16 @@ def _recursive_arithmetic_segment(segment: list[str]) -> bool:
     name = guard._executable_name(words[index])
     arguments = words[index + 1:]
     # NAME subscripts recursively evaluate variables just like explicit arithmetic.
-    # A plain NAME does not: `read x` must not activate earlier data assignments.
+    # Expansion-supplied names and nameref targets can hide the entire subscript
+    # in an earlier assignment. A plain NAME does not: `read x` stays inert.
+    # Bash unset does not re-expand a subscript supplied through a parameter.
+    expanded_name = any("[" in token or (name != "unset" and "$" in token)
+                        for token in arguments)
     return name == "let" or (
         name == "[[" and (any(token in _INT_OPERATORS for token in arguments)
-                          or ("-v" in arguments and any("[" in token for token in arguments)))
+                          or ("-v" in arguments and expanded_name))
     ) or (
-        _name_taking_mode(name, arguments) and any("[" in token for token in arguments)
+        _name_taking_mode(name, arguments) and expanded_name
     )
 
 
@@ -130,7 +135,7 @@ def _implicit_arithmetic_expansion(command: str) -> bool:
     This is only a context prefilter, not an evaluator. Preserve shell quoting so
     literal examples in printf/echo do not activate unrelated data assignments.
     """
-    tokens = re.compile(r'''\\.|'|"|\$\$|\$\[|\$\{[#!]?(?:[A-Za-z_]\w*|\d+|[@*#?$!-])(?:\[|:(?![-=?+]))''')
+    tokens = re.compile(r'''\\.|'|"|\$\$|\$\[|\$\{![A-Za-z_]\w*(?=[}:])|\$\{[#!]?(?:[A-Za-z_]\w*|\d+|[@*#?$!-])(?:\[|:(?![-=?+]))''')
     quoted = False
     pos = 0
     while match := tokens.search(command, pos):

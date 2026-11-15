@@ -10,6 +10,15 @@ from tests.cron.test_lifecycle_guard_arith_escaped_words import _run_bash
 
 
 SHAPES = [
+    r'x="a[\$(SCRIPT)]"; printf -v "$x" 1',
+    r'x="a[\$(SCRIPT)]"; read "$x" <<< 1',
+    r'x="a[\$(SCRIPT)]"; test -v "$x"',
+    r'x="a[\$(SCRIPT)]"; [[ -v $x ]]',
+    r'x="a[\$(SCRIPT)]"; declare "$x=1"',
+    r'x="a[\$(SCRIPT)]"; declare -n r="$x"; echo $r',
+    r'x="a[\$(SCRIPT)]"; echo ${!x}',
+    r'x="a[\$(SCRIPT)]"; echo "${!x}"',
+    r'x="a[\$(SCRIPT)]"; echo ${!x:-d}',
     "declare 'a[$(SCRIPT)]=1'",
     r"declare a[\$\(SCRIPT\)]=1",
     "declare -a 'a[$(SCRIPT)]=1'",
@@ -157,6 +166,12 @@ def test_name_and_indirection_scripts_are_scanned(tmp_path, shape, bash_version)
     "x='a[$(SCRIPT)]'; printf -v x 1",
     "x='a[$(SCRIPT)]'; read x <<< 1",
     "x='a[$(SCRIPT)]'; unset x",
+    'x=\'a[$(SCRIPT)]\'; unset "$x"',
+    "x='a[$(SCRIPT)]'; echo '${!x}'",
+    r"x='a[$(SCRIPT)]'; echo \${!x}",
+    "x='a[$(SCRIPT)]'; echo $${!x}",
+    "x='a[$(SCRIPT)]'; echo ${!x@}",
+    "x='a[$(SCRIPT)]'; echo ${!x*}",
     "echo 'x=a[$(SCRIPT)]'; test -v 'a[x]'",
 ])
 def test_inert_name_words_stay_allowed(tmp_path, shape):
