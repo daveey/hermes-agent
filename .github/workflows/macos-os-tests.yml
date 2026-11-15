@@ -8,8 +8,11 @@ name: macOS OS-marked tests (scheduled)
 # (scheduled, non-required; not a PR lane).
 #
 # Runners: the self-hosted macOS runners (labels self-hosted, macOS,
-# hermes-state: the room minis and the Mac mini), the same ones that serve the
-# REQUIRED hermes_state (macOS) and Native memory PR lanes. So this lane:
+# hermes-state: the room minis), the same ones that serve the
+# REQUIRED hermes_state (macOS) and Native memory PR lanes. Tests requiring
+# a GUI launchd domain run separately on hermes-mac-session (the console-user
+# Mac mini); hidden room-mini users stay isolated from meeting-room sessions.
+# Neither selection silently skips login-session requirements. So this lane:
 #   * never runs on a pull request and is not part of "All required checks
 #     pass (v2)";
 #   * runs twice a day, 00:37 and 12:37 UTC (00-01 UTC had the fewest PR runs
@@ -105,7 +108,47 @@ jobs:
           test -s "$LIST"
           echo "selected $(wc -l < "$LIST" | tr -d ' ') file(s)"
           taskpolicy -c utility scripts/run_tests.sh --files-from "$LIST" -j 2 -- \
-            -m "platforms and not integration" --tb=short
+            -m "platforms and not integration and not macos_login_session" --tb=short
+        env:
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''
+
+  macos-login-session-tests:
+    name: macOS login-session tests (mini)
+    needs: gate
+    if: needs.gate.outputs.run == 'true' && github.repository == 'softmax-universe/daveey-hermes'
+    runs-on: [self-hosted, macOS, hermes-mac-session]
+    timeout-minutes: 30
+    steps:
+      # Hidden bbci users have no login session. Fail on misrouting, never skip.
+      - name: Require the runner user's GUI launchd domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          launchctl print "gui/$(id -u)" > /dev/null
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Set up isolated locked test tools and dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          test-environment: 'true'
+          extras: '["all", "messaging"]'
+      - name: Run login-session tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c "import sys; assert sys.platform == 'darwin'"
+          HERMES_HOME="$(mktemp -d "${RUNNER_TEMP:-/tmp}/macos-session-home.XXXXXX")"
+          export HERMES_HOME
+          LIST="$(mktemp "${RUNNER_TEMP:-/tmp}/macos-session-files.XXXXXX")"
+          trap 'rm -rf "$HERMES_HOME" "$LIST"' EXIT
+          /usr/bin/python3 scripts/ci/list_os_marked_tests.py macos > "$LIST"
+          test -s "$LIST"
+          taskpolicy -c utility scripts/run_tests.sh --files-from "$LIST" -j 2 -- \
+            -m "macos_login_session" --tb=short
         env:
           OPENROUTER_API_KEY: ''
           OPENAI_API_KEY: ''

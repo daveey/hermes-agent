@@ -185,6 +185,7 @@ def test_unknown_cgroup_membership_never_authorizes_stopping_the_unit():
 
 @pytest.mark.platforms("macos")
 @pytest.mark.live_system_guard_bypass
+@pytest.mark.macos_login_session
 def test_a_launchd_job_is_paused_through_launchd_and_restarted_through_it(tmp_path):
     """A KeepAlive job merely killed is respawned by launchd on the old code mid-update; the pause
     boots it out (no respawn) and the restart bootstraps the same plist (a fresh PID)."""

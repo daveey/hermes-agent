@@ -28,6 +28,7 @@ def _command_of(pid: int) -> str:
 
 
 @pytest.mark.platforms("macos")
+@pytest.mark.macos_login_session
 def test_gateway_job_is_a_launchd_osascript_child_that_reads_as_unsupervised(monkeypatch, tmp_path):
     monkeypatch.setenv(runtime.ALLOW_IN_TESTS_ENV, "1")  # this test exists to exercise real launchd
     report = tmp_path / "report.json"

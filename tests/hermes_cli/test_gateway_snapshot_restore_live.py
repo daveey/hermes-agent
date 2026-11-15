@@ -134,6 +134,7 @@ def _legacy_row(home):
 
 
 @pytest.mark.platforms("posix")  # The fixture exercises the POSIX default/named profile layout.
+@pytest.mark.macos_login_session
 @pytest.mark.parametrize("multiplex, mode", [(False, "retained"), (True, "missing"), (False, "legacy-leased")],
                          ids=["standalone-resume-restored", "satellite-create-missing", "legacy-reimport-leased"])
 def test_snapshot_restore_rejoins_the_restored_authority(local_gateway, multiplex, mode, capsys, monkeypatch):

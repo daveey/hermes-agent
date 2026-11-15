@@ -1503,6 +1503,11 @@ def pytest_configure(config):
     _relocate_basetemp_outside_operator_home(config)
     config.addinivalue_line(
         "markers",
+        "macos_login_session: on macOS requires the runner user's GUI launchd domain; "
+        "routed to the dedicated login-session lane, without changing Linux selection.",
+    )
+    config.addinivalue_line(
+        "markers",
         f"{_LIVE_SYSTEM_GUARD_BYPASS_MARK}: bypass the live-system guard "
         "(only for tests that genuinely need real os.kill / subprocess "
         "behaviour — e.g. PTY tests that signal their own child).",

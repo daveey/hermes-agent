@@ -59,7 +59,32 @@ def test_test_job_waits_for_the_gate_and_runs_the_marked_selection_on_the_mini()
     assert "scripts/ci/list_os_marked_tests.py macos" in command
     assert 'test -s "$LIST"' in command
     assert "taskpolicy -c utility scripts/run_tests.sh --files-from \"$LIST\" -j 2" in command
-    assert '-m "platforms and not integration"' in command
+    assert '-m "platforms and not integration and not macos_login_session"' in command
+
+
+@pytest.mark.parametrize("domain_status", [0, 125])
+def test_login_session_job_is_gated_and_requires_a_real_gui_domain(domain_status):
+    job = _workflow()["jobs"]["macos-login-session-tests"]
+    assert job["runs-on"] == ["self-hosted", "macOS", "hermes-mac-session"]
+    assert job["needs"] == "gate"
+    assert "needs.gate.outputs.run == 'true'" in job["if"]
+    assert f"github.repository == '{REPO}'" in job["if"]
+    guard = job["steps"][0]["run"]
+    assert 'launchctl print "gui/$(id -u)"' in guard
+    assert "set -euo pipefail" in guard
+    assert "|| true" not in guard
+    # Execute the workflow's shell contract with a controlled launchctl boundary.
+    probe = subprocess.run(
+        ["bash", "-c", f'launchctl() {{ printf "%s\\n" "$*" >&2; return {domain_status}; }}\n{guard}'],
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    assert probe.returncode == domain_status
+    assert "print gui/" in probe.stderr
+    command = job["steps"][-1]["run"]
+    assert '-m "macos_login_session"' in command
+    assert 'test -s "$LIST"' in command
+    assert "taskpolicy -c utility scripts/run_tests.sh" in command
+    assert any(step.get("uses") == "./.github/actions/setup-pm" for step in job["steps"])
 
 
 def test_native_lane_provisions_real_tools_and_messaging_before_tests():
