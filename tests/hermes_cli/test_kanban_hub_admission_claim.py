@@ -578,10 +578,9 @@ def test_doctor_flags_unjudged_hub_claims(gws, monkeypatch, capsys):
     hub.enter()
     assert doctor_state._check_hub_admission_claims(False).manual_issues == []
     assert "0 hub claims without an admission disposition" in capsys.readouterr().out
-    monkeypatch.setattr(judge, "admit", lambda card, hub_reason=None: judge.Verdict())
     tid = _hub_card(hub, title="claimed unjudged")
-    _tick(hub)
-    hub.round()
+    with kb.write_txn(hub.conn):  # historical claim bypass, not a supported outage route
+        kb._append_event(hub.conn, tid, "claimed", {"holder": HUB})
     hub.enter()
     found = doctor_state._check_hub_admission_claims(False)
     assert len(found.manual_issues) == 1 and tid in found.manual_issues[0], found.manual_issues
