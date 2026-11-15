@@ -220,6 +220,8 @@ def safe_sweep(conn) -> int:
     kanban_pickup_stall.safe_sweep(conn)  # pinned foreign cards this worker node has not picked up [daveey]
     from hermes_cli import worker_resources_unknown_alarm
     worker_resources_unknown_alarm.safe_sweep(conn)  # every claim here refused worker_resources_unknown
+    from hermes_cli import turn_urgency_status_alarm
+    turn_urgency_status_alarm.safe_sweep(conn)
     return posted + kanban_chat_wait.safe_sweep(conn)
 
 
