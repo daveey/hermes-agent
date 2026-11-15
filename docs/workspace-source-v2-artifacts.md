@@ -40,6 +40,13 @@ receipt. Missing selected bytes retain custody. First scratch publication keeps
 `scratch_external`/version2; artifact-bearing worktree manifests use version2 and
 never downgrade a prior v2 manifest.
 
+Selection staging (completion, review and heartbeat `artifacts`) requires a
+protocol-2 run (`source_protocol >= 2`). Protocol-1 runs, i.e. every existing v1
+worktree card, keep ordinary attachment preservation: no snapshot scan, no
+selection, no v2 artifact manifest. `kanban_heartbeat(artifacts=...)` on such a
+run is refused; `kanban_complete`/`kanban_request_review(artifacts=...)` fall
+through to the legacy path.
+
 ## Evidence and limitations
 
 Canonical tests: new staging18 + publisher3, existing transport16 + publisher78 +

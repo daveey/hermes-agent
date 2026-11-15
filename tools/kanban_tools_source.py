@@ -57,7 +57,8 @@ def stage_completion(conn, task_id, metadata, *, expected_run_id):
         return metadata
     task = kb.get_task(conn, task_id)
     current = source.attached_run(conn, task.current_run_id) if task else None
-    if current is None:
+    if current is None or current.source_protocol < 2:
+        # v1 (protocol-1) worktree cards keep the legacy attachment path.
         return metadata
     try:
         entries = artifacts.stage_for_run(

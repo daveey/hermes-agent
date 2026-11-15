@@ -150,6 +150,10 @@ def stage_for_run(conn, task_id, paths, *, board, expected_run_id):
     from hermes_cli import kanban_source_board as source
     run = source.attached_run(conn, expected_run_id)
     _live_run(conn, task_id, run)
+    if run is None or run.source_protocol < 2:
+        # Protocol-1 (v1 worktree) runs keep ordinary attachment behaviour until
+        # protocol 2 is advertised: no snapshot scan, no v2 artifact manifest.
+        raise ArtifactRefused("artifact_refused", "artifact selection requires a source protocol 2 run")
     return stage(conn, task_id, paths, board=board, run_uid=run.run_uid, _expected_run=run)
 
 
