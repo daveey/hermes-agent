@@ -1202,6 +1202,7 @@ def create_task(
     validate_workspace: bool = False, validate_skills: bool = False,
     human_request: Optional[dict] = None,
     origin_intent: Optional[dict] = None, chat_origin: Optional[str] = None,
+    native_origin: Optional[dict] = None,
     requires: Optional[list[str]] = None,
     lint_blocked: bool = True, runs_on: Optional[Iterable[str]] = None, require_declaration: bool = False,
     placement_policy: Optional[str] = None,
@@ -1376,6 +1377,8 @@ def create_task(
                 )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 initialize_ownership(conn, task_id, creator_task_id, parents, now, chat_origin)
+                from hermes_cli.kanban_origin_native import record as record_native_origin
+                record_native_origin(conn, task_id, native_origin, now)
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:

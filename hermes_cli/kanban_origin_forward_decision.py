@@ -87,7 +87,7 @@ def _existing(db, identity, canonical):
 
 
 def prepare(request: dict, *, path: Path, ledger: Path, gateway: str, profile: str,
-            lease_lookup, now_ms, session_exists) -> dict:
+            lease_lookup, now_ms, session_exists, native_lookup=None) -> dict:
     canonical = _canonical(_validated(request, gateway, profile))
     # Work only with a detached JSON snapshot, including across network I/O.
     request = json.loads(canonical)
@@ -111,7 +111,7 @@ def prepare(request: dict, *, path: Path, ledger: Path, gateway: str, profile: s
         lease = lease_lookup(creator["board"], creator["task_id"])
         authorize(ledger=ledger, origin=args["origin"], creator=creator, gateway=gateway,
                   profile=profile, sender=request["from"], run_uid=args["run_uid"],
-                  lease=lease, now_ms=now_ms(), session_exists=session_exists)
+                  lease=lease, now_ms=now_ms(), session_exists=session_exists, native_lookup=native_lookup)
         destination = args["destination"]
         envelope = {"id": "origin-forward-" + hashlib.sha256(identity.encode()).hexdigest(),
                     "to_gw": destination["gateway"], "coll": "tasks", "action": "create",

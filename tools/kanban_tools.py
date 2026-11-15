@@ -1657,6 +1657,9 @@ def _handle_create(args: dict, **kw) -> str:
         marker_placement, runs_on = _landing_placement(conn, args, origin, courier_intent, marker_placement, runs_on,
                                                        title=title, assignee=assignee, skills=skills, project_id=project_id)
         _admission_refused(marker_placement)  # raises the typed refusal for a denied hub pin
+        from hermes_cli.kanban_origin_native import capture as capture_native_origin
+        native_origin = (capture_native_origin(self_tid, courier=courier_intent is not None)
+                         if origin is None else None)
         try:
             creation_options = dict(
                 title=_redact(str(title).strip()), body=_redact_opt(args.get("body")), assignee=str(assignee),
@@ -1690,6 +1693,7 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(args.get("initial_status") or "running"),
                 human_request=kb.redact_review_value(args.get("human_request")),
                 created_by=(selfwork_intent['sender'] if selfwork_intent is not None else _persisted_identity()), session_id=session_id,
+                native_origin=native_origin,
                 origin_intent=origin_intent, chat_origin=origin.ref if origin else args.get("origin_session"),
                 # Reject a worktree path the dispatcher could never resolve now, to the
                 # creator, instead of burning spawn retries on it later. [daveey]

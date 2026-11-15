@@ -60,7 +60,7 @@ def read_lease(hub, board: str, task_id: str) -> dict | None:
 
 def authorize(*, ledger: Path, origin: dict, creator: dict, gateway: str,
               profile: str, sender: str, run_uid: str, lease: dict,
-              now_ms: int, session_exists) -> dict:
+              now_ms: int, session_exists, native_lookup=None) -> dict:
     """Return an accepted local binding, or refuse without modifying any store.
 
     Authority is admission-time: the transport must freeze a successful decision
@@ -75,7 +75,13 @@ def authorize(*, ledger: Path, origin: dict, creator: dict, gateway: str,
             or not isinstance(run_uid, str) or not run_uid
             or not session_exists(origin["session"])):
         raise ValueError("origin_forward_identity_invalid")
-    binding = _local_binding(ledger, origin, creator)
+    binding = native_lookup(origin, creator) if native_lookup is not None else None
+    if binding is None:
+        binding = _local_binding(ledger, origin, creator)
+    else:
+        validate_binding(binding)
+        if binding["origin"] != origin or binding["owner"] != creator or creator["gateway"] != gateway:
+            raise ValueError("origin_forward_binding_missing")
     if (not isinstance(lease, dict) or lease.get("task_id") != creator["task_id"]
             or lease.get("holder") != sender[3:] or lease.get("run_uid") != run_uid
             or type(lease.get("expires")) is not int or lease["expires"] <= now_ms):
