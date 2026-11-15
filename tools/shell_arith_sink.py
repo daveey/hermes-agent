@@ -73,6 +73,7 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
     closes = [m.start() for m in re.finditer(r"\]\]", command)]
     operators = [m.start() for m in _INT_OPERATOR_RE.finditer(command)]
     pending = []
+    literal_cache = {}
     backtick_open = False
     stack: list[list] = [[_CMD, None, 0, False, 0, None]]
     pos, end = 0, len(command)
@@ -90,6 +91,8 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
         pos = match.end()
         top = stack[-1]
         kind, quoted = top[0], top[3]
+        if kind == _CMD and not quoted and _literal_name_sink(command, start, top, date_exempt, literal_cache):
+            return True
         if token in ("`", "$(", "$((", "$[", "${"):
             pos, sink = _expansion_token(command, token, pos, stack, date_exempt, _depth)
             if sink:
@@ -121,6 +124,21 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
             pos = _parameter_token(token, start, pos, stack)
     # Callers also pass opener-only command units; queued bodies are not quote errors.
     return backtick_open or any(frame[3] for frame in stack)
+
+
+def _literal_name_sink(command: str, start: int, top: list, date_exempt: bool, cache: dict) -> bool:
+    from tools.shell_builtin_names import LiteralNameScanner
+
+    if top[1] == "array":
+        return False
+    if len(top) < 7:
+        top.append(None)
+    if top[6] is None or top[6].base != top[4]:
+        top[6] = LiteralNameScanner(top[4], cache)
+    try:
+        return top[6].check(command, start, date_exempt=date_exempt)
+    except (ValueError, RecursionError):
+        return False  # Original scanner handles uncertain quoting and real expansions.
 
 
 def _quoted_subscript_sink(command: str, start: int, top: list) -> bool:

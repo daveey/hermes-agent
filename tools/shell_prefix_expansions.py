@@ -20,8 +20,11 @@ def _comment_end(text: str, pos: int, quoted: str) -> int | None:
     return len(text) if newline < 0 else newline
 
 
-def _expansion_end(text: str, start: int, closer: str) -> int:
+def _expansion_end(text: str, start: int, closer: str, cache: dict | None = None) -> int:
     """Return just past an expansion, respecting nested frames and quote scopes."""
+    key = (start, closer)
+    if cache is not None and key in cache:
+        return cache[key]
     pos, quote = start, ""
     while pos < len(text):
         char = text[pos]
@@ -34,6 +37,8 @@ def _expansion_end(text: str, start: int, closer: str) -> int:
             pos += 1
             continue
         if char == closer and not quote:
+            if cache is not None:
+                cache[key] = pos + 1
             return pos + 1
         if not quote and _CASE_WORD.match(text, pos):
             # A case-pattern ')' is not a frame closer; fail closed on grammar
@@ -46,12 +51,12 @@ def _expansion_end(text: str, start: int, closer: str) -> int:
         nested = _opener(text, pos, quote)
         if nested is not None:
             width, end = nested
-            pos = _expansion_end(text, pos + width, end)
+            pos = _expansion_end(text, pos + width, end, cache)
             continue
         if char in "\"'" and (not quote or char == quote):
             quote = "" if quote else char
         elif not quote and char == "(" and closer == ")":
-            pos = _expansion_end(text, pos + 1, ")")
+            pos = _expansion_end(text, pos + 1, ")", cache)
             continue
         pos += 1
     raise ValueError("unterminated expansion")
