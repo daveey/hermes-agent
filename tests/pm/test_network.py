@@ -15,6 +15,21 @@ from pm import network
 from pm.downloader import DownloadPaused, HashError
 
 
+def test_bootstrap_retry_policy_without_python311_datetime_alias(monkeypatch):
+    """PM imports before it installs Python, including Apple's system Python 3.9."""
+    import datetime as datetime_module
+    import importlib.util
+
+    monkeypatch.delattr(datetime_module, "UTC", raising=False)
+    spec = importlib.util.spec_from_file_location("bootstrap_network", network.__file__)
+    bootstrap_network = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bootstrap_network)
+    monkeypatch.setattr(bootstrap_network.time, "time", lambda: 1577836800.0)
+    # A timezone-less Retry-After exercises the UTC fallback, not just import.
+    error = _http_error(503, "Wed, 01 Jan 2020 00:00:12")
+    assert bootstrap_network._delay(error, 0) == 12.0
+
+
 def _http_error(status, retry_after=None):
     headers = Message()
     if retry_after is not None:

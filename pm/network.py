@@ -10,7 +10,7 @@ import ssl
 import time
 import urllib.error
 import urllib.parse
-from datetime import timezone, UTC
+from datetime import timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, TypeVar
 
@@ -80,7 +80,8 @@ def _delay(exc: Exception, attempt: int) -> float:
                 try:
                     when = parsedate_to_datetime(value)
                     if when.tzinfo is None:
-                        when = when.replace(tzinfo=UTC)
+                        # PM bootstraps on system Python, including macOS 3.9.
+                        when = when.replace(tzinfo=timezone.utc)  # noqa: UP017 -- bootstrap Python can predate 3.11
                     retry_after = when.timestamp() - time.time()
                 except (TypeError, ValueError, OverflowError):
                     retry_after = 0.0
