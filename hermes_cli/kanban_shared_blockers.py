@@ -143,7 +143,8 @@ def normalize_blocker_id(raw, *, cfg=None) -> Optional[str]:
     if not isinstance(raw, str):
         return None
     slug = _blocker_slug(raw)
-    if re.fullmatch(r"github(-(shared|rest|core))*-quota(-reserve)?", slug):
+    if (re.fullmatch(r"github(-(shared|rest|core))*-quota(-reserve)?", slug)
+            or re.fullmatch(r"github-[a-z0-9]+(?:-[a-z0-9]+)*-core(?:-quota)?(?:-reserve)?", slug)):
         return "github-rest-quota"
     if cfg is None:
         from hermes_cli.config_backend import ConfigBackendUnavailable
