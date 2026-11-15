@@ -296,14 +296,6 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
     plus the run's resolved ``run_route`` receipt (every spawn, tier off included).
     Returns the reason. Review resolution/receipt failures refuse admission rather than reusing an author pin."""
     reason = _apply_model_tier(conn, task, lane=lane, cfg=cfg)
-    # The claim-time quota governor started this card on a pool with room instead of holding it on a paced one
-    # (kanban_pace_reroute): move the run there, only when this resolution landed on the route it judged. [daveey]
-    from hermes_cli.kanban_pace_reroute import REASON as _PACED, take as _take_pace_move
-    moved = _take_pace_move(getattr(task, "id", ""), (getattr(task, "model_override", None),
-                                                      getattr(task, "provider_override", None)))
-    if moved:
-        task.model_override, task.provider_override = moved[0], moved[1]
-        reason = f"{reason}+{_PACED}:{moved[2]}"
     record_run_route(conn, task, lane=lane, reason=reason)
     return reason
 
@@ -445,6 +437,12 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                            model, why, getattr(task, "id", "?"))
             reason = f"{reason}+unroutable:{model}:{why}"
             model = provider = None
+    # Persist the pace choice before the owner reloads its authoritative model_tier receipt.
+    from hermes_cli.kanban_pace_reroute import REASON as _PACED, take as _take_pace_move
+    moved = _take_pace_move(getattr(task, "id", ""), (model, provider))
+    if moved:
+        model, provider = moved[0], moved[1]
+        reason = f"{reason}+{_PACED}:{moved[2]}"
     origin = (getattr(task, "model_override", None), getattr(task, "provider_override", None))
     repinned = bool(model) and reason.startswith("pinned+pin_quota_reroute")
     if model:
@@ -471,6 +469,9 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                     from hermes_cli.kanban_pin_reroute import record
                     record(conn, task, (_str(origin[0]), _str(origin[1]).lower()), (_str(model), _str(provider)))
         except Exception as exc:
+            if moved:
+                task.model_override, task.provider_override = origin
+                raise RuntimeError("Cannot persist pace reroute model receipt") from exc
             if is_review:
                 from hermes_cli.kanban_review_model import ReviewModelUnavailable
                 raise ReviewModelUnavailable("Cannot persist review model receipt") from exc

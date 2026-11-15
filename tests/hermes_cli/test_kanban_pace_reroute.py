@@ -72,6 +72,34 @@ def _paced_events(conn, tid):
     return [e for e in kb.list_events(conn, tid) if e.kind == pd.EVENT_KIND]
 
 
+@pytest.mark.parametrize("title", ["routine work", "security work"])
+def test_pace_route_reaches_fresh_owner(pool, strong_pattern, monkeypatch, title):
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title=title, assignee="a")
+        seen, _ = _dispatch(conn)
+        assert seen == [(tid, *GROK)]
+        assert tier.owner_model_pin(conn, kb.get_task(conn, tid)) == GROK
+
+
+@pytest.mark.parametrize("title", ["routine work", "security work"])
+def test_pace_receipt_failure_refuses_spawn(pool, strong_pattern, monkeypatch, title):
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
+    append = kb._append_event
+
+    def fail_receipt(conn, tid, kind, *args, **kwargs):
+        if kind == "model_tier":
+            raise RuntimeError("receipt unavailable")
+        return append(conn, tid, kind, *args, **kwargs)
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title=title, assignee="a")
+        monkeypatch.setattr(kb, "_append_event", fail_receipt)
+        seen, _ = _dispatch(conn)
+        assert seen == []
+        assert _route_receipt(conn, tid) is None
+
+
 def test_default_card_starts_on_grok_when_codex_and_claude_are_paced(pool, monkeypatch):
     _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
     with kbc.connect() as conn:
