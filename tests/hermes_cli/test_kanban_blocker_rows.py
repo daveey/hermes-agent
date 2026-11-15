@@ -131,6 +131,43 @@ def test_an_assertion_leaves_the_window_with_no_write(kanban_home):
         assert BID in _same(conn, now)
 
 
+@pytest.mark.parametrize("old_offset", [-1, 0])
+def test_mixed_assertions_expire_without_refilling_eligible_task(kanban_home, full_reads, old_offset):
+    """Filter each assertion, not just its task, on a small no-write window advance."""
+    with kbc.connect_closing() as conn:
+        tid = helpers._blocked_behind(conn, "mixed")
+        for _ in range(2):
+            assert kb.unblock_task(conn, tid)
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
+            assert kb.claim_task(conn, tid) is not None
+            assert kb.block_task(conn, tid, reason="same wall", kind="capability", blocker_id=BID)
+        run_ids = [r[0] for r in conn.execute(
+            "SELECT id FROM task_runs WHERE task_id = ? ORDER BY id", (tid,))]
+        assert len(run_ids) == 3
+        expired, boundary, recent = run_ids
+        now = _now(conn)
+        cutoff = now - ksb._LOOKBACK_SECONDS
+        with kb.write_txn(conn):
+            for rid, ended in zip(run_ids, (cutoff + old_offset, cutoff, now - 1)):
+                conn.execute("UPDATE task_runs SET started_at = ?, ended_at = ? WHERE id = ?",
+                             (ended - 1, ended, rid))
+        changes = conn.total_changes
+        asserting, held = rows.inputs(conn, now)
+        expected = [boundary, recent] if old_offset < 0 else [expired, boundary, recent]
+        assert [r.id for r in asserting] == expected
+        assert set(held) == {tid}
+        assert [r.id for r in held[tid].runs] == [expired, boundary, recent]
+        assert len(full_reads) == 1
+        assert 1 < rows.REFILL_SECONDS
+        later, retained = rows.inputs(conn, now + 1)
+        assert [r.id for r in later] == [recent]
+        assert set(retained) == {tid}
+        assert retained[tid] is held[tid]
+        assert len(full_reads) == 1
+        assert conn.total_changes == changes
+
+
 def test_a_caller_now_earlier_than_the_fill(kanban_home, full_reads):
     """A task whose assertions are outside the fill's window is not held; an earlier caller window needs it."""
     with kbc.connect_closing() as conn:
