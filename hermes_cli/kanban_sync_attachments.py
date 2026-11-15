@@ -146,7 +146,7 @@ def transfer_pending(conn, hub, board, *, limit=2):
         "AND (r.uid IS NULL OR r.blob_key IS NOT a.blob_key OR r.retry_at<=?) "
         # First transfers and newly available/retryable bytes precede maintenance.
         "ORDER BY CASE WHEN r.uid IS NULL OR r.blob_key IS NOT a.blob_key "
-        "OR (r.error IS NOT NULL AND a.blob_key IS NOT NULL) THEN 0 ELSE 1 END, "
+        "OR (r.error IS NOT NULL AND (a.blob_key IS NOT NULL OR a.stored_path <> '')) THEN 0 ELSE 1 END, "
         "coalesce(r.retry_at,0),a.id LIMIT ?", (now, limit)).fetchall()
     transferred = 0
     for raw in rows:

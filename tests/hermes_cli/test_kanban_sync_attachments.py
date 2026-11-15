@@ -304,6 +304,45 @@ def test_needed_bytes_precede_due_verification_backlog(stores, monkeypatch, urge
     assert attempts == [2, 1, 1]  # stable retry_at/id order, and exactly two candidates
 
 
+@pytest.mark.parametrize("failure", ["OSError", "ValueError"])
+def test_failed_upload_precedes_due_verification_backlog(stores, monkeypatch, failure):
+    from hermes_cli import kanban_sync_attachments as attachments
+    home, _, conn, _, service, tid, _ = stores
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    clock = [100.0]
+    monkeypatch.setattr(attachments, "_now", lambda: clock[0])
+    backlog = [_queued_attachment(conn, tid, f"verified-{i}", retry_at=1000)[0]
+               for i in range(3)]
+    row, data = _queued_attachment(conn, tid, "upload", keyed=False)
+    client.push(conn, service.hub("hub"), "default", "hub", primary=True)
+    service.blobs_offline = failure == "OSError"
+    with monkeypatch.context() as failed:
+        if failure == "ValueError":
+            failed.setattr(BlobHub, "put_attachment", lambda *args: {})
+        assert attachments.transfer_pending(conn, service.hub("hub"), "default", limit=2) == 0
+    receipt = conn.execute("SELECT * FROM kanban_attachment_retry WHERE uid=?", (row["uid"],)).fetchone()
+    assert (receipt["error"], receipt["retry_at"], receipt["attempts"]) == (failure, 130, 1)
+    service.blobs_offline = False
+    clock[0] = 129
+    assert attachments.transfer_pending(conn, service.hub("hub"), "default", limit=2) == 0
+    assert row["uid"] not in service.blobs
+    with kbc.write_txn(conn):
+        for old in backlog:
+            conn.execute("UPDATE kanban_attachment_retry SET retry_at=-100 WHERE uid=?", (old["uid"],))
+    clock[0] = 130
+    assert attachments.transfer_pending(conn, service.hub("hub"), "default", limit=0) == 0
+    assert attachments.transfer_pending(conn, service.hub("hub"), "default", limit=2) == 2
+    assert service.blobs.get(row["uid"]) == data, "failed custodian upload must precede maintenance"
+    published = conn.execute("SELECT blob_key,stored_path FROM task_attachments WHERE uid=?", (row["uid"],)).fetchone()
+    assert published["blob_key"] == "sha256:" + hashlib.sha256(data).hexdigest()
+    assert Path(published["stored_path"]).read_bytes() == data
+    receipt = conn.execute("SELECT * FROM kanban_attachment_retry WHERE uid=?", (row["uid"],)).fetchone()
+    assert (receipt["error"], receipt["retry_at"], receipt["attempts"]) == (None, 730, 2)
+    attempts = [conn.execute("SELECT attempts FROM kanban_attachment_retry WHERE uid=?", (old["uid"],)).fetchone()[0]
+                for old in backlog]
+    assert attempts == [2, 1, 1]
+
+
 def test_first_metadata_attempt_precedes_due_verification(stores, monkeypatch):
     from hermes_cli import kanban_sync_attachments as attachments
     home, _, conn, _, service, tid, _ = stores
