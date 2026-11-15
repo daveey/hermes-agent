@@ -397,6 +397,46 @@ def test_screen_reports_deferred_ids(gws, hub_judge):
     assert all(tid in counts.line() for tid in tids[1:]) and tids[0] not in counts.line()
 
 
+def _aged_review_card(hub, minutes):
+    """A review card whose ready/review interval began ``minutes`` ago: the aged admission score ranks it above
+    fresh higher-priority ready cards (25 points per waiting minute)."""
+    tid = _hub_card(hub, title="aged review card")
+    since = int(time.time()) - minutes * 60
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET status = 'review', created_at = ? WHERE id = ?", (since, tid))
+        hub.conn.execute("UPDATE task_events SET created_at = ? WHERE task_id = ?", (since, tid))
+    return tid
+
+
+def test_the_judge_budget_follows_the_combined_ready_and_review_score_order(gws, hub_judge):
+    """PR #3191 ranks ready and review together by the aged score; the screen used to walk the ready lane and then
+    append review, so a review card the claim pass reaches FIRST was deferred while three lower-ranked ready cards
+    spent the judge budget and were claimed (t_01a1dca84c849edc)."""
+    hub, _worker, _svc = gws
+    ready = [_hub_card(hub, title=f"ready card {i}", priority=100) for i in range(hac.MAX_JUDGED_PER_TICK)]
+    review = _aged_review_card(hub, 60)
+    hub.enter()
+    order = [row["id"] for row in hac._candidates(hub.conn)]
+    assert order[0] == review and set(order[1:]) == set(ready), order
+    _ready, _review, deferred = hac.screened_lanes(hub.conn, False, True)
+    assert hub_judge.calls[0]["card"]["title"] == "aged review card"
+    assert _events(hub.conn, review, "hub_admission") and review not in deferred
+    assert len(deferred) == 1 and deferred <= set(ready)
+
+
+def test_the_screen_skips_review_cards_when_review_dispatch_is_off(gws, hub_judge):
+    """Control: with review dispatch off the claim pass never reaches review cards, so they spend no judge call."""
+    hub, _worker, _svc = gws
+    ready = [_hub_card(hub, title=f"ready card {i}", priority=100) for i in range(hac.MAX_JUDGED_PER_TICK)]
+    review = _aged_review_card(hub, 60)
+    hub.enter()
+    _ready, review_lane, deferred = hac.screened_lanes(hub.conn, False, False)
+    assert review_lane == [] and not deferred
+    assert len(hub_judge.calls) == hac.MAX_JUDGED_PER_TICK
+    assert all(_events(hub.conn, tid, "hub_admission") for tid in ready)
+    assert _events(hub.conn, review, "hub_admission") == []
+
+
 def test_deferred_ids_appear_in_the_dispatch_result(gws, hub_judge, monkeypatch, caplog):
     """A card deferred every tick (kept edited, or a long backlog) must be visible in the tick's diagnostics:
     ``lane_candidates`` leaves it out, so the result and the log line name it (review of #1811)."""

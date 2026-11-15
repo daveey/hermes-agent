@@ -9,23 +9,32 @@ cards, so a freed slot went to whichever board's turn came first, not to the bes
 60320, which could not help (effective priority is capped at ``kanban_priority.PRIORITY_CAP``, 1000, anyway).
 
 When the free slots are fewer than the dispatchable cards on all boards, :func:`shares` ranks every board's cards
-in the dispatcher's own order (effective priority, then cards others wait on, then age) and gives each board a
-spawn quota: how many of the top ``free`` cards are its own. :func:`run` ticks the boards with a quota first and
-hands a quota a board could not spend (a claim refused at spawn time) to the next board. Without contention it
-returns None and every board ticks as before.
+in the dispatcher's own order and gives each board a spawn quota: how many of the top ``free`` cards are its own.
+:func:`run` ticks the boards with a quota first and hands a quota a board could not spend (a claim refused at spawn
+time) to the next board. Without contention it returns None and every board ticks as before.
 
-Starvation guard (deliberate per-board minimum): priorities are set per board by different owners, so pure
-priority would let one board's flood of high numbers hold another board's cards forever. A board whose top card
-has been ready :data:`STARVE_SECONDS` or longer, while the board started no card, takes the first pick (oldest wait
-first), so no board waits much longer than that plus one worker turnover, and a head that can never start wins
-its board at most one starvation pick per window. Ranking is advisory: guards and refusals decided at claim time
-are not modelled, and the host cap check in each board's tick stays authoritative.
+The order is the dispatcher's aged admission score (``kanban_admission_score.rank``: effective priority, class,
+cards waiting on it, minutes waiting, failures), computed over every eligible card before the per-board cut, so a
+long-waiting low-priority card on another board outranks fresh higher-priority work after (priority gap / age
+weight) minutes instead of only through the starvation guard (t_01a1dca84c849edc). One difference: across boards a
+card's age counts from the later of its ready/review entry and its board's latest worker start. A board that keeps
+starting cards is being served, and its own tick spends a quota in its own aged order; without the floor, a head
+the claim loop keeps skipping (respawn guard, per-profile cap, pacing) would age into every tick's first pick and
+hand its board's slots to lower cards there. Its board wins again only once it has started nothing for that long.
+
+Starvation guard (deliberate per-board minimum, kept alongside aging): priorities are set per board by different
+owners, so a board whose top card has been ready :data:`STARVE_SECONDS` or longer, while the board started no card,
+takes the first pick (oldest wait first) whatever the scores, so no board waits much longer than that plus one
+worker turnover, and a head that can never start wins its board at most one starvation pick per window. Ranking is
+advisory: guards and refusals decided at claim time are not modelled, and the host cap check in each board's tick
+stays authoritative.
 """
 from __future__ import annotations
 
 import contextlib
 import heapq
 import logging
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -42,31 +51,65 @@ class Candidate(NamedTuple):
     priority: int
     waited_on: bool
     created_at: float
-    ready_since: float
+    ready_since: float  # the starvation clock, set on a board's head only (:func:`_starve_clock`)
+    score: Optional[float] = None  # cross-board aged admission score; None: raw effective priority (fallback)
+    since: float = 0.0  # the score's age clock: its first tie-break, as in ``kanban_admission_score.rank``
 
     def rank(self) -> tuple:
-        return (-self.priority, not self.waited_on, self.created_at, self.task_id)
+        if self.score is None:
+            return (-self.priority, self.since, not self.waited_on, self.created_at, self.task_id)
+        return (-self.score, self.since, False, self.created_at, self.task_id)
 
 
-def candidates(conn, limit: int) -> list[Candidate]:
-    """Up to ``limit`` unclaimed ready (and review, when review dispatch is on) cards this host could start, in
-    dispatch order; cards this gateway cannot lease (``dispatch_refusals``) are left out."""
+def candidates(conn, limit: int, *, now: Optional[float] = None) -> list[Candidate]:
+    """Up to ``limit`` unclaimed ready (and review, when review dispatch is on) cards this host could start, best
+    first; cards this gateway cannot lease (``dispatch_refusals``) are left out. Every eligible card is scored
+    before the cut, so an aged card below a priority-ordered ``LIMIT`` is not dropped unseen."""
     from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
     from hermes_cli.kanban_db_dispatch_queries import _WAITERS, DISPATCH_ORDER, EFFECTIVE_PRIORITY
     from hermes_cli.kanban_worker_node import dispatch_refusals
-    found: list[Candidate] = []
+    now = time.time() if now is None else now
+    rows: list = []
     for status in ("ready", "review") if review_dispatch_enabled() else ("ready",):
         refused = dispatch_refusals(conn, status)
-        rows = conn.execute(
+        rows += [r for r in conn.execute(
             f"SELECT id, created_at, {EFFECTIVE_PRIORITY} AS eff, EXISTS (SELECT 1 {_WAITERS}) AS waited "
-            f"FROM tasks WHERE status = ? AND claim_lock IS NULL ORDER BY {DISPATCH_ORDER} LIMIT ?",
-            (status, limit + len(refused))).fetchall()
-        found += [Candidate(r["id"], int(r["eff"] or 0), bool(r["waited"]), float(r["created_at"] or 0), 0.0)
-                  for r in rows if r["id"] not in refused]
-    found = sorted(found, key=Candidate.rank)[:limit]
+            f"FROM tasks WHERE status = ? AND claim_lock IS NULL ORDER BY {DISPATCH_ORDER}", (status,)).fetchall()
+                 if r["id"] not in refused]
+    found = sorted(_scored(conn, rows, now), key=Candidate.rank)[:limit]
     if found:  # only the head's wait decides starvation; one event scan per board
         found[0] = found[0]._replace(ready_since=_starve_clock(conn, found[0]))
     return found
+
+
+def _scored(conn, rows: list, now: float) -> list[Candidate]:
+    """``rows`` as candidates scored by the dispatcher's aged admission score, with the age component counted
+    from the later of the card's ready/review entry and the board's latest worker start (see the module
+    docstring). Raw effective priority when the score cannot be read (the dispatcher's own fallback)."""
+    from hermes_cli.kanban_admission_score import AGE_BUCKET_S, rank
+    plain = [Candidate(r["id"], int(r["eff"] or 0), bool(r["waited"]), float(r["created_at"] or 0), 0.0)
+             for r in rows]
+    try:
+        scored = rank(conn, rows, now_ms=int(now * 1000))
+    except (sqlite3.Error, OSError, ValueError):
+        _log.warning("kanban dispatcher: cross-board admission score unavailable; ranking by priority",
+                     exc_info=True)
+        return plain
+    served = _served_at(conn)
+    by_id = {c.task_id: c for c in plain}
+    out = []
+    for row, parts in scored:
+        since = max(parts.ready_since, served)
+        age = dict(parts.weights)["age"]
+        score = parts.total - age * (parts.age_buckets - max(0, int(now - since)) // AGE_BUCKET_S)
+        out.append(by_id[row["id"]]._replace(priority=parts.effective_priority, score=score, since=float(since)))
+    return out
+
+
+def _served_at(conn) -> int:
+    """The board's latest worker start (0 if none): the floor of its cards' cross-board age."""
+    row = conn.execute("SELECT MAX(started_at) FROM task_runs").fetchone()
+    return int(row[0] or 0) if row is not None else 0
 
 
 def _starve_clock(conn, head: Candidate) -> float:
@@ -76,8 +119,7 @@ def _starve_clock(conn, head: Candidate) -> float:
     :data:`STARVE_SECONDS` instead of the first pick on every tick."""
     from hermes_cli.kanban_parent_unclaimed import ready_since
     since = float(ready_since(conn, head.task_id, int(head.created_at)))
-    row = conn.execute("SELECT MAX(started_at) FROM task_runs").fetchone()
-    return max(since, float(row[0] or 0)) if row is not None else since
+    return max(since, float(_served_at(conn)))
 
 
 def _starved(cands: list[Candidate], now: float) -> bool:
@@ -130,6 +172,7 @@ def shares(slugs: list[str], cap: Optional[int], *, now: Optional[float] = None)
     if cap is None or len(slugs) < 2:
         return None
     from hermes_cli.kanban_db_dispatch import count_running_tasks
+    now = time.time() if now is None else now
     heads: dict[str, list[Candidate]] = {}
     paths: set[str] = set()
     running = 0
@@ -141,10 +184,10 @@ def shares(slugs: list[str], cap: Optional[int], *, now: Optional[float] = None)
                     return None
                 paths.add(path)
                 running += count_running_tasks(conn)
-                heads[slug] = candidates(conn, cap)
+                heads[slug] = candidates(conn, cap, now=now)
         except Exception:  # health: allow BLE001 -- an unreadable (e.g. quarantined) board only gets unspent quota
             _log.debug("kanban dispatcher: board %s unreadable for cross-board slot ranking", slug, exc_info=True)
-    return plan(heads, cap - running, now=time.time() if now is None else now)
+    return plan(heads, cap - running, now=now)
 
 
 _tick = threading.local()
@@ -234,7 +277,7 @@ def ahead_elsewhere(conn, task_id: str, *, now: Optional[float] = None, limit: i
     the host's), a starved board's head included. 0 when the card is not a candidate or no other board exists."""
     from hermes_cli import kanban_db as kb
     now = time.time() if now is None else now
-    mine = candidates(conn, limit)
+    mine = candidates(conn, limit, now=now)
     own = next((c for c in mine if c.task_id == task_id), None)
     if own is None:
         return 0
@@ -247,7 +290,7 @@ def ahead_elsewhere(conn, task_id: str, *, now: Optional[float] = None, limit: i
             with _board_conn(slug) as other:
                 if _db_path(other) == own_path:
                     continue
-                cands = candidates(other, limit)
+                cands = candidates(other, limit, now=now)
         except Exception:  # health: allow BLE001 -- an unreadable board adds nothing to an advisory count
             _log.debug("kanban queue position: board %s unreadable", slug, exc_info=True)
             continue

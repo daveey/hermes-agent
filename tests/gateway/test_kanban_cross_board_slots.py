@@ -138,6 +138,56 @@ def test_a_guarded_starved_head_does_not_win_its_board_every_first_pick(home, mo
     assert place is not None and "ahead_other_boards" not in place, place
 
 
+def test_an_aged_card_below_the_priority_limit_wins_the_shared_slot(home, monkeypatch):
+    """Cross-board share ranks by the dispatcher's aged admission score, scored before the per-board cut: hermes'
+    p0 card has waited an hour (score 1500), below a fresh p100 card a priority-ordered ``LIMIT 1`` kept, and
+    outranks default's fresh p900 card well inside :data:`STARVE_SECONDS` (t_01a1dca84c849edc)."""
+    aged = _card("hermes", "hermes p0, waiting an hour", 0, ready_since=time.time() - 3600)
+    _card("hermes", "hermes p100, fresh", 100)
+    _card("default", "default p900, fresh", 900)
+    spawned = []
+    dispatcher = _dispatcher(monkeypatch, spawned, start_board="default")
+
+    dispatcher.tick_once()
+
+    assert spawned == [("hermes", aged)], spawned
+
+
+def test_a_served_board_does_not_age_across_boards(home, monkeypatch):
+    """The age floor is the board's latest worker start: hermes started a card 5 minutes ago, so its hour-old p0
+    card counts 5 minutes (125) across boards and default's p900 card takes the slot."""
+    _card("hermes", "hermes p0, waiting an hour", 0, ready_since=time.time() - 3600)
+    other = _card("hermes", "hermes p100, fresh", 100)
+    top = _card("default", "default p900, fresh", 900)
+    with kbc.connect_closing(board="hermes") as conn:
+        conn.execute("INSERT INTO task_runs (task_id, status, started_at) VALUES (?, 'done', ?)",
+                     (other, int(time.time() - 300)))
+        conn.commit()
+    spawned = []
+    dispatcher = _dispatcher(monkeypatch, spawned, start_board="hermes")
+
+    dispatcher.tick_once()
+
+    assert spawned == [("default", top)], spawned
+
+
+def test_cross_board_ranking_falls_back_to_priority_when_the_score_is_unreadable(home, monkeypatch):
+    import sqlite3
+
+    from hermes_cli import kanban_admission_score as score
+    from hermes_cli import kanban_board_share as share
+    _card("hermes", "hermes p0, waiting an hour", 0, ready_since=time.time() - 3600)
+    fresh = _card("hermes", "hermes p100, fresh", 100)
+
+    def broken(*_a, **_kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(score, "rank", broken)
+    with kbc.connect_closing(board="hermes") as conn:
+        [head] = share.candidates(conn, 1)
+    assert head.task_id == fresh and head.score is None and head.priority == 100
+
+
 def test_board_started_nothing_keeps_the_starvation_pick(home):
     from hermes_cli import kanban_board_share as share
     old = time.time() - share.STARVE_SECONDS - 60

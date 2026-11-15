@@ -95,13 +95,22 @@ def _eligible(conn: sqlite3.Connection, card: sqlite3.Row) -> bool:
     return bool(prior and prior.get("admit") is False and not prior.get("forced"))
 
 
-def _candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _candidates(conn: sqlite3.Connection, lanes: Optional[list] = None) -> list[sqlite3.Row]:
     """Screenable cards in the claim pass's own dispatch order, so the per-tick judge budget covers the cards the
-    claims reach first and never lets lower-priority work jump a deferred higher-priority card."""
-    from hermes_cli.kanban_admission_pools import lane_rows
+    claims reach first and never lets lower-priority work jump a deferred higher-priority card.
+
+    That order is ONE ranking of ready and review together (``kanban_db_dispatch`` ranks its frozen lanes with
+    :func:`kanban_dispatch_priority.order_with_remote_waiters`, the aged admission score), not the ready lane
+    followed by the review lane: there, a review card the claim pass reaches first was deferred while lower ready
+    cards spent the judge budget. ``lanes``: the dispatcher's frozen ready + review rows (review only when review
+    dispatch is on); None reads both lanes now."""
+    from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
+    if lanes is None:
+        from hermes_cli.kanban_admission_pools import lane_rows
+        lanes = lane_rows(conn, "ready") + lane_rows(conn, "review")
     rows = {row["id"]: row for row in conn.execute(f"SELECT * FROM tasks WHERE {_SCREENABLE}").fetchall()}
-    lanes = lane_rows(conn, "ready") + lane_rows(conn, "review")
-    return [rows[row["id"]] for row in lanes if row["id"] in rows and _eligible(conn, rows[row["id"]])]
+    ordered = order_with_remote_waiters(conn, [row for row in lanes if row["id"] in rows])
+    return [rows[row["id"]] for row in ordered if _eligible(conn, rows[row["id"]])]
 
 
 def _current(conn: sqlite3.Connection, tid: str) -> tuple[Optional[sqlite3.Row], int]:
@@ -164,9 +173,11 @@ def _event_head(conn: sqlite3.Connection, tid: str) -> int:
     return conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id = ?", (tid,)).fetchone()[0]
 
 
-def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int = MAX_JUDGED_PER_TICK) -> Counts:
+def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int = MAX_JUDGED_PER_TICK,
+           lanes: Optional[list] = None) -> Counts:
     """Judge this hub's ready, label-less, unjudged cards before the claim pass; see the module docstring.
-    The caller must leave ``deferred_ids`` out of this tick's claims."""
+    ``lanes``: the claim pass's frozen candidates (:func:`_candidates`). The caller must leave ``deferred_ids``
+    out of this tick's claims."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_hub_admission as judge
     from hermes_cli import kanban_hub_admission_pickup as pickup
@@ -181,7 +192,7 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int 
     board = sync.board_slug_for_path(sync._db_key(conn) or "")
     down = False
     calls = 0
-    for tid in [row["id"] for row in _candidates(conn)]:
+    for tid in [row["id"] for row in _candidates(conn, lanes)]:
         card, event_head = _current(conn, tid)
         if card is None:
             continue
@@ -334,15 +345,15 @@ def screened_lanes(conn: sqlite3.Connection, dry_run: bool, review_enabled: bool
     review = lane_rows(conn, "review") if review_enabled else []
     deferred = set(deferred)
     if not dry_run and board_mode(conn) == "primary":
-        deferred.update(safe_screen(conn))
+        deferred.update(safe_screen(conn, ready + review))
     return ([row for row in ready if row["id"] not in deferred],
             [row for row in review if row["id"] not in deferred], deferred)
 
 
-def safe_screen(conn: sqlite3.Connection) -> frozenset:
+def safe_screen(conn: sqlite3.Connection, lanes: Optional[list] = None) -> frozenset:
     """Dispatcher seam: a failed screen cannot turn an unresolved deny into permission to claim."""
     try:
-        return screen(conn).deferred_ids
+        return screen(conn, lanes=lanes).deferred_ids
     except Exception:  # health: allow BLE001 -- defer the frozen lanes instead of bypassing admission
         _log.warning("hub admission: claim screen failed; deferring ready/review claims", exc_info=True)
         return frozenset(row[0] for row in conn.execute(
