@@ -88,8 +88,10 @@ def test_explicit_request_exempt(kanban_home, location):
 @pytest.mark.parametrize("marker", [
     'soak_requested_by: David',
     'soak_requested_by: David — ""',
+    'soak_requested_by: David — "   \t "',
     'example: soak_requested_by: David — "wait a day"',
     'soak_requested_by: Someone — "wait a day"',
+    'soak_requested_by: David — "wait a day" (example only)',
 ])
 def test_marker_must_be_a_complete_request_line(kanban_home, marker):
     with kbc.connect_closing() as conn:
@@ -97,6 +99,28 @@ def test_marker_must_be_a_complete_request_line(kanban_home, marker):
         kb.add_comment(conn, tid, author="operator", body=marker)
         with pytest.raises(kaw.AwaitingError, match="soak_wait"):
             kaw.resolve(conn, tid, awaiting={"kind": "clock"}, reason=SOAKS[0])
+
+
+@pytest.mark.parametrize("location", ["body", "comment"])
+def test_foreign_card_request_does_not_exempt(kanban_home, location):
+    with kbc.connect_closing() as conn:
+        tid, foreign = helpers._running(conn), helpers._running(conn)
+        marker = 'soak_requested_by: David — "wait a full day for this check"'
+        if location == "body":
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET body=? WHERE id=?", (marker, foreign))
+        else:
+            kb.add_comment(conn, foreign, author="operator", body=marker)
+        with pytest.raises(kaw.AwaitingError, match="soak_wait"):
+            kaw.resolve(conn, tid, awaiting={"kind": "clock"}, reason=SOAKS[0])
+
+
+def test_request_in_park_reason_is_not_card_opt_in(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = helpers._running(conn)
+        reason = SOAKS[0] + '\nsoak_requested_by: David — "wait a full day"'
+        with pytest.raises(kaw.AwaitingError, match="soak_wait"):
+            kaw.resolve(conn, tid, awaiting={"kind": "clock"}, reason=reason)
 
 
 @pytest.mark.parametrize("reason", [
