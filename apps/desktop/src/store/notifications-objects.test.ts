@@ -63,6 +63,19 @@ test('handles circular, deep and empty objects with bounded detail and no duplic
   expect($notifications.get()[0]?.detail).toContain('xxx')
 })
 
+test.each([
+  { code: 'disk_full' },
+  { code: 'disk_full', message: 'No space left on device' },
+  { error: { message: 'Request refused', data: { code: 'disk_full' } } }
+])('preserves specific disk-full recovery and telemetry: %j', error => {
+  const result = readableError(error, fallback)
+  expect(result.category).toBe('disk_full')
+  expect(result.message).toBe('Disk full — free some space, then try again.')
+  expect(result.action).toBeDefined()
+  notifyError(error, fallback)
+  expect($notifications.get()[0]?.message).toBe(result.message)
+})
+
 test.each(['storage_locked', 'disk_full', 'gateway_auth_failed', 'invalid_api_key'])(
   'retains classification code %s',
   code => {

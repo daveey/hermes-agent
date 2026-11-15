@@ -170,7 +170,7 @@ const ERROR_SUMMARIES: ErrorSummaryRule[] = [
     // generic length truncation so the user gets a clear "free space" toast
     // instead of a silent send or a raw errno dump.
     category: 'disk_full',
-    test: isDiskFullErrorMessage,
+    test: msg => isDiskFullErrorMessage(msg) || /['"]code['"]\s*:\s*['"]disk_full['"]/i.test(msg),
     summarize: () => translateNow('notifications.errors.diskFull'),
     action: () => RECOVERY_ACTIONS.openMaintenance()
   },
