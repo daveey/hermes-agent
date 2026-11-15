@@ -626,6 +626,9 @@ def _shared_blocker_hold(conn, task_id, *, now=None, interval=None) -> Optional[
     st = blocker_for_task(states, task_id)
     if st is None or not st.is_open or not task_applies(conn, st, task_id):
         return None
+    from hermes_cli.kanban_blocker_own_wait import woken_by_own_park
+    if woken_by_own_park(conn, st.blocker_id, task_id, st.behind[task_id]):
+        return None   # its own park's probe woke it, not the wall
     from hermes_cli.kanban_shared_blocker_checks import registered_checks
     cfg = _hold_config()
     if st.blocker_id in registered_checks(cfg) and _operator_released(conn, task_id, st.blocker_id):
@@ -712,6 +715,7 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
     Returns only task ids whose lane changed (ready/review cards remain queued)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
+    from hermes_cli.kanban_blocker_own_wait import probe_elsewhere
     from hermes_cli.kanban_blocker_rows import foreign_among
 
     # Retained executor copies own host-local wake probes, not shared-wall policy writes.
@@ -735,7 +739,9 @@ def release_cleared_blockers(conn: sqlite3.Connection, *, now: Optional[int] = N
             from hermes_cli.kanban_continuation import pending_wake
             park = pending_wake(conn, tid) or {}
             awaiting = park.get("awaiting") or {}
-            own_wait = (row["status"] == "scheduled" and kwc.get_state(conn, tid) is not None
+            # A probe another gateway runs (``probe_host``) has no row here but is the park's own wait all the same.
+            own_wait = (row["status"] == "scheduled"
+                        and (kwc.get_state(conn, tid) is not None or probe_elsewhere(conn, tid))
                         and (awaiting.get("shared_blocker") or park.get("blocker_id")) != st.blocker_id)
             if row["status"] in ("ready", "review") or own_wait:
                 # Retire the historical hold, not an independent park's probe/backstop.
