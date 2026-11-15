@@ -44,13 +44,14 @@ def test_convergent_readings_are_tokenized_once(monkeypatch):
 
 
 def test_distinct_readings_and_ansi_normalization_survive(monkeypatch):
+    # The raw reading decodes ANSI-C escapes; normalization keeps them literal.
     monkeypatch.setattr(tokens, 'separate_substitutions', lambda command, **kw:
-                        ("echo $'empty'" if kw else "echo $'outer'", []))
-    result = list(tokens._iter_command_token_lists("echo $'original'"))
+                        ("echo $'empty\\x41'" if kw else "echo $'outer\\x41'", []))
+    result = list(tokens._iter_command_token_lists("echo $'original\\x41'"))
     assert {tuple(row) for row in result} == {
-        ('echo', '$original'), ('echo', 'original'),
-        ('echo', '$empty'), ('echo', 'empty'),
-        ('echo', '$outer'), ('echo', 'outer'),
+        ('echo', 'originalA'), ('echo', 'original\\x41'),
+        ('echo', 'emptyA'), ('echo', 'empty\\x41'),
+        ('echo', 'outerA'), ('echo', 'outer\\x41'),
     }
 
 
@@ -64,8 +65,8 @@ def test_cached_occurrences_preserve_order_and_list_isolation():
 
 
 def test_plain_readings_default_keeps_distinct_ansi_evidence():
-    assert list(tokens._iter_plain_token_lists("echo $'ok'")) == [
-        ['echo', '$ok'], ['echo', 'ok'],
+    assert list(tokens._iter_plain_token_lists("echo $'o\\x6b'")) == [
+        ['echo', 'ok'], ['echo', 'o\\x6b'],
     ]
 
 

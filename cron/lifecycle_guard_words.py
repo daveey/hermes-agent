@@ -41,7 +41,7 @@ def tokenize_redirections(line: str, tokenize: Callable[[str], list[str]],
     alphabet = "<>&|" + marker
     replacements = {ch: f"{marker}{index}{marker}" for index, ch in enumerate(alphabet)}
     protected: list[str] = []
-    single = double = escaped = False
+    single = double = escaped = dollar_live = False
     quote_marker = marker + "5" + marker
     end = 0
     for pos, ch in enumerate(line):
@@ -54,13 +54,20 @@ def tokenize_redirections(line: str, tokenize: Callable[[str], list[str]],
                 # Quoting inside the frame still makes the word quoted.
                 protected.append(quote_marker)
             protected.append(span.replace(marker, replacements[marker]))
+            dollar_live = False
             continue
         literal = single or double or escaped
         # Mark the boundary, including empty quoted pieces. The escape marker
         # itself is encoded below, so literal input cannot synthesize this tag.
         if not escaped and (ch == "\\" and not single
                             or ch == "'" and not double or ch == '"' and not single):
-            protected.append(quote_marker)
+            if ch != "\\" and not (single or double) and dollar_live:
+                # Tag before `$'`/`$"`: splitting the pair would hide ANSI-C
+                # quoting (and its NUL truncation) from later normalization.
+                protected.insert(len(protected) - 1, quote_marker)
+            else:
+                protected.append(quote_marker)
+        dollar_live = ch == "$" and not (single or double or escaped)
         if escaped:
             escaped = False
         elif ch == "\\" and not single:
