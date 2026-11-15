@@ -162,6 +162,9 @@ class _HereDocs:
         self._pending: list[tuple[str, bool]] = []
         self._arith = -1
 
+        self.unbounded = False
+        self.skipped = False
+
     def bodies_end(self, text: str, pos: int, depth: int, *, word_start: bool) -> int:
         """Advance on the character at *pos*; when it is the newline before complete bodies,
         return the position after them, else *pos*."""
@@ -178,6 +181,8 @@ class _HereDocs:
         elif char == "\n" and self._pending:
             end = _heredoc_bodies_end(text, pos + 1, self._pending)
             self._pending = []
+            self.unbounded |= end < 0
+            self.skipped |= end > pos
             return max(end, pos)
         return pos
 
@@ -194,6 +199,20 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool,
 
     With *breaks*, record (relative to the returned span) each newline that separates commands
     in this frame or a nested parameter/command frame, so a logical-line split still sees them."""
+    initial_breaks = len(breaks) if breaks is not None else 0
+    end, span, retry = _walk_command_span(text, start, shlex_quotes, breaks, fallback=False)
+    if retry:
+        # A misread shift can skip the real closer. Discard speculative breaks and
+        # retry without body skipping or case patterns rather than hide outer commands.
+        if breaks is not None:
+            del breaks[initial_breaks:]
+        end, span, _ = _walk_command_span(text, start, shlex_quotes, breaks, fallback=True)
+    return end, span
+
+
+def _walk_command_span(text: str, start: int, shlex_quotes: bool,
+                       breaks: list[int] | None, *, fallback: bool) -> tuple[int, str, bool]:
+    """Walk one frame; request a conservative retry if skipped data hid its closer."""
     pos = copied = start
     depth = 1
     word_start = True
@@ -203,7 +222,10 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool,
     at_command = True
     while pos < len(text):
         char = text[pos]
-        end = docs.bodies_end(text, pos, depth, word_start=word_start)
+        end = pos if fallback else docs.bodies_end(text, pos, depth, word_start=word_start)
+        if docs.unbounded:
+            # Unknown delimiter: body words cannot safely open case clauses.
+            cases = _CaseClauses()
         if end > pos:
             _newline_breaks(breaks, text, pos, end, _out_len(parts) + pos - copied)
             pos = end
@@ -219,7 +241,7 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool,
                 parts.append(text[pos:end].rstrip("\r").rstrip("\\"))
             pos = copied = end
             continue
-        if word_start and char not in _WORD_BREAKS:
+        if word_start and char not in _WORD_BREAKS and not (fallback or docs.unbounded):
             at_command = cases.word(_plain_word(text, pos), depth, at_command=at_command)
         if char == "\\":
             if text[pos + 1:pos + 2] != "\n":
@@ -266,7 +288,7 @@ def _command_span(text: str, start: int, *, shlex_quotes: bool,
         word_start = char in _WORD_BREAKS
         pos += 1
     parts.append(text[copied:pos])
-    return pos, "".join(parts)
+    return pos, "".join(parts), bool(depth and docs.skipped)
 
 
 def _parameter_span(text: str, start: int, *, shlex_quotes: bool,
