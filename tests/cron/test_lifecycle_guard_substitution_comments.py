@@ -15,12 +15,7 @@ from tests.cron.test_lifecycle_guard_fd_redirections import _bash_runs, _tree
 @pytest.mark.parametrize('wrapper', ['echo "$(BODY)"', 'echo "$(echo "$(BODY)")"'])
 @pytest.mark.parametrize('script', ['bash ./r.sh', 'bash 2>$(echo /dev/null) < ./r.sh'])
 @pytest.mark.parametrize('dangerous', [True, False])
-def test_nested_quote_comment_boundary(tmp_path, body, wrapper, script, dangerous, request):
-    # Existing quoted-output walker false positive, independent of tokenization.
-    if (not dangerous and body.startswith('case ') and wrapper.count('$(') == 2
-            and '2>' in script):
-        request.node.add_marker(pytest.mark.xfail(
-            strict=True, reason='t_01a1dc4541941587: stderr output scanned as a script'))
+def test_nested_quote_comment_boundary(tmp_path, body, wrapper, script, dangerous):
     _tree(tmp_path)
     if not dangerous:
         script = script.replace('bash', 'python3').replace('./r.sh', './clean.py')

@@ -91,7 +91,7 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
         top = stack[-1]
         kind, quoted = top[0], top[3]
         if token in ("`", "$(", "$((", "$[", "${"):
-            pos, sink = _expansion_token(command, token, pos, stack, date_exempt)
+            pos, sink = _expansion_token(command, token, pos, stack, date_exempt, _depth)
             if sink:
                 return True
             backtick_open ^= token == "`"
@@ -342,7 +342,7 @@ def _parameter_token(token, start, pos, stack) -> int:
     return pos
 
 
-def _expansion_token(command, token, pos, stack, date_exempt) -> tuple[int, bool]:
+def _expansion_token(command, token, pos, stack, date_exempt, depth=0) -> tuple[int, bool]:
     """Open an expansion frame, or flag a producer whose output is arithmetic."""
     if token == "`":
         if stack[-1][0] in (_ARITH, _PARAM_ARITH):
@@ -356,7 +356,19 @@ def _expansion_token(command, token, pos, stack, date_exempt) -> tuple[int, bool
         if stack[-1][0] in (_ARITH, _PARAM_ARITH) and not (
                 date_exempt and _DATE_PRODUCER_RE.match(command, pos)):
             return pos, True
-        stack.append([_CMD, ")", 0, False, pos, None])
+        # A case-pattern ')' is not this substitution's closer. Match the whole
+        # command frame before inspecting its arithmetic; otherwise its quotes
+        # can corrupt the parent and promote ordinary redirection output to code.
+        from cron.lifecycle_guard_substitutions import _paren_end, SubstitutionNestingLimit
+
+        try:
+            end = _paren_end(command, pos - 2, depth)
+        except SubstitutionNestingLimit:
+            return pos, True
+        if not command[pos:end].endswith(')'):
+            return end, True
+        return end, substitution_in_arithmetic(
+            command[pos:end - 1], date_exempt=date_exempt, _depth=depth + 1)
     elif token == "${":
         pos = _open_parameter(command, pos, stack)
     else:  # $(( or $[
