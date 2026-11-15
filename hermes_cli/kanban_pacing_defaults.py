@@ -17,7 +17,7 @@ DEFAULTS = {
     "target_percent": 95,
     "reserve_five_hour_percent": 80,
     "reserve_seven_day_percent": 85,
-    "providers": ["anthropic", "openai-codex"],
+    "providers": ["anthropic", "openai-codex", "xai-oauth"],
     "read_interval_seconds": 300,
     "rate_window_seconds": 3600,
     "min_rate_span_seconds": 600,

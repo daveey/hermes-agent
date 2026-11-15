@@ -5,7 +5,8 @@ weekly rate. One account-week went in under 21 h, 6 of 7 accounts sat at ``seven
 for a week, and nothing finished for hours (301 refused starts). Admission was gated on slots and walls only.
 
 The governor judges each governed provider's OAuth pool from its per-account usage windows (``five_hour`` and
-``seven_day``, the account-wide buckets of ``/api/oauth/usage``; Codex ``Session``/``Weekly``):
+``seven_day``, the account-wide buckets of ``/api/oauth/usage``; Codex ``Session``/``Weekly``; xAI Grok's single
+weekly pool, ``agent.account_usage_xai``):
 
 * **Projection, not elapsed pace.** Each window's burn rate is measured from this host's own samples of that
   window over the last ``rate_window`` (fallback: the window's average so far). A used-vs-elapsed rule read
@@ -39,7 +40,7 @@ class PacingConfig:
     enabled: bool = True
     target: float = 95.0
     reserve: dict = field(default_factory=lambda: {FIVE_HOUR: 80.0, SEVEN_DAY: 85.0})
-    providers: tuple = ("anthropic", "openai-codex")
+    providers: tuple = ("anthropic", "openai-codex", "xai-oauth")
     read_interval: int = 300
     rate_window: int = 3600
     min_rate_span: int = 600

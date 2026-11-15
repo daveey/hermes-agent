@@ -908,15 +908,25 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
     return _snapshot("openrouter", "credits_api", windows, details)
 
 
+def _fetch_xai_oauth_account_usage(_base_url: Optional[str], api_key: Optional[str]) -> Optional[AccountUsageSnapshot]:
+    from agent.account_usage_xai import fetch
+    return fetch(api_key)
+
+
+def _fetch_xai_oauth_account_usage_read_only(_base_url: Optional[str], api_key: Optional[str]) -> Optional[AccountUsageSnapshot]:
+    from agent.account_usage_xai import fetch
+    return fetch(api_key, read_only=True)
+
+
 _USAGE_FETCHERS: dict[str, Callable[[Optional[str], Optional[str]], Optional[AccountUsageSnapshot]]] = {
     "openai-codex": _fetch_codex_account_usage, "anthropic": _fetch_anthropic_account_usage,
-    "openrouter": _fetch_openrouter_account_usage,
+    "openrouter": _fetch_openrouter_account_usage, "xai-oauth": _fetch_xai_oauth_account_usage,
 }
 
 # Picker per-credential variants: same parsers/fetch shape, but a failure is never repaired by
 # rotating/refreshing a credential (see ``fetch_account_usage(read_only=True)``).
 _READ_ONLY_USAGE_FETCHERS: dict[str, Callable[[Optional[str], Optional[str]], Optional[AccountUsageSnapshot]]] = {
-    "openai-codex": _fetch_codex_account_usage_read_only,
+    "openai-codex": _fetch_codex_account_usage_read_only, "xai-oauth": _fetch_xai_oauth_account_usage_read_only,
 }
 
 
