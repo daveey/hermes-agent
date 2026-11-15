@@ -58,7 +58,7 @@ class VariableCandidates:
                 if match:
                     # Dynamic values are not literal bindings: substitutions are
                     # traversed by the ordinary walk, never reinterpreted here.
-                    if not any(char in match[2] for char in '$`'):
+                    if not any(char in match[2] for char in '$`\x00'):
                         self.values.setdefault(match[1], set()).add(match[2])
                 elif not word.startswith('-'):
                     break
