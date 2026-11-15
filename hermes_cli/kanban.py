@@ -1355,6 +1355,10 @@ def _cmd_edit(args: argparse.Namespace) -> int:
             requested = priority if priority is not None else bounded(int(row[0] or 0) + priority_bump) if row else None
             if row is not None and requested < int(row[0] or 0):
                 return _err(f"kanban edit: {kb.PriorityLowerRefused(args.task_id, int(row[0] or 0), requested)}")
+            refused = (kb.paced_raise_refusal(conn, args.task_id, int(row[0] or 0), requested)
+                       if row is not None and requested is not None else None)
+            if refused is not None:
+                return _err(f"kanban edit: {refused}")
         if has_operator:
             # Operator columns first: a refusal (e.g. a session_id overwrite) must leave the
             # whole edit unapplied rather than half of it. [daveey]
@@ -1373,7 +1377,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
                     result=result, summary=summary, metadata=metadata, **admission,
                     priority_reason=reason, require_lower_reason=True, priority_bump=priority_bump,
                 )
-            except (kb.PriorityLowerRefused, AdmissionMetadataError, ReceiptEditRefused) as exc:
+            except (kb.PriorityLowerRefused, kb.PriorityRaisePacedRefused, AdmissionMetadataError, ReceiptEditRefused) as exc:
                 return _err(f"kanban edit: {exc}")
             if not ok:
                 return _err(f"cannot edit {args.task_id} (unknown id, or --result used on a task that is not done)")

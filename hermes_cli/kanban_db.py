@@ -3882,7 +3882,7 @@ from hermes_cli.kanban_db_archive import archive_task
 from hermes_cli.kanban_db_list import list_task_rows, list_tasks
 from hermes_cli.kanban_db_schedule import schedule_task
 from hermes_cli.kanban_db_review_reopen import reopen_review_task
-from hermes_cli.kanban_db_edit import PriorityLowerRefused, edit_task
+from hermes_cli.kanban_db_edit import PriorityLowerRefused, PriorityRaisePacedRefused, edit_task, paced_raise_refusal
 from hermes_cli.kanban_reason_comment import _awaiting_human_answer
 from hermes_cli.kanban_db_notify import _inherit_notify_subs, _owning_sub_clause
 from hermes_cli.kanban_db_boards import (
