@@ -797,3 +797,74 @@ def test_script_shared_by_nested_and_session_scope_is_walked_in_both(tmp_path, s
     unsafe, _refusal = scan_gateway_lifecycle(
         shape, cwd=str(tmp_path), session_aliases=frozenset({"python3"}))
     assert unsafe is True, shape
+
+
+# Self-heal lifecycleguard-6d64a5ee3d48 (came back after t_01a1d0ea6db6c158): a Python script
+# fed over TWO ssh hops (`ssh hub "ssh worker python3 -" < takeover.py`) was walked as a remote
+# login shell's script under unknown alias names, so `sqlite3.connect("<live kanban.db>")` read
+# as `NAME ( <db> )` and failed closed ("is a SQLite database open in this gateway process").
+# `_remote_reads_stdin` treated every further ssh hop as a stdin shell instead of following it to
+# the command that actually reads stdin. A hop chain ending in a data consumer reads the file as
+# data; one ending in a shell (or a hop with no command) still walks it as a nested shell.
+_PY_TAKEOVER = (
+    "import os, sqlite3\n"
+    "DB = os.path.expanduser('~/.hermes/kanban.db')\n"
+    "con = sqlite3.connect(\"{db}\")\n"
+    "print(con.execute('select 1').fetchall())\n"
+)
+
+_MULTI_HOP_DATA_CONSUMERS = [
+    # The card's exact shape (2026-11-15 02:18 PST, David-MBP).
+    "TZ=America/Los_Angeles date '+start %T %Z'\n"
+    "ssh -o BatchMode=yes -o ConnectTimeout=20 ubuntu@100.104.201.88 \"ssh -o BatchMode=yes "
+    "-o ConnectTimeout=15 hermes-worker-8 python3 -\" < {py} 2>&1 | grep -vE 'gh[ps]_|eyJ' "
+    "| cut -c1-600\necho \"rc=${{PIPESTATUS[0]}}\"",
+    "ssh h1 'ssh h2 python3 -' < {py}",
+    "ssh h1 ssh h2 python3 - < {py}",
+    "ssh -p 22 h1 \"ssh -J j h2 'timeout 20 python3 -'\" < {py}",
+    "ssh h1 \"ssh h2 'ssh h3 python3 -'\" < {py}",
+    "ssh h1 'ssh h2 cat' < {script}",
+    "ssh h1 \"ssh h2 python3 -\" <<'PY'\n" + _PY_TAKEOVER + "PY",
+]
+
+
+@pytest.mark.parametrize("shape", _MULTI_HOP_DATA_CONSUMERS)
+def test_multi_hop_ssh_data_consumer_reads_stdin_as_data(tmp_path, live_kanban_db, shape):
+    """Detection guard for lifecycleguard-6d64a5ee3d48: every ssh hop is followed to the
+    command that reads stdin, and a data consumer there never makes the file a shell script."""
+    py = tmp_path / "takeover.py"
+    py.write_text(_PY_TAKEOVER.format(db=live_kanban_db))
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(db=live_kanban_db, py=py, script=script)
+    # Unknown session aliases (None) may rename a heredoc's consumer, so a heredoc body is
+    # visible there even for a bare `python3 - <<'PY'` (main's rule); a stdin file is not.
+    names_list = (frozenset({"zz"}), frozenset()) if "<<" in shape else (
+        frozenset({"zz"}), frozenset(), None)
+    for names in names_list:
+        assert scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=names) == (
+            False, None), (shape, names)
+
+
+_MULTI_HOP_SHELLS = [
+    "ssh h1 'ssh h2' < {script}",  # the last hop has no command: a remote login shell
+    "ssh h1 'ssh h2 bash -s' < {script}",
+    "ssh h1 \"ssh h2 'bash -l'\" < {script}",
+    "ssh h1 \"ssh h2 'ssh h3'\" < {script}",
+    "ssh h1 'ssh h2 python3 -; bash' < {script}",  # any shell segment reading stdin counts
+    "ssh h1 'sudo -i' < {script}",  # other hops are still not modelled: fail closed
+    "ssh h1 'ssh h2 su -l bob' < {script}",
+    "ssh h1 \"ssh h2 'ssh h3 \\\"ssh h4 'ssh h5 python3 -'\\\"'\" < {script}",  # hop cap: closed
+]
+
+
+@pytest.mark.parametrize("shape", _MULTI_HOP_SHELLS)
+def test_multi_hop_ssh_shell_still_walks_stdin_as_nested_script(tmp_path, live_kanban_db, shape):
+    """Controls: a hop chain that ends in a shell reading stdin (or that the walk cannot model)
+    keeps walking the file as that remote shell's script, under unknown alias names."""
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(db=live_kanban_db, script=script)
+    for names in (frozenset({"zz"}), frozenset(), None):
+        unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=names)
+        assert unsafe is True and refusal is not None and "SQLite" in refusal, (shape, names)

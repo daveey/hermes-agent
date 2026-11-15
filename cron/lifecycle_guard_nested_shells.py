@@ -207,10 +207,21 @@ def _shell_inputs(arguments: list[str], shell: str) -> tuple[str, Optional[str]]
     return "stdin", None
 
 
-def _remote_reads_stdin(remote: list[str]) -> bool:
+# ssh hops followed to the command that reads stdin (`ssh hub "ssh worker python3 -" < f`);
+# a longer chain fails closed.
+_MAX_SSH_HOPS = 4
+
+
+def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
     """Whether an ssh remote command (its words, as ssh joins them) hands stdin to a shell:
-    none (a login shell), unparsable, or any segment running a shell that reads stdin."""
+    none (a login shell), unparsable, any segment running a shell that reads stdin, or a
+    further hop whose own input is such a shell (another ``ssh``), or a user switch (``sudo``,
+    ``su``, ``runuser``, ``doas``: not modelled, fail closed).
+    A further ssh hop is followed to its remote command, so a chain ending in a data consumer
+    (``python3 -``, ``cat``) reads the file as data (self-heal lifecycleguard-6d64a5ee3d48)."""
     if not remote:
+        return True
+    if hops > _MAX_SSH_HOPS:
         return True
     text = " ".join(remote)
     try:
@@ -219,18 +230,19 @@ def _remote_reads_stdin(remote: list[str]) -> bool:
         return True
     for view in views:
         index = _executed_command_index(view)
-        if index is None:
+        name = _executable_name(view[index]) if index is not None else None
+        if index is not None and name in _SHELL_EXECUTABLES:
+            if _shell_inputs(_split_redirections(view[index + 1:])[0], name)[0] == "stdin":
+                return True
             continue
-        name = _executable_name(view[index])
-        if name in _SHELL_EXECUTABLES and _shell_inputs(
-                _split_redirections(view[index + 1:])[0], name)[0] == "stdin":
-            return True
-        if name in ("sudo", "su", "ssh"):
-            return True  # another hop: fail closed rather than model it
+        if _nested_shell_input(view, hops=hops + 1) is not None:
+            return True  # an ssh hop feeding a shell, or a user switch's shell (`su -l`, `sudo -i`)
+        if name in ("sudo", "su", "runuser", "doas"):
+            return True  # a user switch on the remote side: fail closed rather than model it
     return False
 
 
-def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
+def _nested_shell_input(view: list[str], hops: int = 1) -> Optional[tuple[str, Optional[str]]]:
     """``_shell_inputs`` of the nested shell *view* starts when that shell holds aliases of its
     own (see above), else ``None``. For ssh only stdin counts: a remote ``-c`` or script names
     remote text and paths. Command wrappers are peeled one at a time (``env su -l bob``,
@@ -296,7 +308,7 @@ def _shell_input(
         from tools.shell_heredoc import _SSH_VALUE_OPTIONS
 
         _options, host = _option_words(arguments, frozenset(_SSH_VALUE_OPTIONS))
-        return ("stdin", None) if _remote_reads_stdin(arguments[host + 1:]) else None
+        return ("stdin", None) if _remote_reads_stdin(arguments[host + 1:], hops) else None
     if name not in _SHELL_EXECUTABLES:
         return None
     options_end = _shell_options_end(arguments, name)[0]
