@@ -508,6 +508,7 @@ def _printed_pipeline_units(command: str) -> list[_PrintedUnit]:
     depth = 0
     continued = False
     command_position = True
+    function_name = False  # the previous word was the `function` keyword
     cases: dict[int, str] = {}  # depth -> subject/header, pattern, or arm body
     for line, bodies in _lines_with_heredoc_bodies(command):
         touched = [unit]
@@ -536,7 +537,12 @@ def _printed_pipeline_units(command: str) -> list[_PrintedUnit]:
                     if case_role == "data":
                         unit.events.append(("data", word))
                         continue
+                    after_function = function_name
+                    function_name = (command_position and word == "function"
+                                     and not getattr(word, "quoted", False))
                     role, command_position = _printed_word_role(word, command_position)
+                    # `function NAME {`: the word after the name is a compound command.
+                    command_position = command_position or after_function
                     if role == "close":
                         cases.pop(depth, None)
                     depth = depth + 1 if role == "open" else max(0, depth - (role == "close"))
@@ -585,16 +591,27 @@ def _unit_feeds_nested_stdin(
     unit: _PrintedUnit, reads: Callable[[list[str]], bool] = _reads_nested_stdin,
     *, output_processes: bool = False,
 ) -> tuple[bool, bool]:
-    """``(printed text, heredoc body output)``: whether a pipe in *unit* feeds a command *reads*
-    accepts (by default a startup shell reading stdin), and whether a heredoc-owning producer
-    upstream of that pipe feeds it. A list operator or line break ends a pipe inside a group:
+    """Preserve the two-field consumer contract for ordinary pipe-flow callers."""
+    feeds, body, _end = _unit_nested_stdin_flow(unit, reads, output_processes=output_processes)
+    return feeds, body
+
+
+def _unit_nested_stdin_flow(
+    unit: _PrintedUnit, reads: Callable[[list[str]], bool] = _reads_nested_stdin,
+    *, output_processes: bool = False,
+) -> tuple[bool, bool, int]:
+    """Return ``(printed text, heredoc body output, upstream end)`` for a pipe feeding *reads*.
+    The last field ends the last consumer's command; function producers are resolved only
+    before that boundary. The second field tracks a heredoc-owning upstream producer. A list
+    operator or line break ends a pipe inside a group:
     what follows reads the group's stdin (nit 2)."""
     feeds = feeds_body = False
+    upstream_end = 0
     piped = carried = own_body = False
     frames: list[list[bool]] = []  # [piped, carried, holds a body] at each open group
     suspended: dict[int, tuple[bool, bool, bool]] = {}
     words: list[str] = []
-    for role, word in [*unit.events, ("list", ";")]:
+    for index, (role, word) in enumerate([*unit.events, ("list", ";")]):
         if role == "data":
             continue
         if role == "word":
@@ -607,6 +624,7 @@ def _unit_feeds_nested_stdin(
         if words and piped and reads(words):
             feeds = True
             feeds_body = feeds_body or carried
+            upstream_end = index
         process = (output_processes and role == "open" and word == "("
                    and bool(words) and words[-1] == ">" and _syntax_word(words[-1]))
         words = []
@@ -629,7 +647,7 @@ def _unit_feeds_nested_stdin(
                 piped, carried, own_body = suspended.pop(len(frames))
         else:
             piped = carried = own_body = False
-    return feeds, feeds_body
+    return feeds, feeds_body, upstream_end
 
 
 def _iter_nested_printed_payloads(command: str, *, pipes: bool = True) -> Iterator[str]:
@@ -642,19 +660,24 @@ def _iter_nested_printed_payloads(command: str, *, pipes: bool = True) -> Iterat
     print is walked too when that producer is upstream of the pipe (nit 1).
     """
     from cron.lifecycle_guard_output import iter_printed_shell_payloads
+    from cron.lifecycle_guard_printed_functions import FunctionProducers
 
     piped = pipes and "|" in command
     substituted = _STDIN_PROCESS_OPENER.search(command) is not None
     if not (piped or substituted):
         return  # do not tokenize large generators with neither feed a second time
-    for unit in _printed_pipeline_units(command):
+    units = _printed_pipeline_units(command)
+    functions = FunctionProducers(units)
+    for unit in units:
         texts = _stdin_substitution_texts(unit) if substituted else []
-        feeds, feeds_body = _unit_feeds_nested_stdin(unit) if piped else (False, False)
+        feeds, feeds_body, upstream_end = _unit_nested_stdin_flow(unit) if piped else (False, False, 0)
         if feeds:
             text = unit.text()
             if feeds_body and unit.bodies:
                 text = "\n".join([text, *unit.bodies])
             texts.append(text)
+            # Resolve only calls upstream of the pipe-fed startup shell.
+            texts.extend(functions.called_texts(unit.events[:upstream_end]))
         for text in texts:
             for payload, _raw_quote in iter_printed_shell_payloads(text, shell_sink=True):
                 yield payload
