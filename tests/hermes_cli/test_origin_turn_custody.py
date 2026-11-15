@@ -68,7 +68,9 @@ def test_admitted_capture_and_copied_thread_context(admitted):
     assert copied.run(native.capture, None) is None
 
 
-@pytest.mark.parametrize("change", ["expired", "holder", "session", "db", "released", "pid", "delegated"])
+@pytest.mark.parametrize("change", ["expired", "holder", "session", "db", "released", "pid", "delegated",
+                                    "home", "profile", "gateway", "custom_profile", "persist_disabled",
+                                    "noncanonical_db", "source", "interrupt", "nonfinite_expiry"])
 def test_custody_revalidated(admitted, monkeypatch, change):
     from agent import origin_turn_custody as custody
     from agent.delegation_context import delegated_child_context
@@ -85,6 +87,28 @@ def test_custody_revalidated(admitted, monkeypatch, change):
             agent.session_id = "other"
         elif change == "db":
             agent._session_db = object()
+        elif change == "home":
+            monkeypatch.setenv("HERMES_HOME", str(db.db_path.parent / "other-home"))
+        elif change in ("profile", "custom_profile"):
+            from hermes_cli import profiles
+            monkeypatch.setattr(profiles, "get_active_profile_name",
+                                lambda: "custom" if change == "custom_profile" else "other")
+        elif change == "gateway":
+            from hermes_cli import kanban_origin
+            monkeypatch.setattr(kanban_origin, "gateway_names", lambda: ("other", []))
+        elif change == "persist_disabled":
+            agent._persist_disabled = True
+        elif change == "noncanonical_db":
+            with monkeypatch.context() as patch:
+                patch.setattr(db, "db_path", db.db_path.parent / "shadow.db")
+                assert native.capture(None) is None
+            return
+        elif change == "source":
+            monkeypatch.setattr(db, "get_session", lambda sid: {"source": "kanban"})
+        elif change == "interrupt":
+            lease.interrupt_message = "revoked"
+        elif change == "nonfinite_expiry":
+            monkeypatch.setattr(db, "session_turn_lease_expires_at", lambda *a: float("nan"))
         elif change == "released":
             lease.release()
         elif change == "pid":
