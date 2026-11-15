@@ -147,6 +147,49 @@ def test_event_coverage_requires_injective_matching(candidates, missing):
     assert _missing_coverage(resolved) == missing
 
 
+@pytest.mark.parametrize("entry", ["promote", "unblock", "tool"])
+@pytest.mark.parametrize("broken", [None, "foreign", "no_claim", "wrong_run", "wrong_author", "missing",
+                                    "unhashable_run"])
+def test_delayed_legacy_local_writer(board, entry, broken, capsys):
+    enable_sync(board)
+    cid = comment(board)
+    with kbc.connect_closing() as conn:
+        with kbc.write_txn(conn):
+            run = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, uid) "
+                "VALUES (?, 'default', 'done', ?, 'writer-run')",
+                (board, int(time.time()) - 300)).lastrowid
+            payload = {"comment_id": cid, "author": "default", "writer_session": "other",
+                       "writer_run_id": run, "writer_run_uid": "writer-run"}
+            if broken == "wrong_run":
+                payload["writer_run_id"] = run + 1
+            if broken == "wrong_author":
+                payload["author"] = "another"
+            if broken == "unhashable_run":
+                payload["writer_run_id"] = [run]
+            conn.execute("UPDATE task_events SET created_at=created_at+21, payload=? "
+                         "WHERE task_id=? AND kind='commented'", (json.dumps(payload), board))
+            if broken != "no_claim":
+                kb._append_event(conn, board, "claimed", {
+                    "holder": "peer" if broken == "foreign" else "owner", "run_uid": "writer-run"})
+            if broken == "missing":
+                conn.execute("DELETE FROM task_comments WHERE id=?", (cid,))
+    before = snapshot(board)
+    ok, output = release(board, entry, capsys)
+    assert not ok, output
+    assert snapshot(board) == before
+    if broken is None:
+        assert "Leave this card in triage" in output
+        assert "Comment data unavailable" not in output
+    ok, output = release(board, entry, capsys, cid)
+    if broken:
+        assert not ok and "Comment data unavailable" in output, output
+        assert snapshot(board) == before
+    else:
+        assert ok, output
+        assert snapshot(board)[0] == "ready"
+
+
 def test_writer_stamps_actual_comment_uid(board):
     enable_sync(board)
     cid = comment(board)

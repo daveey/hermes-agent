@@ -38,7 +38,13 @@ def check(conn, tid, *, session, seen=None, verb="unblock", board=None):
     all_events = conn.execute(
         "SELECT * FROM task_events WHERE task_id=? AND kind='commented'", (tid,),
     ).fetchall()
-    resolved = {e["id"]: _resolve(rows, e, json.loads(e["payload"] or "{}")) for e in all_events}
+    local_runs = _local_writer_runs(conn, tid)
+    resolved = {}
+    for event in all_events:
+        payload = json.loads(event["payload"] or "{}")
+        writer = (payload.get("writer_run_id"), payload.get("writer_run_uid"))
+        local_writer = all(isinstance(v, (int, str)) for v in writer) and writer in local_runs
+        resolved[event["id"]] = _resolve(rows, event, payload, local_writer=local_writer)
     missing = _missing_coverage(resolved)
     comments = []
     for event in events:
@@ -117,7 +123,25 @@ def _listing(cid, body, event, payload):
             "time": datetime.fromtimestamp(event["created_at"], UTC).isoformat(), "body": body[:300]}
 
 
-def _resolve(rows, event, payload):
+def _local_writer_runs(conn, tid):
+    """Prove the writer's integer namespace using its portable local claim receipt.
+
+    NULL event origin and a ``local-`` session prefix are not host identity:
+    imports can have both. A foreign run must never lend its comment_id to a
+    colliding local row, even when its run integer happens to collide too.
+    """
+    from hermes_cli.kanban_db_sync import sync_state
+    state = sync_state(conn)
+    if not state or not state.get("gateway_id"):
+        return set()
+    return {(row[0], row[1]) for row in conn.execute(
+        "SELECT r.id, r.uid FROM task_runs r WHERE r.task_id=? AND r.uid IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=r.task_id AND e.kind='claimed' "
+        "AND json_extract(e.payload, '$.run_uid')=r.uid "
+        "AND json_extract(e.payload, '$.holder')=?)", (tid, state["gateway_id"]))}
+
+
+def _resolve(rows, event, payload, *, local_writer=False):
     """Never compare a wire-local integer with a receiver's watermark.
 
     Legacy synced events have no portable reference. Require acknowledgement of
@@ -129,6 +153,11 @@ def _resolve(rows, event, payload):
         return [r for r in rows if "uid" in r.keys() and r["uid"] == payload["comment_uid"]]
     if rows and "uid" not in rows[0].keys():  # never-synced board: IDs are local
         return [r for r in rows if r["id"] == payload.get("comment_id")]
+    if local_writer and isinstance(payload.get("author"), str) and payload["author"].strip():
+        # add_comment writes the row before the event; scheduling/IO may delay
+        # the second timestamp. Local run provenance makes its integer usable.
+        return [r for r in rows if r["id"] == payload.get("comment_id")
+                and r["author"] == payload["author"].strip()]
     return [r for r in rows if abs(r["created_at"] - event["created_at"]) <= 1
             and (not payload.get("author") or r["author"] == payload["author"].strip())]
 
