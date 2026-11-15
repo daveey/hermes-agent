@@ -330,7 +330,15 @@ def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
     from hermes_cli.kanban_session_activity import LISTED_STATUSES, session_tasks
 
     decisions, waits = [], []
-    for card in session_tasks(ids, LISTED_STATUSES, stale_ok=True):
+    cards = session_tasks(ids, LISTED_STATUSES, stale_ok=True)
+    if not cards:
+        # The display list may be a stale-empty projection while the sidebar counts
+        # already know about open work. Absence is not completion without agreement.
+        from hermes_cli.kanban_session_activity import active_task_counts, blocked_task_counts
+        active, blocked = active_task_counts(), blocked_task_counts()
+        if any(active.get(sid, 0) or blocked.get(sid, 0) for sid in ids):
+            raise ValueError("kanban card list is empty but sidebar counts retain open work")
+    for card in cards:
         tid = str(card.get("id") or "")
         request = card.get("human_request")
         if isinstance(request, str):
