@@ -22,6 +22,20 @@ test('ignores nonobjects, inherited fields, empty text, and unsafe code payloads
   expect(errorDiagnostic({ code: 42 }, 'fallback').codes).toBe('')
 })
 
+test.each([
+  { depth: 6, expected: 'boundary detail' },
+  { depth: 7, expected: 'fallback' }
+])('extracts detail through depth 6 but not beyond it (depth $depth)', ({ depth, expected }) => {
+  let value: unknown = 'boundary detail'
+
+  // The root is depth 0; each detail edge adds one to the string's depth.
+  for (let level = 0; level < depth; level++) {
+    value = { detail: value }
+  }
+
+  expect(errorDiagnostic(value, 'fallback')).toEqual({ text: expected, codes: '' })
+})
+
 test('visits a cycle only once', () => {
   const cycle: { detail?: unknown; code: string } = { code: 'storage_locked' }
   cycle.detail = cycle
