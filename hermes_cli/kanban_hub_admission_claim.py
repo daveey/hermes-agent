@@ -15,14 +15,14 @@ The screen covers ready and review because a scheduled continuation can resume e
 * deny: re-placed on the worker queue (the pickup deny route, never ``machine:worker-N``) with a ``moved`` event
   citing the verdict, so it is not claimed here;
 * deny of a card that must stay (structural restriction, ``host_repo``, a hub worktree in the brief, an unlocated
-  hub-local wake_check, or no worker queue fits): the verdict carries ``kept: <reason>``. A probe registered on
+  hub-local wake_check, or home-coordination gate): the verdict carries ``kept: <reason>``. A probe registered on
   this gateway stays here independently of the ready card's execution; unknown legacy probe custody stays local.
   A fleet probe in :data:`PORTABLE_WAKE_PROBES` (or ``kanban.placement.portable_wake_probes``) is also portable;
 * an earlier deny is resolved immediately, including a card bounced back to this hub's machine pin: re-evaluate
   the structural/pickup constraints, record a current keep or move before claiming, without a new judge call;
   unchanged keep dispositions do not append duplicate events on each screen;
-* judge unavailable: claimed as before, warning logged, nothing recorded (judged at its next ready). Failing open
-  here keeps a judge outage from freezing the hub; only pre-gate cards reach this path.
+* judge unavailable: defer unjudged candidates, warning logged, nothing recorded (judged next tick).
+  Previously admitted cards continue; a deny with no queue and no structural keep also defers.
 * deferred (``Counts.deferred_ids``, left out of this tick's claims and judged next tick): a card edited while the
   judge ran (its verdict belongs to a stale snapshot, so none is recorded), and every card past
   :data:`MAX_JUDGED_PER_TICK` judge calls (each may take the judge's 30 s timeout; a ~27-card backlog at rollout
@@ -46,7 +46,7 @@ from typing import Any, Optional
 _log = logging.getLogger(__name__)
 
 ENTRY = "claim"
-NO_QUEUE = "no worker queue fits"
+
 WINDOW_SECONDS = 7 * 86400
 MAX_JUDGED_PER_TICK = 3  # judge calls per dispatcher tick; the rest wait, unclaimed, for the next tick
 # A wake_check that reads hub-local state (Hermes home, a hub worktree) is probed where the card lives.
@@ -190,6 +190,7 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int 
             continue
         if down:
             counts.unavailable += 1
+            counts.defer(tid)
             continue
         if calls >= budget:
             counts.defer(tid)
@@ -198,12 +199,13 @@ def screen(conn: sqlite3.Connection, *, cfg: Optional[dict] = None, budget: int 
         fields = pickup.card_fields(card, board)
         try:
             found = judge.admit({"title": fields["title"], "body": fields["body"]})
-        except Exception:  # health: allow BLE001 -- a failed judge is unavailable: claimed as before, unjudged
+        except Exception:  # health: allow BLE001 -- a failed judge is unavailable: defer unjudged candidates
             found = judge.Verdict()
         if not found.admit and found.why == judge.Verdict().why:
             down = True  # one outage per tick: never one judge timeout per card
             counts.unavailable += 1
-            _log.warning("hub admission: judge unavailable at claim for %s; claiming pre-gate cards unjudged "
+            counts.defer(tid)
+            _log.warning("hub admission: judge unavailable at claim for %s; deferring unjudged cards "
                          "this tick", tid)
             continue
         counts.judged += 1
@@ -338,13 +340,13 @@ def screened_lanes(conn: sqlite3.Connection, dry_run: bool, review_enabled: bool
 
 
 def safe_screen(conn: sqlite3.Connection) -> frozenset:
-    """Dispatcher seam: the ids this tick must not claim. A failed screen never stops the tick (the cards are
-    claimed as before)."""
+    """Dispatcher seam: a failed screen cannot turn an unresolved deny into permission to claim."""
     try:
         return screen(conn).deferred_ids
-    except Exception:  # health: allow BLE001 -- claim-time admission is a backstop; local dispatch continues
-        _log.warning("hub admission: claim screen failed", exc_info=True)
-        return frozenset()
+    except Exception:  # health: allow BLE001 -- defer the frozen lanes instead of bypassing admission
+        _log.warning("hub admission: claim screen failed; deferring ready/review claims", exc_info=True)
+        return frozenset(row[0] for row in conn.execute(
+            "SELECT id FROM tasks WHERE status IN ('ready', 'review')"))
 
 
 def unjudged_claims(conn: sqlite3.Connection, own: str, *, now: Optional[float] = None,

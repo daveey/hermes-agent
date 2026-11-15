@@ -118,7 +118,7 @@ def test_review_wake_preserves_screen_outcomes(gws, hub_judge, monkeypatch, outc
     elif outcome == "budget":
         monkeypatch.setattr(hac, "safe_screen", lambda conn: hac.screen(conn, budget=0).deferred_ids)
     result = helpers._tick(hub)
-    assert (helpers._holder(svc, tid) == helpers.HUB) == (outcome in {"keep", "unavailable"})
+    assert (helpers._holder(svc, tid) == helpers.HUB) == (outcome == "keep")
     verdicts = helpers._events(hub.conn, tid, "hub_admission")
     if outcome == "keep":
         assert verdicts[0]["kept"] == "wake_check reads a hub-local path"

@@ -126,6 +126,35 @@ def test_denied_without_queue_or_structural_keep_is_deferred(gws, hub_judge, mon
     assert not any(event.get("kept") for event in support._events(hub.conn, tid, "hub_admission"))
 
 
+def test_failed_screen_defers_candidates_instead_of_claiming_denies(gws, monkeypatch):
+    hub, _worker, svc = gws
+    tid = support._hub_card(hub)
+    deny(hub, tid)
+
+    def broken(_conn):
+        raise RuntimeError("screen unavailable")
+
+    monkeypatch.setattr(hac, "screen", broken)
+    support._tick(hub)
+    assert support._holder(svc, tid) != support.HUB
+
+
+def test_judge_outage_defers_all_unjudged_candidates(gws, monkeypatch):
+    from hermes_cli import kanban_hub_admission as judge
+    hub, _worker, svc = gws
+    tids = [support._hub_card(hub, title=f"unjudged {n}") for n in range(2)]
+    calls = []
+
+    def unavailable(*_args, **_kwargs):
+        calls.append(True)
+        return judge.Verdict()
+
+    monkeypatch.setattr(judge, "admit", unavailable)
+    support._tick(hub)
+    assert all(support._holder(svc, tid) != support.HUB for tid in tids)
+    assert len(calls) == 1
+
+
 def test_create_home_override_is_explicit_keep():
     from hermes_cli import kanban_hub_admission_placement as placement
     result = placement.pool_route(
