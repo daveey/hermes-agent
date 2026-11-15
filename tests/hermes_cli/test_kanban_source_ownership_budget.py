@@ -85,6 +85,68 @@ def test_a_definitely_refused_observation_owns_nothing(setup, tmp_path):
     assert reg.register_initial(conn, other, str(source)).state == "attached"
 
 
+def test_refused_replay_rechecks_ownership_inside_the_observation_transaction(setup, tmp_path, monkeypatch):
+    """X is definitely refused; X replays while Y registers the same path first: X's transaction refuses."""
+    conn, b, tid, source, _scratch, _home, _clone = setup
+    b.refuse["source_attach"] = "initial_attach_refused"
+    with pytest.raises(launch.AttachRefused):
+        reg.register_initial(conn, tid, str(source))
+    b.refuse.clear()
+    own = kb.get_task(conn, tid).current_run_id
+    assert board.attached_run(conn, own).state == "refused"
+    other = _second_task(conn, tmp_path, f"wt/{tid}")
+    original = reg.source_identity
+    raced = []
+
+    def racing_identity(path, kind, **kwargs):
+        if not raced:
+            raced.append(True)
+            assert reg.register_initial(conn, other, str(source)).state == "attached"
+        return original(path, kind, **kwargs)
+
+    monkeypatch.setattr(reg, "source_identity", racing_identity)
+    with pytest.raises(launch.AttachRefused) as exc:
+        reg.register_initial(conn, tid, str(source))
+    assert raced and "another active task" in exc.value.detail
+    assert board.attached_run(conn, own).state == "refused", "a refused replay must not reopen past the recheck"
+    assert board.attached_run(conn, kb.get_task(conn, other).current_run_id).state == "attached"
+    attaches = [kw for name, kw in _source_calls(b) if kw.get("mode") == "initial"]
+    assert len(attaches) == 2, "X's refused first attach and Y's attach; X's replay must not reach the Board"
+
+
+def test_refused_replay_without_a_competitor_reopens_and_attaches(setup):
+    conn, b, tid, source, _scratch, _home, _clone = setup
+    b.refuse["source_attach"] = "initial_attach_refused"
+    with pytest.raises(launch.AttachRefused):
+        reg.register_initial(conn, tid, str(source))
+    b.refuse.clear()
+    assert reg.register_initial(conn, tid, str(source)).state == "attached"
+
+
+def test_refused_replay_reserves_path_before_attach_rpc(setup, tmp_path, monkeypatch):
+    conn, b, tid, source, _scratch, _home, _clone = setup
+    b.refuse["source_attach"] = "initial_attach_refused"
+    with pytest.raises(launch.AttachRefused):
+        reg.register_initial(conn, tid, str(source))
+    b.refuse.clear()
+    other = _second_task(conn, tmp_path, f"wt/{tid}")
+    original = reg._attach_settled
+    checked = []
+
+    def competing_attach(connection, run, mode):
+        assert board.attached_run(connection, run.run_id).state == "pending"
+        with pytest.raises(launch.AttachRefused) as exc:
+            reg.register_initial(connection, other, str(source))
+        assert "another active task" in exc.value.detail
+        checked.append(True)
+        return original(connection, run, mode)
+
+    monkeypatch.setattr(reg, "_attach_settled", competing_attach)
+    assert reg.register_initial(conn, tid, str(source)).state == "attached"
+    assert checked == [True]
+    assert board.attached_run(conn, kb.get_task(conn, other).current_run_id) is None
+
+
 def test_a_finished_task_releases_its_external_worktree(setup, tmp_path):
     conn, _b, tid, source, _scratch, _home, _clone = setup
     reg.register_initial(conn, tid, str(source))

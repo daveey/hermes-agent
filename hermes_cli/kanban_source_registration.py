@@ -176,12 +176,20 @@ def _persist_observation(conn, run: board.AttachedRun, *, predecessor=None) -> b
             _refuse("local run changed during source observation")
         if run.mode == "initial":
             _initial_lane(conn, run.task_id, run.run_id)
+        # Recheck ownership under the writer lock so two registrations of one path serialize here. This runs
+        # on every observation, replays included: a definitely refused row owns nothing, so another task may
+        # have registered the path since, and reopening it without the check would attach both.
+        _owned_elsewhere(conn, run.task_id, run.path)
         prior = board.attached_run(conn, run.run_id)
         if prior is None:
-            # Recheck ownership under the writer lock so two registrations of one path serialize here.
-            _owned_elsewhere(conn, run.task_id, run.path)
             board.record_run(conn, run, allow_nested=True)
             prior = run
+        elif prior.state == "refused":
+            # Reopen in the same transaction as the ownership check, so a replay never looks refused (and
+            # never owns nothing) while its attach RPC may still apply.
+            conn.execute("UPDATE kanban_source_runs SET state = 'pending' WHERE run_id = ? AND run_uid = ? "
+                         "AND state = 'refused'", (int(run.run_id), run.run_uid))
+            prior = board.attached_run(conn, run.run_id) or prior
         fields = ("task_id", "run_uid", "machine", "path", "branch", "mode", "source_protocol", "manifest_revision",
                   "source_identity")
         if any(getattr(prior, field) != getattr(run, field) for field in fields):
@@ -198,11 +206,11 @@ def _persist_observation(conn, run: board.AttachedRun, *, predecessor=None) -> b
 def _attach_settled(conn, run: board.AttachedRun, mode: str) -> None:
     """Send the protocol-2 attach for a durable observation and settle it (M3).
 
-    A replay reopens a definitely refused observation before the RPC, so an unanswered replay never looks
-    refused. Only a refusal proving nothing is attached settles ``refused``; the row is kept as evidence.
-    Uncertain refusals leave it ``pending``: an earlier unanswered attach of this run may have applied.
+    ``_persist_observation`` has already reopened a definitely refused observation to ``pending`` under the
+    ownership check, so an unanswered replay never looks refused. Only a refusal proving nothing is attached
+    settles ``refused``; the row is kept as evidence. Uncertain refusals leave it ``pending``: an earlier
+    unanswered attach of this run may have applied.
     """
-    board.settle_state(conn, run.run_id, run.run_uid, "refused", "pending")
     try:
         board.attach(conn, run.task_id, run.run_uid, mode=mode, manifest_revision=0, source_protocol=2)
     except board.SourceCallRefused as exc:
