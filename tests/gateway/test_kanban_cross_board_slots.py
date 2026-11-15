@@ -80,6 +80,21 @@ def test_one_shared_slot_goes_to_the_higher_priority_card_on_the_other_board(hom
     assert hermes.at_capacity == "max_in_progress=1/1"  # ticked after default spent the slot
 
 
+def test_a_turn_owner_on_another_board_takes_the_shared_slot_from_aged_work(home, monkeypatch):
+    """t_01a1e023229f1073: a card holding a land turn wins the host slot across boards too, not only on its own."""
+    from tests.hermes_cli.test_kanban_turn_owner_pickup import observe
+    old = time.time() - 90 * 60
+    aged = _card("default", "default p1000, ready 90 min", 1000, ready_since=old)
+    owner = _card("hermes", "hermes p1000 turn owner, just back in ready", 1000)
+    observe(home, "hermes", owner)
+    spawned = []
+    dispatcher = _dispatcher(monkeypatch, spawned, start_board="default")
+
+    dispatcher.tick_once()
+
+    assert spawned == [("hermes", owner)], (spawned, aged)
+
+
 def test_zero_quota_refuses_spawns_and_says_why(home):
     with kbc.connect_closing(board="hermes") as conn:
         res = kbd.DispatchResult()

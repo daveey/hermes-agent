@@ -54,11 +54,12 @@ class Candidate(NamedTuple):
     ready_since: float  # the starvation clock, set on a board's head only (:func:`_starve_clock`)
     score: Optional[float] = None  # cross-board aged admission score; None: raw effective priority (fallback)
     since: float = 0.0  # the score's age clock: its first tie-break, as in ``kanban_admission_score.rank``
+    turn_owner: bool = False  # holds a land turn/lane: ahead of every non-owner (``kanban_admission_score.rank``)
 
     def rank(self) -> tuple:
         if self.score is None:
-            return (-self.priority, self.since, not self.waited_on, self.created_at, self.task_id)
-        return (-self.score, self.since, False, self.created_at, self.task_id)
+            return (True, -self.priority, self.since, not self.waited_on, self.created_at, self.task_id)
+        return (not self.turn_owner, -self.score, self.since, False, self.created_at, self.task_id)
 
 
 def candidates(conn, limit: int, *, now: Optional[float] = None) -> list[Candidate]:
@@ -102,7 +103,8 @@ def _scored(conn, rows: list, now: float) -> list[Candidate]:
         since = max(parts.ready_since, served)
         age = dict(parts.weights)["age"]
         score = parts.total - age * (parts.age_buckets - max(0, int(now - since)) // AGE_BUCKET_S)
-        out.append(by_id[row["id"]]._replace(priority=parts.effective_priority, score=score, since=float(since)))
+        out.append(by_id[row["id"]]._replace(priority=parts.effective_priority, score=score, since=float(since),
+                                             turn_owner=parts.turn_owner))
     return out
 
 

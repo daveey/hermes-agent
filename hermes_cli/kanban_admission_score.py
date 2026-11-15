@@ -8,6 +8,13 @@ Effective priority and open descendants come from the same graph as
 edge set overriding it. Readiness age is the current ready/review interval (the stranded-ready diagnostic's floor:
 latest ready-entry event, latest run end, else creation), not card age. One call is one snapshot: nothing is cached
 or written (stored priority included), so completion, unlink or archive take effect on the next call.
+
+Turn owners rank first. A card the local turn-urgency observation (:mod:`kanban_turn_urgency`) names as holding the
+core land lane or a state land turn sorts ahead of every other card; owners keep score order among themselves. The
+score itself is unchanged (the 900 inherited floor still applies for donation). The floor alone could not do this:
+at the 1000 cap the age term (25 points per ready minute) decides, so an owner just back in ready from a CI or
+review park ranked behind every older card while its turn ran out (PR #3207, t_01a1e023229f1073). A stale, invalid
+or missing observation names no owners, and the order is the score alone.
 """
 from __future__ import annotations
 
@@ -34,11 +41,13 @@ class ScoreBreakdown:
     total: float
     ready_since: int
     weights: tuple = tuple(sorted(DEFAULT_WEIGHTS.items()))
+    turn_owner: bool = False  # holds a land turn/lane per the turn-urgency observation: ranks ahead of any score
 
     def as_dict(self) -> dict:
         return {"effective_priority": self.effective_priority, "class_rank": self.class_rank,
                 "descendants": self.descendants, "age_buckets": self.age_buckets, "failures": self.failures,
-                "total": self.total, "ready_since": self.ready_since, "weights": dict(self.weights)}
+                "total": self.total, "ready_since": self.ready_since, "weights": dict(self.weights),
+                "turn_owner": self.turn_owner}
 
 
 def _n(value) -> str:
@@ -50,7 +59,7 @@ def explain(parts: dict) -> str:
     w = parts["weights"]
     return (f"score {_n(parts['total'])} = priority {parts['effective_priority']} + class {_n(w['class'])}*"
             f"{parts['class_rank']} + unblock {_n(w['unblock'])}*{parts['descendants']} + age {_n(w['age'])}*"
-            f"{parts['age_buckets']} - failures {_n(w['failure'])}*{parts['failures']}")
+            f"{parts['age_buckets']} - failures {_n(w['failure'])}*{parts['failures']}{_owner_note(parts)}")
 
 
 def summary(parts: dict) -> str:
@@ -58,7 +67,12 @@ def summary(parts: dict) -> str:
     w = parts["weights"]
     return (f"score {_n(parts['total'])} (priority {parts['effective_priority']} + class "
             f"{_n(w['class'] * parts['class_rank'])} + unblock {_n(w['unblock'] * parts['descendants'])} + age "
-            f"{_n(w['age'] * parts['age_buckets'])} - failures {_n(w['failure'] * parts['failures'])})")
+            f"{_n(w['age'] * parts['age_buckets'])} - failures {_n(w['failure'] * parts['failures'])})"
+            f"{_owner_note(parts)}")
+
+
+def _owner_note(parts: dict) -> str:
+    return "; turn owner: ranks ahead of non-owners" if parts.get("turn_owner") else ""
 
 
 def validate_weights(raw) -> dict:
@@ -112,7 +126,7 @@ def _graph(conn: sqlite3.Connection, candidate_ids, *, now_s=None):
     local_ids = {r[0] for r in local}
     tasks = {r[0]: (r[1] or 0, r[2]) for r in remote}
     tasks.update((r[0], (r[1] or 0, r[2])) for r in local)
-    _apply_turn_floor(conn, tasks, now_s=now_s)
+    owners = _apply_turn_floor(conn, tasks, now_s=now_s)
     edges = [(p, c) for p, c in edges if c not in local_ids]
     edges.extend(tuple(r) for r in local_edges)
     children = defaultdict(set)
@@ -121,11 +135,11 @@ def _graph(conn: sqlite3.Connection, candidate_ids, *, now_s=None):
             children[parent].add(child)
     metadata.update(local_metadata)
     since.update(local_since)
-    return tasks, children, metadata, since
+    return tasks, children, metadata, since, owners
 
 
-def _apply_turn_floor(conn, tasks, *, now_s=None):
-    """Apply advisory owners only to existing open rows on this connection's board."""
+def _apply_turn_floor(conn, tasks, *, now_s=None) -> frozenset:
+    """Apply advisory owners only to existing open rows on this connection's board; return those owners."""
     import time
 
     from hermes_cli.kanban_host_counts import board_of
@@ -133,12 +147,15 @@ def _apply_turn_floor(conn, tasks, *, now_s=None):
 
     board = board_of(conn)
     if board is None:
-        return
+        return frozenset()
     owners = read_owners(board=board, now_s=time.time() if now_s is None else now_s)
+    applied = set()
     for tid in owners & tasks.keys():
         priority, status = tasks[tid]
         if status not in ("done", "archived"):
             tasks[tid] = (max(priority, 900), status)
+            applied.add(tid)
+    return frozenset(applied)
 
 
 def _alarm_key(key) -> bool:
@@ -222,7 +239,7 @@ def effective_priorities(conn: sqlite3.Connection, task_ids: list[str]) -> dict[
 
     Return only extant task identities. Stored values are never changed.
     """
-    tasks, children, _metadata, _since = _graph(conn, [])
+    tasks, children, _metadata, _since, _owners = _graph(conn, [])
     return {tid: min(PRIORITY_CAP, max([tasks[tid][0], *(tasks[c][0] for c in _descendants(tid, children))]))
             for tid in task_ids if tid in tasks}
 
@@ -230,8 +247,9 @@ def effective_priorities(conn: sqlite3.Connection, task_ids: list[str]) -> dict[
 def rank(conn: sqlite3.Connection, rows, *, now_ms: Optional[int] = None, weights: Optional[dict] = None):
     """``rows`` (local task rows with ``id``) in admission order, each with its :class:`ScoreBreakdown`.
 
-    Pure and read-only. Ties break on ready-interval start, source creation time,
-    then task id. Creation retains subsecond precision and local custody wins."""
+    Pure and read-only. Turn owners come first (module docstring), then the score; ties break on
+    ready-interval start, source creation time, then task id. Creation retains subsecond precision and local
+    custody wins."""
     import time
 
     rows = list(rows)
@@ -240,7 +258,7 @@ def rank(conn: sqlite3.Connection, rows, *, now_ms: Optional[int] = None, weight
     weights = configured_weights() if weights is None else validate_weights(weights)
     now_s = (time.time() * 1000 if now_ms is None else now_ms) / 1000
     ids = [row["id"] for row in rows]
-    tasks, children, metadata, since = _graph(conn, ids, now_s=now_s)
+    tasks, children, metadata, since, owners = _graph(conn, ids, now_s=now_s)
     scored = []
     for row in rows:
         tid = row["id"]
@@ -257,7 +275,7 @@ def rank(conn: sqlite3.Connection, rows, *, now_ms: Optional[int] = None, weight
         total = (effective + weights["class"] * class_rank + weights["unblock"] * descendants
                  + weights["age"] * buckets - weights["failure"] * failures)
         scored.append((row, ScoreBreakdown(effective, class_rank, descendants, buckets, failures, total, start,
-                                           tuple(sorted(weights.items())))))
-    scored.sort(key=lambda item: (-item[1].total, item[1].ready_since,
+                                           tuple(sorted(weights.items())), tid in owners)))
+    scored.sort(key=lambda item: (not item[1].turn_owner, -item[1].total, item[1].ready_since,
                                  metadata.get(item[0]["id"], ("normal", 0, 0))[2], item[0]["id"]))
     return scored

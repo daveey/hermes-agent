@@ -40,6 +40,36 @@ def test_owner_floor_ranking_inheritance_and_no_write(sources, observation, remo
     assert source.execute("SELECT priority FROM tasks WHERE id='owner'").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize('remote', [False, True])
+def test_owner_ranks_ahead_of_aged_cards_at_the_cap(sources, observation, remote):
+    """t_01a1e023229f1073: a floor of 900 does nothing for an owner already at 1000; the turn ranks it first."""
+    local, replica = sources
+    source = replica if remote else local
+    aged = [helpers.add(source, f'aged-{i}', 1 + i, 1000) for i in range(5)]  # ready ~16 min: +400 points
+    owner = helpers.add(source, 'owner', 999, 1000)
+    source.execute("INSERT INTO task_events VALUES ('owner', 'promoted', '{}', 999)")  # just back from a park
+    ranked = score.rank(local, [*aged, owner], now_ms=1000000)
+    assert ranked[0][0]['id'] == 'owner'
+    parts = dict((row['id'], p) for row, p in ranked)
+    assert parts['owner'].turn_owner and not parts['aged-0'].turn_owner
+    assert parts['owner'].total < parts['aged-0'].total  # the score itself is unchanged: the turn is a tier
+    assert 'turn owner' in score.explain(parts['owner'].as_dict())
+    assert 'turn owner' not in score.explain(parts['aged-0'].as_dict())
+
+
+def test_two_owners_keep_score_order_between_them(sources, observation):
+    local, _ = sources
+    path, value = observation
+    value['owners'].append({'task_id': 'owner-2', 'source': 'state-turn', 'ref': 'turn', 'head': 'h',
+                            'expires_at': 1120})
+    path.write_text(json.dumps(value))
+    first = helpers.add(local, 'owner', 999, 1000)
+    second = helpers.add(local, 'owner-2', 100, 1000)  # waited longer
+    other = helpers.add(local, 'aged', 1, 1000)
+    ranked = score.rank(local, [first, other, second], now_ms=1000000)
+    assert [row['id'] for row, _ in ranked] == ['owner-2', 'owner', 'aged']
+
+
 @pytest.mark.parametrize('change', ['stale', 'future', 'foreign', 'unknown_board'])
 def test_invalid_observation_never_promotes(sources, observation, monkeypatch, change):
     local, _ = sources
