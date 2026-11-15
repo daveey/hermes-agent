@@ -320,38 +320,17 @@ def _profile_label(assignee: Optional[str]) -> str:
 def alarm_placement(own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], *, assignee: Optional[str],
                     requires: tuple[str, ...] = _REQUIRES, now_ms: Optional[int] = None,
                     ) -> tuple[Optional[list[str]], str]:
-    """``(runs_on, why)`` for an alarm about machine ``own``; never ``machine:<own>``. ``machines`` is the registry
-    (None: unreadable). In order: an eligible-now non-hub host (:func:`_can_host` and :func:`_ready_now`) with the
-    most free slots; the eligible-now hub; the hub operator lane; any other host; any card-copying host, even held (hub
-    first: it runs the alarm when that hold ends, not ``own``'s). With no other such machine enrolled, None
-    (default placement): the registry offers nowhere else."""
-    from hermes_cli import kanban_worker_node as wn
-    now_ms = _now_ms() if now_ms is None else now_ms
+    """Queue on the capable worker pool, regardless of current capacity or registry availability.
+
+    Negative eligibility is enforced independently from these positive labels by
+    kanban_pickup_alarm_identity and the Board's authenticated detector provenance gate.
+    A free hub is never a reason to pin an alarm there.
+    """
     from hermes_cli.kanban_placement_coordination import requirement_label
     need = {requirement_label(r) for r in requires} | {_profile_label(assignee)}
-    if machines is None:
-        if own != OPERATOR_LANE:
-            return [f"machine:{OPERATOR_LANE}"], f"the machine registry is unreadable from {own}: hub operator lane"
-        # The hub carries no capability:hub-write, so this label set never lands back on it.
-        return sorted(need | {HUB_ACCESS}), "the registry is unreadable from the hub: any worker with hub access"
-    hosts = {n: e for n, e in machines.items() if _can_host(n, e, own, need)}
-    now = sorted(n for n, e in hosts.items() if _ready_now(e, now_ms))
-    if now:
-        best = min(now, key=lambda n: (n == OPERATOR_LANE, -(_free_slots(hosts[n]) or 0), n))
-        free = _free_slots(hosts[best])
-        return [f"machine:{best}"], (f"{best} is active, unheld, not draining"
-                                     + (f" and has {free} free card slot(s)" if free is not None else ""))
-    if OPERATOR_LANE in hosts:
-        return [f"machine:{OPERATOR_LANE}"], "no other machine is eligible now: hub operator lane"
-    if hosts:
-        best = min(hosts, key=lambda n: (-(_free_slots(hosts[n]) or 0), n))
-        return [f"machine:{best}"], f"no other machine is eligible now; {best} is unheld and will free up first"
-    held = sorted((n != OPERATOR_LANE, n) for n, e in machines.items() if n != own and e
-                  and e.get("state", "active") == "active" and wn.advertises_pickup(e))
-    if held:
-        name = held[0][1]
-        return [f"machine:{name}"], f"every other machine is held or lacks access; {name} takes it when free"
-    return None, f"no other machine copies cards: default placement (the registry offers nowhere but {own})"
+    return sorted(need | {"pool:worker", HUB_ACCESS}), (
+        f"queued for a capable pool worker other than authenticated stalled source {own}; "
+        "capacity and registry availability do not change eligibility")
 
 
 def _stranded(runs_on: Any, own: str, machines: Optional[Mapping[str, Mapping[str, Any]]], need: set[str]) -> bool:

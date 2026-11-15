@@ -22,6 +22,7 @@ from tests.hermes_cli import test_kanban_pickup_stall as base
 WORKER = base.WORKER
 gws = base.gws
 svc = base.svc
+alarm_worker_pool = base.alarm_worker_pool
 
 
 def _observed(worker, tid, ago, runs_on):

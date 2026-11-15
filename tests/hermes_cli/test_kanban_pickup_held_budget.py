@@ -11,6 +11,7 @@ from hermes_cli import kanban_worker_node as wn
 from hermes_cli.kanban_db_connect import write_txn
 from hermes_cli.kanban_db_events import append_event
 from tests.hermes_cli import test_kanban_worker_node as support
+from tests.hermes_cli.test_kanban_pickup_stall import alarm_worker_pool
 
 svc = support.svc
 gws = support.gws

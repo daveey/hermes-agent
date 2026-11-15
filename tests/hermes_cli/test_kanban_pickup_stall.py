@@ -24,6 +24,16 @@ svc = support.svc
 gws = support.gws
 
 
+@pytest.fixture(autouse=True)
+def alarm_worker_pool(monkeypatch):
+    monkeypatch.setitem(support.MACHINES, "worker-2", {
+        "name": "worker-2", "state": "active", "pickup": "explicit", "hold": False,
+        "labels": ["pool:worker", "profile:default", "capability:hub-write",
+                   "capability:terminal", "capability:file", "capability:kanban"],
+        "max_card_runs": 12, "metrics": {"active_card_runs": 12},
+    })
+
+
 def _pinned(hub, title="pinned to the worker", to=WORKER):
     return support._hub_card(hub, title=title, runs_on=[f"machine:{to}"])
 

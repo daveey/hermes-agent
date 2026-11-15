@@ -269,6 +269,9 @@ def effective_labels(entry: Optional[Mapping[str, Any]], name: str) -> set[str]:
 
 def eligible(card: Mapping[str, Any], me: str, machines: Mapping[str, Mapping[str, Any]]) -> Optional[str]:
     """None when this machine may ask for the card's lease, else the Board's refusal reason it would get."""
+    from hermes_cli.kanban_pickup_alarm_identity import refusal
+    if reason := refusal(card, me):
+        return reason
     entry = machines.get(me) or {}
     if entry.get("hold"):
         return "held"
@@ -434,10 +437,18 @@ def local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
         return out
     own = _own(conn)
     rows = conn.execute(
-        "SELECT id, runs_on, created_on, workspace_kind FROM tasks WHERE status = ? AND claim_lock IS NULL "
-        "AND (runs_on IS NOT NULL OR (created_on IS NOT NULL AND created_on != ?))", (status, own)).fetchall()
+        "SELECT id, runs_on, created_on, created_by, idempotency_key, workspace_kind FROM tasks "
+        "WHERE status = ? AND claim_lock IS NULL "
+        "AND (runs_on IS NOT NULL OR (created_on IS NOT NULL AND created_on != ?) "
+        "OR created_by = 'pickup-stall-detector' OR idempotency_key LIKE 'pickup-stall:%' "
+        "OR idempotency_key LIKE 'worker-resources-unknown:%')",
+        (status, own)).fetchall()
     if not rows:
         return out
+    from hermes_cli.kanban_pickup_alarm_identity import refusal
+    for row in rows:
+        if reason := refusal(dict(row), own):
+            out[row["id"]] = reason
     reg = registry()
     if not reg:
         return out
