@@ -71,10 +71,13 @@ def tokenize_redirections(line: str, tokenize: Callable[[str], list[str]],
         if escaped:
             escaped = False
         elif ch == "\\" and not single:
+            protected.append(quote_marker)
             escaped = True
         elif ch == "'" and not double:
+            protected.append(quote_marker)
             single = not single
         elif ch == '"' and not single:
+            protected.append(quote_marker)
             double = not double
         protected.append(replacements.get(ch, ch) if literal or ch == marker else ch)
 

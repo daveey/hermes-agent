@@ -12,7 +12,7 @@ product), so growth is linear in the candidate count. Never discard reachable ta
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 import re
 
 from cron.lifecycle_guard_words import ShellWord, redirection_parts
@@ -71,7 +71,6 @@ def _merge(old: _Table, new: _Table) -> None:
     """Make *old* the union of itself and *new* (the result of a maybe-run ``exec``)."""
     for fd in set(old) | set(new):
         values = tuple(dict.fromkeys(old.get(fd, ()) + new.get(fd, ())))
-
         if values:
             old[fd] = values
         else:
@@ -106,6 +105,8 @@ def _command_start(segment: list[str], nesting: list[str], pattern: re.Pattern[s
     start = 0
     while start < len(segment):
         word = segment[start]
+        if getattr(word, "quoted", False):
+            break  # Quoted/escaped words are commands, never reserved syntax.
         if word in _CLOSERS:
             if nesting:
                 nesting.pop()
@@ -139,7 +140,7 @@ def _command_start(segment: list[str], nesting: list[str], pattern: re.Pattern[s
 
 def carry_exec_descriptors(
     lines: Iterable[list[str]], *, pattern: re.Pattern[str],
-    peel_reserved_words: Callable[[list[str]], int], control_chars: frozenset[str],
+    control_chars: frozenset[str],
 ) -> Iterator[list[str]]:
     """Resolve inherited fd copies in script order, without changing pipeline boundaries.
 
@@ -161,8 +162,7 @@ def carry_exec_descriptors(
         variants: list[list[list[str]]] = []
         for segment, before, after in pieces:
             start = _command_start(segment, nesting, pattern)
-            command = start + peel_reserved_words(segment[start:])
-            redirects = _exec_redirections(segment[command:], pattern)
+            redirects = _exec_redirections(segment[start:], pattern)
             if redirects is not None:
                 new = dict(table)
                 for parts in redirects:

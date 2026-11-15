@@ -796,7 +796,7 @@ def _iter_segment_contexts(
         yield from iter_script_segment_contexts(
             carry_exec_descriptors(
                 join_continued_lines(_iter_command_token_lists(script)), pattern=_REDIRECTION,
-                peel_reserved_words=_peel_reserved_words, control_chars=_CONTROL_CHARS),
+                control_chars=_CONTROL_CHARS),
             cat_operands=_cat_operands, cat_relays_stdin=_cat_relays_stdin,
             opens_call_arguments=opens_call, peel_reserved_words=_peel_reserved_words,
             stdin_redirections=lambda words: _split_redirections(words)[1])
