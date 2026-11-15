@@ -35,6 +35,9 @@ def prepare(args):
         from hermes_cli.kanban_selfwork_discovery import worker_creator
         creator = worker_creator()
     create = json.loads(json.dumps(args))
+    # Freeze the sender's scope before hashing/queueing. The intake receiver must
+    # never substitute its own ambient tenant for this immutable value.
+    create['tenant'] = create.get('tenant') or os.environ.get('HERMES_TENANT')
     raw_origin = create.pop('origin_session', None) or kanban_origin.ambient_origin_ref()
     session = create.pop('session_id', None) or get_session_env('HERMES_SESSION_ID')
     origin = kanban_origin.parse_origin(raw_origin) if raw_origin else None
