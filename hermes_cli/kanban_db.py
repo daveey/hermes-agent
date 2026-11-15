@@ -2304,36 +2304,13 @@ def reclaim_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None, signal_fn=None,
     urgency_source: Optional[str] = None, interrupt_target: Optional[str] = None,
 ) -> bool:
-    """Operator reclaim regardless of TTL: release the claim, restore the source
-    phase, reset the failure counter. False when not running. Bad attribution raises first."""
+    """Release a claim and restore its phase; updater pauses preserve prior failures.
+
+    Other operator reclaims reset the failure counter. False when not running.
+    Bad attribution raises first, before any signal or claim change."""
     attribution = _cu_requeue.reclaim_attribution(reason, urgency_source, interrupt_target)
-    row = conn.execute(
-        "SELECT status, claim_lock, worker_pid, worker_started_at FROM tasks WHERE id = ?", (task_id,),
-    ).fetchone()
-    if not row or (row["status"] != "running" and row["claim_lock"] is None) or _sync.refuse_foreign_reclaim(conn, task_id):
-        return False
-    prev_lock = row["claim_lock"]
-    termination = _terminate_reclaimed_worker(
-        row["worker_pid"], prev_lock, signal_fn=signal_fn, started_at=row["worker_started_at"])
-    custody = {**_requeue_custody.for_requeue(conn, task_id, reason), **attribution}  # core update: end plain processes, pin persisted
-    with write_txn(conn):
-        retry_status = _retry_status_for_run(conn, task_id)
-        cur = conn.execute(
-            "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL "
-            "WHERE id = ? AND status IN ('running', 'ready', 'blocked') "
-            "AND claim_lock IS ?", (retry_status, task_id, prev_lock),
-        )
-        if cur.rowcount != 1:
-            return False
-        run_id = _record_reclaim(
-            conn, task_id, termination,
-            error=f"manual_reclaim: {reason}" if reason else f"manual_reclaim lock={prev_lock}",
-            payload={"manual": True, "reason": reason, "prev_lock": prev_lock, "retry_status": retry_status, **custody},
-        )
-    _sync.release_lease(conn, task_id, _sync.run_uid(conn, run_id))
-    # Operator intervention = fresh retry budget (own txn, runs after commit).
-    _clear_failure_counter(conn, task_id)
-    return True
+    from hermes_cli.kanban_manual_reclaim import reclaim_task as reclaim
+    return reclaim(conn, task_id, reason=reason, signal_fn=signal_fn, attribution=attribution)
 
 
 def reassign_task(

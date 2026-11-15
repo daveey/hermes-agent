@@ -255,6 +255,9 @@ def owner_reclaim_blocked(conn, task_id, *, crash_sweep=False, for_termination=F
     the shape that used to be unreclaimable forever, because ``bound_interpreter_gone`` was the
     only override and it needs the ``worker_bound`` event that run never wrote.
     """
+    from hermes_cli.kanban_update_reclaim_intent import task_pending
+    if task_pending(conn, task_id):
+        return True
     from hermes_cli.kanban_failed_result import expiry_identity_matches, modern_result_recorded
     if selected is not None and not expiry_identity_matches(conn, selected):
         return True

@@ -1256,8 +1256,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
                           *, failed_results_only: bool = False) -> _CrashSweep:
     """Release every host-local ``running`` task whose worker PID is dead."""
     sweep = _CrashSweep()
-    from hermes_cli.kanban_neutral_release import drain
-    sweep.exited_hook_payloads.extend(drain(conn))
+    from hermes_cli.kanban_update_reclaim_intent import recover_and_drain
+    sweep.exited_hook_payloads.extend(recover_and_drain(conn))
     for hook in sweep.exited_hook_payloads:
         target = {"rate_limited": sweep.rate_limited, "reclaimed": sweep.owner_restarted, "host_reboot": sweep.host_rebooted,
                   "owner_down": sweep.owner_unavailable, "owner_unavailable": sweep.owner_unavailable}
@@ -1276,8 +1276,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
             lock = row["claim_lock"] or ""
             if not _kb._claim_is_local(lock, host_prefix):
                 continue
-            from hermes_cli.kanban_failure_release import queued
-            if queued(conn, row["current_run_id"]):
+            from hermes_cli.kanban_update_reclaim_intent import observer_held
+            if observer_held(conn, row):
                 continue
             # Launch-window grace so a freshly-spawned worker isn't reclaimed
             # before its PID is visible on /proc.
