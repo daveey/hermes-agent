@@ -37,7 +37,7 @@ def _startup_variable(shell: str, arguments: list[str]) -> str | None:
     return "BASH_ENV" if shell == "bash" and not interactive else None
 
 
-def iter_startup_sources(command: str) -> Iterator[str]:
+def iter_startup_sources(command: str) -> Iterator[tuple[str, bool]]:
     """Source explicit assignment-prefix/env-wrapper files before child-shell payloads.
 
     Reuse the ordinary source walk so local/remote read limits, cycles and refusals
@@ -62,15 +62,24 @@ def iter_startup_sources(command: str) -> Iterator[str]:
         variable = _startup_variable(shell, view[index + 1:])
         if variable is None:
             continue
+        # Wrapper chdir changes both startup resolution and its relative commands.
+        # Until the recursive walk carries wrapper cwd, refuse rather than read
+        # a same-named clean file from the caller's directory.
+        changes_cwd = any(word.startswith(("-C", "--chdir")) for word in view[:index])
         for word in view[:index]:
             name, equals, value = word.partition("=")
             if equals and name == variable and value:
-                yield value
+                yield value, changes_cwd
 
 
 def scan_startup_sources(command, recurse, budget, cwd, executed, source) -> bool:
     """Walk startup input before -c text; never evaluate dynamic names in the guard."""
-    for value in iter_startup_sources(command):
+    for value, changes_cwd in iter_startup_sources(command):
+        if changes_cwd:
+            if executed:
+                budget.refusal = "Cannot statically resolve shell startup working directory through chdir wrapper"
+                return True
+            continue
         if "$" in value or "`" in value:
             if executed:
                 budget.refusal = "Cannot statically resolve shell startup file expansion; use a literal path"

@@ -102,6 +102,20 @@ def test_dynamic_startup_paths_fail_closed_without_execution(tmp_path, value):
     assert not (tmp_path / "ran").exists()
 
 
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("option", ["-C sub", "-Csub", "--chdir=sub", "--chdir sub"])
+def test_env_chdir_startup_fails_closed(tmp_path, option):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub/start.sh").write_text("touch ran\n")
+    command = f"env {option} BASH_ENV=start.sh bash -c true"
+    result = run_bash(tmp_path, command)
+    assert (tmp_path / "sub/ran").exists(), result.stderr
+    (tmp_path / "sub/ran").unlink()
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe and refusal and "startup working directory" in refusal
+    assert not (tmp_path / "sub/ran").exists()
+
+
 def test_startup_remote_read_uses_same_walk(tmp_path):
     seen = []
 
