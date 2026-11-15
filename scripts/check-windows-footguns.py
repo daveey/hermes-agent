@@ -34,6 +34,7 @@ Suppress an intentional use (e.g. tests or platform-gated code) with:
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import re
 import subprocess
@@ -138,13 +139,14 @@ class Footgun:
     # the regex can't fully distinguish (e.g. open() where mode may contain
     # "b" for binary, or the line may have `encoding=` elsewhere).
     post_filter: Callable[..., Any] | None = None
-    # Optional "the rest of this call excuses it" pattern. When the call
-    # that contains the match is still open at the end of the matched line,
-    # the scanner reads its continuation lines (paren-balanced, comments and
-    # string contents ignored) and drops the hit if this pattern matches
-    # there. Lets a line-based rule see ``encoding=`` passed on a later line
-    # of the same multi-line call instead of forcing a suppression marker.
-    call_continuation_exempt: re.Pattern | None = None
+    # Optional (match_keyword, exempt_keyword) pair. When the line-based hit
+    # is a keyword argument ``match_keyword`` of a call (found by parsing the
+    # file), the hit is dropped if that SAME call also passes
+    # ``exempt_keyword`` as a direct keyword, on any of its lines. Lets the
+    # text=True rule see ``encoding=`` on a continuation line of a
+    # multi-line call without a suppression marker; keywords of nested or
+    # enclosing calls, string contents and ``**kwargs`` never excuse a hit.
+    call_keyword_exempt: tuple[str, str] | None = None
 
 
 # A real open() mode. The regex stops at the first comma, so
@@ -454,7 +456,7 @@ FOOTGUNS: list[Footgun] = [
         ),
         # encoding= on a continuation line of the same call is not a
         # footgun (it used to need a `# windows-footgun: ok` marker).
-        call_continuation_exempt=re.compile(r"\bencoding\s*="),
+        call_keyword_exempt=("text", "encoding"),
     ),
     Footgun(
         name="bare Path.read_text()/write_text() without encoding=",
@@ -696,63 +698,37 @@ def _call_closes_on_line(line: str, open_paren_end: int) -> bool:
     return False
 
 
-def _paren_walk(segment: str, depth: int) -> tuple[str, int]:
-    """Walk ``segment`` from paren ``depth``, skipping string contents.
+_UNPARSED = object()
 
-    Returns (code text consumed, depth after). Stops right after the paren
-    that brings depth to 0. String bodies are dropped from the returned text
-    so ``"encoding="`` inside a literal never excuses a hit.
+
+def _parse_module(text: str) -> ast.AST | None:
+    try:
+        return ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _call_keyword_exempt(tree: ast.AST | None, lineno: int, pair: tuple[str, str]) -> bool:
+    """True when every call passing keyword ``pair[0]`` on line ``lineno``
+    also passes ``pair[1]`` as its own direct keyword (on any line).
+
+    Keyword attribution comes from the parsed call, so an ``encoding=`` of a
+    nested or enclosing call, inside a string, or hidden in ``**kwargs``
+    never excuses a hit. An unparseable file never exempts.
     """
-    out: list[str] = []
-    quote: str | None = None
-    i, n = 0, len(segment)
-    while i < n:
-        c = segment[i]
-        if quote:
-            if c == "\\" and i + 1 < n:
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-            i += 1
+    if tree is None:
+        return False
+    match_kw, exempt_kw = pair
+    found = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-        if c in ("'", '"'):
-            quote = c
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth <= 0:
-                return "".join(out), 0
-        out.append(c)
-        i += 1
-    return "".join(out), depth
-
-
-_CALL_CONTINUATION_MAX_LINES = 40
-
-
-def _call_continuation(lines: list[str], index: int, code: str, match_end: int) -> str:
-    """Code text of the continuation lines of the call open at ``match_end``.
-
-    ``index`` is the 0-based position of the matched line in ``lines`` and
-    ``code`` that line's comment-stripped code. Returns "" when the call
-    closes on the matched line (nothing continues), so a hit is excused only
-    by text that really belongs to the same multi-line call.
-    """
-    _, depth = _paren_walk(code[:match_end], 0)
-    if depth <= 0:
-        return ""
-    _, depth = _paren_walk(code[match_end:], depth)
-    if depth <= 0:
-        return ""
-    collected: list[str] = []
-    for nxt in lines[index + 1 : index + 1 + _CALL_CONTINUATION_MAX_LINES]:
-        text, depth = _paren_walk(_strip_code(nxt), depth)
-        collected.append(text)
-        if depth <= 0:
-            break
-    return "\n".join(collected)
+        if not any(k.arg == match_kw and k.value.lineno == lineno for k in node.keywords):
+            continue
+        found = True
+        if not any(k.arg == exempt_kw for k in node.keywords):
+            return False
+    return found
 
 
 def _looks_like_string_literal(line: str, match: re.Match) -> bool:
@@ -870,8 +846,8 @@ def scan_file(path: Path, footguns: list[Footgun]) -> list[tuple[int, str, Footg
     # triple-quote we see; we don't try to handle nested or f-string cases.
     in_triple: str | None = None  # None, "'''", or '"""'
 
-    all_lines = text.splitlines()
-    for i, line in enumerate(all_lines, start=1):
+    tree: Any = _UNPARSED
+    for i, line in enumerate(text.splitlines(), start=1):
         # Update triple-quote state based on this line's occurrences.
         code_for_scan = line
         if in_triple:
@@ -930,10 +906,11 @@ def scan_file(path: Path, footguns: list[Footgun]) -> list[tuple[int, str, Footg
                 except (IndexError, AttributeError):
                     # Post-filter assumed a named group that isn't there — skip.
                     continue
-            if fg.call_continuation_exempt is not None and fg.call_continuation_exempt.search(
-                _call_continuation(all_lines, i - 1, code, match.end())
-            ):
-                continue
+            if fg.call_keyword_exempt is not None:
+                if tree is _UNPARSED:
+                    tree = _parse_module(text)
+                if _call_keyword_exempt(tree, i, fg.call_keyword_exempt):
+                    continue
             matches.append((i, line.rstrip(), fg))
     return matches
 

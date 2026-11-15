@@ -91,3 +91,47 @@ def test_no_stale_multiline_suppression_markers():
                 if "text=True" in line and stale.search(line):
                     offenders.append(f"{p.relative_to(REPO_ROOT)}:{n}")
     assert offenders == []
+
+
+# Negative regressions from the exact-head review of PR #3340: an encoding=
+# that is not a direct keyword of the matched subprocess call must not
+# excuse it.
+
+
+def test_encoding_in_nested_call_is_still_flagged(tmp_path):
+    src = (
+        "import subprocess\n"
+        "subprocess.run(['git'], text=True,\n"
+        "               env=dict(encoding='utf-8'))\n"
+    )
+    assert _hits(tmp_path, src) == [2]
+
+
+def test_encoding_of_enclosing_call_is_still_flagged(tmp_path):
+    src = (
+        "import subprocess\n"
+        "consume(subprocess.run(['git'], text=True),\n"
+        "        encoding='utf-8')\n"
+    )
+    assert _hits(tmp_path, src) == [2]
+
+
+def test_encoding_inside_multiline_string_is_still_flagged(tmp_path):
+    src = (
+        "import subprocess\n"
+        "subprocess.run(['git'], text=True,\n"
+        "               input=\"\"\"hello\n"
+        "encoding=utf-8\n"
+        "\"\"\")\n"
+    )
+    assert _hits(tmp_path, src) == [2]
+
+
+def test_encoding_via_kwargs_is_not_trusted(tmp_path):
+    src = (
+        "import subprocess\n"
+        "kw = {'encoding': 'utf-8'}\n"
+        "subprocess.run(['git'], text=True,\n"
+        "               **kw)\n"
+    )
+    assert _hits(tmp_path, src) == [3]
