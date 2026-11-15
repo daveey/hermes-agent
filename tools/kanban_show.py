@@ -8,6 +8,20 @@ def fields(obj: Any, names: tuple[str, ...]) -> dict[str, Any]:
     return {n: getattr(obj, n) if obj is not None else None for n in names}
 
 
+_TASK_SUMMARY_FIELDS = tuple(
+    "id title assignee status priority tenant workspace_kind workspace_path project_id created_by "
+    "created_at started_at completed_at current_run_id model_override provider_override block_kind human_request".split())
+
+
+def task_summary(kb, conn, task) -> dict[str, Any]:
+    """One ``kanban_list`` row: summary fields plus parent/child ids and counts."""
+    parents = kb.parent_ids(conn, task.id)
+    children = kb.child_ids(conn, task.id)
+    return {
+        **fields(task, _TASK_SUMMARY_FIELDS), "parents": parents, "children": children,
+        "parent_count": len(parents), "child_count": len(children)}
+
+
 def show(args: dict) -> str:
     from hermes_cli import kanban_foreign_card as kfc
     from tools import kanban_tools as kt

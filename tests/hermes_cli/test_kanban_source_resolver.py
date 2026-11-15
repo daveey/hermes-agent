@@ -66,7 +66,7 @@ def make_world(tmp_path, monkeypatch):
         homes[name] = SimpleNamespace(home=home, clone=clone)
     calls = []
 
-    def lookup(full_name):
+    def lookup(full_name, timeout=30):
         calls.append(full_name)
         return {"id": REPO_ID, "full_name": "acme/widget"}
     monkeypatch.setattr(kcl, "canonical_github", lambda url: "acme/widget" if url.strip() == str(origin) else None)
@@ -331,7 +331,7 @@ def test_github_repo_without_gh_argv_fails_closed(monkeypatch):
 
 def test_wrong_repo_clone_refused(world):
     conn, cfg = use_home(world, "worker-2")
-    world.monkeypatch.setattr(kcl, "github_repo", lambda full_name: {"id": 7, "full_name": full_name})
+    world.monkeypatch.setattr(kcl, "github_repo", lambda full_name, timeout=30: {"id": 7, "full_name": full_name})
     err = refusal(lambda: resolve(world, conn, cfg, snap(world)))
     assert (err.code, err.scope) == ("clone_missing", "host") or err.code == "wrong_repo"
 

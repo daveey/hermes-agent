@@ -68,7 +68,8 @@ def merge_completion_prose_artifacts(
     updated = dict(metadata) if isinstance(metadata, dict) else {}
     existing = updated.get("artifacts")
     merged = list(existing) if isinstance(existing, (list, tuple)) else []
-    seen = {str(path) for path in merged}
+    from hermes_cli.kanban_source_artifacts import completion_mapping
+    seen = {str(path) for path in merged} | set(completion_mapping(conn, task_id, merged))
     for path in discovered:
         if path not in seen:
             merged.append(path)
@@ -267,12 +268,20 @@ def stage_completion_artifacts(
     metadata.pop(SKIPPED_KEY, None)
     metadata.pop("_staged_artifacts", None)
     with discard_on_error(staged):
+        from hermes_cli.kanban_source_artifacts import completion_mapping
+
+        # Selected source-artifact snapshots (workspace_source v2) map their
+        # original paths to the already-staged snapshot, so a receipt or
+        # metadata reference to the original reuses the snapshot instead of
+        # copying bytes that may have changed since it was taken.
+        snapshots = completion_mapping(conn, task_id, cleaned_artifact_paths(metadata))
         mapping: dict[str, str] = {}
         record_files(conn, task_id, metadata, originals, now, staged,
-                     uploaded_by=uploaded_by, relocated={}, local_copies=mapping)
+                     uploaded_by=uploaded_by, relocated=snapshots, local_copies=mapping)
         records = metadata.get("artifact_receipt", [])
         mapping.update({r["path"]: r["retained_path"] for r in records if r.get("retained_path")})
-        known = {str(Path(raw).expanduser().resolve()): kept for raw, kept in mapping.items()}
+        known = dict(snapshots)
+        known.update({str(Path(raw).expanduser().resolve()): kept for raw, kept in mapping.items()})
         if "artifacts" in metadata:
             metadata["artifacts"] = [mapping.get(raw, raw) for raw in cleaned_artifact_paths(metadata)]
         staged.extend(preserve_metadata_files(

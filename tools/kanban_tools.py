@@ -531,9 +531,6 @@ _TASK_FIELDS = tuple(
     "id title body assignee status tenant priority workspace_kind workspace_path created_by "
     "created_at started_at completed_at result current_run_id model_override "
     "provider_override completion_contract review_required last_failure_error block_kind human_request".split())
-_TASK_SUMMARY_FIELDS = tuple(
-    "id title assignee status priority tenant workspace_kind workspace_path project_id created_by "
-    "created_at started_at completed_at current_run_id model_override provider_override block_kind human_request".split())
 _RUN_FIELDS = tuple("id profile status outcome summary error metadata started_at ended_at".split())
 _COMMENT_FIELDS = ("author", "body", "created_at")
 _EVENT_FIELDS = ("kind", "payload", "created_at", "run_id")
@@ -541,15 +538,7 @@ _ATTACHMENT_FIELDS = tuple(
     "id filename content_type size uploaded_by stored_path created_at".split())
 
 
-from tools.kanban_show import fields as _fields
-
-
-def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
-    parents = kb.parent_ids(conn, task.id)
-    children = kb.child_ids(conn, task.id)
-    return {
-        **_fields(task, _TASK_SUMMARY_FIELDS), "parents": parents, "children": children,
-        "parent_count": len(parents), "child_count": len(children)}
+from tools.kanban_show import fields as _fields, task_summary as _task_summary_dict
 
 
 # --- Goal-mode judge gate ---
@@ -862,7 +851,6 @@ def _handle_list(args: dict, **kw) -> str:
                            if truncated and limit < KANBAN_LIST_MAX_LIMIT else None),
             "promoted": promoted})
 
-
 @_kanban_handler("kanban_complete", classify_rejections=True)
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff. Every refusal
@@ -881,8 +869,8 @@ def _handle_complete(args: dict, **kw) -> str:
     created_cards = _coerce_str_list(
         args.get("created_cards"), "created_cards", "task ids", strip=True)
     artifacts = _coerce_str_list(args.get("artifacts"), "artifacts", "file paths", strip=True)
-    if artifacts:
-        metadata = _merge_artifacts(metadata, artifacts)
+    if artifacts or "artifacts" in args:
+        metadata = _merge_artifacts(metadata, artifacts or [])
     _check(summary or result, "provide at least one of: summary (preferred), result", "empty")
     _kc.require_completion_metadata(metadata, _require_dict_metadata)  # dict + receipt shape before the judge
     metadata = _stamp_worker_session_metadata(tid, metadata)
@@ -910,6 +898,8 @@ def _handle_complete(args: dict, **kw) -> str:
         goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip(), conn=conn)
         try:
             event_mark = _kc.event_mark(conn, tid)  # a refusal's own pr_acceptance event lands above it
+            from tools.kanban_tools_source import stage_completion
+            metadata = stage_completion(conn, tid, metadata, expected_run_id=run_id)
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
                 created_cards=created_cards, expected_run_id=run_id, goal_verification=goal_verification)
@@ -1277,8 +1267,8 @@ def _handle_request_review(args: dict, **kw) -> str:
         metadata = _redact_metadata(metadata)
         _check(metadata is not None, "metadata could not be safely serialized")
     artifacts = _coerce_str_list(args.get("artifacts"), "artifacts", "file paths", strip=True)
-    if artifacts:
-        metadata = _merge_artifacts(metadata, artifacts)
+    if artifacts or "artifacts" in args:
+        metadata = _merge_artifacts(metadata, artifacts or [])
     metadata = _stamp_worker_session_metadata(tid, metadata)
     # Reviewer is model-supplied free text stored durably on the event payload.
     reviewer = _redact_opt(args.get("reviewer") or None)
@@ -1291,11 +1281,17 @@ def _handle_request_review(args: dict, **kw) -> str:
                f"reviewer profile {reviewer!r} is not installed. "
                f"Installed profiles: {', '.join(list_profile_names())}")
     with _board(args.get("board")) as (kb, conn):
+        from hermes_cli import kanban_foreign_card as _kfc
+        if foreign := _kfc.refusal(conn, tid):
+            raise _Reject(foreign, _kfc.REJECTION)
         _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary, conn=conn)
+        run_id = _worker_run_id(tid)
         try:
+            from tools.kanban_tools_source import stage_completion
+            metadata = stage_completion(conn, tid, metadata, expected_run_id=run_id)
             ok, fail_reason = kb.request_review(
                 conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
-                expected_run_id=_worker_run_id(tid), with_reason=True)
+                expected_run_id=run_id, with_reason=True)
         except kb.ArtifactPreservationError as artifact_err:
             # Same contract as kanban_complete (#22923): the transition rolled
             # back, the task is untouched and retryable — say so explicitly or
@@ -1325,19 +1321,19 @@ def _handle_request_changes(args: dict, **kw) -> str:
 
 @_kanban_handler("kanban_heartbeat")
 def _handle_heartbeat(args: dict, **kw) -> str:
-    """Signal liveness: extend the claim TTL AND record a heartbeat event.
-    Without the claim half, a worker blocked in one long tool call would still
-    be reclaimed by ``release_stale_claims``."""
+    """Extend the claim TTL (else one long tool call is reclaimed by ``release_stale_claims``)
+    AND record a heartbeat; source fields register scratch source/artifacts for the bound run."""
     tid = _worker_guard("kanban_heartbeat", args)
     from hermes_cli import kanban_db_dispatch as kbd
+    from tools.kanban_tools_source import heartbeat_source
     with _board(args.get("board")) as (kb, conn):
-        # The dispatcher pins HERMES_KANBAN_CLAIM_LOCK at spawn; the default
-        # claimer covers locally-driven workers that bypassed the dispatcher.
+        # Dispatcher pins HERMES_KANBAN_CLAIM_LOCK; the default covers dispatcher-less workers.
         kb.heartbeat_claim(conn, tid, claimer=os.environ.get("HERMES_KANBAN_CLAIM_LOCK"))
-        ok = kbd.heartbeat_worker(
-            conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid))
+        ok = kbd.heartbeat_worker(conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not heartbeat {tid} (unknown id or not running)")
-        return _ok(task_id=tid)
+        source = heartbeat_source(conn, tid, args, worker_task=os.environ.get("HERMES_KANBAN_TASK"),
+                                  expected_run_id=_worker_run_id(tid))
+        return _ok(task_id=tid, **({"source": source} if source is not None else {}))
 
 
 @_kanban_handler("kanban_comment")

@@ -41,7 +41,8 @@ SOURCE_KINDS = frozenset({"task_worktree", "scratch_external"})
 # v3 §6b: host scope releases the grant and memoizes ``(task, manifest_revision)``; card scope releases and blocks.
 HOST_SCOPE = frozenset({"wrong_repo", "origin_rewritten", "origin_unreachable", "occupied_path", "dirty_destination",
                         "diverged_local_branch", "clone_missing", "materialize_timeout", "custody_not_portable",
-                        "source_disabled", "board_lacks_source"})
+                        "source_disabled", "board_lacks_source", "source_identity_refused",
+                        "artifact_unavailable", "artifact_mismatch"})
 CARD_SCOPE = frozenset({"remote_drift", "remote_branch_missing", "manifest_invalid", "custody_source_missing"})
 FENCED_COLUMNS = frozenset({"workspace_kind", "branch_name"})
 SKIP_MEMO_SECONDS = 6 * 3600
@@ -138,6 +139,9 @@ class Manifest:
     source_kind: str
     raw: dict = field(compare=False, repr=False)
 
+    version: int = 1
+    artifacts: tuple[dict, ...] = ()
+
     @property
     def short_branch(self) -> str:
         return self.branch[len("refs/heads/"):]
@@ -157,12 +161,31 @@ def _int(value: Any, what: str, minimum: int = 0) -> int:
     return value
 
 
+def _parse_artifacts(value: Any, version: int) -> list[dict]:
+    """Selected attachment references, never local paths or unverified byte metadata."""
+    if not isinstance(value, list) or len(value) > 32 or (version == 1 and value):
+        raise ManifestInvalid("invalid artifacts count for manifest version")
+    seen = set()
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) != {"attachment_uid", "filename", "sha256"}:
+            raise ManifestInvalid("artifact must be {attachment_uid, filename, sha256}")
+        uid, filename, digest = entry["attachment_uid"], entry["filename"], entry["sha256"]
+        if not isinstance(uid, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", uid) or uid in seen:
+            raise ManifestInvalid("invalid or duplicate attachment_uid")
+        if not isinstance(filename, str) or not filename or filename in {".", ".."} or any(c in filename for c in "/\\\x00"):
+            raise ManifestInvalid("artifact filename must be a basename")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ManifestInvalid("artifact sha256 must be 64 lowercase hex")
+        seen.add(uid)
+    return sorted((dict(entry) for entry in value), key=lambda entry: entry["attachment_uid"])
+
+
 def parse_manifest(value: Any) -> Manifest:
-    """Strict v1 schema (plan v2 §1, v4 §0): unknown keys and versions are refused, no paths, at most 8 KiB, and
-    ``artifacts`` is reserved (must be ``[]`` in v1)."""
+    """Strict v1/v2 wire schema, at most 8 KiB UTF-8. V1 reserves empty artifacts;
+    v2 references explicitly selected Board attachments. Byte custody is verified by the Board."""
     try:
         size = len(value if isinstance(value, (bytes, bytearray)) else
-                   (value if isinstance(value, str) else json.dumps(value)).encode("utf-8"))
+                   (value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))).encode("utf-8"))
         data = _decode(value)
     except (TypeError, ValueError) as exc:
         raise ManifestInvalid(f"not JSON: {exc}") from exc
@@ -174,7 +197,7 @@ def parse_manifest(value: Any) -> Manifest:
         raise ManifestInvalid(f"unknown keys {sorted(unknown)}")
     if missing := _MANIFEST_KEYS - set(data):
         raise ManifestInvalid(f"missing keys {sorted(missing)}")
-    if data["version"] != 1 or isinstance(data["version"], bool):
+    if type(data["version"]) is not int or data["version"] not in (1, 2):
         raise ManifestInvalid(f"unsupported version {data['version']!r}")
     repo, by = data["repository"], data["published_by"]
     if not isinstance(repo, dict) or set(repo) != _REPO_KEYS:
@@ -191,15 +214,17 @@ def parse_manifest(value: Any) -> Manifest:
             raise ManifestInvalid(f"{key} must be 40 lowercase hex")
     if not isinstance(by, dict) or set(by) != _BY_KEYS or not all(isinstance(by[k], str) and by[k] for k in _BY_KEYS):
         raise ManifestInvalid("published_by must be {run_uid, machine}")
-    if data["source_kind"] not in SOURCE_KINDS:
+    if not isinstance(data["source_kind"], str) or data["source_kind"] not in SOURCE_KINDS:
         raise ManifestInvalid(f"unknown source_kind {data['source_kind']!r}")
-    if data["artifacts"] != []:
-        raise ManifestInvalid("artifacts is reserved and must be [] in v1")
+    if data["version"] == 1 and data["source_kind"] != "task_worktree":
+        raise ManifestInvalid("scratch_external requires manifest v2")
+    data = {**data, "artifacts": _parse_artifacts(data["artifacts"], data["version"])}
     return Manifest(repository_id=repo_id, full_name=repo["full_name"], url=repo["url"], branch=data["branch"],
                     commit=data["commit"], base_commit=data["base_commit"],
                     published_at=_int(data["published_at"], "published_at"),
                     manifest_revision=_int(data["manifest_revision"], "manifest_revision", 1),
-                    published_by=dict(by), source_kind=data["source_kind"], raw=data)
+                    published_by=dict(by), source_kind=data["source_kind"], raw=data,
+                    version=data["version"], artifacts=tuple(dict(entry) for entry in data["artifacts"]))
 
 
 @dataclass(frozen=True)
@@ -209,6 +234,8 @@ class Custody:
     manifest_revision: Optional[int]
     attached_run_uid: Optional[str] = None
     reason: Optional[str] = None
+    source_protocol: int = 1
+    retained_run_uid: Optional[str] = None
 
 
 def parse_custody(value: Any) -> Optional[Custody]:
@@ -224,9 +251,14 @@ def parse_custody(value: Any) -> Optional[Custody]:
     if not isinstance(data, dict) or data.get("state") not in CUSTODY_STATES:
         return Custody(None, "retained", None, reason="malformed_custody")
     rev = data.get("manifest_revision")
+    protocol, predecessor = data.get("source_protocol", 1), data.get("retained_run_uid")
+    if (type(protocol) is not int or protocol not in (1, 2)
+            or (predecessor is not None and (not isinstance(predecessor, str) or not predecessor))):
+        return Custody(None, "retained", None, reason="malformed_custody")
     return Custody(source_holder=data.get("source_holder") or None, state=data["state"],
                    manifest_revision=rev if isinstance(rev, int) and not isinstance(rev, bool) else None,
-                   attached_run_uid=data.get("attached_run_uid"), reason=data.get("reason"))
+                   attached_run_uid=data.get("attached_run_uid"), reason=data.get("reason"),
+                   source_protocol=protocol, retained_run_uid=predecessor)
 
 
 # --- the grant snapshot ----------------------------------------------------------------------------------------------
@@ -248,6 +280,7 @@ class SourceSnapshot:
     no source (a new Board, a card without custody)."""
     manifest_value: Any
     custody: Optional[Custody]
+    grant: Optional[dict] = None  # exact response envelope; never supplied by replica reads
 
     @property
     def has_source(self) -> bool:
@@ -259,10 +292,12 @@ class SourceSnapshot:
         return parse_manifest(self.manifest_value)
 
 
-def snapshot_from_row(row: Any) -> Optional[SourceSnapshot]:
+def snapshot_from_row(row: Any, *, grant: Optional[dict] = None) -> Optional[SourceSnapshot]:
     if not isinstance(row, Mapping) or not all(k in row for k in SNAPSHOT_KEYS):
         return None
-    return SourceSnapshot(manifest_value=row["workspace_source"], custody=parse_custody(row["workspace_custody"]))
+    from copy import deepcopy
+    return SourceSnapshot(manifest_value=deepcopy(row["workspace_source"]),
+                          custody=parse_custody(row["workspace_custody"]), grant=deepcopy(grant))
 
 
 def replica_snapshot(row: Any) -> Optional[SourceSnapshot]:
@@ -309,7 +344,10 @@ def skipped(conn: sqlite3.Connection, task_id: str, manifest_revision: Optional[
                            (task_id, int(manifest_revision or 0))).fetchone()
     except sqlite3.OperationalError:
         return None
-    if row is None or time.time() - row[1] > SKIP_MEMO_SECONDS:
+    if row is None:
+        return None
+    lifetime = 60 if row[0] == "artifact_unavailable" else SKIP_MEMO_SECONDS
+    if time.time() - row[1] >= lifetime:
         return None
     return row[0]
 
@@ -351,6 +389,11 @@ def pickup_skip(conn: sqlite3.Connection, card: Any, own: str, *, cfg: Optional[
     if board_lacks_source():  # S2: an old Board never gets a source card through the legacy path
         return "workspace_source: the Board lacks the source protocol"
     if snap.custody is not None and snap.custody.source_holder == own:
+        # A local holder still needs its selected bytes; don't spin on a failed
+        # download merely because its Git worktree is already here.
+        code = skipped(conn, card["id"], snap.custody.manifest_revision)
+        if code in {"artifact_unavailable", "artifact_mismatch"}:
+            return f"workspace_source: refused here ({code}) at revision {snap.custody.manifest_revision}"
         return None
     try:
         manifest = snap.manifest()

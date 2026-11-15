@@ -104,14 +104,18 @@ def _record_local(conn, row, path, key):
             conn.execute("UPDATE kanban_sync_state SET applying=?", (previous,))
 
 
-def _transfer(conn, hub, board, row):
+def _transfer(conn, hub, board, row, *, expected_sha256=None):
     key = row["blob_key"]
+    if expected_sha256 is not None and key and key != "sha256:" + expected_sha256:
+        raise ValueError("attachment differs from selected digest")
     if not key:
         if not row["stored_path"]:
             return False  # metadata arrived first; only its custodian can supply bytes
         path = Path(row["stored_path"])
         data = _read(path, row, board)
         digest = hashlib.sha256(data).hexdigest()
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise ValueError("upload bytes differ from selected digest")
         receipt = hub.put_attachment(board, row["uid"], digest, data)
         if (not isinstance(receipt, dict) or receipt.get("blob_key") != "sha256:" + digest
                 or receipt.get("sha256") != digest or receipt.get("size") != len(data)):

@@ -64,12 +64,40 @@ def with_source_receipt(conn: sqlite3.Connection, task_id: str, do_update: Calla
     if receipt is None:
         purge(conn, task_id)
         return do_update()
+    fenced = _consumable(conn, task_id, run_id, receipt)
     conn.execute(f"INSERT OR REPLACE INTO {TABLE} (task_id, run_id, receipt) VALUES (?, ?, ?)",
-                 (task_id, run_id, _text(receipt)))
+                 (task_id, run_id, _text(fenced)))
     try:
-        return do_update()
+        out = do_update()
     finally:
         purge(conn, task_id)
+    if fenced is not receipt and _left_running(conn, task_id):
+        from hermes_cli import kanban_db as kb  # only an ending that actually happened records the refusal
+        kb._append_event(conn, task_id, "workspace_source_publish_refused",
+                         {"code": "artifact_selection_changed", "detail": "selection changed after the ending preflight",
+                          "run_uid": fenced.get("run_uid")}, run_id=run_id)
+    return out
+
+
+def _left_running(conn: sqlite3.Connection, task_id: str) -> bool:
+    row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return bool(row) and row[0] != "running"
+
+
+def _consumable(conn: sqlite3.Connection, task_id: str, run_id: Optional[int], receipt: Any) -> Any:
+    """Final fence, inside the ending's write transaction: a portable receipt whose artifact selection was
+    replaced after the preflight (a later authenticated stage) rides as ``retained``, never portable."""
+    try:
+        obj = json.loads(receipt) if isinstance(receipt, str) else receipt
+    except ValueError:
+        return receipt  # malformed text: the Board already treats it as retained
+    if not isinstance(obj, dict) or obj.get("state") not in ("published", "unchanged"):
+        return receipt
+    from hermes_cli import kanban_source_artifacts as artifacts
+    if artifacts.receipt_selection_current(conn, task_id, run_id, obj):
+        return receipt
+    return {"run_uid": obj.get("run_uid"), "state": "retained", "manifest_revision": obj.get("manifest_revision"),
+            "commit": None, "reason": "artifact_selection_changed"}
 
 
 def purge(conn: sqlite3.Connection, task_id: str) -> None:

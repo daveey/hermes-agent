@@ -122,24 +122,47 @@ def attach(conn: sqlite3.Connection, claimed: Any, workspace: str, source: Any,
     if plan is None:
         return None
     mode, revision, manifest = plan
+    if mode == "resume" and isinstance(grant, ws.SourceSnapshot) and grant.manifest_value is None:
+        from dataclasses import asdict
+        from hermes_cli.kanban_source_registration import resume_premanifest
+        try:
+            return resume_premanifest(conn, claimed.id, grant.grant, asdict(grant.custody))
+        except board_calls.SourceCallRefused as exc:
+            raise AttachRefused(exc.code, exc.detail) from exc
+        except sync.LeaseUnavailable as exc:
+            raise AttachRefused("attach_unanswered", str(exc), uncertain=True) from exc
     run_uid = sync.run_uid(conn, claimed.current_run_id)
     if not run_uid:
         raise AttachRefused("no_run_uid", "the run has no portable identity")
-    seen = observe(str(workspace), None)
+    source_path = str(source.path) if source is not None else str(workspace)
+    protocol = max((grant.custody.source_protocol if isinstance(grant, ws.SourceSnapshot) and grant.custody else 1),
+                   (manifest or {}).get("version", 1))
+    identity = None
+    if protocol >= 2:
+        if not manifest:
+            raise AttachRefused("source_identity_refused", "a protocol-2 attach has no published manifest to bind")
+        from hermes_cli.kanban_source_registration import source_identity, match_manifest
+        identity = source_identity(source_path, manifest["source_kind"])
+        match_manifest(identity, manifest)
+    seen = observe(source_path, None)
     run = board_calls.AttachedRun(
         run_id=int(claimed.current_run_id), task_id=claimed.id, run_uid=run_uid, mode=mode,
         manifest_revision=revision, branch=(source.branch if source is not None else seen["branch"]),
-        path=str(workspace), pre_head=seen["head"], manifest=manifest, state="pending")
+        path=source_path, pre_head=seen["head"], manifest=manifest, state="pending",
+        machine=_me(conn), source_protocol=protocol, source_identity=identity)
     board_calls.record_run(conn, run)  # before the call: an unanswered attach may have applied
     try:
-        board_calls.attach(conn, claimed.id, run_uid, mode=mode, manifest_revision=revision)
+        board_calls.attach(conn, claimed.id, run_uid, mode=mode, manifest_revision=revision, source_protocol=protocol)
     except board_calls.BoardLacksSource as exc:
-        _forget(conn, run.run_id)
+        _forget(conn, run)
         if source is not None:
             raise AttachRefused("board_lacks_source", exc.detail) from exc
         return None  # a legacy card on an old Board runs exactly as before, with no custody
     except board_calls.SourceCallRefused as exc:
-        _forget(conn, run.run_id)
+        definite = exc.code in board_calls.NOT_ATTACHED
+        if not definite:  # M3: an earlier unanswered attach of this run may have applied; keep the evidence
+            raise AttachRefused(exc.code, exc.detail, uncertain=True) from exc
+        _forget(conn, run)
         if mode == "legacy_adopt" and exc.code == "legacy_adopt_refused":
             _log.info("workspace_source: %s not adopted (%s); it runs without custody", claimed.id, exc)
             return None
@@ -150,23 +173,30 @@ def attach(conn: sqlite3.Connection, claimed: Any, workspace: str, source: Any,
     return board_calls.attached_run(conn, run.run_id)
 
 
-def _forget(conn: sqlite3.Connection, run_id: int) -> None:
+def _forget(conn: sqlite3.Connection, run: board_calls.AttachedRun) -> None:
+    """Drop this attempt's observation after a refusal proving nothing is attached (M3).
+
+    Compare-and-delete: only the still-``pending`` row of this exact run_uid goes, so a concurrent
+    settlement (another attempt that saw ``applied``) is never erased.
+    """
     from hermes_cli.kanban_db_connect import write_txn
     with write_txn(conn):
-        conn.execute("DELETE FROM kanban_source_runs WHERE run_id = ?", (int(run_id),))
+        conn.execute("DELETE FROM kanban_source_runs WHERE run_id = ? AND run_uid = ? AND state = 'pending'",
+                     (int(run.run_id), run.run_uid))
 
 
 # --- release with a receipt (pre-empts _record_task_failure) ---------------------------------------------------------
 
 def abort_receipt(run: board_calls.AttachedRun, *, not_started: bool) -> dict:
     """``unchanged`` + ``abort: pre_spawn`` when no process ever started and the worktree is exactly what attached
-    (clean, on B, HEAD == manifest.commit, or == the pre-attach HEAD with no manifest); ``retained`` otherwise."""
+    (clean, on B, HEAD == manifest.commit, or == the pre-attach HEAD with no manifest); ``retained`` otherwise.
+    Explicit ``initial`` registration is mid-run and can never qualify for a pre-spawn restore."""
     commit = (run.manifest or {}).get("commit") if run.manifest else None
     seen = observe(run.path, run.branch)
     expected = commit or run.pre_head
     same = (seen["clean"] and seen["head"] is not None and seen["head"] == expected
             and (run.branch is None or seen["branch"] == run.branch))
-    if not_started and same:
+    if not_started and same and run.mode != "initial":
         return {"run_uid": run.run_uid, "state": "unchanged", "abort": "pre_spawn",
                 "manifest_revision": run.manifest_revision, "commit": commit}
     reason = "post_spawn_failure" if not not_started else "pre_spawn_worktree_changed"

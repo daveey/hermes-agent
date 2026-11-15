@@ -108,8 +108,10 @@ def call(conn: sqlite3.Connection, action: str, task_id: str, run_uid: Optional[
     return res
 
 
-def attach(conn: sqlite3.Connection, task_id: str, run_uid: str, *, mode: str, manifest_revision: int) -> dict:
-    return call(conn, "source_attach", task_id, run_uid, mode=mode, manifest_revision=int(manifest_revision))
+def attach(conn: sqlite3.Connection, task_id: str, run_uid: str, *, mode: str, manifest_revision: int,
+           source_protocol: Optional[int] = None) -> dict:
+    protocol = {"source_protocol": source_protocol} if source_protocol is not None else {}
+    return call(conn, "source_attach", task_id, run_uid, mode=mode, manifest_revision=int(manifest_revision), **protocol)
 
 
 def publish(conn: sqlite3.Connection, task_id: str, run_uid: str, *, expected_revision: int, manifest: dict) -> dict:
@@ -158,16 +160,31 @@ class AttachedRun:
     pre_head: Optional[str]
     manifest: Optional[dict]
     state: str  # pending (asked, answer unknown) | attached
+    machine: Optional[str] = None
+    source_protocol: int = 1
+    source_identity: Optional[dict] = None
 
 
-def record_run(conn: sqlite3.Connection, run: AttachedRun) -> None:
+def _ensure_runs(conn: sqlite3.Connection) -> None:
+    conn.execute(_RUNS_DDL)
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(kanban_source_runs)")}
+    for name, ddl in (("machine", "TEXT"), ("source_protocol", "INTEGER NOT NULL DEFAULT 1"),
+                      ("source_identity", "TEXT")):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE kanban_source_runs ADD COLUMN {name} {ddl}")
+
+
+def record_run(conn: sqlite3.Connection, run: AttachedRun, *, allow_nested: bool = False) -> None:
     from hermes_cli.kanban_db_connect import write_txn
-    with write_txn(conn):
-        conn.execute(_RUNS_DDL)
-        conn.execute("INSERT OR REPLACE INTO kanban_source_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    with write_txn(conn, allow_nested=allow_nested):
+        _ensure_runs(conn)
+        conn.execute("INSERT OR REPLACE INTO kanban_source_runs "
+                     "(run_id,task_id,run_uid,mode,manifest_revision,branch,path,pre_head,manifest,state,at,machine,source_protocol,source_identity) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                      (run.run_id, run.task_id, run.run_uid, run.mode, int(run.manifest_revision), run.branch,
                       run.path, run.pre_head, json.dumps(run.manifest) if run.manifest is not None else None,
-                      run.state, int(time.time())))
+                      run.state, int(time.time()), run.machine, run.source_protocol,
+                      json.dumps(run.source_identity) if run.source_identity is not None else None))
 
 
 def attached_run(conn: sqlite3.Connection, run_id: Optional[int]) -> Optional[AttachedRun]:
@@ -180,14 +197,38 @@ def attached_run(conn: sqlite3.Connection, run_id: Optional[int]) -> Optional[At
         return None
     if row is None:
         return None
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(kanban_source_runs)")}
+    identity = conn.execute("SELECT machine, source_protocol FROM kanban_source_runs WHERE run_id = ?",
+                            (int(run_id),)).fetchone() if "machine" in columns else (None, 1)
+    source = conn.execute("SELECT source_identity FROM kanban_source_runs WHERE run_id = ?",
+                          (int(run_id),)).fetchone()[0] if "source_identity" in columns else None
     return AttachedRun(int(row[0]), row[1], row[2], row[3], int(row[4]), row[5], row[6], row[7],
-                       json.loads(row[8]) if row[8] else None, row[9])
+                       json.loads(row[8]) if row[8] else None, row[9], identity[0], int(identity[1]),
+                       json.loads(source) if source else None)
+
+
+# ``source_attach`` refusals the Board raises only after finding no attachment for the run_uid, or that are
+# deterministic for an identical replay before that lookup: nothing is attached for this run. Every other code
+# (``lease_lost``, ``source_attach_conflict``, unknown) may hide an earlier unanswered attach that applied.
+NOT_ATTACHED = frozenset({"board_lacks_source", "legacy_adopt_refused", "initial_attach_refused",
+                          "source_client_required", "source_revision_conflict", "workspace_source_unavailable",
+                          "custody_attached", "custody_retained"})
+
+
+def settle_state(conn: sqlite3.Connection, run_id: int, run_uid: str, before: str, after: str) -> bool:
+    """Compare-and-set one observation's state; a concurrent settlement is never overwritten."""
+    from hermes_cli.kanban_db_connect import write_txn
+    with write_txn(conn):
+        conn.execute(_RUNS_DDL)
+        cur = conn.execute("UPDATE kanban_source_runs SET state = ? WHERE run_id = ? AND run_uid = ? AND state = ?",
+                           (after, int(run_id), run_uid, before))
+    return cur.rowcount == 1
 
 
 def update_run(conn: sqlite3.Connection, run_id: int, **changes: Any) -> None:
     from hermes_cli.kanban_db_connect import write_txn
     sets = ", ".join(f"{k} = ?" for k in changes)
-    values = [json.dumps(v) if k == "manifest" and v is not None else v for k, v in changes.items()]
+    values = [json.dumps(v) if k in {"manifest", "source_identity"} and v is not None else v for k, v in changes.items()]
     with write_txn(conn):
         conn.execute(_RUNS_DDL)
         conn.execute(f"UPDATE kanban_source_runs SET {sets} WHERE run_id = ?", (*values, int(run_id)))

@@ -1939,7 +1939,8 @@ class HubLeaseClient:
         from hermes_cli.kanban_workspace_source import snapshot_from_row
         return sync.Lease(granted=granted, run_uid=run_uid, expires_ms=lease.get("expires"),
                           holder=lease.get("holder"), reason=None if granted else res.get("reason"),
-                          version=res.get("version"), source_snapshot=snapshot_from_row(res.get("row")))
+                          version=res.get("version"), source_snapshot=snapshot_from_row(res.get("row"), grant={
+                              k: res.get(k) for k in ("status", "lease", "source_predecessor")}))
 
     def acquire(self, *, board_id: str, task_uid: str, run_uid: str, gateway_id: str, ttl_s: int,
                 lane: str = "ready", source_protocol: Optional[int] = None) -> sync.Lease:

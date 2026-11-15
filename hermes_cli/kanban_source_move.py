@@ -6,13 +6,17 @@
   with ``HEAD == manifest.commit`` (:func:`parked_refusal`).
 * A RUNNING card publishes first (§4 steps 1-8) and is checked against that fresh result (:func:`publish_for_move`);
   the ``continue_task`` that ends the run carries the receipt.
-* ``--reclaim`` refuses worktree cards and manifest-bearing cards (``reclaim_source_unsupported``).
+* ``--reclaim`` refuses worktree cards and every card with source custody or a manifest (``reclaim_source_unsupported``).
+* A scratch card that registered an external worktree (protocol 2) is a source card too: it publishes before a running
+  move and moves parked only with portable custody; its holder's local check reads the publishing run's external
+  worktree from the journal, never the scratch cwd. A plain scratch card is unaffected.
 * A portable worktree card is not host-only: its capability needs drop ``host_repo`` (:func:`capability_kind`,
   :func:`effective_requires`), also the copy ``create_task`` stored in ``requires``.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any, Mapping, Optional
 
@@ -30,6 +34,41 @@ def _local_matches(path: Optional[str], commit: str) -> bool:
     from hermes_cli.kanban_source_launch import observe
     seen = observe(path, None)
     return bool(seen["clean"] and seen["head"] == commit)
+
+
+def _source_card(row: sqlite3.Row) -> bool:
+    """A card whose source travels with Board custody: every worktree card, and a scratch card that registered an
+    external worktree (it has custody or a manifest). A plain scratch card has neither and moves freely."""
+    kind = row["workspace_kind"]
+    return kind == "worktree" or (kind != "dir" and (row["workspace_source"] is not None
+                                                    or row["workspace_custody"] is not None))
+
+
+def _holder_source_path(conn: sqlite3.Connection, task_id: str, row: sqlite3.Row, manifest: Any) -> Optional[str]:
+    """Where the holder's published source lives: a worktree card's workspace, or for a scratch card the external
+    worktree this host's run registered (journal), never the scratch cwd. That run is the publisher, or, after an
+    unchanged ending (the manifest still names the original publisher), this host's latest run that attached at
+    exactly this manifest (revision and commit). None when this host has no such record."""
+    if row["workspace_kind"] == "worktree":
+        return row["workspace_path"]
+    try:
+        rows = conn.execute("SELECT run_uid, manifest_revision, manifest, path FROM kanban_source_runs "
+                            "WHERE task_id = ? ORDER BY run_id DESC", (task_id,)).fetchall()
+    except sqlite3.OperationalError:  # no journal table: this host never attached a source run
+        return None
+    publisher = manifest.published_by.get("run_uid")
+    for run_uid, revision, attached, path in rows:
+        if not path:
+            continue
+        if run_uid == publisher:
+            return path
+        try:
+            commit = json.loads(attached).get("commit") if attached else None
+        except (TypeError, ValueError, AttributeError):
+            commit = None
+        if revision == manifest.manifest_revision and commit == manifest.commit:
+            return path
+    return None
 
 
 def portable(manifest_value: Any, custody_value: Any) -> Optional[str]:
@@ -60,19 +99,22 @@ def parked_refusal(conn: sqlite3.Connection, task_id: str, *, me: str,
     kind = row["workspace_kind"]
     if kind == "dir":
         return "workspace_bound", "a dir card runs only where its workspace is"
-    if kind != "worktree":
+    if not _source_card(row):
         return None
     manifest_value, custody_value = fresh or (row["workspace_source"], row["workspace_custody"])
     code = portable(manifest_value, custody_value)
     if code == "source_disabled":
-        return "workspace_bound", "a worktree card runs only where its workspace is (workspace_source disabled)"
+        return "workspace_bound", f"a {kind} source card runs only where its source is (workspace_source disabled)"
     if code:
-        return code, f"a worktree card moves only with portable custody ({code})"
+        return code, f"a {kind} source card moves only with portable custody ({code})"
     custody = custody_value if isinstance(custody_value, ws.Custody) else ws.parse_custody(custody_value)
-    commit = ws.parse_manifest(manifest_value).commit
-    if custody is not None and custody.source_holder == me and not _local_matches(row["workspace_path"], commit):
-        return ("workspace_source_unpublished",
-                f"the local worktree is not clean at the published commit {commit[:12]}; let a run publish it")
+    manifest = ws.parse_manifest(manifest_value)
+    commit = manifest.commit
+    if custody is not None and custody.source_holder == me:
+        path = _holder_source_path(conn, task_id, row, manifest)
+        if path is None or not _local_matches(path, commit):
+            return ("workspace_source_unpublished",
+                    f"the local source is not clean at the published commit {commit[:12]}; let a run publish it")
     return None
 
 
@@ -80,7 +122,7 @@ def reclaim_refusal(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     row = _row(conn, task_id)
     if row is None:
         return None
-    if row["workspace_kind"] == "worktree" or row["workspace_source"] is not None:
+    if _source_card(row):
         return "reclaim_source_unsupported"
     return None
 
@@ -89,7 +131,9 @@ def publish_for_move(conn: sqlite3.Connection, task_id: str) -> tuple[Optional[d
     """Publish a running card before its move check: ``(receipt, (manifest, custody), "")`` or
     ``(None, None, refusal_code)``. A run that never attached returns ``(None, None, "")`` (nothing to publish)."""
     row = _row(conn, task_id)
-    if row is None or row["workspace_kind"] != "worktree":
+    # Any non-dir card: a scratch card's external worktree attaches mid-run, so its replica may not show custody yet;
+    # receipt_for_current_run is the authority (no attached run: nothing to publish).
+    if row is None or row["workspace_kind"] == "dir":
         return None, None, ""
     from hermes_cli import kanban_source_board as board_calls
     from hermes_cli.kanban_source_preflight import receipt_for_current_run

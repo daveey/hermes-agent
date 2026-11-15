@@ -64,6 +64,10 @@ class MoveRefused(ValueError):
         self.code = code
 
 
+class _SelectionChanged(Exception):
+    """Raised inside the move's ending transaction to roll it back (the portable receipt went stale)."""
+
+
 def max_moves(cfg: Optional[dict] = None) -> int:
     if cfg is None:
         try:
@@ -346,6 +350,10 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
     requested = bool(policy and policy[0])
 
     def _in_txn(c: sqlite3.Connection, run_id: int) -> None:
+        # The ending's receipt fence may have downgraded the portable receipt that chose this placement.
+        from hermes_cli.kanban_source_artifacts import receipt_selection_current
+        if receipt and not receipt_selection_current(c, task_id, run_id, receipt):
+            raise _SelectionChanged()
         if not requested:
             wn.set_runs_on(c, task_id, plan["runs_on"])
         kb._append_event(c, task_id, MOVED_EVENT, {
@@ -357,8 +365,12 @@ def move_task(conn: sqlite3.Connection, task_id: str, *, runs_on: Any, reason: s
     note = f"Moving to {plan['runs_on']} ({', '.join(plan['matches'])}): {reason}"
     run_id = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
     with carrier.staged(task_id, run_id, receipt) if receipt else contextlib.nullcontext():
-        res = continue_task(conn, task_id, checkpoint=f"{checkpoint.strip()}\n\n[{note}]",
-                            expected_run_id=expected_run_id, in_txn=_in_txn)
+        try:
+            res = continue_task(conn, task_id, checkpoint=f"{checkpoint.strip()}\n\n[{note}]",
+                                expected_run_id=expected_run_id, in_txn=_in_txn)
+        except _SelectionChanged:
+            return {"ok": False, "reason_code": "artifact_selection_changed",
+                    "error": "the artifact selection changed after publishing; the run stays here, retry the move"}
     if not res.get("ok"):
         return {"ok": False, "reason_code": res.get("reason_code") or "not_running", "error": res.get("error")}
     out = {"ok": True, "runs_on": plan["runs_on"], "matches": plan["matches"], "move_no": plan["move_no"],

@@ -816,6 +816,37 @@ releases it without a failure and skips that manifest revision; a source that
 moved or vanished blocks the card for a person. On such cards
 `workspace_kind` and `branch_name` cannot be changed (`source_fenced`).
 
+#### Scratch cards that edit a repository (source protocol 2)
+
+A scratch card's working directory is throwaway, so a repository it edits must
+live in a **linked worktree of a registered clone**, registered with the card.
+An ordinary `git clone` inside the scratch directory, or a worktree of any other
+checkout, is never adopted: it stays on that machine and is lost if the card
+moves. As the worker:
+
+1. Find the registered clone for the repository
+   (`hermes config get kanban.workspace_source.clones`). If none is listed on
+   this machine, do not improvise one; ask for it to be configured.
+2. Create the worktree from that clone, checked out on the card's branch: its
+   assigned `branch_name`, or `wt/<task id>` when none is assigned (any other
+   branch is refused):
+   `git -C <clone> worktree add -b wt/<task id> <absolute path> origin/<base>`
+   (drop `-b` if the branch already exists). The clone must pass the same proof
+   as above (GitHub `origin`, no rewrites), and a path another active card uses
+   is refused.
+3. Register it from the live run with `kanban_heartbeat(source_path=<path>)`.
+   Only an implementation run may register a first source (a review run may only
+   resume one), and a replay with the same path is harmless.
+4. Optionally carry up to 32 files that are not in Git with
+   `kanban_heartbeat(artifacts=[...])` (or `artifacts` on the ending call). Each
+   call replaces the selection with byte snapshots taken at that moment; `[]`
+   clears it. Symlinks, special files and secret-looking names or bytes are
+   refused.
+
+Endings then publish the branch exactly as for worktree cards, and the selected
+artifacts are verified by digest when another machine picks the card up. Until
+a source is registered, the card has no custody and nothing is carried.
+
 ### Idempotent create (for automation / webhooks)
 
 ```bash

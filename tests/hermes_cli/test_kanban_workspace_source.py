@@ -60,7 +60,7 @@ def test_manifest_v1_parses():
 
 
 @pytest.mark.parametrize("bad", [
-    {"version": 2}, {"extra": 1}, {"artifacts": [{"attachment_uid": "u", "filename": "f", "sha256": "0" * 64}]},
+    {"version": 3}, {"extra": 1}, {"artifacts": [{"attachment_uid": "u", "filename": "f", "sha256": "0" * 64}]},
     {"commit": "HEAD"}, {"branch": "wt/t_1"}, {"branch": "refs/heads/../x"}, {"repository": {"id": 1}},
     {"repository": {"id": 42, "full_name": "acme/widget", "url": "https://gitlab.com/acme/widget"}},
     {"manifest_revision": 0}, {"published_by": {"run_uid": "r1"}}, {"source_kind": "dir"},
@@ -319,7 +319,7 @@ def test_pickup_skip_disabled_is_inert(conn):
     ({"workspace_custody": json.dumps(custody(state="retained"))}, {42}, "manifest_invalid"),
     ({"workspace_source": json.dumps(manifest()), "workspace_custody": json.dumps(custody(state="retained"))}, {42},
      "custody retained"),
-    ({"workspace_source": json.dumps(manifest(version=2)), "workspace_custody": json.dumps(custody())}, {42},
+    ({"workspace_source": json.dumps(manifest(version=3)), "workspace_custody": json.dumps(custody())}, {42},
      "manifest_invalid"),
     ({"workspace_source": json.dumps(manifest()), "workspace_custody": json.dumps(custody())}, set(), "no proven clone"),
     ({"workspace_source": json.dumps(manifest()), "workspace_custody": json.dumps(custody())}, {42}, None),

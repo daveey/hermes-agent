@@ -58,7 +58,7 @@ def git(path: str | Path, *args: str, timeout: float = 30, check: bool = True) -
         raise TimeoutError(f"git {' '.join(args)} timed out after {timeout}s") from exc
 
 
-def github_repo(full_name: str) -> dict:
+def github_repo(full_name: str, *, timeout: float = 30) -> dict:
     """``{id, full_name}`` from ``GET /repos/{owner}/{name}`` (follows renames) via the gh CLI and its broker token.
     Raises on any failure: no API access means no proof (fail closed).
 
@@ -68,7 +68,10 @@ def github_repo(full_name: str) -> dict:
     every hub-held card stayed ``retained`` (t_01a1cc30806b0e62 rollout)."""
     from hermes_cli.kanban_gh_argv import dispatcher_gh_argv
     argv = [*dispatcher_gh_argv(), "api", f"repos/{full_name}", "--jq", "{id: .id, full_name: .full_name}"]
-    out = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", timeout=30, check=True)
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", timeout=timeout, check=True)
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"gh api repos/{full_name} timed out after {timeout}s") from exc
     data = json.loads(out.stdout)
     if not isinstance(data.get("id"), int) or not isinstance(data.get("full_name"), str):
         raise ValueError(f"unexpected GitHub API answer for {full_name}")
@@ -113,10 +116,17 @@ def _live_checkout() -> Optional[Path]:
 
 
 def prove_clone(key: str, path: str, *, expected_id: Optional[int] = None,
-                lookup: Optional[Callable[[str], dict]] = None, now: Optional[float] = None) -> ProvenClone:
-    """Prove one registered clone; raises :class:`ProofFailed` with a host-scope code."""
+                lookup: Optional[Callable[[str], dict]] = None, now: Optional[float] = None,
+                budget: Optional[Callable[[float], float]] = None) -> ProvenClone:
+    """Prove one registered clone; raises :class:`ProofFailed` with a host-scope code.
+
+    ``budget(cap)`` returns the seconds a call may take under a caller's deadline (it raises once the deadline is
+    spent); every git call and the default GitHub lookup are capped by it. Without it each call keeps its own cap."""
     now = time.time() if now is None else now
-    lookup = lookup or github_repo
+    cap = budget or (lambda seconds: seconds)
+    if lookup is None:
+        def lookup(full_name: str) -> dict:
+            return github_repo(full_name, timeout=cap(30))
     root = Path(path).expanduser()
     if not root.is_absolute() or not root.is_dir():
         raise ProofFailed("clone_missing", f"{path} is not an absolute directory")
@@ -124,29 +134,29 @@ def prove_clone(key: str, path: str, *, expected_id: Optional[int] = None,
     if live is not None and root.resolve() == live:
         raise ProofFailed("clone_missing", f"{path} is the live checkout; register a dedicated clone")
     try:
-        top = git(root, "rev-parse", "--show-toplevel").stdout.strip()
+        top = git(root, "rev-parse", "--show-toplevel", timeout=cap(30)).stdout.strip()
     except (subprocess.CalledProcessError, TimeoutError) as exc:
         raise ProofFailed("clone_missing", f"{path} is not a git repository ({exc})") from exc
     if Path(top).resolve() != root.resolve():
         raise ProofFailed("clone_missing", f"{path} is not a repository root ({top})")
-    raw = git(root, "config", "--get", "remote.origin.url", check=False).stdout.strip()
+    raw = git(root, "config", "--get", "remote.origin.url", timeout=cap(30), check=False).stdout.strip()
     full_name = canonical_github(raw) if raw else None
     if full_name is None:
         raise ProofFailed("wrong_repo", f"origin {raw or '(none)'} is not a GitHub repository")
-    effective = git(root, "ls-remote", "--get-url", "origin", check=False).stdout.strip()
-    push_effective = git(root, "remote", "get-url", "--push", "origin", check=False).stdout.strip()
-    pushurl = git(root, "config", "--get-all", "remote.origin.pushurl", check=False).stdout.strip()
+    effective = git(root, "ls-remote", "--get-url", "origin", timeout=cap(30), check=False).stdout.strip()
+    push_effective = git(root, "remote", "get-url", "--push", "origin", timeout=cap(30), check=False).stdout.strip()
+    pushurl = git(root, "config", "--get-all", "remote.origin.pushurl", timeout=cap(30), check=False).stdout.strip()
     # Any url.* rule in the clone's OWN config refuses. A global/system rule counts only when it changes this
     # origin's fetch or push URL (both expanded above): every pool worker carries install-push-route's
     # ``url.https://github.com/.pushInsteadOf git@github.com:``, which never touches an https origin, and refusing
     # it made no worker prove a clone (t_01a1cc30806b0e62 rollout).
-    rewrites = git(root, "config", "--local", "--get-regexp", r"^url\.", check=False).stdout.strip()
+    rewrites = git(root, "config", "--local", "--get-regexp", r"^url\.", timeout=cap(30), check=False).stdout.strip()
     if effective != raw or push_effective != raw or pushurl or rewrites:
         raise ProofFailed("origin_rewritten", f"origin {raw} resolves to {effective or '?'}"
                           + (f", pushes to {push_effective or '?'}" if push_effective != raw else "")
                           + (f", pushurl {pushurl}" if pushurl else "") + (" (url.* rewrite set)" if rewrites else ""))
     try:
-        git(root, "ls-remote", "origin", "HEAD", timeout=LS_REMOTE_TIMEOUT_S)
+        git(root, "ls-remote", "origin", "HEAD", timeout=cap(LS_REMOTE_TIMEOUT_S))
     except (subprocess.CalledProcessError, TimeoutError) as exc:
         raise ProofFailed("origin_unreachable", f"ls-remote origin HEAD failed: {exc}") from exc
     try:

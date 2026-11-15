@@ -142,19 +142,29 @@ def check_local(deadline: _Deadline, path: str) -> None:
             raise PublishRefused("source_lfs_unsupported", f"{rel} routes files through git-lfs")
 
 
-def prove_origin(path: str, cfg: Settings, *, lookup: Optional[Callable[[str], dict]] = None) -> clones.ProvenClone:
-    """The registered clone this worktree belongs to, proven now (§3: GitHub, no rewrites, repository id)."""
+def prove_origin(path: str, cfg: Settings, *, lookup: Optional[Callable[[str], dict]] = None,
+                 deadline: Optional[_Deadline] = None) -> clones.ProvenClone:
+    """The registered clone this worktree belongs to, proven now (§3: GitHub, no rewrites, repository id).
+
+    With ``deadline`` (an ending's preflight) every git call and the GitHub lookup are capped by what is left of
+    it, and a proof that fails once the budget is spent is ``preflight_timeout`` rather than an origin fault."""
+    budget = deadline.left if deadline is not None else None
     try:
-        common = Path(clones.git(path, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip())
+        common = Path(clones.git(path, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                                 timeout=budget(30) if budget else 30).stdout.strip())
     except (subprocess.CalledProcessError, TimeoutError) as exc:
+        if deadline is not None:
+            deadline.left()
         raise PublishRefused("source_clone_unregistered", f"{path} is not a git worktree ({exc})") from exc
     for key, clone_path in sorted(cfg.clones.items()):
         root = Path(clone_path).expanduser()
         if (root / ".git").resolve() != common.resolve():
             continue
         try:
-            return clones.prove_clone(key, str(root), lookup=lookup)
+            return clones.prove_clone(key, str(root), lookup=lookup, budget=budget)
         except clones.ProofFailed as exc:
+            if deadline is not None:
+                deadline.left()  # a call cut short by the spent budget is a timeout, not an origin fault
             code = {"wrong_repo": "source_remote_unsupported"}.get(exc.code, exc.code)
             raise PublishRefused(code, exc.detail) from exc
     owner = common.parent if common.name == ".git" else common
@@ -362,6 +372,8 @@ class Published:
     commit: str
     revision: int
     pushed: bool
+    source_identity: Optional[dict] = None
+    stale: Optional[Exception] = None  # applied by the Board, then superseded locally (not portable)
 
 
 def _default_branch(deadline: _Deadline, path: str) -> tuple[Optional[str], Optional[str]]:
@@ -411,15 +423,72 @@ def _push(deadline: _Deadline, path: str, cfg: Settings, branch: str, head: str,
         raise PublishRefused(f"push_failed:{klass}", text.strip()[-200:]) from exc
 
 
+def source_artifacts(conn, task_id, prior, run_uid, deadline):
+    from hermes_cli import kanban_source_artifacts as artifacts
+    try:
+        return artifacts.portable(conn, task_id, prior, run_uid, bound=deadline)
+    except artifacts.ArtifactRefused as exc:
+        raise PublishRefused(exc.code, exc.detail) from exc
+
+
+def selection_token(conn, task_id, run_uid):
+    """The explicit selection read BEFORE transport; publication_fence compares against it."""
+    from hermes_cli import kanban_source_artifacts as artifacts
+    return artifacts.selected(conn, task_id, run_uid)
+
+
+def publication_fence(conn, task_id, run, token):
+    from hermes_cli import kanban_source_artifacts as artifacts
+    try:
+        artifacts.publication_fence(conn, task_id, run, token)
+    except artifacts.ArtifactRefused as exc:
+        raise PublishRefused(exc.code, exc.detail) from exc
+
+
+def _identity_exempt(run) -> bool:
+    return run.source_protocol < 2 and (run.manifest or {}).get("version", 1) < 2
+
+
+def validate_run_identity(run, *, clone=None):
+    """V2 observations fail closed; v1 needs no invented historical identity."""
+    from hermes_cli import kanban_source_registration as registration
+    from hermes_cli.kanban_source_launch import AttachRefused
+    if _identity_exempt(run):
+        return
+    kind = (run.manifest or {}).get("source_kind") or (run.source_identity or {}).get("source_kind", "scratch_external")
+    current = registration.identity_from_clone(clone, kind) if clone is not None else None
+    try:
+        registration.validate_identity(run, current=current)
+    except AttachRefused as exc:
+        raise PublishRefused(exc.code, exc.detail) from exc
+
+
+def prove_run_identity(run, cfg: Settings, deadline: _Deadline, *,
+                       lookup: Optional[Callable[[str], dict]] = None) -> Optional[clones.ProvenClone]:
+    """An ending's v2 identity check: one origin proof under the ending's deadline, handed on to :func:`publish`
+    so the ending proves its origin once. v1 runs prove nothing here (``publish`` proves them when it runs)."""
+    if _identity_exempt(run):
+        return None
+    if not run.path:
+        validate_run_identity(run)  # refuses: an observation without a path has no identity to prove
+    clone = prove_origin(str(run.path), cfg, lookup=lookup, deadline=deadline)
+    validate_run_identity(run, clone=clone)
+    return clone
+
+
 def publish(conn: sqlite3.Connection, task: Any, run: board_calls.AttachedRun, cfg: Settings, deadline: _Deadline,
-            *, lookup: Optional[Callable[[str], dict]] = None, machine: str) -> Published:
-    """Steps 1-8 for an attached run's worktree. Returns the Board's new manifest; raises :class:`PublishRefused`."""
+            *, lookup: Optional[Callable[[str], dict]] = None, machine: str,
+            clone: Optional[clones.ProvenClone] = None) -> Published:
+    """Steps 1-8 for an attached run's worktree. Returns the Board's new manifest; raises :class:`PublishRefused`.
+    ``clone`` is this ending's proof from :func:`prove_run_identity`; without it the origin is proven here."""
     path, prior = str(run.path or ""), run.manifest
     seen = observe(deadline, path, remote=False)
     if not seen.head or not seen.branch:
         raise PublishRefused("source_lost", f"{path} is gone or has no branch checked out")
-    clone = prove_origin(path, cfg, lookup=lookup)
-    deadline.left()  # the proof (GitHub API + ls-remote, each with its own cap) counts against the S6 budget
+    if clone is None:
+        clone = prove_origin(path, cfg, lookup=lookup, deadline=deadline)
+    validate_run_identity(run, clone=clone)
+    deadline.left()
     default_name, default_sha = _default_branch(deadline, path)
     remote = ls_remote(deadline, path, seen.branch)
     check_branch(task.id, seen.branch, manifest_branch=(prior or {}).get("branch"),
@@ -456,15 +525,21 @@ def publish(conn: sqlite3.Connection, task: Any, run: board_calls.AttachedRun, c
     if after.remote != seen.head or after.head != seen.head or not after.clean or after.branch != seen.branch:
         raise PublishRefused("publish_reobserve_failed", "the worktree or the remote branch moved during publish")
     expected = int(prior["manifest_revision"]) if prior else int(run.manifest_revision or 0)
-    if prior and prior.get("commit") == seen.head:
+    token = selection_token(conn, task.id, run.run_uid)
+    artifacts = source_artifacts(conn, task.id, prior, run.run_uid, deadline)
+    deadline.left()
+    publication_fence(conn, task.id, run, token)
+    source_kind = (prior or {}).get("source_kind") or (run.source_identity or {}).get("source_kind", "task_worktree")
+    version = max((prior or {}).get("version", 1), 2 if artifacts or source_kind == "scratch_external" else 1)
+    if prior and prior.get("commit") == seen.head and prior.get("artifacts", []) == artifacts:
         return Published(prior, seen.head, expected, pushed)
     manifest = {
-        "version": 1, "repository": {"id": clone.repository_id, "full_name": clone.full_name,
+        "version": version, "repository": {"id": clone.repository_id, "full_name": clone.full_name,
                                      "url": f"https://github.com/{clone.full_name}"},
         "branch": f"refs/heads/{seen.branch}", "commit": seen.head,
         "base_commit": (prior or {}).get("base_commit") or default_sha, "published_at": int(time.time() * 1000),
         "manifest_revision": expected + 1, "published_by": {"run_uid": run.run_uid, "machine": machine},
-        "source_kind": "task_worktree", "artifacts": [],
+        "source_kind": source_kind, "artifacts": artifacts,
     }
     try:
         board_calls.publish(conn, task.id, run.run_uid, expected_revision=expected, manifest=manifest)
@@ -473,4 +548,10 @@ def publish(conn: sqlite3.Connection, task: Any, run: board_calls.AttachedRun, c
                              exc.detail) from exc
     except Exception as exc:  # health: allow BLE001 -- an unanswered publish is fail-closed (retained), never retried
         raise PublishRefused("publish_source:unanswered", str(exc)[:200]) from exc
-    return Published(manifest, seen.head, expected + 1, pushed)
+    from hermes_cli.kanban_source_registration import identity_from_clone
+    stale = None
+    try:
+        publication_fence(conn, task.id, run, token)
+    except PublishRefused as exc:
+        stale = exc  # the Board applied this revision: record it, but never report it portable
+    return Published(manifest, seen.head, expected + 1, pushed, identity_from_clone(clone, source_kind), stale)

@@ -706,6 +706,15 @@ KANBAN_HEARTBEAT_SCHEMA = _schema(
                 "Optional short note describing current progress. "
                 "Shown in the event log."
         )),
+        "source_path": _prop("string", (
+            "Scratch cards only: absolute path of the linked Git worktree (on this task's "
+            "assigned branch, from a configured workspace-source clone) that this run created. "
+            "Registers it so a move or reclaim never strands it."
+        )),
+        "artifacts": {"type": "array", "items": {"type": "string"}, "description": (
+            "Paths of files to carry with the registered source (max 32). Replaces this run's "
+            "selection with byte snapshots; [] clears it."
+        )},
     },
     [],
 )

@@ -56,19 +56,29 @@ def compute_receipt(conn: sqlite3.Connection, task_id: str, run: board_calls.Att
         return _retained(run, "preflight_in_transaction")
     deadline = pub._Deadline(cfg.preflight_timeout_s)
     try:
+        clone = pub.prove_run_identity(run, cfg, deadline)
         manifest = run.manifest
+        token = pub.selection_token(conn, task_id, run.run_uid)
+        artifacts = pub.source_artifacts(conn, task_id, manifest, run.run_uid, deadline)
+        deadline.left()
         seen = pub.observe(deadline, str(run.path or ""), remote=False)
-        if manifest and seen.clean and seen.head == manifest["commit"] and seen.branch and \
+        if manifest and manifest.get("artifacts", []) == artifacts and seen.clean and seen.head == manifest["commit"] and seen.branch and \
                 f"refs/heads/{seen.branch}" == manifest["branch"] and \
                 pub.ls_remote(deadline, str(run.path), seen.branch) == manifest["commit"]:
+            pub.publication_fence(conn, task_id, run, token)
             return {"run_uid": run.run_uid, "state": "unchanged", "manifest_revision": int(manifest["manifest_revision"]),
                     "commit": manifest["commit"]}
         if not (cfg.publish_on_park if publish is None else publish):
             return _retained(run, "publish_disabled")
         from hermes_cli import kanban_db_sync as sync
         machine = sync._state(conn)["gateway_id"]
-        done = pub.publish(conn, _task(conn, task_id), run, cfg, deadline, machine=machine)
-        board_calls.update_run(conn, run.run_id, manifest=done.manifest, manifest_revision=done.revision)
+        done = pub.publish(conn, _task(conn, task_id), run, cfg, deadline, machine=machine, clone=clone)
+        identity = {}
+        if done.manifest.get("version", 1) >= 2 and done.source_identity is not None:
+            identity = {"source_identity": done.source_identity, "source_protocol": 2}
+        board_calls.update_run(conn, run.run_id, manifest=done.manifest, manifest_revision=done.revision, **identity)
+        if done.stale is not None:
+            raise done.stale
         if done.manifest.get("published_by", {}).get("run_uid") != run.run_uid:
             return {"run_uid": run.run_uid, "state": "unchanged", "manifest_revision": done.revision,
                     "commit": done.commit}

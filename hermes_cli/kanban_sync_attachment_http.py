@@ -15,12 +15,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None  # gateway credentials never follow a redirect, even on PUT
 
 
-def _request(hub, method: str, path: str, data: bytes | None, cap: int) -> bytes:
+def _request(hub, method: str, path: str, data: bytes | None, cap: int, *,
+             content_type: str = "application/octet-stream", timeout: float = 5.0) -> bytes:
     from hermes_cli.kanban_sync_client import HubError
     from hermes_cli.kanban_sync_attachment_deadline import Transfer
-    headers = {**hub._headers(), "content-type": "application/octet-stream"}
+    headers = {**hub._headers(), "content-type": content_type}
     request = urllib.request.Request(hub.ident.url + path, data=data, headers=headers, method=method)
-    budget = hub._remaining(5.0)
+    budget = hub._remaining(timeout)
     transfer = Transfer(budget)
 
     def read():

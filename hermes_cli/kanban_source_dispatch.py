@@ -65,7 +65,10 @@ def _resolve(conn: sqlite3.Connection, claimed: Any, snapshot: Any, launch: Any,
                 revision = snapshot.custody.manifest_revision if snapshot.custody else None
             exc.evidence["manifest_revision"] = revision
             raise
-        return Path(source.path), source.branch, source
+        workspace = (kbw.resolve_workspace(claimed, board=board) if claimed.workspace_kind == "scratch"
+                     and source.source_kind == "scratch_external"
+                     else Path(source.path))
+        return workspace, source.branch, source
     if claimed.workspace_kind == "worktree":
         workspace, branch = kbw.resolve_worktree_for_dispatch(conn, claimed, board=board)
         return workspace, branch, None

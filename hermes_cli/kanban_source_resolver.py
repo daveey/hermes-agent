@@ -185,6 +185,18 @@ def resolve_source_workspace(conn: sqlite3.Connection, task: Any, snapshot: Sour
     if not cfg.enabled:
         raise WorkspaceSourceRefusal("source_disabled", "kanban.workspace_source is disabled on this host")
     bound = _Bound(cfg.materialize_bound(ttl_s), clock)
+    resolved = _resolve_source_workspace(conn, task, snapshot, me=me, cfg=cfg, bound=bound, lookup=lookup)
+    if snapshot.manifest_value is not None or (snapshot.custody and snapshot.custody.source_protocol == 2):
+        from hermes_cli.kanban_source_artifact_launch import verify
+        from hermes_cli.kanban_source_launch import AttachRefused
+        try:
+            verify(conn, task.id, snapshot, bound)
+        except AttachRefused as exc:
+            raise WorkspaceSourceRefusal("source_identity_refused", exc.detail) from exc
+    return resolved
+
+
+def _resolve_source_workspace(conn, task, snapshot, *, me, cfg, bound, lookup):
     manifest = None
     if snapshot.manifest_value is not None:
         try:
@@ -192,6 +204,16 @@ def resolve_source_workspace(conn: sqlite3.Connection, task: Any, snapshot: Sour
         except ManifestInvalid as exc:
             raise WorkspaceSourceRefusal("manifest_invalid", str(exc)) from exc
     custody = snapshot.custody
+    if manifest is None and custody is not None and custody.source_protocol == 2:
+        from dataclasses import asdict
+        from hermes_cli import kanban_source_registration as registration
+        from hermes_cli.kanban_source_launch import AttachRefused
+        try:
+            previous = registration.predecessor_for_grant(conn, task.id, snapshot.grant, asdict(custody))
+        except AttachRefused as exc:
+            raise WorkspaceSourceRefusal("source_identity_refused", exc.detail) from exc
+        return ResolvedSource(path=previous.path, branch=previous.branch, commit=None,
+                              manifest_revision=0, mode="resume", source_kind="scratch_external")
     if custody is not None and custody.source_holder == me:
         local = _local_holder_copy(bound, task, manifest, cfg)
         if local is not None:
