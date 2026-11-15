@@ -116,6 +116,22 @@ def test_conflicting_evidence_fails_closed(receipt, case):
     assert not is_core_update_requeue(conn, conn.execute("SELECT * FROM task_runs").fetchone())
 
 
+@pytest.mark.parametrize("value", [0, -1, 42.0])
+def test_matching_malformed_pid_stays_a_fault(receipt, value):
+    receipt[1]["prev_pid"] = value
+    receipt[2]["pid"] = int(value)
+    run = populate(receipt)
+    assert not is_core_update_requeue(receipt[0], run)
+
+
+@pytest.mark.parametrize("value", ["", "   ", 99, None])
+def test_matching_malformed_claim_stays_a_fault(receipt, value):
+    receipt[1]["prev_lock"] = value
+    receipt[2]["claimer"] = value
+    run = populate(receipt)
+    assert not is_core_update_requeue(receipt[0], run)
+
+
 def test_fault_before_checkpoint_does_not_invalidate_it(receipt):
     populate(receipt, crash_time=99)
     assert not owner_faulted_since(receipt[0], "owner", 101)
