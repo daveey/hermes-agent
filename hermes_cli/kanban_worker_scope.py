@@ -85,13 +85,14 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess | None:
 
 
 def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | None = None,
-                 started_at: float | None = None, exit_code: int | None = None) -> dict | None:
+                 started_at: float | None = None, exit_code: int | None = None,
+                 worker_pids: set[int] | None = None) -> dict | None:
     """The run scope's failure, or None when the scope did not fail.
 
     Under ``OOMPolicy=continue`` a child's OOM kill leaves the scope running, so the
     worker's own ``oom_kill`` count no longer means the worker died of it. The kernel's
     record names the victim instead: the run failed by OOM only when that victim is the
-    worker ``pid`` itself (the agent was the largest process in its scope). That lookup
+    spawned ``pid`` or any bound interpreter in ``worker_pids``. That lookup
     runs whenever ``pid`` is known, not only when this process probed the policy: a
     dispatcher restarted after the spawn has no probe verdict, and the agent's own SIGKILL
     leaves no snapshot. ``started_at`` (the run's start, epoch seconds) bounds the
@@ -112,12 +113,15 @@ def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | 
     result = props.get("Result") if loaded else None
     if snapshot.get("oom_kill", 0) > 0 and not continued:
         result = "oom-kill"
+    identities = set(worker_pids or ())
+    if pid:
+        identities.add(pid)
     victim = None
     since = journal_since(started_at)
     if result == "oom-kill":
         victim = kernel_oom_victim(unit, since=since)
-    elif result != "signal" and pid and exit_code != 0:  # rc 0: the worker outlived any kill
-        victim = kernel_oom_victim(unit, pid=pid, since=since)
+    elif result != "signal" and identities and exit_code != 0:  # rc 0: the worker outlived any kill
+        victim = kernel_oom_victim(unit, pid=pid, since=since, worker_pids=identities)
         result = "oom-kill" if victim else result
     if result not in {"oom-kill", "signal"}:
         return None
@@ -127,7 +131,7 @@ def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | 
         "memory_peak_bytes": snapshot.get("memory_peak_bytes", _bytes(props.get("MemoryPeak", ""))),
     }
     if victim:
-        failure["oom_victim"] = {**victim, "is_worker": bool(pid) and victim["pid"] == pid}
+        failure["oom_victim"] = {**victim, "is_worker": victim["pid"] in identities}
         if failure["memory_max_bytes"] is None:
             failure["memory_max_bytes"] = victim.get("limit_bytes")
     return failure
@@ -136,6 +140,33 @@ def read_failure(task_id: str, run_id: int | None, log: str = "", *, pid: int | 
 _OOM_LINE = re.compile(r"oom-kill:.*?task_memcg=([^,]+),task=([^,]*),pid=(\d+)")
 _KILLED_LINE = re.compile(r"Killed process (\d+) \(.*?\).*?anon-rss:(\d+)kB")
 _USAGE_LINE = re.compile(r"memory: usage \d+kB, limit (\d+)kB")
+
+
+def read_run_failure(conn, task_id, run_id, log, *, pid, exit_code=None):
+    """Read scope failure with the run's durable worker identities and time boundary."""
+    return read_failure(task_id, run_id, log, pid=pid, worker_pids=run_worker_pids(conn, task_id, run_id, pid),
+                        started_at=run_started_at(conn, run_id), exit_code=exit_code)
+
+
+def run_worker_pids(conn: sqlite3.Connection | None, task_id: str, run_id: int | None, pid: int) -> set[int]:
+    """Launcher plus every bound interpreter in this run, including before rebinds."""
+    pids = {pid}
+    if conn is None or run_id is None:
+        return pids
+    try:
+        rows = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='worker_bound'",
+                            (task_id, run_id)).fetchall()
+    except sqlite3.Error:
+        return pids
+    for row in rows:
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, ValueError):
+            continue
+        bound = payload.get("pid") if isinstance(payload, dict) else None
+        if type(bound) is int and bound > 0:
+            pids.add(bound)
+    return pids
 
 
 def run_started_at(conn: sqlite3.Connection | None, run_id: int | None) -> int | None:
@@ -157,7 +188,8 @@ def journal_since(started_at: float | None) -> str:
         return "-24h"
 
 
-def kernel_oom_victim(unit: str, *, pid: int | None = None, since: str = "-24h") -> dict | None:
+def kernel_oom_victim(unit: str, *, pid: int | None = None, since: str = "-24h",
+                      worker_pids: set[int] | None = None) -> dict | None:
     """The kernel's last OOM victim in ``unit`` (``pid`` restricts it to that process).
 
     ``{"pid", "task", "anon_rss_bytes", "limit_bytes"}`` from ``journalctl -k``, or None
@@ -182,7 +214,7 @@ def kernel_oom_victim(unit: str, *, pid: int | None = None, since: str = "-24h")
             pending = ({"pid": int(m.group(3)), "task": m.group(2), "limit_bytes": limit}
                        if m.group(1).endswith("/" + unit) else None)
         elif pending and (m := _KILLED_LINE.search(line)) and int(m.group(1)) == pending["pid"]:
-            if pid is None or pending["pid"] == pid:
+            if (pending["pid"] in worker_pids if worker_pids is not None else pid is None or pending["pid"] == pid):
                 found = {**pending, "anon_rss_bytes": int(m.group(2)) * 1024}
             pending = None
     return found

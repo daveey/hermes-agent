@@ -1240,7 +1240,8 @@ class LocalEnvironment(BaseEnvironment):
         if login:
             cmd_string = _append_dropped_path_entries(cmd_string, run_env.get("PATH", ""))
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
-        args = [bash, *(["-l"] if login else []), "-c", cmd_string]
+        from tools.terminal_oom import prefer_command_victim
+        args = prefer_command_victim([bash, *(["-l"] if login else []), "-c", cmd_string])
         self._recover_cwd()
         # [daveey] terminal.update_survivable_processes: own scope, not owned by this process.
         if survivable is not None and (proc := survivable.spawn(args, run_env, self.cwd, stdin_data,
@@ -1291,8 +1292,9 @@ class LocalEnvironment(BaseEnvironment):
         its group die with Hermes however Hermes dies (``spawn_owned``), stdin/stdout as byte pipes.
         ``_stop_long_lived`` kills the group and releases it."""
         from hermes_cli.process_identity import spawn_owned
+        from tools.terminal_oom import prefer_command_victim
         proc = spawn_owned(  # windows-footgun: ok — argv list, no shell; group kill gated on _IS_WINDOWS
-            list(argv), purpose="long-lived environment process",
+            prefer_command_victim(list(argv)), purpose="long-lived environment process",
             env=_make_run_env({**self.env, **(child_env or {})}), cwd=self.cwd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             **({"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}))

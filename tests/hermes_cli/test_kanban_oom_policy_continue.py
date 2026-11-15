@@ -236,6 +236,71 @@ def test_kernel_log_read_is_bounded_by_the_run_start(monkeypatch):
     assert seen[0][seen[0].index("-S") + 1] == "-24h"
 
 
+def _worker5_journal():
+    from pathlib import Path
+    return (Path(__file__).parent / "fixtures/oom-agent-victim.txt").read_text().split("### worker-7")[0]
+
+
+def test_bound_interpreter_victim_differs_from_launcher(monkeypatch):
+    _journal_argv(monkeypatch, text=_worker5_journal())
+    failure = scope.read_failure("t_01a1da7f22dada56", 16314, pid=2111911, worker_pids={2112259})
+    assert failure is not None
+    assert "Worker was OOM-killed at 8192 MiB" in scope.describe(failure)
+    assert failure["oom_victim"]["is_worker"]
+
+
+def test_command_victim_outside_run_process_set_is_not_failure(monkeypatch):
+    _journal_argv(monkeypatch, text=_worker5_journal())
+    assert scope.read_failure("t_01a1da7f22dada56", 16314, pid=2111911, worker_pids={42, 43}) is None
+
+
+def test_dispatch_books_bound_victim_and_uplifts_retry(tmp_path, monkeypatch):
+    from pathlib import Path
+    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc, kanban_db_dispatch as kbd
+    from tests.hermes_cli.test_kanban_worker_exit_trailer import _dead_worker_with_log
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(scope, "mem_available_bytes", lambda: 40 * 1024 ** 3)
+    kbd._recent_worker_exits.clear()
+    kb.init_db()
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="bound interpreter OOM", assignee="a")
+        _dead_worker_with_log(conn, tid, 2111911, 1)
+        rid = kb.get_task(conn, tid).current_run_id
+        for bound in (2112259, 2112260, 2112261):
+            conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?,?,?,?,?)",
+                         (tid, rid, "worker_bound", json.dumps({"pid": bound}), 1))
+        conn.commit()
+        journal = _worker5_journal().replace("t_01a1da7f22dada56-run-16314", f"{tid}-run-{rid}")
+        _journal_argv(monkeypatch, text=journal)
+        monkeypatch.setattr(kbd, "crash_worker_output", lambda *a, **kw: "managed worker lost: EOFError")
+        kbd.detect_crashed_workers(conn)
+        run = conn.execute("SELECT * FROM task_runs WHERE id=?", (rid,)).fetchone()
+        assert run["outcome"] == "oom_killed"
+        assert "OOM-killed at 8192 MiB" in kb.get_task(conn, tid).last_failure_error
+    # A small base avoids the independent 12-GiB ceiling; OOM doubles the normal first-run uplift.
+    argv = ["systemd-run", "--scope", "--property", f"MemoryMax={2 * 1024 ** 3}", "--", "hermes"]
+    assert f"MemoryMax={8 * 1024 ** 3}" in scope.apply_oom_recovery(argv, tid)
+
+
+def test_run_worker_pids_is_run_scoped_and_tolerates_bad_events():
+    import sqlite3
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("CREATE TABLE task_events (task_id TEXT, run_id INTEGER, kind TEXT, payload TEXT)")
+        events = [("t_x", 1, "worker_bound", json.dumps({"pid": p})) for p in (2, 3, 4, 0, -1, True, "5")]
+        events += [("t_other", 1, "worker_bound", '{"pid":6}'), ("t_x", 2, "worker_bound", '{"pid":7}'),
+                   ("t_x", 1, "spawned", '{"pid":8}')]
+        events += [("t_x", 1, "worker_bound", raw) for raw in (None, "{", "[]", "null", "{}")]
+        conn.executemany("INSERT INTO task_events VALUES (?,?,?,?)", events)
+        assert scope.run_worker_pids(conn, "t_x", 1, 9) == {2, 3, 4, 9}
+        assert scope.run_worker_pids(conn, "t_x", None, 9) == {9}
+    assert scope.run_worker_pids(None, "t_x", 1, 9) == {9}
+
+
 def test_classify_dead_worker_passes_the_run_start(monkeypatch):
     import sqlite3
     from hermes_cli import kanban_db_dispatch as kbd
@@ -251,7 +316,7 @@ def test_classify_dead_worker_passes_the_run_start(monkeypatch):
                                                              "memory_max_bytes": None, "memory_peak_bytes": None})
     monkeypatch.setattr(kbd, "crash_worker_output", lambda *a, **kw: "")
     kbd._classify_dead_worker(4242, "h:1", None, task_id="t_x", run_id=5, conn=conn)
-    assert seen == {"pid": 4242, "started_at": 1794550650, "exit_code": None}
+    assert seen == {"pid": 4242, "worker_pids": {4242}, "started_at": 1794550650, "exit_code": None}
 
 
 def test_failure_path_reads_the_worker_log_once(monkeypatch):

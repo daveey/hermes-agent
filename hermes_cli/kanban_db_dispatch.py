@@ -1134,7 +1134,7 @@ def _classify_dead_worker(
     """
     log = (_kb.read_worker_log(task_id, tail_bytes=None, board=board) or "") if task_id and run_id else None
     exited = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board, run_id=run_id, log=log)
-    failure = _worker_scope.read_failure(task_id, run_id, log or "", pid=pid, started_at=_worker_scope.run_started_at(conn, run_id),
+    failure = _worker_scope.read_run_failure(conn, task_id, run_id, log or "", pid=pid,
                                          exit_code=0 if exited.kind == "clean_exit" else None) if task_id else None  # rc 0 skips the kernel log
     if failure:
         kind = "oom_killed" if failure["scope_result"] == "oom-kill" else "signaled"
