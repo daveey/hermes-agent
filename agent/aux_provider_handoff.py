@@ -189,8 +189,10 @@ def provider_worker_scope() -> Any:
     (run inside the daemon, whose context copy carries the relay task name; never prompt or token content).
     A no-op context when accounting cannot load."""
     try:
-        from agent.auxiliary_client import _RELAY_AUX_CALL_CONTEXT
         from hermes_cli import loop_accounting
+        if not loop_accounting.scopes_enabled():
+            return contextlib.nullcontext()
+        from agent.auxiliary_client import _RELAY_AUX_CALL_CONTEXT
         operation = str((_RELAY_AUX_CALL_CONTEXT.get() or {}).get("task") or "unknown")[:48]
         return loop_accounting.scope(f"aux_provider/{operation}")
     except Exception:  # health: allow BLE001 -- accounting must never fail a provider call

@@ -418,7 +418,6 @@ def _darwin_thread_cpu() -> list[tuple[int, str, float]]:
         import ctypes
         import ctypes.util
         lib = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True)
-        libc = ctypes.CDLL(None)
 
         class _ThreadInfo(ctypes.Structure):
             _fields_ = [("user", ctypes.c_uint64), ("system", ctypes.c_uint64), ("cpu_usage", ctypes.c_int32),
@@ -426,15 +425,11 @@ def _darwin_thread_cpu() -> list[tuple[int, str, float]]:
                         ("sleep_time", ctypes.c_int32), ("curpri", ctypes.c_int32), ("priority", ctypes.c_int32),
                         ("maxpriority", ctypes.c_int32), ("name", ctypes.c_char * 64)]
 
-        class _Timebase(ctypes.Structure):
-            _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
-
-        tb = _Timebase()
-        libc.mach_timebase_info(ctypes.byref(tb))
-        scale = (tb.numer / tb.denom if tb.denom else 1.0) / 1e9
         pid = os.getpid()
         ids = (ctypes.c_uint64 * 1024)()
-        got = lib.proc_pidinfo(pid, 6, 0, ids, ctypes.sizeof(ids))  # PROC_PIDLISTTHREADS
+        # PROC_PIDLISTTHREADIDS (28) returns thread ids (== threading.native_id), which is what
+        # PROC_PIDTHREADID64INFO (15) looks up; PROC_PIDLISTTHREADS (6) would return pthread handles.
+        got = lib.proc_pidinfo(pid, 28, 0, ids, ctypes.sizeof(ids))
         if got <= 0:
             return []
         out = []
@@ -442,7 +437,7 @@ def _darwin_thread_cpu() -> list[tuple[int, str, float]]:
             info = _ThreadInfo()
             if lib.proc_pidinfo(pid, 15, ids[i], ctypes.byref(info), ctypes.sizeof(info)) <= 0:  # THREADID64INFO
                 continue
-            out.append((int(ids[i]), info.name.decode("utf-8", "replace"), (info.user + info.system) * scale))
+            out.append((int(ids[i]), info.name.decode("utf-8", "replace"), (info.user + info.system) / 1e9))  # pth_*_time are already ns
         total = sum(c for _, _, c in out)
         if total > (os.times().user + os.times().system) * 1.25 + 1.0:
             return []
@@ -458,7 +453,7 @@ def thread_cpu() -> list[dict[str, Any]]:
     names = {t.native_id: t.name for t in threading.enumerate() if t.native_id is not None}
     with _lock:
         _fold_exited()
-        accounted_by = dict(_thread_accounted)
+        accounted_by = _copy_accounted()
     out: list[dict[str, Any]] = []
     hz = _clk_tck()
     task_dir = "/proc/self/task"
@@ -509,11 +504,13 @@ def snapshot() -> dict[str, Any]:
         live_tids = {t.native_id for t in threading.enumerate() if t.native_id is not None}
     with _lock:
         _fold_exited()
+        by_tid = _copy_accounted()
         if live_tids:
-            for tid in [tid for tid in _thread_accounted if tid not in live_tids]:
-                _state["exited_accounted"] = _state.get("exited_accounted", 0.0) + _thread_accounted.pop(tid)
-        accounted_total = sum(_thread_accounted.values()) + _state.get("exited_accounted", 0.0)
-        accounted_live = sum(_thread_accounted.get(t["tid"], 0.0) for t in threads)
+            for tid in [tid for tid in by_tid if tid not in live_tids]:
+                _state["exited_accounted"] = _state.get("exited_accounted", 0.0) + by_tid.pop(tid)
+                _thread_accounted.pop(tid, None)
+        accounted_total = sum(by_tid.values()) + _state.get("exited_accounted", 0.0)
+        accounted_live = sum(by_tid.get(t["tid"], 0.0) for t in threads)
     process_cpu = times.user + times.system
     return {
         "version": SCHEMA_VERSION,
@@ -541,7 +538,9 @@ def _residual(threads: list[dict[str, Any]], process_cpu: float, accounted_total
               have_cpu: bool) -> dict[str, Any]:
     """CPU no accounting scope owns, per thread-name family. ``families[f].unaccounted_cpu_s`` is that family's
     thread CPU minus the CPU its outermost scopes accounted (clamped at 0, so never negative); ``exited`` holds
-    the threads gone since start (process CPU not on a live thread, against the accounted CPU they folded in)."""
+    the threads gone since start (process CPU not on a live thread, against the accounted CPU they folded in).
+    Note: ``process.accounted_cpu_s`` now also counts the thread/aux/plugin/loop_cb scopes, so
+    ``process.unaccounted_*`` is not like-for-like with snapshots written before the residual scopes existed."""
     out: dict[str, Any] = {"available": have_cpu, "families": {}, "exited": None,
                            "process_unaccounted_cpu_s": round(max(0.0, process_cpu - accounted_total), 3),
                            "unaccounted_cpu_s": None}
@@ -661,11 +660,27 @@ def interval_s() -> float:
     return max(value, 0.05)
 
 
+def scopes_enabled() -> bool:
+    """``loop_accounting.scopes`` as read by :func:`instrument` (default on until instrumented)."""
+    return bool(_state.get("scopes", True))
+
+
+def _copy_accounted() -> dict[int, float]:
+    """Copy of ``_thread_accounted``; callback hooks insert into it lock-free, so retry a racing resize."""
+    for _ in range(5):
+        try:
+            return dict(_thread_accounted)
+        except RuntimeError:  # dictionary changed size during iteration
+            continue
+    return {}
+
+
 def _writer(stop: threading.Event, period: float) -> None:
     writes = 0
     while not stop.wait(period):
         try:
-            instrument_plugins()
+            if scopes_enabled():
+                instrument_plugins()
             write_snapshot()
             if writes % 10 == 0:
                 prune()
@@ -980,7 +995,8 @@ def instrument_plugins() -> int:
 def instrument() -> None:
     """Install the residual instrumentation: ``loop_accounting.scopes`` (default on: executor and plugin
     scopes) and ``loop_accounting.callbacks`` (main-loop callback attribution; default per the hub A/B)."""
-    if _setting("scopes", True):
+    _state["scopes"] = bool(_setting("scopes", True))
+    if _state["scopes"]:
         instrument_executors()
         instrument_plugins()
     if _setting("callbacks", CALLBACKS_DEFAULT):

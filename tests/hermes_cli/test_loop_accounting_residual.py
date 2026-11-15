@@ -12,7 +12,7 @@ import pytest
 
 from hermes_cli import loop_accounting as la
 
-linux_procfs = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="per-thread CPU needs procfs here")
+linux_procfs = pytest.mark.platforms("linux")  # per-thread CPU via procfs
 
 
 @pytest.fixture(autouse=True)
@@ -278,6 +278,46 @@ def test_callback_keys_are_capped_with_an_other_bucket():
     keys = [k for k in la.counters() if k.startswith("loop_cb/")]
     assert la.CALLBACK_OTHER in keys
     assert len(keys) <= la.MAX_CALLBACK_KEYS + 1
+
+
+@pytest.mark.platforms("macos")
+def test_darwin_per_thread_residual_is_available_and_names_threads():
+    def unscoped():
+        _burn(0.4)
+
+    _t, release = _hold("darwinfam_1", unscoped)
+    try:
+        res = la.snapshot()["residual"]
+    finally:
+        release.set()
+    assert res["available"] is True
+    fam = res["families"]["darwinfam"]
+    assert abs(fam["unaccounted_cpu_s"] - 0.4) <= 0.1
+    assert la.thread_cpu() and all(t["cpu_s"] is not None for t in la.thread_cpu())
+
+
+def test_scopes_flag_off_disables_plugin_and_aux_scopes(monkeypatch):
+    from agent import aux_provider_handoff as aph
+    monkeypatch.setattr(la, "_setting", lambda key, default: False if key in ("scopes", "callbacks") else default)
+    monkeypatch.setitem(la._state, "scopes", True)
+    la.instrument()
+    assert la.scopes_enabled() is False
+    called = []
+
+    def sweep_jobs():
+        called.append(1)
+
+    ut = _fake_plugin(monkeypatch, "fake_ut_off", "/x/plugins/user-terminal/__init__.py", sweep_jobs=sweep_jobs)
+    stop = threading.Event()
+    stop.set()
+    if la.scopes_enabled():  # the writer's guard
+        la.instrument_plugins()
+    ut.sweep_jobs()
+    assert called == [1] and "plugin/user-terminal.sweep_jobs" not in la.counters()
+    with aph.provider_worker_scope():
+        pass
+    assert not any(k.startswith("aux_provider/") for k in la.counters())
+    la._state.pop("scopes", None)
 
 
 def test_old_snapshot_keys_unchanged():
