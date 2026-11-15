@@ -108,6 +108,18 @@ def test_quoted_compound_array_element_is_data():
     assert arith_sink.substitution_in_arithmetic('declare -a "x=([$(cat f)]=1)"', date_exempt=True)
 
 
+@pytest.mark.parametrize("separator", ["; ", "\n", " && ", " || ", " | ", " & ",
+                                       "; # ignored ' \" ; & |\n"])
+@pytest.mark.parametrize("frame", ["{body}", 'printf %s "$({body})"', "({body})"])
+def test_previous_command_uncertainty_does_not_taint_subscript(separator, frame):
+    # The prefix masker deliberately cannot parse case patterns. That uncertainty
+    # belongs to the completed command, not a later data consumer or name builtin.
+    previous = "echo $(case x in (x) :;; esac)" + separator
+    for consumer, expected in (("unset", True), ("echo", False)):
+        command = frame.format(body=previous + f'{consumer} "a[$(printf 7)]"')
+        assert arith_sink.substitution_in_arithmetic(command, date_exempt=False) is expected
+
+
 SINKS = [
     'echo hi; unset "a[{p}]"',
     'echo hi && unset "a[{p}]"',
