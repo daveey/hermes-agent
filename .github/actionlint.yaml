@@ -32,8 +32,9 @@ self-hosted-runner:
     - ci-bwrap
     # Autoscaled one-VM-per-job group for the Python test slices (tests.yml test).
     - tfgar-tests
-    # Dedicated single-job macOS state-suite runner on the mini.
+    # Dedicated macOS pool and isolated console-user login-session lane.
     - hermes-state
+    - hermes-mac-session
     - tfgar-probe
 
 # fork (daveey/hermes): known findings that are not bugs. The lint runs in

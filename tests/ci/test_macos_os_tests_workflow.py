@@ -87,6 +87,33 @@ def test_login_session_job_is_gated_and_requires_a_real_gui_domain(domain_status
     assert any(step.get("uses") == "./.github/actions/setup-pm" for step in job["steps"])
 
 
+def test_session_runner_label_is_declared_for_actionlint():
+    config = hermes_yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text(encoding="utf-8"))
+    assert "hermes-mac-session" in config["self-hosted-runner"]["labels"]
+
+
+def test_login_session_marker_covers_exactly_the_three_login_dependent_functions():
+    import ast
+
+    expected = {
+        ("test_gateway_launchd_runtime.py",
+         "test_gateway_job_is_a_launchd_osascript_child_that_reads_as_unsupervised"),
+        ("test_gateway_snapshot_restore_live.py", "test_snapshot_restore_rejoins_the_restored_authority"),
+        ("test_update_posix_pause.py", "test_a_launchd_job_is_paused_through_launchd_and_restarted_through_it"),
+    }
+    marked = set()
+    for path in (ROOT / "tests/hermes_cli").glob("test_*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                ast.unparse(decorator) == "pytest.mark.macos_login_session"
+                for decorator in node.decorator_list
+            ):
+                marked.add((path.name, node.name))
+    assert marked == expected
+    assert "macos_login_session:" in (ROOT / "tests/conftest.py").read_text(encoding="utf-8")
+
+
 def test_native_lane_provisions_real_tools_and_messaging_before_tests():
     import json
 
