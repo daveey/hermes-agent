@@ -169,6 +169,14 @@ def may_set_integer_attributes(command: str) -> bool:
         if index is None:
             continue
         name = guard._executable_name(words[index])
+        # Alias values are dequoted assignment words: the '=' before declare
+        # prevents the ordinary declaration regex from matching its command name.
+        # Inspect only alias definitions, not arbitrary data assignments.
+        if name == "alias" and any(
+            _INTEGER_DECLARATION_RE.search(word.partition("=")[2])
+            for word in words[index + 1:] if "=" in word
+        ):
+            return True
         # Do not evaluate expansions or source files to discover attributes. Either
         # can introduce an integer declaration; allow the later subscript walk now,
         # before referenced files are traversed. Unknown commands may be declare.

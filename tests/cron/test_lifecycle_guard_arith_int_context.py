@@ -9,6 +9,8 @@ from cron.lifecycle_guard import scan_gateway_lifecycle
 
 
 SHAPES = [
+    "shopt -s expand_aliases\nalias d='declare -i'\nd x\nx=a[\\$\\(SCRIPT\\)]",
+    "shopt -s expand_aliases\nalias d='typeset -i'\nd x\nx=a[\\$\\(SCRIPT\\)]",
     r'let "a[\`SCRIPT\`]=1"',
     r"declare -i x; eval 'x=a[\$\(SCRIPT\)]'",
     r"declare -i x; eval 'x=a[\`SCRIPT\`]'",
@@ -26,6 +28,8 @@ SHAPES = [
     r". ./decl.sh; eval 'x=a[\$\(SCRIPT\)]'",
 ]
 CONTROLS = [
+    "shopt -s expand_aliases\nalias d='declare'\nd x\nx=a[\\$\\(SCRIPT\\)]",
+    "shopt -s expand_aliases\nalias d='declare +i'\nd x\nx=a[\\$\\(SCRIPT\\)]",
     r"eval 'x=a[\$\(SCRIPT\)]'",
     r"declare x; eval 'x=a[\$\(SCRIPT\)]'",
     r"declare +i x; eval 'x=a[\$\(SCRIPT\)]'",
