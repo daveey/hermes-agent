@@ -18,7 +18,7 @@ def source_contexts(command: str, views: list[list[str]]) -> Iterator:
 
     fds: dict[str, list[tuple[str, str]]] = {}
     flat = _flat_sequence(command, views)
-    for view, variables in zip(views, variable_contexts(command, views)):
+    for view, variables in zip(views, variable_contexts(command, views, flat=flat)):
         yield _StdinSources(dict(fds), variables)
         if flat and _split_redirections(view)[0] == ["exec"]:
             for fd, operator, target in _redirections(view):
@@ -41,7 +41,9 @@ def descriptor_definition(operator, target, fds, variables) -> list[tuple[str, s
     return [(operator, target)]
 
 
-def variable_contexts(command: str, views: list[list[str]]) -> Iterator[dict[str, list[str]]]:
+def variable_contexts(
+    command: str, views: list[list[str]], *, flat: bool | None = None,
+) -> Iterator[dict[str, list[str]]]:
     """Snapshot variables before each view; unsupported scope or mutation is unknown.
 
     This is deliberately not a shell evaluator. Only standalone assignments in
@@ -54,7 +56,8 @@ def variable_contexts(command: str, views: list[list[str]]) -> Iterator[dict[str
 
     unknown = {match.group(1) or match.group(2): ["$"]
                for match in _VARIABLE_RE.finditer(command)}
-    flat = _flat_sequence(command, views)
+    if flat is None:
+        flat = _flat_sequence(command, views)
     state: dict[str, list[str]] = {} if flat else unknown
     for view in views:
         yield dict(state)
