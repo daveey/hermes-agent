@@ -49,6 +49,34 @@ describe('isReconnectableSessionWriteError', () => {
 })
 
 describe('withSessionWriteReconnect', () => {
+  it('passes the remaining window to each attempt, including time spent dialing', async () => {
+    const c = clock()
+    const down = new Error('socket hang up')
+
+    const run = vi.fn(async (remainingMs: number) => {
+      c.advance(Math.min(30_000, remainingMs ?? 30_000))
+      throw down
+    })
+
+    await expect(withSessionWriteReconnect(run, {
+      label: 'PATCH s', now: c.now, sleep: c.sleep, log: vi.fn()
+    })).rejects.toBe(down)
+    expect(run.mock.calls).toEqual([[60_000], [29_000]])
+    expect(c.now()).toBe(60_000)
+  })
+
+  it.each([1_000, 2_000])('does not start an attempt after a sleep exhausts the budget (%i)', async elapsed => {
+    const c = clock()
+    const down = new Error('socket hang up')
+    const run = vi.fn().mockRejectedValue(down)
+
+    await expect(withSessionWriteReconnect(run, {
+      label: 'PATCH s', budgetMs: 1_500, now: c.now,
+      sleep: async () => { c.advance(elapsed + 500) }, log: vi.fn()
+    })).rejects.toBe(down)
+    expect(run).toHaveBeenCalledOnce()
+  })
+
   it('rides out a hub reconnect and lands the write without a user retry', async () => {
     const c = clock()
     const log = vi.fn()

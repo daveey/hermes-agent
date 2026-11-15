@@ -10,7 +10,8 @@ import { isDefinitiveSessionMutationRefusal } from '../../../shared/src/session-
  * the fail-fast refusal, a dial timeout, `Passive read: no warm backend`), each one a user click
  * that had to be repeated once the hub was back a few seconds later.
  *
- * A session write is safe to replay: the mutation client keeps the same request_id and expected
+ * A fenced session write is safe to replay (identity-less legacy writes are excluded):
+ * the mutation client keeps the same request_id and expected
  * revision for the same intent until the owner answers definitively, so a write the owner already
  * committed is answered from its receipt instead of applied twice. So a transport failure (the
  * renderer never reached the owner, or lost its reply) is retried here with backoff for a bounded
@@ -23,6 +24,9 @@ export const SESSION_WRITE_RECONNECT_BUDGET_MS = 60_000
 const FIRST_DELAY_MS = 1_000
 const MAX_DELAY_MS = 10_000
 
+/** A legacy write has no receipt identity: a lost reply cannot safely be replayed. */
+export class NonReplayableSessionWriteError extends Error {}
+
 const RECONNECTABLE =
   /socket hang up|\b(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|ETIMEDOUT)\b|Remote backend "[^"]*" is down|Timed out connecting to Hermes backend|Passive read: no warm backend/i
 
@@ -31,6 +35,7 @@ export function isReconnectableSessionWriteError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
 
   return (
+    !(error instanceof NonReplayableSessionWriteError) &&
     RECONNECTABLE.test(message) &&
     !isDefinitiveSessionMutationRefusal(message) &&
     !/client_upgrade_required|mutation_identity_required/.test(message)
@@ -63,17 +68,22 @@ function desktopLog(line: string): void {
 }
 
 export async function withSessionWriteReconnect<T>(
-  run: () => Promise<T>,
+  run: (remainingMs: number) => Promise<T>,
   options: SessionWriteReconnectOptions
 ): Promise<T> {
   const { label, budgetMs = SESSION_WRITE_RECONNECT_BUDGET_MS, now = Date.now, log = desktopLog } = options
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
   const started = now()
   let delay = FIRST_DELAY_MS
+  let lastError: unknown = new Error('Session write reconnect deadline exceeded')
 
   for (let attempt = 1; ; attempt += 1) {
+    const remainingMs = budgetMs - (now() - started)
+
+    if (remainingMs <= 0) { throw lastError }
+
     try {
-      const result = await run()
+      const result = await run(remainingMs)
 
       if (attempt > 1) {
         log(`[session-write] ${label} landed on attempt ${attempt} after ${now() - started} ms`)
@@ -81,6 +91,7 @@ export async function withSessionWriteReconnect<T>(
 
       return result
     } catch (error) {
+      lastError = error
       const wait = Math.max(delay, gateRetryHintMs(error))
       const reason = (error instanceof Error ? error.message : String(error)).slice(0, 160)
 

@@ -23,7 +23,7 @@ import {
   profileScoped,
   sessionReadOwnerPin
 } from './client'
-import { withSessionWriteReconnect } from './session-write-reconnect'
+import { NonReplayableSessionWriteError, withSessionWriteReconnect } from './session-write-reconnect'
 
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
 
@@ -401,7 +401,9 @@ export function mutateSessionFenced<T>(key: string, read: () => Promise<SessionM
   }), send).catch(error => {
     if (!(error instanceof MissingMutationSnapshotRoute)) { throw error }
 
-    return send({})
+    return send({}).catch(cause => {
+      throw new NonReplayableSessionWriteError(cause instanceof Error ? cause.message : String(cause), { cause })
+    })
   })
 }
 
@@ -414,23 +416,36 @@ function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: R
   const suffix = query.size ? `?${query}` : ''
   const key = JSON.stringify([scope, id, method, payload])
 
-  const send = (identity: Partial<SessionMutationIdentity>) => {
+  const send = (identity: Partial<SessionMutationIdentity>, timeoutMs: number) => {
     if (method === 'DELETE') {
       const params = new URLSearchParams(query)
 
       for (const [name, value] of Object.entries(identity)) { params.set(name, String(value)) }
 
-      return hermesApi<T>({ ...scope, path: params.size ? `${path}?${params}` : path, method })
+      return hermesApi<T>({ ...scope, path: params.size ? `${path}?${params}` : path, method, timeoutMs })
     }
 
-    return hermesApi<T>({ ...scope, path, method,
+    return hermesApi<T>({ ...scope, path, method, timeoutMs,
       body: { ...payload, ...identity, ...(scope.profile ? { profile: scope.profile } : {}) } })
   }
 
   // A reconnect (hub restart, tunnel reset) replays the same intent with its retained identity.
-  return withSessionWriteReconnect(() => mutateSessionFenced(key,
-    () => hermesApi<SessionMutationSnapshot>({ ...scope, path: `${path}/mutation-snapshot${suffix}` }), send),
-  { label: `${method} ${id}` })
+  return withSessionWriteReconnect(remainingMs => {
+    const deadline = Date.now() + remainingMs
+
+    const timeout = () => {
+      const remaining = deadline - Date.now()
+
+      // Zero means unlimited to the transport. Never dispatch an expired request.
+      if (remaining <= 0) { throw new Error('Session write reconnect deadline exceeded') }
+
+      return Math.min(30_000, remaining)
+    }
+
+    return mutateSessionFenced(key,
+      () => hermesApi<SessionMutationSnapshot>({ ...scope, path: `${path}/mutation-snapshot${suffix}`, timeoutMs: timeout() }),
+      identity => send(identity, timeout()))
+  }, { label: `${method} ${id}` })
 }
 
 // Mutations take the owning `profile` so Electron can route them to the correct

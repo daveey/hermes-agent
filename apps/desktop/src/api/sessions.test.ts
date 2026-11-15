@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SidebarSessionsResponse } from './sessions'
 
-vi.mock('@/lib/gateway-rpc', () => ({ isMissingRestEndpoint: () => false, isUnroutedRestPath: () => false }))
+vi.mock('@/lib/gateway-rpc', () => ({ isMissingRestEndpoint: () => false, isUnroutedRestPath: vi.fn(() => false) }))
+const gatewayRpc = await import('@/lib/gateway-rpc')
 vi.mock('@/store/transcript-tail', () => ({ pageHonorsLatestOrder: () => true, recordTranscriptTail: vi.fn() }))
 vi.mock('./client', () => ({
   ambientOwnerConnectionId: vi.fn(() => 'prometheus'),
@@ -40,6 +41,79 @@ beforeEach(() => {
   vi.mocked(client.capabilityScoped).mockImplementation(scope =>
     typeof scope === 'string' && scope.trim() ? { profile: scope.trim() } : {}
   )
+})
+
+describe('session write reconnect safety', () => {
+  it('does not replay an identity-less legacy DELETE after losing its reply', async () => {
+    vi.useFakeTimers()
+    const missing = new Error('404: Not Found')
+    const lostReply = new Error('socket hang up')
+    vi.mocked(gatewayRpc.isUnroutedRestPath).mockImplementation(error => error === missing)
+    hermesApi.mockImplementation(async request => {
+      if (!request.method) { throw missing }
+      throw lostReply
+    })
+
+    try {
+      const result = deleteSession('legacy-lost-reply').catch(error => error)
+      await vi.runAllTimersAsync()
+      expect(await result).toMatchObject({ message: lostReply.message, cause: lostReply })
+      const writes = hermesApi.mock.calls.filter(([request]) => request.method === 'DELETE')
+      expect(writes).toHaveLength(1)
+      expect(writes[0][0].path).not.toContain('request_id')
+    } finally {
+      vi.mocked(gatewayRpc.isUnroutedRestPath).mockReturnValue(false)
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['PATCH', 'DELETE'])('subtracts snapshot time and backoff from each %s timeout', async method => {
+    vi.useFakeTimers()
+    let writes = 0
+    hermesApi.mockImplementation(async request => {
+      if (!request.method) {
+        await new Promise(resolve => setTimeout(resolve, 25_000))
+
+        return { exists: true, runtime_revision: 7, runtime_generation: 3 } as never
+      }
+
+      writes += 1
+      await new Promise(resolve => setTimeout(resolve, request.timeoutMs ?? 30_000))
+      throw new Error('socket hang up')
+    })
+
+    try {
+      const write = method === 'PATCH'
+        ? setSessionArchived(`budget-snapshot-${method}`, true)
+        : deleteSession(`budget-snapshot-${method}`)
+
+      const result = write.catch(error => error)
+      await vi.runAllTimersAsync()
+      expect(await result).toBeInstanceOf(Error)
+      expect(writes).toBe(2)
+      expect(hermesApi.mock.calls.map(([request]) => request.timeoutMs)).toEqual([30_000, 30_000, 4_000])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not send a write when the snapshot consumes the remaining deadline', async () => {
+    vi.useFakeTimers()
+    hermesApi.mockImplementation(async () => {
+      await new Promise(resolve => setTimeout(resolve, 60_000))
+
+      return { exists: true, runtime_revision: 7, runtime_generation: 3 } as never
+    })
+
+    try {
+      const result = setSessionArchived('snapshot-deadline', true).catch(error => error)
+      await vi.runAllTimersAsync()
+      expect(await result).toBeInstanceOf(Error)
+      expect(hermesApi).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('deleteSession profile scoping', () => {
