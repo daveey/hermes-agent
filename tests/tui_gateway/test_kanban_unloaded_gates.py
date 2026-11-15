@@ -388,6 +388,9 @@ def remote_host(monkeypatch, tmp_path):
     monkeypatch.setattr(remote, 'ledger_path', lambda: ledger)
     monkeypatch.setattr(observer, 'fingerprint', lambda path: ('stamp', stamp[0]))
     monkeypatch.setattr(remote, '_sweep_snapshot', lambda path, me: (list(cards), {}))
+    tasks = [(1, 1, 1)]
+    monkeypatch.setattr(gates, '_replica_tasks_signature', lambda path: tasks[0])
+    stamp.append(tasks)
     gates.reset_for_tests()
     remote._ledger(ledger).close()
 
@@ -441,3 +444,21 @@ def test_remote_probe_open_chat_in_flight_claim_and_woken_stay_hot(remote_host):
     finally:
         with remote._woken_lock:
             remote._woken.clear()
+
+
+def test_remote_probe_runs_when_an_unlinked_terminal_card_arrives(remote_host):
+    """``observe`` records the first sighting of every terminal state, linked or not; skipping the pass that would
+    record it lets a later link resurrect an expired notice (review of PR #3349)."""
+    gates, _, stamp, settle = remote_host
+    settle()
+    first = gates._remote()
+    assert not first.pending
+    stamp[1][0] = (2, 2, 3)  # a task row arrived; no card the sweep owes a notice for changed
+    assert gates._remote().key != first.key
+
+
+def test_remote_probe_unreadable_task_signature_stays_hot(remote_host):
+    gates, _, stamp, settle = remote_host
+    settle()
+    stamp[1][0] = None
+    assert gates._remote().pending

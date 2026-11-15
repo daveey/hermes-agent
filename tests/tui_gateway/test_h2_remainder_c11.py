@@ -72,6 +72,35 @@ def test_unchanged_board_is_skipped_without_connecting(db, monkeypatch):
     assert boards == []  # no per-pass board connect when the cursor equals the board's newest event
 
 
+def test_bookkeeping_events_keep_the_board_idle_and_advance_the_cursor(db, monkeypatch):
+    """A comment/heartbeat moves the newest event id but is no STATUS kind: ``_changed_tasks`` would return no card,
+    so the pass must not connect to the board (t_01a1dfa94f2251cd: the hub's default board never went idle)."""
+    tid = _card()
+    nf.card_change_pass(session_db=_opener(db))
+    ident = str(kb.kanban_db_path("default").resolve())
+    with contextlib.closing(kbc.connect()) as conn:
+        kb.add_comment(conn, tid, "someone", "a note")
+        top = conn.execute("SELECT MAX(id) FROM task_events").fetchone()[0]
+    from tui_gateway import notice_fanout_state as state
+    assert state.get_cursor(ident) < top
+    real, boards = kbc.connect, []
+    monkeypatch.setattr(kbc, "connect", lambda *a, **k: boards.append(k.get("board")) or real(*a, **k))
+    assert nf.card_change_pass(session_db=_opener(db)) == []
+    assert boards == [] and state.get_cursor(ident) == top
+
+
+def test_a_status_event_behind_bookkeeping_events_still_runs_the_pass(db, monkeypatch):
+    tid = _card()
+    nf.card_change_pass(session_db=_opener(db))
+    with contextlib.closing(kbc.connect()) as conn:
+        kb.add_comment(conn, tid, "someone", "a note")
+        assert kb.complete_task(conn, tid, summary="done")
+        kb.add_comment(conn, tid, "someone", "after")
+    ksa._reset_cache_for_tests()
+    changed = nf.card_change_pass(session_db=_opener(db))
+    assert [(c["task_id"], c["status"]) for c in changed] == [(tid, "done")]
+
+
 def test_outcome_change_is_picked_up_within_one_pass(db, monkeypatch):
     tid = _card()
     nf.card_change_pass(session_db=_opener(db))

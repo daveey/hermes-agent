@@ -281,11 +281,32 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
         return Inputs()
     # The key is what the pass would read, not the replica's commit counter: the hub's replica commits on every
     # sync, and none of those commits changed a card this host owes a notice for (t_01a1dfa94f2251cd).
+    # ``observe`` records this host's first sighting of EVERY terminal state, linked or not, and a later link must
+    # not resurrect a notice that expired unseen: so a replica whose task rows changed is never skipped, even when
+    # no card the sweep owes a notice for changed. Unreadable = unknown = hot.
+    tasks = _replica_tasks_signature(path)
+    if tasks is None:
+        return Inputs()
     digest = hashlib.sha256()
+    digest.update(repr(tasks).encode())
     for owner, key, task, links in cards:
         digest.update(repr((owner, key, remote._notice_state(task),
                             tuple((link.get('profile'), link.get('session')) for link in links))).encode())
     return Inputs((str(path), me, digest.hexdigest(), str(ledger), ledger_stamp), pending=False)
+
+
+def _replica_tasks_signature(path):
+    """The replica's task rows as ``observe`` reads them (count, newest seq, seq total): unchanged across the sync
+    pulls that commit only cursors or other collections. None when unreadable."""
+    import contextlib
+    import sqlite3
+
+    from tui_gateway.kanban_remote_notices import _ro
+    try:
+        with contextlib.closing(_ro(path)) as conn:
+            return tuple(conn.execute("SELECT COUNT(*), MAX(seq), TOTAL(seq) FROM replica WHERE coll='tasks'").fetchone())
+    except (OSError, sqlite3.Error, TypeError):
+        return None
 
 
 def _cards_settled(conn, cards, live) -> bool:

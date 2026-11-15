@@ -49,6 +49,8 @@ _TASK_ID = re.compile(r"Kanban (t_[0-9A-Za-z_]+)")
 
 
 def _reset_for_tests() -> None:
+    global _remote_memo
+    _remote_memo = None
     from tui_gateway import notice_fanout_state
     notice_fanout_state.reset_for_tests()
 
@@ -182,8 +184,20 @@ def _board_idle(ident: str) -> bool:
         if since is None:
             return False
         with reader(Path(ident)) as ro:
-            top = ro.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
-        return int(top) == since
+            top = int(ro.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0])
+            if top == since:
+                return True
+            if top < since:
+                return False
+            # Heartbeats, comments and other bookkeeping events move the newest id every few seconds on a live
+            # board, but ``_changed_tasks`` fans out only STATUS_EVENT_KINDS: when none lies in (since, top] the
+            # full pass would return no card, and only advance the cursor, which is all this does (t_01a1dfa94f2251cd).
+            kinds = ",".join("?" * len(STATUS_EVENT_KINDS))
+            if ro.execute(f"SELECT 1 FROM task_events WHERE id > ? AND id <= ? AND kind IN ({kinds}) LIMIT 1",
+                          (since, top, *STATUS_EVENT_KINDS)).fetchone() is not None:
+                return False
+        state.set_cursor(ident, top)
+        return True
     except Exception:  # health: allow BLE001 -- an unreadable board is not idle; the full pass decides
         logger.debug("card-change idle check unavailable for %s", ident, exc_info=True)
         return False
@@ -231,8 +245,55 @@ def _fan_out_changes(conn: sqlite3.Connection, _kb: Any, session_db: Callable, s
     return out
 
 
+# The input key of the last remote pass that left every chat acknowledged, with the ledger cards it was computed over
+# (held, so an object identity in the key cannot be reused). A pass over the same inputs reads the same snapshot.
+_remote_memo: Optional[tuple] = None
+
+
+def _remote_inputs_key() -> Optional[tuple]:
+    """Everything ``activity._remote_cards`` reads for the replica projection that ``_remote_change_pass`` keeps
+    (card key, status, chat, origin chat), or None when any of it cannot be vouched for. That is each synced board's
+    replica content revision (trigger-backed only: a stat fallback never vouches), the origin-ledger projection's
+    card objects (``_remote_links`` returns the same dicts until it re-projects), this gateway and profile, and
+    the reader mode. A pull that moves only ``pulled_at`` changes none of them (t_01a1dfa94f2251cd)."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_session_activity as activity
+    from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli.kanban_activity_revision import SHADOW_TABLES, is_revision
+    from hermes_cli.profiles import get_active_profile_name
+
+    if sync.sync_config().get("links_reader") != "replica":
+        return None
+    try:
+        gateway = ksc.load_identity().gateway
+    except ksc.SyncUnavailable:
+        return None
+    if not gateway:
+        return None
+    boards = []
+    for slug, _path in ksc.board_paths():
+        path = ksc.shadow_path(slug)
+        content = activity._board_content_key(path, SHADOW_TABLES)
+        if not is_revision(content):
+            return None
+        boards.append((slug, str(path), content))
+    ledger = activity._remote_links(stale_ok=True)
+    return (gateway, get_active_profile_name(), tuple(boards)), ledger
+
+
 def _remote_change_pass(session_db: Callable) -> list[dict]:
     """Observe the same remote projection as outcomes; failed reads never mean cards finished."""
+    global _remote_memo
+    try:
+        inputs = _remote_inputs_key()
+    except Exception:  # health: allow BLE001 -- an unreadable input is unknown: run the pass
+        logger.debug("remote card-change inputs unavailable", exc_info=True)
+        inputs = None
+    memo = _remote_memo
+    if inputs is not None and memo is not None and memo[0] == inputs[0] and len(memo[1]) == len(inputs[1]) \
+            and all(a is b for a, b in zip(memo[1], inputs[1])):
+        return []
+    _remote_memo = None
     from hermes_cli import kanban_session_activity as activity
     from hermes_state_outcome import refresh_outcomes_quietly
     from tui_gateway import notice_fanout_state as state
@@ -269,6 +330,8 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
         out.append({"board": None, "task_id": None, "chat_id": chat, "session_id": tip,
                     "status": None, "skipped": skipped, "source": "remote"})
     state.ack_remote(acked)
+    if inputs is not None and all(previous.get(c) == snapshot.get(c) or c in acked for c in previous.keys() | snapshot.keys()):
+        _remote_memo = inputs
     return out
 
 

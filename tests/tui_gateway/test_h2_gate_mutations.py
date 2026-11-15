@@ -339,6 +339,7 @@ def test_remote_pending_inputs_stay_hot(monkeypatch, tmp_path):
     monkeypatch.setattr(kanban_origin, '_hub_db', lambda: tmp_path / 'hub.db')
     monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: ['me'])
     monkeypatch.setattr(observer, 'fingerprint', lambda p: ('fp', 1))
+    monkeypatch.setattr(gates, '_replica_tasks_signature', lambda p: (1, 1, 1))
     monkeypatch.setattr(remote, '_sweep_snapshot', lambda p, me: ([], {}))
     monkeypatch.setattr(remote, 'ledger_path', lambda: ledger)
     remote._woken.clear()
@@ -360,6 +361,7 @@ def test_remote_pending_inputs_stay_hot(monkeypatch, tmp_path):
     assert gates.probe('remote_notices').pending  # unknown replica state
     monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: [''])
     monkeypatch.setattr(observer, 'fingerprint', lambda p: ('fp', 1))
+    monkeypatch.setattr(gates, '_replica_tasks_signature', lambda p: (1, 1, 1))
     assert gates.probe('remote_notices').pending  # unknown gateway name
 
 
@@ -376,6 +378,7 @@ def test_remote_each_key_component_moves_the_key_independently(monkeypatch, tmp_
     monkeypatch.setattr(kanban_origin, '_hub_db', lambda: tmp_path / 'hub.db')
     monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: [state['me']])
     monkeypatch.setattr(observer, 'fingerprint', lambda p: state['fp'])
+    monkeypatch.setattr(gates, '_replica_tasks_signature', lambda p: (1, 1, 1))
     monkeypatch.setattr(remote, '_sweep_snapshot', lambda p, me: ([], {}))
     monkeypatch.setattr(remote, 'ledger_path', lambda: state['ledger'])
     remote._woken.clear()

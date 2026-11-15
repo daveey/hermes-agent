@@ -162,3 +162,74 @@ def test_origin_alias_and_duplicate_rows_refresh_once(db, remote):
     remote.extend([row, dict(row)])
     assert len(run(db)) == 1
     assert so.get_outcome(CHAT, db=db)["kind"] == "waiting"
+
+
+# --- the pass is skipped while its inputs are unchanged (t_01a1dfa94f2251cd) ------------------------------------------
+
+@pytest.fixture
+def gated(db, remote, monkeypatch):
+    """A controllable input key; ``reads`` counts the passes that actually read the projection."""
+    ledger, key, reads = [], [("gw", "default", ())], []
+    monkeypatch.setattr(nf, "_remote_inputs_key", lambda: None if key[0] is None else (key[0], list(ledger)))
+    real = remote
+
+    def read(ids, statuses, stale_ok):
+        reads.append(1)
+        return list(real)
+    monkeypatch.setattr(ksa, "_remote_cards", read)
+    return ledger, key, reads
+
+
+def test_unchanged_inputs_skip_the_remote_read(db, remote, gated):
+    _ledger, _key, reads = gated
+    run(db)  # seeds
+    run(db)
+    n = len(reads)
+    for _ in range(3):
+        assert run(db) == []
+    assert len(reads) == n  # three more passes, no read
+
+
+def test_a_changed_input_runs_the_pass_and_a_card_change_is_fanned_out(db, remote, gated):
+    _ledger, key, _reads = gated
+    assert so.refresh_outcome(CHAT, "manual", db=db)["kind"] == "done"
+    run(db)
+    run(db)
+    remote.append(card())
+    key[0] = ("gw", "default", ("revision", 2))
+    assert len(run(db)) == 1
+    assert so.get_outcome(CHAT, db=db)["kind"] == "waiting"
+
+
+def test_a_new_ledger_projection_runs_the_pass(db, remote, gated):
+    ledger, _key, reads = gated
+    run(db)
+    run(db)
+    n = len(reads)
+    ledger.append({"key": "x"})
+    run(db)
+    assert len(reads) > n
+
+
+def test_unvouched_inputs_never_skip(db, remote, gated):
+    _ledger, key, reads = gated
+    key[0] = None
+    run(db)
+    n = len(reads)
+    run(db)
+    run(db)
+    assert len(reads) > n
+
+
+def test_a_failed_refresh_is_retried_not_memoised(db, remote, gated, monkeypatch):
+    _ledger, key, reads = gated
+    run(db)
+    run(db)
+    remote.append(card())
+    key[0] = ("gw", "default", ("revision", 3))
+    with monkeypatch.context() as patch:
+        patch.setattr(so, "refresh_outcomes_quietly", lambda *a, **k: False)
+        assert run(db) == []
+    n = len(reads)
+    assert len(run(db)) == 1  # same inputs, but the chat was never acknowledged: the pass runs again
+    assert len(reads) > n
