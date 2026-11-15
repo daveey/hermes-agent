@@ -91,6 +91,41 @@ def test_literal_name_reaches_lifecycle_refusal(tmp_path, shape):
     assert unsafe and refusal and "larger than the scan cap" in refusal
 
 
+CASE_PREFIX_SINKS = [
+    "a=(1); unset \"$(case x in x) printf x;; esac)\" 'a[$(P)]'",
+    "a=(1); unset x$(case x in x) printf x;; esac) 'a[$(P)]'",
+    "a=(1); unset `case x in x) printf x;; esac` 'a[$(P)]'",
+    "declare \"x=$(case x in x) printf x;; esac)\" 'a[$(P)]=1'",
+]
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("shape", CASE_PREFIX_SINKS)
+def test_uncertain_prefix_cannot_hide_literal_name(tmp_path, shape):
+    test_literal_builtin_name_marker(tmp_path, shape, True)
+
+
+@pytest.mark.parametrize("opener, closer", [("$(", ")"), ("`", "`")])
+def test_uncertain_prefix_has_bounded_scan_work(monkeypatch, opener, closer):
+    from tools import shell_prefix_expansions as expansions
+
+    original = expansions._opener
+    calls = 0
+    command = 'unset "' + opener + "x" * 1000 + " case x in x) :;; esac" + closer + '"' + " 'x'" * 1000
+
+    def counted(*args):
+        nonlocal calls
+        calls += 1
+        assert calls < len(command) * 4, "uncertain word repeatedly rescanned"
+        return original(*args)
+
+    from tools import shell_builtin_names
+
+    monkeypatch.setattr(expansions, "_opener", counted)
+    monkeypatch.setattr(shell_builtin_names, "_opener", counted)
+    substitution_in_arithmetic(command, date_exempt=True)
+
+
 def test_nested_expansions_share_linear_boundary_scan(monkeypatch):
     from tools import shell_prefix_expansions as expansions
 
