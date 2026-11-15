@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+import hashlib
 import logging
 import math
 import time
@@ -60,8 +61,13 @@ def _killed_empty(conn) -> bool:
     if not transactional and _killed_empty_keys.get(conn) == stamp:
         return True
     _killed_empty_keys.pop(conn, None)
+    # The consumer re-offers only children reaped inside RETRY_WINDOW_S (reap_notices._REAPED_SQL). Older reaped
+    # rows (73 on the hub) can never become work again: the window only moves forward, so a row leaves it and
+    # enters only through a write, which moves the stamp. Without the predicate they kept the pass hot forever.
+    from tui_gateway.reap_notices import RETRY_WINDOW_S
     empty = conn.execute("SELECT 1 FROM sessions WHERE parent_session_id IS NOT NULL "
-                         "AND end_reason='startup_orphan_reap' LIMIT 1").fetchone() is None
+                         "AND end_reason='startup_orphan_reap' AND ended_at >= ? LIMIT 1",
+                         (time.time() - RETRY_WINDOW_S,)).fetchone() is None
     if empty and not transactional:
         # Bound retained identities when profiles/readers turn over. Connection
         # identity also prevents a replacement store inheriting an empty proof.
@@ -75,7 +81,7 @@ def _revision(conn) -> tuple:
     return (conn, conn.execute('PRAGMA data_version').fetchone()[0], conn.total_changes)
 
 
-def _notices() -> Inputs:
+def _notices(live: frozenset = frozenset()) -> Inputs:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_reader_retention import reader
     from tui_gateway.kanban_unloaded_candidates import _on_connection as subscriptions
@@ -87,10 +93,15 @@ def _notices() -> Inputs:
     keys = []
     for path in sorted(paths):
         with reader(path) as conn:
-            stamp = _revision(conn)  # capture BEFORE reading/working; never bless a later commit
-            if subscriptions(conn, _KANBAN_NOTIFY_KINDS):
+            # The sweep skips a sub whose chat is live (``chat_id in live_ids``), and the live set is part of the
+            # key, so such a sub is not pending: the chat unloading moves the key. An in-flight claim stays
+            # pending (dead-holder recovery is a process-liveness decision, not structure). The board's own
+            # revision is NOT in the key: a live board is rewritten by bookkeeping all the time, and the
+            # emptiness of the candidate set is re-evaluated by every probe.
+            if any(sub.get('inflight_from') is not None or str(sub.get('chat_id') or '') not in live
+                   for sub in subscriptions(conn, _KANBAN_NOTIFY_KINDS)):
                 return Inputs()
-            keys.append((str(path), stamp))
+            keys.append((str(path),))
     return Inputs(tuple(keys), pending=False)
 
 
@@ -138,10 +149,20 @@ def _guarantee() -> Inputs:
                 keys.append((str(path), None))
                 continue
             db = reader_of(store)
-            stamp = db._read_retrying_ioerr(_revision)
+            digest = hashlib.blake2b(digest_size=16)
             for row in rows(db, sql):
                 meta = _decode(row['display_metadata'])
                 closeout = meta.get('closeout')
+                digest.update(repr((row['sid'], row['msg_id'], row['timestamp'], row['last_active'],
+                                    row['display_metadata'])).encode())
+                last = row['last_active']
+                if (not (isinstance(closeout, dict) and closeout.get('state') == 'deferred')
+                        and (last is None or (isinstance(last, (int, float)) and last < now - ng.LOOKBACK_S))):
+                    # ``candidates()`` never offers a non-deferred row whose chat was last active before
+                    # LOOKBACK_S. Time only moves it further out; a write that revives it changes
+                    # ``last_active`` and so the digest. A 3-day-old notice with no close-out held the whole
+                    # pass hot on the hub (73 s of CPU per 600 s window, H2 run 132120).
+                    continue
                 # Held/live and budget-only candidates remain hot: neither an
                 # active-session lease nor an hourly charge requires a DB write.
                 if closeout is None or ng._legacy_busy(meta):
@@ -166,7 +187,9 @@ def _guarantee() -> Inputs:
                     if deadline <= now:
                         return Inputs()
                     due = min(due, deadline)
-            keys.append((str(path), stamp))
+            # The key is the candidate rows themselves, not the store's revision: every chat message on a live
+            # install commits to state.db, and none of those changes what this pass would do.
+            keys.append((str(path), digest.hexdigest()))
     return Inputs(tuple(keys), pending=False, due=due)
 
 
@@ -182,7 +205,6 @@ def _session_empty(kind: str) -> Inputs:
             keys.append((str(path), None))
             continue
         with reader(path) as conn:
-            stamp = _revision(conn)
             if kind == 'delegation':
                 if not ledger_quiet(path):
                     return Inputs()
@@ -192,7 +214,8 @@ def _session_empty(kind: str) -> Inputs:
                 # is deliberately not interpreted by this admission layer.
                 if not _killed_empty(conn):
                     return Inputs()
-            keys.append((str(path), stamp))
+            # Quiet/empty is re-proved on every probe; the store's revision is not part of the key (see _notices).
+            keys.append((str(path), 'quiet'))
     from tui_gateway.delegation_unloaded import RECOVER_EVERY_S
     return Inputs(tuple(keys), pending=False,
                   due=time.time() + RECOVER_EVERY_S if kind == 'delegation' else float('inf'))
@@ -229,17 +252,18 @@ def _remote() -> Inputs:
     return Inputs((str(path), me, stamp, str(ledger), ledger_stamp), pending=False)
 
 
-def probe(kind: str, *, every_store: bool = True) -> Inputs:
+def probe(kind: str, *, every_store: bool = True, live: frozenset | set = frozenset()) -> Inputs:
     """Fail open; never infer pending state from a delivery function's return."""
     try:
         if kind == 'card_change_pass':
-            # No cheap, complete fanout key exists: the strict remote projection
-            # depends on alias TTL, owner freshness, ledger, config and last-good
-            # state, and computing it as a probe cost ~4x the pass it would skip
-            # (v9 replay at the production 30 s cadence). Always run.
+            # No cheap, complete key exists for the REMOTE half (alias TTL, owner freshness, ledger, config,
+            # last-good state: computing it as a probe cost ~4x the pass, v9 replay), so the sub-pass always runs.
+            # Its LOCAL half is skipped inside the pass by the durable ``task_events`` cursor against the
+            # board's retained reader (``notice_fanout._board_idle``): no per-pass board connect, and a changed
+            # outcome is picked up on the very next pass.
             return Inputs()
         if kind == 'notices':
-            return _notices()
+            return _notices(frozenset(live))
         if kind == 'guarantee_pass':
             return _guarantee()
         if kind == 'remote_notices':
@@ -254,7 +278,7 @@ def probe(kind: str, *, every_store: bool = True) -> Inputs:
 def run(kind: str, work, *args, live: set[str], every_store: bool = True, **kwargs):
     """Each pass owns its key; pending/busy/slots never acquire a skip stamp."""
     with accounting.pass_('unloaded.' + kind) as count:
-        inputs = probe(kind, every_store=every_store) if every_store else Inputs()
+        inputs = probe(kind, every_store=every_store, live=live) if every_store else Inputs()
         key = (frozenset(live), every_store, inputs.key)
         previous = _last.get(kind)
         if (not inputs.pending and previous is not None and previous[0] == key

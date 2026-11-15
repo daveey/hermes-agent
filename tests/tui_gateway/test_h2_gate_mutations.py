@@ -6,6 +6,7 @@ probe failure swallowed, reader identity dropped, ...) turns it red. See the mut
 import contextlib
 import json
 import sqlite3
+import time
 
 import pytest
 
@@ -410,9 +411,9 @@ def test_delegation_and_killed_pending_inputs_stay_hot(tmp_path, monkeypatch):
     assert gates.probe('delegation').pending
     assert not gates.probe('killed_notices').pending  # independent of delegation
     with contextlib.closing(sqlite3.connect(path)) as conn:
-        conn.execute("INSERT INTO sessions VALUES ('c','p','startup_orphan_reap',1.0)")
+        conn.execute("INSERT INTO sessions VALUES ('c','p','startup_orphan_reap',?)", (time.time() - 60,))
         conn.commit()
-    assert gates.probe('killed_notices').pending  # no age predicate: delivered ones stay hot too
+    assert gates.probe('killed_notices').pending  # inside the retry window delivered ones stay hot too
 
 
 # ---------------------------------------------------------------------------------- failure fallback
@@ -498,7 +499,7 @@ def test_revision_key_contains_the_reader_so_a_new_handle_never_matches(tmp_path
         b.close()
 
 
-def test_notices_probe_stable_on_the_kept_reader_but_rearms_on_a_swapped_reader(monkeypatch):
+def test_notices_probe_key_is_independent_of_the_reader_handle(monkeypatch):
     from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import kanban_reader_retention as retention
     from hermes_cli import kanban_db as kb
@@ -519,11 +520,11 @@ def test_notices_probe_stable_on_the_kept_reader_but_rearms_on_a_swapped_reader(
     monkeypatch.setattr(retention, 'reader', fresh)
     one, two = gates.probe('notices'), gates.probe('notices')
     assert not one.pending and not two.pending
-    assert one.key != two.key  # new handle each time: never a "no change" proof
+    assert one.key == two.key  # the key is the (re-proved) empty candidate set, not a handle revision
     ran = []
     for _ in range(2):
         gates.run('notices', lambda: ran.append(1) or [], live=set())
-    assert len(ran) == 2
+    assert len(ran) == 1
     for h in handles:
         h.close()
     monkeypatch.setattr(retention, 'reader', real)
@@ -540,25 +541,27 @@ def test_guarantee_key_is_stable_on_the_kept_reader_across_passes(store):
     with profile_store(db.db_path) as s2:
         r2 = reader_of(s2)
     assert r1 is r2
-    assert first.key[0][1][0] is second.key[0][1][0]  # the key names the same kept handle every pass
     ran = []
     for _ in range(2):
         gates.run('guarantee_pass', lambda: ran.append(1) or [], live=set())
     assert len(ran) == 1
 
 
-def test_guarantee_commit_by_another_writer_moves_the_key(store):
+def test_guarantee_commit_to_a_candidate_row_moves_the_key_but_an_unrelated_one_does_not(store):
     db, seed = store
     seed({'state': 'started'})
     before = gates.probe('guarantee_pass')
     other = sqlite3.connect(db.db_path)
     try:
-        other.execute("UPDATE messages SET content='changed' WHERE display_kind='kanban_notice'")
+        other.execute("INSERT INTO sessions(id, source, started_at) VALUES ('unrelated', 'desktop', 1.0)")
+        other.commit()  # any chat write on a live install: not an input of this pass
+        assert gates.probe('guarantee_pass').key == before.key
+        other.execute("UPDATE messages SET display_metadata='{}' WHERE display_kind='kanban_notice'")
         other.commit()
     finally:
         other.close()
     after = gates.probe('guarantee_pass')
-    assert not after.pending and after.key != before.key
+    assert after.pending or after.key != before.key
 
 
 def test_guarantee_store_appearing_or_vanishing_moves_the_key(store, tmp_path, monkeypatch):
@@ -586,11 +589,11 @@ def test_notices_second_board_change_moves_key_and_new_subscription_goes_hot():
     with contextlib.closing(kbc.connect(board='second')) as conn:
         tid = kb.create_task(conn, title='y', assignee='w')
     moved = gates.probe('notices')
-    assert not moved.pending and moved.key != base.key
+    assert not moved.pending and moved.key == base.key  # board bookkeeping/writes are not inputs
     with contextlib.closing(kbc.connect(board='second')) as conn:
         notify.add_notify_sub(conn, task_id=tid, platform='tui', chat_id='chat')
     quiet = gates.probe('notices')
-    assert not quiet.pending and quiet.key != moved.key  # a sub on an open card is still an empty proof
+    assert not quiet.pending and quiet.key == moved.key  # a sub on an open card is still an empty proof
     with contextlib.closing(kbc.connect(board='second')) as conn:
         kb.complete_task(conn, tid, summary='ready')
     assert gates.probe('notices').pending  # the unseen terminal event on the OTHER board goes hot
