@@ -620,8 +620,14 @@ from hermes_cli._parser import command_argv
 # Repair needs only stdlib. Do not activate the damaged tree to reach it.
 _pm_repair = command_argv(sys.argv[1:])[:2] == ["pm", "repair"]
 if not _pm_repair:
+    from hermes_cli import launch_malloc
     from hermes_cli.venv_sync import exec_launch, prepare_launch, relaunch_command
 
+    # libmalloc already consumed our exec-time setting. Scrub before preparation
+    # can spawn children or fail into degraded startup; never ensure twice.
+    _malloc_consumed = launch_malloc.MARK in os.environ
+    if _malloc_consumed:
+        launch_malloc.ensure(sys.argv[1:])
     try:
         _launch_python = prepare_launch(_root, sys.argv[1:])
         if _launch_python is not None:
@@ -635,9 +641,7 @@ if not _pm_repair:
 
                 raise RelaunchExit(subprocess.call(_command))
             exec_launch(_launch_python, _command, sys.argv[1:])
-        else:
-            from hermes_cli import launch_malloc
-
+        elif not _malloc_consumed:
             launch_malloc.ensure(sys.argv[1:])
     except Exception as exc:
         if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
