@@ -183,6 +183,27 @@ def test_a_rewritten_key_at_a_new_seq_is_seen(host):
     assert refs.unresolved_after_replica([HUB_ONLY]) == [HUB_ONLY]
 
 
+def test_distinct_refs_under_an_unchanged_probe_stay_bounded(host, hub_scans, monkeypatch):
+    """Each lookup of new refs grows the memo; past ``_HUB_MEMO_REFS`` it keeps only the current request's refs, so
+    distinct refs on one kept reader cannot pile up. An evicted ref is looked up afresh and answers as before."""
+    monkeypatch.setattr(refs, "_HUB_MEMO_REFS", 2)
+    gone = [f"t_01a1cfdeadbeef{n:02d}" for n in (1, 2)]
+
+    def memo_refs():
+        (entry,) = refs._hub_memo.values()
+        return set(entry[1])
+
+    assert refs.unresolved_after_replica([HUB_ONLY]) == []
+    assert refs.unresolved_after_replica([gone[0]]) == [gone[0]]
+    assert memo_refs() == {HUB_ONLY, gone[0]}  # at the bound: nothing dropped
+    assert refs.unresolved_after_replica([gone[1]]) == [gone[1]]
+    assert memo_refs() == {gone[1]}  # over it: only the refs this request asked about
+    hub_scans.clear()
+    assert refs.unresolved_after_replica([HUB_ONLY]) == []  # evicted, so scanned again, still found
+    assert hub_scans == [HUB_ONLY]
+    assert memo_refs() == {gone[1], HUB_ONLY}
+
+
 def test_rows_without_seq_are_never_memoized(host, hub_scans):
     _write(host, ("INSERT INTO replica VALUES ('gw-z', 'tasks', 'default/t_01a1cf000000abcd', 1, NULL, '{}', 0)", ()))
     refs.unresolved_after_replica([NOWHERE])
