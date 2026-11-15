@@ -149,16 +149,31 @@ def _check_payloads(conn, now):
 
 
 def _latest_results(conn, now=None) -> dict[str, dict]:
-    from hermes_cli.kanban_shared_blockers import normalize_blocker_id
+    # All lanes reduce the same inputs. Retain the reduction only within the
+    # existing commit/config-validated scope, with private copies for callers.
+    ts = int(time.time()) if now is None else int(now)
+    results, _trusted = read('latest_check_results', conn, ts,
+                             lambda: _reduce_latest_results(conn, ts), store_if=lambda value: value[1])
+    return results
 
+
+def _reduce_latest_results(conn, now):
+    from hermes_cli.kanban_shared_blockers import normalize_blocker_id
+    from hermes_cli.kanban_blocker_inputs import config
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+
+    try:
+        cfg, trusted = config(), True
+    except ConfigBackendUnavailable:
+        cfg, trusted = {}, False  # preserve slug fallback, but never publish it as an alias-aware result
     results = {}
     tokens = _assertion_tokens(conn, now)
     for payload in _check_payloads(conn, now):
-        bid = normalize_blocker_id(payload.get("blocker_id"))
+        bid = normalize_blocker_id(payload.get("blocker_id"), cfg=cfg)
         token = tokens.get(bid)
         if bid and (bid not in results or _result_key(payload, token) > _result_key(results[bid], token)):
             results[bid] = payload
-    return results
+    return results, trusted
 
 
 def apply_check_clears(conn, states, now=None) -> None:
