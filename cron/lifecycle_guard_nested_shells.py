@@ -824,7 +824,9 @@ def _iter_nested_shell_inputs(
         yield from _fed_shell_inputs(walk_command, cwd=cwd)
     from cron.lifecycle_guard_stdin_provenance import source_contexts
 
-    contexts = source_contexts(walk_command, [view for view, _found in classified])
+    # Provenance is only consumed by stdin readers; do not re-lex ordinary scripts.
+    contexts = (source_contexts(walk_command, [view for view, _found in classified])
+                if grouped else (_StdinSources({}, {}) for _ in classified))
     for (view, found), local_sources in zip(classified, contexts):
         if grouped and (_compound_redirections(view) or _calls_function(view, functions)):
             yield from _redirected_shell_inputs(view, cwd=cwd, sources=local_sources)
