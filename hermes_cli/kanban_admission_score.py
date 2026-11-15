@@ -176,8 +176,8 @@ def _candidate_state(conn, ids):
     for offset in range(0, len(ids), 400):
         batch = ids[offset:offset + 400]
         marks = ",".join("?" for _ in batch)
-        found = {r[0]: (r[1] or "normal", r[2] or 0) for r in conn.execute(
-            f"SELECT id, admission_class, consecutive_failures FROM tasks WHERE id IN ({marks})", batch)}
+        found = {r[0]: (r[1] or "normal", r[2] or 0, r[3] or 0) for r in conn.execute(
+            f"SELECT id, admission_class, consecutive_failures, created_at FROM tasks WHERE id IN ({marks})", batch)}
         metadata.update(found)
         # Restrict history to extant rows; orphan events do not restore a vanished candidate.
         since.update(_ready_since(conn, list(found)))
@@ -230,7 +230,8 @@ def effective_priorities(conn: sqlite3.Connection, task_ids: list[str]) -> dict[
 def rank(conn: sqlite3.Connection, rows, *, now_ms: Optional[int] = None, weights: Optional[dict] = None):
     """``rows`` (local task rows with ``id``) in admission order, each with its :class:`ScoreBreakdown`.
 
-    Pure and read-only. Ties break on the earlier ready-interval start, then task id."""
+    Pure and read-only. Ties break on ready-interval start, source creation time,
+    then task id. Creation retains subsecond precision and local custody wins."""
     import time
 
     rows = list(rows)
@@ -245,7 +246,7 @@ def rank(conn: sqlite3.Connection, rows, *, now_ms: Optional[int] = None, weight
         tid = row["id"]
         below = _descendants(tid, children)
         priority = max([tasks.get(tid, (0, None))[0], *(tasks[c][0] for c in below)])
-        klass, failures = metadata.get(tid, ("normal", 0))
+        klass, failures, _created = metadata.get(tid, ("normal", 0, 0))
         class_rank = CLASS_RANK.get(klass, 0)
         start = since.get(tid, 0)
         if start <= 0:
@@ -257,5 +258,6 @@ def rank(conn: sqlite3.Connection, rows, *, now_ms: Optional[int] = None, weight
                  + weights["age"] * buckets - weights["failure"] * failures)
         scored.append((row, ScoreBreakdown(effective, class_rank, descendants, buckets, failures, total, start,
                                            tuple(sorted(weights.items())))))
-    scored.sort(key=lambda item: (-item[1].total, item[1].ready_since, item[0]["id"]))
+    scored.sort(key=lambda item: (-item[1].total, item[1].ready_since,
+                                 metadata.get(item[0]["id"], ("normal", 0, 0))[2], item[0]["id"]))
     return scored

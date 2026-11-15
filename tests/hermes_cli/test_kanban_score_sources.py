@@ -44,6 +44,43 @@ def add(conn, tid, start, priority=0, klass="normal", failures=0):
     return conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
 
 
+@pytest.mark.parametrize("replica", [False, True])
+def test_same_second_ready_ties_use_source_creation_before_random_id(sources, replica):
+    local, remote = sources
+    source = remote if replica else local
+    older = add(source, "z-first", 1000.1)
+    newer = add(source, "a-second", 1000.2)
+    for tid in ("z-first", "a-second"):
+        source.execute("INSERT INTO task_events VALUES (?, 'promoted', '{}', 9000)", (tid,))
+    # Minimal candidate projections and reversed input must not erase source FIFO.
+    rows = [{"id": newer["id"]}, {"id": older["id"]}]
+    ranked = score.rank(local, rows, now_ms=9_001_000, weights={})
+    assert [row["id"] for row, _ in ranked] == ["z-first", "a-second"]
+
+
+def test_ready_episode_precedes_creation_tiebreak(sources):
+    local, _ = sources
+    older = add(local, "older-card", 1000)
+    newer = add(local, "newer-card", 2000)
+    local.execute("INSERT INTO task_events VALUES ('older-card', 'promoted', '{}', 9001)")
+    local.execute("INSERT INTO task_events VALUES ('newer-card', 'promoted', '{}', 9000)")
+    ranked = score.rank(local, [older, newer], now_ms=9_002_000, weights={})
+    assert [row["id"] for row, _ in ranked] == ["newer-card", "older-card"]
+
+
+def test_local_creation_tiebreak_overrides_replica(sources):
+    local, remote = sources
+    older = add(remote, "z-first", 2000)
+    newer = add(remote, "a-second", 1000)
+    add(local, "z-first", 1000)
+    add(local, "a-second", 2000)
+    for source in (local, remote):
+        for tid in ("z-first", "a-second"):
+            source.execute("INSERT INTO task_events VALUES (?, 'promoted', '{}', 9000)", (tid,))
+    ranked = score.rank(local, [newer, older], now_ms=9_001_000, weights={})
+    assert [row["id"] for row, _ in ranked] == ["z-first", "a-second"]
+
+
 def test_replica_candidate_uses_replica_readiness_and_metadata(sources):
     local, remote = sources
     row = add(remote, "remote", 1000, 300, "capacity", 2)
