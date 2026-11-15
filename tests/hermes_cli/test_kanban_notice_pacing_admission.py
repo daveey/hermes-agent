@@ -175,6 +175,23 @@ def test_held_pool_notice_carries_the_until_time(hub, path):
     _assert_names_no_re_placement(text)
 
 
+@pytest.mark.parametrize("state", [lp.PACED, lp.HELD])
+@pytest.mark.parametrize("path", sorted(NOTICES))
+def test_ready_hint_matches_the_notice_pacing_admission(hub, state, path):
+    until = int(time.time()) + 3600
+    _store(("anthropic", state, until))
+    tid = _hub_card(hub.conn)
+    payload, text = NOTICES[path](hub.conn, tid)
+    hint = pu.ready_hint(hub.conn, kb.get_task(hub.conn, tid), now=payload["observed_at"])
+    assert hint is not None
+    assert pu._observation(payload) in hint
+    assert pu._options(tid, payload=payload) in hint
+    assert "it starts on its own once its provider pool is back on pace" in hint
+    assert "this machine cannot lease it" in hint
+    _assert_names_no_re_placement(hint)
+    assert "LLM quota pacing" in text
+
+
 # --- card case 4: no positive read, today's payload and words -------------------------------------------------------
 
 
@@ -202,6 +219,14 @@ def test_without_a_positive_governor_read_the_notice_is_as_before(hub, monkeypat
     assert payload["admission"] == UNKNOWN, payload
     assert "admission reason unknown" in text and "re-place on a capable gateway with free slots" in text, text
     assert "pacing" not in json.dumps(payload) and "pacing" not in text, (payload, text)
+    task, now = kb.get_task(hub.conn, tid), payload["observed_at"]
+    hint = pu.ready_hint(hub.conn, task, now=now)
+    assert hint is not None
+    assert asked == [tid, tid]
+    monkeypatch.setattr(pu, "_pacing_admission", lambda *_a: None)
+    assert hint == pu.ready_hint(hub.conn, task, now=now)
+    assert "re-place on a capable gateway with free slots" in hint
+    assert "admission reason" not in hint
 
 
 # --- every condition the rule adds ----------------------------------------------------------------------------------
@@ -302,6 +327,9 @@ def test_a_busy_pool_and_a_core_update_hold_still_come_first(hub):
             kb._append_event(hub.conn, claimed, "claimed", {"holder": f"worker-{3 + i % 2}", "run_uid": f"r{i}"})
     payload = _post(hub.conn, busy)
     assert payload["admission"] == {"reason": "matching_pool_busy", "status": "queued"}, payload
+    hint = pu.ready_hint(hub.conn, kb.get_task(hub.conn, busy))
+    assert hint is not None and "Not a placement problem" in hint
+    assert "LLM quota pacing" not in hint
     held = _pool_card(hub.conn, title="held for an update")
     assert _post(hub.conn, held, core_update_hold=True)["admission"] == {"reason": "core_update_hold", "status": "held"}
 
