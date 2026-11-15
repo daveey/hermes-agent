@@ -297,7 +297,7 @@ WRAPPED = {
 }
 INVOLUNTARY = {  # no receipt: custody becomes ``retained`` (fail closed)
     "hermes_cli/kanban_failure_accounting.py::_record_task_failure",
-    "hermes_cli/kanban_db.py::reclaim_task",
+    "hermes_cli/kanban_manual_reclaim.py::_reclaim",
     "hermes_cli/kanban_db.py::release_stale_claims",
     "hermes_cli/kanban_db.py::invalidate_descendants_for_parent_reopen",
     "hermes_cli/kanban_db_dispatch.py::enforce_max_runtime",
