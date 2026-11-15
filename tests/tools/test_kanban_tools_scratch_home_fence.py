@@ -284,6 +284,89 @@ def test_exemption_is_the_scratch_dir_get_scratch_dir_gives_for_the_marker_root(
     assert kanban_path_is_fenced(scratch / ".." / "other" / "kanban.db")
 
 
+@pytest.mark.parametrize("absolute", [False, True])
+def test_core_noindex_scratch_descendants_and_fences(monkeypatch, tmp_path, absolute):
+    from agent.delegation_context import delegated_child_context, kanban_path_is_fenced
+    from hermes_constants import SPOTLIGHT_NOINDEX_SUFFIX, ensure_spotlight_noindex_dir
+
+    root = tmp_path / "real-hermes"
+    scratch = root / "cache" / "scratch"
+    sibling = scratch.with_name(scratch.name + SPOTLIGHT_NOINDEX_SUFFIX)
+    monkeypatch.delenv("HERMES_SPOTLIGHT_INDEX_CACHE", raising=False)
+    ensure_spotlight_noindex_dir(scratch, platform="darwin")
+    if absolute:
+        scratch.unlink()
+        scratch.symlink_to(sibling, target_is_directory=True)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", str(root))
+    for spelling in (scratch, sibling):
+        assert not kanban_path_is_fenced(spelling / "probe")
+        assert not kanban_path_is_fenced(spelling / "probe" / "kanban.db")
+        assert kanban_path_is_fenced(spelling)
+    escaped = sibling / "escape"
+    escaped.symlink_to(root / "sub", target_is_directory=True)
+    assert kanban_path_is_fenced(escaped / "kanban.db")
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(scratch / "probe" / "kanban.db"))
+    assert kanban_path_is_fenced(sibling / "probe" / "kanban.db")
+    monkeypatch.delenv("HERMES_KANBAN_DB")
+    with delegated_child_context("child-session"):
+        assert kanban_path_is_fenced(sibling / "probe")
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", "1")
+    assert kanban_path_is_fenced(sibling / "probe")
+
+
+@pytest.mark.parametrize("link", [None, "other", "./scratch.noindex", "../cache/scratch.noindex"])
+def test_noindex_sibling_requires_exact_core_link(monkeypatch, tmp_path, link):
+    from agent.delegation_context import kanban_path_is_fenced
+
+    root = tmp_path / "real-hermes"
+    scratch = root / "cache" / "scratch"
+    sibling = scratch.with_name("scratch.noindex")
+    sibling.mkdir(parents=True)
+    if link is None:
+        scratch.mkdir()
+    else:
+        scratch.symlink_to(link, target_is_directory=True)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", str(root))
+    assert kanban_path_is_fenced(sibling / "probe")
+    if link is None:
+        assert not kanban_path_is_fenced(scratch / "probe")
+    else:
+        assert kanban_path_is_fenced(scratch / "probe")
+
+
+def test_noindex_sibling_requires_symlink_even_with_matching_readlink(monkeypatch, tmp_path):
+    from agent.delegation_context import kanban_path_is_fenced
+
+    root = tmp_path / "real-hermes"
+    scratch = root / "cache" / "scratch"
+    scratch.mkdir(parents=True)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", str(root))
+    # Isolate the is_symlink condition from the readlink OSError fallback.
+    monkeypatch.setattr(os, "readlink", lambda path: "scratch.noindex")
+    assert kanban_path_is_fenced(scratch.with_name("scratch.noindex") / "probe")
+
+
+def test_noindex_scratch_readlink_failure_stays_fenced(monkeypatch, tmp_path):
+    from agent.delegation_context import kanban_path_is_fenced
+
+    root = tmp_path / "real-hermes"
+    scratch = root / "cache" / "scratch"
+    scratch.parent.mkdir(parents=True)
+    scratch.symlink_to("scratch.noindex", target_is_directory=True)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", str(root))
+
+    def failed_readlink(path, *args, **kwargs):
+        raise OSError("link changed during inspection")
+
+    # Probe the physical spelling so target.resolve does not itself read this link.
+    monkeypatch.setattr(os, "readlink", failed_readlink)
+    assert kanban_path_is_fenced(scratch.with_name("scratch.noindex") / "probe")
+
+
 @pytest.mark.parametrize("rel", ["sub", "cache/other", "cache"])
 def test_homes_elsewhere_under_the_root_stay_refused(monkeypatch, tmp_path, rel):
     real_root = tmp_path / "real-hermes"

@@ -414,9 +414,19 @@ def kanban_path_is_fenced(path: os.PathLike[str] | str) -> bool:
         target.relative_to(root)
     except ValueError:
         return False
-    # Not resolved: a scratch dir that is itself a symlink to elsewhere under the root exempts nothing there.
+    from hermes_constants import SPOTLIGHT_NOINDEX_SUFFIX
+
+    # Never resolve arbitrary scratch links into an exemption. Accept only the sibling link
+    # shape ensure_spotlight_noindex_dir creates/recognizes on Darwin, including its physical spelling.
     scratch = root / "cache" / "scratch"
-    return target == scratch or not target.is_relative_to(scratch)
+    candidates = [scratch]
+    sibling = scratch.with_name(scratch.name + SPOTLIGHT_NOINDEX_SUFFIX)
+    try:
+        if scratch.is_symlink() and os.readlink(scratch) in (sibling.name, str(sibling)):
+            candidates.append(sibling)
+    except OSError:
+        pass  # A changed/unreadable link establishes no additional exemption.
+    return not any(target != candidate and target.is_relative_to(candidate) for candidate in candidates)
 
 
 @overload
