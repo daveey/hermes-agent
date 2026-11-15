@@ -175,7 +175,27 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
         released = covers_latest(conn, task.id)
         if released:
             place["quota_released"] = {k: released.get(k) for k in ("reason", "via", "actor", "until")}
+        rerouted = _paced_reroute(conn, task)
+        if rerouted:
+            place["reroute"] = rerouted
     return place
+
+
+def _paced_reroute(conn: sqlite3.Connection, task) -> Optional[str]:
+    """The next run's move off a pacing-held pool (``kanban_paced_reroute.route_words``), else None. Advisory."""
+    try:
+        from hermes_cli.kanban_paced_reroute import route_words
+        return route_words(conn, task)
+    except Exception:  # health: allow BLE001 -- an advisory route note must never fail the read
+        _log.debug("kanban queue position: paced reroute unavailable for %s", task.id, exc_info=True)
+        return None
+
+
+def reroute_prefix(place: Optional[dict[str, Any]]) -> str:
+    """``"next run rerouted: default+paced:openai-codex -> anthropic/<model>; "`` for a place whose card runs off a
+    pacing-held pool, else ``""``: queue notes and stall notices name the move, not only the held pool."""
+    rerouted = (place or {}).get("reroute")
+    return f"next run rerouted: {rerouted}; " if rerouted else ""
 
 
 def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:
@@ -295,6 +315,8 @@ def describe(place: Optional[dict[str, Any]]) -> Optional[str]:
     for, so "ready, no run" never reads as stuck. [daveey] kanban-7d720d4ab8: a chat saw only a null
     ``queue_reason`` for a card waiting on a full hub, called it stuck and ran its work in a subagent."""
     words = _describe_lane(place)
+    if words:
+        words = reroute_prefix(place) + words
     released = (place or {}).get("quota_released")
     if words and isinstance(released, dict):
         words = (f"quota hold released ({released.get('reason') or 'no reason'}, via {released.get('via')}); "

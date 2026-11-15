@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -329,6 +330,26 @@ def paced_pools(conn: sqlite3.Connection, task_id: str) -> Optional[list[lp.Pool
             return None
         paces.append(pace)
     return paces
+
+
+def held_pools(section: Any, now: float) -> dict[str, float]:
+    """``provider -> until`` (``inf`` when no reset is known) for every governed pool this home's dispatchers stored as
+    ``held`` and fresh (:func:`_stored_pace`), under the ``kanban.llm_pacing`` ``section``; pacing off = none.
+
+    The route resolver's read-only view (``kanban_paced_reroute``: a far hold moves a route to an unheld peer). Like
+    :func:`paced_pools` it reads the stored pace only: no usage read, no write, no hold."""
+    cfg = lp.config_from(section)
+    if not cfg.enabled:
+        return {}
+    now_held: dict[str, float] = {}
+    for provider, entry in _load_state(state_path()).items():
+        name = str(provider).strip().lower()
+        pace = _stored_pace(entry, now, cfg) if name in cfg.providers else None
+        if pace is None or pace.state != lp.HELD:
+            continue
+        until = pace.until
+        now_held[name] = float(until) if isinstance(until, (int, float)) and not isinstance(until, bool) else math.inf
+    return now_held
 
 
 def admission(paces: list[lp.PoolPace]) -> dict[str, Any]:

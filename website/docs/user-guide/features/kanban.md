@@ -1565,6 +1565,8 @@ Before claiming a ready or review card, the dispatcher checks the OAuth pool of 
 
 A held card stays `ready` and unclaimed. The dispatcher records an `llm_paced` event (providers, state, limit, running) and a `dispatch_skipped` row with reason `llm_paced`. Queue position, the chat-wait and parent-unclaimed notices, and `hermes kanban diagnostics` (`held_in_ready`) name the hold instead of "skip reason unrecorded". Raising the card's priority does not lift it. If no account can be read, the governor fails open, and mandatory model pins and ungoverned providers always start. Only Kanban dispatch consults it.
 
+A **held** pool whose reset is more than `reroute_after_s` away (or unknown) moves the route instead of holding the card for days: an unpinned default-routed card, a `review_unpinned` reviewer, or a non-mandatory concrete pin runs on another eligible route of the same routing class whose provider is neither held nor walled (the same eligibility as the quota-wall reroutes). The route reason is `default+paced:<provider>`, `review_unpinned+paced:<provider>` or `pinned+paced:<provider>`; the card row never changes, and the governor then judges the new provider as usual. Queue notes and stall notices name the move (`next run rerouted: default+paced:openai-codex -> anthropic/<model>`). A **paced** pool never moves a route, and mandatory pins, `class:*` selectors and `require_model: true` cards keep theirs. The decision reads only the pace stored in `llm_pacing.json`; it makes no usage read.
+
 | Config key | Default | What it does |
 |------------|---------|--------------|
 | `kanban.llm_pacing.enabled` | `true` | `false` restores ungoverned claims. |
@@ -1576,6 +1578,7 @@ A held card stays `ready` and unclaimed. The dispatcher records an `llm_paced` e
 | `kanban.llm_pacing.rate_window_seconds` | `3600` | Lookback for burn rates and this host's average concurrency. |
 | `kanban.llm_pacing.min_rate_span_seconds` | `600` | Shortest sample span a burn slope is measured over. |
 | `kanban.llm_pacing.deferrable_share` | `0.5` | Share of a paced limit that deferrable cards may use (0-1). |
+| `kanban.llm_pacing.reroute_after_s` | `3600` | A held pool whose reset is further away than this moves default, `review_unpinned` and non-mandatory pinned routes to an unheld same-class peer. |
 
 ### Dependency-review repair continuation
 

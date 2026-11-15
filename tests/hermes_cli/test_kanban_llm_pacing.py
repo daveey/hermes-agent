@@ -276,11 +276,13 @@ def test_only_kanban_dispatch_consults_the_governor():
                    if "kanban_llm_pacing" in p.read_text(encoding="utf-8", errors="ignore"))
     assert users == ["hermes_cli/kanban_db_dispatch.py", "hermes_cli/kanban_dispatch_maintenance.py",
                      "hermes_cli/kanban_llm_pacing.py", "hermes_cli/kanban_llm_pacing_dispatch.py",
+                     "hermes_cli/kanban_paced_reroute.py",
                      "hermes_cli/kanban_parent_unclaimed.py", "hermes_cli/kanban_worker_node.py"]
     assert _governor_names(root / "hermes_cli/kanban_dispatch_maintenance.py") == {
         "kanban_llm_pacing_dispatch": {"refresh_pools"}}
     assert _governor_names(root / "hermes_cli/kanban_parent_unclaimed.py") == NOTICE_VIEW
     assert _governor_names(root / "hermes_cli/kanban_worker_node.py") == PICKUP_VIEW
+    assert _governor_names(root / "hermes_cli/kanban_paced_reroute.py") == REROUTE_VIEW
 
 
 # What the stall notice may take from the governor: no hold(), no usage read, no state write.
@@ -288,6 +290,8 @@ NOTICE_VIEW = {"kanban_llm_pacing_dispatch": {"admission", "admission_skip", "pa
 # Worker pickup (t_01a1ddeb76e30be7) predicts the claim-time hold on the replica's copy, so a card dispatch would
 # hold takes no pickup budget: its one entry point holds nothing, records no card event and fails open.
 PICKUP_VIEW = {"kanban_llm_pacing_dispatch": {"pickup_hold"}}
+# The route resolver moves a route off a far held pool (t_01a1e026c2ba361b): the stored holds only, no usage read.
+REROUTE_VIEW = {"kanban_llm_pacing_dispatch": {"held_pools"}}
 
 
 def _governor_names(path: pathlib.Path) -> dict[str, set[str]]:

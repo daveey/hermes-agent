@@ -51,6 +51,13 @@ def _place(conn, parent_id: str) -> dict[str, Any]:
 
 
 def _queue_words(place: dict[str, Any], now: Optional[float] = None) -> str:
+    from hermes_cli.kanban_queue_position import reroute_prefix
+    if place.get("lane") == "unplaceable":
+        return _lane_words(place, now)  # ``describe`` already names the reroute
+    return reroute_prefix(place) + _lane_words(place, now)
+
+
+def _lane_words(place: dict[str, Any], now: Optional[float] = None) -> str:
     if place.get("lane") == "worker_pool":
         return f"waiting for a pool worker ({place.get('reason') or 'no reason recorded'})"
     if place.get("lane") in ("machine", "unplaceable"):
