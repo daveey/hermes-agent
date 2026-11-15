@@ -99,8 +99,29 @@ def test_kill_stale_dashboard_processes_never_kills_an_always_on_backend(monkeyp
 # ── the proxy ────────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_proxy_holds_a_client_while_no_backend_answers_then_splices_it(home):
-    async def scenario():
+@pytest.fixture(params=[False, True], ids=["uncontended", "port-takeover"])
+def backend_port_contender(request, monkeypatch):
+    """Try a real silent listener in the gap after the first (dead) active port is published."""
+    real_write_active = ro.write_active
+    published = []
+    with socket.socket() as contender:
+        def publish(port):
+            real_write_active(port)
+            published.append(port)
+            if request.param and len(published) == 1:  # later publishes name live backends
+                try:
+                    contender.bind(("127.0.0.1", port))
+                except OSError as exc:
+                    assert exc.errno == errno.EADDRINUSE
+                else:
+                    contender.listen(1)  # A successful TCP connect must not be mistaken for refusal.
+
+        monkeypatch.setattr(ro, "write_active", publish)
+        yield
+
+
+def test_proxy_holds_a_client_while_no_backend_answers_then_splices_it(home, backend_port_contender):
+    async def scenario(dead):
         async def echo(reader, writer):
             writer.write(b"pong:" + await reader.read(4))
             await writer.drain()
@@ -108,7 +129,6 @@ def test_proxy_holds_a_client_while_no_backend_answers_then_splices_it(home):
 
         backend = await asyncio.start_server(echo, "127.0.0.1", 0)
         backend_port = backend.sockets[0].getsockname()[1]
-        dead = socket_free_port()
         ro.write_active(dead)  # active names a port nothing listens on (a backend mid-restart)
         proxy = ro.Proxy(hold_s=10)
         front = await asyncio.start_server(proxy.handle, "127.0.0.1", 0)
@@ -124,26 +144,10 @@ def test_proxy_holds_a_client_while_no_backend_answers_then_splices_it(home):
         backend.close()
         return data
 
-    assert asyncio.run(scenario()) == b"pong:ping"
-
-
-@pytest.fixture(params=[False, True], ids=["uncontended", "port-takeover"])
-def backend_port_contender(request, monkeypatch):
-    """Try a real silent listener in the gap after the active port is published."""
-    real_write_active = ro.write_active
-    with socket.socket() as contender:
-        def publish(port):
-            real_write_active(port)
-            if request.param:
-                try:
-                    contender.bind(("127.0.0.1", port))
-                except OSError as exc:
-                    assert exc.errno == errno.EADDRINUSE
-                else:
-                    contender.listen(1)  # A successful TCP connect must not be mistaken for refusal.
-
-        monkeypatch.setattr(ro, "write_active", publish)
-        yield
+    # Bind without listening for the whole hold: connections refuse, and no other listener can take the port.
+    with socket.socket() as dead:
+        dead.bind(("127.0.0.1", 0))
+        assert asyncio.run(scenario(dead.getsockname()[1])) == b"pong:ping"
 
 
 def test_proxy_closes_a_client_only_after_the_hold(home, backend_port_contender):
@@ -218,14 +222,6 @@ def test_proxy_target_follows_every_atomic_replace(home):
     ro.write_active(9149)
     os.utime(path, ns=(stamp, stamp))  # the replace landed inside the same mtime tick
     assert proxy.target() == 9149
-
-
-def socket_free_port() -> int:
-    import socket
-
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 # ── the roller ───────────────────────────────────────────────────────────────────────────────────────
