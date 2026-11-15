@@ -46,6 +46,14 @@ def pending(conn, task_id: str) -> bool:
     return bool(rows and max((dict(r) for r in rows), key=_event_order)["kind"] == EVENT)
 
 
+def unblock_refusal(conn, task_id: str) -> str | None:
+    """An unblock is not a recorded spend decision; keep every release surface honest."""
+    if not pending(conn, task_id):
+        return None
+    return (f"cannot unblock {task_id}: spend-budget decision pending; split or re-scope the work, "
+            f"then use `hermes kanban promote {task_id} --reason <what changed>`, or archive it")
+
+
 def notice(payload: dict) -> str:
     return (str(payload.get("reason") or "Spend budget reached") + ". Held in triage until a recorded decision: "
             "split or re-scope the work, then manually promote it, or archive it. "

@@ -188,6 +188,9 @@ def refusal(conn: sqlite3.Connection, requester: str, target: str) -> Optional[s
         return f"unknown task {target}"
     if row[0] == "archived":
         return f"{target} is archived"
+    from hermes_cli.kanban_spend_decision import unblock_refusal as spend_refusal
+    if held := spend_refusal(conn, target):
+        return held
     found = (scope_refusal(conn, requester, target) or exhaustion_refusal(conn, target)
              or _recovery_refusal(conn, requester, target))
     if found is None and len(_resume_events(conn, target)) >= MAX_RESUMES:
@@ -259,7 +262,7 @@ def execute(conn: sqlite3.Connection, req: dict, executor: str) -> str:
         elif ok and applied_by(conn, target, rid):
             results.append({**op, "outcome": "applied", **_safe_readback(conn, target)})
         else:
-            error = f"unblock_task did not move {target}"
+            error = kb.unblock_refusal(conn, target) or f"unblock_task did not move {target}"
             results.append({**op, "outcome": "failed", "detail": error, **_safe_readback(conn, target)})
     applied = any(r["outcome"] in ("applied", "already_applied") for r in results)
     status = "done" if not error else ("failed" if applied or any(r["outcome"] == "failed" for r in results)

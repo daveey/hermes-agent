@@ -285,8 +285,11 @@ def hold(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
     if decision.pending(conn, task_id):
         with kb.write_txn(conn):
             if decision.pending(conn, task_id):
-                conn.execute("UPDATE tasks SET status='triage' WHERE id=? AND status IN ('ready','review') "
+                cur = conn.execute("UPDATE tasks SET status='triage' WHERE id=? AND status IN ('ready','review') "
                              "AND current_run_id IS NULL AND " + _UNCLAIMED, (task_id, now))
+                if cur.rowcount == 1:
+                    kb._append_event(conn, task_id, "spend_budget_held", {
+                        "status": "triage", "reason": decision.unblock_refusal(conn, task_id)})
                 decision.safe_ensure_producer(conn, task_id)
                 return "triage"
     board = limits() if lim is None else lim

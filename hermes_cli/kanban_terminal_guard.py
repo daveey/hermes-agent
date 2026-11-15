@@ -144,9 +144,12 @@ def unblock_held(conn: sqlite3.Connection, task_id: str) -> bool:
     """``kanban_db.unblock_task``, first inside its write txn: True (refuse) when the row reads blocked/scheduled/
     triage but the card is held terminal. ``unblocked`` is an explicit reopen (``REOPEN_KINDS``, and on the Board),
     so an automated caller acting on a stale copy (shared-blocker clear/probe, quota release, ``resolved_check``)
-    would otherwise reopen a done card. A card that is not unblockable anyway leaves no note."""
+    would otherwise reopen a done card. Spend stops also require a recorded promote/archive decision.
+    A card that is not unblockable anyway leaves no note."""
+    from hermes_cli.kanban_spend_decision import pending as spend_pending
     row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    return row is not None and row[0] in _UNBLOCKABLE and skip_wake(conn, task_id, "unblocked")
+    return row is not None and row[0] in _UNBLOCKABLE and (
+        skip_wake(conn, task_id, "unblocked") or spend_pending(conn, task_id))
 
 
 def stale_hold(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
@@ -162,6 +165,9 @@ def unblock_refusal(conn: sqlite3.Connection, task_id: str, *, verb: str = "unbl
     ``verb="reopen"``: the CLI reopen's refusal, which names only the archived hold (reopen accepts a done one)."""
     hold = stale_hold(conn, task_id)
     if hold is None or (verb == "reopen" and hold["status"] == "done"):
+        if verb == "unblock":
+            from hermes_cli.kanban_spend_decision import unblock_refusal as spend_refusal
+            return spend_refusal(conn, task_id)
         return None
     head = f"cannot {verb} {task_id}: its {hold['kind']} event holds it {hold['status']} (this row is a stale copy)"
     if hold["status"] == "done":
