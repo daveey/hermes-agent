@@ -324,8 +324,11 @@ def test_a_full_queue_files_one_card_per_host_naming_the_oldest(gws):
 
 @pytest.mark.parametrize("reason", ["budget_exhausted", "hold", "other", "evidence_missing"])
 @pytest.mark.parametrize("initial", [2, 25])
-def test_same_cause_burst_refreshes_all_targets_without_comment_churn(gws, reason, initial):
+@pytest.mark.parametrize("start", [1200, 1201])
+def test_same_cause_burst_refreshes_all_targets_without_comment_churn(gws, monkeypatch, reason, initial, start):
     from hermes_cli import kanban_pickup_stall as kps
+    clock = [start]
+    monkeypatch.setattr(kps, "_now_ms", lambda now=None: int((clock[0] if now is None else now) * 1000))
     _, worker = gws
     worker.enter()
     if reason == "hold":  # a hold repair needs the hold in the live registry entry (t_01a1d5b42df173d3)
@@ -336,23 +339,25 @@ def test_same_cause_burst_refreshes_all_targets_without_comment_churn(gws, reaso
               "skip": {"reason": reason, "first_at": 1, "last_at": 1, "passes": 1,
                        "detail": "machine registry unavailable" if reason == "other" else None}}
              for i in range(25)]
-    # Cross a whole-minute boundary without changing any pickup evidence.
-    [tid] = kps.file_repairs(worker.conn, WORKER, cards[:initial], now=1200)
-    assert kps.file_repairs(worker.conn, WORKER, cards, now=1200) == [tid]
+    # Cross a second boundary, with and without a whole-minute age change.
+    [tid] = kps.file_repairs(worker.conn, WORKER, cards[:initial])
+    assert kps.file_repairs(worker.conn, WORKER, cards) == [tid]
     comments = kb.list_comments(worker.conn, tid)
     repair = kb.get_task(worker.conn, tid)
     assert repair is not None
     text = (repair.body or "") + "\n".join(c.body for c in comments)
     assert all(c["id"] in text for c in cards)
-    kps.file_repairs(worker.conn, WORKER, cards, now=1201)
+    clock[0] += 1
+    kps.file_repairs(worker.conn, WORKER, cards)
     assert len(kb.list_comments(worker.conn, tid)) == len(comments)
     # Real new pickup evidence must still reach the open incident.
-    cards[0]["skip"].update(last_at=1201000, passes=2)
-    assert kps.file_repairs(worker.conn, WORKER, cards, now=1201) == [tid]
+    cards[0]["skip"].update(last_at=clock[0] * 1000, passes=2)
+    assert kps.file_repairs(worker.conn, WORKER, cards) == [tid]
     updated = kb.list_comments(worker.conn, tid)
     assert len(updated) == len(comments) + 1
     assert "2 pass(es)" in updated[-1].body
-    kps.file_repairs(worker.conn, WORKER, cards, now=1261)
+    clock[0] += 60
+    kps.file_repairs(worker.conn, WORKER, cards)
     assert len(kb.list_comments(worker.conn, tid)) == len(updated)
     other = {**cards[0], "skip": {**cards[0]["skip"], "reason": "capability_missing"}}
     assert kps.file_repairs(worker.conn, WORKER, [other]) != [tid]

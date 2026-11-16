@@ -37,6 +37,21 @@ def test_repeat_appends_one_comment(gws):
     assert refusal(identity, "worker-2") is None
 
 
+@pytest.mark.parametrize("entry", [None, {"hold": False, "metrics": {"active_card_runs": 1}}])
+def test_registry_evidence_changes_only_when_fields_change(monkeypatch, entry):
+    clock = [1201000]
+    registry = {"machines": {support.WORKER: entry}}
+    monkeypatch.setattr(pickup, "_now_ms", lambda now=None: clock[0])
+    monkeypatch.setattr(support.wn, "registry", lambda: registry)
+    before = pickup._registry_line(support.WORKER)
+    clock[0] += 1000
+    assert pickup._registry_line(support.WORKER) == before
+    registry["machines"][support.WORKER] = {"hold": True, "metrics": {"active_card_runs": 2}}
+    after = pickup._registry_line(support.WORKER)
+    assert after != before
+    assert "hold=True" in after and "active_card_runs=2" in after
+
+
 def test_distinct_subjects_have_distinct_incidents(gws):
     _, worker = gws
     assert fire(worker) != fire(worker, "hold")

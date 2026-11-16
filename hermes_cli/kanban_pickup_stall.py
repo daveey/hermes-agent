@@ -409,11 +409,12 @@ def _registry_line(own: str) -> str:
     from hermes_cli import kanban_worker_node as wn
     entry = ((wn.registry() or {}).get("machines") or {}).get(own)
     if not entry:
-        return f"Registry entry for {own}: unreadable from {own} at {_stamp(_now_ms())}."
+        return f"Registry entry for {own}: unreadable from {own}."
     keys = ("state", "hold", "hold_reason", "hold_by", "hold_at", "hold_owner", "pickup", "max_card_runs")
     fields = ", ".join(f"{k}={entry.get(k)!r}" for k in keys if k in entry)
     active = (entry.get("metrics") or {}).get("active_card_runs")
-    return f"Registry entry for {own} at {_stamp(_now_ms())}: {fields}, active_card_runs={active!r}."
+    # The task/comment creation time records when we observed these fields.
+    return f"Registry entry for {own}: {fields}, active_card_runs={active!r}."
 
 
 # --- expected holds ------------------------------------------------------------------------------------------
