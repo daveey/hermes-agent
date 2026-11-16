@@ -14,8 +14,8 @@ POLICY = "worker-first-v1"
 WAITING = "waiting_for_worker_capacity"
 MAX_RESERVES_PER_TICK = 4
 DISPATCH_NETWORK_BUDGET_S = 2.0
-# A 409 not_claimable means the Board row moved on (leased, or not ready) and this copy has not pulled it yet.
-# Re-asking at the same revision every dispatcher tick only repeats the refusal; wait for a new revision instead.
+# A 409 not_claimable means the Board row moved on (leased, or not ready); pin_not_stale rejects recovery.
+# Re-asking the same revision every tick repeats the refusal; retry after a new revision or bounded cooldown.
 NOT_CLAIMABLE_BACKOFF_S = 600.0
 _refused: dict[tuple[str, str], tuple[int, float]] = {}  # (board, task) -> (refused revision, retry after)
 # (board, task) -> revision at which the Board refused the worker-first self-check's repin: any 4xx but
@@ -465,6 +465,8 @@ def reevaluate(conn, hub, board, gateway, *, cfg=None, may_pull=True):
                     continue
                 fence = None
                 _remember_refusal(refusals, key, row["sync_version"], exc)
+                if mode == "stale_pin" and rejection_code(exc) == "pin_not_stale":
+                    _refused[key] = (row["sync_version"], now + NOT_CLAIMABLE_BACKOFF_S)
                 if rejection_code(exc) == "not_claimable":
                     # The Board already has it leased or not ready: our copy is behind. Back off at this revision.
                     _refused[key] = (row["sync_version"], now + NOT_CLAIMABLE_BACKOFF_S)

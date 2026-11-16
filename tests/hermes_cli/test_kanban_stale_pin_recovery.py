@@ -26,7 +26,8 @@ def test_stale_pin_recovery_requests_board_recheck(setup, monkeypatch, entry):
         "machine:worker-1", "linux"]
 
 
-@pytest.mark.parametrize("registry", [None, {}, {"machines": {}},
+@pytest.mark.parametrize("registry", [None, {}, {"machines": None},
+    {"machines": {"worker-1": None}},
     {"machines": {"worker-1": {"state": "active"}}},
     {"machines": {"worker-1": {"state": "active", "last_seen": "bad"}}},
     {"machines": {"worker-1": {"state": "active", "last_seen": 0}}},

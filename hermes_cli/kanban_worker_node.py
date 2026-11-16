@@ -253,11 +253,16 @@ def _registry_locked() -> Optional[Mapping[str, Any]]:
         fetch = hub.machines
     try:
         raw = fetch()
+        machines = raw.get("machines") if isinstance(raw, dict) else None
+        if (not isinstance(machines, list) or any(
+                not isinstance(m, dict) or not isinstance(m.get("name"), str) or not m["name"].strip()
+                for m in machines) or len({m["name"] for m in machines}) != len(machines)):
+            raise ValueError("malformed machine registry")
+        value = {"me": raw.get("me"), "machines": {m["name"]: m for m in machines}}
     except Exception as exc:  # health: allow BLE001 -- registry unreachable: pick up nothing this tick
         _REGISTRY.update(at=time.monotonic(), retry=True)
         _log.info("kanban worker node: machine registry unavailable (%s: %s)", type(exc).__name__, exc)
         return _REGISTRY["value"]
-    value = {"me": raw.get("me"), "machines": {m["name"]: m for m in raw.get("machines") or [] if m.get("name")}}
     now = time.monotonic()
     _REGISTRY.update(at=now, value=value, retry=False, ok_at=now)
     return value

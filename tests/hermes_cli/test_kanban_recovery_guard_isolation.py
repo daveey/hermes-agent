@@ -31,12 +31,13 @@ def test_snapshot_fence_without_pending_outbox(setup, change):
     assert not recovery.unchanged_ready(db, row)
 
 
-def test_pending_owner_move_preempts_stale_recovery(setup, monkeypatch):
+@pytest.mark.parametrize("machines", [{"worker-1": {"state": "revoked"}}, {}])
+def test_pending_owner_move_preempts_stale_recovery(setup, monkeypatch, machines):
     db, _ = setup
     tid = fixtures.fixtures.acknowledged(db, placement_policy=wp.POLICY, runs_on='["machine:worker-1"]')
     kb._append_event(db, tid, "moved", {"runs_on": ["machine:worker-2"]})
     db.commit()
-    monkeypatch.setattr(node, "registry", lambda **kw: {"machines": {"worker-1": {"state": "revoked"}}})
+    monkeypatch.setattr(node, "registry", lambda **kw: {"machines": machines})
     row = dict(db.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
     assert wp.requested_move(db, tid) == ["machine:worker-2"]
     assert recovery.recovery_mode(db, row, {}) is None

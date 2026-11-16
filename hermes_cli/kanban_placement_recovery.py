@@ -90,7 +90,15 @@ def recovery_mode(conn, row, cfg, *, board="default"):
     names = [label.removeprefix("machine:") for label in labels or [] if label.startswith("machine:")]
     if len(names) != 1:
         return None
-    entry = ((node.registry(require_fresh=True) or {}).get("machines") or {}).get(names[0])
+    snapshot = node.registry(require_fresh=True)
+    machines = snapshot.get("machines") if isinstance(snapshot, dict) else None
+    if not isinstance(machines, dict):
+        return None
+    if names[0] not in machines:
+        # Active-list discovery omits revoked names. Only the Board can distinguish
+        # a retired pin from an unknown name; absence is a proposal, not authority.
+        return "stale_pin" if current_portable(conn, row, cfg) else None
+    entry = machines[names[0]]
     if not isinstance(entry, dict):
         return None
     seen = entry.get("last_seen")
