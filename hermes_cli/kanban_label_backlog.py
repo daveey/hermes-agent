@@ -9,7 +9,7 @@ import json
 import logging
 import sqlite3
 import time
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 _log = logging.getLogger(__name__)
 WINDOW_SECONDS = 30 * 60
@@ -48,7 +48,8 @@ def available(labels: Iterable[str], machines: Any) -> set[str]:
 
 
 def read(conn: sqlite3.Connection, task_id: str, labels: Iterable[str], *,
-         machines: Iterable[str] = (), now: Optional[float] = None) -> dict[str, Any]:
+         machines: Iterable[str] = (), now: Optional[float] = None,
+         machine_labels: Optional[Mapping[str, Iterable[str]]] = None) -> dict[str, Any]:
     """Exact-label ready predecessors and distinct recently claimed cards in this board view.
 
     Use canonical worker dispatch ordering (including donated priority). Counts are approximate: admission may
@@ -56,8 +57,13 @@ def read(conn: sqlite3.Connection, task_id: str, labels: Iterable[str], *,
     current ready episode, capped at 30 minutes. Current labels are usable only without a subsequent move/edit;
     ambiguous history is excluded, not guessed.
     Unreadable evidence stays unknown and cannot refuse a move.
+
+    With ``machine_labels`` (matching machine -> its effective labels) the result also carries ``pool_ahead``: ready,
+    unclaimed predecessors whose labels one of those machines carries, which it would claim first. Approximate:
+    label-less predecessors are not counted. [daveey] t_01a1deaf95f5b885 read "0 ahead" at 13/31 in its pool.
     """
     wanted, holders = frozenset(labels), set(machines)
+    pools = None if machine_labels is None else [frozenset(have) for have in machine_labels.values()]
     out: dict[str, Any] = {"ahead": 0, "claimed_recent": 0, "claimers": [], "window_s": WINDOW_SECONDS,
                            "approximate": True, "scope": "board_view", "known": False}
     if not wanted:
@@ -82,8 +88,12 @@ def read(conn: sqlite3.Connection, task_id: str, labels: Iterable[str], *,
             if kb._json_dict(event[1]).get("status") == "ready":
                 since = max(since, event[0])
         before = set(ordered[:ordered.index(task_id)])
-        ahead = sum(row[0] in before and _labels(row[1]) == wanted for row in conn.execute(
-            "SELECT id, runs_on FROM tasks WHERE status = 'ready' AND claim_lock IS NULL"))
+        ahead = pool_ahead = 0
+        for row in conn.execute("SELECT id, runs_on FROM tasks WHERE status = 'ready' AND claim_lock IS NULL"):
+            if row[0] not in before or (have := _labels(row[1])) is None:
+                continue
+            ahead += have == wanted
+            pool_ahead += pools is not None and any(have <= pool for pool in pools)
         claimed: set[str] = set()
         claimers: set[str] = set()
         for row in conn.execute(
@@ -102,6 +112,8 @@ def read(conn: sqlite3.Connection, task_id: str, labels: Iterable[str], *,
         _log.debug("label backlog unavailable for %s", task_id, exc_info=True)
         return out
     out.update(ahead=ahead, claimed_recent=len(claimed), claimers=sorted(claimers), known=True)
+    if pools is not None:
+        out["pool_ahead"] = pool_ahead
     return out
 
 
@@ -115,8 +127,11 @@ def words(backlog: Any) -> str:
         return ""
     ahead, claimed = int(backlog.get("ahead") or 0), int(backlog.get("claimed_recent") or 0)
     who = ", ".join(backlog.get("claimers") or [])
-    return (f"{ahead} card(s) with matching labels ahead of it (approximate, this board view); matching workers claimed "
-            f"{claimed} such card(s) in the last 30 min" + (f" ({who})" if who and claimed else ""))
+    pool = (f"{int(backlog['pool_ahead'] or 0)} ready card(s) ahead that its matching workers can also run; "
+            if "pool_ahead" in backlog else "")
+    return pool + (f"{ahead} card(s) with matching labels ahead of it (approximate, this board view); "
+                   f"matching workers claimed {claimed} such card(s) in the last 30 min"
+                   + (f" ({who})" if who and claimed else ""))
 
 
 def move_refusal(conn: sqlite3.Connection, task_id: str, status: Optional[str], previous: Optional[list[str]],
