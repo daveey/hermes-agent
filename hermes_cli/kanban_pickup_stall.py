@@ -594,7 +594,8 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
         if group == "hold" and (_hold_expected(own, now_ms) or _hold_lifted(own)):
             continue
         oldest = members[0]
-        listed = "\n".join(f"- {c['id']} ({c['title']}), ready {_minutes(c['since_ms'], now_ms)} min, "
+        # The watcher deduplicates bodies: age alone is not a new observation.
+        listed = "\n".join(f"- {c['id']} ({c['title']}), ready since {_stamp(c['since_ms'])}, "
                            f"last skip {describe(c['skip'])}" for c in members[:20])
         # Below ordinary work: a host-wide repair must not take the slot the cards it reports on are waiting for.
         ids.append(_create(

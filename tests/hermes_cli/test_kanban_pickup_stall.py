@@ -336,15 +336,24 @@ def test_same_cause_burst_refreshes_all_targets_without_comment_churn(gws, reaso
               "skip": {"reason": reason, "first_at": 1, "last_at": 1, "passes": 1,
                        "detail": "machine registry unavailable" if reason == "other" else None}}
              for i in range(25)]
-    [tid] = kps.file_repairs(worker.conn, WORKER, cards[:initial])
-    assert kps.file_repairs(worker.conn, WORKER, cards) == [tid]
+    # Cross a whole-minute boundary without changing any pickup evidence.
+    [tid] = kps.file_repairs(worker.conn, WORKER, cards[:initial], now=1200)
+    assert kps.file_repairs(worker.conn, WORKER, cards, now=1200) == [tid]
     comments = kb.list_comments(worker.conn, tid)
     repair = kb.get_task(worker.conn, tid)
     assert repair is not None
     text = (repair.body or "") + "\n".join(c.body for c in comments)
     assert all(c["id"] in text for c in cards)
-    kps.file_repairs(worker.conn, WORKER, cards)
+    kps.file_repairs(worker.conn, WORKER, cards, now=1201)
     assert len(kb.list_comments(worker.conn, tid)) == len(comments)
+    # Real new pickup evidence must still reach the open incident.
+    cards[0]["skip"].update(last_at=1201000, passes=2)
+    assert kps.file_repairs(worker.conn, WORKER, cards, now=1201) == [tid]
+    updated = kb.list_comments(worker.conn, tid)
+    assert len(updated) == len(comments) + 1
+    assert "2 pass(es)" in updated[-1].body
+    kps.file_repairs(worker.conn, WORKER, cards, now=1261)
+    assert len(kb.list_comments(worker.conn, tid)) == len(updated)
     other = {**cards[0], "skip": {**cards[0]["skip"], "reason": "capability_missing"}}
     assert kps.file_repairs(worker.conn, WORKER, [other]) != [tid]
     assert len(_repairs(worker.conn)) == 2
@@ -571,7 +580,12 @@ def test_a_card_moved_here_stalls_from_the_move_and_reports_that_wait(gws):
     _moved_onto(hub, worker, tid, 700)
     [card] = _queue_full_repairs(worker)
     assert tid in card["title"] and "waiting 11 min" in card["title"]
-    assert f"- {tid} (pinned to the worker), ready 11 min" in card["body"]
+    from hermes_cli import kanban_pickup_stall as kps
+    with sqlite3.connect(wn._replica_path(worker.conn)) as replica:
+        moved_at = replica.execute(
+            "SELECT created_at FROM task_events WHERE task_id=? AND kind='moved'", (tid,)
+        ).fetchone()[0]
+    assert f"- {tid} (pinned to the worker), ready since {kps._stamp(moved_at * 1000)}" in card["body"]
 
 
 def test_a_move_older_than_ready_since_or_naming_another_machine_does_not_restart_the_clock(gws):
