@@ -37,6 +37,16 @@ def _startup_variable(shell: str, arguments: list[str]) -> str | None:
     return "BASH_ENV" if shell == "bash" and not interactive else None
 
 
+def _cwd_option(word: str) -> str:
+    """Canonicalize possible GNU env cwd flags without changing token count."""
+    option, equals, value = word.partition("=")
+    if option.startswith("--") and len(option) > 2 and "--chdir".startswith(option):
+        return "--chdir" + equals + value
+    if word.startswith("-") and not word.startswith("--") and "C" in word[1:]:
+        return "-C" + word.partition("C")[2]
+    return word
+
+
 def iter_startup_sources(command: str) -> Iterator[tuple[str, bool]]:
     """Source explicit assignment-prefix/env-wrapper files before child-shell payloads.
 
@@ -58,7 +68,10 @@ def iter_startup_sources(command: str) -> Iterator[tuple[str, bool]]:
 
     for view in _iter_command_segment_views(command):
         view = _split_redirections(view)[0]
-        index = _executed_command_index(view)
+        # Normalize cwd option spellings for the shared wrapper indexer too:
+        # otherwise a separate directory argument is mistaken for the command.
+        wrapper_view = [_cwd_option(word) for word in view]
+        index = _executed_command_index(wrapper_view)
         if index is None:
             continue
         shell = _executable_name(view[index])
@@ -70,7 +83,10 @@ def iter_startup_sources(command: str) -> Iterator[tuple[str, bool]]:
         # Wrapper chdir changes both startup resolution and its relative commands.
         # Until the recursive walk carries wrapper cwd, refuse rather than read
         # a same-named clean file from the caller's directory.
-        changes_cwd = any(word.startswith(("-C", "--chdir")) for word in view[:index])
+        # GNU env accepts clustered short flags and unambiguous long prefixes.
+        # Conservatively recognize them across the wrapper prefix, even when an
+        # option's argument boundary is not modeled by the shared unwrapper.
+        changes_cwd = any(word.startswith(("-C", "--chdir")) for word in wrapper_view[:index])
         for word in view[:index]:
             name, equals, value = word.partition("=")
             if equals and name == variable and value:

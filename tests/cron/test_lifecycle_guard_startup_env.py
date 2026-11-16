@@ -109,7 +109,10 @@ def test_dynamic_startup_paths_fail_closed_without_execution(tmp_path, value):
 
 
 @pytest.mark.platforms("linux")
-@pytest.mark.parametrize("option", ["-C sub", "-Csub", "--chdir=sub", "--chdir sub"])
+@pytest.mark.parametrize("option", [
+    "-C sub", "-Csub", "--chdir=sub", "--chdir sub",
+    "-iC sub", "-vC sub", "-iCsub", "--chd=sub", "--ch sub", "--chd sub",
+])
 def test_env_chdir_startup_fails_closed(tmp_path, option):
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub/start.sh").write_text("touch ran\n")
