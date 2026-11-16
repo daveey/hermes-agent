@@ -15,7 +15,7 @@ def _move(path, gateway):
     krn._reset_for_tests()
 
 
-@pytest.mark.parametrize('door', ['collect', 'sweep'])
+@pytest.mark.parametrize('door', ['collect', 'sweep', 'passive'])
 def test_delivered_state_is_settled_moved_without_another_turn(tmp_path, door):
     now = time.time()
     hub = once._hub(tmp_path, now)
@@ -31,7 +31,7 @@ def test_delivered_state_is_settled_moved_without_another_turn(tmp_path, door):
             assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 10) == []
         else:
             assert krn.sweep_remote_notices(replica_path=hub, gateway='macbook', session_db=opener,
-                                            ledger=ledger, now=now + 10, waker=waker) == []
+                                            ledger=ledger, now=now + 10, waker=None if door == 'passive' else waker) == []
         assert waker.calls == 0
         assert len(db.get_messages(once.CHAT)) == 1
     with sqlite3.connect(ledger) as conn:
@@ -70,6 +70,29 @@ def test_dead_holder_old_home_transcript_key_is_not_reoffered(tmp_path, monkeypa
     assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 10,
                        transcript_has=transcript_has) == []
     assert old['event_key'] in seen
+
+
+def test_delivered_moved_old_state_does_not_log_undelivered(tmp_path, caplog):
+    from tests.tui_gateway import test_kanban_remote_late_observed as late
+    ledger = tmp_path / 'ledger.db'
+    hub = late._observed_then_starved(tmp_path, ledger)
+    [old] = krn.collect(late.CHAT, 'default', hub_db=hub, ledger=ledger, now=late.T0 + 3 * 3600)
+    assert krn.ack(old, ledger=ledger)
+    _move(hub, 'worker-6')
+    assert krn.collect(late.CHAT, 'default', hub_db=hub, ledger=ledger, now=late.T0 + 88 * 3600) == []
+    assert 'dropped undelivered notice' not in caplog.text
+
+
+def test_live_holder_keeps_custody_after_home_move(tmp_path):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    _move(hub, 'worker-6')
+    [old] = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now)
+    _move(hub, 'hub')
+    assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 10) == []
+    assert krn.ack(old, ledger=ledger)
+    assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 20) == []
 
 
 def test_new_terminal_state_after_move_still_delivers_once(tmp_path):

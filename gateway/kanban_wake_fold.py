@@ -275,13 +275,12 @@ def _guidance(text, cards):
     lines = last['text'].rstrip().split('\n')
     rest = lines[1:] if _LEGACY_HEAD.match(lines[0]) else lines
     tail = '\n'.join(rest).rstrip()
-    if tail:  # refresh_card keeps every line after the head, in order, at the end of the card
+    if tail and text.find(tail, pos) < 0 and f"[kanban] Task {last.get('task_id')} " in text:
+        # A relabel removes the obsolete ask; an ask-only tail becomes a one-line card.
+        tail = '\n'.join(line for line in rest if not line.startswith(
+            ('Next action for the user:', 'Why only the user:', 'Scope:', 'Open task:'))).rstrip()
+    if tail:
         end = text.find(tail, pos)
-        if end < 0 and f"[kanban] Task {last.get('task_id')} " in text:
-            # A relabel removes the obsolete human ask, but retains the remaining tail verbatim.
-            tail = '\n'.join(line for line in rest if not line.startswith(
-                ('Next action for the user:', 'Why only the user:', 'Scope:', 'Open task:'))).rstrip()
-            end = text.find(tail, pos) if tail else -1
         if end < 0:
             return None
         end += len(tail)

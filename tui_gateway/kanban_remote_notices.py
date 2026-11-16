@@ -1352,6 +1352,12 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
                 _note_wait(sid, ref, state, f"left to gateway pid {gw_pid}: its turn holds the chat's lease")
                 return
             if waker is None:
+                from tui_gateway.kanban_remote_identity import moved_claim
+                with contextlib.closing(_ledger(ledger)) as conn:
+                    if moved_claim(conn, session=sid, ref=ref, state=state, now=now or time.time(),
+                                   notice_key=event_key, swept_key=memo_key,
+                                   transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t)) is not None:
+                        return
                 from tui_gateway.kanban_notice_session_store import notice_writer
                 with notice_writer(db) as wdb:
                     row_id = wdb.append_kanban_notice(tip, text, metadata)

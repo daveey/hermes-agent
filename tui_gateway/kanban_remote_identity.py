@@ -19,7 +19,7 @@ def moved_claim(conn, *, session, ref, state, now, notice_key, swept_key, transc
                          'VALUES (?,?,?,?,?,?,1,?)',
                          (session, ref, state, now, notices.SETTLED, notice_key, 'moved'))
             notices._swept_row(conn, swept_key, 'moved')
-        return 'settled'
+        return 'moved'
     if any(notices._holder_alive(row['holder_pid'], row['holder_start']) for row in aliases):
         return 'skip'
     return None

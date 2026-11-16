@@ -86,9 +86,11 @@ def test_remote_outcome_metadata_never_relabels(monkeypatch, state, kind):
     assert grouped['task_id'] == grouped['board'] == '' and grouped['kinds'] == []
 
 
-def test_remote_relabel_preserves_guidance_at_claim(monkeypatch):
+@pytest.mark.parametrize('original', ['Remote blocked\nNext action for the user: choose\nContext',
+                                       '[kanban] Task t_01a1d59e5543daa1 blocked.\nNext action for the user: choose'])
+def test_remote_relabel_preserves_guidance_at_claim(monkeypatch, original):
     item = {'ref': 'worker-6/default/default/t_01a1d59e5543daa1', 'state': 'blocked@1',
-            'event_key': 'event', 'text': 'Remote blocked\nNext action for the user: choose\nContext'}
+            'event_key': 'event', 'text': original}
     card = kro._metadata(item)['kanban_cards'][0]
     monkeypatch.setattr(kanban_wake_fold, '_live_task', lambda _: ('ready', ''))
     text = kanban_wake_fold._compose([card], GUIDANCE)

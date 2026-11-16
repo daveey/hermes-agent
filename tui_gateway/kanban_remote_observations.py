@@ -168,12 +168,13 @@ def _persist(source: str, cards: list[tuple], ledger, now: float, extra=()) -> d
             for key, state, ref, at, answer in missing:
                 # Unknown ages and frozen legacy keys cannot establish local freshness.
                 seen = now if at is not None and key.count('/') >= 2 and (not initial or now - at <= FRESH_S) else None
-                rows = conn.execute("SELECT first_seen FROM observations WHERE source=? AND state=? "
+                rows = conn.execute("SELECT ref, first_seen FROM observations WHERE source=? AND state=? "
                                     "AND substr(ref, instr(ref, '/') + 1)=?",
                                     (source, state, key)).fetchall()
                 if rows:
-                    seen = None if any(row[0] is None for row in rows) else min(row[0] for row in rows)
-                conn.execute("INSERT OR IGNORE INTO observations VALUES (?,?,?,?)", (source, ref, state, seen))
+                    seen = None if any(row[1] is None for row in rows) else min(row[1] for row in rows)
+                if not any(row[0] == ref for row in rows):
+                    conn.execute("INSERT INTO observations VALUES (?,?,?,?)", (source, ref, state, seen))
                 if answer:
                     added[(ref, state)] = seen
             conn.commit()
