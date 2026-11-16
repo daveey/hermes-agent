@@ -40,7 +40,7 @@ def test_quoted_parentheses_are_data(tmp_path, prefix, parens, producer):
 def test_generated_real_bash_output_execution(tmp_path, shape, substitution):
     marker = tmp_path / "executed"
     payload = tmp_path / "payload"
-    payload.write_text("#!/bin/bash\n: > " + shlex.quote(str(marker)) + "\n", encoding="utf-8")
+    payload.write_text("#!/usr/bin/env bash\n: > " + shlex.quote(str(marker)) + "\n", encoding="utf-8")
     payload.chmod(0o700)
     command = shape.replace("SUB", substitution.replace("PAYLOAD", shlex.quote(str(payload))))
     bash = shutil.which("bash")
@@ -81,12 +81,16 @@ def test_uncertain_or_nested_context_keeps_original_sink(command):
     assert output_reaches_shell(command)
 
 
-def test_quoted_parentheses_in_command_word_execute(tmp_path):
+@pytest.mark.parametrize("command", [
+    './"($(printf payload))"',
+    'echo () { ./"($(printf payload))"; }; echo',
+    'echo \\\n() { ./"($(printf payload))"; }; echo',
+])
+def test_quoted_parentheses_in_command_word_execute(tmp_path, command):
     marker = tmp_path / "executed"
     payload = tmp_path / "(payload)"
-    payload.write_text("#!/bin/bash\n: > " + shlex.quote(str(marker)) + "\n", encoding="utf-8")
+    payload.write_text("#!/usr/bin/env bash\n: > " + shlex.quote(str(marker)) + "\n", encoding="utf-8")
     payload.chmod(0o700)
-    command = './"($(printf payload))"'
     bash = shutil.which("bash")
     assert bash is not None
     subprocess.run([bash, "--noprofile", "--norc", "-c", command], cwd=tmp_path,

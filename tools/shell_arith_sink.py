@@ -46,7 +46,7 @@ _INTEGER_DECLARATION_RE = re.compile(
     r"[ \t]+-[A-Za-z]*i")
 _PARAM_NAME_RE = re.compile(r"[#!]?(?:[A-Za-z_]\w*|\d+|[@*#?$!-])")
 _COMMENT_PRECEDERS = frozenset(" \t\n;&|(")
-_LITERAL_ECHO_PREFIX_RE = re.compile(r"[ \t]*echo[ \t]+")
+_LITERAL_ECHO_PREFIX_RE = re.compile(r'[ \t]*echo[ \t]+"')
 
 # Characters that cannot end a variable name or an expansion: a quoted `[` after one
 # (or after a quote concatenation ending in one) never names an array subscript.
