@@ -444,7 +444,7 @@ def admission_skip(stored: Any) -> Optional[dict[str, Any]]:
     """The ``llm_paced`` skip a stored :func:`admission` stands for, so a notice words and advises it as the
     dispatcher's own hold does (``kanban_dispatch_skip``): every pool, and the earliest ``until``. None for any other
     admission and for a malformed one."""
-    if not isinstance(stored, dict) or stored.get("reason") != ADMISSION_REASON:
+    if not isinstance(stored, dict) or stored.get("reason") not in (ADMISSION_REASON, EVENT_KIND):
         return None
     listed = stored.get("providers")
     pools = [p for p in listed if isinstance(p, dict) and p.get("provider") and p.get("state") in (lp.PACED, lp.HELD)

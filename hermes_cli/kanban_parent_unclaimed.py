@@ -290,10 +290,13 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     place = _place(conn, waiting_on)
     extra = _host_hold_only_if_local(extra, place)
     busy = klb.busy(place.get("backlog"))
+    from hermes_cli import kanban_notice_verdict
+    verdict = ({} if busy or (extra or {}).get("core_update_hold") else
+               kanban_notice_verdict.fields(conn, waiting_on, place, ready_seconds))
     observed = {"board": place.get("board") or khc.board_of(conn), "observed_at": place.get("observed_at") or int(time.time()),
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
                               else {"reason": klb.REASON, "status": "queued"} if busy
-                              else _pacing_admission(conn, waiting_on, place, extra)
+                              else verdict.get("admission") or _pacing_admission(conn, waiting_on, place, extra)
                               or {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
     pool_hint = "" if guard else _pool_sentence(place, observed["observed_at"])  # outside the queue clause (#1821)
@@ -316,6 +319,6 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
             **_backlog(place),
             "respawn_guard": guard,
             "priority_evidence": lane_evidence(conn, waiting_on),
-            **({} if guard else notice_fields(place, ready_seconds)),
+            **({} if guard else {**notice_fields(place, ready_seconds), **verdict}),
         })
     return True

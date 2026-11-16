@@ -307,7 +307,10 @@ def test_a_verdict_recorded_by_a_dispatcher_able_to_lease_the_card_keeps_todays_
     tid = _hub_card(hub.conn)
     assert skips.record(hub.conn, tid, verdict[0], detail=verdict[1])
     payload, text = _chat_wait(hub.conn, tid)
-    assert payload["admission"] == UNKNOWN and "LLM quota pacing" not in text, (payload, text)
+    if verdict[0] == "llm_paced":
+        assert payload["admission"]["reason"] == "llm_paced" and "LLM quota pacing" in text, (payload, text)
+    else:
+        assert payload["admission"] == UNKNOWN and "LLM quota pacing" not in text, (payload, text)
 
 
 @pytest.mark.parametrize("cannot_lease", CANNOT_LEASE)
