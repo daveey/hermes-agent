@@ -124,5 +124,9 @@ def prepare(request: dict, *, path: Path, ledger: Path, gateway: str, profile: s
             replay = _existing(db, identity, canonical)
             if replay is not None:
                 return replay
+            # Evidence reads and write-lock waits can outlive the authorized
+            # lease. Only a previously durable decision may replay after expiry.
+            if lease["expires"] <= now_ms():
+                raise ValueError("origin_forward_lease_invalid")
             db.execute("INSERT INTO decisions VALUES (?,?,?)", (identity, canonical, _canonical(envelope)))
         return envelope

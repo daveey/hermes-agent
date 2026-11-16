@@ -1,6 +1,8 @@
 """Immutable forwarding authorization survives retries, never payload changes."""
 import copy
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -96,3 +98,52 @@ def test_bad_destination_refused_without_authority_read(forwarding, destination)
     with pytest.raises(ValueError, match="origin_forward_"):
         decide(forwarding, changed)
     assert not forwarding[2]
+
+
+@pytest.mark.parametrize("expired_at", [2000, 3000])
+def test_expiry_during_evidence_read_never_freezes_decision(forwarding, expired_at):
+    clock = [1000]
+
+    def session_exists(session):
+        clock[0] = expired_at
+        return session == "chat-1"
+
+    with pytest.raises(ValueError, match="^origin_forward_lease_invalid$"):
+        decide(forwarding, now_ms=lambda: clock[0], session_exists=session_exists)
+    with sqlite3.connect(forwarding[1]["path"]) as db:
+        assert db.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
+    # Refusal leaves no replay authorization; a later live attempt can succeed.
+    assert decide(forwarding)["action"] == "create"
+
+
+@pytest.mark.parametrize("expired_at", [2000, 3000])
+def test_expiry_while_waiting_for_write_lock_never_freezes_decision(forwarding, monkeypatch, expired_at):
+    path = forwarding[1]["path"]
+    connect = sqlite3.connect
+    clock = [1000]
+    attempting_write = threading.Event()
+
+    def traced_connect(database, *args, **kwargs):
+        db = connect(database, *args, **kwargs)
+        if database == path:
+            db.set_trace_callback(lambda sql: attempting_write.set() if sql == "BEGIN IMMEDIATE" else None)
+        return db
+
+    # Seed the schema so startup DDL does not take the contested write lock.
+    with connect(path) as blocker:
+        blocker.execute("CREATE TABLE decisions (identity TEXT PRIMARY KEY, "
+                        "request_json TEXT NOT NULL, envelope_json TEXT NOT NULL)")
+        blocker.execute("BEGIN IMMEDIATE")
+        monkeypatch.setattr(sqlite3, "connect", traced_connect)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(decide, forwarding, now_ms=lambda: clock[0])
+            try:
+                assert attempting_write.wait(5), "admission never reached the contested lock"
+                assert not future.done(), "admission bypassed the held write lock"
+                clock[0] = expired_at
+            finally:
+                blocker.rollback()
+            with pytest.raises(ValueError, match="^origin_forward_lease_invalid$"):
+                future.result(timeout=5)
+    with connect(path) as db:
+        assert db.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
