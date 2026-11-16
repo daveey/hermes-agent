@@ -689,8 +689,10 @@ releases it with one operator call, never an unblock:
 `kanban_supervisor_request` op `{"op": "operator", "action": "spend_promote",
 "task_id", "runs" (1-20), "episode" (uid of the current spend_budget_triaged
 event), "decision_comment_id" (its earlier operator comment recording the
-decision), "reason"}`. Only the card the stop's producer names may make it; the
-card's home rechecks the stop, producer, comment, human holds and parents, then
+decision), "reason"}`. Only the card the stop's producer names may make it, and
+only after its decision comment (a human comment after it needs a new decision
+comment); the card's home rechecks the stop, producer, comment, human holds and
+parents, then
 records `spend_budget_set` (exactly `runs` runs, any cache-read override kept)
 and `promoted_manual` (with `spend_budget`) in one transaction. That promotion
 opens the new window, so the card gets exactly `runs` more runs.

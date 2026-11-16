@@ -254,7 +254,7 @@ def test_decision_comment_must_be_the_callers_after_the_stop(fleet):
 
 @pytest.mark.parametrize("bad", [{"runs": 0}, {"runs": 21}, {"runs": True}, {"runs": "x"}, {"episode": ""},
                                  {"decision_comment_id": None}, {"decision_comment_id": 0}, {"reason": " "},
-                                 {"exempt": True}, {"task_id": ""}])
+                                 {"exempt": True}, {"task_id": ""}, {"runs": "²"}])
 def test_invalid_spend_promote_ops_are_refused(fleet, bad):
     with pytest.raises(ksr.SupervisorRequestError) as exc:
         _submit(fleet, {**_op(fleet, "e", 1), **bad})
@@ -265,3 +265,126 @@ def test_tool_schema_exposes_spend_promote():
     from tools import kanban_tools_schemas as schemas
     text = json.dumps({k: getattr(schemas, k) for k in dir(schemas) if not k.startswith("_")}, default=str)
     assert "spend_promote" in text and "decision_comment_id" in text
+
+
+def _mark(f, cid, *, caller=None, at=None):
+    """An operator comment marker on the target, as the home writes it for ``caller``'s comment ``cid``."""
+    with kb.write_txn(f.h):
+        kb._append_event(f.h, f.target, kox.COMMENT_MARK, {"comment_id": cid, "operator_request_uid": f"m{cid}",
+                                                          "operator_caller": {"task_id": caller or f.caller}})
+        if at is not None:
+            f.h.execute("UPDATE task_events SET created_at = ? WHERE id = (SELECT MAX(id) FROM task_events)", (at,))
+
+
+def _direct(f, episode, cid, uid="req-direct", **args):
+    return {"target_task_id": f.target, "request_uid": uid, "caller": {"gateway": f.name(f.w), "task_id": f.caller},
+            "args": {"runs": 4, "episode": episode, "decision_comment_id": cid, "reason": "re-scoped", **args}}
+
+
+def _untouched(f):
+    assert kb.get_task(f.h, f.target).status == "triage"
+    assert not _events(f.h, f.target, "promoted_manual") and not _events(f.h, f.target, ksb.OVERRIDE_EVENT)
+
+
+def test_target_must_still_be_triaged_and_pending(fleet):
+    f = fleet
+    episode = _stop(f)
+    _mark(f, 701)
+    assert ksp.scope_refusal(f.h, f.target, f.caller, episode, 701) is None
+    with kb.write_txn(f.h):
+        f.h.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (f.target,))
+    assert "not held in triage" in ksp.scope_refusal(f.h, f.target, f.caller, episode, 701)
+    with kb.write_txn(f.h):  # promoted by someone else, then triaged for another reason: no pending decision
+        kb._append_event(f.h, f.target, "promoted_manual", {"actor": "user", "reason": "x"})
+        f.h.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (f.target,))
+    assert "no pending spend-budget decision" in ksp.scope_refusal(f.h, f.target, f.caller, episode, 701)
+
+
+def test_producer_receipt_must_name_this_supervisor_for_this_episode(fleet):
+    f = fleet
+    episode = _stop(f, producer_task="t_nobody")
+    _mark(f, 702)
+    with kb.write_txn(f.h):  # strip the receipt: none for this episode
+        f.h.execute("DELETE FROM task_events WHERE task_id = ? AND kind = ?", (f.target, ksd.NOTICE))
+    assert "no decision producer receipt" in ksp.scope_refusal(f.h, f.target, f.caller, episode, 702)
+    with kb.write_txn(f.h):  # a receipt naming the caller, but for another episode
+        kb._append_event(f.h, f.target, ksd.NOTICE, {"episode": "other",
+                                                     "producer": {"kind": "supervisor", "task_id": f.caller}})
+    assert "no decision producer receipt" in ksp.scope_refusal(f.h, f.target, f.caller, episode, 702)
+    with kb.write_txn(f.h):  # this episode, the caller's id, but a chat owns the decision
+        kb._append_event(f.h, f.target, ksd.NOTICE, {"episode": episode,
+                                                     "producer": {"kind": "chats", "task_id": f.caller}})
+    assert "names its decision owner" in ksp.scope_refusal(f.h, f.target, f.caller, episode, 702)
+    with kb.write_txn(f.h):
+        kb._append_event(f.h, f.target, ksd.NOTICE, {"episode": episode,
+                                                     "producer": {"kind": "supervisor", "task_id": f.caller}})
+    assert ksp.scope_refusal(f.h, f.target, f.caller, episode, 702) is None
+
+
+def test_decision_comment_must_be_the_callers_own_and_strictly_after_the_stop(fleet):
+    f = fleet
+    at = int(time.time()) - 1000
+    _mark(f, 703, at=at)  # same second as the stop, but written before it
+    episode = _stop(f, at=at)
+    assert "decision comment" in ksp.scope_refusal(f.h, f.target, f.caller, episode, 703)
+    _mark(f, 704, caller="t_other_supervisor")
+    assert "decision comment" in ksp.scope_refusal(f.h, f.target, f.caller, episode, 704)
+    _mark(f, 705)
+    assert ksp.scope_refusal(f.h, f.target, f.caller, episode, 705) is None
+
+
+def test_human_comment_after_the_decision_needs_a_new_decision(fleet):
+    f = fleet
+    episode = _stop(f)
+    _mark(f, 706)
+    with kb.write_txn(f.h):
+        kb._append_event(f.h, f.target, "commented", {"writer_kind": "human"})
+    assert "a human commented" in ksp.scope_refusal(f.h, f.target, f.caller, episode, 706)
+    _mark(f, 707)
+    assert ksp.scope_refusal(f.h, f.target, f.caller, episode, 707) is None
+    with kb.write_txn(f.h):
+        kb._append_event(f.h, f.target, "commented", {"relayed_human": True})
+    assert "a human commented" in ksp.scope_refusal(f.h, f.target, f.caller, episode, 707)
+
+
+def test_home_apply_bounds_runs_and_reason(fleet):
+    f = fleet
+    episode = _stop(f)
+    _mark(f, 708)
+    for bad in ({"runs": 0}, {"runs": ksp.MAX_RUNS + 1}, {"runs": "²"}, {"reason": " "}):
+        assert ksp.apply(f.h, _direct(f, episode, 708, **bad), {})[0] == "refused", bad
+    _untouched(f)
+    extra = {"operator_request_uid": "req-direct"}
+    assert ksp.apply(f.h, _direct(f, episode, 708, runs="4"), extra)[0] == "applied"
+    assert _events(f.h, f.target, ksb.OVERRIDE_EVENT)[-1]["runs"] == 4
+    # A replay after the card finished still answers already_applied, not a terminal refusal.
+    with kb.write_txn(f.h):
+        f.h.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (f.target,))
+    assert kox._apply(f.h, {**_direct(f, episode, 708), "action": "spend_promote"}, "x")[0] == "already_applied"
+
+
+def test_open_parent_is_refused_at_home(fleet):
+    f = fleet
+    episode = _stop(f)
+    _mark(f, 709)
+    parent = f.card(f.h, "an open parent")
+    with kb.write_txn(f.h):
+        f.h.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (parent, f.target))
+    outcome, why = ksp.apply(f.h, _direct(f, episode, 709), {"operator_request_uid": "req-direct"})
+    assert outcome == "refused" and parent in why
+    _untouched(f)
+    with kb.write_txn(f.h):
+        f.h.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (parent,))
+    assert ksp.apply(f.h, _direct(f, episode, 709), {"operator_request_uid": "req-direct"})[0] == "applied"
+
+
+def test_promotion_is_all_or_nothing(fleet, monkeypatch):
+    f = fleet
+    episode = _stop(f)
+    _mark(f, 710)
+    monkeypatch.setattr(ksp, "scope_refusal", lambda *a: None)  # scope passed, then the card left triage
+    with kb.write_txn(f.h):
+        f.h.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (f.target,))
+    with pytest.raises(RuntimeError):
+        ksp.apply(f.h, _direct(f, episode, 710), {"operator_request_uid": "req-direct"})
+    assert not _events(f.h, f.target, "promoted_manual") and not _events(f.h, f.target, ksb.OVERRIDE_EVENT)

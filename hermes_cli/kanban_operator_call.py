@@ -673,11 +673,11 @@ def _apply(conn: sqlite3.Connection, payload: dict, own: str) -> tuple[str, Opti
     if action == "creator_archive":
         from hermes_cli.kanban_creator_archive import apply
         return apply(conn, payload, extra)
-    if task.status in ("done", "archived"):
-        return "refused", f"{target} is {task.status}"
-    if action == "spend_promote":
+    if action == "spend_promote":  # its marker answers a replay first; its scope refuses any non-triage card
         from hermes_cli import kanban_spend_promote as ksp
         return ksp.apply(conn, payload, extra)
+    if task.status in ("done", "archived"):
+        return "refused", f"{target} is {task.status}"
     if action == "comment":
         if _marker(conn, target, COMMENT_MARK, uid):
             return "already_applied", None

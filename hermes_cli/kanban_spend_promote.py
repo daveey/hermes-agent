@@ -13,7 +13,8 @@ board writes), and an operator ``unblock`` is not a decision. This is the one su
 Scope, checked on the replica at request time and again on the home's live file inside the write transaction:
 the target is in triage under a pending spend hold whose CURRENT stop is ``episode``; that stop's
 ``spend_budget_decision_ready`` producer is a supervisor and it is the calling card; the decision comment is the
-caller's own operator comment on the target, written after the stop; no human hold and no open parent. The
+caller's own operator comment on the target, written after the stop (event order, not just the second), and no
+human has commented on the card since that decision comment; no human hold and no open parent. The
 operator courier proves the caller (live run, Board lease holder, Board evidence) before the home applies it.
 
 The home then, in ONE transaction: moves the card triage -> ready, records a ``spend_budget_set`` override of
@@ -44,7 +45,7 @@ def _pos_int(value: Any) -> Optional[int]:
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.strip().isdigit():
+    if isinstance(value, str) and value.strip().isascii() and value.strip().isdecimal():
         return int(value.strip())
     return None
 
@@ -125,19 +126,31 @@ def scope_refusal(conn: sqlite3.Connection, target: str, requester: Optional[str
     if producer.get("kind") != "supervisor" or producer.get("task_id") != requester:
         return (f"spend stop {episode} on {target} names its decision owner as {producer.get('kind')} "
                 f"{producer.get('task_id') or ''}".rstrip() + f", not {requester}")
-    cid = _pos_int(comment_id)
-    recorded = False
-    for raw, at in conn.execute("SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = ?",
-                                (target, COMMENT_MARK)):
-        p = _payload(raw)
+    from hermes_cli.kanban_sync_divergence import _event_order
+    cid, after = _pos_int(comment_id), _event_order(stop)
+    decided = None
+    for ev in conn.execute("SELECT * FROM task_events WHERE task_id = ? AND kind = ?", (target, COMMENT_MARK)):
+        ev = dict(ev)
+        p = _payload(ev["payload"])
         if (cid is not None and _pos_int(p.get("comment_id")) == cid
                 and (p.get("operator_caller") or {}).get("task_id") == requester
-                and int(at or 0) >= int(stop["created_at"] or 0)):
-            recorded = True
+                and _event_order(ev) > after):
+            decided = ev
             break
-    if not recorded:
+    if decided is None:
         return (f"decision comment {comment_id} is not {requester}'s operator comment on {target} made after "
                 f"spend stop {episode}; record the decision there first")
+    # A human who spoke on the card after the decision was recorded has not been heard by it: the decision card
+    # reads that comment and records a new decision (the manual promote's unread-comment gate, for this path).
+    decided_at = _event_order(decided)
+    for ev in conn.execute(
+            "SELECT * FROM task_events WHERE task_id = ? AND kind = 'commented' AND json_valid(payload) AND "
+            "(json_extract(payload, '$.writer_kind') = 'human' "
+            "OR json_extract(payload, '$.relayed_human') IS NOT NULL)",
+            (target,)):
+        if _event_order(dict(ev)) > decided_at:
+            return (f"a human commented on {target} after decision comment {cid}; read it and record a new "
+                    "decision comment first")
     return None
 
 
