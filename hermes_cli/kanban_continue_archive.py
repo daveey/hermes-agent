@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
+import sys
+from pathlib import Path
 
 
 # Accept the existing checkpoint prose, but pair the path with its adjacent digest.
@@ -20,12 +22,12 @@ def plan(conn, task_id: str, checkpoint: str):
     from hermes_cli import kanban_park_pin
 
     pin = kanban_park_pin.plan(conn, task_id, checkpoint)
-    if pin and pin["op"] == "pin" and portable(conn, task_id, checkpoint):
+    if pin and pin["op"] == "pin" and portable(conn, task_id, checkpoint, trees=pin["trees"]):
         return None
     return pin
 
 
-def portable(conn, task_id: str, checkpoint: str) -> bool:
+def portable(conn, task_id: str, checkpoint: str, *, trees=()) -> bool:
     """Only current checkpoint or newest post-move archive comment is eligible.
 
     Never fall back to an older archive after a newer reference fails verification.
@@ -50,20 +52,41 @@ def portable(conn, task_id: str, checkpoint: str) -> bool:
         if match:
             path = match['path']
             parts = path.split('/')
-            return task_id in parts and '..' not in parts and verify(path, match['sha'].lower())
+            declared = re.search(r"(?:^|\n)portable-workspace:\s*$", text[:match.start()], re.IGNORECASE)
+            if not declared or task_id not in parts or '..' in parts:
+                return False
+            row = conn.execute("SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            return bool(row and row[0] and verify(path, match['sha'].lower(), row[0], trees))
     return False
 
 
-def verify(path: str, digest: str) -> bool:
-    """Hash on the hub, never on the worker with a coincidentally identical path."""
+def _probe(argv):
     from tools.environments.local import build_subprocess_env
 
+    result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", timeout=20,
+                            check=False, env=build_subprocess_env())
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and re.fullmatch(r"[a-f0-9]{64}", value) else None
+
+
+def verify(path: str, digest: str, workspace: str, trees=()) -> bool:
+    """Compare actual hub archive bytes with the complete current local workspace.
+
+    All pin-planner trees must be within the archived root. Local inventory both
+    before and after the remote read fences edits made while the hub was hashing.
+    Each probe has a hard deadline; any uncertainty retains the machine pin.
+    """
     try:
-        result = subprocess.run(
-            ["hub-admin", f"sha256sum -- {shlex.quote(path)}"],
-            capture_output=True, text=True, encoding="utf-8", timeout=20, check=False,
-            env=build_subprocess_env(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        root = Path(workspace).resolve(strict=True)
+        if any(not Path(tree).resolve(strict=True).is_relative_to(root) for tree in trees):
+            return False
+        script = Path(__file__).with_name("kanban_archive_inventory.py")
+        local = [sys.executable, str(script), "tree", str(root)]
+        before = _probe(local)
+        if not before:
+            return False
+        remote = shlex.join(["python3", "-c", script.read_text(encoding="utf-8-sig"), "archive", path, digest])
+        actual = _probe(["hub-admin", remote])
+        return actual == before and _probe(local) == before
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
-    return result.returncode == 0 and result.stdout.strip() == f"{digest}  {path}"
