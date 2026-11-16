@@ -1365,11 +1365,15 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
                 return
             if waker is None:
                 # The passive sweep historically works in memory when its ledger is unavailable.
-                with contextlib.suppress(sqlite3.Error, OSError), contextlib.closing(_ledger(ledger)) as conn:
-                    verdict = _claim_notice(conn, session=sid, ref=ref, state=state, now=now or time.time(),
-                                            fresh=True, notice_key=event_key, task_id=str(task['id']),
-                                            swept_key=memo_key,
-                                            transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t))
+                conn = None
+                with contextlib.suppress(sqlite3.Error, OSError):
+                    conn = _ledger(ledger)
+                if conn is not None:
+                    with contextlib.closing(conn):
+                        verdict = _claim_notice(conn, session=sid, ref=ref, state=state, now=now or time.time(),
+                                                fresh=True, notice_key=event_key, task_id=str(task['id']),
+                                                swept_key=memo_key,
+                                                transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t))
                     if verdict not in ('offer', 'acked'):
                         return
                 from tui_gateway.kanban_notice_session_store import notice_writer

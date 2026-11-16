@@ -290,8 +290,7 @@ def _guidance(text, cards):
     tail = '\n'.join(rest).rstrip()
     if tail and text.find(tail, pos) < 0 and f"[kanban] Task {last.get('task_id')} " in text:
         # A relabel removes the obsolete ask; an ask-only tail becomes a one-line card.
-        tail = '\n'.join(line for line in rest if not line.startswith(
-            ('Next action for the user:', 'Why only the user:', 'Scope:', 'Open task:'))).rstrip()
+        tail = '\n'.join(_without_superseded_ask(rest)).rstrip()
     if tail:
         end = text.find(tail, pos)
         if end < 0:

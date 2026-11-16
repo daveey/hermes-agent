@@ -79,12 +79,19 @@ def test_resolved_real_notice_drops_multiline_ask_presentation(monkeypatch, drop
     assert 'Next action for the user:' in text
     item = {'ref': f'worker-6/default/default/{tid}', 'state': 'blocked@1', 'event_key': 'key',
             'text': text + '\nKeep other context'}
-    monkeypatch.setattr(kanban_wake_fold, '_live_task', lambda _: ('done', 'Finished'))
-    result = kanban_wake_fold._compose([kro._metadata(item)['kanban_cards'][0]], GUIDANCE, strict=True)
+    monkeypatch.setattr(kanban_wake_fold, '_live_task', lambda _: ('ready', ''))
+    card = kro._metadata(item)['kanban_cards'][0]
+    result = kanban_wake_fold._compose([card], GUIDANCE, strict=True)
     for stale in ('Then unblock', 'can grant access', 'and its credentials', 'Your step is still needed',
                   'NOT resume', 'Use the owner Desktop', 'Next action for the user:'):
         assert stale not in result
     assert 'Keep other context' in result and result.endswith(GUIDANCE)
+    payload = {'text': result, 'local_automation_v1': {
+        'identity': json.dumps(['kanban-wake', 'id']), 'kanban_cards': [card]}}
+    monkeypatch.setattr(kanban_wake_fold, '_live_task', lambda _: ('done', 'Finished'))
+    kanban_wake_fold.refresh_claimed(payload)
+    assert 'Result: Finished' in payload['text']
+    assert payload['text'].endswith(GUIDANCE)
 
 
 def test_remote_blocked_metadata_preserves_premise_and_board():

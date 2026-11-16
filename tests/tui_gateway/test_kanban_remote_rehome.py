@@ -95,6 +95,19 @@ def test_live_holder_keeps_custody_after_home_move(tmp_path):
     assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 20) == []
 
 
+def test_passive_claim_contention_never_falls_back_to_unclaimed_write(tmp_path, monkeypatch):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    def busy(*args, **kwargs):
+        raise sqlite3.OperationalError('database is locked')
+    monkeypatch.setattr(krn, '_claim_notice', busy)
+    with once._chat(tmp_path) as (db, opener):
+        assert krn.sweep_remote_notices(replica_path=hub, gateway='macbook', session_db=opener,
+                                        ledger=ledger, now=now, waker=None) == []
+        assert db.get_messages(once.CHAT) == []
+
+
 def test_passive_failed_write_releases_claim_for_retry(tmp_path, monkeypatch):
     now = time.time()
     hub = once._hub(tmp_path, now)
