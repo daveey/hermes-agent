@@ -394,6 +394,16 @@ def resumes_review(conn, task_id, pr_urls, *, discharged=()):
     parents = _awaited_parents(conn, parents, evidence, parked_at)
     if not parents:
         return False
+    # A done ordering prerequisite (no review result) neither authorizes nor refuses while a
+    # review parent remains; an all-ordering park keeps the ordering handoff. Only parents
+    # the checkpoint itself named as awaited qualify: a historical parent reopened after the
+    # park (or any legacy-checkpoint parent) still answers to the review rules.
+    from hermes_cli.kanban_dependency_review_ordering import ordering_prerequisites
+    named_awaited = evidence.get("awaited")
+    ordering = ordering_prerequisites(
+        conn, task_id, [p for p in parents if isinstance(named_awaited, list) and p in named_awaited], captured)
+    if ordering and len(ordering) < len(parents):
+        parents = [p for p in parents if p not in ordering]
     urls -= {norm_pr(u) for u in discharged}
     if not urls:
         return False
