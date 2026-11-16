@@ -1,0 +1,235 @@
+"""A review route on a pacing-held provider moves to the next independent reviewer free of holds. [daveey]
+
+2026-11-15 (t_01a1e15ae11c8d41): Claude-implemented reviews resolved to gpt-6-astra on openai-codex, pacing-``held``
+until 11-20 22:40Z. ``paced_route`` moved an unpinned reviewer (#3362) but not an explicit handoff ``review_model``,
+and a review run's receipt did not say which hold it left or until when. Both entry paths are covered: a card in
+the review lane and a ready-lane card carrying ``sdlc-review``.
+
+Fixture (``test_kanban_pin_reroute``): the implementer ran claude-opus-5-5 (also the strong tier, so it is never the
+reviewer); deep routes are opus (anthropic), gpt-6-astra (openai-codex), grok-5 (xai-oauth).
+"""
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_model_tier as tier
+from hermes_cli import kanban_review_model as review
+from tests.hermes_cli import test_kanban_model_tier_paced_reroute as paced_tests
+from tests.hermes_cli import test_kanban_pin_reroute as pin_tests
+from tests.hermes_cli.test_kanban_quota_episode import board as board  # noqa: PLC0414 -- the self-alias is load-bearing: it suppresses F811 for the pytest fixture parameter shadowing this import
+
+clock = paced_tests.clock
+PIN, PEER, GROK = pin_tests.PIN, pin_tests.PEER, pin_tests.GROK  # astra/codex, opus/anthropic (implementer), grok
+HELD_FAR = paced_tests.HELD_FAR
+GOVERNED = {'llm_pacing': {'providers': ['anthropic', 'openai-codex', 'xai-oauth']}}
+ENTRIES = ['review_lane', 'ready_skill']
+
+
+def _card(conn, entry, *, override=None):
+    """A Claude-implemented card under review on *entry*; ``override`` = the handoff's review_model/provider."""
+    tid = kb.create_task(conn, title='review me', assignee='a', model_override=PEER[0], provider_override=PEER[1],
+                         skills=['sdlc-review'] if entry == 'ready_skill' else None)
+    if override is not None:
+        kb.claim_task(conn, tid)
+        assert kb.request_review(conn, tid, metadata={'review_model': override[0], 'review_provider': override[1]})
+    status = 'review' if entry == 'review_lane' else 'ready'
+    conn.execute('UPDATE tasks SET status=? WHERE id=?', (status, tid))
+    conn.commit()
+    return tid
+
+
+def _lane(entry):
+    return 'review' if entry == 'review_lane' else 'ready'
+
+
+def _route(conn, tid, entry):
+    return tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane=_lane(entry))
+
+
+def _apply(conn, tid, entry):
+    """One real dispatcher tick (claim from the card's column, admission, spawn): the spawned route + receipts."""
+    seen = pin_tests._tick(conn)
+    assert len(seen) == 1, seen
+    tier_event = pin_tests._events(conn, tid, 'model_tier')[-1]
+    route_event = pin_tests._events(conn, tid, 'run_route')[-1]
+    assert route_event['lane'] == _lane(entry)
+    return tier_event['reason'], seen[0], tier_event, route_event
+
+
+@pytest.mark.parametrize('entry', ENTRIES)
+def test_a_held_independent_reviewer_moves_to_the_next_one_free_of_holds(board, clock, monkeypatch, all_assignees_spawnable, entry):
+    """(a) + (e): the unpinned reviewer on held codex moves to grok; the receipts name the hold and its reset."""
+    paced_tests._deep(monkeypatch, GOVERNED, grok=True)
+    paced_tests._pools(clock, openai_codex=('held', HELD_FAR), anthropic=('paced', None))
+    with kbc.connect() as conn:
+        tid = _card(conn, entry)
+        assert tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane=_lane(entry)) == (*PIN, 'review_unpinned')
+        assert _route(conn, tid, entry) == (*GROK, 'review_unpinned+paced:openai-codex')
+        reason, route, tier_event, route_event = _apply(conn, tid, entry)
+    assert reason == 'review_unpinned+paced:openai-codex' and route == GROK
+    assert tier_event['paced'] == {'provider': 'openai-codex', 'until': int(clock[0] + HELD_FAR),
+                                   'from': {'model': PIN[0], 'provider': PIN[1]}}
+    assert tier_event['implementer_model'] == PEER[0]
+    assert (route_event['model'], route_event['provider'], route_event['tier_reason']) == (
+        *GROK, 'review_unpinned+paced:openai-codex')
+
+
+@pytest.mark.parametrize('entry', ENTRIES)
+def test_a_held_pool_with_no_known_reset_records_until_none(board, clock, monkeypatch, all_assignees_spawnable, entry):
+    paced_tests._deep(monkeypatch, GOVERNED, grok=True)
+    paced_tests._pools(clock, openai_codex=('held', None))
+    with kbc.connect() as conn:
+        reason, route, tier_event, _ = _apply(conn, _card(conn, entry), entry)
+    assert (reason, route) == ('review_unpinned+paced:openai-codex', GROK)
+    assert tier_event['paced']['until'] is None
+
+
+@pytest.mark.parametrize('entry', ENTRIES)
+@pytest.mark.parametrize('state', ['paced', 'open'])
+def test_a_reviewer_whose_provider_is_only_paced_keeps_its_route(board, clock, monkeypatch, all_assignees_spawnable, entry, state):
+    """(b): a paced pool still admits (limit >= 1): the review waits for a slot there, never rerouted."""
+    paced_tests._deep(monkeypatch, GOVERNED, grok=True)
+    paced_tests._pools(clock, openai_codex=(state, HELD_FAR))
+    with kbc.connect() as conn:
+        tid = _card(conn, entry)
+        assert _route(conn, tid, entry) == (*PIN, 'review_unpinned')
+        reason, route, tier_event, _ = _apply(conn, tid, entry)
+    assert (reason, route) == ('review_unpinned', PIN)
+    assert 'paced' not in tier_event
+
+
+@pytest.mark.parametrize('entry', ENTRIES)
+def test_a_reviewer_on_a_held_pool_with_a_near_reset_keeps_its_route(board, clock, monkeypatch, all_assignees_spawnable, entry):
+    """Same threshold as default routes (``reroute_after_s``, 3600 s): a hold ending within it is waited out."""
+    paced_tests._deep(monkeypatch, GOVERNED, grok=True)
+    paced_tests._pools(clock, openai_codex=('held', 1800))
+    with kbc.connect() as conn:
+        assert _route(conn, _card(conn, entry), entry) == (*PIN, 'review_unpinned')
+
+
+@pytest.mark.parametrize('entry', ENTRIES)
+@pytest.mark.parametrize('fleet', ['only_held_reviewer', 'every_reviewer_held'])
+def test_no_independent_reviewer_free_of_holds_keeps_the_route_never_the_implementer(
+        board, clock, monkeypatch, all_assignees_spawnable, entry, fleet):
+    """(c): the pool-worker shape (deep = opus + astra; opus implemented) keeps astra and waits. The implementer's
+    own provider being free (anthropic paced) never makes opus its own reviewer."""
+    paced_tests._deep(monkeypatch, GOVERNED, grok=fleet == 'every_reviewer_held')
+    pools = {'openai_codex': ('held', HELD_FAR), 'anthropic': ('paced', None)}
+    if fleet == 'every_reviewer_held':
+        pools['xai_oauth'] = ('held', HELD_FAR)
+    paced_tests._pools(clock, **pools)
+    with kbc.connect() as conn:
+        tid = _card(conn, entry)
+        assert _route(conn, tid, entry) == (*PIN, 'review_unpinned')
+        assert pin_tests._tick(conn) == []  # it waits: the governor holds it on codex, nothing spawns
+        held = pin_tests._events(conn, tid, 'llm_paced')[-1]['providers']
+        assert [(p['provider'], p['state']) for p in held] == [('openai-codex', 'held')]
+        assert pin_tests._events(conn, tid, 'model_tier') == []
+
+
+@pytest.mark.parametrize('entry', ENTRIES)
+def test_a_held_review_override_falls_back_and_records_the_requested_route(board, clock, monkeypatch, all_assignees_spawnable, entry):
+    """(d): the handoff asked for astra on held codex; the review runs on the next independent registered reviewer
+    and the receipt keeps the requested route, the held provider and its reset."""
+    paced_tests._deep(monkeypatch, GOVERNED, grok=True)
+    paced_tests._pools(clock, openai_codex=('held', HELD_FAR), anthropic=('paced', None))
+    with kbc.connect() as conn:
+        tid = _card(conn, entry, override=PIN)
+        assert tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane=_lane(entry)) == (*PIN, 'review_override')
+        assert _route(conn, tid, entry) == (*GROK, 'review_override+paced:openai-codex')
+        reason, route, tier_event, route_event = _apply(conn, tid, entry)
+        stored = kb.get_task(conn, tid)
+    assert (reason, route) == ('review_override+paced:openai-codex', GROK)
+    assert tier_event['paced'] == {'provider': 'openai-codex', 'until': int(clock[0] + HELD_FAR),
+                                   'from': {'model': PIN[0], 'provider': PIN[1]}}
+    assert route_event['tier_reason'] == 'review_override+paced:openai-codex'
+    assert (stored.model_override, stored.provider_override) == PEER  # the row never moves
+
+
+@pytest.mark.parametrize('entry', ENTRIES)
+@pytest.mark.parametrize('case', ['paced_only', 'no_free_peer', 'unregistered_peer', 'require_model', 'class'])
+def test_a_review_override_keeps_its_route_unless_a_registered_free_peer_exists(
+        board, clock, monkeypatch, all_assignees_spawnable, entry, case):
+    """(b)/(c) for overrides: a paced pool, no free independent peer, a peer this host's registry refuses, a
+    ``require_model`` card or a class override (``auto`` is never held) keeps the requested route."""
+    paced_tests._deep(monkeypatch, GOVERNED, grok=case != 'no_free_peer')
+    paced_tests._pools(clock, openai_codex=('paced' if case == 'paced_only' else 'held', HELD_FAR),
+                       anthropic=('paced', None))
+    if case == 'unregistered_peer':
+        real = review.registry_refusal
+        monkeypatch.setattr(review, 'registry_refusal',
+                            lambda m, p, a: RuntimeError('not registered') if m == GROK[0] else real(m, p, a))
+    override = ('class:deep', 'auto') if case == 'class' else PIN
+    with kbc.connect() as conn:
+        tid = _card(conn, entry, override=override)
+        if case == 'require_model':
+            conn.execute('UPDATE tasks SET body=? WHERE id=?', (pin_tests.walls.REQUIRE_MODEL_MARKER, tid))
+            conn.commit()
+        assert _route(conn, tid, entry) == (*override, 'review_override')
+
+
+def test_a_registry_refusal_only_gates_override_fallbacks(board, clock, monkeypatch, all_assignees_spawnable):
+    """The unpinned reviewer's candidates are the registry's own deep routes (``independent_routes``), so its
+    reroute is unchanged by the override-only registry check."""
+    paced_tests._deep(monkeypatch, GOVERNED, grok=True)
+    paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
+    monkeypatch.setattr(review, 'registry_refusal', lambda m, p, a: RuntimeError('refused') if m == GROK[0] else None)
+    with kbc.connect() as conn:
+        assert _route(conn, _card(conn, 'review_lane'), 'review_lane') == (*GROK, 'review_unpinned+paced:openai-codex')
+
+
+def test_a_held_refused_override_substitute_moves_too(board, clock, monkeypatch, all_assignees_spawnable):
+    """``review_override_refused``: the registry refused the handoff's model and substituted astra (held): the
+    substitute moves on like any reviewer, and the receipt still names what the handoff asked for."""
+    paced_tests._deep(monkeypatch, GOVERNED, grok=True)
+    paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
+    real = review.registry_refusal
+
+    def refuse_fable(model, provider, assignee):
+        if model == 'claude-fable-5-2':
+            return type('Refusal', (), {'code': 'model_pin_not_in_routing_registry', 'allowed': [PIN[0]]})()
+        return real(model, provider, assignee)
+    monkeypatch.setattr(review, 'registry_refusal', refuse_fable)
+    with kbc.connect() as conn:
+        tid = _card(conn, 'review_lane', override=('claude-fable-5-2', 'anthropic'))
+        assert tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane='review') == (
+            *PIN, 'review_override_refused')
+        reason, route, tier_event, _ = _apply(conn, tid, 'review_lane')
+    assert (reason, route) == ('review_override_refused+paced:openai-codex', GROK)
+    assert tier_event['paced']['from'] == {'model': PIN[0], 'provider': PIN[1]}
+
+
+def test_a_failed_paced_receipt_keeps_the_reroute_and_its_reason(board, clock, monkeypatch, all_assignees_spawnable):
+    """The ``paced`` block is detail: a fault reading it never refuses admission or undoes the move."""
+    from hermes_cli import kanban_paced_reroute as paced
+
+    def boom(*_a, **_k):
+        raise RuntimeError('state unreadable')
+    paced_tests._deep(monkeypatch, GOVERNED, grok=True)
+    paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
+    monkeypatch.setattr(paced, 'receipt', boom)
+    with kbc.connect() as conn:
+        reason, route, tier_event, _ = _apply(conn, _card(conn, 'review_lane'), 'review_lane')
+    assert (reason, route) == ('review_unpinned+paced:openai-codex', GROK)
+    assert 'paced' not in tier_event
+
+
+def test_only_review_receipts_carry_the_paced_block(board, clock, monkeypatch, all_assignees_spawnable):
+    """A default route moved off the same hold keeps its existing receipt shape (``tier_reason`` only)."""
+    paced_tests._deep(monkeypatch)
+    paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title='default card', assignee='a')
+        assert pin_tests._tick(conn) == [PEER]
+        tier_event = pin_tests._events(conn, tid, 'model_tier')[-1]
+    assert tier_event['reason'] == 'default+paced:openai-codex' and 'paced' not in tier_event
+
+
+@pytest.mark.parametrize('reason', ['review_unpinned', 'review_override', 'default', 'pinned+pin_quota_reroute'])
+def test_a_route_that_did_not_move_off_a_hold_has_no_paced_receipt(board, clock, monkeypatch, reason):
+    from hermes_cli import kanban_paced_reroute as paced
+    _, cfg = paced_tests._deep(monkeypatch, GOVERNED, grok=True)
+    paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, _card(conn, 'review_lane'))
+        assert paced.receipt(conn, task, reason, lane='review', cfg=cfg) is None

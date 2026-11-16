@@ -399,6 +399,16 @@ def _class_alternate_off_wall(conn, task, base):
     return route[0], route[1], provider
 
 
+def _paced_receipt(conn, task, reason, *, lane, cfg):
+    """The review receipt's ``paced`` block (``kanban_paced_reroute.receipt``); a fault only drops the detail."""
+    from hermes_cli.kanban_paced_reroute import receipt
+    try:
+        return receipt(conn, task, reason, lane=lane, cfg=load_tier_config() if cfg is None else cfg)
+    except Exception:  # health: allow BLE001 -- the tier_reason already names the move; the detail is optional
+        logger.warning("kanban model tier: paced receipt failed for %s", getattr(task, "id", "?"), exc_info=True)
+        return None
+
+
 def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
     implementer_model = _str(getattr(task, "model_override", None)) or None
     is_review = lane == "review" or REVIEW_SKILL in (getattr(task, "skills", None) or [])
@@ -448,6 +458,7 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
         reason = f"{reason}+{_PACED}:{moved[2]}"
     origin = (getattr(task, "model_override", None), getattr(task, "provider_override", None))
     repinned = bool(model) and reason.startswith("pinned+pin_quota_reroute")
+    paced = _paced_receipt(conn, task, reason, lane=lane, cfg=cfg) if is_review else None
     if model:
         task.model_override = model
         task.provider_override = provider
@@ -459,6 +470,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                        "lane": lane}
             if is_review:
                 payload["implementer_model"] = implementer_model
+                if paced:
+                    payload["paced"] = paced
                 if reason == "review_override_refused":
                     # The receipt names what the handoff asked for and why this host substituted. [daveey]
                     from hermes_cli.kanban_review_model import refused_override

@@ -11,16 +11,22 @@ Rule (:func:`paced_route`); anything else keeps the route, as before:
    ``kanban_llm_pacing_dispatch.held_pools``, no usage read here) and its ``until`` is more than
    ``kanban.llm_pacing.reroute_after_s`` (default 3600) away, or unknown. A ``paced`` pool (limit >= 1) never moves a
    route;
-2. the route is an unpinned ``default`` route, a ``review_unpinned`` reviewer, or a non-mandatory concrete pin (the
-   far-wall rule of ``kanban_pin_reroute``). Mandatory pins, class selectors and ``require_model: true`` cards keep
-   their route;
+2. the route is an unpinned ``default`` route, a ``review_unpinned`` reviewer, an explicit handoff ``review_model``
+   (``review_override``/``review_override_refused``), or a non-mandatory concrete pin (the far-wall rule of
+   ``kanban_pin_reroute``). Mandatory pins, class selectors and ``require_model: true`` cards keep their route;
 3. the peer comes from the same eligibility the wall reroutes use (``alternate_route``, the review resolver's
    independent routes, the pin's class peers) and its provider is neither held nor walled, and serves on this
-   host's live pool (``live_pool_serving``: never a provider this host holds no credential for). With none, the route
-   stays and the governor holds it as before; a moved route is judged by the governor on its new provider.
+   host's live pool (``live_pool_serving``: never a provider this host holds no credential for). A review peer is
+   never the implementer's model, and an override's peer must also pass this host's routing registry. With none,
+   the route stays and the governor holds it as before; a moved route is judged by the governor on its new provider.
 
 The move lives on the in-memory claimed task only (as every tier decision does); ``run_route.tier_reason`` names it
-``<reason>+paced:<held provider>``.
+``<reason>+paced:<held provider>``, and a review run's ``model_tier`` receipt adds ``paced`` (:func:`receipt`): the
+held provider, its ``until`` and the route it replaced.
+
+2026-11-16 (t_01a1e15ae11c8d41): pool-worker registries list no Fable deep route, so a Claude-implemented review
+there has gpt-6-astra as its only independent reviewer and keeps waiting on a codex hold (rule 3: never the
+implementer). That is registry policy, not this rule.
 """
 from __future__ import annotations
 
@@ -35,6 +41,9 @@ logger = logging.getLogger(__name__)
 REASON = "paced"
 DEFAULT_REROUTE_AFTER_S = 3600.0
 _MAX_PEER_PROBES = 8  # peers refused for no live pool on this host before the route stays
+# Review tier reasons a far hold moves: the unpinned independent reviewer and an explicit handoff
+# ``review_model`` (kept or substituted by the registry), each to the next independent registered reviewer.
+REVIEW_REASONS = ("review_unpinned", "review_override", "review_override_refused")
 
 
 def _section(cfg: Optional[dict]) -> Any:
@@ -67,18 +76,23 @@ def _default_peer(conn, task, base, held, now):
     return route[0], route[1]
 
 
-def _review_peer(conn, task, cfg, held, now):
-    """The first independent reviewer (``_review_off_wall``'s candidates) on a provider neither held nor walled."""
+def _review_peer(conn, task, cfg, held, now, *, registered=False):
+    """The first independent reviewer (``_review_off_wall``'s candidates) on a provider neither held nor walled.
+    ``registered`` (override fallbacks) also requires this host's routing registry to accept it, as the
+    refused-override fallback does: a handoff's own model may sit outside the registry's deep routes."""
     from hermes_cli import kanban_provider_walls as pw
-    from hermes_cli.kanban_review_model import _implementer_model, independent_routes
+    from hermes_cli.kanban_review_model import _implementer_model, independent_routes, registry_refusal
     implementer = _implementer_model(conn, task)
     if not implementer:
         return None
+    assignee = getattr(task, "assignee", None)
     walled = pw.active_walls(now=now)
-    for alt_model, alt_provider in independent_routes(implementer, cfg, getattr(task, "assignee", None)):
+    for alt_model, alt_provider in independent_routes(implementer, cfg, assignee):
         alt_provider = pw._norm(alt_provider)
         if (not alt_provider or alt_provider == "auto" or alt_provider in held or alt_provider in walled
                 or pw.live_quota_wall(alt_provider, alt_model)):
+            continue
+        if registered and registry_refusal(alt_model, alt_provider, assignee):
             continue
         return alt_model, alt_provider
     return None
@@ -102,7 +116,7 @@ def _probe(conn, task, base, cfg, now):
         if pinned is None:
             return None
         model, provider = pinned
-    elif reason in ("default", "review_unpinned"):
+    elif reason in ("default", *REVIEW_REASONS):
         model, provider = base[0], pw._norm(base[1])
         if not model or not provider or pw.requires_model(task):
             return None
@@ -121,7 +135,7 @@ def _probe(conn, task, base, cfg, now):
         elif reason == "default":
             moved = _default_peer(conn, task, base, excluded, now)
         else:
-            moved = _review_peer(conn, task, cfg or {}, excluded, now)
+            moved = _review_peer(conn, task, cfg or {}, excluded, now, registered=reason != "review_unpinned")
         if not moved:
             return None
         target = pw._norm(moved[1])
@@ -151,6 +165,22 @@ def paced_route(conn: sqlite3.Connection, task: Any, base: tuple, *, lane: str,
     if not moved:
         return None
     return moved[0], moved[1], f"{base[2]}+{REASON}:{moved[2]}"
+
+
+def receipt(conn: sqlite3.Connection, task: Any, reason: str, *, lane: str,
+            cfg: Optional[dict]) -> Optional[dict[str, Any]]:
+    """``{"provider", "until", "from"}`` for a route *reason* that moved off a hold (``...+paced:<provider>``): the
+    held provider, its stored reset (None when unknown) and the ``{model, provider}`` it replaced (the read-only
+    pre-pacing tier). None for any other reason. Read before the claimed task's route is overwritten."""
+    marker = f"+{REASON}:"
+    if marker not in str(reason or ""):
+        return None
+    from hermes_cli.kanban_model_tier import resolve_model_tier
+    held = str(reason).rsplit(marker, 1)[1]
+    until = _held(cfg, time.time()).get(held)
+    base = resolve_model_tier(conn, task, lane=lane, cfg=cfg)
+    return {"provider": held, "until": int(until) if until is not None and math.isfinite(until) else None,
+            "from": {"model": base[0], "provider": base[1]}}
 
 
 def route_words(conn: sqlite3.Connection, task: Any) -> Optional[str]:
