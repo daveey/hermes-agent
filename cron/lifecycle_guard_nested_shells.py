@@ -29,6 +29,7 @@ from cron.lifecycle_guard import (
     _split_redirections,
 )
 from cron.lifecycle_guard_groups import _CLOSERS
+from cron.lifecycle_guard_lines import strip_shell_comments
 
 if TYPE_CHECKING:
     from cron.lifecycle_guard import _LifecycleScanBudget
@@ -1014,6 +1015,8 @@ _FUNCTION_DEFINITION_RE = re.compile(
 
 def _defined_functions(command: str) -> frozenset[str]:
     """Names of the shell functions *command* may define."""
+    # Match the command tokenizer's joined spelling, not a suffix after a continuation.
+    command = strip_shell_comments(command).replace("\\\n", "")
     return frozenset(name for match in _FUNCTION_DEFINITION_RE.finditer(command)
                      for name in match.groups() if name)
 
