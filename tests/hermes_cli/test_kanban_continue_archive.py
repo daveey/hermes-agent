@@ -123,6 +123,10 @@ def test_comment_window_starts_at_current_run(w2, monkeypatch):
     tid, text = _task(w2, monkeypatch)
     monkeypatch.setattr(archive, "verify", lambda *args: True)
     kb.add_comment(w2.conn, tid, author="default", body=text)
+    with kb.write_txn(w2.conn):
+        w2.conn.execute("UPDATE task_comments SET created_at = (SELECT started_at FROM task_runs "
+                        "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)) WHERE task_id = ?",
+                        (tid, tid))
     assert not archive.portable(w2.conn, tid, "resume")
     _backdate_run(w2.conn, tid, 5)
     assert archive.portable(w2.conn, tid, "resume")
