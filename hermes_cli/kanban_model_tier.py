@@ -408,6 +408,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
         if is_review:
             from hermes_cli.kanban_review_model import ReviewModelUnavailable
             raise ReviewModelUnavailable(f"Review model resolution failed: {exc}") from exc
+        from hermes_cli.kanban_pace_reroute import lose as _lose_pace_offer
+        _lose_pace_offer(getattr(task, "id", ""), f"route resolution failed: {type(exc).__name__}")
         logger.warning("kanban model tier: resolve failed for %s (%s)", getattr(task, "id", "?"), exc,
                        exc_info=True)
         return "error"
@@ -437,7 +439,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                            model, why, getattr(task, "id", "?"))
             reason = f"{reason}+unroutable:{model}:{why}"
             model = provider = None
-    # Persist the pace choice before the owner reloads its authoritative model_tier receipt.
+    # Persist the pace choice before the owner reloads its authoritative model_tier receipt. An offer that expired or
+    # no longer matches raises OfferLost: the launch is refused and requeued, never started on the held route.
     from hermes_cli.kanban_pace_reroute import REASON as _PACED, take as _take_pace_move
     moved = _take_pace_move(getattr(task, "id", ""), (model, provider))
     if moved:

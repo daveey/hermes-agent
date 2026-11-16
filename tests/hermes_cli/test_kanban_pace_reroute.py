@@ -248,20 +248,113 @@ def test_profile_fallback_route_keeps_the_hold(pool, monkeypatch, config):
 
 def test_offer_applies_only_to_the_route_it_judged():
     reroute.clear()
+    assert reroute.take("t1", ("gpt-6-astra", "openai-codex")) is None  # no offer: an ordinary admission
     reroute.offer("t1", ("gpt-6-astra", "openai-codex"), ("grok-4.7", "xai-oauth", "openai-codex"))
-    assert reroute.take("t1", ("claude-opus-5-5", "anthropic")) is None  # the route moved since: no move
+    with pytest.raises(reroute.OfferLost):  # the route moved since: the admission it rested on is gone
+        reroute.take("t1", ("claude-opus-5-5", "anthropic"))
     assert reroute.take("t1", ("gpt-6-astra", "openai-codex")) is None  # consumed by the first take
     reroute.offer("t1", ("gpt-6-astra", "OpenAI-Codex"), ("grok-4.7", "xai-oauth", "openai-codex"))
     assert reroute.take("t1", ("gpt-6-astra", "openai-codex")) == ("grok-4.7", "xai-oauth", "openai-codex")
 
 
-def test_stale_offer_is_ignored(monkeypatch):
+def test_stale_offer_fails_closed(monkeypatch):
     reroute.clear()
     now = [1000.0]
     monkeypatch.setattr(reroute.time, "monotonic", lambda: now[0])
     reroute.offer("t1", ("gpt-6-astra", "openai-codex"), ("grok-4.7", "xai-oauth", "openai-codex"))
     now[0] += reroute.TTL_SECONDS
+    with pytest.raises(reroute.OfferLost):
+        reroute.take("t1", ("gpt-6-astra", "openai-codex"))
+    reroute.offer("t1", ("gpt-6-astra", "openai-codex"), ("grok-4.7", "xai-oauth", "openai-codex"))
+    reroute.withdraw("t1")
     assert reroute.take("t1", ("gpt-6-astra", "openai-codex")) is None
+
+
+def _lapse_during_prepare(monkeypatch, lapse):
+    """Run ``lapse()`` inside the claimed card's workspace preparation (between the governor's offer and the take)."""
+    from hermes_cli import kanban_source_launch as launch
+    prepare = launch._prepare
+
+    def slow_prepare(*args, **kwargs):
+        lapse()
+        return prepare(*args, **kwargs)
+    monkeypatch.setattr(launch, "_prepare", slow_prepare)
+
+
+def _expire(monkeypatch):
+    """A clock that jumps past the offer's TTL during the first launch only."""
+    now, fired = [1000.0], []
+    monkeypatch.setattr(reroute.time, "monotonic", lambda: now[0])
+
+    def lapse():
+        if not fired:
+            fired.append(True)
+            now[0] += reroute.TTL_SECONDS + 1
+    return lapse
+
+
+def _requeued_without_penalty(conn, tid):
+    task = kb.get_task(conn, tid)
+    assert task.status == "ready" and not task.claim_lock
+    assert int(task.consecutive_failures or 0) == 0
+    assert _route_receipt(conn, tid) is None
+
+
+@pytest.mark.parametrize("title", ["routine work", "security work"])
+def test_offer_expiring_during_launch_refuses_spawn(pool, strong_pattern, monkeypatch, title):
+    """Review t_01a1e104366a08a8: a slow claim outlived the offer and the card started on the held Codex route."""
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
+    _lapse_during_prepare(monkeypatch, _expire(monkeypatch))
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title=title, assignee="a")
+        seen, _ = _dispatch(conn)
+        assert seen == []
+        _requeued_without_penalty(conn, tid)
+        seen, result = _dispatch(conn)  # requeued like any refused admission: spaced by the infrastructure cooldown
+        assert seen == [] and result.respawn_guarded and "infrastructure_cooldown" in str(result.respawn_guarded)
+        monkeypatch.setattr(kb, "_resolve_rate_limit_cooldown_seconds", lambda: 0)
+        seen, _ = _dispatch(conn)  # the next tick judges it afresh and starts it on Grok
+        assert seen == [(tid, *GROK)]
+
+
+@pytest.mark.parametrize("title", ["routine work", "security work"])
+def test_offer_for_another_route_refuses_spawn(pool, strong_pattern, monkeypatch, title):
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
+    resolve = tier.resolve_dispatch_tier
+
+    def moved_route():  # the card's route changed between the governor's read and the launch
+        monkeypatch.setattr(tier, "resolve_dispatch_tier",
+                            lambda *a, **k: ("claude-sonnet-5-5", "anthropic", resolve(*a, **k)[2]))
+    _lapse_during_prepare(monkeypatch, moved_route)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title=title, assignee="a")
+        seen, _ = _dispatch(conn)
+        assert seen == []
+        _requeued_without_penalty(conn, tid)
+
+
+def test_offer_for_an_unresolvable_route_refuses_spawn(pool, monkeypatch):
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
+
+    def broken():
+        def fail(*_a, **_k):
+            raise RuntimeError("resolver down")
+        monkeypatch.setattr(tier, "resolve_dispatch_tier", fail)
+    _lapse_during_prepare(monkeypatch, broken)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="routine work", assignee="a")
+        seen, _ = _dispatch(conn)
+        assert seen == []
+        _requeued_without_penalty(conn, tid)
+
+
+def test_an_earlier_ticks_offer_never_steers_an_ordinary_admission(pool, monkeypatch):
+    _pools(monkeypatch, {"anthropic": 5, "openai-codex": 5})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="routine work", assignee="a")
+        reroute.offer(tid, ("gpt-6-astra", "openai-codex"), (*GROK, "openai-codex"))  # left by a claim that never ran
+        seen, _ = _dispatch(conn)
+        assert seen == [(tid, "gpt-6-astra", "openai-codex")]
 
 
 @pytest.fixture

@@ -149,7 +149,8 @@ def admission_refusal(conn, task_id, exc):
     from tools.process_registry import RestartSafeScopeUnavailable
     if isinstance(exc, ReviewModelUnavailable) and deferral_exhausted(conn, task_id, str(exc)):
         return False, True, {"admission_refusal": "review_model_unavailable", "deferrals": DEFERRAL_LIMIT}
-    return isinstance(exc, (RestartSafeScopeUnavailable, ReviewModelUnavailable)), False, None
+    from hermes_cli.kanban_pace_reroute import OfferLost  # a lapsed pace move: requeue for a fresh judgment
+    return isinstance(exc, (RestartSafeScopeUnavailable, ReviewModelUnavailable, OfferLost)), False, None
 
 
 def _distinct_deep(pin, assignee, *, registered=False):

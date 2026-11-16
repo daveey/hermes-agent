@@ -449,6 +449,10 @@ def admission_skip(stored: Any) -> Optional[dict[str, Any]]:
 def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run: bool = False) -> bool:
     """True when the card must wait for its provider's pool to come back to pace (recorded on ``result``)."""
     try:
+        if not dry_run:
+            # A fresh judgment: an offer from an earlier tick whose claim never happened must not steer this one.
+            from hermes_cli.kanban_pace_reroute import withdraw
+            withdraw(row["id"])
         cfg = load_config()
         judged = _governed(conn, row["id"], lane, cfg) if cfg.enabled else None
         if judged is None:

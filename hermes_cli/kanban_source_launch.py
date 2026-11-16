@@ -324,8 +324,7 @@ def launch(conn: sqlite3.Connection, claimed: Any, workspace: Any, branch: Optio
         # Admission failed before any worker ran; preserve its retry budget (a repeated review refusal: visible block).
         infrastructure, exhausted, extra = admission_refusal(conn, claimed.id, exc)
         if infrastructure:
-            dispatch._kb._log.warning("kanban dispatcher: spawn of %s deferred, host cannot place the worker: %s",
-                                      claimed.id, exc)
+            dispatch._kb._log.warning("kanban dispatcher: spawn of %s deferred without penalty: %s", claimed.id, exc)
         if run is not None:
             not_started = stage == "pre_spawn" or (stage == "spawning" and isinstance(exc, _not_started_types()))
             abort_attached(conn, claimed, run, not_started=not_started, pid=pid, outcome="spawn_failed",
