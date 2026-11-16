@@ -115,7 +115,9 @@ def test_unchanged_sync_does_not_write_and_removed_parent_drops_evidence(moved_p
         assert sync.refresh_remote_parents(worker.conn, hub.conn) == []
     finally:
         worker.conn.set_trace_callback(None)
-    assert not any(s.startswith(("BEGIN", "CREATE", "DELETE", "INSERT", "UPDATE")) for s in statements)
+    # A deferred BEGIN is the scope memo's read snapshot (kanban_move_parent_scope); no write lock is taken.
+    assert not any(s.startswith(("BEGIN IMMEDIATE", "BEGIN EXCLUSIVE", "CREATE", "DELETE", "INSERT", "UPDATE"))
+                   for s in statements)
     hub.conn.execute("DELETE FROM task_runs WHERE task_id = ?", (parent,))
     assert sync.refresh_remote_parents(worker.conn, hub.conn) == [parent]
     assert evidence.result(worker.conn, task, parent) is None
@@ -187,7 +189,7 @@ def test_refresh_reads_status_and_result_in_one_snapshot(moved_parent, monkeypat
     assert hub.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     original = evidence.prepare
 
-    def change_between_reads(live, replica, wanted):
+    def change_between_reads(live, replica, wanted, scoped=None):
         other = sqlite3.connect(path, isolation_level=None)
         try:
             other.execute("BEGIN IMMEDIATE")
@@ -196,7 +198,7 @@ def test_refresh_reads_status_and_result_in_one_snapshot(moved_parent, monkeypat
             other.commit()
         finally:
             other.close()
-        return original(live, replica, wanted)
+        return original(live, replica, wanted, scoped=scoped)
 
     monkeypatch.setattr(evidence, "prepare", change_between_reads)
     sync.refresh_remote_parents(worker.conn, hub.conn)

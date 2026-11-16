@@ -361,10 +361,12 @@ def has_remote_parents(conn: sqlite3.Connection) -> bool:
                         (REMOTE_PARENTS_TABLE,)).fetchone() is not None
 
 
-def refresh_remote_parents(live: sqlite3.Connection, replica: sqlite3.Connection) -> list[str]:
+def refresh_remote_parents(live: sqlite3.Connection, replica: sqlite3.Connection, *,
+                           scoped=None) -> list[str]:
     """Copy the replica's status of every foreign parent the live file's links name into the mirror; drop rows no
     link needs and rows the replica no longer has. Returns the parents whose status changed (the caller wakes the
-    dispatcher so a released child is promoted on the next tick, not the next sweep)."""
+    dispatcher so a released child is promoted on the next tick, not the next sweep). ``scoped``: the evidence scope
+    the caller already read (the P2 gate stamps exactly the scope the mirror was built from)."""
     if not has_remote_parents(live):
         return []
     wanted = [r[0] for r in live.execute(
@@ -381,7 +383,7 @@ def refresh_remote_parents(live: sqlite3.Connection, replica: sqlite3.Connection
             chunk = wanted[i:i + 500]
             found.update({r[0]: r[1] for r in replica.execute(
                 f"SELECT id, status FROM tasks WHERE id IN ({','.join('?' * len(chunk))})", chunk)})
-        values, evidence_changed = evidence.prepare(live, replica, wanted)
+        values, evidence_changed = evidence.prepare(live, replica, wanted, scoped=scoped)
     finally:
         replica.execute("RELEASE move_parent_snapshot")
     current = {r[0]: r[1] for r in live.execute(f"SELECT parent_id, status FROM {REMOTE_PARENTS_TABLE}")}

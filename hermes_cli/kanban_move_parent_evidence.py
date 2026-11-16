@@ -36,6 +36,13 @@ def _parked_review_checkpoint(conn, task_id, run):
 
 
 def _parked_scope(live):
+    """Incremental memo (``kanban_move_parent_scope``); the uncached query is ``_parked_scope_uncached``."""
+    from hermes_cli import kanban_move_parent_scope as scope
+
+    return scope.parked_scope(live)
+
+
+def _parked_scope_uncached(live):
     """Foreign parents an orderly owner park named in its review checkpoint. [daveey]
 
     A worker that parks on a review it created on its own gateway leaves that
@@ -60,32 +67,87 @@ def _parked_scope(live):
     return scoped
 
 
-def prepare(live, replica, wanted):
+_QUEUED = (
+    "SELECT e.task_id, e.payload FROM tasks t JOIN task_events e ON e.id = "
+    "(SELECT MAX(m.id) FROM task_events m WHERE m.task_id = t.id AND m.kind = 'moved') "
+    "WHERE t.status NOT IN ('done', 'archived')"
+)
+
+
+def _queued_checkpoint(payload):
     from hermes_cli import kanban_db as kb
 
-    # Do not copy arbitrary foreign histories: only dependencies of cards whose
-    # operator explicitly supplied a queued-move checkpoint, or that an owner's
-    # authenticated review park names, need this evidence.
-    scoped = _parked_scope(live)
-    for event in live.execute(
-        "SELECT e.task_id, e.payload FROM tasks t JOIN task_events e ON e.id = "
-        "(SELECT MAX(m.id) FROM task_events m WHERE m.task_id = t.id AND m.kind = 'moved') "
-        "WHERE t.status NOT IN ('done', 'archived')"
-    ):
-        payload = kb._json_dict(event["payload"])
-        checkpoint = payload.get("checkpoint")
-        if payload.get("queued") is True and isinstance(checkpoint, str) and checkpoint.strip():
+    payload = kb._json_dict(payload)
+    checkpoint = payload.get("checkpoint")
+    return payload.get("queued") is True and isinstance(checkpoint, str) and bool(checkpoint.strip())
+
+
+def _queued_scope_uncached(live):
+    from hermes_cli import kanban_db as kb
+
+    scoped = set()
+    for event in live.execute(_QUEUED):
+        if _queued_checkpoint(event["payload"]):
             scoped.update(kb.parent_ids(live, event["task_id"]))
+    return scoped
+
+
+def _evidence_scope_uncached(live):
+    return _parked_scope_uncached(live) | _queued_scope_uncached(live)
+
+
+def _evidence_scope(live):
+    from hermes_cli import kanban_move_parent_scope as scope
+
+    return scope.evidence_scope(live)
+
+
+def payload(replica, parent):
+    """The mirrored result of ``parent`` (its latest replica run), or None when the replica has none. Bookkeeping
+    run columns (claims, heartbeats, sync version) are left out: no reader uses them and the P2 cursor never marks
+    them, so keeping them would make the mirror differ from the keyed refresh until the next floor."""
+    from hermes_cli.kanban_activity_revision import BOOKKEEPING_COLUMNS
+
+    row = replica.execute(
+        "SELECT r.*, t.status AS parent_status, EXISTS (SELECT 1 FROM task_events e "
+        "WHERE e.task_id = r.task_id AND e.run_id = r.id AND e.kind = 'claimed') AS was_claimed "
+        "FROM task_runs r JOIN tasks t ON t.id = r.task_id WHERE t.id = ? "
+        "ORDER BY r.id DESC LIMIT 1", (parent,),
+    ).fetchone()
+    if row is None:
+        return None
+    skip = BOOKKEEPING_COLUMNS["task_runs"]
+    return json.dumps({k: row[k] for k in row.keys() if k not in skip})
+
+
+def stored(live, parents):
+    """Current mirrored payloads of ``parents`` (absent when the table or the row is missing)."""
+    if not live.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (_TABLE,)).fetchone():
+        return {}
+    out = {}
+    parents = list(parents)
+    for i in range(0, len(parents), 500):
+        chunk = parents[i:i + 500]
+        out.update(live.execute(
+            f"SELECT parent_id, payload FROM {_TABLE} WHERE parent_id IN ({','.join('?' * len(chunk))})", chunk))
+    return out
+
+
+def apply_rows(live, rows):
+    """Row-keyed ``apply``: ``rows`` maps parent -> payload, None deletes. Caller owns the transaction."""
+    live.execute(f"CREATE TABLE IF NOT EXISTS {_TABLE} (parent_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+    live.executemany(f"DELETE FROM {_TABLE} WHERE parent_id = ?", [(p,) for p in rows])
+    live.executemany(f"INSERT INTO {_TABLE} VALUES (?, ?)", [(p, v) for p, v in rows.items() if v is not None])
+
+
+def prepare(live, replica, wanted, scoped=None):
+    # Only explicit queued-move checkpoints and authenticated owner parks scope evidence.
+    scoped = _evidence_scope(live) if scoped is None else scoped
     values = []
     for parent in sorted(set(wanted) & scoped):
-        row = replica.execute(
-            "SELECT r.*, t.status AS parent_status, EXISTS (SELECT 1 FROM task_events e "
-            "WHERE e.task_id = r.task_id AND e.run_id = r.id AND e.kind = 'claimed') AS was_claimed "
-            "FROM task_runs r JOIN tasks t ON t.id = r.task_id WHERE t.id = ? "
-            "ORDER BY r.id DESC LIMIT 1", (parent,),
-        ).fetchone()
-        if row is not None:
-            values.append((parent, json.dumps(dict(row))))
+        value = payload(replica, parent)
+        if value is not None:
+            values.append((parent, value))
     exists = live.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (_TABLE,)).fetchone()
     current = dict(live.execute(f"SELECT parent_id, payload FROM {_TABLE}")) if exists else {}
     updated = dict(values)
@@ -109,9 +171,7 @@ def _checkpointed_move_after(conn, task_id, ended):
     ).fetchone()
     if move is None:
         return False
-    payload = kb._json_dict(move["payload"])
-    checkpoint = payload.get("checkpoint")
-    if payload.get("queued") is not True or not isinstance(checkpoint, str) or not checkpoint.strip():
+    if not _queued_checkpoint(move["payload"]):
         return False
     moved = kb._to_epoch(move["created_at"])
     return moved is not None and moved >= ended

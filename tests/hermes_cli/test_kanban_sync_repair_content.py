@@ -49,10 +49,16 @@ def test_event_only_feed_skips_content_and_partition_repairs(
         assert not any(calls.values())  # Warm unchanged ticks also do no scans.
         refreshes = []
         refresh = window.sync.refresh_remote_parents
-        def refreshed(*args):
+        def refreshed(*args, **kwargs):
             refreshes.append(True)
-            return refresh(*args)
+            return refresh(*args, **kwargs)
         monkeypatch.setattr(window.sync, "refresh_remote_parents", refreshed)
+        from hermes_cli import kanban_sync_parent_refresh as parent_gate
+        rows = parent_gate._refresh_rows
+        def row_refreshed(*args, **kwargs):
+            refreshes.append(True)  # the keyed path re-reads just the moved parent
+            return rows(*args, **kwargs)
+        monkeypatch.setattr(parent_gate, "_refresh_rows", row_refreshed)
         clock[0] += ksc.REPLICA_REPAIR_MIN_S + 1
         window._remote(svc, table="task_events", uid="event-foreign", fields={
             "task_id": parent, "kind": "commented", "created_at": 1, "payload": "{}",

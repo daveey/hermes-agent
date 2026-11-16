@@ -1053,7 +1053,8 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
             applies = None if applies is None else steps
             key = str(path)
             outcome = "unchanged"
-            if inputs is None or _REPAIRED.get(key) != inputs:
+            repair_changed = inputs is None or _REPAIRED.get(key) != inputs
+            if repair_changed:
                 outcome = "rebuilt" if rebuilt else decide(key, inputs, applies, _repair_clock(), REPLICA_REPAIR_MIN_S)
                 deferred = outcome == "deferred"
                 from hermes_cli.kanban_sync_partition_repair import repair_partition_chat_links, repair_partition_links
@@ -1063,11 +1064,10 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                     if not decision.skip:
                         repair_partition_links(live, replica, gateway)
                         repair_partition_chat_links(live, replica, gateway)
-                # The remote-parent mirror is cheap and gates child promotion, so a deferral never delays it.
-                with credited(live):  # copied from the replica (already an input), not a local edit
-                    moved = mode == "primary" and sync.refresh_remote_parents(live, replica)
-                if moved:
-                    sync.wake_dispatcher()  # a foreign parent moved: re-gate its children now
+            from hermes_cli.kanban_sync_parent_refresh import refresh_and_wake
+            # Independent P2 gate and 30s recovery floor; retain mirror-before-repair ordering.
+            refresh_and_wake(live, replica, board=slug, mode=mode, rebuilt=rebuilt)
+            if repair_changed:
                 if deferred:
                     result.repair_deferred = True
                 else:
@@ -1082,7 +1082,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
                     _REPAIR_CREDIT.pop(key, None)
             note_round(slug, outcome, _repair_clock())
             if mode == "primary":
-                # The mirror matches this round's pull (refreshed above, or inputs unchanged since the last refresh)
+                # The mirror now matches this round's pull, including skipped unchanged rows.
                 sync.mark_mirrored(replica, slug)  # only then can a parent be missing (kanban_replica_freshness)
                 from hermes_cli.kanban_sync_divergence import heal_clobbered_completions, heal_running_over_ended_run
                 heal_clobbered_completions(live)

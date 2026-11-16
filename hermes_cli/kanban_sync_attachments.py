@@ -25,6 +25,9 @@ _COMPONENT = re.compile(r"[A-Za-z0-9_-]+\Z")
 
 
 def _setup(conn):
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='kanban_attachment_retry'").fetchone():
+        return
     with write_txn(conn):
         conn.execute("CREATE TABLE IF NOT EXISTS kanban_attachment_retry ("
                      "uid TEXT PRIMARY KEY, blob_key TEXT, attempts INTEGER NOT NULL, "
@@ -83,6 +86,13 @@ def _publish_file(path, data):
 def _record_local(conn, row, path, key):
     # stored_path is local-only. Suppress echo of the service's verified receipt.
     # A deleted/rebound row must not be resurrected after network I/O.
+    # Read current metadata, not the pre-I/O snapshot: another writer may have
+    # cleared the path while these bytes were being verified.
+    current = conn.execute("SELECT stored_path,blob_key FROM task_attachments WHERE uid=? "
+                           "AND task_id=? AND size=? AND blob_key IS ?",
+                           (row["uid"], row["task_id"], row["size"], row["blob_key"])).fetchone()
+    if current is None or (current["stored_path"] == str(path) and current["blob_key"] == key):
+        return
     with write_txn(conn):
         previous = conn.execute("SELECT applying FROM kanban_sync_state").fetchone()[0]
         conn.execute("UPDATE kanban_sync_state SET applying=1")
@@ -149,6 +159,7 @@ def transfer_pending(conn, hub, board, *, limit=2):
         "OR (r.error IS NOT NULL AND (a.blob_key IS NOT NULL OR a.stored_path <> '')) THEN 0 ELSE 1 END, "
         "coalesce(r.retry_at,0),a.id LIMIT ?", (now, limit)).fetchall()
     transferred = 0
+    stamps = []
     for raw in rows:
         row, error, done = dict(raw), None, False
         try:
@@ -157,9 +168,10 @@ def transfer_pending(conn, hub, board, *, limit=2):
         except (OSError, ValueError, HubError) as exc:
             error = type(exc).__name__  # no remote response bodies/credentials in durable state
             _log.warning("kanban attachment %s transfer pending (%s)", row["uid"], error)
+        stamps.append((row["uid"], row["blob_key"], now + (600 if done else 30), error))
+    if stamps:
         with write_txn(conn):
-            conn.execute("INSERT INTO kanban_attachment_retry(uid,blob_key,attempts,retry_at,error) "
-                         "VALUES (?,?,1,?,?) ON CONFLICT(uid) DO UPDATE SET blob_key=excluded.blob_key, "
-                         "attempts=attempts+1,retry_at=excluded.retry_at,error=excluded.error",
-                         (row["uid"], row["blob_key"], now + (600 if done else 30), error))
+            conn.executemany("INSERT INTO kanban_attachment_retry(uid,blob_key,attempts,retry_at,error) "
+                             "VALUES (?,?,1,?,?) ON CONFLICT(uid) DO UPDATE SET blob_key=excluded.blob_key, "
+                             "attempts=attempts+1,retry_at=excluded.retry_at,error=excluded.error", stamps)
     return transferred
