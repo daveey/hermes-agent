@@ -150,7 +150,12 @@ def attach(conn: sqlite3.Connection, claimed: Any, workspace: str, source: Any,
         manifest_revision=revision, branch=(source.branch if source is not None else seen["branch"]),
         path=source_path, pre_head=seen["head"], manifest=manifest, state="pending",
         machine=_me(conn), source_protocol=protocol, source_identity=identity)
-    board_calls.record_run(conn, run)  # before the call: an unanswered attach may have applied
+    from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli.kanban_source_registration import _owned_elsewhere
+    # Share initial registration's writer lock and predicate, including replay after a refusal.
+    with write_txn(conn):
+        _owned_elsewhere(conn, claimed.id, source_path)
+        board_calls.record_run(conn, run, allow_nested=True)  # reserve before an uncertain RPC
     try:
         board_calls.attach(conn, claimed.id, run_uid, mode=mode, manifest_revision=revision, source_protocol=protocol)
     except board_calls.BoardLacksSource as exc:

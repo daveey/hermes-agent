@@ -13,7 +13,7 @@ def heartbeat_source(conn, task_id, args, *, worker_task, expected_run_id):
     use it (task scope + run id), never an operator or orchestrator on its behalf.
     Returns None when no source field was given (plain liveness heartbeat).
     """
-    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_artifact_receipt import attachment_board
     from hermes_cli import kanban_source_artifacts as artifacts
     from hermes_cli import kanban_source_board as source
     from hermes_cli import kanban_source_launch as launch
@@ -32,7 +32,7 @@ def heartbeat_source(conn, task_id, args, *, worker_task, expected_run_id):
         if path is not None:
             registration.register_initial(conn, task_id, path, expected_run_id=expected_run_id)
         if selection is not None:
-            artifacts.stage_for_run(conn, task_id, selection, board=kb.get_current_board(),
+            artifacts.stage_for_run(conn, task_id, selection, board=attachment_board(conn, task_id),
                                     expected_run_id=expected_run_id)
     except (launch.AttachRefused, artifacts.ArtifactRefused) as exc:
         raise ValueError(f"{exc.code}: {exc.detail}") from exc
@@ -50,6 +50,7 @@ def stage_completion(conn, task_id, metadata, *, expected_run_id):
     Committed snapshots survive a later refused/rolled-back ending for replay.
     """
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_artifact_receipt import attachment_board
     from hermes_cli import kanban_source_artifacts as artifacts
     from hermes_cli import kanban_source_board as source
 
@@ -62,7 +63,7 @@ def stage_completion(conn, task_id, metadata, *, expected_run_id):
         return metadata
     try:
         entries = artifacts.stage_for_run(
-            conn, task_id, metadata["artifacts"], board=kb.get_current_board(),
+            conn, task_id, metadata["artifacts"], board=attachment_board(conn, task_id),
             expected_run_id=expected_run_id,
         )
         # Only rows in this exact selection may supply the delivery path. A

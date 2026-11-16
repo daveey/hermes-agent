@@ -86,7 +86,10 @@ def _worktrees(bound: _Bound, clone: str) -> list[dict[str, str]]:
 def _occupied_by_other_task(conn: sqlite3.Connection, task_id: str, path: str) -> Optional[str]:
     row = conn.execute("SELECT id FROM tasks WHERE workspace_path = ? AND id != ? "
                        "AND status NOT IN ('done', 'archived') LIMIT 1", (path, task_id)).fetchone()
-    return row[0] if row else None
+    if row:
+        return row[0]
+    from hermes_cli.kanban_source_registration import _source_owner
+    return _source_owner(conn, task_id, path)
 
 
 def _clean(bound: _Bound, path: str | Path) -> bool:
@@ -221,6 +224,8 @@ def _resolve_source_workspace(conn, task, snapshot, *, me, cfg, bound, lookup):
     if custody is not None and custody.source_holder == me:
         local = _local_holder_copy(bound, task, manifest, cfg)
         if local is not None:
+            if (other := _occupied_by_other_task(conn, task.id, local)) is not None:
+                raise WorkspaceSourceRefusal("occupied_path", f"{local} is {other}'s live workspace")
             if manifest is not None:
                 head = _head(bound, local)
                 if head != manifest.commit and not (head and _is_ancestor(bound, local, manifest.commit, head)):

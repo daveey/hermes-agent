@@ -11,6 +11,28 @@ from tests.hermes_cli import test_kanban_source_registration as helpers
 setup = helpers.setup
 
 
+@pytest.mark.parametrize("surface", ["heartbeat", "completion"])
+def test_selection_uses_connection_board_not_ambient(setup, tmp_path, monkeypatch, surface):
+    from tools import kanban_tools_source as tools_source
+    from hermes_cli.kanban_artifact_receipt import attachment_board
+    conn, _, tid, source, _, _, _ = setup
+    run = registration.register_initial(conn, tid, str(source))
+    expected_board = attachment_board(conn, tid)
+    monkeypatch.setattr(kb, "get_current_board", lambda: "other")
+    src = tmp_path / "report.txt"
+    src.write_bytes(b"board scoped report")
+    if surface == "heartbeat":
+        tools_source.heartbeat_source(conn, tid, {"artifacts": [str(src)]},
+                                      worker_task=tid, expected_run_id=run.run_id)
+    else:
+        tools_source.stage_completion(conn, tid, {"artifacts": [str(src)]}, expected_run_id=run.run_id)
+    selected = artifacts.selected(conn, tid, run.run_uid)
+    assert len(selected) == 1
+    row = artifacts._row(conn, tid, selected[0])
+    assert Path(row["stored_path"]).is_relative_to(kb.attachments_root(board=expected_board) / tid)
+    assert Path(row["stored_path"]).read_bytes() == b"board scoped report"
+
+
 def test_completion_snapshot_survives_retry_and_ending_rollback(setup, tmp_path, monkeypatch):
     from tools.kanban_tools_source import stage_completion
     from hermes_cli.kanban_db_workspace import _managed_scratch_path_info

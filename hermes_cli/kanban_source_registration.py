@@ -53,7 +53,7 @@ def _source_owner(conn, task_id, path) -> str | None:
 
 def _owned_elsewhere(conn, task_id, path) -> None:
     from hermes_cli.kanban_source_resolver import _occupied_by_other_task
-    if _occupied_by_other_task(conn, task_id, path) is not None or _source_owner(conn, task_id, path) is not None:
+    if _occupied_by_other_task(conn, task_id, path) is not None:
         _refuse("source belongs to another active task")
 
 
