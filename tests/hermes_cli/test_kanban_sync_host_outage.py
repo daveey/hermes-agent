@@ -488,6 +488,42 @@ def test_a_failing_board_never_slows_a_healthy_one(home, monkeypatch):
     assert len(loop.failed("default")) <= 9
 
 
+def test_deferred_repair_during_post_pull_failure_does_not_spin(home, monkeypatch):
+    loop = Loop(home, monkeypatch, ["default"])
+    path = loop.boards[0][1]
+    real_send, real_wait = ksc._send, ksc.wait_for_work
+    waits, deferred = [], []
+    failing = [True]
+
+    def send(live, hub, slug, gateway, mode, result, **kwargs):
+        if kwargs["after_pull"] and failing[0]:
+            # A real post-pull transport failure leaves both pending writes and
+            # any repair deferral created earlier in the round intact.
+            _write(path, "post-pull edit")
+            deferred.append(ksc._REPAIR_DEFERRED.get(str(path)))
+            loop.hub.down.add(slug)
+        try:
+            return real_send(live, hub, slug, gateway, mode, result, **kwargs)
+        finally:
+            loop.hub.down.clear()
+
+    def wait(wake, paths, timeout, keep_running):
+        waits.append(timeout)
+        assert len(waits) < 500, "deferred repair hot-spins during round backoff"
+        return real_wait(wake, paths, timeout, keep_running)
+
+    monkeypatch.setattr(ksc, "_send", send)
+    monkeypatch.setattr(ksc, "wait_for_work", wait)
+    start = loop.clock[0]
+    loop.at(180, lambda: failing.__setitem__(0, False))
+    loop.run(260)
+    assert any(due is not None for due in deferred)
+    assert loop.clock[0] >= start + 260
+    assert len(loop.failed("default")) <= 10
+    assert _pending(path) == 0
+    assert any(ok and t >= start + 180 for t, ok in loop.rounds["default"])
+
+
 def test_sync_work_backoff_keeps_dirty_flags_and_clears_on_success_or_reconnect():
     from pathlib import Path
     work = SyncWork(5)

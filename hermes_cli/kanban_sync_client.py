@@ -1534,16 +1534,16 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
             remaining = 0.0 if any(r.behind for r in results) else max(0.0, work.deadline - time.monotonic())
             if any(r.skipped for r in results):
                 remaining = min(remaining, BUSY_RETRY_S)
-            deferred_due = next_deferred_repair(boards)
+            now = time.monotonic()
+            ready = [(s, p) for s, p in boards if not work.backing_off(s, now)]
+            deferred_due = next_deferred_repair(ready)
             if deferred_due is not None:
                 remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
-            # A failed board's pending outbox must not end the wait at once: it waits out its backoff.
-            now = time.monotonic()
+            # Failed boards' outboxes and deferred repairs wait for backoff; neither may force a zero wait.
             retry_in = work.next_retry(now)
             if retry_in is not None:
                 remaining = min(remaining, retry_in)
-            ready = [p for s, p in boards if not work.backing_off(s, now)]
-            sync_timing.wait(wait_for_work, wake, ready, remaining, keep_running)
+            sync_timing.wait(wait_for_work, wake, [p for _, p in ready], remaining, keep_running)
     finally:
         rounds.close()
         links.stop()
