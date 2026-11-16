@@ -44,6 +44,10 @@ async def _gateway(monkeypatch):
     key = runner.session_store._generate_session_key(source)
     await async_wait_until(lambda: _settled(authority, runner.session_store.peek_session_id(key)),
                            timeout=15, what='the inbound turn to settle')
+    # The turn's drain outlives its settlement (it re-reads the FIFO before exiting idle): a drain
+    # still alive here would claim the notice a test admits next, whatever ``_schedule`` does.
+    await asyncio.wait_for(asyncio.gather(
+        *[live.task for live in authority.sessions.values() if live.task is not None]), 15)
     # Admitted notices stay queued from here on: these tests assert the admission, not its turn.
     monkeypatch.setattr(SessionAuthority, '_schedule', lambda self, ref: None)
     return runner, authority, runner.session_store.lookup_by_session_key(key)
