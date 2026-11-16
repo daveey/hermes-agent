@@ -8,10 +8,11 @@ name: hermes_state (macOS)
 # Runners: self-hosted, labels self-hosted, macOS, hermes-state. Each is a
 # dedicated runner with its own work dir, one job at a time: the three Softmax
 # room Mac minis (sx-{main,heart,conway}-...-hermes, a hidden non-GUI bbci
-# user's LaunchDaemon at nice 19 + low-priority I/O) and the Mac mini's launchd
-# user agent (com.daveey.ci-runner-hermes-state). Which of them carry the label
-# is runner configuration, not this file. GitHub-hosted runners are not used
-# (account billing refusal), so this lane does not depend on billing.
+# user's LaunchDaemon at nice 19 + low-priority I/O). The BB runtime mini's
+# registered standby no longer carries hermes-state; its hermes-mac-session
+# label serves only the separate login-session tests. Keep dedicated-runner
+# serialization for checkout cleanup, not as a repository-wide capacity limit.
+# These existing custom runners add no hosted macOS spend.
 #
 # ci.yaml calls this for selected same-repository PRs and release/dispatch runs.
 # Its macOS state required (v1) consumer requires success when selected.

@@ -115,6 +115,7 @@ jobs:
       hermes_state: ${{ steps.gate-lanes.outputs.hermes_state }}
       hermes_state_reuse_key: ${{ steps.state-reuse-key.outputs.key }}
       native_memory: ${{ steps.gate-lanes.outputs.native_memory }}
+      macos_bash32: ${{ steps.gate-lanes.outputs.macos_bash32 }}
       event_name: ${{ github.event_name }}
       python_changed: ${{ steps.python-plan.outputs.changed }}
       python_slices: ${{ steps.python-plan.outputs.slices }}
@@ -178,7 +179,7 @@ jobs:
               for lane, value in values.items():
                   if lane.startswith('e2e') and not e2e_allowed:
                       value = 'false'
-                  elif (lane in ('hermes_state', 'native_memory') and os.environ['EVENT_NAME'] == 'push'
+                  elif (lane in ('hermes_state', 'native_memory', 'macos_bash32') and os.environ['EVENT_NAME'] == 'push'
                         and os.environ['TEST_REF'] == 'refs/heads/main' and not release):
                       value = 'false'
                   elif lane == 'hermes_state' and reused:
@@ -352,6 +353,14 @@ jobs:
     with:
       commit: ${{ inputs.commit }}
 
+  macos-bash32:
+    name: Shell execution (macOS Bash 3.2)
+    needs: detect
+    if: needs.detect.outputs.macos_bash32 == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    uses: ./.github/workflows/macos-bash32.yml
+    with:
+      commit: ${{ inputs.commit }}
+
   native-memory-macos:
     name: Native memory (macOS)
     needs: detect
@@ -489,6 +498,7 @@ jobs:
       - remote-backends
       - hermes-state-macos
       - native-memory-macos
+      - macos-bash32
       - catalog-tests
       - bootstrap-installer
       - e2e-desktop

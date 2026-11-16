@@ -1,0 +1,51 @@
+name: Shell execution (macOS Bash 3.2)
+
+# Called by CI only for shell/scanner/test-harness changes. Its selected result
+# feeds All required checks pass (v2); scheduled OS and login-session coverage
+# stays in macos-os-tests.yml. The hermes-mac label is room-only, never runner159.
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: Commit to test. Empty keeps the triggering merge commit.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  bash32:
+    name: Lifecycle shell execution (Bash 3.2)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, hermes-mac]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+      - name: Set up isolated locked test tools and dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: all
+          test-environment: 'true'
+      - name: Exercise lifecycle proofs on the system Bash
+        shell: /bin/bash {0}
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$BASH_VERSINFO" = 3
+          test "${BASH_VERSINFO[1]}" = 2
+          /bin/bash --version
+          # Both literal /bin/bash and subprocess lookups of bash use 3.2.
+          export PATH="/bin:$PATH"
+          test "$(command -v bash)" = /bin/bash
+          HERMES_HOME="$(mktemp -d "${RUNNER_TEMP}/bash32-home.XXXXXX")"
+          export HERMES_HOME
+          trap 'rm -rf "$HERMES_HOME"' EXIT
+          taskpolicy -c utility scripts/run_tests.sh tests/cron/test_lifecycle_guard*.py -j 2 -p scripts.ci.bash32_guard
+        env:
+          OPENROUTER_API_KEY: ''
+          OPENAI_API_KEY: ''
+          NOUS_API_KEY: ''

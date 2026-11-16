@@ -62,6 +62,7 @@ _UPDATE_CONSUMER_LANES = {
     "hermes-state-macos": ("hermes_state",),
     # The Darwin memory reader's macOS-only tests (skip on every Linux lane).
     "native-memory-macos": ("native_memory",),
+    "macos-bash32": ("macos_bash32",),
 }
 
 # ci.yaml's ``macOS state required (v1)`` consumer: the macOS state lane and its selector.

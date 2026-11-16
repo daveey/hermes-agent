@@ -57,11 +57,12 @@ DEFAULT = {
     "remote_backends": True,
     "catalog": True,
     "hermes_state": True,
+    "macos_bash32": False,
     # Exact paths only: a generic CI-config change does not hold the mini for it.
     "native_memory": False,
 }
 # An empty (failed) diff may hide the native memory paths, so it runs that lane too.
-EMPTY_DIFF = {**DEFAULT, "native_memory": True}
+EMPTY_DIFF = {**DEFAULT, "native_memory": True, "macos_bash32": True}
 # A .github/ change outside the mini lanes' own wiring holds neither: those lanes run no local
 # action, so the edit cannot change what runs on the mini (t_01a1d58663f79436).
 GITHUB_CHANGE = {**DEFAULT, "hermes_state": False}
@@ -69,7 +70,7 @@ GITHUB_CHANGE = {**DEFAULT, "hermes_state": False}
 SLOW_LANES = {"docker", "nix", "e2e", "e2e_upgrade", "e2e_desktop_core", "e2e_desktop_update"}
 
 
-def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_lock=False, npm_lock=False, bootstrap=False, desktop_updater=False, rust=False, docker_meta=False, python_prod=None, nix=False, docker=None, e2e=False, e2e_upgrade=False, e2e_desktop_core=False, e2e_desktop_update=False, remote_backends=False, catalog=False, hermes_state=False, native_memory=False) -> dict[str, bool]:
+def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_lock=False, npm_lock=False, bootstrap=False, desktop_updater=False, rust=False, docker_meta=False, python_prod=None, nix=False, docker=None, e2e=False, e2e_upgrade=False, e2e_desktop_core=False, e2e_desktop_update=False, remote_backends=False, catalog=False, hermes_state=False, native_memory=False, macos_bash32=False) -> dict[str, bool]:
     # python_prod tracks python except for tests-only diffs; default it to
     # python so the majority of cases don't need to spell it out.
     #
@@ -101,6 +102,7 @@ def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_
         "catalog": catalog,
         "hermes_state": hermes_state,
         "native_memory": native_memory,
+        "macos_bash32": macos_bash32,
     }
 
 
@@ -132,9 +134,9 @@ CASES = {
     # install, so they start those slow lanes on the PR itself.
     "dep manifest → python": (
         ["pyproject.toml"],
-        _lanes(python=True, scan=True, deps=True, uv_lock=True, desktop_updater=True, docker=True, nix=True, e2e_upgrade=True, hermes_state=True),
+        _lanes(python=True, scan=True, deps=True, uv_lock=True, desktop_updater=True, docker=True, nix=True, e2e_upgrade=True, hermes_state=True, macos_bash32=True),
     ),
-    "uv.lock → python": (["uv.lock"], _lanes(python=True, uv_lock=True, docker=True, nix=True, e2e_upgrade=True, hermes_state=True)),
+    "uv.lock → python": (["uv.lock"], _lanes(python=True, uv_lock=True, docker=True, nix=True, e2e_upgrade=True, hermes_state=True, macos_bash32=True)),
     "ts package → frontend": (["apps/desktop/src/app.tsx"], _lanes(frontend=True)),
     "ui-tui → frontend": (["ui-tui/src/entry.ts"], _lanes(frontend=True)),
     # Lockfile bump shifts every TS package's tree, but not the Python suite.
@@ -285,11 +287,11 @@ CASES = {
     # lane's bare-interpreter pytest step loads it as well.
     "conftest → python + desktop_updater + python e2e": (
         ["tests/conftest.py"],
-        _lanes(python=True, python_prod=False, scan=True, bootstrap=True, desktop_updater=True, e2e=True, e2e_upgrade=True, hermes_state=True),
+        _lanes(python=True, python_prod=False, scan=True, bootstrap=True, desktop_updater=True, e2e=True, e2e_upgrade=True, hermes_state=True, macos_bash32=True),
     ),
     "conftest fixture module → python + desktop_updater + python e2e": (
         ["tests/_fixtures/platform_gating.py"],
-        _lanes(python=True, python_prod=False, scan=True, bootstrap=True, desktop_updater=True, e2e=True, e2e_upgrade=True, hermes_state=True),
+        _lanes(python=True, python_prod=False, scan=True, bootstrap=True, desktop_updater=True, e2e=True, e2e_upgrade=True, hermes_state=True, macos_bash32=True),
     ),
     "tests + prod source → both lanes": (
         ["tests/agent/test_foo.py", "agent/x.py"],
@@ -301,15 +303,15 @@ CASES = {
     # .py/.pth payloads are what it scans for).
     "test runner script → python_prod stays on": (
         ["scripts/run_tests_parallel.py"],
-        _lanes(python=True, scan=True, bootstrap=True, e2e=True, e2e_upgrade=True, hermes_state=True),
+        _lanes(python=True, scan=True, bootstrap=True, e2e=True, e2e_upgrade=True, hermes_state=True, macos_bash32=True),
     ),
     "runner launch module → same lanes as the runner": (
         ["scripts/run_tests_launch.py"],
-        _lanes(python=True, scan=True, bootstrap=True, e2e=True, e2e_upgrade=True, hermes_state=True),
+        _lanes(python=True, scan=True, bootstrap=True, e2e=True, e2e_upgrade=True, hermes_state=True, macos_bash32=True),
     ),
     "fork-server child → same lanes as the runner": (
         ["scripts/run_tests_fork_child.py"],
-        _lanes(python=True, scan=True, bootstrap=True, e2e=True, e2e_upgrade=True, hermes_state=True),
+        _lanes(python=True, scan=True, bootstrap=True, e2e=True, e2e_upgrade=True, hermes_state=True, macos_bash32=True),
     ),
     # Supply-chain lanes
     ".pth file → scan": (["evil.pth"], _lanes(python=True, scan=True)),
@@ -368,7 +370,7 @@ CASES = {
     ),
     "setup-hermes.sh → bootstrap lane": (
         ["setup-hermes.sh"],
-        _lanes(python=True, bootstrap=True, python_prod=True, e2e_upgrade=True),
+        _lanes(python=True, bootstrap=True, python_prod=True, e2e_upgrade=True, macos_bash32=True),
     ),
     "tauri installer source → bootstrap + rust": (
         ["apps/bootstrap-installer/src-tauri/src/lib.rs"],
@@ -417,7 +419,7 @@ CASES = {
         ["hermes_cli/update_cmd_git.py"],
         _lanes(python=True, scan=True, e2e_upgrade=True, e2e_desktop_update=True),
     ),
-    "PM → e2e_upgrade + docker": (["pm/environments.py"], _lanes(python=True, scan=True, e2e_upgrade=True, docker=True)),
+    "PM → e2e_upgrade + docker": (["pm/environments.py"], _lanes(python=True, scan=True, e2e_upgrade=True, docker=True, macos_bash32=True)),
     # The update pipeline lives beyond the update_* family too: the entry
     # point, launch-time recovery, the gateway restart/pause surface.
     # main.py is also `hermes desktop --build-only`, the update's Desktop rebuild.
@@ -487,13 +489,13 @@ CASES = {
     ),
     # Fail open: CI-config / empty / blank diffs run everything.
     ".github change → all": ([".github/workflows/tests.yml"], GITHUB_CHANGE),
-    "action change → all": ([".github/actions/detect-changes/action.yml"], GITHUB_CHANGE),
+    "action change → all": ([".github/actions/detect-changes/action.yml"], {**GITHUB_CHANGE, "macos_bash32": True}),
     # The state lane's own wiring: the lane workflow and its caller.
     "state lane workflow → all": ([".github/workflows/hermes-state-macos.yml"], DEFAULT),
-    "ci caller → all": ([".github/workflows/ci.yaml"], DEFAULT),
+    "ci caller → all": ([".github/workflows/ci.yaml"], {**DEFAULT, "macos_bash32": True}),
     # Workflows call just recipes, so the recipes are CI config too.
     "justfile change → all": (["justfile"], DEFAULT),
-    "recipe python wrapper → all": (["scripts/hermes-python"], DEFAULT),
+    "recipe python wrapper → all": (["scripts/hermes-python"], {**DEFAULT, "macos_bash32": True}),
     "empty diff → all": ([], EMPTY_DIFF),
     "blank lines → all": (["", "  "], EMPTY_DIFF),
     # The Darwin reader's no-fork tests skip on Linux; only the mini lane runs them.

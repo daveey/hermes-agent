@@ -75,6 +75,9 @@ outputs:
   hermes_state:
     description: Run tests/hermes_state/ on the macOS mini (state modules/tests, test harness, dependency manifests).
     value: ${{ steps.classify.outputs.hermes_state }}
+  macos_bash32:
+    description: Run lifecycle shell execution tests under native macOS Bash 3.2 on room minis.
+    value: ${{ steps.classify.outputs.macos_bash32 }}
   native_memory:
     description: Run the Darwin memory reader's ABI and no-fork tests on the macOS mini (only its six exact paths).
     value: ${{ steps.classify.outputs.native_memory }}

@@ -810,6 +810,25 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
         # A capped list may omit the state files, so it runs the lane; so does an empty diff.
         "hermes_state": not files or len(files) >= COMPARE_FILE_CAP or bool(hermes_state_files(files)),
         # Exact paths only: an empty diff or a capped list may hide them, so those run it.
+        "macos_bash32": not files or len(files) >= COMPARE_FILE_CAP or any(
+            f.startswith(("tests/cron/test_lifecycle_guard", "cron/lifecycle_guard",
+                          "tools/shell_", "tests/_fixtures/", "scripts/run_tests", "pm/",
+                          "tests/cron/fixtures/lifecycle_guard_heredoc/"))
+            or f in {"tools/terminal_tool_guards.py", "tests/conftest.py", "tests/cron/conftest.py",
+                     "tests/cron/heredoc_shape_corpus.py", "tools/environments/local.py",
+                     "tools/environments/base_session_env.py", "tools/approval.py",
+                     "tools/approval_detection.py", "tools/code_execution_tool.py",
+                     "tools/terminal_tool.py", "tools/process_registry.py", "hermes_constants.py",
+                     "hermes_cli/sqlite_safe_read.py", "hermes_cli/profiles.py",
+                     "scripts/_activation.sh", "scripts/tool_store_pins.py", "setup-hermes.sh",
+                     "scripts/ci/setup_toolchain.py", "scripts/ci/pm_cache_log.py",
+                     "scripts/ci/bash32_guard.py", "tests/ci/test_macos_bash32_routing.py",
+                     "pyproject.toml", "uv.lock", "scripts/run-in-hermes-env", "scripts/hermes-python",
+                     ".github/actions/setup-pm/action.yml", ".github/actions/detect-changes/action.yml",
+                     ".github/workflows/ci.yaml", ".github/workflows/macos-bash32.yml",
+                     "scripts/ci/classify_changes.py", "scripts/ci/required_results.py"}
+            for f in files
+        ),
         "native_memory": not files or len(files) >= COMPARE_FILE_CAP
         or any(f in NATIVE_MEMORY_PATHS for f in files),
         **{lane: run_e2e or on for lane, on in _slow_lanes(files).items()},

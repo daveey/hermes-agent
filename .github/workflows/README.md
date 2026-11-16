@@ -216,6 +216,7 @@ of every suite that reads it.
 | ↳ `Run tests (1/2, 2/2)` | | always inside `tests.yml` | |
 | ↳ `e2e` | | `e2e` lane (release or dispatch) | every PR and every push to `main` |
 | ↳ `e2e-upgrade-plan`, `e2e-upgrade (shard)` | | `e2e_upgrade` lane (release or dispatch) | every PR and every push |
+| Shell execution (macOS Bash 3.2) | `macos-bash32.yml` | `macos_bash32`: lifecycle shell tests/scanner and their execution/bootstrap dependencies; same-repository PRs only, on room-only `hermes-mac` runners | unrelated paths and main pushes; selected failure/missing result blocks v2 |
 | OS-specific tests | `tests-os.yml` | **never in this fork** (`if: false`, no GitHub-hosted macOS/Windows runner); upstream: `python` or `desktop_updater` or `e2e` or `e2e_upgrade`. The macOS selection runs on a schedule instead: `macos-os-tests.yml` ([Scheduled monitors](#scheduled-monitors)) | always (fork) |
 | ↳ macOS (2 slices), Windows x64, Windows arm64 (2 slices) | | always inside `tests-os.yml`; the real Windows hand-off tests only with `desktop_updater` | |
 | ↳ Windows install + update E2E | `windows-install-update-e2e.yml` | `e2e_upgrade` (release or dispatch) | PRs and pushes |
