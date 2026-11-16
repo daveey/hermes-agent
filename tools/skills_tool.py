@@ -253,7 +253,8 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
             try:
-                frontmatter, body = _parse_frontmatter(_read_skill_text(skill_md)[:4000])
+                from tools.skill_catalog_parse import parse_catalog_text
+                frontmatter, body = parse_catalog_text(_read_skill_text(skill_md)[:4000])
                 description = frontmatter.get("description", "")
                 if not description:  # first non-heading body line (a null value stays null)
                     description = next((ln for ln in map(str.strip, body.strip().split("\n"))
