@@ -56,6 +56,12 @@ Shapes that used to refuse forever archive too (``kanban_scratch_archive_shapes`
   are no longer bundled, and a ref needing objects the promisor remote vouches
   for is left to the payload (``promised_refs``).
 
+Git inspection errors (unsupported metadata, missing objects, or invalid alternate
+paths) fall back to the complete filesystem payload, with no omissions or Git-shaped
+summaries anywhere in that workspace. ``git-fallback.json`` records the cause.
+This preserves existing bytes; it does not repair objects already missing from the
+source. A workspace referencing an external gitdir cannot use that fallback.
+
 Anything it cannot prove safe keeps the workspace: a ``.git`` symlink, a gitlink
 whose gitdir is missing or empty, a device node, unpushed objects that are
 missing locally and vouched for by no promisor remote (reason
@@ -85,6 +91,10 @@ _GIT_TIMEOUT = 600
 
 class ArchiveRefused(Exception):
     """The tree must be kept; the message says why."""
+
+
+class GitInspectionFailed(ArchiveRefused):
+    """Git cannot interpret local metadata; a complete filesystem payload can retain it."""
 
 
 def find_repos(root: Path) -> list[Path]:
@@ -234,7 +244,12 @@ def _git(repo: Path, env: dict[str, str], *args: str, ok=(0,), stdin: Optional[b
     )
     if proc.returncode not in ok:
         err = proc.stderr.decode("utf-8", "replace").strip()[:500]
-        raise ArchiveRefused(f"git {' '.join(args[:3])} failed in {repo} (rc {proc.returncode}): {err}")
+        # Failure to interpret a repo is distinct from a failed archive write/verification.
+        refusal = GitInspectionFailed if args[0] in {
+            "rev-parse", "symbolic-ref", "remote", "config", "for-each-ref", "rev-list",
+            "diff", "ls-files", "cat-file",
+        } else ArchiveRefused
+        raise refusal(f"git {' '.join(args[:3])} failed in {repo} (rc {proc.returncode}): {err}")
     return proc
 
 
@@ -900,16 +915,9 @@ def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
         partial.mkdir(parents=True)
         payload = partial / PAYLOAD_DIR
         payload.mkdir()
-        plans, records = _omission_plans(workspace, repos, payload)
-        for repo in repos:
-            rel = repo.relative_to(workspace)
-            archive_repo(repo, partial / rel if rel.parts else partial,
-                         task_id=task_id, completed_at=completed_at, omitted=records.get(repo))
-        for repo, kwargs in ([(r, {"bare": True}) for r in layout.bare]
-                             + [(w, {"gitdir": g}) for w, g in sorted(layout.linked.items())]):
-            rel = repo.relative_to(workspace)
-            archive_repo(repo, partial / rel if rel.parts else partial,
-                         task_id=task_id, completed_at=completed_at, **kwargs)
+        from hermes_cli.kanban_scratch_archive_fallback import prepare
+        plans, records = prepare(workspace, partial, payload, layout,
+                                 task_id=task_id, completed_at=completed_at)
         omitter = None
         if plans:
             from hermes_cli.kanban_scratch_archive_omit import Omitter

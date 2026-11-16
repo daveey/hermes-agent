@@ -215,7 +215,7 @@ def test_workspace_root_that_is_a_bare_repo(board, remote):
     assert _meta(tid, ".")["bare"] is True
 
 
-def test_directory_that_only_looks_bare_refuses(board):
+def test_directory_that_only_looks_bare_is_preserved_as_bytes(board):
     from hermes_cli import kanban_scratch_archive as sa
 
     def build(p):
@@ -225,9 +225,11 @@ def test_directory_that_only_looks_bare_refuses(board):
         (fake / "HEAD").write_text("not a ref\n")
 
     tid, path = base._plain_task(build)
-    with pytest.raises(sa.ArchiveRefused):
-        sa.archive_workspace(path, _archive(tid), task_id=tid, completed_at=base.OLD)
-    assert _gc() == 0 and (path / "fixture" / "HEAD").exists()
+    assert _gc() == 0 and not path.exists()
+    manifest = sa.verify_complete_archive(_archive(tid))
+    assert manifest["version"] == 1
+    with tarfile.open(_archive(tid) / sa.PAYLOAD_DIR / "tree.tar.gz", "r:gz") as tar:
+        assert tar.extractfile("fixture/HEAD").read() == b"not a ref\n"
 
 
 # --- 3. linked worktrees and submodules ----------------------------------------------------
