@@ -248,9 +248,9 @@ _suppress_mouse_residue_early()
 
 
 _startup_fast.ensure_project_root_on_path()
-
+from hermes_cli.stdio_pipe import quiet_stdout_pipe
 # ``hermes --version`` is answered before config/logging imports.
-if _startup_fast.try_fast_version():
+if quiet_stdout_pipe(_startup_fast.try_fast_version)():
     raise SystemExit(0)
 
 import argparse
@@ -3281,6 +3281,7 @@ def _default_to_chat(args) -> None:
     cmd_chat(args)
 
 
+@quiet_stdout_pipe
 def main():
     """Main entry point for hermes CLI."""
     # A Desktop/serve/dashboard/gateway launched from inside a kanban worker must not inherit
@@ -3294,7 +3295,6 @@ def main():
     _warn_if_unsupervised_pid1()
     _advertise_agent_env()
 
-    # Force UTF-8 stdio on Windows before anything prints.  No-op elsewhere.
     try:
         from hermes_cli.stdio import configure_windows_stdio
         configure_windows_stdio()
