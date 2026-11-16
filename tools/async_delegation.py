@@ -1020,13 +1020,13 @@ def failed_delegations_for_session(
     if not selectors:
         return []
     cutoff = (now if now is not None else time.time()) - _FAILURE_SURFACE_WINDOW_S
-    owner_sql = " OR ".join(f"{col}=?" for col, _ in selectors)
-    with _DB_LOCK, _transaction() as conn:
-        rows = conn.execute(
-            f"""SELECT delegation_id, state, dispatched_at, completed_at, task_json, result_json FROM async_delegations
-                WHERE ({owner_sql}) AND state NOT IN ('running','finalizing') AND completed_at >= ?
-                ORDER BY completed_at DESC LIMIT ?""",
-            (*(val for _, val in selectors), cutoff, limit)).fetchall()
+    from agent.runtime_session_store import WorkerPersistenceError, is_worker_process
+    from tools.async_delegation_focused_reads import failure_rows
+
+    if is_worker_process():
+        raise WorkerPersistenceError('worker_delegation_ledger_unavailable')
+    rows = failure_rows(_db_path(), selectors, limit)
+    rows = [row for row in rows if row[3] >= cutoff]
     failed: list[dict[str, Any]] = []
     for delegation_id, state, dispatched_at, completed_at, task_json, result_json in rows:
         task, result = _json_object(task_json), redact_child_result(_json_object(result_json))
