@@ -60,3 +60,23 @@ def test_pricing_changes_invalidate_payload_memo(picker, monkeypatch, change):
     fresh = call()
     assert fresh != before  # positive control: this input changes real pricing decoration
     assert got == fresh
+
+
+@pytest.mark.parametrize("evict_first", [False, True])
+def test_expired_prices_never_resurrect_after_reader_eviction(picker, monkeypatch, evict_first):
+    call, clock, _tier = picker
+    pricing._cache_catalog("first", CATALOG, ttl_seconds=1.0)
+    before = call()
+    assert call() == before
+    clock["t"] += 2
+    if evict_first:
+        assert pricing._cached_catalog("first") is None
+    # Cover both another consumer evicting first and the picker doing its own eviction.
+    # Keep the memo clock frozen so TTL expiry cannot hide an obsolete stamp's reuse.
+    for _ in range(3):
+        got = call()
+        with monkeypatch.context() as patch:
+            patch.setattr(inventory, "_MEMO_ENABLED", False)
+            fresh = call()
+        assert fresh != before
+        assert got == fresh

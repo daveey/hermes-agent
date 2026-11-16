@@ -50,6 +50,7 @@ def pricing_cache_version() -> tuple:
 
 def _cached_catalog(cache_key: str) -> Optional[dict[str, dict[str, Any]]]:
     """The cached catalog for *cache_key*, or None to go fetch it."""
+    global _pricing_cache_generation
     with _pricing_cache_lock:
         cached = _pricing_cache.get(cache_key)
         if cached is None:
@@ -58,6 +59,8 @@ def _cached_catalog(cache_key: str) -> Optional[dict[str, dict[str, Any]]]:
         if retry_after is not None and time.monotonic() >= retry_after:
             _pricing_cache.pop(cache_key, None)
             _pricing_cache_retry_after.pop(cache_key, None)
+            # Removing the expired-key stamp must not restore a pre-expiry memo key.
+            _pricing_cache_generation += 1
             return None
         return cached
 
