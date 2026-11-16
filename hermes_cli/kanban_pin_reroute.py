@@ -22,6 +22,8 @@ Rule (:func:`pinned_route`); every condition must hold, anything else keeps the 
 
 Rule 1 reads the card's history, not only the live episode: a rerouted run that ends (continued,
 reclaimed, blocked) closes the episode, and the next run must not go back into a wall the card knows.
+Historical pin evidence is ignored when a positive live pool read proves room for that exact model;
+unknown pool state retains it. Current episode, provider-file and live quota walls still count.
 
 The reroute lives on the in-memory claimed task only: the row's pin is never written, so the first
 run after the reset goes back to the pin. Every rerouted admission records a ``model_reroute`` event;
@@ -155,12 +157,18 @@ def pinned_route(conn: Any, task: Any, *, lane: str, now: float, cfg: Optional[d
     pin's own provider counts as the card's (rule 1); on any other provider it only rules peers out.
     Non-allocating: reads config and the credential pool and writes nothing, so preview and admission
     decide alike."""
-    from hermes_cli.kanban_provider_walls import active_walls
+    from hermes_cli.kanban_provider_walls import active_walls, live_quota_room
     pinned = pin(task)
     if lane == "review" or pinned is None or is_mandatory_pin(task):
         return None
     model, provider = pinned
-    own = _with_known_wall(own_walls(conn, task.id, now, current), pinned, now)
+    own = own_walls(conn, task.id, now, current)
+    # History survives episode closure and provider-file pruning. A future receipt deadline is not
+    # a live wall when this pool positively serves the pin; unknown pool state proves nothing.
+    # Keep the episode caller's current walls and fold current provider/live evidence back in below.
+    if provider in own and provider not in (current or {}) and live_quota_room(provider, model):
+        own.pop(provider)
+    own = _with_known_wall(own, pinned, now)
     if provider not in own or own[provider][0] - now < min_wall_seconds(cfg):
         return None
     return peer_route(task, model, {**active_walls(now=now), **{name: wall[0] for name, wall in own.items()}})
