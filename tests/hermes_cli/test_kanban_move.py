@@ -189,6 +189,37 @@ def test_a_capped_move_off_a_retired_pinned_machine_is_allowed_and_audited(gws, 
     assert res["reason_code"] == "move_limit", res
 
 
+@pytest.mark.parametrize("outage", [False, True], ids=["fresh", "failed-refresh"])
+def test_dead_pin_budget_requires_nonfailed_registry_read(gws, monkeypatch, outage):
+    hub, _ = gws
+    tid = _capped_card_pinned_to(hub, "worker-6")
+    calls = []
+
+    def fetch():
+        calls.append(True)
+        if outage and len(calls) > 1:
+            raise OSError("registry offline")
+        return {"me": HUB, "machines": list(LIVE.values())}
+
+    wn.set_registry_fetch(fetch)
+    assert wn.registry()["machines"] == LIVE
+    monkeypatch.setitem(wn._REGISTRY, "at", -1e9)
+    before = _events(hub.conn, tid)
+    res = km.move_queued(hub.conn, tid, runs_on=["linux"], reason="retired pin", me=HUB)
+    assert len(calls) == 2
+    if outage:
+        assert res["reason_code"] == "registry_unavailable", res
+        assert _events(hub.conn, tid) == before
+        assert json.loads(hub.conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (tid,)).fetchone()[0]) == ["machine:worker-6"]
+        # A retry inside the failed-fetch TTL must refuse too, not use last-good membership.
+        again = km.move_queued(hub.conn, tid, runs_on=["linux"], reason="retry", me=HUB)
+        assert again["reason_code"] == "registry_unavailable"
+        assert len(calls) == 2
+    else:
+        assert res["ok"] and res["move_no"] == 4, res
+        assert _events(hub.conn, tid)[-1]["dead_pin"] == "worker-6"
+
+
 @pytest.mark.parametrize("entry", [
     {"state": "active", "hold": True},  # held: drains and comes back
     {"state": "active", "hold": False, "last_seen": 1},  # stale telemetry: maybe asleep, not retired

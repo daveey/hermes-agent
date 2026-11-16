@@ -172,7 +172,7 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     labels = carry(labels, dict(row), me=me)
     from hermes_cli import kanban_label_backlog as klb
     if machines is None:
-        reg = wn.registry()
+        reg = wn.registry(require_fresh=True)
         if reg is None:
             raise MoveRefused("registry_unavailable", "the Board machine registry is unreachable; try again")
         machines = reg.get("machines") or {}
