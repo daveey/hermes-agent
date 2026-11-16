@@ -1353,7 +1353,8 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
                 return
             if waker is None:
                 from tui_gateway.kanban_remote_identity import moved_claim
-                with contextlib.closing(_ledger(ledger)) as conn:
+                # The passive sweep historically works in memory when its ledger is unavailable.
+                with contextlib.suppress(sqlite3.Error, OSError), contextlib.closing(_ledger(ledger)) as conn:
                     if moved_claim(conn, session=sid, ref=ref, state=state, now=now or time.time(),
                                    notice_key=event_key, swept_key=memo_key,
                                    transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t)) is not None:
