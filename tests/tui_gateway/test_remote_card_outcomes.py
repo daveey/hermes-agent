@@ -233,3 +233,59 @@ def test_a_failed_refresh_is_retried_not_memoised(db, remote, gated, monkeypatch
     n = len(reads)
     assert len(run(db)) == 1  # same inputs, but the chat was never acknowledged: the pass runs again
     assert len(reads) > n
+
+
+# --- the real key over the real ``_remote_links`` at the 30 s host-pass cadence (t_01a1e16c9e6427ce) ---------------
+
+@pytest.fixture
+def real_key(db, remote, monkeypatch):
+    """The real ``_remote_inputs_key`` over the real ``_remote_links`` (warm ``stale_ok`` entry, refresh run inline),
+    a clock that moves 30 s per pass, and a projector that builds NEW dicts of ``ledger`` content on every call."""
+    import time as _time
+    from types import SimpleNamespace
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as ksc
+
+    clock, ledger, projections, reads = [1000.0], [], [], []
+    monkeypatch.setattr(sync, "sync_config", lambda: {"links_reader": "replica"})
+    monkeypatch.setattr(ksc, "load_identity", lambda: SimpleNamespace(gateway="gw"))
+    monkeypatch.setattr(ksc, "board_paths", list)
+    monkeypatch.setattr(ksa, "time", SimpleNamespace(**{**vars(_time), "monotonic": lambda: clock[0]}))
+    monkeypatch.setattr(ksa, "_links_cache", {})
+    monkeypatch.setattr(ksa, "_project_remote_links", lambda: projections.append(1) or [dict(c) for c in ledger])
+    monkeypatch.setattr(ksa, "_refresh_links_in_background", ksa._refresh_links_scope)
+    monkeypatch.setattr(ksa, "_remote_cards", lambda ids, statuses, stale_ok: reads.append(1) or list(remote))
+
+    def tick():
+        clock[0] += 30.0  # INTERVAL_S: past _LINKS_MAX_AGE_S, so every warm read republishes
+        return run(db)
+    return ledger, projections, reads, tick
+
+
+def test_unchanged_ledger_content_skips_across_republished_projections(db, remote, real_key):
+    ledger, projections, reads, tick = real_key
+    ledger.append({**card(), "profile": "default", "ownership_state": "qualified"})
+    tick()  # seeds
+    tick()  # reads and memoises
+    n, p = len(reads), len(projections)
+    for _ in range(3):
+        assert tick() == []
+    assert len(projections) > p  # new card objects every pass ...
+    assert len(reads) == n  # ... and the pass never re-read the remote cards
+
+
+@pytest.mark.parametrize("change", [{"key": "worker/default/t_other"}, {"status": "blocked"},
+                                    {"session": "other-chat"}, {"origin_session": "origin-chat"},
+                                    {"profile": "bb-tuner"}, {"gateway": "worker-2"}, {"released": True}])
+def test_a_ledger_content_change_runs_the_pass(db, remote, real_key, change):
+    ledger, _projections, reads, tick = real_key
+    ledger.append({**card(), "profile": "default", "ownership_state": "qualified"})
+    tick()
+    tick()
+    tick()  # the projection republished before this pass: settled on the memo
+    n = len(reads)
+    assert tick() == [] and len(reads) == n
+    ledger[0] = {**ledger[0], **change}
+    tick()  # warm read returns the old projection and refreshes inline; the next pass sees the change
+    tick()
+    assert len(reads) > n

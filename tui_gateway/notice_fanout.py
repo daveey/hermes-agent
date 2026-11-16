@@ -25,6 +25,7 @@ Session-outcome contract, "Fan-out" and "Stale notices":
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -245,17 +246,30 @@ def _fan_out_changes(conn: sqlite3.Connection, _kb: Any, session_db: Callable, s
     return out
 
 
-# The input key of the last remote pass that left every chat acknowledged, with the ledger cards it was computed over
-# (held, so an object identity in the key cannot be reused). A pass over the same inputs reads the same snapshot.
+# The input key of the last remote pass that left every chat acknowledged. A pass over the same inputs reads the same
+# snapshot.
 _remote_memo: Optional[tuple] = None
+
+# The ledger-card fields ``kanban_chat_links.replica_cards`` reads (owner labels, profile-board cards, cold-start
+# fallback) and the pass keeps (key, status, chat, origin chat, unfinished).
+_LEDGER_KEY_FIELDS = ("key", "board", "id", "gateway", "profile", "session", "origin_session", "origin_gateway",
+                      "origin_profile", "status", "unfinished", "released", "ownership_state")
+
+
+def _ledger_content_key(cards: list[dict]) -> str:
+    """A digest of what the pass can see of the origin-ledger projection. By content, not object identity: a warm
+    ``stale_ok`` read re-projects in the background once its entry is older than ``_LINKS_MAX_AGE_S`` (15 s), so
+    every 30 s pass would see new dicts for an unchanged ledger (t_01a1e16c9e6427ce)."""
+    rows = sorted(repr(tuple(c.get(f) for f in _LEDGER_KEY_FIELDS)) for c in cards)
+    return hashlib.blake2b("\n".join(rows).encode(), digest_size=16).hexdigest()
 
 
 def _remote_inputs_key() -> Optional[tuple]:
     """Everything ``activity._remote_cards`` reads for the replica projection that ``_remote_change_pass`` keeps
     (card key, status, chat, origin chat), or None when any of it cannot be vouched for. That is each synced board's
     replica content revision (trigger-backed only: a stat fallback never vouches), the origin-ledger projection's
-    card objects (``_remote_links`` returns the same dicts until it re-projects), this gateway and profile, and
-    the reader mode. A pull that moves only ``pulled_at`` changes none of them (t_01a1dfa94f2251cd)."""
+    content (``_ledger_content_key``), this gateway and profile, and the reader mode. A pull that moves only
+    ``pulled_at`` changes none of them (t_01a1dfa94f2251cd)."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_session_activity as activity
     from hermes_cli import kanban_sync_client as ksc
@@ -277,7 +291,7 @@ def _remote_inputs_key() -> Optional[tuple]:
         if not is_revision(content):
             return None
         boards.append((slug, str(path), content))
-    ledger = activity._remote_links(stale_ok=True)
+    ledger = _ledger_content_key(activity._remote_links(stale_ok=True))
     return (gateway, get_active_profile_name(), tuple(boards)), ledger
 
 
@@ -289,9 +303,7 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
     except Exception:  # health: allow BLE001 -- an unreadable input is unknown: run the pass
         logger.debug("remote card-change inputs unavailable", exc_info=True)
         inputs = None
-    memo = _remote_memo
-    if inputs is not None and memo is not None and memo[0] == inputs[0] and len(memo[1]) == len(inputs[1]) \
-            and all(a is b for a, b in zip(memo[1], inputs[1])):
+    if inputs is not None and inputs == _remote_memo:
         return []
     _remote_memo = None
     from hermes_cli import kanban_session_activity as activity
