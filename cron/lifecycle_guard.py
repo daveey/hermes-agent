@@ -1708,19 +1708,11 @@ def _contains_unsafe_gateway_action(
             walk_command, include_quoted=covered_quote_scope != quote_scope(cwd, executed, budget)))))
     nested_texts, nested_scripts = collect_nested_shell_inputs(
         command, walk_command, cwd=cwd, budget=budget, session_payloads=session_payloads)
-    from cron.lifecycle_guard_variables import scan_recursive_payloads, scan_variable_payloads
+    from cron.lifecycle_guard_startup import scan_shell_inputs, script_working_directory
 
-    from cron.lifecycle_guard_startup import scan_startup_sources, script_working_directory
-
-    if scan_startup_sources(walk_command, recurse, budget, cwd, executed, source):
-        return True
-    if scan_variable_payloads(walk_command, cwd=cwd, executed=executed, budget=budget,
-                              recurse=recurse, source=source, variable_source=variable_source):
-        return True
-
-    if scan_recursive_payloads(
+    if scan_shell_inputs(
             walk_command, nested_texts, cwd=cwd, executed=executed, budget=budget,
-            covered_scope=covered_quote_scope, recurse=recurse, source=source):
+            covered_scope=covered_quote_scope, recurse=recurse, source=source, variable_source=variable_source):
         return True
 
     # A nested shell's script may be a path the ordinary candidates never name: a stdin file

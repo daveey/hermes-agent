@@ -112,6 +112,20 @@ def scan_startup_sources(command, recurse, budget, cwd, executed, source) -> boo
     return False
 
 
+def scan_shell_inputs(command, nested_texts, *, cwd, executed, budget,
+                      covered_scope, recurse, source, variable_source):
+    """Startup declarations precede variable sinks and recursive child inputs."""
+    from cron.lifecycle_guard_variables import scan_recursive_payloads, scan_variable_payloads
+
+    if scan_startup_sources(command, recurse, budget, cwd, executed, source):
+        return True
+    if scan_variable_payloads(command, cwd=cwd, executed=executed, budget=budget,
+                              recurse=recurse, source=source, variable_source=variable_source):
+        return True
+    return scan_recursive_payloads(command, nested_texts, cwd=cwd, executed=executed, budget=budget,
+                                   covered_scope=covered_scope, recurse=recurse, source=source)
+
+
 def script_working_directory(resolved, cwd, preserve_cwd):
     """Startup sources do not chdir; retain the legacy directory rule elsewhere."""
     from cron.lifecycle_guard import _resolve_script_directory
