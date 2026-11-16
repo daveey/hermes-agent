@@ -495,6 +495,9 @@ _SHELL_SINK_TEMPLATE = (
     r"|(?:^|[\s;&|({])(?:source|\.)\s+(?:<\s*\(|/dev/(?:stdin|fd/)|/proc/self/fd/)"
     rf"|{_WORD_START}{_SINK_SHELLS}{_WORD_END}[^|;&\n]*?(?:<\(|<<<)"
     rf"|{_WORD_START}(?:ba|da|z|k|mk|a)?sh\s+(?:[-+][A-Za-z]+\s+)*-[A-Za-z]*c\s*\"?(?:\$\(|`)"
+)
+_DIRECT_OUTPUT_SINK_RE = re.compile(_SHELL_SINK_TEMPLATE, re.MULTILINE)
+_SHELL_SINK_TEMPLATE += (
     # [ \t]* not \s*: newline is already an anchor, and \s* made this alternative quadratic on
     # the all-newline bodies strip_inert_heredoc_bodies leaves (review 5890191993).
     r"|(?:^|[;&|({\n]|\b(?:then|do|else)\b)[ \t]*\"?(?:\$\((?!\()")
@@ -531,8 +534,20 @@ def output_reaches_shell(command: str) -> bool:
     sink = _SHELL_SINK_NUMERIC_RE if date_exempt else _SHELL_SINK_RE
     # The regex sees a substitution only in command position; inside arithmetic bash also runs
     # code from its output wherever it sits (`$(( 1 + $(…) ))`, `a[$(…)]`; t_01a1d6ae05c19594).
-    return (sink.search(command) is not None
-            or substitution_in_arithmetic(command, date_exempt=date_exempt)
+    if _DIRECT_OUTPUT_SINK_RE.search(command):
+        return True
+    quoted_parens: list[int] = []
+    if substitution_in_arithmetic(command, date_exempt=date_exempt, _quoted_parens=quoted_parens):
+        return True
+    # Literal '(' inside a double-quoted word is not a shell command boundary.
+    # Use the existing heredoc/expansion-aware lexical walk, and only its complete
+    # successful proof; a flat quote pass would misread quotes in heredoc data.
+    if -1 in quoted_parens:
+        quoted_parens.clear()
+    lexical = list(command)
+    for index in quoted_parens:
+        lexical[index] = "x"
+    return (sink.search("".join(lexical)) is not None
             or _grouped_pipe_reaches_shell(command, sink))
 
 

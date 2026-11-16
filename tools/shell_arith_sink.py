@@ -46,6 +46,7 @@ _INTEGER_DECLARATION_RE = re.compile(
     r"[ \t]+-[A-Za-z]*i")
 _PARAM_NAME_RE = re.compile(r"[#!]?(?:[A-Za-z_]\w*|\d+|[@*#?$!-])")
 _COMMENT_PRECEDERS = frozenset(" \t\n;&|(")
+_LITERAL_ECHO_PREFIX_RE = re.compile(r"[ \t]*echo[ \t]+")
 
 # Characters that cannot end a variable name or an expansion: a quoted `[` after one
 # (or after a quote concatenation ending in one) never names an array subscript.
@@ -59,13 +60,16 @@ _PARAM_ARITH = "param_arith"  # parameter word feeding an arithmetic evaluator
 _PARAM_PATTERN = "param_pattern"  # only its replacement feeds the evaluator
 
 
-def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int = 0) -> bool:
+def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int = 0,
+                               _quoted_parens: list[int] | None = None) -> bool:
     """Whether *command* holds a ``$(`` (not the exempt ``$(date +%s)`` when *date_exempt*)
     whose nearest enclosing context is arithmetic.
 
     Uncertain quoting and expanding heredoc bodies deliberately fail closed,
     even for benign producers. Unmasked literal bodies are scanned as programs;
-    only the caller may mask a proven-inert body.
+    only the caller may mask a proven-inert body. Optional ``_quoted_parens`` records
+    root literal-echo argument anchors (and -1 on uncertain heredoc framing); a
+    caller may use them only when this function returns False.
     """
     quick = _quick_result(command, _depth)
     if quick is not None:
@@ -102,7 +106,8 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
         skipped = _word_token(command, token, start, pos, stack)
         if skipped is None:
             skipped = _skip_data(command, token, start, pos, quoted, stack, pending,
-                                 date_exempt, _depth + sum(frame[0] == _CMD for frame in stack) - 1)
+                                 date_exempt, _depth + sum(frame[0] == _CMD for frame in stack) - 1,
+                                 _quoted_parens)
         if skipped is not None:
             if skipped < 0:
                 return True
@@ -115,6 +120,13 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
             stack.append([_ARITH, "]", 0, False])
             continue
         if quoted:
+            # Certify only literal echo arguments, never an unknown command's
+            # operands or a constructed command word such as "($(producer))".
+            # Nested frames retain their original conservative matching.
+            if (_quoted_parens is not None and len(stack) == 1
+                    and token in ("(", "((")
+                    and _LITERAL_ECHO_PREFIX_RE.match(command, top[4], start)):
+                _quoted_parens.extend(range(start, pos))
             continue  # inside "…" only expansions (handled above) matter
         if kind == _CMD:
             if (start, "case-pattern") in literal_cache:
@@ -283,7 +295,8 @@ def _word_token(command, token, start, pos, stack) -> int | None:
     return None
 
 
-def _skip_data(command, token, start, pos, quoted, stack, pending, date_exempt, depth) -> int | None:
+def _skip_data(command, token, start, pos, quoted, stack, pending, date_exempt, depth,
+               quoted_parens=None) -> int | None:
     """Skip literal spans; None means a normal token, -1 means fail closed."""
     kind = stack[-1][0]
     if token in ("'", "$'"):
@@ -329,6 +342,8 @@ def _skip_data(command, token, start, pos, quoted, stack, pending, date_exempt, 
         if close is None:
             # Opener-only caller views may omit bodies. Scan the remainder rather
             # than hiding later sinks or unmatched quotes behind an unknown body.
+            if quoted_parens is not None:
+                quoted_parens.append(-1)  # no certified quote provenance for this view
             break
         body_end, after = close
         # Unquoted bodies expand; quoted bodies may be programs for bash/ssh or
