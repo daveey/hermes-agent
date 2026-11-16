@@ -33,6 +33,19 @@ _pricing_cache_retry_after: dict[str, float] = {}
 # Guards a catalog and its deadline as one unit: expiring one key (reader or sweep) pops two tables, and a
 # refresh landing between the pops would otherwise keep its catalog without its deadline, forever.
 _pricing_cache_lock = threading.Lock()
+_pricing_cache_generation = 0
+
+
+def pricing_cache_version() -> tuple:
+    """Cheap memo stamp for publications, endpoint selection and pending TTL expiry.
+
+    Do not expire entries here: the next ordinary pricing read retains ownership of cleanup.
+    """
+    with _pricing_cache_lock:
+        expired = tuple(sorted(key for key, deadline in _pricing_cache_retry_after.items()
+                               if time.monotonic() >= deadline))
+        selected = tuple(sorted(_pricing_provider_cache_keys.copy().items()))
+        return _pricing_cache_generation, selected, expired
 
 
 def _cached_catalog(cache_key: str) -> Optional[dict[str, dict[str, Any]]]:
@@ -59,7 +72,9 @@ def _cache_catalog(
     observe (an org's model policy can change while a long-lived process holds the entry).
     Entries past their deadline are dropped here as the reader would: a rotated credential's
     catalog is otherwise never read again and stays resident for the life of the process."""
+    global _pricing_cache_generation
     with _pricing_cache_lock:
+        _pricing_cache_generation += 1
         now = time.monotonic()
         for key, deadline in list(_pricing_cache_retry_after.items()):
             if now >= deadline:

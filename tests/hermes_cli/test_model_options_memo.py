@@ -182,7 +182,13 @@ def _set_home(home, monkeypatch, tmp_path_factory=None):
     monkeypatch.setenv("HERMES_HOME", str(other))
 
 
+def _set_pricing(home, monkeypatch):
+    from hermes_cli.models_pricing import _cache_catalog
+    _cache_catalog("fixture-pricing-key", {})
+
+
 CASES = {
+    "pricing": _set_pricing,
     "config": _set_config,
     "dotenv": _set_dotenv,
     "auth": _set_auth,

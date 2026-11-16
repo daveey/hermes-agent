@@ -371,10 +371,16 @@ def _stamp_usage():
     return snapshot_generation()
 
 
+def _stamp_pricing():
+    from hermes_cli.models import get_cached_nous_free_tier
+    from hermes_cli.models_pricing import pricing_cache_version
+    return pricing_cache_version(), get_cached_nous_free_tier()
+
+
 _STAMP_PARTS: dict[str, Any] = {
     "home": _stamp_home, "config": _stamp_config, "dotenv": _stamp_dotenv, "auth": _stamp_auth,
     "environ": _stamp_environ, "catalog_files": _stamp_catalog_files, "external_creds": _stamp_external_creds,
-    "plugins": _stamp_plugins, "usage": _stamp_usage,
+    "plugins": _stamp_plugins, "usage": _stamp_usage, "pricing": _stamp_pricing,
 }
 
 
