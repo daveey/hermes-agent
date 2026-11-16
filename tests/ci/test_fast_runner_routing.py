@@ -315,8 +315,11 @@ def test_e2e_upgrade_has_release_tags_for_n_minus_1():
     assert names.index("Fetch upstream release tags") < names.index("Run upgrade e2e tests (${{ matrix.shard }})")
     assert "https://github.com/NousResearch/hermes-agent.git" in fetch["run"]
     assert "refs/tags/v20*:refs/tags/v20*" in fetch["run"]
-    # The step proves N-1 resolves instead of letting every N-1 test fail on its own.
-    assert fetch["run"].rstrip().endswith("git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' HEAD~1")
+    assert "refs/tags/v0.*:refs/tags/v0.*" in fetch["run"]
+    # A reachable calver release must not suppress fetching the newer by-path line.
+    assert "if ! git describe" not in fetch["run"]
+    assert "--match 'v0.*'" in fetch["run"]
+    assert "--exclude '*+*'" in fetch["run"]
 
 
 def test_termux_assembly_permissions_run_with_docker_and_fail_on_skip():

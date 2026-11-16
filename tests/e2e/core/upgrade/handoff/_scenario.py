@@ -27,6 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from gateway.control_socket import query_gateway_control
 from tests.e2e.core._pending_fixes import known_failure, known_gate
 from tests.e2e.core.upgrade import _helpers as H
 from tests.e2e.core.upgrade.handoff import _handoff as X
@@ -316,6 +317,23 @@ def run(column: str, root: Path) -> SimpleNamespace:
 
             o.boots = len(X.gateway_starts(inst))
             o.target = X.publish_target(inst)
+            if column == "head":
+                # The fork's pre-swap contract is idle-only: never wait for a drain
+                # that a busy update correctly refuses to start. Long drain coverage
+                # lives in test_kanban_long_drain, using the explicit control verb.
+                refused = inst.update()
+                out = refused.stdout + refused.stderr
+                assert "Update deferred" in out and "busy or cannot acknowledge an idle pause" in out, (
+                    f"a busy update did not defer safely\n{inst.diagnostics(refused)}")
+                assert inst.sha() == X.refs().head, "a busy update moved the checkout"
+                ident = X.identify(inst.hermes_home)
+                assert ident and ident["pid"] == o.old_pid, "a busy update stopped the gateway"
+                assert card_status(inst, o.card1) == "running", "the held worker was interrupted"
+                model.release.set()
+                X.wait_for(lambda: card_status(inst, o.card1) == "done", timeout=120,
+                           what="the held worker to finish before the idle update")
+                X.wait_for(lambda: (query_gateway_control(inst.hermes_home, "active-work") or {}).get(
+                    "active_agents") == 0, timeout=120, what="the completed worker's turn to retire")
             due = dt.datetime.now(dt.UTC).replace(microsecond=0) + dt.timedelta(seconds=CRON_DUE_S + 5)
             cp = inst.cli("cron", "create", due.isoformat(), f"Reply with the word done. {model.cron_marker}",
                           "--name", model.cron_marker)
@@ -325,12 +343,15 @@ def run(column: str, root: Path) -> SimpleNamespace:
             o.job_id = job["id"]
             assert not model.cron_calls, "premise: the job ran before it was due"
 
-            # The held turn ends inside the update's drain, past the old 180 s worker give-up: the
-            # drain waits for it and the worker outlasts it (it used to give up at 180 s and the
-            # update's drain "completed" on a dead turn). The update returning releases it too.
+            # Older upstream releases still drain during update. HEAD now proves the
+            # busy refusal above, then retries idle; its long drain has a separate cell.
             releaser = threading.Thread(target=_release_inside_the_drain, args=(inst, model), daemon=True)
             releaser.start()
-            o.up = inst.update()
+            try:
+                o.up = inst.update()
+            finally:
+                model.release.set()
+                releaser.join(timeout=5)
             o.sha_after = inst.sha()
             o.layout_after = {rel: (inst.checkout / rel).is_file() for rel in X.NEXT_MOVE}
 
@@ -505,9 +526,8 @@ class HandoffProperties:
         assert len(o.runs[o.card1]) <= 2, f"the in-flight card ran {len(o.runs[o.card1])} times\n{o.diag}"
         assert len(o.runs[o.card2]) == 1, f"the new card ran {len(o.runs[o.card2])} times\n{o.diag}"
         if o.column == "head":
-            # The updater under test drains its own restart: the in-flight turn outlives the old
-            # 180 s give-up and finishes in its one run, never booked a crash. (n1's worker is the
-            # previous release's and still gives up at 180 s.) [daveey]
+            # The busy update refused without interrupting or rerunning this worker.
+            # test_kanban_long_drain separately proves survival beyond the old 180s cap.
             outcomes = [r["outcome"] for r in o.runs[o.card1]]
             assert outcomes == ["completed"], f"the drain lost the in-flight run: {outcomes}\n{o.diag}"
 

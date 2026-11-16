@@ -479,17 +479,14 @@ jobs:
           fetch-tags: true
 
       - name: Fetch upstream release tags
-        # [daveey] The fork carries no v20* release tags, so N-1 (`git describe` below) found
-        # nothing and every N-1 test failed "No names found" (run 40658892506, git shard).
-        # main = upstream + fork commits, so upstream's release tags are ancestors of HEAD~1.
-        # Fetched only when origin's own tags can't resolve N-1; the last line fails the step
-        # if they still can't.
+        # [daveey] Fetch both upstream release eras, even when a calver tag already resolves:
+        # the generation-specific suites also need the newer v0.x by-path updater.
+        # Origin's +canary tags are not stable release starting points.
         run: |
           set -euo pipefail
-          if ! git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' HEAD~1 >/dev/null 2>&1; then
-            git fetch --no-tags --quiet https://github.com/NousResearch/hermes-agent.git '+refs/tags/v20*:refs/tags/v20*'
-          fi
-          git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' HEAD~1
+          git fetch --no-tags --quiet https://github.com/NousResearch/hermes-agent.git \
+            '+refs/tags/v20*:refs/tags/v20*' '+refs/tags/v0.*:refs/tags/v0.*'
+          git describe --tags --abbrev=0 --match 'v20[0-9][0-9].*' --match 'v0.*' --exclude '*+*' HEAD~1
 
       - name: Set up locked Node and ripgrep
         # `hermes update` builds the web UI / TUI workspaces.

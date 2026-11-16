@@ -43,6 +43,17 @@ def test_a_wait_that_never_closes_fails(tmp_path):
     assert "never closed" in _verdict(tmp_path, OPENED, HOLDING)
 
 
+def test_a_larger_explicit_cell_cap_is_used(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "gateway.log").write_text(
+        f"{OPENED}\n{HOLDING}\n2026-11-06 23:34:50,808 {CLOSES['drained']}\n", encoding="utf-8")
+    inst = SimpleNamespace(hermes_home=tmp_path)
+    assert "closed late" in X.restart_wait_verdict(inst)
+    assert X.restart_wait_verdict(inst, cap_s=300) == ""
+    assert "closed late" in X.restart_wait_verdict(inst, cap_s=180)
+
+
 def test_a_later_wait_neither_closes_nor_names_the_holders_of_an_earlier_one(tmp_path):
     later_open = OPENED.replace("23:31:20,808", "23:32:00,000")
     later_holding = HOLDING.replace("23:31:20,810", "23:32:00,001").replace("local-1", "local-2")

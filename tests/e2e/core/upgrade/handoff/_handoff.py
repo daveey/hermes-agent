@@ -437,7 +437,7 @@ def _log_time(stamp: str) -> dt.datetime:
     return dt.datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S,%f")
 
 
-def restart_wait_verdict(inst: Install, slack_s: float = 15.0) -> str:
+def restart_wait_verdict(inst: Install, slack_s: float = 15.0, *, cap_s: float = RESTART_WAIT_CAP_S) -> str:
     """'' when every restart wait the gateway logged closed within ``RESTART_WAIT_CAP_S``; otherwise
     how long the first failing wait held and the work units the gateway last named while it held."""
     log = inst.hermes_home / "logs" / "gateway.log"
@@ -448,9 +448,9 @@ def restart_wait_verdict(inst: Install, slack_s: float = 15.0) -> str:
         opened = _log_time(_WAIT_OPENED.match(wait).group(1))
         close = _WAIT_CLOSED.search(wait)
         held = ((_log_time(close.group(1)) if close else dt.datetime.now()) - opened).total_seconds()
-        if close is None or held > RESTART_WAIT_CAP_S + slack_s:
+        if close is None or held > cap_s + slack_s:
             holders = _WAIT_HOLDERS.findall(wait[:close.start()] if close else wait)
-            return (f"the gateway's restart wait held {held:.0f}s against its {RESTART_WAIT_CAP_S}s cap "
+            return (f"the gateway's restart wait held {held:.0f}s against its {cap_s}s cap "
                     f"({'never closed' if close is None else 'closed late'}); last named holders: "
                     f"{holders[-1] if holders else 'none'}")
     return ""
