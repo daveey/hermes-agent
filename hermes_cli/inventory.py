@@ -238,7 +238,7 @@ def _strip_aggregator_overlaps(rows: list[dict]) -> None:
             row["total_models"] = len(filtered)
 
 
-def build_model_options_payload(
+def _build_model_options_payload_uncached(
     ctx: ConfigContext, *, explicit_only: bool = False, include_unconfigured: bool = False,
     refresh: bool = False,
 ) -> dict:
@@ -267,6 +267,154 @@ def build_model_options_payload(
     if not refresh:
         _prewarm_pricing_async(payload["providers"], current_provider=ctx.current_provider,
                                current_base_url=ctx.current_base_url)
+    return payload
+
+
+# --- whole-payload memo -----------------------------------------------------------------------------
+# A warm ``model.options`` rebuilds ~25 provider rows from ~60 credential-pool, config and env reads whose
+# answer only moves when one of a handful of inputs does. ``_STAMP_PARTS`` names each input; the payload
+# is served from the memo while every part is unchanged AND the entry is younger than ``_MEMO_TTL_S``.
+# The TTL bounds inputs that have no cheap stamp (wall-clock cooldown expiry, pricing and live-probe
+# state) and re-arms the side effects a build starts (catalog and pricing warmers, usage refresh) at most
+# once per TTL. ``refresh=True`` never reads or writes the memo.
+_MEMO_TTL_S = 5.0
+_MEMO_MAX_ENTRIES = 8
+_MEMO_ENABLED = True
+_memo_lock = Lock()
+_memo: dict[tuple, tuple[float, dict]] = {}
+
+
+def _memo_clock() -> float:
+    import time
+    return time.monotonic()
+
+
+def reset_model_options_memo() -> None:
+    with _memo_lock:
+        _memo.clear()
+
+
+def _file_bytes(path) -> Optional[bytes]:
+    """Content, not stat: a same-size rewrite inside one mtime tick must still change the stamp."""
+    try:
+        return path.read_bytes() if path is not None else None
+    except OSError:
+        return None
+
+
+def _file_stat(path) -> Optional[tuple]:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def _stamp_home():
+    from hermes_constants import get_hermes_home
+    return str(get_hermes_home())
+
+
+def _stamp_config():
+    from hermes_cli.config import get_config_path
+    from hermes_cli.config_backend import config_cache_version_or_none
+    return config_cache_version_or_none(get_config_path())
+
+
+def _stamp_dotenv():
+    from hermes_constants import get_hermes_home
+    return _file_bytes(get_hermes_home() / ".env")
+
+
+def _stamp_auth():
+    from hermes_cli.auth import _auth_file_path, _global_auth_file_path
+    return (_file_bytes(_auth_file_path()), _file_bytes(_global_auth_file_path()))
+
+
+def _stamp_environ():
+    import os
+    return tuple(sorted(os.environ.items()))
+
+
+def _stamp_catalog_files():
+    from hermes_constants import get_hermes_home
+    home = get_hermes_home()
+    try:
+        listing = tuple(sorted((e.name, e.stat().st_mtime_ns, e.stat().st_size) for e in (home / "models").iterdir()))
+    except OSError:
+        listing = None
+    return (_file_stat(home / "provider_models_cache.json"), _file_stat(home / "ollama_cloud_models_cache.json"),
+            _file_stat(home / "cache" / "model_catalog.json"), listing)
+
+
+def _external_credential_paths() -> list:
+    """Borrowed credential stores a signed-in check can see (CLI logins outside the Hermes home)."""
+    from pathlib import Path
+    from hermes_constants import get_hermes_home
+    home, user = get_hermes_home(), Path.home()
+    return [home / ".anthropic_oauth.json", home / "credentials.json", user / ".claude" / ".credentials.json",
+            user / ".codex" / "auth.json", user / ".qwen" / "oauth_creds.json",
+            user / ".minimax" / "credentials.json"]
+
+
+def _stamp_external_creds():
+    return tuple(_file_stat(p) for p in _external_credential_paths())
+
+
+def _stamp_plugins():
+    import providers
+    return providers.bound_registry_key()
+
+
+def _stamp_usage():
+    from agent.account_usage_cache import snapshot_generation
+    return snapshot_generation()
+
+
+_STAMP_PARTS: dict[str, Any] = {
+    "home": _stamp_home, "config": _stamp_config, "dotenv": _stamp_dotenv, "auth": _stamp_auth,
+    "environ": _stamp_environ, "catalog_files": _stamp_catalog_files, "external_creds": _stamp_external_creds,
+    "plugins": _stamp_plugins, "usage": _stamp_usage,
+}
+
+
+def _memo_stamp() -> Optional[tuple]:
+    """Every part's current value, or None when one cannot be read (then nothing is memoized)."""
+    try:
+        return tuple((name, fn()) for name, fn in _STAMP_PARTS.items())
+    except Exception:
+        logging.getLogger(__name__).debug("model.options memo stamp unavailable", exc_info=True)
+        return None
+
+
+def build_model_options_payload(
+    ctx: ConfigContext, *, explicit_only: bool = False, include_unconfigured: bool = False,
+    refresh: bool = False,
+) -> dict:
+    """``_build_model_options_payload_uncached`` behind the whole-payload memo (see ``_STAMP_PARTS``)."""
+    explicit_only, include_unconfigured, refresh = bool(explicit_only), bool(include_unconfigured), bool(refresh)
+    kwargs = dict(explicit_only=explicit_only, include_unconfigured=include_unconfigured, refresh=refresh)
+    if refresh or not _MEMO_ENABLED:
+        if refresh:
+            reset_model_options_memo()
+        return _build_model_options_payload_uncached(ctx, **kwargs)
+    import copy
+    stamp = _memo_stamp()
+    if stamp is None:
+        return _build_model_options_payload_uncached(ctx, **kwargs)
+    # ConfigContext holds unhashable dicts/lists: its repr is a complete, deterministic value key.
+    key = (repr(ctx), explicit_only, include_unconfigured, stamp)
+    now = _memo_clock()
+    with _memo_lock:
+        hit = _memo.get(key)
+        if hit is not None and now - hit[0] < _MEMO_TTL_S:
+            return copy.deepcopy(hit[1])
+    payload = _build_model_options_payload_uncached(ctx, **kwargs)
+    with _memo_lock:
+        _memo.pop(key, None)
+        while len(_memo) >= _MEMO_MAX_ENTRIES:
+            _memo.pop(next(iter(_memo)))
+        _memo[key] = (now, copy.deepcopy(payload))
     return payload
 
 

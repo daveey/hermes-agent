@@ -53,6 +53,14 @@ _last_try: dict[tuple[str, str, str, str], float] = {}
 _inflight: dict[tuple[str, str, str, str], tuple[object, float]] = {}
 
 
+_generation = [0]
+
+
+def snapshot_generation() -> int:
+    """Counter bumped each time a snapshot lands; memos of payloads that embed usage key on it."""
+    return _generation[0]
+
+
 def _key(provider: str, identity_id: Optional[str] = None, base_url: Optional[str] = None) -> tuple[str, str, str, str]:
     from hermes_constants import hermes_home_key
 
@@ -136,6 +144,7 @@ def remember_account_usage(
                 continue  # a fresher fetch already landed; this late result must not replace it
             _snapshots[key] = snapshot
             _started[key] = started
+            _generation[0] += 1
 
 
 def cached_account_usage(
