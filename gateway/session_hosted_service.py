@@ -145,6 +145,8 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
                 # The binary PK range avoids LIKE's unrelated-metadata scan and ASCII folding.
                 'SELECT key FROM state_meta WHERE key >= ? AND key < ?',
                 (_OWNER, 'gateway.hosted.owner.v1;'))}
+        if not owned:
+            return ()
         return tuple(b for b in super().bindings() if b.room_id in owned)
 
     def _turn_lock(self, profile):
