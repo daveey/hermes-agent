@@ -254,9 +254,15 @@ def is_deferrable(conn: sqlite3.Connection, task: Any, lane: str) -> bool:
 
 
 def _verdicts(conn, task, providers, lane, cfg, host=None) -> Optional[list[dict]]:
-    """One verdict per governed candidate provider, or None as soon as one provider admits the card.
+    """One verdict per governed candidate pool at its pace limit; None when none is (the card starts as routed).
     ``host``: the connection whose running cards count (default ``conn``): pickup judges a replica card against
-    this machine's own board."""
+    this machine's own board.
+
+    A class route (several candidate pools) is judged pool by pool: ONE pool at its limit is enough, because the class
+    allocator is weighted round-robin, not pace-aware, and would hand the card to that pool on its turn. The caller
+    then moves the card to a pool of its class with room (:func:`_pace_alternate`, the limited pools as walls) or
+    holds it. Since xai-oauth is governed too (b6f19b5dbc), a Grok pool with room no longer exempts a class card whose
+    Claude/Codex pools are paced: it is the move's target instead. [daveey] (t_01a1deaf95f5b885)"""
     host = conn if host is None else host
     now = time.time()
     deferrable = is_deferrable(conn, task, lane)
@@ -266,9 +272,9 @@ def _verdicts(conn, task, providers, lane, cfg, host=None) -> Optional[list[dict
         limit = lp.admit_limit(pace, avg_running(provider, now, cfg), deferrable=deferrable, cfg=cfg)
         running = local_running(host, provider)
         if limit is None or running < limit:
-            return None
+            continue
         verdicts.append({**pace.as_dict(), "limit": limit, "running": running, "deferrable": deferrable})
-    return verdicts
+    return verdicts or None
 
 
 def _record(conn: sqlite3.Connection, task_id: str, verdicts: list[dict], result: Any, *, dry_run: bool,
@@ -299,10 +305,10 @@ def _governed(conn: sqlite3.Connection, task_id: str, lane: str, cfg: lp.PacingC
     """``(task, providers)`` for a card the governor judges on ``lane``; None when it starts regardless: no such card,
     a mandatory pin, an unknown route or no provider the governor governs.
 
-    A class route judges only its governed pools: an ungoverned pool in the same class (xai-oauth: Grok on the X Ultra
-    subscription) no longer exempts the card, which would start it ungoverned and let the class allocator hand it to
-    a paced Claude/Codex pool. When every governed pool holds it, :func:`_pace_alternate` moves it to the ungoverned
-    pool if that one serves here. [daveey] (t_01a1deaf95f5b885)"""
+    A class route judges only its governed pools: an ungoverned pool in the same class no longer exempts the card,
+    which would start it ungoverned and let the class allocator hand it to a paced pool. When any governed pool holds
+    it (:func:`_verdicts`), :func:`_pace_alternate` moves it to a pool of its class with room that serves here, or it
+    holds. [daveey] (t_01a1deaf95f5b885)"""
     from hermes_cli import kanban_db as kb
     task = kb.get_task(conn, task_id)
     if task is None or int(getattr(task, "model_pin_mandatory", 0) or 0):
@@ -316,8 +322,8 @@ def _governed(conn: sqlite3.Connection, task_id: str, lane: str, cfg: lp.PacingC
 def _pace_alternate(conn: sqlite3.Connection, task: Any, lane: str, cfg: lp.PacingConfig,
                     host: sqlite3.Connection, verdicts: list[dict]) -> Optional[tuple[str, str, str, tuple]]:
     """``(model, provider, paced, judged)``: a route of the card's own class on a pool that is NOT ahead of pace, for a
-    card whose every candidate pool holds it (``verdicts``); ``judged`` is the ``(model, provider)`` route it moves
-    from. None keeps the hold. [daveey]
+    card a candidate pool holds (``verdicts``: the pools at their limit); ``judged`` is the ``(model, provider)`` route
+    it moves from. None keeps the hold. [daveey]
 
     The move uses the quota-episode probe (``alternate_route``: unpinned default or strong-class routes only, the
     worker's own billing/capability eligibility, never a mandatory or ``require_model`` card, never a walled provider)

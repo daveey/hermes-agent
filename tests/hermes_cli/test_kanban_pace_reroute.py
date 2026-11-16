@@ -53,7 +53,10 @@ def pool(board, monkeypatch, all_assignees_spawnable):
 
 
 def _pools(monkeypatch, used):
-    """``used``: provider -> seven-day percent; 99 holds the pool (past reserve), 5 leaves it open."""
+    """``used``: provider -> seven-day percent; 99 holds the pool (past reserve), 5 leaves it open. Grok (xai-oauth) is
+    a governed pool (b6f19b5dbc) and reads open unless ``used`` names it."""
+    used = {"xai-oauth": 5, **used}
+
     def read(provider, now):
         return [lp.Reading(now, f"{provider}-1", lp.SEVEN_DAY, used[provider], now + 9 * HOUR)]
     monkeypatch.setattr(pd, "read_pool", read)
@@ -137,8 +140,8 @@ def strong_pattern(pool, monkeypatch):
 
 
 def test_strong_class_card_moves_to_grok_not_a_paced_pool(pool, strong_pattern, monkeypatch):
-    """A class card whose class also holds an ungoverned subscription pool (xai-oauth) is still judged on its governed
-    pools: otherwise it starts ungoverned and the class allocator may hand it to a paced Claude/Codex pool."""
+    """A class card whose class also holds a Grok pool with room (xai-oauth) is still judged pool by pool: otherwise it
+    starts unmoved and the class allocator may hand it to a paced Claude/Codex pool."""
     _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="security work", assignee="a")
@@ -150,13 +153,47 @@ def test_strong_class_card_moves_to_grok_not_a_paced_pool(pool, strong_pattern, 
     assert receipt["tier_reason"] == "pattern:security+paced:anthropic,openai-codex"
 
 
-def test_strong_class_card_with_an_open_governed_pool_starts_unmoved(pool, strong_pattern, monkeypatch):
-    _pools(monkeypatch, {"anthropic": 5, "openai-codex": 99})
+def test_strong_class_card_with_every_pool_open_starts_unmoved(pool, strong_pattern, monkeypatch):
+    _pools(monkeypatch, {"anthropic": 5, "openai-codex": 5})
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="security work", assignee="a")
         seen, result = _dispatch(conn)
         assert _paced_events(conn, tid) == []
     assert seen == [(tid, "class:deep", "auto")] and tid not in result.clock_held
+
+
+def test_strong_class_card_with_one_paced_pool_moves_off_it(pool, strong_pattern, monkeypatch):
+    """One paced pool is enough to move a class card: the round-robin class allocator is not pace-aware and would
+    hand it to Codex on its turn. It moves to the first open pool of its class (class order: Claude)."""
+    _pools(monkeypatch, {"anthropic": 5, "openai-codex": 99})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="security work", assignee="a")
+        seen, result = _dispatch(conn)
+        receipt = _route_receipt(conn, tid)
+        assert _paced_events(conn, tid) == []
+    assert seen == [(tid, "claude-opus-5-5", "anthropic")] and tid not in result.clock_held
+    assert receipt["tier_reason"] == "pattern:security+paced:openai-codex"
+
+
+def test_strong_class_card_waits_when_grok_is_paced_too(pool, strong_pattern, monkeypatch):
+    """Grok is a governed pool: a class card whose every pool is at its limit holds, Grok named in the hold."""
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99, "xai-oauth": 99})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="security work", assignee="a")
+        seen, result = _dispatch(conn)
+        events = _paced_events(conn, tid)
+    assert seen == [] and result.clock_held[tid][0] == lp.GUARD_REASON
+    assert sorted(p["provider"] for p in events[-1].payload["providers"]) == ["anthropic", "openai-codex", "xai-oauth"]
+
+
+def test_default_card_holds_when_grok_is_paced_too(pool, monkeypatch):
+    """A governed move target is judged before the move: with Claude and Grok both at their limit, the default Codex
+    card has no pool with room and holds."""
+    _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99, "xai-oauth": 99})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="routine work", assignee="a")
+        seen, result = _dispatch(conn)
+    assert seen == [] and result.clock_held[tid][0] == lp.GUARD_REASON
 
 
 def test_strong_class_card_without_grok_credential_waits(pool, strong_pattern, monkeypatch):
