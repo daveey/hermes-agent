@@ -154,7 +154,7 @@ def _stored_owner(db, owner_ids, namespaces):
     profile's store."""
     stored_id, route = owner_ids
     if stored_id:
-        return stored_id if db.get_session(stored_id) else ""
+        return stored_id if db.get_session_list_row(stored_id) else ""
     parts = route.split(":")
     if len(parts) < 3 or parts[0] != "agent" or parts[1] not in namespaces:
         return ""
@@ -181,12 +181,16 @@ def _(rid, params):
     counts = {}
     work = {}
     profile_home = _profile_home(scope.get("profile"))
-    namespaces = _route_namespaces(profile_home)
+    # Stored owner ids are authoritative; route namespace discovery is irrelevant
+    # unless a live process actually needs the legacy route fallback.
+    namespaces = _route_namespaces(profile_home) if any(not ids[0] for _, ids, _ in owners) else set()
     with _profile_db(scope) as db:
         if db is None:
             return _ok(rid, {"sessions": []})
+        from tui_gateway.roster_owner_reads import resolve_owners
+        resolved = resolve_owners(db, owners, namespaces, _stored_owner)
         for kind, owner_ids, item in owners:
-            if sid := _stored_owner(db, owner_ids, namespaces):
+            if sid := resolved[owner_ids]:
                 counts.setdefault(sid, {"subagents": 0, "background": 0})[kind] += 1
                 work.setdefault(sid, []).append((kind, item))
     profile = _profile_label(profile_home)
