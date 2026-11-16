@@ -1883,8 +1883,8 @@ DEFAULT_CONFIG = {
     "kanban": {
         "self_work": {"sample_rate": 0.2},  # Reversible spot checks; risky/unknown diffs always selected. [daveey]
         "wake_check_stale_hours": 48,  # Reconsider a never-passing probe; same-probe re-parks retain age.
-        # Central sync (core patch 0193): true = boards opened afterwards get sync tables + outbox triggers. [daveey]
-        "sync": {"enabled": False},
+        "passive_intake": {},  # Exact task ID -> exact wake_check for standing external listeners.
+        "sync": {"enabled": False},  # New boards get sync tables + outbox triggers when enabled. [daveey]
         "create_overlap_check": True,  # kanban_create refuses work open cards already own (kanban_overlap) [daveey]
         # A board whose TABLE b-trees fail integrity_check (REINDEX can't fix it) pauses dispatch; true = the
         # gateway dispatcher also starts `hermes kanban recover` for it (salvage in a child process, fill from

@@ -808,7 +808,7 @@ def producer_note(hit: dict) -> str:
 
 
 def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, now: Optional[int], generation: str,
-                     purpose: str = "wake", stale_interval: Optional[float] = None) -> Any:
+                     purpose: str = "wake", stale_interval: Optional[float] = None, passive_policy=None) -> Any:
     key = (db_path, task_id)
     try:
         rc, out = _run_probe(key, cmd, cwd, env)
@@ -843,7 +843,7 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
                 dead_ancestry = detect(cmd, cwd)
             apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation, diagnostics=diag,
                          answered=answered, producer=producer, dead_ancestry=dead_ancestry,
-                         stale_interval=stale_interval)
+                         stale_interval=stale_interval, passive_policy=passive_policy)
         finally:
             conn.close()
         return rc
@@ -856,7 +856,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                  *, generation: str, now: Optional[int] = None,
                  diagnostics: Optional[dict] = None, answered: Optional[dict] = None,
                  producer: Optional[dict] = None, dead_ancestry: Optional[list[dict]] = None,
-                 stale_interval: Optional[float] = None) -> Optional[str]:
+                 stale_interval: Optional[float] = None, passive_policy=None) -> Optional[str]:
     """Record one probe result; wake the card on success or a broken probe. Returns the event
     kind appended (``condition_met`` / ``wake_check_broken``) or None. A result for a probe
     that is no longer the card's (re-parked, unblocked) is dropped."""
@@ -908,7 +908,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                 woke = wake_once(conn, task_id, cmd, dead_ancestry)
                 if woke:
                     return woke
-            stale = episode.not_yet(conn, task_id, cmd, now, interval)
+            stale = episode.not_yet(conn, task_id, cmd, now, interval, passive_policy=passive_policy)
             if stale:
                 woke = _wake(conn, task_id, episode.STALE_EVENT, stale)
                 if woke:
@@ -1044,6 +1044,8 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                 (ts,)).fetchall()
         # Resolve policy only for a real probe batch, still on the scoped dispatcher thread.
         stale_interval = episode.stale_seconds() if due else None
+        from hermes_cli import kanban_passive_intake as passive
+        passive_policy = passive.snapshot() if due else {}
         for task_id, cmd, every, generation, purpose in due:
             key = (db_path, task_id)
             sweeping = kanban_ci_progress.running_sweeps()  # [daveey] a CI sweep holds a pool worker too
@@ -1070,7 +1072,7 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                     continue
             cwd = probe_cwd(task.workspace_path)
             fut = _pool().submit(_probe_and_apply, db_path, task_id, cmd, cwd, _probe_env(task, db_path), now, claim,
-                                 purpose, stale_interval)
+                                 purpose, stale_interval, passive_policy)
             with _LOCK:
                 _IN_FLIGHT[key] = fut
             submitted.append(task_id)

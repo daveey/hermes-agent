@@ -154,6 +154,11 @@ def park(
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
 
+    from hermes_cli.kanban_blocker_metadata import blocker_metadata, FIELDS
+    meta = blocker_metadata(conn, task_id, reason=reason, metadata=run_metadata,
+                            blocker_id=blocker_id, blocker_provider=blocker_provider,
+                            blocker_model=blocker_model, blocker_lane=blocker_lane)
+    blocker_id = meta.get("blocker_id")
     now = int(time.time())
     if blocker_wake:
         wake_at = now + blocker_wake_seconds()
@@ -166,7 +171,7 @@ def park(
     else:
         try:
             record = kaw.gate(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
-                              clock_only=clock_only, op="block")
+                              clock_only=clock_only, op="block", blocker_id=blocker_id)
         except kaw.RepeatedPark as rp:
             return kaw.escalate(conn, task_id, record=rp.record, reason=reason,
                                 expected_run_id=expected_run_id) is not None
@@ -189,11 +194,6 @@ def park(
     from hermes_cli.kanban_source_receipt import with_source_receipt
     if with_source_receipt(conn, task_id, lambda: conn.execute(sql, params).rowcount) != 1:
         return False
-    from hermes_cli.kanban_blocker_metadata import blocker_metadata, FIELDS
-    meta = blocker_metadata(conn, task_id, reason=reason, metadata=run_metadata,
-                            blocker_id=blocker_id, blocker_provider=blocker_provider,
-                            blocker_model=blocker_model, blocker_lane=blocker_lane)
-    blocker_id = meta.get("blocker_id")
     run_id = kb._end_or_synthesize_run(
         conn, task_id, outcome="scheduled", status="scheduled", summary=reason, metadata=meta or None,
         synthesize=bool(reason or meta),

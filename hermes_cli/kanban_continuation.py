@@ -153,7 +153,8 @@ def continue_task(
             from hermes_cli import kanban_awaiting as kaw
             try:
                 record = kaw.gate(conn, task_id, awaiting=awaiting, reason=checkpoint, wake_check=wake_check,
-                                  clock_only=clock_only, op="continue", wake_in=resume_after)
+                                  clock_only=clock_only, op="continue", wake_in=resume_after,
+                                  blocker_id=blocker_id or (metadata or {}).get("blocker_id"))
             except kaw.AwaitingError as exc:
                 return {"ok": False, "error": str(exc), "reason_code": exc.code}
             except kaw.RepeatedPark as rp:
@@ -318,11 +319,14 @@ def wake_due_continuations(conn: sqlite3.Connection, *, now: Optional[int] = Non
     from hermes_cli.kanban_sweep_gate import gated
     # [daveey] G2: the park scan reads only content rows (the parking events, statuses), so it reruns when they
     # move or when the earliest wake it found arrives; condition probes above keep their own next_at clock.
-    return gated("dispatch.continuation_parks", conn, _wake_parks, conn, now, skipped=([], None), now=now,
-                 extra=own_gateway, run_due=lambda out: out[1])[0]
+    from hermes_cli import kanban_passive_intake as passive
+    policy = passive.snapshot()
+    return gated("dispatch.continuation_parks", conn, _wake_parks, conn, now, policy,
+                 skipped=([], None), now=now,
+                 extra=lambda db: (own_gateway(db), tuple(sorted(policy.items()))), run_due=lambda out: out[1])[0]
 
 
-def _wake_parks(conn: sqlite3.Connection, now: Optional[int]) -> tuple[list[str], Optional[int]]:
+def _wake_parks(conn: sqlite3.Connection, now: Optional[int], passive_policy=None) -> tuple[list[str], Optional[int]]:
     """Wake the due parks; returns ``(woken, earliest wake still pending)`` (None when no park can come due)."""
     from hermes_cli import kanban_db as kb
 
@@ -343,6 +347,9 @@ def _wake_parks(conn: sqlite3.Connection, now: Optional[int]) -> tuple[list[str]
                 info = missing_wake(conn, tid)
                 pending.append(int(info["wake_at"]) if info and info.get("wake_at") is not None else now)
             continue
+        from hermes_cli import kanban_passive_intake as passive
+        if passive.current(conn, tid, payload.get("wake_check"), policy=passive_policy, park=park):
+            continue  # no renewed timestamp or exempt timer in the memo deadline
         wake_at = payload["wake_at"]
         pending.append(int(wake_at))  # a skipped or stale wake stays due: the next tick retries it
         if wake_at > now:

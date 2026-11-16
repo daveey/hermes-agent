@@ -262,7 +262,8 @@ def stamp(timestamp: int) -> str:
     return datetime.fromtimestamp(timestamp, ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M PT")
 
 
-def not_yet(conn: sqlite3.Connection, task_id: str, cmd: str, now: int, interval: float) -> dict | None:
+def not_yet(conn: sqlite3.Connection, task_id: str, cmd: str, now: int, interval: float,
+            *, passive_policy=None) -> dict | None:
     """Count a validated clean exit 1 and return a due stale-wake payload."""
     repark(conn, task_id, cmd)
     conn.execute(
@@ -274,6 +275,9 @@ def not_yet(conn: sqlite3.Connection, task_id: str, cmd: str, now: int, interval
     if checks == 1:
         from hermes_cli import kanban_db as kb
         kb._append_event(conn, task_id, "wake_episode_started")
+    from hermes_cli import kanban_passive_intake as passive
+    if passive.current(conn, task_id, cmd, policy=passive_policy):
+        return None  # keep age/count, not a renewed stale-wake lease
     if now - first < interval or (last is not None and now - last < interval):
         return None
     conn.execute("UPDATE task_wake_episodes SET last_stale_at = ? WHERE task_id = ?", (now, task_id))

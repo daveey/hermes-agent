@@ -798,7 +798,7 @@ def probe_fire_reparks(conn: sqlite3.Connection, task_id: str, premise: str, pro
 
 def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optional[str],
          wake_check: Optional[str] = None, clock_only: bool = False, op: str = "schedule",
-         wake_in: Optional[int] = None) -> dict:
+         wake_in: Optional[int] = None, blocker_id: Optional[str] = None) -> dict:
     """``resolve`` plus re-park escalation: the record to store on the parking event.
 
     Raises ``RepeatedPark`` on the third park in a row on one premise. Card waits (their producer
@@ -832,7 +832,9 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     kdw.annotate(conn, task_id, record, now=int(time.time()))
     if kdw.is_healthy(record):
         return record
-    if prior_same_premise(conn, task_id, record["premise"], probe=probe) >= REPARK_LIMIT:
+    from hermes_cli import kanban_passive_intake as passive
+    if (not passive.eligible(task_id, wake_check, record, blocker_id)
+            and prior_same_premise(conn, task_id, record["premise"], probe=probe) >= REPARK_LIMIT):
         raise RepeatedPark(record)
     fired = probe_fire_reparks(conn, task_id, record["premise"], probe)
     if fired >= PROBE_FIRE_REPARK_LIMIT:

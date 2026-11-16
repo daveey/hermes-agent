@@ -45,7 +45,7 @@ def schedule_task(
         from hermes_cli import kanban_wake_check as kwc
         try:
             record = kaw.gate(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
-                              clock_only=clock_only, op="schedule")
+                              clock_only=clock_only, op="schedule", blocker_id=blocker_id)
         except kaw.RepeatedPark as rp:
             return noted.keep(kaw.escalate(conn, task_id, record=rp.record, reason=reason,
                                            expected_run_id=expected_run_id) is not None)

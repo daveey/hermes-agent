@@ -16,6 +16,31 @@ All settings are stored in the `~/.hermes/` directory for easy access.
 Run `hermes setup --portal` — one OAuth gets you a model provider and all four Tool Gateway tools without hand-editing YAML. Portal subscribers also get 10% off token-billed providers. See [Nous Portal](../integrations/nous-portal.md).
 :::
 
+## Standing Kanban intake listeners
+
+`kanban.passive_intake` defaults to `{}`. It maps exact task IDs to exact stored
+`wake_check` command strings (no whitespace normalization or pattern matching):
+
+```yaml
+kanban:
+  passive_intake:
+    t_0123456789abcdef: "python scripts/check_inbox.py"
+```
+
+Use this only for standing external intake. The current timed park must explicitly
+declare `awaiting: {kind: external, ref: "inbox senders", why: "new messages arrive here"}`,
+with no inferred producer or effective shared `blocker_id`. Card/CI probes do not qualify.
+Malformed configuration fails closed to ordinary wake/re-park guards.
+
+Eligible clean exit-1 probes retain their episode age and check counts but do not
+wake merely for age; their timer backstop is suppressed without renewing its timestamp.
+Only same-premise re-park escalation is exempt: repeated successful-probe/re-park
+cycles still escalate. Exit 0, broken probes, lost/silent probe recovery and normal
+probe cadence remain unchanged. Removing the entry reactivates ordinary guards,
+including an already-overdue timer on an otherwise quiet board. Policy is scoped
+to the dispatcher configuration and captured for its asynchronous probe batch;
+it is not a synced exemption on the card.
+
 ## Directory Structure
 
 ```text
