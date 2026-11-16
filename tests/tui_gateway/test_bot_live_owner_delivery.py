@@ -101,8 +101,9 @@ def test_viewer_poller_never_discovers_or_claims_bot_execution(monkeypatch, tmp_
         '_notif_log_failure': unexpected_failure, 'logger': logging.getLogger(__name__),
     })
     # Start from the module's own globals: the fork's poller also reads its parked/held handoff helpers.
-    poll = rebind(session_notifications._notification_poller_scoped_loop, {
+    globals_ = {
         **vars(session_notifications),
+        'logger': logging.getLogger(__name__),
         '_kb_release_claims': release_claims, '_notif_log_failure': unexpected_failure,
         'time': time, '_LOOP_POLL_SECONDS': 0, '_KANBAN_POLL_SECONDS': 0,
         '_poll_bot_live_delivery_once': lambda *a: calls.append('legacy-claim'),
@@ -112,7 +113,10 @@ def test_viewer_poller_never_discovers_or_claims_bot_execution(monkeypatch, tmp_
         '_session_profile_runtime_scope': lambda session: contextlib.nullcontext(),
         '_session_home': lambda session: tmp_path,
         '_notif_handle_ready': lambda sid, session, ready, *a, **kw: (delivered.extend(ready), stop.set()),
-    })
+    }
+    for name in ('_notification_poller_run', '_notification_poller_cleanup'):
+        globals_[name] = rebind(getattr(session_notifications, name), globals_)
+    poll = rebind(session_notifications._notification_poller_scoped_loop, globals_)
     poll(stop, 'live', {'agent': object(), 'history_lock': threading.RLock(), 'session_key': 'chat',
                       'active_session_lease': SimpleNamespace(lease_id='lease', released=False)})
     assert delivered == [{'type': 'owned-completion'}]

@@ -49,6 +49,23 @@ def test_deferred_reader_consumes_publication_before_next_churn(own, monkeypatch
     assert not computes  # the genuine retry hit ended the previous miss episode
 
 
+def test_remote_collector_failure_cancels_callback_retry(own, monkeypatch):
+    session = {"session_key": fixtures.CHAT}
+    failures = []
+    monkeypatch.setattr(sn, "_session_lineage", lambda key: ())
+    monkeypatch.setattr(sn, "_notif_log_failure", lambda *args: failures.append(args))
+
+    def collect(*args, on_defer, **kwargs):
+        on_defer()
+        assert "_kanban_remote_retry_at" in session
+        raise RuntimeError("collector failed after deferring")
+
+    monkeypatch.setattr(krn, "collect", collect)
+    assert sn._collect_remote_kanban_notifications(fixtures.CHAT, [], session=session) == []
+    assert "_kanban_remote_retry_at" not in session
+    assert len(failures) == 1 and "collector failed" in str(failures[0][1])
+
+
 @pytest.mark.parametrize("outcome", ["empty_hit", "defer", "mixed_ok", "binding", "release_error",
                                     "refused", "_closing", "_finalized", "_lease_taken_over", "exception"])
 def test_poll_attempt_keeps_only_valid_deferral(monkeypatch, outcome):

@@ -408,7 +408,7 @@ def test_gateway_owned_chat_skips_the_remote_collection_a_legacy_only_chat_keeps
     _runner, authority, _adapter, _admitted = env
     asked = []
     monkeypatch.setattr(server, "_collect_remote_kanban_notifications",
-                        lambda key, claims: asked.append(key) or [])
+                        lambda key, claims, *, session=None: asked.append(key) or [])
     session = _session()
     _legacy_collect(session)
     assert asked == [CHAT], "a legacy-only chat still collects its remote notices"
