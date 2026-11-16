@@ -178,7 +178,7 @@ def _decode_parts(raw: Any) -> tuple | None:
 
 def save_host(scope: tuple[str, ...], fingerprint: str, read_at: float, parts: tuple,
               *, mutation_token: str | None = None, display_identity: str | None = None,
-              narrow_key: str | None = None) -> bool:
+              narrow_key: str | None = None, watch_sig: str | None = None) -> bool:
     """[daveey] The host copy other processes adopt (``kanban_annotation_host``): ``parts`` answered exactly the
     inputs ``fingerprint`` names, read at ``read_at``. Never raises."""
     if not enabled() or len(parts) not in (_PARTS, _PARTS + 1):
@@ -209,7 +209,7 @@ def save_host(scope: tuple[str, ...], fingerprint: str, read_at: float, parts: t
             header = {"version": _HOST_VERSION, "scope": list(scope), "fingerprint": fingerprint,
                       "read_at": float(read_at), "parts_digest": digest, "mutation_token": mutation_token,
                       "display_identity": display_identity, "narrow_key": narrow_key,
-                      "verified_at": float(read_at)}
+                      "verified_at": float(read_at), "watch_sig": watch_sig}
             _write_json(path.with_suffix(".host.json"), header)
             prune(path, {digest, previous})
             return True
@@ -218,10 +218,11 @@ def save_host(scope: tuple[str, ...], fingerprint: str, read_at: float, parts: t
         return False
 
 
-def confirm_host(scope: tuple[str, ...], narrow_key: str, verified_at: float) -> bool:
+def confirm_host(scope: tuple[str, ...], narrow_key: str, verified_at: float, *, watch_sig: str | None = None) -> bool:
     """Header-only rewrite: the holder found ``narrow_key`` unchanged since the published read, so the display
     copy stays current. Keeps fingerprint/read_at/parts/mutation ack exactly (strict adopters unaffected);
-    only ``verified_at`` advances. Never raises."""
+    only ``verified_at`` advances, and ``watch_sig`` (the holder's watch signature taken before that verification)
+    is recorded. Never raises."""
     if not enabled() or not narrow_key:
         return False
     try:
@@ -236,6 +237,7 @@ def confirm_host(scope: tuple[str, ...], narrow_key: str, verified_at: float) ->
                     or not verified_at <= time.time()):
                 return False
             header["verified_at"] = max(float(header.get("verified_at") or 0.0), float(verified_at))
+            header["watch_sig"] = watch_sig
             _write_json(target, header)
             return True
     except Exception:  # health: allow BLE001 -- best-effort; the copy then ages out for display callers
@@ -294,24 +296,27 @@ def load_host(scope: tuple[str, ...], *, shared: bool = False,
         return None
 
 
-def touch_demand(scope: tuple[str, ...]) -> None:
-    """Mark ``scope`` as polled now (the host refresher keeps such scopes' copies current). Never raises."""
+def touch_demand(scope: tuple[str, ...], *, strict: bool = False) -> None:
+    """Mark ``scope`` as polled now (the host refresher keeps such scopes' copies current); ``strict``: by an
+    exact (read-your-writes) caller, which adopts only a copy younger than ``_COUNTS_MAX_AGE_S``. Never raises."""
     if not enabled():
         return
     try:
-        path = _path(scope).with_suffix(".demand")
+        path = _path(scope).with_suffix(".strict-demand" if strict else ".demand")
+        now = time.time()  # the clock ``demand_age`` reads
         try:
-            os.utime(path)
+            os.utime(path, (now, now))
         except FileNotFoundError:
             _write_json(path, {"scope": list(scope)})
+            os.utime(path, (now, now))
     except Exception:  # health: allow BLE001 -- demand only steers the refresher
         log.debug("kanban annotation demand not recorded", exc_info=True)
 
 
-def demand_age(scope: tuple[str, ...]) -> float | None:
-    """Seconds since any process last polled ``scope`` (None: never, or unreadable)."""
+def demand_age(scope: tuple[str, ...], *, strict: bool = False) -> float | None:
+    """Seconds since any process last polled ``scope`` (``strict``: exactly; None: never, or unreadable)."""
     try:
-        return time.time() - _path(scope).with_suffix(".demand").stat().st_mtime
+        return time.time() - _path(scope).with_suffix(".strict-demand" if strict else ".demand").stat().st_mtime
     except OSError:
         return None
 

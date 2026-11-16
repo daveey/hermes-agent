@@ -276,24 +276,28 @@ def test_holder_refreshes_a_scope_demanded_on_another_profile(world, tmp_path, m
         hermes_scope.pop_state(token)
 
 
-def test_holder_renews_the_copy_before_adopters_would_miss(world):
-    """Under steady demand the holder publishes a fresh ``read_at`` before the copy reaches ``_COUNTS_MAX_AGE_S``:
-    its re-read at ``HOLDER_REFRESH_AGE_S`` really reads instead of taking the still-revalidatable counts cache and
-    republishing the old ``read_at`` (PR #2200 review nit 2)."""
+def test_holder_renews_the_copy_at_its_fallback_and_strict_adopters_stay_exact(world):
+    """Under steady demand the holder publishes a fresh ``read_at`` every ``HOLDER_REFRESH_AGE_S`` with a real read
+    (not the still-revalidatable counts cache, PR #2200 review nit 2). The fallback is past ``_COUNTS_MAX_AGE_S``
+    (t_01a1db1387f61a98 phase 2): an exact adopter polling an older copy reads for itself instead of adopting it."""
     import contextvars
 
     host._known[SCOPE] = contextvars.copy_context()
     disk.touch_demand(SCOPE)
     assert host._holder_pass() == 1
     ages = []
-    for _ in range(int(3 * ksa._COUNTS_MAX_AGE_S / host.HOLDER_INTERVAL_S)):
+    for _ in range(int(3 * host.HOLDER_REFRESH_AGE_S / host.HOLDER_INTERVAL_S)):
         _advance(world, host.HOLDER_INTERVAL_S)
+        disk.touch_demand(SCOPE)
         copy = disk.load_host(SCOPE)
         assert copy is not None
         ages.append(world["wall"] - copy[1])  # what an adopter polling now finds
         host._holder_pass()
-    assert max(ages) <= host.HOLDER_REFRESH_AGE_S + host.HOLDER_INTERVAL_S < ksa._COUNTS_MAX_AGE_S, ages
+    assert max(ages) <= host.HOLDER_REFRESH_AGE_S + host.HOLDER_INTERVAL_S, ages
+    assert 3 <= world["calls"]["recompute"] <= 4  # the first read and one real re-read per fallback, no more
+    while world["wall"] - disk.load_host(SCOPE)[1] < ksa._COUNTS_MAX_AGE_S:
+        _advance(world, host.HOLDER_INTERVAL_S)
     reads = world["calls"]["recompute"]
     _other_process()
     _poll()
-    assert world["calls"]["recompute"] == reads  # an adopter at any moment finds a current copy
+    assert world["calls"]["recompute"] == reads + 1  # too old to adopt exactly: a local read, never a stale one

@@ -1754,7 +1754,7 @@ def _annotation_snapshot(*, display: bool = False) -> tuple | None:
     """
     global _annotate_waiters
     scope = _origin_scope()
-    _host_copy.demand(scope)
+    _host_copy.demand(scope, strict=not display)
     deadline = time.monotonic() + _REFRESH_WAIT_S
     if not _annotate_refresh_lock.acquire(blocking=False):
         _annotate_waiters += 1

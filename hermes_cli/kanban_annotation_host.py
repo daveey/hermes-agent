@@ -21,9 +21,12 @@ for the same scope: ``kanban_session_activity._refresh_annotation_locked`` was 1
 * **Holder** (lease ``kanban-annotation``, ``host_loop_lease``): one process per home runs a demand-driven refresher
   for every scope it can reproduce that any process polled (``<scope>.demand`` touched) in the last
   ``DEMAND_WINDOW_S``, so the copy is current when the others poll. It reads each scope's demand inside that scope's
-  own context (a serve hosting several profiles keeps each profile's demand under its own home), and renews a copy
-  past ``HOLDER_REFRESH_AGE_S`` with a real read (bypassing the counts cache), so a fresh ``read_at`` is published
-  before adopters drop the copy at ``_COUNTS_MAX_AGE_S``. A miss anywhere still refreshes locally as before:
+  own context (a serve hosting several profiles keeps each profile's demand under its own home). It renews a copy
+  with a real read (bypassing the counts cache) past ``STRICT_REFRESH_AGE_S`` while an exact caller polled the scope
+  lately (``<scope>.strict-demand``), so a fresh ``read_at`` is published before such adopters drop the copy at
+  ``_COUNTS_MAX_AGE_S``; with display demand only, past ``HOLDER_REFRESH_AGE_S``. Between, a scope costs one
+  watch signature per tick (``kanban_annotation_watch``) until a file it reads moves or a mutation cue lands.
+  A miss anywhere still refreshes locally as before:
   no added latency, and ``HERMES_ANNOTATION_HOST_COPY=0`` turns publishing and adopting off.
 """
 
@@ -52,8 +55,19 @@ DEMAND_TOUCH_S = 10.0  # a poller re-touches its scope's demand file at most thi
 HOLDER_INTERVAL_S = 2.0
 HOLDER_MOVED_FLOOR_S = 10.0
 DISPLAY_MAX_AGE_S = 12.0
-HOLDER_REFRESH_AGE_S = 20.0  # the holder re-reads an unchanged scope this long after its copy's read
+# [daveey] Due-time fallback: the holder re-reads an unchanged scope this long after its copy's read (was 20 s).
+# Between, a scope wakes only when a file it reads changes (``watch_signature``) or a mutation cue lands
+# (t_01a1db1387f61a98 phase 2, owner decision A: the 20 s renewal of 8 scopes was ~11% of a core of identical reads).
+# Strict adopters still need an exact copy younger than ``_COUNTS_MAX_AGE_S``; past it they read for themselves.
+HOLDER_REFRESH_AGE_S = 60.0
+# While an exact caller polls the scope, renew every 20 s as before: it adopts only copies younger than 30 s
+# (``_COUNTS_MAX_AGE_S``) and otherwise reads for itself on the poll path (design t01a1d563 C16 / review R10).
+STRICT_REFRESH_AGE_S = 20.0
+# A holder-verified copy whose watched files have not moved since the verification stays displayable this long
+# (one fallback plus slack); any watched move falls back to ``DISPLAY_MAX_AGE_S`` from the last verification.
+DISPLAY_WATCH_MAX_AGE_S = HOLDER_REFRESH_AGE_S + 15.0
 NARROW_CONFIRM_S = 6.0  # an unchanged narrow key re-stamps the copy's display ``verified_at`` this often
+_WATCH_PATHS_TTL_S = HOLDER_MOVED_FLOOR_S  # a new board/shadow file is picked up within this (plus the fallback)
 _VERSION = 1
 _UNDECLARED = "undeclared"
 _holder_ctx = threading.local()  # .active: this thread is the holder (only it pays for a narrow key)
@@ -228,6 +242,45 @@ def _activity_now() -> tuple[tuple, float]:
     return _ksa._activity_fingerprint(include_shadows=False) + _ksa._shadow_fingerprint(), wall
 
 
+# -- watch signature (holder wake gate, display trust) -------------------------------------------------------------
+
+_paths_memo: dict[tuple[str, ...], tuple[float, list[str], list[str]]] = {}
+
+
+def _watch_paths(scope: tuple[str, ...]) -> tuple[list[str], list[str]]:
+    """``(sqlite files, plain files)`` ``scope``'s annotation and narrow key read, resolved in the current (scope's)
+    context; the enumeration (board globs, sync config) is memoised for ``_WATCH_PATHS_TTL_S``."""
+    from hermes_cli import kanban_annotation_narrow as _narrow
+    from hermes_cli import kanban_session_activity as _ksa
+    from hermes_constants import get_hermes_home
+
+    now = time.monotonic()
+    memo = _paths_memo.get(scope)
+    if memo is not None and 0 <= memo[0] - now <= _WATCH_PATHS_TTL_S:
+        return memo[1], memo[2]
+    hub = _ksa._hub_db_path()
+    dbs = ([str(hub)] if hub is not None else []) + [str(p) for p in _ksa._board_db_paths()]
+    dbs += [str(p) for p in _ksa._replica_paths()]
+    dbs += [str(get_hermes_home() / "state.db"), str(_narrow._ledger_path())]
+    files = [str(_disk._path(scope).with_suffix(".mutation.json"))]
+    while len(_paths_memo) >= 32:
+        del _paths_memo[next(iter(_paths_memo))]
+    _paths_memo[scope] = (now + _WATCH_PATHS_TTL_S, dbs, files)
+    return dbs, files
+
+
+def watch_signature(scope: tuple[str, ...]) -> str | None:
+    """``kanban_annotation_watch.signature`` of ``scope``'s inputs; None (= moved) when anything is unreadable."""
+    from hermes_cli import kanban_annotation_watch as _watch
+
+    try:
+        dbs, files = _watch_paths(scope)
+        return _watch.signature(scope, dbs, files)
+    except Exception:  # health: allow BLE001 -- an unknown signature is a change: the holder probes as before
+        log.debug("kanban annotation watch signature unavailable", exc_info=True)
+        return None
+
+
 # -- the read -----------------------------------------------------------------------------------------------------
 
 # Per origin scope, the last frozen annotation parts (``read_annotation_parts``).
@@ -311,7 +364,10 @@ def adopt_display(scope: tuple[str, ...]) -> tuple | None:
         verified = header.get("verified_at")
         # Display age runs from the holder's last narrow-key confirmation (never ahead of now, never before read).
         seen = max(copy[1], float(verified)) if isinstance(verified, (int, float)) and verified <= now else copy[1]
-        if not 0 <= now - seen <= DISPLAY_MAX_AGE_S:
+        if not 0 <= now - seen <= DISPLAY_MAX_AGE_S and not (
+                # [daveey] Nothing the holder watches moved since it verified this copy: trust it to the fallback.
+                0 <= now - seen <= DISPLAY_WATCH_MAX_AGE_S and header.get("narrow_key")
+                and header.get("watch_sig") and header.get("watch_sig") == watch_signature(scope)):
             return None
         parts = copy[2]
     except Exception:  # health: allow BLE001 -- unknown code/copy fails closed to the normal read
@@ -365,6 +421,8 @@ def prepare(scope: tuple[str, ...]) -> tuple | None:
     if not enabled():
         return None
     try:
+        # [daveey] Taken before any input read: a write racing the read moves it, so the holder probes again.
+        watch = watch_signature(scope) if getattr(_holder_ctx, "active", False) else None
         # Only a forced read can acknowledge the cue: an ordinary poll may reuse
         # counts that predate a closeout mutation outside the board fingerprint.
         token = _mutation.current(scope) if getattr(_ksa._revalidate.force_read, "scope", None) == scope else None
@@ -380,7 +438,7 @@ def prepare(scope: tuple[str, ...]) -> tuple | None:
     if getattr(_ksa._revalidate.inputs_pin, "fingerprints", None) is None:
         _ksa._revalidate.inputs_pin.fingerprints = (local, full)
         _pin_set.scope = scope
-    return (full, wall, fp, token, display_identity, narrow)
+    return (full, wall, fp, token, display_identity, narrow, watch if narrow else None)
 
 
 def finish(scope: tuple[str, ...]) -> None:
@@ -399,21 +457,27 @@ def publish(scope: tuple[str, ...], prepared: tuple | None, parts: tuple) -> boo
 
     if prepared is None or prepared[2] is None:
         return False
-    full, wall, (digest, _complete), token, display_identity, narrow = prepared
+    full, wall, (digest, _complete), token, display_identity, narrow, watch = prepared
     with _ksa._cache_lock:
         if (_ksa._cache is None or _ksa._cache_scope != scope or _ksa._cache_fingerprint != full
                 or not _ksa._cache_revalidatable):
             return False
         counts_at = time.time() - max(0.0, time.monotonic() - _ksa._cache_read_at)
     return _disk.save_host(scope, digest, min(wall, counts_at), parts, mutation_token=token,
-                           display_identity=display_identity, narrow_key=narrow)
+                           display_identity=display_identity, narrow_key=narrow, watch_sig=watch)
 
 
 # -- holder -------------------------------------------------------------------------------------------------------
 
 _known: dict[tuple[str, ...], contextvars.Context] = {}
-_touched: dict[tuple[str, ...], float] = {}
+_touched: dict[tuple[tuple[str, ...], bool], float] = {}
 _holder: list = []
+# [daveey] Per scope, ``(watch signature, due wall time, copy read_at or None)``: the holder sleeps on the scope while
+# the signature is unchanged and the due time (floor end, or the renewal of the copy read at ``read_at``) has not
+# come. ``_seen``: the last signature observed.
+_gates: dict[tuple[str, ...], tuple[str, float, float | None]] = {}
+_seen: dict[tuple[str, ...], str | None] = {}
+_wake = threading.Event()  # an in-process kick wakes the holder before its next tick
 
 
 def kick(scope: tuple[str, ...]) -> None:
@@ -421,34 +485,69 @@ def kick(scope: tuple[str, ...]) -> None:
     if not enabled():
         return
     demand(scope)
+    _gates.pop(scope, None)
     try:
         _mutation.record(scope)
     except (OSError, ValueError):
         log.warning("kanban annotation mutation cue not recorded", exc_info=True)
+    _wake.set()
 
 
-def demand(scope: tuple[str, ...]) -> None:
-    """A poll of ``scope``: remember how to reproduce it here and touch its demand file (throttled)."""
+def demand(scope: tuple[str, ...], *, strict: bool = False) -> None:
+    """A poll of ``scope``: remember how to reproduce it here and touch its demand file (throttled). ``strict``: an
+    exact caller; while one polls, the holder renews the copy every ``STRICT_REFRESH_AGE_S`` so it stays adoptable."""
     if not enabled():
         return
     now = time.monotonic()
-    if now - _touched.get(scope, -1e9) < DEMAND_TOUCH_S:
+    key = (scope, strict)
+    if now - _touched.get(key, -1e9) < DEMAND_TOUCH_S:
         return
-    _touched[scope] = now
+    _touched[key] = now
     _known[scope] = contextvars.copy_context()
     _disk.touch_demand(scope)
+    if strict:
+        _disk.touch_demand(scope, strict=True)
+
+
+def _renew_age(scope: tuple[str, ...]) -> float:
+    """[daveey] The holder's due-time fallback for ``scope``: ``HOLDER_REFRESH_AGE_S``, or ``STRICT_REFRESH_AGE_S``
+    while an exact caller (which adopts only copies younger than ``_COUNTS_MAX_AGE_S``) polled it lately."""
+    age = _disk.demand_age(scope, strict=True)
+    return STRICT_REFRESH_AGE_S if age is not None and age <= DEMAND_WINDOW_S else HOLDER_REFRESH_AGE_S
 
 
 def _holder_pass() -> int:
     """Refresh every scope this process can reproduce that someone polled lately and whose copy is missing,
-    another input's, or aging. Returns how many it refreshed."""
+    another input's, or aging. A scope whose watched files have not moved since the holder last verified it, and
+    whose due time has not come, costs a signature and nothing else. Returns how many it refreshed."""
     refreshed = 0
     for scope, ctx in list(_known.items()):
         try:
+            if ctx.run(_asleep, scope):
+                continue
             refreshed += bool(ctx.run(_holder_refresh, scope))
         except Exception:  # health: allow BLE001 -- one scope's failed read must not stop the others
+            _gates.pop(scope, None)
             log.debug("kanban annotation holder refresh failed", exc_info=True)
     return refreshed
+
+
+def _asleep(scope: tuple[str, ...]) -> bool:
+    gate = _gates.get(scope)
+    if gate is None:
+        return False
+    due = gate[1] if gate[2] is None else min(gate[1], gate[2] + _renew_age(scope))  # an exact caller may arrive
+    if not 0 < due - time.time() <= HOLDER_REFRESH_AGE_S:  # due (or a clock jump): wake
+        return False
+    sig = watch_signature(scope)
+    return sig is not None and sig == gate[0]
+
+
+def _arm(scope: tuple[str, ...], sig: str | None, due: float, read_at: float | None = None) -> None:
+    if sig is None:
+        _gates.pop(scope, None)
+    else:
+        _gates[scope] = (sig, due, read_at)
 
 
 def _holder_refresh(scope: tuple[str, ...]) -> bool:
@@ -468,26 +567,38 @@ def _holder_refresh_scope(scope: tuple[str, ...]) -> bool:
 
     age = _disk.demand_age(scope)
     if age is None or age > DEMAND_WINDOW_S or _ksa._origin_scope() != scope:
+        _gates.pop(scope, None)
         return False  # nobody polled it lately, or this context no longer reproduces the scope
+    sig = watch_signature(scope)  # before reading anything: a write racing this pass moves it
+    seen, _seen[scope] = _seen.get(scope), sig
+    _gates.pop(scope, None)
     copy = _disk.load_host(scope, shared=True, header_out=(header := {}))
     copy_age = time.time() - copy[1] if copy is not None else None
-    renew = copy_age is not None and copy_age >= HOLDER_REFRESH_AGE_S
+    renew = copy_age is not None and copy_age >= _renew_age(scope)
     kicked = _mutation.pending(scope)
     if copy is not None and not renew and not kicked:
         # [daveey] Inside the floor nothing refreshes either way: return before reading any input.
         if copy_age is not None and 0 <= copy_age < HOLDER_MOVED_FLOOR_S:
+            _arm(scope, sig, copy[1] + HOLDER_MOVED_FLOOR_S)
             return False
         # Past the floor: refresh only for a substantive move (narrow key). An unchanged narrow key re-stamps the
-        # display ``verified_at`` (header only) and waits for the 20 s renewal. The narrow key needs no exact
-        # fingerprint (whose waiting-input probes cost more than it), so a known key answers alone.
+        # display ``verified_at`` (header only) and sleeps until a watched file moves or the fallback renewal.
+        # The narrow key needs no exact fingerprint (whose waiting-input probes cost more than it).
         published, narrow = header.get("narrow_key"), None
         if published:
             full, wall = _activity_now()
             narrow = _narrow_now(scope, full)
             if narrow == published:
                 verified = header.get("verified_at")
-                if not isinstance(verified, (int, float)) or wall - verified >= NARROW_CONFIRM_S:
-                    _disk.confirm_host(scope, published, wall)
+                watched = sig is not None and header.get("watch_sig") == sig
+                # Nothing watched moved since the last verification: nothing to re-stamp. Otherwise stamp every
+                # NARROW_CONFIRM_S, and at once when a new signature held for a whole tick (the scope went quiet),
+                # so a display then trusts the quiet copy to the fallback.
+                if not watched and (not isinstance(verified, (int, float)) or wall - verified >= NARROW_CONFIRM_S
+                                    or (sig is not None and sig == seen)):
+                    watched = _disk.confirm_host(scope, published, wall, watch_sig=sig) and sig is not None
+                if watched:
+                    _arm(scope, sig, copy[1] + HOLDER_REFRESH_AGE_S, copy[1])
                 return False
         if not published or narrow is None:  # no narrow verdict: the exact fingerprint decides
             _local, full, wall, fp = _inputs_now(scope)
@@ -525,7 +636,12 @@ def start_holder(role: str) -> threading.Thread | None:
         log.debug("kanban annotation holder: own scope unavailable", exc_info=True)
 
     def loop() -> None:
-        while not stop.wait(HOLDER_INTERVAL_S):
+        while not stop.is_set():
+            # [daveey] A tick polls only watch signatures of sleeping scopes; an in-process kick wakes it at once.
+            _wake.wait(HOLDER_INTERVAL_S)
+            _wake.clear()
+            if stop.is_set():
+                break
             try:
                 if lease.held():
                     _holder_pass()
@@ -544,4 +660,7 @@ def reset() -> None:
     _touched.clear()
     _code_ids.clear()
     _core.clear()
+    _gates.clear()
+    _seen.clear()
+    _paths_memo.clear()
     _pin_set.scope = None

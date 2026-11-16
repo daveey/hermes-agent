@@ -139,10 +139,20 @@ def test_ordinary_publication_cannot_acknowledge_potentially_old_counts(world):
     assert not host._holder_refresh_scope(SCOPE)
 
 
-def test_renew_remains_twenty_seconds(world):
-    helpers._poll()
+def test_renew_is_the_sixty_second_fallback(world):
+    ksa.annotate_kanban_activity([{"id": "s1"}], display=True)  # display demand only
     host.demand(SCOPE)
-    helpers._advance(world, 19)
+    helpers._advance(world, host.HOLDER_REFRESH_AGE_S - 1)
+    host.demand(SCOPE)
+    assert not host._holder_refresh_scope(SCOPE)
+    helpers._advance(world, 1)
+    assert host._holder_refresh_scope(SCOPE)
+
+
+def test_renew_stays_twenty_seconds_for_exact_callers(world):
+    helpers._poll()  # an exact caller polls the scope
+    host.demand(SCOPE)
+    helpers._advance(world, host.STRICT_REFRESH_AGE_S - 1)
     assert not host._holder_refresh_scope(SCOPE)
     helpers._advance(world, 1)
     assert host._holder_refresh_scope(SCOPE)

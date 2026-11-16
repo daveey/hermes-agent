@@ -24,9 +24,9 @@ def test_recent_confirmation_is_not_written_again(world, gate, monkeypatch):
     calls = []
     original = disk.confirm_host
 
-    def confirm(*args):
+    def confirm(*args, **kwargs):
         calls.append(args)
-        return original(*args)
+        return original(*args, **kwargs)
 
     monkeypatch.setattr(disk, 'confirm_host', confirm)
     helpers.helpers._advance(world, 2)
@@ -35,7 +35,13 @@ def test_recent_confirmation_is_not_written_again(world, gate, monkeypatch):
     assert helpers._header()['verified_at'] == confirmed
     helpers.helpers._advance(world, 4)
     assert not host._holder_refresh_scope(SCOPE)
+    assert calls == []  # [daveey] nothing watched moved since the confirmation: nothing to re-stamp
+    helpers._move(world)  # a watched file moved, the narrow key did not: confirmed again (6 s since the last)
+    assert not host._holder_refresh_scope(SCOPE)
     assert len(calls) == 1
+    helpers.helpers._advance(world, 2)
+    assert not host._holder_refresh_scope(SCOPE)
+    assert len(calls) == 1  # confirmed 2 s ago and the signature still matches it
 
 
 def test_failed_exact_fingerprint_does_not_compute_narrow(world, monkeypatch):

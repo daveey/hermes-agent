@@ -99,7 +99,7 @@ def test_renewal_still_forces_read(world, gate):
     _move(world)
     helpers._advance(world, 10)
     assert not host._holder_refresh_scope(SCOPE)
-    helpers._advance(world, 10)
+    helpers._advance(world, host._renew_age(SCOPE) - 10)  # 20 s: the fixture's poll is an exact caller
     assert host._holder_refresh_scope(SCOPE)
 
 
