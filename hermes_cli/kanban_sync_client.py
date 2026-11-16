@@ -948,6 +948,7 @@ class RoundResult:
     repair_deferred: bool = False  # a replica-only change waits for the repair window (see ``decide``)
     behind: bool = False  # a pull stopped at its page budget: the loop runs this board again at once
     skipped: bool = False  # SyncRoundBusy: another holder (a dispatcher tick) had the board; retried shortly
+    cause: Optional[str] = None  # a failure's host-to-Board transport class (kanban_sync_host_outage.classify)
 
 
 def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
@@ -1156,7 +1157,8 @@ def sync_all_once(hub: Optional[Hub] = None, *,
             results.append(RoundResult(board=slug, mode="?", error=f"SyncRoundBusy: {exc}", skipped=True))
         except (HubError, OSError, Resync, sqlite3.Error, SyncUnavailable) as exc:
             _log.warning("kanban sync: round for %s failed (%s: %s)", slug, type(exc).__name__, exc)
-            results.append(RoundResult(board=slug, mode="?", error=f"{type(exc).__name__}: {exc}"))
+            from hermes_cli.kanban_sync_host_outage import classify  # one host card, not one per board [daveey]
+            results.append(RoundResult(board=slug, mode="?", error=f"{type(exc).__name__}: {exc}", cause=classify(exc)))
         finally:
             sync_timing.board_end(mark, results)
     return results
@@ -1503,6 +1505,8 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
             selected = sync_timing.select(work.select, boards, time.monotonic(), outbox_pending)
             selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
             selected += [b for b in backlog.due(boards) if b not in selected]  # a pull backlog drains round by round
+            picked = time.monotonic()  # a board backing off a failed round waits for it, whatever else is due
+            selected = [b for b in selected if not work.backing_off(b[0], picked)]
             outbox_age.round_started()
             results = sync_all_once(hub, boards=selected)
             ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
@@ -1511,11 +1515,12 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                 on_give_up(runstate, ident.gateway, "gave up the sync role: ", [(r.board, r.error) for r in ahead])
                 return
             runstate.clear()  # a completed round: the loop runs
+            ended = time.monotonic()
             for r in results:
                 if r.skipped:
                     work.changed(r.board)  # run it again after BUSY_RETRY_S, as a changed board
                     continue
-                work.finished(r.board, not r.error)
+                work.finished(r.board, not r.error, ended)  # a failure backs the board off (kanban_sync_work)
                 if r.push and (r.push.sent or r.push.rejected):
                     _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
                               r.push.sent, r.push.rejected)
@@ -1532,7 +1537,13 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
             deferred_due = next_deferred_repair(boards)
             if deferred_due is not None:
                 remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
-            sync_timing.wait(wait_for_work, wake, [p for _s, p in boards], remaining, keep_running)
+            # A failed board's pending outbox must not end the wait at once: it waits out its backoff.
+            now = time.monotonic()
+            retry_in = work.next_retry(now)
+            if retry_in is not None:
+                remaining = min(remaining, retry_in)
+            ready = [p for s, p in boards if not work.backing_off(s, now)]
+            sync_timing.wait(wait_for_work, wake, ready, remaining, keep_running)
     finally:
         rounds.close()
         links.stop()

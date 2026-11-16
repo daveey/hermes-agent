@@ -27,6 +27,12 @@ observation, starts afresh. Old records resume with last=seen_at and excluded=0.
 One check covers every shape: rounds ending behind, rounds failing, no rounds at all (a dead loop or a give-up),
 and a missing replica. The card names the host, board, stamp (PT), awake minutes, the last round's outcome, the
 loop's recorded stop, the pending outbox, the running core and the cards frozen behind a remote parent.
+
+Boards that come due while their last round (under :data:`NO_ROUND_S` ago) failed to reach the Board at all (DNS,
+refused/unreachable connection: ``kanban_sync_host_outage.classify``) share ONE host card naming every board and its
+frozen cards; ten board cards for one DNS outage (2026-11-15, t_01a1e1174026210f) was the alternative. Any other or
+unknown cause, and a loop with no recent round, keeps its own board card. Archived boards (``board.json``
+``archived: true``) are not judged, like detached ones.
 """
 from __future__ import annotations
 
@@ -72,12 +78,14 @@ class _Round:
     wall: float
     error: Optional[str]
     behind: bool
+    cause: Optional[str] = None  # kanban_sync_host_outage.classify of a failure
 
 
 _LOCK = threading.Lock()
 _SEEN: dict[str, _Seen] = {}
 _ROUNDS: dict[str, _Round] = {}
 _TELEMETRY_AT: dict[str, float] = {}
+_HOST = "__host__"  # memo key of the open host incident (never a board slug: BOARD_ID_RE starts alphanumeric)
 
 
 def note_round(results: Iterable[Any], *, mono: Callable[[], float] = time.monotonic,
@@ -85,7 +93,8 @@ def note_round(results: Iterable[Any], *, mono: Callable[[], float] = time.monot
     """The sync loop completed a round (``kanban_sync_outbox_age.after_round``): remember each board's outcome."""
     with _LOCK:
         for r in results:
-            _ROUNDS[r.board] = _Round(mono(), wall(), r.error, bool(r.behind))
+            _ROUNDS[r.board] = _Round(mono(), wall(), r.error, bool(r.behind),
+                                      getattr(r, "cause", None) if r.error else None)
 
 
 def _pt(at: Optional[float]) -> str:
@@ -133,19 +142,70 @@ def _core_sha() -> Optional[str]:
 def check(boards: list[tuple[str, Path]], *, now: float, wall: Callable[[], float] = time.time,
           file_fn: Optional[Callable[[str, str, str], Optional[str]]] = None,
           board_status: Optional[Callable[[str, list[str]], dict[str, str]]] = None,
-          awake_fn: Optional[Callable[[], bool]] = None) -> list[str]:
+          awake_fn: Optional[Callable[[], bool]] = None,
+          host_fn: Optional[Callable[..., Optional[str]]] = None) -> list[str]:
     """One observation of every board (``now``: monotonic). Returns the card ids it filed or commented. Never
-    raises."""
+    raises. Boards that come due together with a host-to-Board transport cause share one host card (``host_fn``,
+    default :func:`kanban_sync_host_outage.report`); every other due board files its own (``file_fn``)."""
     awake = fully_awake(awake_fn)
     out: list[str] = []
+    shared: list[tuple[str, Path, str, str]] = []
+    status_fn = board_status or _board_status
     for slug, path in boards:
         try:
-            tid = _check_board(slug, path, now, wall, file_fn or report, board_status or _board_status, awake)
+            tid = _check_board(slug, path, now, wall, file_fn or report, status_fn, awake, shared)
             if tid:
                 out.append(tid)
         except Exception:  # health: allow BLE001 -- an alert must never break the dispatcher tick
             log.warning("kanban sync: replica freshness check failed for %s", slug, exc_info=True)
+    try:
+        tid = _host_incident(shared, status_fn, host_fn)
+        if tid:
+            out.append(tid)
+    except Exception:  # health: allow BLE001 -- an alert must never break the dispatcher tick
+        log.warning("kanban sync: host replica incident failed for %s", [s for s, *_ in shared], exc_info=True)
     return out
+
+
+_HOST_REC: list[Optional[dict]] = [None]  # this process's open host incident: {"boards": [...]}
+
+
+def _host_incident(shared: list[tuple[str, Path, str, str]], board_status,
+                   host_fn: Optional[Callable[..., Optional[str]]]) -> Optional[str]:
+    """Fold the boards that came due with a transport cause into the host incident (kanban_sync_host_outage)."""
+    from hermes_cli import kanban_sync_host_outage as host_outage
+    boot = _boot_id()
+    kept = _load_memo().get(_HOST)
+    rec = _HOST_REC[0]
+    if rec is None and isinstance(kept, dict) and boot is not None and kept.get("boot") == boot \
+            and isinstance(kept.get("boards"), list):
+        rec = {"boards": [str(b) for b in kept["boards"]]}  # a restarted gateway keeps the same host incident
+    if rec is not None:
+        with _LOCK:
+            still = [b for b in rec["boards"] if (s := _SEEN.get(b)) is not None and s.open]
+        if not still:  # every member's replica reached the head again (or left sync): the incident is over
+            log.info("kanban sync: host replica incident over (%s)", ", ".join(rec["boards"]))
+            rec = None
+    if shared:
+        entries = [(slug, detail, _frozen_text(slug, path, board_status)) for slug, path, detail, _c in shared]
+        cause = "dns" if any(c == "dns" for *_x, c in shared) else "network"
+        host_fn = host_fn or host_outage.report
+        tid = host_fn(entries, fresh=rec is None, cause=cause)
+        rec = {"boards": sorted(set(rec["boards"] if rec else []) | {s for s, *_x in shared})}
+    else:
+        tid = None
+    _HOST_REC[0] = rec
+    if not shared and (rec is not None or kept is None):
+        return tid  # nothing new to record
+
+    def update(memo: dict[str, Any]) -> None:
+        if rec is None or boot is None:
+            memo.pop(_HOST, None)
+        else:
+            memo[_HOST] = {"boards": rec["boards"], "boot": boot}
+
+    _save_memo(update)
+    return tid
 
 
 def fully_awake(awake_fn: Optional[Callable[[], bool]] = None) -> bool:
@@ -239,9 +299,27 @@ def _remember(slug: str, seen: Optional[_Seen], now: float) -> None:
     _save_memo(update)
 
 
+def _archived(slug: str) -> bool:
+    """The board was archived (``board.json`` tombstone ``archived: true``, as ``kanban boards`` writes it): no
+    replica alarm, since nobody works it. Unreadable metadata reads not archived, so the alarm stays on."""
+    from hermes_cli import kanban_db as kb
+    try:
+        return bool(kb.read_board_metadata(slug).get("archived"))
+    except Exception:  # health: allow BLE001 -- unknown metadata must keep the alarm, not silence it
+        return False
+
+
+def _shared_cause(rnd: Optional[_Round], now: float) -> Optional[str]:
+    """The host-to-Board transport cause of a recent failed round (None: another or no cause, or no recent round,
+    e.g. a dead loop, which stays the board's own incident)."""
+    if rnd is None or not rnd.error or not rnd.cause or now - rnd.mono >= NO_ROUND_S:
+        return None
+    return rnd.cause
+
+
 def _check_board(slug: str, path: Path, now: float, wall: Callable[[], float], file_fn, board_status,
-                 awake: bool = True) -> Optional[str]:
-    if _mode(path) not in ("primary", "shadow"):
+                 awake: bool = True, shared: Optional[list] = None) -> Optional[str]:
+    if _mode(path) not in ("primary", "shadow") or _archived(slug):
         with _LOCK:
             known = _SEEN.pop(slug, None)  # detached or unsynced: nothing to judge, and a later attach starts afresh
         if known is not None or slug in _load_memo():
@@ -276,6 +354,10 @@ def _check_board(slug: str, path: Path, now: float, wall: Callable[[], float], f
     if not due:
         return None
     detail = _detail(slug, path, seen, elapsed, rnd, now, wall())
+    cause = _shared_cause(rnd, now)
+    if cause is not None and shared is not None:
+        shared.append((slug, path, detail, cause))  # one host card for every board this tick (check)
+        return None
     return file_fn(slug, detail, _body(slug, path, detail, board_status))
 
 
@@ -370,7 +452,8 @@ def _board_status(board: str, ids: list[str]) -> dict[str, str]:
     return out
 
 
-def _body(slug: str, path: Path, detail: str, board_status) -> str:
+def _frozen_text(slug: str, path: Path, board_status) -> str:
+    """The cards homed on ``slug`` that wait on a remote parent, each with its parent's status."""
     frozen: list = []
     try:
         frozen = frozen_children(path)
@@ -388,11 +471,15 @@ def _body(slug: str, path: Path, detail: str, board_status) -> str:
             else:
                 where = f"{mirrored or 'unknown'} (local mirror, may be stale)"
             lines.append(f"- `{child}` ({status}) waits on remote parent `{parent}`: {where}")
-    frozen_text = ("Cards homed here that wait on a remote parent (nothing promotes them while this replica is "
-                   "stale; after 10 min the home may block them parent_missing). Re-place each card's next step on "
-                   "a worker, following kanban-orchestrator references/stuck-card-recovery.md item 3 (precedent: "
-                   "t_01a1d42acdce8e23):\n" + "\n".join(lines) if lines else
-                   "No card homed here waits on a remote parent.")
+    return ("Cards homed here that wait on a remote parent (nothing promotes them while this replica is "
+            "stale; after 10 min the home may block them parent_missing). Re-place each card's next step on "
+            "a worker, following kanban-orchestrator references/stuck-card-recovery.md item 3 (precedent: "
+            "t_01a1d42acdce8e23):\n" + "\n".join(lines) if lines else
+            "No card homed here waits on a remote parent.")
+
+
+def _body(slug: str, path: Path, detail: str, board_status) -> str:
+    frozen_text = _frozen_text(slug, path, board_status)
     return (
         "This host's replica of a synced board has not reached the Board's feed head for over 20 awake minutes, "
         "so remote parents, missing-parent checks and ready notices read an old copy (and since #1931 they wait "
@@ -417,3 +504,4 @@ def reset() -> None:
         _SEEN.clear()
         _ROUNDS.clear()
     _TELEMETRY_AT.clear()
+    _HOST_REC[0] = None

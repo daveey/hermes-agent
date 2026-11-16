@@ -335,7 +335,7 @@ def test_a_round_a_tick_holds_off_is_skipped_not_failed_and_retried_shortly(monk
     finished: list = []
     real_finished = kanban_sync_work.SyncWork.finished
     monkeypatch.setattr(kanban_sync_work.SyncWork, "finished",
-                        lambda self, board, ok: finished.append((board, ok)) or real_finished(self, board, ok))
+                        lambda self, board, ok, now=None: finished.append((board, ok)) or real_finished(self, board, ok, now))
 
     def sync_board(slug, path, *args):
         rounds[-1].append(slug)

@@ -231,22 +231,23 @@ def _check_outbox(boards: list[tuple[str, Path]], mono, file_fn, age, awake=True
 
 
 def report(slug: str, detail: str, *, key: str = KEY, author: str = AUTHOR, title: Optional[str] = None,
-           body: Optional[str] = None, what: str = "outbox stalled") -> Optional[str]:
+           body: Optional[str] = None, what: str = "outbox stalled", comment: Optional[str] = None) -> Optional[str]:
     """Open or comment the stalled-outbox card on the default board (or, with ``key``/``author``/``title``/
-    ``body``, another alarm's card on the same one-card-per-incident path). Best effort: never raises."""
+    ``body``, another alarm's card on the same one-card-per-incident path). ``comment``: posted verbatim on an open
+    card and never throttled (news the card must carry, e.g. a board joining a host incident). Never raises."""
     try:
         from hermes_cli import kanban_db as kb
         from hermes_cli import kanban_db_connect as kbc
         log.warning("kanban sync: %s: %s", what, detail)
         with kbc.connect_closing(kb.kanban_home() / "kanban.db") as conn:
-            return _report(conn, slug, detail, key=key, author=author, title=title, body=body)
+            return _report(conn, slug, detail, key=key, author=author, title=title, body=body, comment=comment)
     except Exception:  # health: allow BLE001 -- runs on the dispatcher tick
         log.warning("kanban: could not file the %s card (%s)", what, detail, exc_info=True)
         return None
 
 
 def _report(conn: sqlite3.Connection, slug: str, detail: str, *, key: str = KEY, author: str = AUTHOR,
-            title: Optional[str] = None, body: Optional[str] = None) -> str:
+            title: Optional[str] = None, body: Optional[str] = None, comment: Optional[str] = None) -> str:
     from hermes_cli import kanban_db as kb
     key = f"{key}:{slug}"
     row = conn.execute(
@@ -254,6 +255,9 @@ def _report(conn: sqlite3.Connection, slug: str, detail: str, *, key: str = KEY,
         "ORDER BY status IN ('done', 'failed', 'cancelled'), created_at DESC, rowid DESC LIMIT 1", (key,),
     ).fetchone()
     if row and row[1] not in ("done", "failed", "cancelled"):
+        if comment is not None:
+            kb.add_comment(conn, row[0], author, comment)
+            return row[0]
         recent = conn.execute("SELECT 1 FROM task_comments WHERE task_id = ? AND author = ? AND created_at >= ? LIMIT 1",
                               (row[0], author, int(time.time()) - _COMMENT_EVERY)).fetchone()
         if not recent:
