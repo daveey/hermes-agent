@@ -211,6 +211,24 @@ def _shell_inputs(arguments: list[str], shell: str) -> tuple[str, Optional[str]]
 # a longer chain fails closed.
 _MAX_SSH_HOPS = 4
 
+# Past the first hop (a further ssh hop or a shell's -c payload) stdin counts as data only when
+# every segment runs one of these: interpreters and filters that never hand stdin to a shell, and
+# commands that do not read stdin at all. Anything else (`source /dev/stdin`, `eval bash`,
+# `busybox sh`, `flock l bash`, `docker exec -i c bash`, `xargs bash`) fails closed, as every
+# multi-hop chain did before it was followed (review 5914322131 B1). Not listed on purpose:
+# `tar`/`sort`/`find` (options that run commands), launchers and wrappers that are not peeled.
+_PYTHON_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?")
+_HOP_DATA_COMMANDS = frozenset({
+    "cat", "tee", "wc", "head", "tail", "base64", "gzip", "gunzip", "zcat", "xz", "unxz",
+    "sha256sum", "sha1sum", "md5sum", "dd", "xxd", "jq", "grep", "cut", "tr", "uniq",
+    # read no stdin
+    "cd", "true", ":", "echo", "printf", "export", "umask", "date", "hostname", "sleep",
+})
+
+
+def _hop_data_command(name: Optional[str]) -> bool:
+    return name is not None and (name in _HOP_DATA_COMMANDS or bool(_PYTHON_RE.fullmatch(name)))
+
 
 def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
     """Whether an ssh remote command (its words, as ssh joins them) hands stdin to a shell:
@@ -218,7 +236,9 @@ def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
     further hop whose own input is such a shell (another ``ssh``), or a user switch (``sudo``,
     ``su``, ``runuser``, ``doas``: not modelled, fail closed).
     A further ssh hop is followed to its remote command, so a chain ending in a data consumer
-    (``python3 -``, ``cat``) reads the file as data (self-heal lifecycleguard-6d64a5ee3d48)."""
+    (``python3 -``, ``cat``) reads the file as data (self-heal lifecycleguard-6d64a5ee3d48).
+    Past the first hop that is an allowlist (``_HOP_DATA_COMMANDS``): any other command, a
+    shell's script operand included (``bash /dev/stdin``), counts as a stdin shell."""
     if not remote:
         return True
     if hops > _MAX_SSH_HOPS:
@@ -239,11 +259,15 @@ def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
             # `sh -c "exec sh"`; review 5911756789 B1), under the same depth cap.
             if kind == "payload" and _remote_reads_stdin([value or ""], hops + 1):
                 return True
+            if kind == "script" and hops > 1:
+                return True  # `bash /dev/stdin`, `sh -- -`: not modelled past the first hop
             continue
         if _nested_shell_input(view, hops=hops + 1) is not None:
             return True  # an ssh hop feeding a shell, or a user switch's shell (`su -l`, `sudo -i`)
         if name in ("sudo", "su", "runuser", "doas"):
             return True  # a user switch on the remote side: fail closed rather than model it
+        if hops > 1 and index is not None and name != "ssh" and not _hop_data_command(name):
+            return True  # past the first hop only known data consumers read stdin as data
     return False
 
 

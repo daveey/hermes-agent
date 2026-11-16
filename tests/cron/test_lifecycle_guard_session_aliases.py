@@ -832,6 +832,10 @@ _MULTI_HOP_DATA_CONSUMERS = [
     "ssh h1 \"ssh h2 'bash -c \\\"python3 -\\\"'\" < {py}",
     "ssh h1 'bash -c \"exec python3 -\"' < {py}",
     "ssh h1 \"ssh h2 python3 -\" <<'PY'\n" + _PY_TAKEOVER + "PY",
+    # Allowlisted consumers after commands that never read stdin.
+    "ssh h1 \"ssh h2 'cd /tmp && python3 -'\" < {py}",
+    "ssh h1 'ssh h2 python3.12 -' < {py}",
+    "ssh h1 'ssh h2 tee /tmp/takeover.py' < {py}",
 ]
 
 
@@ -878,6 +882,26 @@ _MULTI_HOP_SHELLS = [
     "ssh h1 \"ssh h2 'bash -c \\\"bash -c sh\\\"'\" < {script}",
     "ssh h1 \"ssh h2 'sh -c \\\"ssh h3\\\"'\" < {script}",
     "ssh h1 \"ssh h2 'bash -c \\\"python3 -; sh\\\"'\" < {script}",
+    # A followed hop hands stdin to a command only when it is a known data consumer; anything
+    # else (scripts on /dev/stdin, builtins that run code, launchers) is a shell reader
+    # (review 5914322131 B1: base refused every one of these, so they must stay refused).
+    "ssh h1 'ssh h2 bash /dev/stdin' < {script}",
+    "ssh h1 'ssh h2 sh /dev/stdin' < {script}",
+    "ssh h1 'ssh h2 source /dev/stdin' < {script}",
+    "ssh h1 'ssh h2 . /dev/stdin' < {script}",
+    "ssh h1 'ssh h2 eval bash' < {script}",
+    "ssh h1 'ssh h2 exec -a x bash' < {script}",
+    "ssh h1 'ssh h2 busybox sh' < {script}",
+    "ssh h1 \"ssh h2 'bash -c \\\"source /dev/stdin\\\"'\" < {script}",
+    "ssh h1 \"bash -c 'source /dev/stdin'\" < {script}",
+    "ssh h1 'ssh h2 flock /tmp/l bash' < {script}",
+    "ssh h1 'ssh h2 chroot / bash' < {script}",
+    "ssh h1 'ssh h2 sg grp bash' < {script}",
+    "ssh h1 \"ssh h2 'script -qc bash /dev/null'\" < {script}",
+    "ssh h1 'ssh h2 docker exec -i c bash' < {script}",
+    "ssh h1 'ssh h2 kubectl exec -i p -- bash' < {script}",
+    "ssh h1 'ssh h2 xargs -0 bash' < {script}",
+    "ssh h1 \"ssh h2 'cd /tmp && bash'\" < {script}",
 ]
 
 
