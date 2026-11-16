@@ -40,7 +40,8 @@ def test_quiet_episode_and_expired_timer(listener):
     state = wc.get_state(conn, tid)
     assert state["episode_first_at"] == now
     assert state["episode_checks"] == 2
-    assert kc._wake_parks(conn, now + 49 * 3600) == ([], None)
+    assert kc._wake_parks(conn, now + 49 * 3600) == (
+        [], now + 49 * 3600 + wc.ALIVE_EVERY + 2 * state["every"] + wc.SILENT_GRACE + 1)
     assert kc.park_state(conn, tid) == park
 
 
@@ -81,6 +82,7 @@ def test_removal_invalidates_quiet_sweep_memo(listener, monkeypatch):
     monkeypatch.setattr(wc, "run_due_wake_checks", lambda *a, **kw: None)
     monkeypatch.setattr(registry, "maybe_refresh_async", lambda: None)
     now = int(time.time()) + 49 * 3600
+    apply(listener, now)
     assert kc.wake_due_continuations(conn, now=now) == []
     assert kc.wake_due_continuations(conn, now=now) == []
     policy.clear()

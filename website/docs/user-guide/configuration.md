@@ -33,7 +33,10 @@ with no inferred producer or effective shared `blocker_id`. Card/CI probes do no
 Malformed configuration fails closed to ordinary wake/re-park guards.
 
 Eligible clean exit-1 probes retain their episode age and check counts but do not
-wake merely for age; their timer backstop is suppressed without renewing its timestamp.
+wake merely for age. Their timer backstop is suppressed without renewing its timestamp
+only while a current clean local result or matching remote heartbeat proves recent
+probe activity. The timer scan rechecks at that observation's silence deadline;
+registration alone, stale results and unrelated heartbeats do not defer an overdue timer.
 Only same-premise re-park escalation is exempt: repeated successful-probe/re-park
 cycles still escalate. Exit 0, broken probes, lost/silent probe recovery and normal
 probe cadence remain unchanged. Removing the entry reactivates ordinary guards,

@@ -348,8 +348,10 @@ def _wake_parks(conn: sqlite3.Connection, now: Optional[int], passive_policy=Non
                 pending.append(int(info["wake_at"]) if info and info.get("wake_at") is not None else now)
             continue
         from hermes_cli import kanban_passive_intake as passive
-        if passive.current(conn, tid, payload.get("wake_check"), policy=passive_policy, park=park):
-            continue  # no renewed timestamp or exempt timer in the memo deadline
+        quiet_until = passive.quiet_until(conn, tid, park, now, policy=passive_policy)
+        if quiet_until is not None:
+            pending.append(quiet_until)
+            continue  # recheck custody even if no board content changes
         wake_at = payload["wake_at"]
         pending.append(int(wake_at))  # a skipped or stale wake stays due: the next tick retries it
         if wake_at > now:

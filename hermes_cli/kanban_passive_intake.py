@@ -53,3 +53,32 @@ def current(conn, task_id, cmd, *, policy=None, park=None) -> bool:
     if not park["timed"] or payload.get("wake_check") != cmd:
         return False
     return eligible(task_id, cmd, payload.get("awaiting"), payload.get("blocker_id"), policy=policy)
+
+
+def quiet_until(conn, task_id, park, now, *, policy=None) -> int | None:
+    """Bound timer deferral by observed custody, not by a registration alone."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_wake_check as wc
+
+    payload = park["payload"]
+    cmd = payload.get("wake_check")
+    if not current(conn, task_id, cmd, policy=policy, park=park):
+        return None
+    host, own = payload.get("probe_host"), wc.own_gateway(conn)
+    every = wc.normalize_every(payload.get("check_every"))
+    if host and own and host != own:
+        rows = conn.execute(
+            "SELECT payload, created_at FROM task_events WHERE task_id = ? AND id > ? AND kind = ?",
+            (task_id, park["event_id"], wc.ALIVE_EVENT)).fetchall()
+        observed = max((int(at) for raw, at in rows
+                        if (note := kb._json_dict(raw)).get("host") == host
+                        and note.get("wake_check") == cmd), default=0)
+    else:
+        state = wc.get_state(conn, task_id)
+        if not state or state["cmd"] != cmd or state["last_rc"] != 1 or state["fails"]:
+            return None
+        observed = int(state["last_at"] or 0)
+    if observed < park["parked_at"] or not observed:
+        return None
+    deadline = observed + wc.ALIVE_EVERY + 2 * every + wc.SILENT_GRACE + 1
+    return deadline if deadline > now else None
