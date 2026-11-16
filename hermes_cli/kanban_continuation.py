@@ -266,10 +266,13 @@ def park_state(conn: sqlite3.Connection, task_id: str) -> dict:
     if event is None or _park_spent(conn, task_id, int(event[3]), event[4]):
         # No park, or only a spent one: a feed page can bring a remote run's ``scheduled`` row before the
         # ``continued`` event that carries its wake (t_01a1df6a505bf42f). [daveey]
+        from hermes_cli.kanban_restore_chat_subs import restored_at
+        restored = restored_at(conn, task_id)
         last = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ?", (task_id,)).fetchone()
-        parked_at = int(last[0]) if last and last[0] else int(time.time())
+        parked_at = max(int(last[0] or 0), restored or 0) if last else restored
+        parked_at = parked_at or int(time.time())
         return {"payload": {}, "parked_at": parked_at, "timed": False, "event_id": None,
-                "superseded": event is not None}
+                "superseded": event is not None or restored is not None}
     timed = pending_wake_payload(event[0], event[1])
     return {"payload": timed if timed is not None else kb._json_dict(event[1]),
             "parked_at": int(event[2]), "timed": timed is not None, "event_id": int(event[3]),

@@ -53,6 +53,11 @@ def latest_block_reason(conn: sqlite3.Connection, task_id: str) -> str | None:
 def has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """Explicit blocks and policy breakers need resolution, not a higher retry limit."""
     from hermes_cli.kanban_db import _json_dict
+    # Task rows arrive before their event history during rehome/snapshot imports.
+    # An outstanding ask is authoritative on the row; unblock_task clears it.
+    task = conn.execute("SELECT human_request FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if task and task["human_request"]:
+        return True
     row = conn.execute(
         "SELECT kind FROM task_events "
         "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "

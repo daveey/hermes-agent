@@ -67,6 +67,15 @@ def note_restored_task(conn: sqlite3.Connection, task_id: str, created_on: Any, 
 _NAME = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 
 
+def restored_at(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    """Local import time, not a historical event clock; absent on ordinary local cards."""
+    if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_restored_cards'").fetchone():
+        return None
+    row = conn.execute("SELECT restored_at FROM kanban_restored_cards WHERE task_id = ?", (task_id,)).fetchone()
+    return int(row[0]) if row else None
+
+
 def _safe(part: Any) -> bool:
     """One ``<gw>/<profile>/<session>`` segment the hermes-hub collector accepts (its ``parse_shepherd``)."""
     return isinstance(part, str) and bool(_NAME.fullmatch(part))
