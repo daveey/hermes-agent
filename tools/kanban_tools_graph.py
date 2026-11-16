@@ -32,6 +32,20 @@ def handle_link(args: dict, **kw) -> str:
             refused = kre.refusal(conn, "kanban_link", own)
             if refused:
                 return refused
+        # Graph tools carry two endpoints, not the task_id checked by other writes.
+        from hermes_cli import kanban_foreign_card as kfc
+        from tools.registry import tool_error
+        for endpoint in (child_id, parent_id):
+            foreign = kfc.refusal(conn, str(endpoint))
+            if foreign:
+                return tool_error(
+                    foreign + " Do not retry this local link or import a replica card. "
+                    "Read both endpoints with cross_task to verify their current owners and existing edges. "
+                    "If the child is local and still needs a remote parent, park the child with "
+                    "kind='time', awaiting={kind:'card', ref:'" + str(parent_id) + "', "
+                    "gateway:'<verified-parent-owner>'}. If the child is remote, ask its owner "
+                    "by comment to arrange the dependency; do not park a different card here.",
+                    rejection=kfc.REJECTION)
         gated = kb.link_tasks(
             conn, parent_id=parent_id, child_id=child_id,
             expected_child_run_id=_worker_run_id(str(child_id)))
