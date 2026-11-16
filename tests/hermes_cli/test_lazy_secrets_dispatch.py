@@ -205,22 +205,19 @@ print('PASS: main() update --check path never loaded cryptography._rust')
 sys.exit(0)
 """
         repo_root = Path(__file__).parent.parent.parent
-        probe = repo_root / "_test_main_update_crypto_probe.py"
-        probe.write_text(script)
-        try:
-            result = subprocess.run(
-                [sys.executable, probe.name],
-                capture_output=True,
-                text=True,
-                cwd=str(repo_root),
-                timeout=60,
-                check=False,
-            )
-            assert result.returncode == 0, (
-                f"Decisive main()-level probe failed:\n"
-                f"stdout: {result.stdout}\n"
-                f"stderr: {result.stderr}"
-            )
-            assert "PASS" in result.stdout
-        finally:
-            probe.unlink(missing_ok=True)
+        # -c keeps the checkout first on sys.path without publishing a temporary
+        # product .py file that parallel ownership scans can inventory then lose.
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"Decisive main()-level probe failed:\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+        assert "PASS" in result.stdout
