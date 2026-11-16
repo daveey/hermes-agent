@@ -246,9 +246,34 @@ def _fan_out_changes(conn: sqlite3.Connection, _kb: Any, session_db: Callable, s
     return out
 
 
-# The input key of the last remote pass that left every chat acknowledged. A pass over the same inputs reads the same
-# snapshot.
+# What the last remote pass that left every chat acknowledged was computed over: ``(base, ledger digest, {board:
+# per-task change cursor}, {board: task ids the pass projected})``. A pass whose projection inputs are unchanged reads
+# the same snapshot.
 _remote_memo: Optional[tuple] = None
+
+
+def _remote_inputs_key() -> Optional[tuple]:
+    """``(base, ledger cards)`` of everything ``activity._remote_cards`` reads for the replica projection that
+    ``_remote_change_pass`` keeps (card key, status, chat, origin chat), or None when any of it cannot be vouched
+    for: this gateway and profile, the synced boards, and the origin-ledger projection's cards. The replica's own
+    content is judged per board by ``_remote_boards_quiet`` (a pull that moves only ``pulled_at``, or writes a task
+    no linked chat of this origin names, is not a change: t_01a1dfa94f2251cd)."""
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_session_activity as activity
+    from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli.profiles import get_active_profile_name
+
+    if sync.sync_config().get("links_reader") != "replica":
+        return None
+    try:
+        gateway = ksc.load_identity().gateway
+    except ksc.SyncUnavailable:
+        return None
+    if not gateway:
+        return None
+    boards = tuple((slug, str(ksc.shadow_path(slug))) for slug, _path in ksc.board_paths())
+    return (gateway, get_active_profile_name(), boards), activity._remote_links(stale_ok=True)
+
 
 # The ledger-card fields ``kanban_chat_links.replica_cards`` reads (owner labels, profile-board cards, cold-start
 # fallback) and the pass keeps (key, status, chat, origin chat, unfinished).
@@ -264,35 +289,93 @@ def _ledger_content_key(cards: list[dict]) -> str:
     return hashlib.blake2b("\n".join(rows).encode(), digest_size=16).hexdigest()
 
 
-def _remote_inputs_key() -> Optional[tuple]:
-    """Everything ``activity._remote_cards`` reads for the replica projection that ``_remote_change_pass`` keeps
-    (card key, status, chat, origin chat), or None when any of it cannot be vouched for. That is each synced board's
-    replica content revision (trigger-backed only: a stat fallback never vouches), the origin-ledger projection's
-    content (``_ledger_content_key``), this gateway and profile, and the reader mode. A pull that moves only
-    ``pulled_at`` changes none of them (t_01a1dfa94f2251cd)."""
-    from hermes_cli import kanban_db_sync as sync
-    from hermes_cli import kanban_session_activity as activity
-    from hermes_cli import kanban_sync_client as ksc
-    from hermes_cli.kanban_activity_revision import SHADOW_TABLES, is_revision
-    from hermes_cli.profiles import get_active_profile_name
+def _poll_boards(base: tuple, previous: Optional[dict]) -> Optional[dict]:
+    """``{board: (task ids changed since the memo's cursor or FULL, next cursor)}`` over the synced replicas, or
+    None when any is unreadable or cannot vouch for a cursor (the per-task change table)."""
+    from hermes_cli.kanban_activity_revision import SHADOW_TABLES
+    from hermes_cli.kanban_session_activity import cached_ro
+    from hermes_cli.kanban_task_change import changed_since
 
-    if sync.sync_config().get("links_reader") != "replica":
-        return None
-    try:
-        gateway = ksc.load_identity().gateway
-    except ksc.SyncUnavailable:
-        return None
-    if not gateway:
-        return None
-    boards = []
-    for slug, _path in ksc.board_paths():
-        path = ksc.shadow_path(slug)
-        content = activity._board_content_key(path, SHADOW_TABLES)
-        if not is_revision(content):
+    out = {}
+    for slug, path in base[2]:
+        try:
+            with cached_ro(Path(path), busy_budget=0) as conn:
+                changed, cursor = changed_since(conn, (previous or {}).get(slug), tables=SHADOW_TABLES)
+        except Exception:  # health: allow BLE001 -- unknown is hot
             return None
-        boards.append((slug, str(path), content))
-    ledger = _ledger_content_key(activity._remote_links(stale_ok=True))
-    return (gateway, get_active_profile_name(), tuple(boards)), ledger
+        if cursor is None:
+            return None
+        out[slug] = (changed, cursor)
+    return out
+
+
+def _task_linked(conn: sqlite3.Connection, ids: list, gateway: str, profile: str) -> bool:
+    """Any of these tasks has a chat link of this origin (released or not): a link written, moved or dropped."""
+    for start in range(0, len(ids), 400):
+        chunk = ids[start:start + 400]
+        marks = ",".join("?" * len(chunk))
+        if conn.execute(f"SELECT 1 FROM task_chat_links WHERE task_id IN ({marks}) AND chat_gateway = ? "
+                        "AND chat_profile = ? LIMIT 1", (*chunk, gateway, profile)).fetchone() is not None:
+            return True
+    return False
+
+
+def _task_prints(conn: sqlite3.Connection, ids: list) -> dict:
+    """``{task id: (status, its chat links)}`` for these tasks (absent tasks are absent)."""
+    out: dict = {}
+    for start in range(0, len(ids), 400):
+        chunk = ids[start:start + 400]
+        marks = ",".join("?" * len(chunk))
+        for tid, status, owner in conn.execute(f"SELECT id, status, created_on FROM tasks WHERE id IN ({marks})", chunk):
+            out[tid] = [(status, owner), []]
+        for row in conn.execute(f"SELECT task_id, chat_gateway, chat_profile, chat_session, kind, released "
+                                f"FROM task_chat_links WHERE task_id IN ({marks})", chunk):
+            if row[0] in out:
+                out[row[0]][1].append(tuple(row[1:]))
+    return {tid: (v[0], tuple(sorted(map(repr, v[1])))) for tid, v in out.items()}
+
+
+def _known_prints(base: tuple, known: dict) -> Optional[dict]:
+    """``{board: {task id: print}}`` for the projected cards, or None when a board cannot be read."""
+    from hermes_cli.kanban_session_activity import cached_ro
+    out = {}
+    for slug, path in base[2]:
+        try:
+            with cached_ro(Path(path), busy_budget=0) as conn:
+                ids = sorted(known.get(slug, ()))
+                prints = _task_prints(conn, ids)
+                out[slug] = {tid: prints.get(tid) for tid in ids}
+        except Exception:  # health: allow BLE001 -- unknown is hot
+            return None
+    return out
+
+
+def _remote_boards_quiet(base: tuple, polled: dict, known: dict) -> bool:
+    """True when every task written since the memo is a projected card whose status and chat links are what the
+    projection saw (a heartbeat, a comment, a run row), or a task no chat of this origin links."""
+    from hermes_cli.kanban_session_activity import cached_ro
+    from hermes_cli.kanban_task_change import FULL
+
+    for slug, path in base[2]:
+        changed = polled[slug][0]
+        if changed is FULL:
+            return False
+        if not changed:
+            continue
+        seen = known.get(slug, {})
+        try:
+            with cached_ro(Path(path), busy_budget=0) as conn:
+                mine = sorted(changed & seen.keys())
+                if mine:
+                    now = _task_prints(conn, mine)
+                    if any(now.get(tid) != seen[tid] for tid in mine):
+                        return False
+                rest = sorted(changed - seen.keys())
+                if rest and _task_linked(conn, rest, base[0], base[1]):
+                    return False
+        except Exception:  # health: allow BLE001 -- unknown is hot
+            return False
+    return True
 
 
 def _remote_change_pass(session_db: Callable) -> list[dict]:
@@ -303,7 +386,20 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
     except Exception:  # health: allow BLE001 -- an unreadable input is unknown: run the pass
         logger.debug("remote card-change inputs unavailable", exc_info=True)
         inputs = None
-    if inputs is not None and inputs == _remote_memo:
+    polled = None
+    if inputs is not None:
+        try:
+            memo = _remote_memo
+            polled = _poll_boards(inputs[0], memo[2] if memo is not None and memo[0] == inputs[0] else None)
+        except Exception:  # health: allow BLE001 -- unknown is hot
+            logger.debug("remote card-change boards unavailable", exc_info=True)
+            polled = None
+        if polled is None:
+            inputs = None
+    memo = _remote_memo
+    if inputs is not None and memo is not None and memo[0] == inputs[0] and memo[1] == _ledger_content_key(inputs[1]) \
+            and _remote_boards_quiet(inputs[0], polled, memo[3]):
+        _remote_memo = (memo[0], memo[1], {slug: polled[slug][1] for slug in polled}, memo[3])
         return []
     _remote_memo = None
     from hermes_cli import kanban_session_activity as activity
@@ -311,7 +407,9 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
     from tui_gateway import notice_fanout_state as state
     from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES
     current: dict[str, set[tuple[str, str]]] = {}
+    known: dict[str, set[str]] = {}
     for card in activity._remote_cards(None, activity.LISTED_STATUSES, stale_ok=True):
+        known.setdefault(str(card.get("board")), set()).add(str(card.get("id")))
         status = card.get("status")
         if status not in activity.LISTED_STATUSES and not (status in PENDING_RELEASE_STATUSES and card.get("unfinished")):
             continue
@@ -343,7 +441,12 @@ def _remote_change_pass(session_db: Callable) -> list[dict]:
                     "status": None, "skipped": skipped, "source": "remote"})
     state.ack_remote(acked)
     if inputs is not None and all(previous.get(c) == snapshot.get(c) or c in acked for c in previous.keys() | snapshot.keys()):
-        _remote_memo = inputs
+        # Only certify a projection if its cursor stayed still THROUGH fingerprint collection. A later
+        # fingerprint must not describe a write the projection never saw.
+        prints = _known_prints(inputs[0], known)
+        after = _poll_boards(inputs[0], {slug: polled[slug][1] for slug in polled})
+        if prints is not None and after is not None and all(after[slug][1] == polled[slug][1] for slug in polled):
+            _remote_memo = (inputs[0], _ledger_content_key(inputs[1]), {slug: polled[slug][1] for slug in polled}, prints)
     return out
 
 

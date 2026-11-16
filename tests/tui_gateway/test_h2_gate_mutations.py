@@ -346,8 +346,10 @@ def test_remote_pending_inputs_stay_hot(monkeypatch, tmp_path):
     base = gates.probe('remote_notices')
     assert not base.pending and base.key[1] == 'me' and isinstance(base.key[2], str)  # a content digest, not the replica counter
     monkeypatch.setattr(remote, '_sweep_snapshot', lambda p, me: ([{'key': 'a'}], {}))
+    gates._remote_memo.clear()  # the swept cards follow the replica's rows: this mock stands for a write
     assert gates.probe('remote_notices').pending  # even delivered terminal cards are hot
     monkeypatch.setattr(remote, '_sweep_snapshot', lambda p, me: ([], {}))
+    gates._remote_memo.clear()
     remote._woken[('x',)] = {}
     try:
         assert gates.probe('remote_notices').pending  # a woken running flag is not a DB commit
@@ -388,8 +390,10 @@ def test_remote_each_key_component_moves_the_key_independently(monkeypatch, tmp_
     state['fp'] = ('fp', 2)  # the replica's commit counter churns on every sync: it is NOT a key component
     assert gates.probe('remote_notices').key == base.key
     monkeypatch.setattr(remote, '_sweep_snapshot', lambda p, me: ([('gw', 'k', {'status': 'done'}, [])], {}))
+    gates._remote_memo.clear()  # the swept cards follow the replica's rows: this mock stands for a write
     assert gates.probe('remote_notices').key != base.key  # a swept card's content moves it
     monkeypatch.setattr(remote, '_sweep_snapshot', lambda p, me: ([], {}))
+    gates._remote_memo.clear()
     state['fp'] = ('fp', 1)
     state['me'] = 'you'
     assert gates.probe('remote_notices').key != base.key

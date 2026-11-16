@@ -1,5 +1,6 @@
 """H2/C11: exercise the production host boundary, not delivery return values."""
 import contextlib
+import time
 
 import pytest
 
@@ -391,6 +392,9 @@ def remote_host(monkeypatch, tmp_path):
     tasks = [(1, 1, 1)]
     monkeypatch.setattr(gates, '_replica_tasks_signature', lambda path: tasks[0])
     stamp.append(tasks)
+    rows = []  # task rows "written" since the last signature: (gw, key, task)
+    monkeypatch.setattr(gates, '_replica_rows_after', lambda path, seq: list(rows))
+    stamp.append(rows)
     gates.reset_for_tests()
     remote._ledger(ledger).close()
 
@@ -419,13 +423,88 @@ def test_remote_probe_key_ignores_unrelated_replica_commits(remote_host):
 
 
 def test_remote_probe_key_changes_with_the_card_state_and_the_ledger(remote_host):
-    gates, cards, _, settle = remote_host
+    gates, cards, stamp, settle = remote_host
     settle()
     first = gates._remote()
     settle(session='chat-b')
     assert gates._remote().key != first.key
     cards[0] = (*cards[0][:2], {'id': 't_1', 'status': 'blocked', 'blocked_at': 200.0}, cards[0][3])
+    stamp[1][0] = (1, 2, 2)  # the owner's write of that state
+    stamp[2][:] = [('macbook', 'default/t_1', cards[0][2])]
     assert gates._remote().pending  # the new state has no settled row: it runs
+
+
+def test_remote_probe_runs_when_an_unlinked_terminal_card_arrives(remote_host):
+    """``observe`` records the first sighting of every terminal state, linked or not; skipping the pass that would
+    record it lets a later link resurrect an expired notice (review of PR #3349)."""
+    gates, _, stamp, settle = remote_host
+    settle()
+    first = gates._remote()
+    assert not first.pending
+    stamp[1][0] = (2, 2, 3)  # a task row arrived; no card the sweep owes a notice for changed
+    stamp[2][:] = [('worker-1', 'default/t_9', {'status': 'done', 'completed_at': 5.0})]
+    assert gates._remote().key != first.key
+    stamp[1][0] = (2, 3, 4)  # ... and a blocked one
+    stamp[2][:] = [('worker-1', 'default/t_8', {'status': 'blocked'})]
+    second = gates._remote()
+    assert second.key != first.key
+    stamp[1][0] = (2, 4, 5)  # ... and a request withdrawn (an archived card)
+    stamp[2][:] = [('worker-1', 'default/t_7', {'status': 'archived', 'withdrawal_notice': {'event_id': 3, 'kind': 'request_withdrawn', 'created_at': 1.0}})]
+    from hermes_cli.kanban_withdrawal_notice import envelope
+    assert envelope(stamp[2][0][2]) is not None
+    assert gates._remote().key != second.key
+
+
+def test_remote_probe_ignores_liveness_writes_to_cards_it_does_not_owe(remote_host):
+    """The hub's replica rewrites several non-terminal task rows a second (claims, heartbeats, queue notes). None of
+    them can add a terminal state to observe or change a swept card, so none moves the key (t_01a1dfa94f2251cd)."""
+    gates, _, stamp, settle = remote_host
+    settle()
+    first = gates._remote()
+    for n in range(2, 6):
+        stamp[1][0] = (1 + 0, n, n)
+        stamp[2][:] = [('worker-1', 'default/t_5', {'status': 'running'}), ('hub', 'default/t_6', {'status': 'ready'})]
+        assert gates._remote() == first
+
+
+def test_remote_probe_runs_when_a_swept_card_is_rewritten_or_unreadable(remote_host):
+    gates, _, stamp, settle = remote_host
+    settle()
+    first = gates._remote()
+    stamp[1][0] = (1, 2, 2)
+    stamp[2][:] = [('macbook', 'default/t_1', {'status': 'ready'})]  # a reopened swept card
+    assert gates._remote().key != first.key
+    again = gates._remote()
+    stamp[1][0] = (1, 3, 3)
+    stamp[2][:] = [('worker-1', 'default/t_5', None)]  # undecodable
+    assert gates._remote().key != again.key
+
+
+def test_remote_probe_runs_when_rows_vanish_or_the_sequence_moves_backwards(remote_host):
+    gates, _, stamp, settle = remote_host
+    stamp[1][0] = (5, 9, 30)
+    settle()
+    first = gates._remote()
+    stamp[1][0] = (4, 9, 29)
+    assert gates._remote().key != first.key
+    second = gates._remote()
+    stamp[1][0] = (4, 3, 12)
+    assert gates._remote().key != second.key
+    third = gates._remote()
+    stamp[1][0] = (7, 10, 40)  # three rows more but only one newer sequence
+    stamp[2][:] = [('worker-1', 'default/t_5', {'status': 'running'})]
+    assert gates._remote().key != third.key
+
+
+def test_remote_probe_unreadable_new_rows_stay_hot(remote_host, monkeypatch):
+    gates, _, stamp, settle = remote_host
+    settle()
+    assert not gates._remote().pending
+    def boom(path, seq):
+        raise OSError('replica unreadable')
+    monkeypatch.setattr(gates, '_replica_rows_after', boom)
+    stamp[1][0] = (1, 2, 2)
+    assert gates._remote().pending
 
 
 def test_remote_probe_open_chat_in_flight_claim_and_woken_stay_hot(remote_host):
@@ -446,19 +525,83 @@ def test_remote_probe_open_chat_in_flight_claim_and_woken_stay_hot(remote_host):
             remote._woken.clear()
 
 
-def test_remote_probe_runs_when_an_unlinked_terminal_card_arrives(remote_host):
-    """``observe`` records the first sighting of every terminal state, linked or not; skipping the pass that would
-    record it lets a later link resurrect an expired notice (review of PR #3349)."""
-    gates, _, stamp, settle = remote_host
-    settle()
-    first = gates._remote()
-    assert not first.pending
-    stamp[1][0] = (2, 2, 3)  # a task row arrived; no card the sweep owes a notice for changed
-    assert gates._remote().key != first.key
-
-
 def test_remote_probe_unreadable_task_signature_stays_hot(remote_host):
     gates, _, stamp, settle = remote_host
     settle()
     stamp[1][0] = None
     assert gates._remote().pending
+
+
+# --- an owed notice the sweep drops for good is not work (t_01a1dfa94f2251cd) ----------------------------------
+
+@pytest.fixture
+def observe_row(remote_host):
+    """Record this host's observation of the fixture card's state (``first_seen`` None = seeded silently)."""
+    from pathlib import Path
+
+    from hermes_cli import kanban_origin
+    from tui_gateway import kanban_remote_notices as remote
+    gates, cards, _stamp, _settle = remote_host
+
+    def put(first_seen):
+        with contextlib.closing(remote._ledger(remote.ledger_path())) as conn, conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS observations (source TEXT, ref TEXT, state TEXT, first_seen REAL, '
+                         'PRIMARY KEY(source, ref, state))')
+            conn.execute('INSERT OR REPLACE INTO observations VALUES (?,?,?,?)',
+                         (str(Path(kanban_origin._hub_db()).resolve()), 'macbook/default/t_1',
+                          remote._notice_state(cards[0][2]), first_seen))
+        gates._remote_memo.clear()
+    return remote, gates, put
+
+
+def test_remote_probe_expired_unobserved_notice_is_not_work(observe_row):
+    remote, gates, put = observe_row
+    assert gates._remote().pending  # never observed: the pass records it
+    put(None)  # seeded by the source's first snapshot: the sweep counts it stale and delivers nothing
+    assert not gates._remote().pending
+    put(time.time() - remote.LATE_MAX_S - 3600)  # first seen past the late window
+    assert not gates._remote().pending
+
+
+def test_remote_probe_late_notice_is_still_work(observe_row):
+    remote, gates, put = observe_row
+    put(time.time() - 3600)  # observed an hour ago: past FRESH_S by the card's clock? not by the arrival clock
+    assert gates._remote().pending
+    put(time.time() - remote.FRESH_S - 3600)  # observed 7 h ago, inside the 72 h late window: delivered, late
+    assert gates._remote().pending
+
+
+@pytest.mark.parametrize('field', ['ident', 'generation', 'signature'])
+def test_remote_identity_rearms_equal_aggregate_proofs(remote_host, monkeypatch, field):
+    from tui_gateway import kanban_replica_observer as observer
+    gates, _, _, settle = remote_host
+    stamp = [observer.Fingerprint('replica', (1, 2), 3, 4, (100, 200))]
+    monkeypatch.setattr(observer, 'fingerprint', lambda path: stamp[0])
+    settle()
+    before = gates._remote()
+    stamp[0] = stamp[0]._replace(**{field: (9, 9) if field != 'generation' else 9})
+    assert gates._remote().key != before.key
+
+
+def test_remote_expiry_proof_rearms_on_backward_clock(observe_row, monkeypatch):
+    remote, gates, put = observe_row
+    clock = [remote.LATE_MAX_S + 2000]
+    monkeypatch.setattr(gates.time, 'time', lambda: clock[0])
+    put(1000)
+    assert not gates._remote().pending
+    clock[0] = 2000
+    assert gates._remote().pending
+
+
+def test_remote_concurrent_replica_write_does_not_publish(remote_host, monkeypatch):
+    from tui_gateway import kanban_remote_notices as remote
+    gates, _, stamp, settle = remote_host
+    settle()
+    original = remote._sweep_snapshot
+    def racing(*args):
+        result = original(*args)
+        stamp[0] += 1
+        return result
+    monkeypatch.setattr(remote, '_sweep_snapshot', racing)
+    assert gates._remote().pending
+    assert 'inputs' not in gates._remote_memo

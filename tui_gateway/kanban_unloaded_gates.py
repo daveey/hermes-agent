@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import hashlib
 import logging
 import math
+from pathlib import Path
 import time
 
 from hermes_cli import loop_accounting as accounting
@@ -52,6 +53,8 @@ _killed_empty_keys: dict[object, tuple] = {}
 def reset_for_tests() -> None:
     _last.clear()
     _killed_empty_keys.clear()
+    _replica_watch.clear()
+    _remote_memo.clear()
 
 
 def _killed_empty(conn) -> bool:
@@ -250,6 +253,14 @@ def _session_empty(kind: str) -> Inputs:
                   due=time.time() + RECOVER_EVERY_S if kind == 'delegation' else float('inf'))
 
 
+# replica path -> (signature, token, swept refs): the last replica task rows this host examined for changes that
+# ``observe``/the sweep can act on. ``token`` moves only on such a change (see ``_replica_token``).
+_replica_watch: dict = {}
+# The non-pending ``_remote`` answer with the exact inputs it was computed from: an unchanged pass reads none of the
+# replica's cards again.
+_remote_memo: dict = {}
+
+
 def _remote(live: frozenset = frozenset()) -> Inputs:
     from hermes_cli.kanban_origin import _hub_db, gateway_names
     from hermes_cli.kanban_reader_retention import reader
@@ -263,7 +274,20 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
     stamp = fingerprint(path)
     if not me or stamp is None:
         return Inputs()
-    cards, _states = remote._sweep_snapshot(path, me)
+    # Commit counters are deliberately excluded, but replacement, observer recovery and same-inode restore
+    # signals must still retire a semantic proof. A normal checkpoint may conservatively rearm it too.
+    identity = (getattr(stamp, 'ident', None), getattr(stamp, 'generation', None),
+                getattr(stamp, 'signature', None))
+    if _remote_memo.get('identity') != identity:
+        _replica_watch.pop(str(path), None)
+        _remote_memo.pop('inputs', None)
+        _remote_memo['identity'] = identity
+    now = time.time()
+    if now < _remote_memo.get('clock', now):
+        _remote_memo.pop('inputs', None)
+        _remote_memo['clock_epoch'] = _remote_memo.get('clock_epoch', 0) + 1
+    _remote_memo['clock'] = now
+    epoch = (identity, _remote_memo.get('clock_epoch', 0))
     with remote._woken_lock:
         if remote._woken:
             return Inputs()
@@ -275,24 +299,40 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
             # Holder-death and stale-claim recovery: only a claim WITH a holder is ever settled by the sweep.
             if conn.execute('SELECT 1 FROM notices WHERE delivered=0 AND holder_pid IS NOT NULL LIMIT 1').fetchone():
                 return Inputs()
-            if cards and not _cards_settled(conn, cards, live):
-                return Inputs()
-    elif cards:
-        return Inputs()
-    # The key is what the pass would read, not the replica's commit counter: the hub's replica commits on every
-    # sync, and none of those commits changed a card this host owes a notice for (t_01a1dfa94f2251cd).
+    # The key is what the pass would read, not the replica's commit counter: the hub's replica commits several
+    # task-row writes a second, and almost none touches a card this host owes a notice for (t_01a1dfa94f2251cd).
     # ``observe`` records this host's first sighting of EVERY terminal state, linked or not, and a later link must
-    # not resurrect a notice that expired unseen: so a replica whose task rows changed is never skipped, even when
-    # no card the sweep owes a notice for changed. Unreadable = unknown = hot.
-    tasks = _replica_tasks_signature(path)
-    if tasks is None:
+    # not resurrect a notice that expired unseen: so a task row that is terminal, withdrawn or swept is never
+    # skipped. Unreadable = unknown = hot.
+    token = _replica_token(path)
+    if token is None:
         return Inputs()
+    memo_key = (str(path), me, token, str(ledger), ledger_stamp, live, epoch)
+    hit = _remote_memo.get('inputs')
+    if hit is not None and hit[0] == memo_key:
+        return hit[1]
+    _remote_memo.pop('inputs', None)
+    cards, _states = remote._sweep_snapshot(path, me)
+    watch = _replica_watch.get(str(path))
+    if watch is not None:  # a later non-terminal write to one of these (a reopened card) must not be skipped
+        _replica_watch[str(path)] = (*watch[:2], frozenset(f'{owner}/{key}' for owner, key, _t, _l in cards))
+    if ledger_stamp is None:
+        if cards:
+            return Inputs()
+    else:
+        with reader(ledger) as conn:
+            if cards and not _cards_settled(conn, cards, live, str(Path(path).resolve())):
+                return Inputs()
     digest = hashlib.sha256()
-    digest.update(repr(tasks).encode())
+    digest.update(repr((token, epoch)).encode())
     for owner, key, task, links in cards:
         digest.update(repr((owner, key, remote._notice_state(task),
                             tuple((link.get('profile'), link.get('session')) for link in links))).encode())
-    return Inputs((str(path), me, digest.hexdigest(), str(ledger), ledger_stamp), pending=False)
+    result = Inputs((str(path), me, digest.hexdigest(), str(ledger), ledger_stamp), pending=False)
+    if fingerprint(path) != stamp:
+        return Inputs()  # never publish a quiet proof across a concurrent replica write or replacement
+    _remote_memo['inputs'] = (memo_key, result)
+    return result
 
 
 def _replica_tasks_signature(path):
@@ -309,7 +349,66 @@ def _replica_tasks_signature(path):
         return None
 
 
-def _cards_settled(conn, cards, live) -> bool:
+def _replica_rows_after(path, seq):
+    """``[(gw, key, task or None)]`` for the task rows written after ``seq`` (the hub numbers every write from one
+    sequence; ``task`` None = undecodable). Raises ``sqlite3.Error``/``OSError`` when unreadable."""
+    import contextlib
+    import json
+
+    from tui_gateway.kanban_remote_notices import _ro
+    with contextlib.closing(_ro(path)) as conn:
+        rows = conn.execute("SELECT gw, key, data FROM replica WHERE coll='tasks' AND seq > ?", (seq,)).fetchall()
+    out = []
+    for gw, key, raw in rows:
+        try:
+            task = json.loads(raw)
+        except (TypeError, ValueError):
+            task = None
+        out.append((gw, key, task if isinstance(task, dict) else None))
+    return out
+
+
+def _substantive(gw, key, task, swept) -> bool:
+    """A replica task row whose write the remote sweep (or ``observe``) may act on."""
+    from hermes_cli.kanban_withdrawal_notice import envelope
+    from tui_gateway.kanban_remote_notices import _TERMINAL
+    if task is None or f'{gw}/{key}' in swept or envelope(task) is not None:
+        return True
+    return task.get('status') in _TERMINAL or not task.get('status')
+
+
+def _moved_since(path, old, sig, swept):
+    """True when a task row written between signatures ``old`` and ``sig`` may matter; None when unreadable."""
+    if any(v is None for v in (*old, *sig)) or sig[1] < old[1] or sig[0] < old[0]:
+        return True  # an empty table, a vanished row or a sequence that went backwards: no basis to skip
+    try:
+        rows = _replica_rows_after(path, old[1])
+    except Exception:  # health: allow BLE001 -- unreadable rows are unknown: hot
+        return None
+    return sig[0] - old[0] > len(rows) or any(_substantive(gw, key, task, swept) for gw, key, task in rows)
+
+
+def _replica_token(path):
+    """A counter that moves only when a replica task row changes in a way ``observe``/the sweep can act on, else
+    None (unknown). The first sight is 0: the first pass runs anyway."""
+    sig = _replica_tasks_signature(path)
+    if sig is None:
+        return None
+    prev = _replica_watch.get(str(path))
+    if prev is None:
+        _replica_watch[str(path)] = (sig, 0, frozenset())
+        return 0
+    old, token, swept = prev
+    if sig != old:
+        moved = _moved_since(path, old, sig, swept)
+        if moved is None:
+            return None
+        token += bool(moved)
+        _replica_watch[str(path)] = (sig, token, swept)
+    return token
+
+
+def _cards_settled(conn, cards, live, source: str = '', now: float | None = None) -> bool:
     """True when every notice the sweep could deliver already has a settled ledger row, so the pass has nothing to
     deliver, claim, wait on or count. Anything unproven (a link without a settled row, an open chat, whose poller
     the sweep notes) keeps the pass hot. Blank and placement-placeholder links are dropped by the delivery
@@ -317,15 +416,41 @@ def _cards_settled(conn, cards, live) -> bool:
     from hermes_cli.kanban_placement import is_placeholder_session
     from tui_gateway import kanban_remote_notices as remote
 
+    now = time.time() if now is None else now
     for owner, key, task, links in cards:
         ref, state = f'{owner}/{key}', remote._notice_state(task)
         for link in links:
             profile, sid = link.get('profile'), link.get('session')
             if not profile or not sid or is_placeholder_session(sid):
                 continue
-            if sid in live or not remote._ledger_settled(conn, (sid,), ref, state):
+            if sid in live:
+                return False
+            if not remote._ledger_settled(conn, (sid,), ref, state) and not _expired_unobserved(
+                    conn, source, task, ref, state, now):
                 return False
     return True
+
+
+def _expired_unobserved(conn, source: str, task, ref: str, state: str, now: float) -> bool:
+    """True when the sweep drops this card's state without a ledger row, for good: it is past ``FRESH_S`` by its
+    freshness time and this host either never observed it (seeded by the source's first snapshot) or first saw it
+    more than ``LATE_MAX_S`` ago (``_deliver_fresh_cards``'s ``stale`` branch). Both only age further. A state with
+    no observation row yet is unknown: ``observe`` writes it, so the pass runs. Eleven of these held the hub's pass
+    hot every 30 s (t_01a1dfa94f2251cd)."""
+    import sqlite3
+    try:
+        from tui_gateway import kanban_remote_notices as remote
+        row = conn.execute('SELECT first_seen FROM observations WHERE source=? AND ref=? AND state=?',
+                           (source, ref, state)).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    first, at = row[0], remote._fresh_at(task)
+    observed = max(at, first) if at is not None and first is not None else at
+    if not (observed is None or now - observed > remote.FRESH_S):
+        return False
+    return first is None or remote._late_verdict(now, first) != 'late'
 
 
 def probe(kind: str, *, every_store: bool = True, live: frozenset | set = frozenset()) -> Inputs:
