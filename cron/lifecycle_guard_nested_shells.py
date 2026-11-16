@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from cron.lifecycle_guard import (
-    _MAX_PREFIX_PEELS,
     _REDIRECTION,
     _SHELL_EXECUTABLES,
     _command_token_index,
@@ -238,9 +237,9 @@ def _nested_shell_input(view: list[str]) -> Optional[tuple[str, Optional[str]]]:
     ``nice sudo -i``, ``sudo su - bob``): each may itself be the shell launcher."""
     index = _command_token_index(view)
     login_exec = False
-    for _ in range(_MAX_PREFIX_PEELS):
-        if index is None or index >= len(view):
-            return None
+    # Every peel advances index: input length bounds the walk without hiding a shell
+    # at (or beyond) an arbitrary wrapper-count limit.
+    while index is not None and index < len(view):
         name = _executable_name(view[index])
         found = _launcher_shell_input(view, index, name)
         if found is not None:

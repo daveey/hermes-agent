@@ -412,6 +412,24 @@ def test_continued_process_opener_inert_text(tmp_path, live_kanban_db, count, wr
         assert scan_gateway_lifecycle(command, cwd=str(tmp_path), session_aliases=names) == (False, None)
 
 
+@pytest.mark.parametrize("count", [7, 8, 9, 16])
+@pytest.mark.parametrize("shape", [
+    "{prefix}bash -l < {script}",
+    "{prefix}su -l bob < {script}",
+    "{prefix}sudo -i < {script}",
+    "cat {script} | {prefix}su -l bob",
+    "{{ {prefix}su -l bob; }} < {script}",
+    "{prefix}su -l bob <<'EOF'\nt ( bash {db} )\nEOF",
+])
+def test_nested_shell_wrapper_boundary(tmp_path, live_kanban_db, count, shape):
+    script = tmp_path / "inner.sh"
+    script.write_text(f"t ( bash {live_kanban_db} )\n")
+    text = shape.format(prefix="nice " * count, script=script, db=live_kanban_db)
+    for names in (frozenset({"zz"}), None):
+        unsafe, refusal = scan_gateway_lifecycle(text, cwd=str(tmp_path), session_aliases=names)
+        assert unsafe and refusal and "SQLite" in refusal
+
+
 @pytest.mark.parametrize("shape", _NESTED_FOREIGN_SHELLS + [
     shape.replace("<(", "<" + "\\\n" * count + "(")
     for shape in _NESTED_FOREIGN_SHELLS if "<(" in shape
