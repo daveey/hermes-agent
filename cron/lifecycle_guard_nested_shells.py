@@ -1026,5 +1026,7 @@ def _calls_function(view: list[str], functions: frozenset[str]) -> bool:
 
 def _reaches_group(owner: str, functions: frozenset[str]) -> bool:
     """Whether a heredoc's *owner* text hands the body to a compound command or function call."""
-    return any(_compound_redirections(view) or _calls_function(view, functions)
+    return any(_compound_redirections(view) or (
+                   _calls_function(view, functions)
+                   and any(operator in {"<<", "<<-"} for _fd, operator, _target in _redirections(view)))
                for view in _iter_command_segment_views(owner))
