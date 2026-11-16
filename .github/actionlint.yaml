@@ -34,6 +34,7 @@ self-hosted-runner:
     - tfgar-tests
     # Dedicated macOS pool and isolated console-user login-session lane.
     - hermes-state
+    - hermes-mac
     - hermes-mac-session
     - tfgar-probe
 
