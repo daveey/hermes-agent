@@ -144,6 +144,9 @@ CASE_BODIES = [
     "case x in x) printf x;;& y) :;; esac",
     "case x in x) # ) case esac\n printf x;; esac",
     "printf '%s' case esac",
+    "x=1 case z in y",
+    "x=1 y=2 case z in y",
+    "x+=1 case z in y",
     "time case x in x) :;; esac",
     "time -p case x in x) :;; esac",
     "time { case x in x) :;; esac; }",
@@ -193,6 +196,22 @@ def test_case_boundary_masks_whole_substitution(body):
     from tools.shell_prefix_expansions import mask_prefix_expansions
 
     assert mask_prefix_expansions('$(' + body + ') after') == '__expansion__ after'
+
+
+@pytest.mark.platforms("linux")
+@pytest.mark.parametrize("prefix", ["x=1", "x=1 y=2", "x+=1"])
+def test_assignment_prefix_case_cannot_hide_arithmetic_output(tmp_path, prefix):
+    from cron.lifecycle_guard import scan_gateway_lifecycle
+    from tests.cron.test_lifecycle_guard_arith_sink import _big_log
+    from tools.shell_heredoc import output_reaches_shell
+
+    shape = ('echo "$(' + prefix + ' case z in y)"; '
+             '[[ 1 -eq $(printf \'%s\' \'a[$(P)]\') ]]; echo ")"')
+    test_literal_builtin_name_marker(tmp_path, shape, True)
+    command = shape.replace("P", "bash " + str(_big_log(tmp_path)))
+    assert output_reaches_shell(command)
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe and refusal and "larger than the scan cap" in refusal
 
 
 def test_failed_word_boundary_is_not_retried(monkeypatch):

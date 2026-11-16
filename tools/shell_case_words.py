@@ -5,10 +5,6 @@ word fragments; their own boundary walk has its own state.
 """
 from __future__ import annotations
 
-import re
-
-_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*(?:\+)?=")
-
 
 class CaseWords:
     def __init__(self):
@@ -54,7 +50,9 @@ class CaseWords:
                 self.prefix = ""
             else:
                 self.prefix = ""
-                self.command = bool(_ASSIGNMENT.match(word)) or word in {
+                # Assignment words keep builtin lookup open, but end Bash's
+                # reserved-word position: `x=1 case` runs a command named case.
+                self.command = word in {
                     "if", "then", "elif", "else", "while", "until", "do", "!", "{",
                 }
 
