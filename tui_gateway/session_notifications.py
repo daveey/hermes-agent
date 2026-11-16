@@ -854,7 +854,7 @@ def _kb_poll_board_now(_kb, _kbc, _kbn, slug: str, session_key: str, claims: lis
     return texts
 
 
-def _collect_kanban_notifications(session: dict, claims: list | None = None) -> list:
+def _collect_kanban_notifications(session: dict, claims: list | None = None, *, remote_only=False) -> list:
     """Claim unseen terminal kanban events for this session's ``platform="tui"`` subscriptions (``kanban_create``
     auto-subscribes with ``chat_id=HERMES_SESSION_KEY``; no "tui" messaging adapter exists, so this poller is the
     delivery path). Same atomic cursor-claim as the gateway notifier: exactly-once even if a gateway polls the same DB.
@@ -864,6 +864,8 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
     session_key = str(session.get("session_key") or "")
     if not session_key or session.get("_finalized"):
         return []
+    if remote_only:
+        return [] if _kb_gateway_owns(session) else _collect_remote_kanban_notifications(session_key, claims, session=session)
     try:
         from hermes_cli import kanban_db as _kb
     except Exception:
@@ -886,7 +888,7 @@ def _collect_kanban_notifications(session: dict, claims: list | None = None) -> 
         _kb, slug, session_key, claims, seen, stray=stray, unreclaimed=unreclaimed)]
     if stray and not unreclaimed:
         session["_kanban_stray_keys"] = ()  # every board is clean; stop probing
-    return texts if owned else texts + _collect_remote_kanban_notifications(session_key, claims)
+    return texts if owned else texts + _collect_remote_kanban_notifications(session_key, claims, session=session)
 
 
 _LINEAGE_TTL_S = 30.0
@@ -956,17 +958,22 @@ def _remote_transcript_has(session_key: str):
     return check
 
 
-def _collect_remote_kanban_notifications(session_key: str, claims: list | None) -> list:
+def _collect_remote_kanban_notifications(session_key: str, claims: list | None, *, session=None) -> list:
     """Done/blocked notices for cards on other gateways linked to this chat (``kanban_remote_notices``). [daveey]"""
     try:
         from hermes_cli.profiles import get_active_profile_name
         from tui_gateway import kanban_remote_notices as _krn
         if not _krn.hub_db_path().is_file():
             return []
+        def on_defer():
+            if session is not None:
+                session["_kanban_remote_retry_at"] = time.monotonic() + 1.0
         found = _krn.collect(session_key, get_active_profile_name() or "default",
                              lineage=_session_lineage(session_key), skip=_forwarded_locally,
-                             transcript_has=_remote_transcript_has(session_key))
+                             transcript_has=_remote_transcript_has(session_key), on_defer=on_defer)
     except Exception as exc:
+        if session is not None:
+            session.pop("_kanban_remote_retry_at", None)
         _notif_log_failure("remote kanban notification poll failed", exc)
         return []
     texts = []
@@ -982,37 +989,10 @@ def _collect_remote_kanban_notifications(session_key: str, claims: list | None) 
     return texts
 
 
-def _notif_poll_kanban(sid: str, session: dict) -> None:
-    # Collection only reads/claims local SQLite rows. Provider/terminal bindings are
-    # needed for delivery, not for every empty tick. Resolve the home each time:
-    # sessions can move profiles and multiplexing can activate after thread start.
-    from tui_gateway.notification_idle import collection_home
-    with collection_home(session, _launch_home):
-        from tui_gateway.kanban_claim_custody import release_expired
-        if release_expired(session, time.monotonic()):
-            return
-        if session.get("_finalized") or session.get("_closing") or session.get("_lease_taken_over"):
-            prepared = ([], [])
-        else:
-            prepared = _notif_collect_kanban(session)
-        # Track custody before provider binding or a concurrent finalize can fail.
-        session.setdefault("_kanban_pending", []).extend(prepared[0])
-        session.setdefault("_kanban_claims", []).extend(prepared[1])
-    if not any(prepared) and not session.get("_kanban_pending") and not session.get("_kanban_claims"):
-        return
-    with contextlib.ExitStack() as scope:
-        try:
-            scope.enter_context(_session_profile_runtime_scope(session))
-        except Exception as exc:
-            # Nothing has been dispatched. Return custody in the collection home
-            # so a transient binding error retries next tick instead of killing
-            # the poller and stranding claims until their lease expires.
-            with collection_home(session, _launch_home):
-                _kb_release_claims(session)
-            logger.debug("Kanban provider binding failed", exc_info=True)
-            _notif_log_failure("kanban provider binding failed", exc)
-            return
-        _notif_poll_kanban_scoped(sid, session, prepared)
+def _notif_poll_kanban(sid: str, session: dict, *, remote_only=False) -> None:
+    from tui_gateway.notification_remote_retry import attempt
+    with attempt(session, time.monotonic):
+        _notif_poll_kanban_attempt(sid, session, remote_only=remote_only)
 
 
 class _KanbanText(str):
@@ -1254,13 +1234,16 @@ def _kb_owner_refusal(sid: str, session: dict):
     return refusal
 
 
-def _notif_collect_kanban(session: dict) -> tuple:
+def _notif_collect_kanban(session: dict, *, remote_only=False) -> tuple:
     claims: list = []
     texts = []
     if time.monotonic() >= float(session.get("_kanban_refused_until") or 0):
         try:
-            texts = _collect_kanban_notifications(session, claims)
+            texts = (_collect_kanban_notifications(session, claims, remote_only=True) if remote_only
+                     else _collect_kanban_notifications(session, claims))
         except Exception as exc:
+            from tui_gateway.notification_remote_retry import cancel
+            cancel(session)
             logger.debug("Kanban collection failed", exc_info=True)
             _notif_log_failure("kanban notification poll failed", exc)
     return texts, claims
@@ -1782,20 +1765,30 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     platform="tui" rows that tools/kanban_tools.py documents (issue #59890). Each sub-poll is a
     ``notifications.<poll>`` pass (loop_accounting).
     """
-    from hermes_cli import loop_accounting as _la
-    from tools import async_delegation
     from tools.process_registry import process_registry
-    from tools.process_registry_awaiting import release as release_in_flight, take_ready
-    from tui_gateway import notification_park
     from tools.process_registry_notifications import format_process_notification
     process_registry.restore_completions()  # first consumer in a TUI process (#123265)
-    queue = process_registry.completion_queue
     emitted = session.setdefault("_notification_emitted", set())
     with _notif_held_lock:
         session["_notif_poller_ident"] = threading.get_ident()
         session["_notif_held"] = session.get("_notif_held") or []
     handle = lambda events, deferred: _notif_handle_ready(
         sid, session, events, emitted, process_registry, format_process_notification, deferred)
+    try:
+        _notification_poller_run(stop_event, sid, session, process_registry, handle)
+    finally:
+        from tui_gateway.notification_remote_retry import cancel
+        cancel(session)
+        _notification_poller_cleanup(sid, session, process_registry, handle)
+
+
+def _notification_poller_run(stop_event, sid, session, process_registry, handle):
+    from hermes_cli import loop_accounting as _la
+    from tools import async_delegation
+    from tools.process_registry_awaiting import release as release_in_flight, take_ready
+    from tui_gateway import notification_park
+    from tui_gateway.notification_remote_retry import cancel, deadline
+    queue = process_registry.completion_queue
     from tui_gateway.notification_wait import due_timeout, generation
     last_kanban_poll = last_loop_poll = last_parked_poll = 0.0
     while not stop_event.is_set() and not session.get("_finalized"):
@@ -1811,6 +1804,7 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
                 try:
                     _la.timed(f"notifications.{what.replace(' ', '_')}", fire, sid, session)
                 except Exception as tick_exc:
+                    logger.debug("notification tick failed", exc_info=True)
                     _notif_log_failure(f"{what} poll failed", tick_exc)
         if now - last_kanban_poll >= _KANBAN_POLL_SECONDS:
             last_kanban_poll = now
@@ -1818,6 +1812,9 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
             # [daveey] Trusted producer completions queued for this unrouted chat (hermes_state_producer_admission).
             from tui_gateway.producer_admission import deliver_pending
             _la.timed("notifications.producer_deliver_pending", deliver_pending, sid, session)
+        elif (retry_at := deadline(session, now)) is not None and now >= retry_at:
+            cancel(session)
+            _la.timed("notifications.poll_kanban_remote_retry", _notif_poll_kanban, sid, session, remote_only=True)
         if now - last_parked_poll >= _PARKED_POLL_SECONDS:
             last_parked_poll = now
             _la.timed("notifications.take_parked", _notif_take_parked, sid, session, process_registry, handle)
@@ -1826,6 +1823,7 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
             try:
                 handle(taken, None)  # still busy → held again by the claim gate
             except Exception as exc:
+                logger.debug("held notification failed", exc_info=True)
                 _notif_log_failure("held notification dispatch failed", exc)
             finally:
                 release_in_flight(taken)
@@ -1839,6 +1837,8 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
         ready = []
         try:
             deadlines = [last_loop_poll + _LOOP_POLL_SECONDS, last_kanban_poll + _KANBAN_POLL_SECONDS]
+            if (retry_at := deadline(session, time.monotonic())) is not None:
+                deadlines.append(retry_at)
             has_registry_park = getattr(process_registry, "has_parked_events", lambda: True)
             if has_registry_park() or notification_park.has_parked():
                 deadlines.append(last_parked_poll + _PARKED_POLL_SECONDS)
@@ -1851,15 +1851,22 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
         except Exception as exc:
             # This thread is the session's only path to notifications, /loop, /heartbeat and its
             # bot mailbox; one bad event must not end all four.
+            logger.debug("notification dispatch failed", exc_info=True)
             _notif_log_failure("notification dispatch failed", exc)
         finally:
             release_in_flight(ready)
             release_in_flight(parked)
             notification_park.unhold(parked)
+
+
+def _notification_poller_cleanup(sid, session, process_registry, handle):
+    from tools.process_registry_awaiting import release as release_in_flight, take_ready
+    queue = process_registry.completion_queue
     # Kanban claims still buffered go back to the board: the process may live on (close, evict). [daveey]
     try:
         _kb_release_claims(session)
     except Exception as exc:
+        logger.debug("poller claim release failed", exc_info=True)
         _notif_log_failure("kanban notice release on poller stop failed", exc)
     # Drain remaining events after the stop signal so nothing is lost on shutdown: events held for this session are
     # routed with the queued ones; unowned ones park for their owner's return; foreign ones (and delegations the park
@@ -1952,3 +1959,5 @@ def register(server) -> None:
     bind_module(globals(), server, skip=("_",))
     _surface.register(server)
     _readopt.register(server)
+    from . import session_notifications_kanban
+    session_notifications_kanban.register(server)

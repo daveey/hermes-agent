@@ -216,7 +216,7 @@ def _index(path: Path) -> tuple[str, dict]:
 
 
 def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple,
-                own: bool = False) -> tuple[str, dict[str, Any], dict]:
+                own: bool = False, *, on_defer: Optional[Callable[[], None]] = None) -> tuple[str, dict[str, Any], dict]:
     """``(me, {sid: [card, ...]}, observed)`` for one chat: the host's published copy when it is of the replica's
     current state, else built here (``_index`` + ``observe``, as before) and offered for publishing. [daveey]
 
@@ -232,6 +232,8 @@ def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple,
         return hit
     key = published.current_key(path, ledger_file, stamp)
     if own and published.defer(path, ledger_file, profile, sids, key):
+        if on_defer is not None:
+            on_defer()
         return "", {}, {}
     me, index, observed = published.compute(path, ledger, ledger_file, now, key)
     return me, {sid: index.get((profile, sid), ()) for sid in sids}, observed
@@ -675,7 +677,8 @@ def _log_dropped(task: dict, ref: str, state: str, session: str, first_seen: flo
 def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, ledger: Optional[Path] = None,
             now: Optional[float] = None, lineage: tuple[str, ...] = (),
             skip: Optional[Callable[[str], bool]] = None,
-            transcript_has: Optional[Callable[[str, str], bool]] = None, per_link: bool = False) -> list[dict]:
+            transcript_has: Optional[Callable[[str, str], bool]] = None, per_link: bool = False,
+            on_defer: Optional[Callable[[], None]] = None) -> list[dict]:
     """Claim and return ``[{text, session, ref, state, event_key}]`` for this session's newly terminal remote cards.
 
     The ledger row stays in flight (holder pid + start) until :func:`ack`. ``lineage`` adds earlier ids of the
@@ -700,7 +703,7 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
             from tui_gateway.kanban_remote_index import ensure_holder
             ensure_holder("serve")  # once per process; a gateway's own later claim upgrades the role
         me, by_sid, fresh_times = _chat_index(path, ledger, now, profile, sids,
-                                              own=hub_db is None and ledger is None)
+                                              own=hub_db is None and ledger is None, on_defer=on_defer)
         cards = [dict(c, sid=sid) for sid in sids for c in by_sid.get(sid, ())]
         if not cards:
             return []
