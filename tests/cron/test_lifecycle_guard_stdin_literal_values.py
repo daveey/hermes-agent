@@ -8,13 +8,19 @@ from cron.lifecycle_guard import scan_gateway_lifecycle
     'P=$S; bash --noprofile -l < "$P"',
     'exec 3<"$S"; bash --noprofile -l <&3',
 ])
-def test_environment_value_is_not_shell_source(tmp_path, monkeypatch, command):
-    monkeypatch.setenv('S', '$T')
+@pytest.mark.parametrize('value', ['$T', '~/input.sh'])
+def test_environment_value_is_not_shell_source(tmp_path, monkeypatch, command, value):
+    monkeypatch.setenv('S', value)
     monkeypatch.setenv('T', '/dev/null')
-    script = tmp_path / '$T'
+    home = tmp_path / 'home'
+    home.mkdir()
+    (home / 'input.sh').write_text('printf harmless\n')
+    monkeypatch.setenv('HOME', str(home))
+    script = tmp_path / value
+    script.parent.mkdir(exist_ok=True)
     script.write_text("printf 'REVIEW_LITERAL_EXECUTED\\n'\n")
     result = subprocess.run(['/bin/bash', '--noprofile', '--norc', '-c', command], cwd=tmp_path,
-        env=dict(os.environ, HOME=str(tmp_path), BASH_ENV='/dev/null'), input='', text=True,
+        env=dict(os.environ, BASH_ENV='/dev/null'), input='', text=True,
         capture_output=True, timeout=10, check=False)
     assert result.returncode == 0 and result.stdout == 'REVIEW_LITERAL_EXECUTED\n', result
     script.write_text('t ( bash huge.sh )\n')
