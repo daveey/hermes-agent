@@ -253,6 +253,8 @@ def test_kanban_modules_open_boards_only_through_the_guard():
         # state.db / hub.db / in-memory / offline copies, not live boards
         "kanban_worker_recovery.py", "kanban_transfer.py",
         "kanban_origin_ledger.py", "kanban_lockguard.py",
+        # Origin-local receipt and decision journals, never Kanban board connections.
+        "kanban_origin_forward.py", "kanban_origin_forward_decision.py",
         # connects only inside its own short-lived child (`python -m hermes_cli.kanban_db_recover`);
         # in-process callers (kanban_ops, the dispatcher) reach it only through spawn_recovery()
         "kanban_db_recover.py",

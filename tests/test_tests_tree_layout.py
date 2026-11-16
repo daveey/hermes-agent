@@ -31,6 +31,7 @@ TESTS_ROOT = REPO_ROOT / "tests"
 # plumbing (env filtering, live-system guard, platform gating), not tests.
 _NON_MIRROR_DIRS = {
     "compat", "installation", "_fixtures",
+    "origin_transport",  # composed core argv → courier → core adapter transport, across repositories
     "ci", "conformance", "dashboard", "desktop", "docker", "e2e", "evals",
     "fakes", "fixtures", "install", "integration", "manual",
     "monitoring", "perf_guards", "scripts", "secret_sources",
