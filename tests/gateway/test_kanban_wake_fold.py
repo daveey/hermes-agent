@@ -345,6 +345,35 @@ async def test_review_wake_uses_current_review_state_at_drain(tmp_path, monkeypa
         authority.db.close()
 
 
+@pytest.mark.parametrize('status', ['done', 'ready', 'blocked', None, 'unreadable'])
+def test_replica_only_card_live_state(tmp_path, monkeypatch, board, status):
+    import sqlite3
+    from hermes_cli import kanban_replica_freshness as fresh
+    from hermes_cli import kanban_db_sync as sync
+    tid = 't_01a1d59e5543daa1'
+    path = tmp_path / 'replica.db'
+    conn = kbc.connect()
+    try:
+        sync.apply_sync_schema_steps(conn)
+        assert kb.get_task(conn, tid) is None
+    finally:
+        conn.close()
+    with sqlite3.connect(path) as replica:
+        if status != 'unreadable':
+            replica.execute('CREATE TABLE tasks(id TEXT, status TEXT, ready_since INTEGER, sync_version INTEGER, result TEXT)')
+            replica.execute('CREATE TABLE task_runs(id INTEGER, task_id TEXT, summary TEXT, ended_at INTEGER, started_at INTEGER)')
+            if status:
+                replica.execute('INSERT INTO tasks VALUES (?, ?, NULL, 12, ?)', (tid, status, 'Fallback result'))
+                replica.execute('INSERT INTO task_runs VALUES (1, ?, ?, 20, 10)', (tid, 'Replica handoff'))
+    monkeypatch.setattr(fresh, '_replica', lambda _: (path, 0))
+    card = {'task_id': tid, 'board': '', 'kinds': ['blocked'],
+            'text': 'Remote blocked\nNext action for the user: choose'}
+    expected = (None, '') if status in (None, 'unreadable') else (status, 'Replica handoff' if status == 'done' else '')
+    assert kanban_wake_fold._live_task(card) == expected
+    if status in ('blocked', None, 'unreadable'):
+        assert kanban_wake_fold.refresh_card(card, strict=True) == card
+
+
 def test_review_wake_with_newer_running_replica_does_not_infer_run_lane(monkeypatch, board):
     from hermes_cli import kanban_replica_freshness as fresh
     tid = board('replica reviewer')

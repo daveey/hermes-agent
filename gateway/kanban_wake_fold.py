@@ -190,14 +190,14 @@ def _live_task(card):
     from hermes_cli import kanban_replica_freshness as fresh
     with kb.pin_first_board_resolution(), contextlib.closing(kbc.connect(board=card.get('board') or None)) as conn:
         task = kb.get_task(conn, card['task_id'])
-        if task is None:
-            return None, ''
         newer = fresh.newer_rows(conn, [card['task_id']]).get(card['task_id'])
         if newer is not None and newer['status']:
             if newer['status'] == 'running' and 'review_requested' in card.get('kinds', []):
                 return None, ''  # no replica run lane: a running reviewer may still be deciding
             summary = (newer.get('summary') or newer.get('result') or '') if newer['status'] == 'done' else ''
             return newer['status'], summary.strip()
+        if task is None:
+            return None, ''
         if (task.status == 'running' and 'review_requested' in card.get('kinds', [])
                 and kb._retry_status_for_run(conn, card['task_id'], task.current_run_id) == 'review'):
             return 'review', ''  # the handoff is still pending, not returned to implementation
@@ -233,6 +233,8 @@ def refresh_card(card, *, strict=False):
     out = [f"[kanban] Task {card['task_id']} {label}.",
            f'Note: an earlier wake for this card said "{earlier}"; that no longer holds. Live status: {status}.']
     rest = lines[1:] if _LEGACY_HEAD.match(head) else lines
+    rest = [line for line in rest if not line.startswith(
+        ('Next action for the user:', 'Why only the user:', 'Scope:', 'Open task:'))]
     out.extend(rest)
     if status == 'done' and result and not any(line.startswith('Result:') for line in rest):
         out.insert(2, 'Result: ' + result.splitlines()[0][:400])
@@ -275,6 +277,11 @@ def _guidance(text, cards):
     tail = '\n'.join(rest).rstrip()
     if tail:  # refresh_card keeps every line after the head, in order, at the end of the card
         end = text.find(tail, pos)
+        if end < 0 and f"[kanban] Task {last.get('task_id')} " in text:
+            # A relabel removes the obsolete human ask, but retains the remaining tail verbatim.
+            tail = '\n'.join(line for line in rest if not line.startswith(
+                ('Next action for the user:', 'Why only the user:', 'Scope:', 'Open task:'))).rstrip()
+            end = text.find(tail, pos) if tail else -1
         if end < 0:
             return None
         end += len(tail)

@@ -43,6 +43,64 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from tests.gateway.test_kanban_wake_fold import GUIDANCE, _automation, _claim, _drain, _local_chat, _wake
 
+@pytest.mark.parametrize('status', ['done', 'ready'])
+def test_remote_blocked_notice_refreshes_replica_only_card(monkeypatch, status):
+    from hermes_cli import kanban_replica_freshness as fresh
+    tid = 't_01a1d59e5543daa1'
+    item = {'ref': f'worker-6/default/default/{tid}', 'state': 'blocked@1794779059',
+            'event_key': 'remote:worker-6:default/default/' + tid + ':1',
+            'text': 'Remote card blocked\nNext action for the user: Reply A or B\n'
+                    'Why only the user: decision\nScope: example\nOpen task: example\nKeep this context'}
+    monkeypatch.setattr(fresh, 'newer_rows', lambda *_: {tid: {'status': status, 'summary': 'Waiver completed'}})
+    with contextlib.closing(kbc.connect()) as conn:
+        assert kb.get_task(conn, tid) is None
+    card = kro._metadata(item)['kanban_cards'][0]
+    text = kanban_wake_fold._compose([card], 'guidance', strict=True)
+    assert f"[kanban] Task {tid} {'completed' if status == 'done' else status}." in text
+    assert 'Note: an earlier wake' in text and f'Live status: {status}.' in text
+    assert 'Keep this context' in text
+    for prefix in ('Next action for the user:', 'Why only the user:', 'Scope:', 'Open task:'):
+        assert prefix not in text
+    if status == 'done':
+        assert 'Result: Waiver completed' in text
+
+
+def test_remote_blocked_metadata_preserves_premise_and_board():
+    item = {'ref': 'worker-6/default/research/t_01a1d59e5543daa1', 'state': 'blocked@1794779059',
+            'event_key': 'event', 'text': 'blocked'}
+    card = kro._metadata(item)['kanban_cards'][0]
+    assert card['kinds'] == ['blocked']
+    assert card['board'] == 'research'
+
+
+@pytest.mark.parametrize(('state', 'kind'), [('done@1', 'completed'),
+                                              ('request_withdrawn@1', 'request_withdrawn'), ('other@1', None)])
+def test_remote_outcome_metadata_never_relabels(monkeypatch, state, kind):
+    item = {'ref': 'worker-6/default/default/t_01a1d59e5543daa1', 'state': state,
+            'event_key': 'event', 'text': 'Outcome'}
+    card = kro._metadata(item)['kanban_cards'][0]
+    assert card['kinds'] == ([kind] if kind else [])
+    monkeypatch.setattr(kanban_wake_fold, '_live_task', lambda _: pytest.fail('Outcome must not read live state'))
+    assert kanban_wake_fold.refresh_card(card, strict=True) == card
+    grouped = kro._metadata({**item, 'children': [item]})['kanban_cards'][0]
+    assert grouped['task_id'] == grouped['board'] == '' and grouped['kinds'] == []
+
+
+def test_remote_relabel_preserves_guidance_at_claim(monkeypatch):
+    item = {'ref': 'worker-6/default/default/t_01a1d59e5543daa1', 'state': 'blocked@1',
+            'event_key': 'event', 'text': 'Remote blocked\nNext action for the user: choose\nContext'}
+    card = kro._metadata(item)['kanban_cards'][0]
+    monkeypatch.setattr(kanban_wake_fold, '_live_task', lambda _: ('ready', ''))
+    text = kanban_wake_fold._compose([card], GUIDANCE)
+    assert kanban_wake_fold._guidance(text, [card]) == GUIDANCE
+    payload = {'text': text, 'local_automation_v1': {
+        'identity': json.dumps(['kanban-wake', 'id']), 'kanban_cards': [card]}}
+    monkeypatch.setattr(kanban_wake_fold, '_live_task', lambda _: ('done', 'Finally completed'))
+    kanban_wake_fold.refresh_claimed(payload)
+    assert 'Result: Finally completed' in payload['text']
+    assert payload['text'].endswith(GUIDANCE)
+
+
 CHAT = "20261026_235722_bef6c6"
 GW_HOLDER = f"pid={os.getpid()}:turn={CHAT}:x:platform=local"
 

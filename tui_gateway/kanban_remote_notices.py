@@ -575,6 +575,11 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
         (session, ref, state)).fetchone()
     pid, start = _my_holder()
     if row is None:
+        from tui_gateway.kanban_remote_identity import moved_claim
+        moved = moved_claim(conn, session=session, ref=ref, state=state, now=now,
+                            notice_key=notice_key, swept_key=swept_key, transcript_has=transcript_has)
+        if moved is not None:
+            return moved
         if fresh and notice_key and transcript_has is not None and transcript_has(notice_key, ""):
             # [daveey] Another writer already put this notice in the chat (a second sweeper, another ledger):
             # offering it again woke a turn whose row duplicated the passive one (t_01a1db370b459fab).

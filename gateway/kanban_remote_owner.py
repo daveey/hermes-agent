@@ -216,7 +216,12 @@ def _metadata(item: dict) -> dict:
     shown = text if len(text) <= _DISPLAY_LIMIT else text[:_DISPLAY_LIMIT - 1] + "…"
     keys = [child["event_key"] for child in _children(item)]
     task_id = "" if item.get("children") else str(item.get("ref") or "").rsplit("/", 1)[-1]
-    card = {"task_id": task_id, "board": "", "kinds": [], "text": text[:_CARD_TEXT_LIMIT]}
+    parts = str(item.get("ref") or "").split("/")
+    board = parts[2] if task_id and len(parts) == 4 else ""
+    kind = {"blocked": "blocked", "done": "completed", "request_withdrawn": "request_withdrawn"}.get(
+        str(item.get("state") or "").split("@", 1)[0])
+    card = {"task_id": task_id, "board": board, "kinds": [kind] if task_id and kind else [],
+            "text": text[:_CARD_TEXT_LIMIT]}
     return {"display_kind": "kanban_notice", "display_text": shown, "kanban_event_keys": keys,
             "kanban_cards": [card]}
 

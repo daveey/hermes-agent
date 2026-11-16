@@ -157,6 +157,8 @@ def _persist(source: str, cards: list[tuple], ledger, now: float, extra=()) -> d
         conn.execute("CREATE TABLE IF NOT EXISTS observation_sources (source TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE IF NOT EXISTS observations (source TEXT, ref TEXT, state TEXT, "
                      "first_seen REAL, PRIMARY KEY(source, ref, state))")
+        conn.execute("CREATE INDEX IF NOT EXISTS observations_card_state ON observations "
+                     "(source, substr(ref, instr(ref, '/') + 1), state)")
         # Serialize baseline + snapshot: concurrent backends must agree which is first.
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -166,12 +168,14 @@ def _persist(source: str, cards: list[tuple], ledger, now: float, extra=()) -> d
             for key, state, ref, at, answer in missing:
                 # Unknown ages and frozen legacy keys cannot establish local freshness.
                 seen = now if at is not None and key.count('/') >= 2 and (not initial or now - at <= FRESH_S) else None
-                row = conn.execute("SELECT first_seen FROM observations WHERE source=? AND ref=? AND state=?",
-                                   (source, ref, state)).fetchone()
-                if row is None:
-                    conn.execute("INSERT INTO observations VALUES (?,?,?,?)", (source, ref, state, seen))
+                rows = conn.execute("SELECT first_seen FROM observations WHERE source=? AND state=? "
+                                    "AND substr(ref, instr(ref, '/') + 1)=?",
+                                    (source, state, key)).fetchall()
+                if rows:
+                    seen = None if any(row[0] is None for row in rows) else min(row[0] for row in rows)
+                conn.execute("INSERT OR IGNORE INTO observations VALUES (?,?,?,?)", (source, ref, state, seen))
                 if answer:
-                    added[(ref, state)] = row[0] if row is not None else seen
+                    added[(ref, state)] = seen
             conn.commit()
         except BaseException:
             conn.rollback()
