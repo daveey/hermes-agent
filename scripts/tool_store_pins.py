@@ -11,9 +11,9 @@ no store of its own, so without sharing setup-hermes.sh downloads the whole
 toolchain (~1.5 GB) into it. The root is the one PM resolves for this process
 (HERMES_HOME's root, else HOME's). It borrows only when it is not STORE's own
 root and holds no store: the owner provisions its own store, and a root with a
-store keeps it. facts.json selects ONE entry per package, not one per version:
-provisioning a checkout with other pins re-points the account's own runtime at
-them and pulls the selection from under a concurrent run on the store's pins.
+store keeps it. facts.json selects ONE entry per package and keeps other checkouts'
+pins only as history: provisioning a checkout with other pins downloads into
+and re-records the account's live store under a concurrent run on its pins.
 So share only when every tool `pm install` would provision here (cmd_install's
 roots, developer tools, defaults and the venv's deps) passes PM's own installed-at-the-pin lookup
 without an exec-bit heal, and records the env this checkout's package code

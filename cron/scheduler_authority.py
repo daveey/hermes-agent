@@ -235,15 +235,20 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
     attempted = journal.exists()
     owner = owner_for_home(get_hermes_home())
 
-    def save():
+    def write_journal():
         root.mkdir(parents=True, exist_ok=True)
         atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
+
+    async def save():
+        # ``observe`` runs on the owner loop when this process owns the profile: the fsynced journal
+        # write (file and directory) waits in a worker, and still completes before the next step.
+        await asyncio.to_thread(write_journal)
 
     async def observe(call):
         nonlocal attempted
         recovering = attempted
         attempted = True
-        save()
+        await save()
         try:
             if recovering:
                 state = await call('recover', params)
@@ -265,7 +270,7 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                     # Durable before the absence check: if that check is lost too, journal
                     # recovery still knows the owner refused this fire as not ready.
                     record['submit_refused'] = refused
-                    save()
+                    await save()
                 state = await call('recover', params)
                 if state['status'] == 'missing' and refused:
                     # [daveey] Refused while draining for a restart and proven never admitted:
@@ -281,7 +286,7 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                     job['_fire_error'] = True  # refused before admission: the agent never ran
                     record['refusal'] = result
                     record['job'] = dict(job)
-                    save()
+                    await save()
                     return tuple(result)
                 if state['status'] not in {'queued', 'started', 'terminal'}:
                     raise
@@ -290,7 +295,7 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
             else:
                 raise
         record['receipt'] = receipt
-        save()
+        await save()
         delay, progress = .1, None
         while True:
             if cancel_event is not None and cancel_event.is_set():

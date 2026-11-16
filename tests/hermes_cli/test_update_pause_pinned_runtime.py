@@ -131,7 +131,9 @@ def test_update_proceeds_past_a_pinned_unit_that_cannot_idle_pause(host, capsys,
     assert verdict is None, f"the update was deferred on a gateway it cannot affect: {verdict}"
     assert host["asked"] == [], "the pinned gateway was asked for an idle pause it cannot answer"
     assert host["writes"] == [] and host["repairs"] == [], "the pinned unit was touched through systemd"
-    assert UNIT in out and "running its own checkout" in out and str(host["core"]) in out, out
+    # [daveey] Either probe may name it first: the live code root or (upstream) the unit's own checkout.
+    assert UNIT in out and ("running its own checkout" in out or "another Hermes checkout" in out), out
+    assert str(host["core"]) in out, out
     assert host["procs"][0].poll() is None, "the pinned gateway was stopped"
     assert host["dropin"].read_bytes() == host["dropin_before"], "the pin (drop-in ExecStart) changed"
     assert not deferrals.state_path().exists(), "a pause that went through left a deferral streak"

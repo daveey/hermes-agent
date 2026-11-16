@@ -37,6 +37,14 @@ def _prepend_note(run_message: Any, note: str) -> Any:
     return run_message
 
 
+def _loop_route_is_gateway_chat(state) -> bool:
+    """A /loop set from a messaging chat carries the gateway's ``route`` (platform + chat_id); its wakeup scanner
+    (``gateway/run_goals.py::_loop_wakeup_fire_one``) fires those and skips route-less CLI/TUI loops. Mirror it in
+    session_notifications so a Desktop viewer of the same session never consumes the tick and strands the reply."""
+    route = getattr(state, "route", None) or {}
+    return bool(route.get("platform") and route.get("chat_id"))
+
+
 def register(server) -> None:
     """Publish this module's helpers onto ``server``, rebound to its globals."""
     bind_module(globals(), server, skip=("_",))

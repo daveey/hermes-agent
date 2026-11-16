@@ -573,7 +573,8 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
 
 def _dispatch_claimed_followup(rid, sid, session, prompt, what, *, on_done=None, on_error=None):
     """Chain one follow-up turn (caller set ``running``); on failure run ``on_error``, log,
-    release ``running``."""
+    release ``running`` while it is still the caller's claim (``_notif_release_claim``)."""
+    claim = session.get("_notif_turn_claim")
     try:
         _emit("message.start", sid)
         _run_prompt_submit(rid, sid, session, prompt)
@@ -584,7 +585,7 @@ def _dispatch_claimed_followup(rid, sid, session, prompt, what, *, on_done=None,
             on_error()
         logger.exception("Follow-up turn dispatch failed: %s", what)
         _hook_failure(what, exc)
-        _notif_release_turn(session)
+        _notif_release_claim(session, claim)
 
 
 def _goal_waits_for_paused_turn(session: dict) -> bool:
@@ -624,6 +625,7 @@ def _run_post_turn_followups(
             if session.get("_turn_cancel_requested"):
                 return  # the user pressed Stop; the goal resumes after their next prompt
             session["running"] = True
+            session["_notif_turn_claim"] = object()  # _dispatch_followup_turn's failure release frees only this claim
         _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch")
     # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof
     # and compression-chain aware (same fail-closed gate as the poller): session B must

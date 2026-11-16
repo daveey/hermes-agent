@@ -194,7 +194,7 @@ async def test_kill_that_races_the_reader_exit_settles_only_an_explicit_kill(rig
     h = await rig["setup"]()
     registry, session = _job(h)
 
-    def reader_exits_mid_signal(sess, sid, consume):
+    def reader_exits_mid_signal(sess, consume):
         _settle_exit(registry, sess, 0)
         assert OBLIGATION_KEY in _receipt(h)
     registry._signal_kill = reader_exits_mid_signal

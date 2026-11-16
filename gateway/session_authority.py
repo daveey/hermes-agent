@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from functools import partial
 import sqlite3
+import threading
 from types import SimpleNamespace
 import uuid
 
@@ -104,6 +105,9 @@ class LiveSession:
     retire_timer: object = None
     # Last-viewer detaches between losing their subscriber and recording the close (``detach``).
     detaching: int = 0
+    # Set while a plugin's turn waits for the session's background work (run_plugin_injection
+    # ``admission_turn_scope``): a person's input queued behind it sets it and ends that wait.
+    background_wait: threading.Event | None = None
 
     def __post_init__(self):
         self.controls = PendingControls(self.event_stream)
@@ -501,6 +505,9 @@ class SessionAuthority:
         live = self.sessions[ref.session_id]
         live.rescan = True
         live.claim_changed.set()
+        if getattr(live, "background_wait", None) is not None:
+            from gateway.run_plugin_injection import wake_background_wait
+            wake_background_wait(self, ref)
         if live.task is None or live.task.done():
             live.task = asyncio.create_task(self._drain(ref))
             live.task.add_done_callback(_log_drain_failure)
@@ -983,6 +990,8 @@ class SessionAuthority:
         # Stop hard-cancels this turn (aborts compression too). Background delegations are not the
         # turn: they keep running and report back; `/stop` and session close/reset end them.
         from agent.interrupt_compat import request_hard_interrupt
+        from gateway.run_plugin_injection import wake_background_wait
+        wake_background_wait(self, ref, person_input=True)  # a Stop never sits out a plugin turn's grace
         if agent is not None:
             request_hard_interrupt(agent)
         return self._handle(ref)
@@ -1020,6 +1029,8 @@ class SessionAuthority:
         resident one is the previous turn's cached agent, which this turn may replace, so *text* is
         latched for the agent this generation adopts (adopt_agent, under the same lock):
         ``(None, True)``. A claim with no steer seam (cron, managed worker) latches nothing."""
+        from gateway.run_plugin_injection import wake_background_wait
+        wake_background_wait(self, ref, person_input=True)  # a steer/redirect ends a plugin turn's grace
         adopted_generation, agent = self.adopted.get(ref.session_id, (None, None))
         if adopted_generation != generation:
             agent = self.agent(ref) if self._runs_own_agent(ref) else None
@@ -1106,19 +1117,22 @@ class SessionAuthority:
     async def _claim_next(self, ref, live, attempted=None):
         # False asks the pump to re-read after a queued head changed during preflight.
         async with live.claim_gate, live.mutation_lock:
-            pending = list_session_admissions(self.db, session_id=ref.session_id)
+            # Read in a worker (once per turn, on every drain): the claim below only takes the head this
+            # read validated (``head=``), so input or a cancel committed meanwhile is re-read, not lost.
+            # [daveey] Clear before the off-loop read: a wake set while the read runs must survive it.
             live.claim_changed.clear()
+            pending = await asyncio.to_thread(list_session_admissions, self.db, session_id=ref.session_id)
             if any(row['status'] == 'unknown' for row in pending):
                 raise RuntimeStoreError('unknown_execution')
             from gateway.session_update_pause import checkpoint_head, update_held, UPDATE_PAUSED
             from gateway.session_notifier_drain import eligible, queued_head
             # A started update checkpoint precedes every queued row; only queued selection skips
             # notifier wakes held by a core-update drain.
-            checkpoint = checkpoint_head(self, ref)
+            checkpoint = await asyncio.to_thread(checkpoint_head, self, ref)
             if checkpoint is not None and update_held(self):
                 return UPDATE_PAUSED, None
-            first = (get_session_admission(self.db, admission_id=checkpoint['admission_id']) if checkpoint
-                     else queued_head(pending))
+            first = (await asyncio.to_thread(get_session_admission, self.db, admission_id=checkpoint['admission_id'])
+                     if checkpoint else queued_head(pending))
             if attempted is not None:
                 attempted[:] = [first]
             if checkpoint is None and first is None and any(row['status'] == 'queued' for row in pending):
@@ -1167,7 +1181,7 @@ class SessionAuthority:
                     await asyncio.to_thread(service.check_admission, ref, first)
                 # Cancellation may advance the FIFO while the source owner is awaited;
                 # the successor must earn its own reauthorization, not inherit this one.
-                current = get_session_admission(self.db, admission_id=first['admission_id'])
+                current = await asyncio.to_thread(get_session_admission, self.db, admission_id=first['admission_id'])
                 if current is None or current['status'] != expected_status:
                     return False, first
             if 'local_automation_v1' in first['payload']:
@@ -1194,7 +1208,7 @@ class SessionAuthority:
                                self.runner._adapter_for_source(live.source))
             # Cancellation may advance FIFO while the connector is awaited.
             # Never let the successor inherit this row's fresh verdict.
-            current = get_session_admission(self.db, admission_id=first['admission_id'])
+            current = await asyncio.to_thread(get_session_admission, self.db, admission_id=first['admission_id'])
             if current is None or current['status'] != expected_status:
                 return False, first
         if first is not None and live.source.platform == Platform.API_SERVER:
@@ -1295,7 +1309,8 @@ class SessionAuthority:
                     refusing = None
                 # Remember the attempted FIFO identity, including a started checkpoint. A
                 # refusal must never select a queued follower behind unfinished work.
-                attempted = next(iter(list_session_admissions(self.db, session_id=ref.session_id)), None)
+                attempted = next(iter(await asyncio.to_thread(
+                    list_session_admissions, self.db, session_id=ref.session_id)), None)
                 # The row the claim actually validated: a held notifier wake is skipped, so the
                 # queued FIFO front is not necessarily the attempted queued identity.
                 selected = _Attempt()
@@ -1489,8 +1504,10 @@ class SessionAuthority:
                 retire_at_idle(self, ref, live)
                 return
             admission_id = row['admission_id']
+            from gateway.run_plugin_injection import admission_turn_scope
             try:
-                response, outcome = await self._execute_claimed(ref, live, row)
+                with admission_turn_scope(self, ref, live, row):
+                    response, outcome = await self._execute_claimed(ref, live, row)
                 if outcome == 'settled_unknown':
                     self.deferred_resets.pop(live.route, None)  # no settlement follows, as below
                     continue

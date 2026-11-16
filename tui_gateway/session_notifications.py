@@ -9,6 +9,7 @@ import threading
 
 from .method_ctx import bind_module
 from . import session_notifications_surface as _surface
+from . import session_notifications_readopt as _readopt
 from .kanban_notice_text import (chat_wait_suffix as _kb_chat_wait, failure_suffix as _kb_failure,
     left_open_suffix as _kb_left_open, repin_suffix as _kb_repin_notice, timed_out_suffix as _kb_timed_out,
     parent_unclaimed_suffix as _kb_parent_unclaimed, quota_episode_suffix as _kb_quota_episode)
@@ -242,8 +243,19 @@ def _notif_release_turn(session: dict) -> None:
     with session["history_lock"]:
         if settle(session):
             session["running"] = False
+        session.pop("_notif_turn_claim", None)
     from tui_gateway.detached_turn_cleanup import settled
     settled(session)
+
+
+def _notif_release_claim(session: dict, claim) -> None:
+    """Release ``running`` only while it is still ``claim``'s: admission that refused (or a turn that ended) already
+    released it, and a user prompt may own ``running`` since — clearing it would run two turns on one agent.
+    [daveey] Same settle as ``_notif_release_turn`` (the turn-admission generation and the detached grace)."""
+    with session["history_lock"]:
+        if claim is None or session.get("_notif_turn_claim") is not claim:
+            return
+    _notif_release_turn(session)
 
 
 def _notif_claim_turn(session: dict) -> bool:
@@ -261,6 +273,7 @@ def _notif_claim_turn(session: dict) -> bool:
                 or session.get("_exit_notices_pending")):
             return False
         session["running"] = True
+        session["_notif_turn_claim"] = object()  # this claim's identity; every release of it pops the token
         return True
 
 
@@ -372,7 +385,9 @@ def _notif_refusal_backoff(session: dict) -> None:
 def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwargs) -> bool:
     """Only the execution gate can acknowledge a claimed notification turn (message.start is emitted by
     _run_prompt_submit once admitted). Returns the gate's verdict (False = refused, no turn runs): callers
-    that already took the notice off a durable store put it back."""
+    that already took the notice off a durable store put it back. Every caller claimed ``running`` just
+    before, so the token read here is its own; nothing else can claim while ``running`` stays True."""
+    claim = session.get("_notif_turn_claim")
     # [daveey] The first ownership refusal of a streak shows its one notice; later probes in the streak are
     # silent (_notif_owner_preflight / the owner-refusal backoff).
     kwargs.setdefault("report_ownership_refusal", not session.get("_notif_owner_refusal_delay"))
@@ -381,13 +396,13 @@ def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwa
         if accepted:
             session.pop("_notif_refusal_delay", None)
         else:
-            # Admission can refuse even after the local running flag was claimed. A caller that
-            # requeues the notice backs off first (_notif_refusal_backoff); the rest return at once.
-            _notif_release_turn(session)
+            # A refusing admission already released ``running``, and a user prompt may own it since. A caller
+            # that requeues the notice backs off first (_notif_refusal_backoff); the rest return at once.
+            _notif_release_claim(session, claim)
         return accepted
     except Exception as exc:
         _notif_log_failure(what, exc)
-        _notif_release_turn(session)
+        _notif_release_claim(session, claim)
         raise
 
 
@@ -468,6 +483,7 @@ def _maybe_fire_tui_heartbeat_tick(sid: str, session: dict) -> None:
         return  # not due, or the gateway poller owns the routed conversation — stays due there
     if not _notif_claim_turn(session):
         return  # busy — the tick coalesces to the next idle poll
+    claim = session.get("_notif_turn_claim")
     if not (prompt := mgr.due_prompt()):
         _notif_release_turn(session)
         return
@@ -478,18 +494,10 @@ def _maybe_fire_tui_heartbeat_tick(sid: str, session: dict) -> None:
     except Exception as exc:
         _notif_log_failure("heartbeat dispatch failed", exc)
     if not started:
-        # _run_prompt_submit releases ``running`` itself when it refuses the turn; make it unconditional.
-        _notif_release_turn(session)
+        # A refusing admission already released ``running`` (a user prompt may own it since): release only our claim.
+        _notif_release_claim(session, claim)
         with contextlib.suppress(Exception):
             mgr.abandon_fire()
-
-
-def _loop_route_is_gateway_chat(state) -> bool:
-    """A /loop set from a messaging chat carries the gateway's ``route`` (platform + chat_id); its wakeup scanner
-    (``gateway/run_goals.py::_loop_wakeup_fire_one``) fires those and skips route-less CLI/TUI loops. Mirror it here
-    so a Desktop viewer of the same session never consumes the tick and strands the reply off the chat."""
-    route = getattr(state, "route", None) or {}
-    return bool(route.get("platform") and route.get("chat_id"))
 
 
 def _session_owns_live_wakeup_schedule(session: dict) -> bool:
@@ -556,6 +564,7 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
         return  # not due, or the gateway's wakeup scanner owns the routed chat — stays due there
     if not _notif_claim_turn(session):
         return  # busy — stays due, next poll retries
+    claim = session.get("_notif_turn_claim")
     if not (wakeup := mgr.fire_tick()):
         _notif_release_turn(session)
         return
@@ -572,13 +581,21 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
                     mgr.abandon_tick()
                 return
             _emit("message.start", sid)
-            _notif_run_submit(rid, sid, session, wakeup)
+            if not _notif_run_submit(rid, sid, session, wakeup):
+                # Refused at admission (another surface owns the chat): no turn will settle this tick. Admission
+                # already released ``running``; only the loop state rolls back here.
+                _notif_abandon_loop_tick(sid, session, mgr)
     except Exception as exc:
         _notif_log_failure("loop wakeup dispatch failed", exc)
-        _notif_release_turn(session)
-        with contextlib.suppress(Exception):
-            mgr.abandon_tick()
-        _publish_session_control_snapshot(sid, session)  # back to the countdown, not "running now"
+        _notif_release_claim(session, claim)  # still ours unless admission released it before raising
+        _notif_abandon_loop_tick(sid, session, mgr)
+
+
+def _notif_abandon_loop_tick(sid: str, session: dict, mgr) -> None:
+    """Roll the fired tick back to the countdown. Never touches ``running``: it may be another turn's by now."""
+    with contextlib.suppress(Exception):
+        mgr.abandon_tick()
+    _publish_session_control_snapshot(sid, session)  # back to the countdown, not "running now"
 
 
 def _kb_first_line(value: Any, limit: int) -> str:
@@ -1351,6 +1368,7 @@ def _background_notifications_off(session: dict) -> bool:
 def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None:
     """Run the claimed (running=True) agent turn for one notification event."""
     from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
+    turn_claim = session.get("_notif_turn_claim")
     try:
         claim = claim_event_delivery(evt, "tui-poller")
     except Exception as exc:  # shared ledger busy/unreadable: the durable row stays pending and replays
@@ -1360,7 +1378,7 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
         # Another consumer holds the durable row — a gateway sharing this home claims before it verifies
         # the target. No turn will run, and nothing else clears ``running``: a busy session is exempt
         # from the reaper, keeps its lease, and never reaches its bot mailbox again.
-        _notif_release_turn(session)
+        _notif_release_claim(session, turn_claim)
         return
     evt_type = evt.get("type")
     kwargs: dict = {}
@@ -1652,22 +1670,6 @@ def _notif_take_parked(sid, session, registry, handle) -> int:
         return 0
 
 
-def _readopted_exit_deliver(evt: dict, *, registry=None):
-    """``ProcessRegistry.on_unknown_exit`` in a Desktop backend: park a re-adopted job's exit for its chat's
-    poller, and when that chat is not open here, resume it in-process (as the startup-resume sweep does) so its
-    poller takes the event and runs the completion turn. Returns the wake thread, or None. [daveey]"""
-    if registry is None:
-        from tools.process_registry import process_registry as registry
-    registry.park_unowned_event(evt)
-    key = str(evt.get("session_key") or "")
-    if not key or _notif_live_session_matches({key, _notif_resolve_event_key(key)}):
-        return None  # open here: its poller takes the parked event within _PARKED_POLL_SECONDS
-    t = threading.Thread(target=_wake_chat_for_readopted_exit, args=(key,), daemon=True,
-                         name=f"readopt-wake-{key[-6:]}")
-    t.start()
-    return t
-
-
 def _readopt_wake_profiles() -> list:
     """Launch store first, then each named profile with a state.db (a checkpoint entry records no profile)."""
     from hermes_constants import get_hermes_home
@@ -1676,35 +1678,6 @@ def _readopt_wake_profiles() -> list:
         root = Path(get_hermes_home()) / "profiles"
         out += sorted(p.name for p in root.iterdir() if (p / "state.db").is_file())
     return out
-
-
-def _wake_chat_for_readopted_exit(key: str):
-    """Resume chat ``key`` detached in this backend; returns the profile it resumed under (None = launch), or
-    None when no store has it or the resume was refused (e.g. open in another backend). Never raises."""
-    import itertools as _it
-    handler = _methods.get("session.resume")
-    if handler is None:
-        logger.warning("readopt wake: session.resume not installed; %s waits until it is opened", key)
-        return None
-    from tui_gateway.update_pause import readopt_wake_yields
-    if readopt_wake_yields(key):  # [daveey] waited out a paused turn's hand-off and the chat is now loaded here
-        return None
-    for n, profile in zip(_it.count(1), _readopt_wake_profiles()):
-        params = {"session_id": key, "omit_messages": True, **({"profile": profile} if profile else {})}
-        try:
-            env = handler(f"readopt-wake-{n}", params) or {}
-        except Exception:
-            logger.warning("readopt wake of %s failed", key, exc_info=True)
-            return None
-        err = env.get("error") if isinstance(env, dict) else None
-        if not err:
-            logger.info("Woke chat %s (profile=%s) for its re-adopted job's exit", key, profile or "default")
-            return profile
-        if not (isinstance(err, dict) and err.get("code") == 4007):
-            logger.warning("readopt wake of %s refused (%s); the exit stays parked until it is opened here", key, err)
-            return None
-    logger.warning("readopt wake: chat %s not found in any profile store", key)
-    return None
 
 
 def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None = None,
@@ -1788,13 +1761,6 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
     except Exception:
         logger.warning("%s: waking %s failed", label, key, exc_info=True)
         return "error"
-
-
-def _install_readopted_exit_waker(registry=None) -> None:
-    """Desktop backend boot: route re-adopted jobs' unknown exits through ``_readopted_exit_deliver``."""
-    if registry is None:
-        from tools.process_registry import process_registry as registry
-    registry.on_unknown_exit = lambda evt: _readopted_exit_deliver(evt, registry=registry)
 
 
 def _notification_poller_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
@@ -1985,3 +1951,4 @@ def register(server) -> None:
     """Publish this module's helpers + handlers onto ``server``, rebound to its globals."""
     bind_module(globals(), server, skip=("_",))
     _surface.register(server)
+    _readopt.register(server)

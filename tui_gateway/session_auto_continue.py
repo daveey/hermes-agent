@@ -294,6 +294,7 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
                 session["_auto_continue_scheduled"] = False  # a real user prompt beat us; it clears the marker
                 return
             session["running"] = True
+            session["_notif_turn_claim"] = claim = object()  # the exception release below frees only this claim
             session["last_active"] = time.time()
         # Ownership admission BEFORE message.start: a sibling backend sharing this HERMES_HOME may have written the
         # marker and still be mid-turn. Leave the marker so a later resume retries.
@@ -356,11 +357,11 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
                     **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {}))
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
-            _notif_release_turn(session)  # rebound from session_notifications
+            _notif_release_claim(session, claim)  # a user turn admitted after a refusal keeps its ``running``
             _drop_kickoff_marker_inputs(session, marker)
             return
         if accepted is False:
-            _notif_release_turn(session)  # rebound from session_notifications
+            _notif_release_claim(session, claim)  # still ours only if admission did not release it
             _auto_continue_refused(sid, session, session_key, paused, "submit refused at admission", marker)
     if _start_session_work(kickoff, name=f"auto-continue-{sid}", home=session.get("profile_home")) is None:
         session["_auto_continue_scheduled"] = False
@@ -930,6 +931,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         queue_generation = int(session.get("_queued_prompt_generation", 0))
         _ac_set_queue(session, session.get("queued_prompts") or [])
         session["running"] = True
+        session["_notif_turn_claim"] = object()  # [daveey] _dispatch_claimed_queue reads it back: its release frees only this claim
         queued_transport = queued.get("transport")
         # The queuer's transport is pinned so the drained turn reaches the client that sent it — but
         # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the
@@ -943,6 +945,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
 
 
 def _dispatch_claimed_queue(rid, sid, session, queued, queue_generation):
+    claim = session.get("_notif_turn_claim")  # set by _drain_queued_prompt's claim just before
     use_compute_host = _session_uses_compute_host(session)
     with session["history_lock"]:
         if int(session.get("_queued_prompt_generation", 0)) != queue_generation:
@@ -990,7 +993,7 @@ def _dispatch_claimed_queue(rid, sid, session, queued, queue_generation):
     except Exception as exc:
         logger.exception("Queued prompt dispatch failed")
         _notif_log_failure("queued prompt dispatch failed", exc)
-        _notif_release_turn(session)
+        _notif_release_claim(session, claim)
         dispatch_failed = True
     if dispatch_failed:
         with session["history_lock"]:

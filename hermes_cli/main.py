@@ -413,15 +413,18 @@ def _s6_supervised_gateway_run(argv: list) -> bool:
     current profile, and it is the image's own CMD. Following the sticky ``active_profile`` there
     started that profile's named slot on every container boot: the one the boot reconciler just
     registered down, because a started named slot is a second gateway beside the multiplexer.
-    ``--no-supervise`` keeps the foreground run, which follows ``active_profile`` as before (#22502).
+    ``--no-supervise`` (or an argparse abbreviation) keeps the foreground run on ``active_profile`` (#22502).
     """
     words = [a for a in argv if not a.startswith("-")]
-    if words[:2] != ["gateway", "run"] or "--no-supervise" in argv:
+    if words[:2] != ["gateway", "run"]:
         return False
     if os.environ.get("HERMES_GATEWAY_NO_SUPERVISE", "").lower() in ("1", "true", "yes"):
         return False
     from hermes_cli.service_manager import _s6_running
-    return _s6_running()
+    if not _s6_running():
+        return False
+    from hermes_cli._parser import gateway_run_no_supervise  # the container boot's own decision
+    return not gateway_run_no_supervise(argv)
 
 
 def explicit_cli_profile() -> str | None:
@@ -1951,7 +1954,7 @@ _FROZEN_UPDATER_SURFACE: dict[str, tuple[str, ...]] = {
         "_leftover_pausable_gateway_pids", "_npm_lockfile_changed",
         "_orphaned_desktop_backend_pids", "_refresh_active_lazy_features",
         "_refresh_active_memory_provider_dependencies", "_relaunch_stopped_serves",
-        "_stop_process_trees",
+        "_stop_process_trees", "_write_update_incomplete_marker",
     ),
     "hermes_cli.update_cmd_maint": (
         "_purge_stale_hermes_modules", "_reload_updated_runtime_modules",
@@ -1967,15 +1970,12 @@ _FROZEN_ATTR_SOURCES: dict[str, str] = {
 
 def __getattr__(name):
     """Resolve the frozen updater surface on first read (see _FROZEN_UPDATER_SURFACE)."""
-    if name == "_write_update_incomplete_marker":
-        from hermes_cli._old_updater import stop_for_relaunch as value
-    else:
-        module = _FROZEN_ATTR_SOURCES.get(name)
-        if module is None:
-            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-        import importlib
+    module = _FROZEN_ATTR_SOURCES.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
 
-        value = getattr(importlib.import_module(module), name)
+    value = getattr(importlib.import_module(module), name)
     globals()[name] = value  # cache: later accesses skip __getattr__
     return value
 

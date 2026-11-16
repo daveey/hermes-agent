@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 BOOT_FILES = (
     "hermes_bootstrap.py", "hermes_constants.py", "hermes_cli/__init__.py", "hermes_cli/_launchers.py",
     "hermes_cli/_launch_template.py",
+    "hermes_agent/__init__.py", "hermes_agent/compat/__init__.py", "hermes_agent/compat/finder.py",
+    "hermes_agent/compat/moves.py",
     "pm/environments.py", "pm/filesystem.py", "pm/paths.py", "hermes_cli/runtime_state.py",
     "hermes_cli/_early_recovery.py", "hermes_cli/_parser.py",
     "hermes_cli/venv_sync.py", "hermes_cli/steward.py", "hermes_cli/launch_malloc.py",

@@ -110,9 +110,15 @@ class ProcessCheckpointMixin:
         return _lock()
 
     def _writer_identity(self) -> dict[str, Any]:
-        """Which process supervises the entries this registry writes. [daveey]"""
+        """Which process supervises the entries this registry writes. [daveey]
+
+        ``owner_pid`` (upstream): the gateway whose jobs these are. Every interpreter on the home
+        writes this file; ``hermes update --force`` sweeps only what the gateway it killed owns
+        (update_cmd_force_stop): a managed worker's jobs are its owner's."""
+        from agent.runtime_session_store import is_worker_process
         pid = os.getpid()
-        return {"writer_pid": pid, "writer_start_time": self._safe_host_start_time(pid)}
+        owner_pid = os.getppid() if is_worker_process() else pid  # windows-footgun: ok — getppid exists on Windows
+        return {"writer_pid": pid, "writer_start_time": self._safe_host_start_time(pid), "owner_pid": owner_pid}
 
     def _writer_alive(self, entry: dict[str, Any]) -> bool:
         """True when the process that wrote *entry* still runs (so it still supervises

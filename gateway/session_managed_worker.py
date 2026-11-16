@@ -38,13 +38,16 @@ class ManagedExecutionUnknown(RuntimeError):
 
 
 def managed_policy(authority, ref):
-    """Bypass (safe / config-only) sessions always execute out of process; other local
-    sessions only under the explicit custom-provider opt-in.
+    from gateway.session_policy import policy_for_source
+    return policy_if_managed(policy_for_source(authority.runner, authority.sessions[ref.session_id].source))
+
+
+def policy_if_managed(policy):
+    """``policy`` when its session executes out of process, else None. Bypass (safe / config-only)
+    sessions always do; other local sessions only under the explicit custom-provider opt-in.
 
     The frozen creation snapshot, not current profile config, chooses execution.
     """
-    from gateway.session_policy import policy_for_source
-    policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
     if policy is None:
         return None
     if policy.ignore_user_config or policy.kanban_json is not None:
@@ -680,6 +683,10 @@ async def admit_managed(authority, ref, row, policy):
         result = workspace_unavailable_result(policy)
         authority.pending_results[row['admission_id']] = {'result': result, 'usage': {}}
         return result['final_response']
+    result = _unsupported_command_result(row)
+    if result is not None:
+        authority.pending_results[row['admission_id']] = {'result': result, 'usage': {}}
+        return result['final_response']
     reply = await execute_managed(authority, ref, row, policy)
     pending = authority.pending_results.get(row['admission_id'], {})
     result = pending.get('result', {})
@@ -700,6 +707,29 @@ async def admit_managed(authority, ref, row, policy):
             'session_id': ref.session_id, 'request_id': row.get('request_id'),
             'admission_id': row.get('admission_id'), 'cause': pending.get('runtime_stop_cause')})
     return reply
+
+
+def _unsupported_command_result(row):
+    """The never-run result for a managed turn whose text is ``/moa``, else None. The worker runs the
+    session's frozen route and never binds a preset, so every route into it (raw ``prompt.submit``,
+    a queued row, a slash.exec that got past its own check) is refused here instead of handing the
+    worker the literal command. A finite prompt's exit code is its only verdict, so it fails."""
+    text = (row.get('payload') or {}).get('text')
+    if not isinstance(text, str):
+        return None
+    from gateway.platforms.event import MessageEvent
+    from hermes_cli.commands import resolve_command
+    name = MessageEvent(text=text).get_command()
+    command = resolve_command(name) if name else None
+    if command is None or command.name != 'moa':
+        return None
+    from agent.i18n import t
+    text = t('gateway.moa.managed_session')
+    if row['payload'].get('finite') is not True:
+        return {'final_response': text, 'messages': []}
+    from agent.turn_failure_copy import stamp_failure
+    return stamp_failure({'final_response': text, 'messages': [], 'api_calls': 0, 'tools': [],
+                          'failed': True, 'completed': False, 'error': text}, 'command_unavailable', False)
 
 
 async def _finalize_managed_refusal(authority, session_id, accepted):

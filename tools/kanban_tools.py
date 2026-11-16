@@ -1650,7 +1650,7 @@ def _handle_create(args: dict, **kw) -> str:
         _admission_refused(marker_placement)  # raises the typed refusal for a denied hub pin
         try:
             creation_options = dict(
-                title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
+                title=_redact(str(title).strip()), body=_redact_opt(args.get("body")), assignee=str(assignee),
                 parents=tuple(parents), tenant=_ca.effective_tenant(args, courier_intent),
                 priority=_opt_int(args.get("priority"), 0),
                 admission_class=args.get("admission_class", "normal"), admission_frees=args.get("admission_frees"),

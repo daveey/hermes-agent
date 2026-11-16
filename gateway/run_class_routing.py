@@ -58,7 +58,7 @@ def stored_route(runner, session_key):
     entry = getattr(store, "_entries", {}).get(session_key) if session_key else None
     db = getattr(runner, "_session_db", None)
     db = getattr(db, "_db", db)
-    if entry is None or db is None:
+    if entry is None or db is None or not isinstance(getattr(entry, "session_id", None), str):
         return None
     row = db.get_session(entry.session_id)
     if not isinstance(row, dict):
