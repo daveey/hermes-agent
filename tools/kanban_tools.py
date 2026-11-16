@@ -1460,7 +1460,7 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
                                       hub_admission=decision.get("hub_admission"),
                                       remedy=decision.get("remedy")), None
         if target == "local":
-            local = _local_placement(kp, view, decision, machine_ok=machine_ok, note_local_pin=note_local_pin)
+            local = _local_placement(kp, view, decision, machine_ok=machine_ok, note_local_pin=note_local_pin, origin_gateway=origin_gateway)
             stranded = _runstate.stranded_create((local or {}).get("runs_on"))
             return (tool_error(stranded, rejection="sync_not_running"), None) if stranded else (None, local)
         self_gw = reg.self_gateway() or "local"

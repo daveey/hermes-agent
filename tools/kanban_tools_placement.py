@@ -148,7 +148,7 @@ def _with_admission(placement: dict, marker_placement) -> dict:
     return {**placement, "hub_admission": verdict} if verdict else placement
 
 
-def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_pin: bool) -> dict:
+def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_pin: bool, origin_gateway=None) -> dict:
     """``placement`` for a card ``kp.decide`` kept on this gateway; every local decision says why. [daveey]
 
     Pins, "needs ..." and plain local reasons used to return nothing, which left 41 of 148 MacBook cards
@@ -156,6 +156,12 @@ def _local_placement(kp, view: dict, decision: dict, *, machine_ok, note_local_p
     elsewhere without the pin also gets a ``note`` naming that target (the card is still created here).
     """
     why = decision.get("why") or ""
+    if decision.get("defer") and origin_gateway:
+        # A local placeholder has no accepted binding on the foreign chat owner;
+        # its own native run cannot attest that origin when the parents finish.
+        return {"where": "refuse", "pin": decision["defer"],
+                "why": "foreign-origin deferred placement is unsupported",
+                "remedy": "Create the card from the origin gateway, or wait for its parents and retry."}
     if decision.get("hub_admission"):
         # Admission already resolved the execution target; advisory re-deciding
         # would make another model call and could discard the effective contract.

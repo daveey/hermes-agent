@@ -62,22 +62,43 @@ def test_qualified_transport_failure_never_creates_local(home, monkeypatch, exce
         assert not conn.execute("SELECT 1 FROM tasks WHERE title='must not exist'").fetchone()
 
 
-def test_deferred_retains_gateway_and_uses_current_deferred_creator(home, monkeypatch):
+def test_foreign_deferred_create_refuses_before_creating_placeholder(home, monkeypatch):
     creator(monkeypatch)
     monkeypatch.setattr(kp, "decide", lambda *a, **k: {"where": "local", "defer": "hub", "why": "parents"})
+    with kbc.connect_closing() as conn:
+        before = [tuple(row) for row in conn.execute("SELECT id FROM tasks ORDER BY id")]
     out = json.loads(tools._handle_create({"title": "deferred child", "requires": []}))
+    assert out.get("created") is False, out
+    assert out["code"] == "placement_unavailable"
+    assert "foreign-origin deferred placement is unsupported" in out["error"]
+    assert "task_id" not in out
+    with kbc.connect_closing() as conn:
+        assert [tuple(row) for row in conn.execute("SELECT id FROM tasks ORDER BY id")] == before
+
+
+def test_foreign_origin_without_deferral_still_creates_local_card(home, monkeypatch):
+    creator(monkeypatch)
+    monkeypatch.setattr(kp, "decide", lambda *a, **k: {"where": "local", "why": "local marker"})
+    out = json.loads(tools._handle_create({"title": "local foreign child", "requires": []}))
     assert out["ok"] is True, out
-    calls = []
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, out["task_id"]) is not None
+        assert kpf.state(conn, out["task_id"]) is None
+
+
+@pytest.mark.parametrize("owner", ["local", "none"])
+def test_supported_deferred_create_still_records_placeholder(home, monkeypatch, owner):
+    tid = creator(monkeypatch)
+    with kbc.connect_closing() as conn:
+        conn.execute("DELETE FROM task_chat_links WHERE task_id=?", (tid,))
+        conn.commit()
+        if owner == "local":
+            helpers._link(conn, tid, "here", "default", helpers.CHAT)
+    monkeypatch.setattr(kp, "decide", lambda *a, **k: {"where": "local", "defer": "hub", "why": "parents"})
+    out = json.loads(tools._handle_create({"title": "supported deferred child", "requires": []}))
+    assert out["ok"] is True, out
     with kbc.connect_closing() as conn:
         st = kpf.state(conn, out["task_id"])
-        assert st["origin_gateway"] == "macbook"
-        fwd = kpf.Forwarder(conn, out["task_id"], 17)
-        monkeypatch.setattr(provenance, "forwarding_authority", lambda c, t, r, **kw: calls.append((t, r)) or AUTHORITY)
-        fwd.create = lambda a, **kw: kw
-        result = fwd._create({}, "hub", st, "immutable-key")
-        assert calls == [(out["task_id"], 17)]
-        assert result["origin_gateway"] == "macbook"
-        assert result["transport_key"] == "immutable-key"
-        fwd._park_clock = lambda why: "requeued"
-        assert fwd._cancel("authority refused") == "requeued"
-        assert kpf.state(conn, out["task_id"])["origin_gateway"] == "macbook"
+        assert st["target"] == "hub"
+        assert st["origin_session"] == (helpers.CHAT if owner == "local" else None)
+        assert not st.get("origin_gateway")
