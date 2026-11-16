@@ -594,6 +594,7 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         tid: ("parents_incomplete", "a parent is not done") for tid in mine - {c["id"] for c in listed}}
     picked: list[str] = []
     free = 0  # guard-held copies take no budget: they `continue` before room.take
+    paced: dict[str, int] = {}  # provider -> cards this pass took against its pacing limit (_paced)
     from hermes_cli.kanban_admission_pools import PoolBudget, row_class
     room = PoolBudget(limit.regular, limit.priority, limit.limit) if isinstance(limit, PoolBudget) else \
         PoolBudget(limit, 0)  # an int is a classless budget; a hub's pool budget never copies unstartable work
@@ -605,8 +606,9 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
                               profile_exists=profile_exists)
         if reason is None:
             reason = _quota_held(replica, card)
+        admitted: list[str] = []
         if reason is None:
-            reason = _paced(conn, replica, card)
+            reason = _paced(conn, replica, card, paced, admitted)
         hold = kph.board_hold(replica, card) if reason is None else None
         if hold is not None:
             if held is not None and free < kph.FREE_PER_TICK and not kph.recently_copied(card["id"], hold[1]):
@@ -620,18 +622,25 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         if reason is None:
             picked.append(card["id"])
             room.take(row_class(card))
+            for provider in admitted:
+                paced[provider] = paced.get(provider, 0) + 1
         elif reason[0] and card["id"] in mine:
             skips[card["id"]] = reason
     return picked, skips
 
 
-def _paced(conn: sqlite3.Connection, replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
+def _paced(conn: sqlite3.Connection, replica: sqlite3.Connection, card: sqlite3.Row,
+           picked: Optional[dict[str, int]] = None, admitted: Optional[list[str]] = None,
+           ) -> Optional[tuple[str, Optional[str]]]:
     """[daveey] ``("other", detail)`` when this machine's dispatcher would pace-hold ``card`` (provider at or over its
     ``kanban.llm_pacing`` limit here) right now. Such a card is not offered, so it takes no pickup budget and the
     window fills with the next cards that can run; it is offered again on the tick its limit frees
-    (t_01a1ddeb76e30be7: 9 paced codex cards hid a runnable anthropic card)."""
+    (t_01a1ddeb76e30be7: 9 paced codex cards hid a runnable anthropic card). ``picked`` counts the cards this pass
+    already took per provider against that limit; ``admitted`` receives the limited provider that admits ``card``
+    (t_01a1e14333fada79: limit 1, running 0, one pass copied 10 anthropic cards and a card pinned here below them
+    read ``budget_exhausted``)."""
     from hermes_cli.kanban_llm_pacing_dispatch import pickup_hold
-    held = pickup_hold(conn, replica, card)
+    held = pickup_hold(conn, replica, card, picked=picked, admitted=admitted)
     if held is not None:
         return "other", f"llm_paced: {held} (local dispatch would hold it)"
     from hermes_cli.kanban_start_gate import hold as start_gate_hold  # a plugin holds this machine's card starts

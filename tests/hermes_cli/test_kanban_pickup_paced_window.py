@@ -25,7 +25,9 @@ def pools(monkeypatch):
     def pace_for(conn, provider, cfg, now):
         if provider == "openai-codex":
             return lp.PoolPace(provider, state["codex"], 0.0 if state["codex"] == lp.HELD else 1.0)
-        return lp.PoolPace(provider, lp.OPEN, 1.0)
+        # At the ramp factor an open pool has no limit (``lp.admit_limit``); below it an idle host may start one
+        # card, and a pass counts its own picks against that (t_01a1e14333fada79).
+        return lp.PoolPace(provider, lp.OPEN, lp.OPEN_RAMP_FACTOR)
     monkeypatch.setattr(pd, "pace_for", pace_for)
     return state
 

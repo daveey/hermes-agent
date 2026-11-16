@@ -254,10 +254,12 @@ def is_deferrable(conn: sqlite3.Connection, task: Any, lane: str) -> bool:
     return row is not None and row[0] == CONTINUATION_WOKEN_EVENT
 
 
-def _verdicts(conn, task, providers, lane, cfg, host=None) -> Optional[list[dict]]:
+def _verdicts(conn, task, providers, lane, cfg, host=None, picked=None, admitted=None) -> Optional[list[dict]]:
     """One verdict per governed candidate pool at its pace limit; None when none is (the card starts as routed).
     ``host``: the connection whose running cards count (default ``conn``): pickup judges a replica card against
-    this machine's own board.
+    this machine's own board. ``picked`` counts this pass's reservations. ``admitted`` receives all limited
+    candidates with room: without a reroute the class allocator can choose any of them, so pickup conservatively
+    reserves each. When rerouting, pickup instead reserves only the chosen target.
 
     A class route (several candidate pools) is judged pool by pool: ONE pool at its limit is enough, because the class
     allocator is weighted round-robin, not pace-aware, and would hand the card to that pool on its turn. The caller
@@ -272,9 +274,13 @@ def _verdicts(conn, task, providers, lane, cfg, host=None) -> Optional[list[dict
         pace = pace_for(host, provider, cfg, now)
         limit = lp.admit_limit(pace, avg_running(provider, now, cfg), deferrable=deferrable, cfg=cfg)
         running = local_running(host, provider)
-        if limit is None or running < limit:
+        taken = int((picked or {}).get(provider, 0))
+        if limit is None or running + taken < limit:
+            if limit is not None and admitted is not None:
+                admitted.append(provider)
             continue
-        verdicts.append({**pace.as_dict(), "limit": limit, "running": running, "deferrable": deferrable})
+        verdicts.append({**pace.as_dict(), "limit": limit, "running": running, "deferrable": deferrable,
+                         **({"picked": taken} if taken else {})})
     return verdicts or None
 
 
@@ -321,7 +327,7 @@ def _governed(conn: sqlite3.Connection, task_id: str, lane: str, cfg: lp.PacingC
 
 
 def _pace_alternate(conn: sqlite3.Connection, task: Any, lane: str, cfg: lp.PacingConfig,
-                    host: sqlite3.Connection, verdicts: list[dict]) -> Optional[tuple[str, str, str, tuple]]:
+                    host: sqlite3.Connection, verdicts: list[dict], *, picked=None) -> Optional[tuple[str, str, str, tuple]]:
     """``(model, provider, paced, judged)``: a route of the card's own class on a pool that is NOT ahead of pace, for a
     card a candidate pool holds (``verdicts``: the pools at their limit); ``judged`` is the ``(model, provider)`` route
     it moves from. None keeps the hold. [daveey]
@@ -339,13 +345,13 @@ def _pace_alternate(conn: sqlite3.Connection, task: Any, lane: str, cfg: lp.Paci
         route = candidate_route(conn, task, lane)[0]
         if route is None:
             return None  # a pin/profile fallback route is launched as is: holding is the only safe answer
-        return _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts)
+        return _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts, picked=picked)
     except Exception as exc:  # health: allow BLE001 -- a failed probe keeps today's hold, never starts a paced card
         _warn("alternate", "kanban pacing: pace alternate probe failed (%s: %s); holding", type(exc).__name__, exc)
         return None
 
 
-def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts):
+def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts, *, picked=None):
     from hermes_cli import kanban_provider_walls as pw
     from hermes_cli.kanban_quota_episode import alternate_route
     if pw.requires_model(task):
@@ -371,7 +377,7 @@ def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts):
         if target in cfg.providers:
             pace = pace_for(host, target, cfg, now)
             limit = lp.admit_limit(pace, avg_running(target, now, cfg), deferrable=deferrable, cfg=cfg)
-            if limit is not None and local_running(host, target) >= limit:
+            if limit is not None and local_running(host, target) + int((picked or {}).get(target, 0)) >= limit:
                 paced[target] = float(pace.until or now + cfg.read_interval)
                 continue
         return moved[0], target, ",".join(sorted(paced)), (model, provider)
@@ -488,21 +494,35 @@ def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run:
         return False
 
 
-def pickup_hold(local: sqlite3.Connection, replica: sqlite3.Connection, card: Any) -> Optional[str]:
+def pickup_hold(local: sqlite3.Connection, replica: sqlite3.Connection, card: Any, *,
+                picked: Optional[dict[str, int]] = None, admitted: Optional[list[str]] = None) -> Optional[str]:
     """Pickup's read-only twin of :func:`hold`: ``"<provider> <state>, ..."`` when this machine's dispatcher would
     pace-hold the foreign ``card`` right now, else None. The card is judged on the replica's copy, the running
     count on ``local`` (this machine's board), so a copy that only pacing would hold is never taken into the pickup
     window (worker-6 2026-11-15: 9 paced codex cards hid a runnable anthropic card at rank 16). Records nothing;
-    any fault returns None (fail open: the local dispatcher still decides after the copy)."""
+    any fault returns None (fail open: the local dispatcher still decides after the copy).
+
+    ``picked``/``admitted``: the pass's own spend (:func:`_verdicts`). The cards a pass already took count against
+    the limit, so a pass copies no more cards of a provider than it can start (worker-3 2026-11-15: limit 1, running
+    0, a batch of 10 anthropic copies, 9 pace-held and evicted each tick, t_01a1e14333fada79)."""
     try:
         cfg = load_config()
         judged = _governed(replica, card["id"], card["status"], cfg) if cfg.enabled else None
         if judged is None:
             return None
-        verdicts = _verdicts(replica, judged[0], judged[1], card["status"], cfg, host=local)
-        if verdicts is not None and _pace_alternate(replica, judged[0], card["status"], cfg, local, verdicts):
-            return None  # the local claim starts it on a pool with room (hold)
-        return None if verdicts is None else ", ".join(f"{v['provider']} {v['state']}" for v in verdicts)
+        pools: list[str] = []
+        verdicts = _verdicts(replica, judged[0], judged[1], card["status"], cfg, host=local, picked=picked,
+                             admitted=pools)
+        if verdicts is not None:
+            moved = _pace_alternate(replica, judged[0], card["status"], cfg, local, verdicts, picked=picked)
+            if moved is not None:
+                pools = [moved[1]]
+                verdicts = None
+        if verdicts is None and admitted is not None:
+            admitted.extend(pools)
+        return None if verdicts is None else ", ".join(
+            f"{v['provider']} {v['state']}" + (f" (limit {v['limit']}, running {v['running']}, {v['picked']} picked "
+                                               "this pass)" if v.get("picked") else "") for v in verdicts)
     except Exception as exc:  # health: allow BLE001 -- a hold prediction must never stop a pickup
         _warn("pickup", "kanban pacing: pickup hold check failed (%s: %s); copying ungoverned", type(exc).__name__, exc)
         return None
