@@ -339,6 +339,20 @@ _NESTED_FOREIGN_SHELLS = [
     "cat {script} | while read l; do\nsu -l bob\ndone",
     "(\nsu -l bob\n) < {script}",
     "while true; do\nsu -l bob\ndone < {script}",
+    # Printed text a process substitution feeds the login shell's stdin, as the pipe twins
+    # (`echo T | su -l bob`) are walked (PR #3368 review 5912629938; pre-existing on main).
+    "su -l bob < <(echo 't ( bash {db} )')",
+    "su -l bob < <(printf '%s\\n' 't ( bash {db} )')",
+    "su -l bob 0< <(echo 't ( bash {db} )')",
+    "< <(echo 't ( bash {db} )') su -l bob",
+    "bash -l < <(echo 't ( bash {db} )')",
+    "sudo -i < <(echo 't ( bash {db} )')",
+    "ssh host < <(echo 't ( bash {db} )')",
+    "su -l bob < <(echo ':'; echo 't ( bash {db} )')",
+    "{{ su -l bob; }} < <(echo 't ( bash {db} )')",
+    "( bash -l ) < <(printf '%s\\n' 't ( bash {db} )')",
+    "while read l; do su -l bob; done < <(echo 't ( bash {db} )')",
+    "su -l bob < <(python3 - <<'PY'\nprint('t ( bash {db} )')\nPY\n)",
 ]
 
 
@@ -416,6 +430,14 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "cat {script}; su -l bob",
     "su -l bob | cat {script}",
     "cat {script} | su -l bob -c true",
+    # Printed text in a `<(…)` read as stdin by no login shell keeps session scope.
+    "bash < <(echo 't ( bash {db} )')",
+    "bash -s < <(printf '%s\\n' 't ( bash {db} )')",
+    "cat < <(echo 't ( bash {db} )')",
+    "su -l bob -c true < <(echo 't ( bash {db} )')",
+    "su -l bob; cat < <(echo 't ( bash {db} )')",
+    "{{ su -l bob; cat < <(echo 't ( bash {db} )'); }}",
+    "su -l bob < <(echo ':'); echo 't ( bash {db} )'",
 ])
 def test_plain_child_shell_keeps_session_names(tmp_path, live_kanban_db, shape):
     """Controls: no login/interactive shell, so the session's names still decide (#2358)."""

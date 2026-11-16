@@ -97,8 +97,10 @@ def collect_nested_shell_inputs(
     texts: list[str] = []
     scripts: set[Path] = set()
     unknown_names = budget.alias_names is None
-    if not unknown_names:
-        texts.extend(_iter_nested_printed_payloads(walk_command))
+    # Under unknown names the session walk reads a printed pipe, but not text a `<(…)` feeds a
+    # compound command or a redirection-first command (`{ su -l bob; } < <(echo T)`).
+    texts.extend(text for text in _iter_nested_printed_payloads(walk_command, pipes=not unknown_names)
+                 if not (unknown_names and text in session_payloads))
     for text, script in _iter_nested_shell_inputs(command, walk_command, cwd=cwd,
                                                   heredocs=not unknown_names):
         if script is not None:
@@ -503,8 +505,9 @@ def _unit_feeds_nested_stdin(
     return feeds, feeds_body
 
 
-def _iter_nested_printed_payloads(command: str) -> Iterator[str]:
-    """Walk printed text with unknown names only within a pipe feeding a startup shell.
+def _iter_nested_printed_payloads(command: str, *, pipes: bool = True) -> Iterator[str]:
+    """Walk printed text with unknown names only within a pipe feeding a startup shell, or a
+    process substitution read as its stdin (``su -l bob < <(echo T)``, as ``echo T | su -l bob``).
 
     The ordinary printed-text approximation still scans each connected compound pipeline;
     unrelated top-level pipelines retain their session scope. Keep the ordinary walk too.
@@ -513,16 +516,92 @@ def _iter_nested_printed_payloads(command: str) -> Iterator[str]:
     """
     from cron.lifecycle_guard_output import iter_printed_shell_payloads
 
-    if "|" not in command:
-        return  # do not tokenize large no-pipe generators a second time
+    piped, substituted = pipes and "|" in command, "<(" in command
+    if not (piped or substituted):
+        return  # do not tokenize large generators with neither feed a second time
     for unit in _printed_pipeline_units(command):
-        feeds, feeds_body = _unit_feeds_nested_stdin(unit)
+        texts = _stdin_substitution_texts(unit) if substituted else []
+        feeds, feeds_body = _unit_feeds_nested_stdin(unit) if piped else (False, False)
         if feeds:
             text = unit.text()
             if feeds_body and unit.bodies:
                 text = "\n".join([text, *unit.bodies])
+            texts.append(text)
+        for text in texts:
             for payload, _raw_quote in iter_printed_shell_payloads(text, shell_sink=True):
                 yield payload
+
+
+_STDIN_OPERATORS = frozenset({"<", "0<", "<>", "0<>"})
+_SUBSTITUTION_WORD = "\x00<(…)"  # what a `<(…)` stands in for in a command's words
+
+
+def _syntax_word(word: str) -> bool:
+    return not getattr(word, "quoted", False)
+
+
+def _split_substituted_commands(
+    events: list[tuple[str, str]], commands: list[tuple[list[str], list[list[tuple[str, str]]]]],
+) -> None:
+    """Append ``(words, bodies)`` for each simple command in *events*: *bodies* are the events of
+    each ``<(…)`` read as its stdin (``< <(…)``, ``0< <(…)``), one placeholder word in *words*.
+    Commands inside those bodies are appended too."""
+    words: list[str] = []
+    bodies: list[list[tuple[str, str]]] = []
+    index = 0
+    while index < len(events):
+        role, word = events[index]
+        if (role == "word" and word == "<" and _syntax_word(word) and words
+                and words[-1] in _STDIN_OPERATORS and _syntax_word(words[-1])
+                and index + 1 < len(events) and events[index + 1] == ("open", "(")):
+            depth = 0
+            for end in range(index + 1, len(events)):
+                depth += {"open": 1, "close": -1}.get(events[end][0], 0)
+                if not depth:
+                    break
+            else:
+                end = len(events)  # unterminated: the rest is the body (fail closed)
+            body = events[index + 2:end]
+            bodies.append(body)
+            _split_substituted_commands(body, commands)
+            words.append(_SUBSTITUTION_WORD)
+            index = end + 1
+            continue
+        if role == "word":
+            words.append(word)
+        elif role != "data":
+            if words:
+                commands.append((words, bodies))
+            words, bodies = [], []
+        index += 1
+    if words:
+        commands.append((words, bodies))
+
+
+def _stdin_substitution_texts(unit: _PrintedUnit) -> list[str]:
+    """Printed text of each ``<(…)`` fed to a startup shell's stdin (``su -l bob < <(echo T)``),
+    as ``echo T | su -l bob`` is walked. A compound command's closer (``} < <(…)``) counts when any
+    command in *unit* is such a shell: its own redirections are not tracked (fail closed, as for
+    a file). A heredoc body in the substitution is its producer's program, so it is walked too."""
+    from cron.lifecycle_guard import _command_segment_views
+
+    commands: list[tuple[list[str], list[list[tuple[str, str]]]]] = []
+    _split_substituted_commands(unit.events, commands)
+    reads = [any(_nested_shell_input(view) == ("stdin", None)
+                 for view in _command_segment_views(words)) for words, _bodies in commands]
+    texts: list[str] = []
+    for (words, bodies), feeds in zip(commands, reads):
+        if not bodies or not (feeds or (any(reads) and _compound_redirections(words))):
+            continue
+        for body in bodies:
+            producer = _PrintedUnit()
+            producer.events = body
+            text = producer.text()
+            if unit.bodies and any(role == "word" and _is_heredoc_opener(word)
+                                   for role, word in body):
+                text = "\n".join([text, *unit.bodies])
+            texts.append(text)
+    return texts
 
 
 def _feeds_nested_shell(owner: Optional[str]) -> bool:
