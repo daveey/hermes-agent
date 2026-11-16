@@ -20,6 +20,7 @@ def test_continue_archive(w2, monkeypatch, source, verified):
 
     tid = kb.create_task(w2.conn, title="portable archive", assignee="default", runs_on=[helpers.POOL])
     helpers._run(w2, monkeypatch, tid)
+    _backdate_run(w2.conn, tid, 5)
     monkeypatch.setattr(kmp, "card_trees_state", lambda *a, **kw: (["/work"], "unchecked worktree /work (timeout)"))
     digest = hashlib.sha256(b"workspace").hexdigest()
     text = f"Full workspace archive hub-admin:/srv/kanban/evidence/{tid}/run.tar.gz SHA256 {digest}"
@@ -66,6 +67,8 @@ def test_reference_scope(w2, monkeypatch, mutation):
 def test_comments_after_move_and_no_old_fallback(w2, monkeypatch):
     from hermes_cli import kanban_continue_archive as archive
     tid = kb.create_task(w2.conn, title="archive age", assignee="default")
+    helpers._run(w2, monkeypatch, tid)
+    _backdate_run(w2.conn, tid, 5)
     text = f"hub-admin:/srv/{tid}/full.tar.gz SHA256 {'a' * 64}"
     kb.add_comment(w2.conn, tid, author="default", body=text)
     with kb.write_txn(w2.conn):
@@ -99,3 +102,48 @@ def test_hub_hash_verification(monkeypatch, mode):
 
     monkeypatch.setattr(archive.subprocess, "run", run)
     assert archive.verify(path, digest) is (mode == "match")
+
+
+def _backdate_run(conn, tid, seconds):
+    """Real runs start seconds before their worker comments; same-second stays stale."""
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_runs SET started_at = started_at - ? WHERE id = "
+                     "(SELECT current_run_id FROM tasks WHERE id = ?)", (seconds, tid))
+
+
+def test_earlier_run_archive_comment_does_not_carry_to_next_run(w2, monkeypatch):
+    """An archive comment from run 1 must not release run 2's unpushed state to the pool."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_continue_archive as archive
+    import subprocess
+
+    tid = kb.create_task(w2.conn, title="two runs", assignee="default", runs_on=[helpers.POOL])
+    monkeypatch.setattr(kmp, "card_trees_state", lambda *a, **kw: (["/work"], "unchecked worktree /work (timeout)"))
+    digest = hashlib.sha256(b"workspace").hexdigest()
+    path = f"/srv/kanban/evidence/{tid}/run.tar.gz"
+    monkeypatch.setattr(archive.subprocess, "run", lambda *a, **kw:
+                        subprocess.CompletedProcess(a[0], 0, f"{digest}  {path}\n"))
+    helpers._run(w2, monkeypatch, tid)
+    _backdate_run(w2.conn, tid, 5)
+    kb.add_comment(w2.conn, tid, author="default", body=f"archive hub-admin:{path} SHA256 {digest}")
+    with kb.write_txn(w2.conn):  # run 1's comment predates run 2's claim
+        w2.conn.execute("UPDATE task_comments SET created_at = created_at - 2 WHERE task_id = ?", (tid,))
+    assert json.loads(kt._handle_continue({"checkpoint": "run 1 resume"})).get("ok")
+    assert helpers._runs_on(w2.conn, tid) == [helpers.POOL]
+    helpers._run(w2, monkeypatch, tid)  # run 2: new unpushed commits, no new archive
+    out = json.loads(kt._handle_continue({"checkpoint": "run 2 resume"}))
+    assert out.get("ok"), out
+    assert helpers._runs_on(w2.conn, tid) == ["machine:worker-2"]
+    assert helpers._placement_events(w2.conn, tid)
+
+
+def test_comment_window_starts_at_current_run(w2, monkeypatch):
+    from hermes_cli import kanban_continue_archive as archive
+    tid = kb.create_task(w2.conn, title="run window", assignee="default", runs_on=[helpers.POOL])
+    monkeypatch.setattr(archive, "verify", lambda *args: True)
+    text = f"hub-admin:/srv/{tid}/full.tar.gz SHA256 {'a' * 64}"
+    kb.add_comment(w2.conn, tid, author="default", body=text)
+    helpers._run(w2, monkeypatch, tid)
+    assert not archive.portable(w2.conn, tid, "resume")  # comment not after this run's start
+    _backdate_run(w2.conn, tid, 5)
+    assert archive.portable(w2.conn, tid, "resume")

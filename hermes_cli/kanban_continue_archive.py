@@ -32,13 +32,18 @@ def portable(conn, task_id: str, checkpoint: str) -> bool:
     A task-id path component prevents unrelated artifacts granting portability.
     """
     texts = [checkpoint]
-    moved = conn.execute(
-        "SELECT COALESCE(MAX(created_at), -1) FROM task_events WHERE task_id = ? AND kind = 'moved'",
-        (task_id,),
+    # Comments must postdate both the last move and the current run's start: an earlier
+    # run's archive does not carry that run's successor's unpushed work. No current run
+    # (or same-second) means no comment is eligible.
+    since = conn.execute(
+        "SELECT MAX(COALESCE((SELECT MAX(created_at) FROM task_events "
+        "WHERE task_id = :t AND kind = 'moved'), -1), COALESCE((SELECT r.started_at "
+        "FROM tasks t JOIN task_runs r ON r.id = t.current_run_id WHERE t.id = :t), 1 << 62))",
+        {"t": task_id},
     ).fetchone()[0]
     texts.extend(row[0] for row in conn.execute(
         "SELECT body FROM task_comments WHERE task_id = ? AND created_at > ? ORDER BY id DESC LIMIT 20",
-        (task_id, moved),
+        (task_id, since),
     ))
     for text in texts:
         match = _ARCHIVE.search(text or "")
