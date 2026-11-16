@@ -13,8 +13,37 @@ from tests.waiting import async_wait_until
 def _replace_connector(authority) -> None:
     payload = _rows(authority)[0]['payload']
     payload['native_text_v1']['provenance']['connector'] = 'replaced-connector'
-    with authority.db._conn:
-        authority.db._conn.execute('UPDATE session_admissions SET payload_json=?', (json.dumps(payload),))
+    # Settlement commits before its worker detaches the authorizer. The raw connection
+    # can race that detach and invert SQLite's mutex against the GIL. Use the existing
+    # bounded writer mutex, including commit and authorizer teardown, just like production.
+    authority.db._execute_write(lambda conn: conn.execute(
+        'UPDATE session_admissions SET payload_json=?', (json.dumps(payload),)))
+
+
+def test_connector_replacement_uses_serialized_writer(monkeypatch):
+    """A terminal row is visible before its writer removes the SQLite authorizer."""
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    module = sys.modules[__name__]
+
+    payload = {'native_text_v1': {'provenance': {'connector': 'original'}}}
+    monkeypatch.setattr(module, '_rows', lambda _: [{'payload': payload}])
+    connection = Mock()
+
+    class Writer:
+        @property
+        def _conn(self):
+            pytest.fail('connector mutation bypassed the bounded SessionDB writer mutex')
+
+        def _execute_write(self, write):
+            return write(connection)
+
+    module._replace_connector(SimpleNamespace(db=Writer()))
+    connection.execute.assert_called_once_with(
+        'UPDATE session_admissions SET payload_json=?', (json.dumps(payload),))
+    assert payload['native_text_v1']['provenance']['connector'] == 'replaced-connector'
 
 
 @pytest.mark.asyncio
