@@ -516,7 +516,8 @@ def _iter_nested_printed_payloads(command: str, *, pipes: bool = True) -> Iterat
     """
     from cron.lifecycle_guard_output import iter_printed_shell_payloads
 
-    piped, substituted = pipes and "|" in command, "<(" in command
+    piped = pipes and "|" in command
+    substituted = _STDIN_PROCESS_OPENER.search(command) is not None
     if not (piped or substituted):
         return  # do not tokenize large generators with neither feed a second time
     for unit in _printed_pipeline_units(command):
@@ -532,6 +533,8 @@ def _iter_nested_printed_payloads(command: str, *, pipes: bool = True) -> Iterat
                 yield payload
 
 
+# Only a prefilter: tokenization below removes active continuations in their quote frame.
+_STDIN_PROCESS_OPENER = re.compile(r"<(?:\\\n)*\(")
 _STDIN_OPERATORS = frozenset({"<", "0<", "<>", "0<>"})
 _SUBSTITUTION_WORD = "\x00<(…)"  # what a `<(…)` stands in for in a command's words
 

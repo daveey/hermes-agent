@@ -356,7 +356,44 @@ _NESTED_FOREIGN_SHELLS = [
 ]
 
 
-@pytest.mark.parametrize("shape", _NESTED_FOREIGN_SHELLS)
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("names", [frozenset({"zz"}), frozenset(), None])
+def test_continued_process_opener_real_bash_and_clean_twin(tmp_path, count, names):
+    import shlex
+
+    from tools.environments.local import build_subprocess_env
+
+    script = _big(tmp_path)
+    # The referenced script is harmless to execute, but exceeds the guard's scan cap.
+    script.write_text("# padding\n" * 130000 + "printf RAN\n")
+    payload = "shopt -s expand_aliases\nalias t='time '\n" + f"t ( bash {script} )"
+    command = "bash --noprofile -l < <" + "\\\n" * count + "(printf '%s\\n' " + shlex.quote(payload) + ")"
+    result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", command],
+                            env=build_subprocess_env(), text=True, encoding="utf-8",
+                            capture_output=True, timeout=10, check=True)
+    assert result.stdout == "RAN"
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path), session_aliases=names)
+    assert unsafe and refusal is not None and "scan cap" in refusal
+    script.write_text("printf RAN\n")
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path), session_aliases=names) == (False, None)
+
+
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("wrapper", ["printf '%s' {text}", "cat <<'EOF'\n{text}\nEOF"])
+def test_continued_process_opener_inert_text(tmp_path, live_kanban_db, count, wrapper):
+    import shlex
+
+    text = "su -l bob < <" + "\\\n" * count + f"(echo t ( bash {live_kanban_db} ))"
+    command = wrapper.format(text=shlex.quote(text) if wrapper.startswith("printf") else text)
+    for names in (frozenset({"zz"}), frozenset()):
+        assert scan_gateway_lifecycle(command, cwd=str(tmp_path), session_aliases=names) == (False, None)
+
+
+@pytest.mark.parametrize("shape", _NESTED_FOREIGN_SHELLS + [
+    shape.replace("<(", "<" + "\\\n" * count + "(")
+    for shape in _NESTED_FOREIGN_SHELLS if "<(" in shape
+    for count in (1, 2)
+])
 def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_db, shape):
     """Base refused these under any session alias; #2358 allowed them when the outer names
     (`zz`) missed `t`. The inner shell's own startup files decide whether `t` is an alias."""
@@ -434,6 +471,8 @@ def test_nested_login_shell_body_treats_names_as_unknown(tmp_path, live_kanban_d
     "bash < <(echo 't ( bash {db} )')",
     "bash -s < <(printf '%s\\n' 't ( bash {db} )')",
     "cat < <(echo 't ( bash {db} )')",
+    *[shell + " < <" + "\\\n" * count + "(echo 't ( bash {db} )')"
+      for shell in ("bash", "cat") for count in (1, 2)],
     "su -l bob -c true < <(echo 't ( bash {db} )')",
     "su -l bob; cat < <(echo 't ( bash {db} )')",
     "{{ su -l bob; cat < <(echo 't ( bash {db} )'); }}",
