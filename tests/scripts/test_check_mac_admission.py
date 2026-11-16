@@ -99,6 +99,8 @@ def test_git_snapshot_push_refuses_before_historical_checker(tmp_path, caller, h
     refused = host == "Darwin"
     assert (result.returncode != 0) == refused, result.stdout + result.stderr
     assert ("pool worker" in result.stderr) == refused
+    if refused:  # the refusal names the candidate's shape, not only "core belongs on a pool worker"
+        assert ("no checker" if not candidate else "unknown layout") in result.stderr
     assert sentinel.exists() == (candidate and not refused)
     refs = _run(["git", "--git-dir", str(remote), "show-ref"], repo, env)
     assert refs.returncode == (1 if refused else 0), refs.stdout

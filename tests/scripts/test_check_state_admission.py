@@ -98,6 +98,43 @@ def test_executable_state_files_admitted(candidate):
     assert admission(candidate).returncode == 0
 
 
+# Real refused shapes from review of PR #3346 (t_01a1e0b2f8ab655b). None was found pushed from a
+# Mac (t_01a1e167bc724c0a), so they stay refused; the refusal must say which shape and what to do.
+REFUSED_SHAPES = {
+    # refs/heads/evidence/t_01a1ccf95e85a6f1-capacity-rollout: orphan evidence tree
+    "evidence-orphan": (("README.md", "rollout-kit.tgz"), "no checker",
+                        "push it from a pool worker"),
+    # bb-tuner/2026-10-28-*: state tree from before state had scripts/check
+    "state-without-checker": (("hermes-sync", "shared-config.json", "README.md"), "no checker",
+                              "push it from a pool worker"),
+    # state branch based before 808ded1b8b (no scripts/state-push-guard yet)
+    "stale-state": (("scripts/check", "hermes-sync", "shared-config.json"),
+                    "stale state layout (missing: scripts/state-push-guard tests/state_guard_rules.py)",
+                    "rebase it onto current origin/state"),
+    "unknown-with-checker": (("scripts/check", "README.md"), "unknown layout",
+                             "push it from a pool worker"),
+    "historical-core-without-checker": (("pyproject.toml", "hermes-sync"),
+                                        "core candidate (has pyproject.toml)",
+                                        "hermes-core-wt test/ship"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(REFUSED_SHAPES))
+def test_darwin_refusal_names_classification_and_remedy(candidate, shape):
+    repo, _ = candidate
+    files, classification, remedy = REFUSED_SHAPES[shape]
+    for rel in STATE_FILES:
+        (repo / rel).unlink()
+    for rel in files:
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("# fixture\n", encoding="utf-8")
+    result = admission(candidate)
+    assert result.returncode == 2
+    assert f"refused on this Mac: {classification}" in result.stderr
+    assert remedy in result.stderr
+    assert admission(candidate, "Linux").returncode == 0
+
+
 def test_admitted_candidate_runs_checker_and_preserves_failure(candidate):
     repo, env = candidate
     (repo / "scripts/check").write_text('print("candidate checker ran")\nraise SystemExit(7)\n',
