@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Iterable
 
 from cron.lifecycle_guard_printf import decode_c_escapes
 
@@ -295,7 +296,7 @@ def _walk_command_span(text: str, start: int, shlex_quotes: bool,
     pos = copied = start
     depth = 1
     word_start = True
-    parts = ["$("]
+    parts = _OutputParts("$(")
     cases = _CaseClauses()
     docs = _HereDocs()
     math = _ArithmeticContext()
@@ -384,7 +385,7 @@ def _parameter_span(text: str, start: int, *, shlex_quotes: bool,
     """
     stack = ["}"]
     pos = copied = start
-    parts = [text[start - 2:start]]
+    parts = _OutputParts(text[start - 2:start])
     while pos < len(text) and stack:
         char = text[pos]
         if char == "`" or text.startswith("$'", pos) or (
@@ -427,8 +428,24 @@ def _parameter_span(text: str, start: int, *, shlex_quotes: bool,
     return pos, "".join(parts)
 
 
+class _OutputParts(list[str]):
+    """Append-only frame fragments with constant-time output-offset accounting."""
+
+    def __init__(self, initial: str) -> None:
+        super().__init__([initial])
+        self.length = len(initial)
+
+    def append(self, part: str) -> None:
+        super().append(part)
+        self.length += len(part)
+
+    def extend(self, parts: Iterable[str]) -> None:
+        for part in parts:
+            self.append(part)
+
+
 def _out_len(parts: list[str]) -> int:
-    return sum(map(len, parts))
+    return parts.length if isinstance(parts, _OutputParts) else sum(map(len, parts))
 
 
 def _shift_breaks(breaks: list[int] | None, nested: list[int] | None, offset: int) -> None:
