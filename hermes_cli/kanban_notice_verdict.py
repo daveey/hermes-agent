@@ -4,12 +4,11 @@ from __future__ import annotations
 import logging
 
 from hermes_cli import kanban_dispatch_skip as skips
-from hermes_cli import kanban_llm_pacing_dispatch as pacing
 
 _log = logging.getLogger(__name__)
 
 
-def fields(conn, task_id, place, ready_seconds):
+def fields(conn, task_id, place, ready_seconds, read_pacing):
     """Newest capable verdict in this ready episode, without replacing a queue-provided skip.
 
     Ordering verdicts remain ordinary capacity advice. Recorder-only eligibility failures are not verdicts on the
@@ -25,9 +24,9 @@ def fields(conn, task_id, place, ready_seconds):
         return carried
     admission = {"reason": skips.LLM_PACED, "status": "held", "providers": verdict.get("providers", [])}
     try:
-        paces = pacing.paced_pools(conn, task_id)
-        if paces:
-            admission = {**pacing.admission(paces), "reason": skips.LLM_PACED}
+        current = read_pacing(conn, task_id)
+        if current:
+            admission = {**current, "reason": skips.LLM_PACED}
     except Exception:  # health: allow BLE001 -- keep the recorded verdict if the advisory governor read fails
         _log.debug("notice: pacing read unavailable for %s", task_id, exc_info=True)
     return {**carried, "admission": admission}

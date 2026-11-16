@@ -239,6 +239,13 @@ def _already_posted(conn, task_id: str, waiting_on: str, wait_key: Any, kind: st
                                         (task_id, kind)))
 
 
+def _read_pacing(conn, task_id):
+    """Keep advisory governor access at the notice's audited read-only boundary."""
+    from hermes_cli import kanban_llm_pacing_dispatch as pacing
+    paces = pacing.paced_pools(conn, task_id)
+    return pacing.admission(paces) if paces else None
+
+
 def _pacing_admission(conn, task_id: str, place: dict[str, Any], extra: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     """The ``admission`` for a card that only other machines can lease while this gateway's own LLM pacing governor
     holds every provider it may run on (t_01a1db9d9538716b); None otherwise, so the notice keeps its words.
@@ -253,11 +260,9 @@ def _pacing_admission(conn, task_id: str, place: dict[str, Any], extra: Optional
         return None  # every machine that could lease it is on hold or draining: that wait ends differently
     try:
         from hermes_cli import kanban_dispatch_skip as skips
-        from hermes_cli import kanban_llm_pacing_dispatch as pacing
         if not all(skips.recorder_cannot_lease(skip) for skip in skips.episode_skips(conn, task_id)):
             return None  # a dispatcher able to lease it recorded a verdict: the notice does not talk over it
-        paces = pacing.paced_pools(conn, task_id)
-        return pacing.admission(paces) if paces else None
+        return _read_pacing(conn, task_id)
     except Exception:  # health: allow BLE001 -- the governor read is advisory; the notice still goes out as before
         _log.debug("parent-unclaimed: pacing read unavailable for %s", task_id, exc_info=True)
         return None
@@ -292,7 +297,7 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
     busy = klb.busy(place.get("backlog"))
     from hermes_cli import kanban_notice_verdict
     verdict = ({} if busy or (extra or {}).get("core_update_hold") else
-               kanban_notice_verdict.fields(conn, waiting_on, place, ready_seconds))
+               kanban_notice_verdict.fields(conn, waiting_on, place, ready_seconds, _read_pacing))
     observed = {"board": place.get("board") or khc.board_of(conn), "observed_at": place.get("observed_at") or int(time.time()),
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
                               else {"reason": klb.REASON, "status": "queued"} if busy

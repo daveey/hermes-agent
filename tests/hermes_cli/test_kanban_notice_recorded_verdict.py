@@ -60,7 +60,7 @@ def test_verdict_carriage_boundaries(hub, case):
         assert skips.record(hub.conn, tid, "claim_deferred", detail="capacity")
     elif case == "recorder":
         assert skips.record(hub.conn, tid, "skipped_ineligible", detail="labels_mismatch")
-    assert nv.fields(hub.conn, tid, place, 2400) == {}
+    assert nv.fields(hub.conn, tid, place, 2400, pu._read_pacing) == {}
 
 
 @pytest.mark.parametrize("precedence", ["busy", "core_update"])
