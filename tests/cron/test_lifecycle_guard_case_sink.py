@@ -36,12 +36,12 @@ def test_incomplete_substitution_stays_conservative(command):
 
 
 def test_substitution_boundary_budget_stays_conservative(monkeypatch):
-    from cron import lifecycle_guard_substitutions as substitutions
+    from tools import shell_prefix_expansions as substitutions
 
     def exhausted(*args):
-        raise substitutions.SubstitutionNestingLimit('test boundary budget')
+        raise RecursionError('test boundary budget')
 
-    monkeypatch.setattr(substitutions, '_paren_end', exhausted)
+    monkeypatch.setattr(substitutions, '_expansion_end', exhausted)
     assert substitution_in_arithmetic('echo $(echo ok)', date_exempt=True)
 
 
@@ -53,6 +53,13 @@ def test_nested_body_preserves_date_policy(date_exempt):
 
 def test_nested_body_charges_recursion_depth():
     assert substitution_in_arithmetic('echo $(echo ok)', date_exempt=True, _depth=31)
+
+
+@pytest.mark.parametrize('levels, expected', [(10, False), (20, True)])
+def test_executable_heredoc_keeps_enclosing_substitution_depth(levels, expected):
+    inner = 'echo $(' * levels + 'echo ok' + ')' * levels
+    command = 'echo $(' * levels + "bash <<'EOF'\n" + inner + '\nEOF\n' + ')' * levels
+    assert substitution_in_arithmetic(command, date_exempt=True) is expected
 
 
 def test_case_body_executed_device_still_fails_closed():

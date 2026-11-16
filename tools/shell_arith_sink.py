@@ -94,7 +94,7 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
         if kind == _CMD and not quoted and _literal_name_sink(command, start, top, date_exempt, literal_cache):
             return True
         if token in ("`", "$(", "$((", "$[", "${"):
-            pos, sink = _expansion_token(command, token, pos, stack, date_exempt, _depth)
+            pos, sink = _expansion_token(command, token, pos, stack, date_exempt, _depth, literal_cache)
             if sink:
                 return True
             backtick_open ^= token == "`"
@@ -102,7 +102,7 @@ def substitution_in_arithmetic(command: str, *, date_exempt: bool, _depth: int =
         skipped = _word_token(command, token, start, pos, stack)
         if skipped is None:
             skipped = _skip_data(command, token, start, pos, quoted, stack, pending,
-                                 date_exempt, _depth)
+                                 date_exempt, _depth + sum(frame[0] == _CMD for frame in stack) - 1)
         if skipped is not None:
             if skipped < 0:
                 return True
@@ -364,7 +364,7 @@ def _parameter_token(token, start, pos, stack) -> int:
     return pos
 
 
-def _expansion_token(command, token, pos, stack, date_exempt, depth=0) -> tuple[int, bool]:
+def _expansion_token(command, token, pos, stack, date_exempt, depth=0, cache=None) -> tuple[int, bool]:
     """Open an expansion frame, or flag a producer whose output is arithmetic."""
     if token == "`":
         if stack[-1][0] in (_ARITH, _PARAM_ARITH):
@@ -378,19 +378,17 @@ def _expansion_token(command, token, pos, stack, date_exempt, depth=0) -> tuple[
         if stack[-1][0] in (_ARITH, _PARAM_ARITH) and not (
                 date_exempt and _DATE_PRODUCER_RE.match(command, pos)):
             return pos, True
-        # A case-pattern ')' is not this substitution's closer. Match the whole
-        # command frame before inspecting its arithmetic; otherwise its quotes
-        # can corrupt the parent and promote ordinary redirection output to code.
-        from cron.lifecycle_guard_substitutions import _paren_end, SubstitutionNestingLimit
+        # Populate shared pattern boundaries before walking the body in its own
+        # frame. Re-parsing sliced bodies loses that cache and is quadratic.
+        from tools.shell_prefix_expansions import _expansion_end
 
-        try:
-            end = _paren_end(command, pos - 2, depth)
-        except SubstitutionNestingLimit:
+        if depth + sum(frame[0] == _CMD for frame in stack) >= 32:
             return pos, True
-        if not command[pos:end].endswith(')'):
-            return end, True
-        return end, substitution_in_arithmetic(
-            command[pos:end - 1], date_exempt=date_exempt, _depth=depth + 1)
+        try:
+            _expansion_end(command, pos, ")", cache)
+        except (ValueError, RecursionError):
+            return pos, True
+        stack.append([_CMD, ")", 0, False, pos, None])
     elif token == "${":
         pos = _open_parameter(command, pos, stack)
     else:  # $(( or $[

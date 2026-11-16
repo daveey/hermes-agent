@@ -245,6 +245,8 @@ def test_nested_expansions_share_linear_boundary_scan(monkeypatch):
         return original(*args)
 
     monkeypatch.setattr(expansions, "_opener", counted)
-    command = "echo $(" * 200 + "echo 'x'" + ")" * 200
+    command = "echo $(" * 20 + "echo 'x'" + ")" * 20
     assert not substitution_in_arithmetic(command, date_exempt=True)
     assert calls < len(command) * 3
+    # Main's conservative nesting budget still applies to the iterative walk.
+    assert substitution_in_arithmetic("echo $(" * 200 + "echo 'x'" + ")" * 200, date_exempt=True)
