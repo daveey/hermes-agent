@@ -95,6 +95,128 @@ def test_live_holder_keeps_custody_after_home_move(tmp_path):
     assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 20) == []
 
 
+def test_passive_failed_write_releases_claim_for_retry(tmp_path, monkeypatch):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    with once._chat(tmp_path) as (db, opener):
+        original = db.append_kanban_notice
+        def fail(*args, **kwargs):
+            raise OSError('temporary write failure')
+        monkeypatch.setattr(db, 'append_kanban_notice', fail)
+        assert krn.sweep_remote_notices(replica_path=hub, gateway='macbook', session_db=opener,
+                                        ledger=ledger, now=now, waker=None) == []
+        monkeypatch.setattr(db, 'append_kanban_notice', original)
+        krn.sweep_remote_notices(replica_path=hub, gateway='macbook', session_db=opener,
+                                 ledger=ledger, now=now + 1, waker=None)
+        assert len(db.get_messages(once.CHAT)) == 1
+
+
+def test_passive_sweep_reserves_custody_before_writing(tmp_path, monkeypatch):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    with once._chat(tmp_path) as (db, opener):
+        original = db.append_kanban_notice
+        competing = []
+        def append(*args, **kwargs):
+            _move(hub, 'other-home')
+            competing.extend(krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 1))
+            return original(*args, **kwargs)
+        monkeypatch.setattr(db, 'append_kanban_notice', append)
+        krn.sweep_remote_notices(replica_path=hub, gateway='macbook', session_db=opener,
+                                 ledger=ledger, now=now, waker=None)
+        assert len(db.get_messages(once.CHAT)) == 1
+        assert competing == []
+
+
+def test_opposite_home_claims_are_serialized(tmp_path):
+    import concurrent.futures
+    import threading
+
+    ledger = tmp_path / 'ledger.db'
+    krn._ledger(ledger).close()
+    start = threading.Barrier(2)
+    scanned = threading.Barrier(2)
+
+    def claim(home):
+        conn = krn._ledger(ledger)
+        def transcript_has(*_):
+            try:
+                scanned.wait(timeout=0.3)
+            except threading.BrokenBarrierError:
+                pass  # a serialized claimant cannot reach this until the other commits
+            return False
+        try:
+            start.wait(timeout=3)
+            return krn._claim_notice(conn, session=once.CHAT, ref=f'{home}/default/default/t_dup',
+                                     state='done@1', now=10, fresh=True, notice_key=f'remote:{home}:event',
+                                     task_id='t_dup', transcript_has=transcript_has)
+        finally:
+            conn.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        verdicts = list(executor.map(claim, ['worker-6', 'hub']))
+    assert verdicts.count('offer') == 1
+    assert verdicts.count('skip') == 1
+
+
+def test_unconfirmed_legacy_delivery_does_not_suppress_moved_state(tmp_path):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    _move(hub, 'worker-6')
+    krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now)
+    with sqlite3.connect(ledger) as conn:
+        conn.execute('UPDATE notices SET delivered=1, notice_key=NULL, legacy_seen=0')
+    _move(hub, 'hub')
+    offered = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 10,
+                          transcript_has=lambda *_: False)
+    assert len(offered) == 1
+
+
+@pytest.mark.parametrize('running', [False, True])
+def test_moved_woken_claim_recovers_only_after_turn_ends(tmp_path, running):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    _move(hub, 'worker-6')
+    [old] = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now)
+    _move(hub, 'hub')
+    claim_id = (old['session'], old['ref'], old['state'])
+    krn._track_woken(claim_id, {'running': running})
+    try:
+        offered = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 10,
+                              transcript_has=lambda *_: False)
+        assert len(offered) == (0 if running else 1)
+        if not running:
+            assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 11,
+                               transcript_has=lambda *_: False) == []
+    finally:
+        krn._forget_woken(claim_id)
+
+
+@pytest.mark.parametrize('delivered', [False, True])
+def test_returning_old_home_respects_successor_custody(tmp_path, monkeypatch, delivered):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    _move(hub, 'worker-6')
+    [old] = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now)
+    with sqlite3.connect(ledger) as conn:
+        conn.execute('UPDATE notices SET holder_pid=987654, holder_start=0')
+    monkeypatch.setattr(krn, '_holder_alive', lambda pid, start: pid != 987654)
+    _move(hub, 'hub')
+    [new] = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 10)
+    if delivered:
+        assert krn.ack(new, ledger=ledger)
+    _move(hub, 'worker-6')
+    assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 20) == []
+    if delivered:
+        with sqlite3.connect(ledger) as conn:
+            assert conn.execute('SELECT settled FROM notices WHERE ref=?', (old['ref'],)).fetchone() == ('moved',)
+
+
 def test_new_terminal_state_after_move_still_delivers_once(tmp_path):
     now = time.time()
     hub = once._hub(tmp_path, now)

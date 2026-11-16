@@ -555,6 +555,17 @@ class _ExpiredReason:
 def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id, transcript_has,
                   swept_key: Optional[tuple] = None,
                   settle_reason: str | _ExpiredReason = "stale") -> str:
+    """Serialize logical alias inspection and claim reservation across consumers."""
+    with conn:
+        if not conn.in_transaction:
+            conn.execute('BEGIN IMMEDIATE')
+        return _claim_notice_locked(conn, session=session, ref=ref, state=state, now=now, fresh=fresh,
+                                    notice_key=notice_key, task_id=task_id, transcript_has=transcript_has,
+                                    swept_key=swept_key, settle_reason=settle_reason)
+
+
+def _claim_notice_locked(conn, *, session, ref, state, now, fresh, notice_key, task_id, transcript_has,
+                         swept_key=None, settle_reason: str | _ExpiredReason = "stale"):
     """``offer`` a new or orphaned claim, ``acked`` when the transcript already has it, else ``skip``.
 
     A fresh claim is in flight (delivered=0, this process's pid + start). It becomes delivered only in
@@ -574,12 +585,13 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
         "SELECT delivered, holder_pid, holder_start, notice_key FROM notices WHERE session=? AND ref=? AND state=?",
         (session, ref, state)).fetchone()
     pid, start = _my_holder()
-    if row is None:
+    if row is None or (not row['delivered'] and not _holder_alive(row['holder_pid'], row['holder_start'])):
         from tui_gateway.kanban_remote_identity import moved_claim
         moved = moved_claim(conn, session=session, ref=ref, state=state, now=now,
                             notice_key=notice_key, swept_key=swept_key, transcript_has=transcript_has)
         if moved is not None:
             return moved
+    if row is None:
         if fresh and notice_key and transcript_has is not None and transcript_has(notice_key, ""):
             # [daveey] Another writer already put this notice in the chat (a second sweeper, another ledger):
             # offering it again woke a turn whose row duplicated the passive one (t_01a1db370b459fab).
@@ -1352,18 +1364,22 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
                 _note_wait(sid, ref, state, f"left to gateway pid {gw_pid}: its turn holds the chat's lease")
                 return
             if waker is None:
-                from tui_gateway.kanban_remote_identity import moved_claim
                 # The passive sweep historically works in memory when its ledger is unavailable.
                 with contextlib.suppress(sqlite3.Error, OSError), contextlib.closing(_ledger(ledger)) as conn:
-                    if moved_claim(conn, session=sid, ref=ref, state=state, now=now or time.time(),
-                                   notice_key=event_key, swept_key=memo_key,
-                                   transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t)) is not None:
+                    verdict = _claim_notice(conn, session=sid, ref=ref, state=state, now=now or time.time(),
+                                            fresh=True, notice_key=event_key, task_id=str(task['id']),
+                                            swept_key=memo_key,
+                                            transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t))
+                    if verdict not in ('offer', 'acked'):
                         return
                 from tui_gateway.kanban_notice_session_store import notice_writer
-                with notice_writer(db) as wdb:
-                    row_id = wdb.append_kanban_notice(tip, text, metadata)
-                    from hermes_state_outcome import refresh_outcomes_quietly
-                    refresh_outcomes_quietly([tip], "notice", db=wdb)  # [daveey] unloaded sweeper's remote rows too
+                with contextlib.ExitStack() as cleanup:
+                    cleanup.callback(release, claim, ledger=ledger)
+                    with notice_writer(db) as wdb:
+                        row_id = wdb.append_kanban_notice(tip, text, metadata)
+                        from hermes_state_outcome import refresh_outcomes_quietly
+                        refresh_outcomes_quietly([tip], "notice", db=wdb)
+                    cleanup.pop_all()
                 delivered.append({"task_id": task["id"], "session_id": tip, "message_row": row_id})
                 swept.append(memo_key)
                 ack(claim, ledger=ledger)

@@ -65,6 +65,28 @@ def test_remote_blocked_notice_refreshes_replica_only_card(monkeypatch, status):
         assert 'Result: Waiver completed' in text
 
 
+@pytest.mark.parametrize('dropped', [False, True])
+def test_resolved_real_notice_drops_multiline_ask_presentation(monkeypatch, dropped):
+    from hermes_cli.kanban_block_notice import block_notice
+    tid = 't_01a1d59e5543daa1'
+    request: dict = {'action': 'Choose A\nThen unblock this card', 'why_human': 'Only you\ncan grant access',
+               'scope': 'One machine\nand its credentials', 'interaction': 'user_terminal',
+               'evidence': 'Access denied'}
+    if dropped:
+        request['resolved_check_dropped_at'] = 10
+    text = block_notice({'status': 'blocked', 'block_kind': 'needs_input', 'human_request': request,
+                         'title': 'Keep work context'}, tid, 'default')
+    assert 'Next action for the user:' in text
+    item = {'ref': f'worker-6/default/default/{tid}', 'state': 'blocked@1', 'event_key': 'key',
+            'text': text + '\nKeep other context'}
+    monkeypatch.setattr(kanban_wake_fold, '_live_task', lambda _: ('done', 'Finished'))
+    result = kanban_wake_fold._compose([kro._metadata(item)['kanban_cards'][0]], GUIDANCE, strict=True)
+    for stale in ('Then unblock', 'can grant access', 'and its credentials', 'Your step is still needed',
+                  'NOT resume', 'Use the owner Desktop', 'Next action for the user:'):
+        assert stale not in result
+    assert 'Keep other context' in result and result.endswith(GUIDANCE)
+
+
 def test_remote_blocked_metadata_preserves_premise_and_board():
     item = {'ref': 'worker-6/default/research/t_01a1d59e5543daa1', 'state': 'blocked@1794779059',
             'event_key': 'event', 'text': 'blocked'}

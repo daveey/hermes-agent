@@ -205,6 +205,20 @@ def _live_task(card):
         return task.status, summary.strip()
 
 
+def _without_superseded_ask(lines):
+    """Remove the formatter's whole ask block, including multiline field values."""
+    start = next((i for i, line in enumerate(lines) if line.startswith('Next action for the user:')), None)
+    end = next((i for i, line in enumerate(lines) if line.startswith('Open task:')
+                and start is not None and i > start), None)
+    if start is not None and end is not None:
+        lines = lines[:start] + lines[end + 1:]
+    return [line for line in lines if not line.startswith((
+        'Next action for the user:', 'Why only the user:', 'Scope:', 'Open task:',
+        'Automatic detection stopped', 'Automatic detection had stopped for an earlier version of this ask;',
+        'Your step is still needed. Filed ask, historical wording',
+        "Use the owner Desktop session's user-terminal flow;"))]
+
+
 def refresh_card(card, *, strict=False):
     """``card`` with its live status applied: a wake whose premise no longer holds (an unclaimed wait
     since claimed or done, a block since resolved) is relabelled with the card's current status. An
@@ -233,8 +247,7 @@ def refresh_card(card, *, strict=False):
     out = [f"[kanban] Task {card['task_id']} {label}.",
            f'Note: an earlier wake for this card said "{earlier}"; that no longer holds. Live status: {status}.']
     rest = lines[1:] if _LEGACY_HEAD.match(head) else lines
-    rest = [line for line in rest if not line.startswith(
-        ('Next action for the user:', 'Why only the user:', 'Scope:', 'Open task:'))]
+    rest = _without_superseded_ask(rest)
     out.extend(rest)
     if status == 'done' and result and not any(line.startswith('Result:') for line in rest):
         out.insert(2, 'Result: ' + result.splitlines()[0][:400])
