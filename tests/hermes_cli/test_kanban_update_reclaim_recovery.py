@@ -89,3 +89,45 @@ def test_resumed_pause_keeps_explicit_operator_attribution(board, monkeypatch):
     assert reclaimed[0].get("interrupt_target") == target
     assert kb.get_task(board, tid).status == "ready"
     assert not intent.task_pending(board, tid)
+
+
+@pytest.mark.parametrize("then", ["finished", "replaced"])
+def test_stale_recovery_never_touches_a_replacement_attempt(board, monkeypatch, then):
+    """Observer A matches an abandoned pause, then stalls; observer B finishes it and
+    the dispatcher starts a new attempt (optionally fenced by a new pause). A must
+    become a no-op: no signal, no reclaimed receipt and no close for the new run."""
+    tid, alive = race.running(board, monkeypatch)
+    row = board.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+    with intent.fence(board, tid, row, CORE_UPDATE_REQUEUE_REASON):
+        pass  # the updater died after publishing: an abandoned, exact-run pause
+    assert intent.task_pending(board, tid)
+    original = intent._matching
+    replacement = {}
+
+    def stall_after_match(saved, current):
+        matched = original(saved, current)
+        if replacement or saved is None or saved["current_run_id"] != row["current_run_id"]:
+            return matched
+        replacement["run"] = None  # fire once: everything below happens while A stalls
+        intent.recover_and_drain(board)  # observer B completes the same pause
+        assert kb.get_task(board, tid).status == "ready"
+        assert kb.claim_task(board, tid)
+        alive[race.PID + 1] = True
+        dispatch._set_worker_pid(board, tid, race.PID + 1)
+        replacement["run"] = kb.get_task(board, tid).current_run_id
+        if then == "replaced":
+            fresh = board.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+            with intent.fence(board, tid, fresh, CORE_UPDATE_REQUEUE_REASON):
+                pass
+        return matched
+
+    monkeypatch.setattr(intent, "_matching", stall_after_match)
+    intent.recover_and_drain(board)  # observer A resumes after its matching read
+    task = kb.get_task(board, tid)
+    new_run = replacement["run"]
+    assert new_run is not None and new_run != row["current_run_id"]
+    assert alive[race.PID + 1], f"replacement worker was signalled by stale recovery; run {new_run} {task.status}"
+    assert task.status == "running" and task.current_run_id == new_run
+    assert not [e for e in kb.list_events(board, tid) if e.kind == "reclaimed" and e.run_id == new_run]
+    # A replacement's own pause stays durable for a later, legitimate recovery.
+    assert intent.task_pending(board, tid) is (then == "replaced")
