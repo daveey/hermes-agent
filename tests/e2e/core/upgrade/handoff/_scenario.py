@@ -220,8 +220,9 @@ def _overlap(runs: list[dict]) -> list[tuple[int, int]]:
 
 class WorkerSampler:
     """Samples the sandbox process table once a second while the block runs and records, per card,
-    the most kanban workers (``hermes ... chat -q "work kanban task <id>"``) alive at the same moment:
-    two at once is a duplicate spawn, whatever the board says afterwards."""
+    the most Kanban worker clients alive at the same moment. Legacy workers name the card in
+    ``chat -q``; owner receipt clients carry HERMES_KANBAN_TASK in their environment instead.
+    Two roots at once is a duplicate dispatch, whatever the board says afterwards."""
 
     def __init__(self, inst: X.Install, interval: float = 1.0) -> None:
         self.inst, self.interval = inst, interval
@@ -233,9 +234,13 @@ class WorkerSampler:
         live = [p for p in self.inst.host.procs() if p["state"] not in ("Z", "X")]
         by_card: dict[str, list[dict]] = {}
         for p in live:
-            m = _TASK_RE.search(" ".join(p["cmdline"]))
-            if m:
-                by_card.setdefault(m.group(1), []).append(p)
+            command = " ".join(p["cmdline"])
+            m = _TASK_RE.search(command)
+            tid = m.group(1) if m else None
+            if "hermes_cli.kanban_worker_client" in command:
+                tid = p.get("env", {}).get("HERMES_KANBAN_TASK")
+            if tid:
+                by_card.setdefault(tid, []).append(p)
         for tid, procs in by_card.items():
             pids = {p["pid"] for p in procs}
             roots = sorted(p["pid"] for p in procs if p["ppid"] not in pids)
