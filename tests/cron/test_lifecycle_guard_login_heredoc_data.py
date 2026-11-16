@@ -66,6 +66,11 @@ def test_generated_real_bash_execution_is_refused(tmp_path, shell, consumer, sha
     fake = tmp_path / "hermes"
     fake.write_text('#!/bin/sh\nprintf RUN\\n\n')
     fake.chmod(0o755)
+    # Exercise wrapper peeling, not GNU timeout (absent on stock macOS).
+    # The real Bash oracle remains bounded by subprocess.run(timeout=10).
+    timeout = tmp_path / "timeout"
+    timeout.write_text('#!/bin/sh\n[ "$1" = 5 ] || exit 2\nshift\nexec "$@"\n')
+    timeout.chmod(0o755)
     danger = tmp_path / "danger.sh"
     danger.write_text('hermes gateway "restart"\n')
     payload = f"bash {danger}"
