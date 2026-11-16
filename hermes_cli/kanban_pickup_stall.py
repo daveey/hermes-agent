@@ -364,15 +364,12 @@ def _create(conn, *, key: str, title: str, body: str, tenant: Optional[str], own
     machines = None if reg is None else (reg.get("machines") or {})
     assignee = _supervisor_profile()
     runs_on, why = alarm_placement(own, machines, assignee=assignee, now_ms=now_ms)
-    from hermes_cli.kanban_db_comment_ids import add_comment
+    from hermes_cli.kanban_pickup_observation import append_observation
     from uuid import uuid4
     with kb.write_txn(conn):
         existing = _covering_repair(conn, key, now_ms)
         if existing:
-            note = f"Watcher firing:\n\n{body}"
-            if not conn.execute("SELECT 1 FROM task_comments WHERE task_id=? AND author=? AND body=? LIMIT 1",
-                                (existing, DETECTOR, note)).fetchone():
-                add_comment(conn, existing, DETECTOR, note)
+            append_observation(conn, existing, DETECTOR, body)
         else:
             # Positive decimal suffix preserves the authenticated Board alarm identity contract.
             return kb.create_task(conn, title=title, body=body + f"\n\nPlaced with runs_on {runs_on}: {why}."

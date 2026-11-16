@@ -52,6 +52,43 @@ def test_registry_evidence_changes_only_when_fields_change(monkeypatch, entry):
     assert "hold=True" in after and "active_card_runs=2" in after
 
 
+def test_ticks_ignore_elapsed_but_keep_material_changes(gws):
+    _, worker = gws
+    worker.enter()
+    card = {"id": "t_0123456789abcdef", "title": "Pending task", "tenant": None,
+            "since_ms": 1000, "skip": {"reason": "other", "detail": "not eligible",
+                                      "first_at": 1000, "last_at": 1000, "passes": 1}}
+    first = pickup.file_repairs(worker.conn, support.WORKER, [card], now=1200)[0]
+    for tick in range(1, 20):
+        card["skip"].update(last_at=(1200 + tick * 60) * 1000, passes=tick + 1)
+        assert pickup.file_repairs(worker.conn, support.WORKER, [card], now=1200 + tick * 60) == [first]
+    assert len(kb.list_comments(worker.conn, first)) == 1
+    card["skip"]["detail"] = "capability changed"
+    pickup.file_repairs(worker.conn, support.WORKER, [card], now=2500)
+    assert len(kb.list_comments(worker.conn, first)) == 2
+    card["skip"]["detail"] = "not eligible"
+    pickup.file_repairs(worker.conn, support.WORKER, [card], now=2560)
+    assert len(kb.list_comments(worker.conn, first)) == 3
+
+
+def test_host_ticks_ignore_registry_clock_and_report_new_targets(gws, monkeypatch):
+    _, worker = gws
+    worker.enter()
+    card = {"id": "t_0123456789abcdef", "title": "Pending task", "tenant": None,
+            "since_ms": 1000, "skip": {"reason": "budget_exhausted", "detail": "no slot",
+                                      "first_at": 1000, "last_at": 1000, "passes": 1}}
+    first = pickup.file_repairs(worker.conn, support.WORKER, [card], now=1200)[0]
+    for tick in range(1, 20):
+        monkeypatch.setattr(pickup, "_now_ms", lambda now=None, tick=tick: (1200 + tick * 60) * 1000)
+        card["skip"].update(last_at=(1200 + tick * 60) * 1000, passes=tick + 1)
+        assert pickup.file_repairs(worker.conn, support.WORKER, [card], now=1200 + tick * 60) == [first]
+    assert len(kb.list_comments(worker.conn, first)) == 1
+    changed = {**card, "id": "t_fedcba9876543210"}
+    pickup.file_repairs(worker.conn, support.WORKER, [changed], now=2500)
+    assert len(kb.list_comments(worker.conn, first)) == 2
+    assert "t_fedcba9876543210" in kb.list_comments(worker.conn, first)[-1].body
+
+
 def test_distinct_subjects_have_distinct_incidents(gws):
     _, worker = gws
     assert fire(worker) != fire(worker, "hold")
