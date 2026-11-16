@@ -51,6 +51,14 @@ def test_bootstrapped_producer_cli(tmp_path, monkeypatch):
                             text=True, encoding='utf-8', timeout=45, check=False)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {'task_id': tid, 'board': 'default', 'priority': 37}
+    command = runtime_command(root, ['absent', '--board', 'default', '--fallback', '19'],
+                              module='hermes_cli.kanban_effective_priority')
+    result = subprocess.run(command, env=build_subprocess_env(), capture_output=True,
+                            text=True, encoding='utf-8', timeout=45, check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        'task_id': 'absent', 'board': 'default', 'priority': 19,
+        'fallback_reason': 'requester is absent from the board and replica'}
     assert path.read_bytes() == before
 
 
@@ -60,3 +68,40 @@ def test_absent_requester_is_not_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(kb, 'kanban_db_path', lambda board=None: path)
     with pytest.raises(ValueError, match='absent'):
         ep.snapshot('absent')
+    with pytest.raises(SystemExit) as exc:
+        ep.main(['absent'])
+    assert exc.value.code == 1
+
+
+@pytest.mark.parametrize('fallback', [0, -17, 731])
+def test_missing_requester_optional_fallback(tmp_path, monkeypatch, capsys, fallback):
+    path = tmp_path / 'kanban.db'
+    kbc.connect(path).close()
+    monkeypatch.setattr(kb, 'kanban_db_path', lambda board=None: path)
+    before = path.read_bytes()
+    ep.main(['absent', '--fallback', str(fallback)])
+    result = json.loads(capsys.readouterr().out)
+    assert result == {'task_id': 'absent', 'board': None, 'priority': fallback,
+                      'fallback_reason': 'requester is absent from the board and replica'}
+    assert path.read_bytes() == before
+
+
+def test_existing_requester_ignores_fallback(tmp_path, monkeypatch, capsys):
+    path = tmp_path / 'kanban.db'
+    conn = kbc.connect(path)
+    tid = kb.create_task(conn, title='present', priority=37)
+    conn.close()
+    monkeypatch.setattr(kb, 'kanban_db_path', lambda board=None: path)
+    ep.main([tid, '--fallback', '99'])
+    result = json.loads(capsys.readouterr().out)
+    assert result['priority'] == 37
+    assert 'fallback_reason' not in result
+
+
+def test_missing_board_remains_fatal_with_fallback(tmp_path, monkeypatch):
+    path = tmp_path / 'missing.db'
+    monkeypatch.setattr(kb, 'kanban_db_path', lambda board=None: path)
+    with pytest.raises(SystemExit) as exc:
+        ep.main(['absent', '--fallback', '19'])
+    assert exc.value.code == 1
+    assert not path.exists()
