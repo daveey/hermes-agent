@@ -320,3 +320,28 @@ def _create_session_id(args: dict, origin_intent: Optional[dict], self_task) -> 
             or _persisted_session_id(self_task.session_id if self_task else None)
             or _persisted_session_id(_current_origin_session_id())
             or _persisted_session_id(get_session_env("HERMES_SESSION_ID", "")))
+
+
+def _placed_rejection(kp, rid: str, target: str, fields: dict) -> Optional[str]:
+    """[daveey] The tool error for a placed create the target refused (terminal), None while it is not refused.
+
+    origin_idempotency_conflict: a live card on the target already holds the creator's idempotency_key. That
+    card is named as ``existing_task_id`` (kanban_create's key semantics: the key's card, not a new one); it
+    was not bound to this chat, so the creator uses it or picks another key."""
+    import re
+    why = kp.remote_rejection(rid)
+    if not why:
+        return None
+    code = why.get("code") or "placement_rejected"
+    error = why.get("error") or f"{target} {why.get('state') or 'rejected'} request {rid}"
+    extra: dict = {"created": False, **fields}
+    if code == "origin_idempotency_conflict" and (m := re.search(r"already names card (t_[A-Za-z0-9_]+)", error)):
+        extra["existing_task_id"] = m.group(1)
+        error = (f"No card was created: {m.group(1)} on {target} already holds this idempotency_key. Use that "
+                 f"card (cross_task @task:default@{target}/{m.group(1)}) or create with a different key. "
+                 f"({error})")
+    else:
+        error = f"No card was created: {target} refused request {rid}: {error}"
+    if why.get("matches"):
+        extra["matches"] = why["matches"]
+    return tool_error(error, code=code, **extra)

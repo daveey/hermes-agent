@@ -26,7 +26,8 @@ from hermes_cli import kanban_contract_cli as _contract_cli, kanban_overlap, kan
 from tools.kanban_tools_placement import (_local_placement, _machine_placement, _marker_placement_fields, _persisted_session_id,
                                           _create_session_id, _placement_origin, _placement_refused, _runs_where,
                                           _effective_board_args, _origin_enrollment, _landing_placement, _pinned_note,
-                                          _admission_refused, _effective_requires, _with_admission, _forwarding_fields)
+                                          _admission_refused, _effective_requires, _with_admission, _forwarding_fields,
+                                          _placed_rejection)
 # SSRF-checked capped download lives in a sibling; tests monkeypatch it on this module.
 from tools.kanban_tools_attach_url import _download_url_with_cap, _store_attachment
 from tools.kanban_tools_db_hint import generic_tool_error
@@ -1430,31 +1431,6 @@ def _handle_attachments(args: dict, **kw) -> str:
             "ok": True, "task_id": tid,
             "attachments": [
                 _fields(a, _ATTACHMENT_FIELDS) for a in kb.list_attachments(conn, tid)]})
-
-
-def _placed_rejection(kp, rid: str, target: str, fields: dict) -> Optional[str]:
-    """[daveey] The tool error for a placed create the target refused (terminal), None while it is not refused.
-
-    origin_idempotency_conflict: a live card on the target already holds the creator's idempotency_key. That
-    card is named as ``existing_task_id`` (kanban_create's key semantics: the key's card, not a new one); it
-    was not bound to this chat, so the creator uses it or picks another key."""
-    import re
-    why = kp.remote_rejection(rid)
-    if not why:
-        return None
-    code = why.get("code") or "placement_rejected"
-    error = why.get("error") or f"{target} {why.get('state') or 'rejected'} request {rid}"
-    extra: dict = {"created": False, **fields}
-    if code == "origin_idempotency_conflict" and (m := re.search(r"already names card (t_[A-Za-z0-9_]+)", error)):
-        extra["existing_task_id"] = m.group(1)
-        error = (f"No card was created: {m.group(1)} on {target} already holds this idempotency_key. Use that "
-                 f"card (cross_task @task:default@{target}/{m.group(1)}) or create with a different key. "
-                 f"({error})")
-    else:
-        error = f"No card was created: {target} refused request {rid}: {error}"
-    if why.get("matches"):
-        extra["matches"] = why["matches"]
-    return tool_error(error, code=code, **extra)
 
 
 def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, session_id, conn=None,
