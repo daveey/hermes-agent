@@ -690,8 +690,9 @@ def test_interactive_configuration_keeps_terminal_input(transition):
 def test_interrupt_reaps_completion_descendants_before_return(transition, monkeypatch):
     import io
     import psutil
-    import time
     from hermes_cli import update_completion
+    from tests.hermes_cli.completion_process_helpers import descendant_exited, reap_descendant
+    from tests.waiting import wait_until
 
     root, _git, _old, _new, request = transition
     (root / "hermes_cli/update_completion.py").write_text(
@@ -700,12 +701,13 @@ def test_interrupt_reaps_completion_descendants_before_return(transition, monkey
         "print('READY ' + str(child.pid), flush=True)\n"
         "time.sleep(600)\n"
     )
-    pids = []
+    descendants = []
 
     class Interrupt(io.StringIO):
         def write(self, value):
             if 'READY ' in value:
-                pids.append(int(value.split('READY ')[1].strip()))
+                # Capture PID + creation time before cancellation can retire it.
+                descendants.append(psutil.Process(int(value.split('READY ')[1].strip())))
                 raise KeyboardInterrupt()
             return super().write(value)
 
@@ -713,18 +715,36 @@ def test_interrupt_reaps_completion_descendants_before_return(transition, monkey
     try:
         with pytest.raises(KeyboardInterrupt):
             update_completion.run_completion(request)
-        assert pids
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            if not psutil.pid_exists(pids[0]) or psutil.Process(pids[0]).status() == psutil.STATUS_ZOMBIE:
-                break
-            time.sleep(0.02)
-        else:
-            pytest.fail("completion descendant survived parent cancellation")
+        assert descendants
+        wait_until(lambda: descendant_exited(descendants[0]), timeout=3, interval=0.02,
+                   what="completion descendant to exit after parent cancellation")
     finally:
-        for pid in pids:
-            if psutil.pid_exists(pid):
-                psutil.Process(pid).kill()
+        for proc in descendants:
+            reap_descendant(proc)
+            wait_until(lambda: descendant_exited(proc), timeout=3, interval=0.02,
+                       what="owned completion descendant cleanup")
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.live_system_guard_bypass
+def test_surviving_completion_descendant_fails_and_is_cleaned(transition, monkeypatch):
+    from tests.hermes_cli import completion_process_helpers as custody
+
+    owned = []
+    reap = custody.reap_descendant
+
+    def record_and_reap(proc):
+        owned.append(proc)
+        reap(proc)
+
+    # Mutate only tree cancellation: the real completion parent is still killed
+    # and waited, so its real descendant survives until the assertion/finally.
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: None)
+    monkeypatch.setattr(custody, "reap_descendant", record_and_reap)
+    with pytest.raises(AssertionError, match="completion descendant to exit after parent cancellation"):
+        test_interrupt_reaps_completion_descendants_before_return(transition, monkeypatch)
+    assert len(owned) == 1
+    assert custody.descendant_exited(owned[0]), "failure cleanup leaked the descendant"
 
 
 @pytest.mark.platforms("windows")
