@@ -183,12 +183,12 @@ def save_notes(result: dict, *, now: Optional[float] = None) -> None:
     doc = {"at": int(time.time() if now is None else now), "notes": result["notes"],
            "applied": len(result["applied"]), "rejected": len(result["rejected"])}
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(doc))
+    tmp.write_text(json.dumps(doc), encoding="utf-8")
     tmp.replace(path)
 
 
 def read_notes() -> Optional[dict]:
     try:
-        return json.loads(notes_path().read_text())
+        return json.loads(notes_path().read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None

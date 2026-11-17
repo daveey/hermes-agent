@@ -158,7 +158,7 @@ def _set(args) -> int:
 def _apply(args) -> int:
     from hermes_cli import kanban_lanes_plan as plan
 
-    raw = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
+    raw = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8-sig").read()
     with kbc.connect_closing() as conn:
         result = plan.apply(conn, json.loads(raw), dry_run=args.dry_run)
     if not args.dry_run:
