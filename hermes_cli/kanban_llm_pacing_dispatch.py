@@ -389,23 +389,26 @@ def _stored_pace(entry: Any, now: float, cfg: lp.PacingConfig) -> Optional[lp.Po
 
 def paced_pools(conn: sqlite3.Connection, task_id: str) -> Optional[list[lp.PoolPace]]:
     """The pools holding ready card ``task_id``, for a stall notice: one :class:`~kanban_llm_pacing.PoolPace` per
-    candidate provider when EVERY candidate is stored as ``paced`` or ``held``; else None (no positive read).
+    candidate provider when EVERY candidate is stored in a state that holds starts (``held``; also ``paced`` with
+    ``pace_starts``); else None (no positive read).
 
     A notice describes the hold, it never makes one: this reads the pace the dispatchers of this home stored
     (``llm_pacing.json``; pool workers draw the same accounts from the hub's relay), makes no usage read and writes
     nothing. It judges the card as :func:`hold` does (:func:`_governed`) and, like :func:`_verdicts`, finds no hold as
     soon as one candidate is open, unknown or unread: the card may start there. The pool's state, not this host's slot
-    math: the hosts that would run the card keep their own concurrency, so a held pool admits nothing anywhere and a
-    paced pool limits every host. Faults propagate; the caller fails open."""
+    math: the hosts that would run the card keep their own concurrency, so a held pool admits nothing anywhere and,
+    with ``pace_starts``, a paced pool limits every host. Without it (the default) a paced pool holds nothing, so
+    it is no hold to describe. Faults propagate; the caller fails open."""
     cfg = load_config()
     judged = _governed(conn, task_id, "ready", cfg) if cfg.enabled else None
     if judged is None:
         return None
     stored, now = _load_state(state_path()), time.time()
+    holding = (lp.PACED, lp.HELD) if cfg.pace_starts else (lp.HELD,)  # what admit_limit can limit on
     paces: list[lp.PoolPace] = []
     for provider in judged[1]:
         pace = _stored_pace(stored.get(provider), now, cfg)
-        if pace is None or pace.state not in (lp.PACED, lp.HELD):
+        if pace is None or pace.state not in holding:
             return None
         paces.append(pace)
     return paces

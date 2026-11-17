@@ -13,6 +13,7 @@ unreadable, failing or OPEN read leaves today's payload and words, "admission re
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import time
 
@@ -33,6 +34,15 @@ from tests.hermes_cli import test_kanban_model_tier as model_tier
 
 hub = pool_wait.hub  # a hub that cannot lease ``pool:worker`` cards: the Board registry names two pool workers
 board = model_tier.board  # one unsynced gateway: every card is its own to lease
+
+
+@pytest.fixture(autouse=True)
+def _pace_starts_mode(monkeypatch):
+    """This file describes the opt-in mode (``kanban.llm_pacing.pace_starts: true``), where a paced pool holds
+    starts. The default, where it holds nothing and is no hold to describe, is in
+    ``test_kanban_pacing_default_reads.py``."""
+    real = lp.config_from
+    monkeypatch.setattr(lp, "config_from", lambda section: dataclasses.replace(real(section), pace_starts=True))
 LABELS = pool_wait.LABELS
 OPUS = "claude-opus-5-5"
 DAY = 86400

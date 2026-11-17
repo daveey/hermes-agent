@@ -21,7 +21,8 @@ from hermes_cli import kanban_llm_pacing as lp
 from hermes_cli import kanban_llm_pacing_dispatch as pd
 from hermes_cli.kanban_parser import build_parser
 from tests.hermes_cli import test_kanban_model_tier as model_tier
-from tests.hermes_cli.test_kanban_notice_pacing_admission import OPUS, _store
+from tests.hermes_cli.test_kanban_notice_pacing_admission import (  # _pace_starts_mode: the autouse opt-in
+    OPUS, _pace_starts_mode, _store)
 
 board = model_tier.board  # one unsynced gateway: every card is its own to lease
 
