@@ -316,7 +316,9 @@ def test_per_thread_cpu_covers_each_thread():
 
 
 def test_without_procfs_snapshot_folds_exited_threads(monkeypatch):
-    """macOS has no /proc and never reuses native thread ids: exited threads must still fold, or the map grows."""
+    """With no per-thread CPU source (no /proc, no Darwin proc_pidinfo) rows carry no CPU and native thread ids are
+    never reused: exited threads must still fold, or the map grows. Both sources are hidden, so the test means the
+    same on every host; macOS's real proc_pidinfo source is covered by the platforms("macos") test below. [daveey]"""
     real_listdir = os.listdir
 
     def no_procfs(path="."):
@@ -325,6 +327,8 @@ def test_without_procfs_snapshot_folds_exited_threads(monkeypatch):
         return real_listdir(path)
 
     monkeypatch.setattr(la.os, "listdir", no_procfs)
+    # Hiding /proc alone leaves macOS's proc_pidinfo source live (80c0c4c277e6), so its rows carry CPU.
+    monkeypatch.setattr(la, "_darwin_thread_cpu", list)
 
     def worker():
         with la.pass_("short-lived"):
@@ -346,6 +350,33 @@ def test_without_procfs_snapshot_folds_exited_threads(monkeypatch):
         assert snap["process"]["accounted_cpu_s"] == pytest.approx(accounted_before_fold, abs=1e-5)
         assert snap["process"]["exited_threads_cpu_s"] is None
         assert snap["process"]["unaccounted_live_cpu_s"] is None
+    assert la._state["exited_accounted"] >= 100 * 0.002 * 0.5
+
+
+@pytest.mark.platforms("macos")
+def test_darwin_thread_source_rows_carry_cpu_and_exited_threads_fold():
+    """Real macOS: no /proc, so per-thread CPU comes from proc_pidinfo (80c0c4c277e6). Live rows carry measured CPU,
+    the exited/unaccounted split is computed, and exited threads still fold out of the map. [daveey]"""
+    assert not os.path.isdir("/proc/self/task")
+
+    def worker():
+        with la.pass_("short-lived"):
+            _burn(0.002)
+
+    for _ in range(5):
+        threads = [threading.Thread(target=worker) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        with la._lock:
+            accounted_before_fold = sum(la._thread_accounted.values()) + la._state.get("exited_accounted", 0.0)
+        snap = la.snapshot()
+        assert snap["threads"] and all(row["cpu_s"] is not None for row in snap["threads"])
+        assert len(la._thread_accounted) <= threading.active_count()
+        assert snap["process"]["accounted_cpu_s"] == pytest.approx(accounted_before_fold, abs=1e-5)
+        assert snap["process"]["exited_threads_cpu_s"] is not None
+        assert snap["process"]["unaccounted_live_cpu_s"] is not None
     assert la._state["exited_accounted"] >= 100 * 0.002 * 0.5
 
 
