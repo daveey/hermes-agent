@@ -973,6 +973,8 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     if reason == "pinned_quota_wall":
         hold_until = _pinned_quota_hold_until(events, now)
     paced = _llm_paced_hold(events, now) if reason == "llm_paced" else None
+    if reason == "start_gate":
+        guard_reason = str(_episode_skip(events).get("detail") or "") or None  # the plugin's word
     if paced:
         guard_reason = str(paced.get("detail") or "") or None
         hold_until = int(paced["until"]) if isinstance(paced.get("until"), (int, float)) else None
@@ -982,7 +984,8 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         hold += f", until {stamp}" if hold_until > now else f", expired {stamp}"
     return [Diagnostic(
         kind="held_in_ready", severity="warning",
-        title=(f"Ready {int(age / 60)}m, last observed hold ({hold})" if reason in ("respawn_guarded", "llm_paced")
+        title=(f"Ready {int(age / 60)}m, last observed hold ({hold})"
+               if reason in ("respawn_guarded", "llm_paced", "start_gate")
                else f"Ready {int(age / 60)}m, held ({hold})"),
         detail=("The last recorded dispatch decision was a guard hold; the current hold is not verified. "
                 "A cleared blocker, capacity limit, or missing pickup can leave this historical event "

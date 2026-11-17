@@ -540,6 +540,14 @@ def _open_coverage(conn, own: str) -> dict[str, str]:
     return out
 
 
+def _start_gate_expected(skip: Mapping[str, Any]) -> bool:
+    """Pickup skipped the card because a plugin start gate holds this machine's card starts (``kanban_start_gate``;
+    pickup records ``other`` with detail ``start_gate:<word> (...)``). That is a deliberate fleet-wide wait, e.g.
+    the token throttle while spend is over its cap: a repair card per pinned card would only add work to a fleet
+    that is being told to start none. The gate is asked again every pass, so the skip ends with it."""
+    return skip.get("reason") == "other" and str(skip.get("detail") or "").startswith("start_gate:")
+
+
 def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[float] = None) -> list[str]:
     """One repair per stalled card with a card-specific last reason; one per host per host-wide cause
     (:data:`_HOST_GROUPS`), naming the oldest card. A card an open repair about this host already lists under
@@ -559,7 +567,7 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
         if (card["skip"]["reason"] == "evidence_missing"
                 and now_ms - card["skip"]["first_at"] < stall_seconds() * 1000):
             continue
-        if _quota_hold_expected(card["skip"], now_ms):
+        if _quota_hold_expected(card["skip"], now_ms) or _start_gate_expected(card["skip"]):
             continue
         group = _group(card)
         if group is not None:

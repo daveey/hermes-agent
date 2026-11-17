@@ -188,3 +188,35 @@ def test_pickup_skips_a_foreign_card_this_machines_gate_would_hold(monkeypatch):
     assert asked == [dict(task_id="t_1", lane="ready", assignee="default", board=None)]
     monkeypatch.setattr(pd, "pickup_hold", lambda *a, **k: "anthropic held")
     assert wn._paced(None, None, card) == ("other", "llm_paced: anthropic held (local dispatch would hold it)")
+
+
+def test_a_long_gate_hold_files_no_pickup_stall_repair(paced_board, monkeypatch):
+    from hermes_cli import kanban_pickup_stall as kps
+    gated = {"reason": "other", "detail": "start_gate:token_throttle (local dispatch would hold it)", "first_at": 0}
+    assert kps._start_gate_expected(gated) is True
+    for skip in ({"reason": "other", "detail": "llm_paced: anthropic held (local dispatch would hold it)"},
+                 {"reason": "other", "detail": "machine registry unavailable"}, {"reason": "other", "detail": None},
+                 {"reason": "budget_exhausted", "detail": "start_gate:token_throttle"}, {"reason": "guard_held"}):
+        assert kps._start_gate_expected(skip) is False, skip
+    created = []
+    monkeypatch.setattr(kps, "_create", lambda *a, **k: created.append(k) or "t_repair")
+    card = {"id": "t_1", "title": "pinned", "tenant": None, "since_ms": 0, "skip": gated}
+    with kbc.connect() as conn:
+        assert kps.file_repairs(conn, "worker-1", [card], now=10 * 3600.0) == [] and created == []  # hours on: none
+        other = dict(card, id="t_2", skip={"reason": "other", "detail": "something else", "first_at": 0, "last_at": 0, "passes": 3})
+        assert kps.file_repairs(conn, "worker-1", [other], now=10 * 3600.0) == ["t_repair"]  # the control
+
+
+def test_held_in_ready_names_the_gate_and_its_word_for_both_event_forms(paced_board, monkeypatch):
+    import time
+    from hermes_cli import kanban_diagnostics as kd
+    _write_cfg(paced_board)
+    _hook(monkeypatch, [{"hold": True, "reason": "token_throttle"}])
+    with kbc.connect() as conn:
+        tid = _opus_card(conn)
+        _dispatch(conn)
+        task, events = kb.get_task(conn, tid), kb.list_events(conn, tid)
+    later = time.time() + 3 * 3600
+    (diag,) = kd._rule_held_in_ready(task, events, [], later, {})
+    assert diag.kind == "held_in_ready" and "last observed hold (start_gate: token_throttle)" in diag.title
+    assert "plugin start gate" in diag.detail and diag.data["hold_reason"] == "start_gate"
