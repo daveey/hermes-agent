@@ -361,10 +361,15 @@ def decompose_task(
     """Decompose a triage task into a graph of child tasks. Expected failures
     (not in triage, no aux client, API error, malformed/empty reply) surface
     as ``ok=False``. A card that already ran or was escalated by a block loop
-    is refused (:func:`kanban_db.decomposition_refusal`) unless ``force``."""
+    is refused (:func:`kanban_db.decomposition_refusal`) unless ``force``. A card held at an enforced lane
+    gate is refused even with ``force``: its exit is ``hermes kanban lanes admit``."""
     task, reason = _load_triage_task(task_id)
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
+    from hermes_cli.kanban_lanes import gate_refusal
+    with kbc.connect_closing() as conn:
+        if held := gate_refusal(conn, task_id):
+            return DecomposeOutcome(task_id, False, held)
     if not force:
         with kbc.connect_closing() as conn:
             refusal = kb.decomposition_refusal(conn, task_id)

@@ -12,7 +12,7 @@ from tests.hermes_cli import test_kanban_lanes as base
 
 conn = base.conn
 configured = base.configured
-_human_shell = base._human_shell
+person = base.person
 
 
 def cli(*args):

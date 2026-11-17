@@ -138,7 +138,6 @@ def _origin_receipt(conn, options, task_id):
 
 def append_existing(conn, *, request_id, authority, options, request, now):
     """Try append before creation preflight; a miss performs no writes."""
-    from hermes_cli.kanban_db_graph import initial_task_state
     _authority(conn, authority, authority)
     value = policy.contract(options.get('self_work'))
     with kb.write_txn(conn, allow_nested=True):

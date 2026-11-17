@@ -148,8 +148,10 @@ def set_lane(lane: str, *, share=None, admit_per_day=None, paused=None) -> None:
     pol = lanes.policy()
     if pol is None or lane not in pol.lanes:
         raise ValueError(f"unknown lane: {lane}")
-    if share is not None and (type(share) not in (int, float) or share < 0):
-        raise ValueError("share must be a nonnegative number")
+    import math
+
+    if share is not None and (type(share) not in (int, float) or not math.isfinite(share) or share < 0):
+        raise ValueError("share must be a finite nonnegative number")
     if admit_per_day is not None and (type(admit_per_day) is not int or admit_per_day < 0):
         raise ValueError("admit_per_day must be a nonnegative integer")
     if paused is not None and type(paused) is not bool:

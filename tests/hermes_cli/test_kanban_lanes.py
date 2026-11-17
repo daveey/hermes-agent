@@ -22,10 +22,12 @@ LANES = {
 
 
 @pytest.fixture(autouse=True)
-def _human_shell(monkeypatch):
-    """These tests create cards as a person would; a worker running the suite carries its own card in the env."""
+def person(monkeypatch):
+    """These tests create cards as a person would; an agent or worker running the suite carries session and
+    card markers in its environment."""
     for name in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK", "HERMES_TENANT"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(lanes, "_human_shell", lambda: True)
 
 
 @pytest.fixture
@@ -383,3 +385,81 @@ def test_unreadable_config_does_not_break_creation(conn, configured):
     (Path(get_default_hermes_root()) / "config.yaml").write_text("kanban: [unclosed")
     tid = kb.create_task(conn, title="still works", assignee="default")
     assert _task(conn, tid)["status"] == "ready"
+
+
+def test_forced_decompose_still_refuses_a_held_card(conn, configured):
+    from hermes_cli import kanban_decompose
+
+    _parent, held = _held_card(conn)
+    outcome = kanban_decompose.decompose_task(held, force=True)
+    assert outcome.ok is False and "lane gate" in outcome.reason
+    assert _task(conn, held)["status"] == "triage"
+
+
+def test_an_agent_session_shell_is_not_the_user(conn, configured, monkeypatch):
+    monkeypatch.setattr(lanes, "_human_shell", lambda: False)  # a chat or cron agent's terminal
+    tid = kb.create_task(conn, title="main is red", assignee="default", priority=1000, created_by="user",
+                         tenant="hermes", idempotency_key="ci-main-watch:1")
+    row = _task(conn, tid)
+    assert (row["status"], row["priority"]) == ("triage", 100)
+
+
+def test_human_shell_detection_reads_the_session_markers(monkeypatch):
+    from hermes_cli import kanban_lanes
+
+    monkeypatch.undo()  # the real detector, not this module's stand-in
+    for name in ("HERMES_SESSION_KEY", "HERMES_SESSION_ID", "HERMES_SESSION_SOURCE", "HERMES_RPC_SOCKET",
+                 "HERMES_KERNEL_SENTINEL", "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK"):
+        monkeypatch.delenv(name, raising=False)
+    assert kanban_lanes._human_shell() is True
+    monkeypatch.setenv("HERMES_SESSION_ID", "chat-1")
+    assert kanban_lanes._human_shell() is False
+
+
+def test_a_parked_or_held_waiter_does_not_release_a_held_card(conn, configured):
+    mapping = json.loads(json.dumps(LANES))
+    mapping["infra2"] = {"share": 5, "gated": True}
+    configured(mapping)
+    _parent, held = _held_card(conn)
+    owner2 = kb.create_task(conn, title="p2", assignee="default", created_by="user", tenant="infra2")
+    gated_child = kb.create_task(conn, title="needs it", assignee="default", creator_task_id=owner2,
+                                 parents=[held])
+    assert _task(conn, gated_child)["block_kind"] == lanes.GATE_KIND  # held in its own gated lane
+    assert _task(conn, held)["status"] == "triage"
+    kb.create_task(conn, title="parked", assignee="default", tenant="babybear", created_by="user", triage=True,
+                   parents=[held])
+    assert _task(conn, held)["status"] == "triage"
+
+
+def test_a_tenant_that_names_no_lane_is_gated_as_the_default_lane(conn, configured):
+    mapping = json.loads(json.dumps(LANES))
+    mapping["other"]["gated"] = True
+    configured(mapping)
+    old = kb.create_task(conn, title="pre-lanes card", assignee="default", created_by="user")
+    conn.execute("UPDATE tasks SET tenant='legacy-team' WHERE id=?", (old,))
+    conn.commit()
+    child = kb.create_task(conn, title="follow-up", assignee="default", creator_task_id=old)
+    row = _task(conn, child)
+    assert (row["tenant"], row["status"], row["block_kind"]) == ("legacy-team", "triage", lanes.GATE_KIND)
+
+
+def test_a_promoted_card_sent_back_to_triage_before_it_ran_is_not_held(conn, configured):
+    _parent, held = _held_card(conn)
+    ok, _why = kb.promote_task(conn, held, actor="user")
+    assert ok
+    conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (held,))  # a spend hold before its first run
+    conn.commit()
+    assert lanes.held(conn) == [] and kb.decomposition_refusal(conn, held) is None
+
+
+@pytest.mark.parametrize("share", [float("nan"), float("inf"), -1])
+def test_non_finite_and_negative_shares_are_rejected(share):
+    with pytest.raises(ValueError):
+        lanes.parse({"lanes": {"other": {"share": share}}})
+
+
+def test_lane_tenant_resolves_what_creation_will_store(conn, configured):
+    opts = {"created_by": "default", "workspace_path": "/src/hermes-agent", "workspace_kind": "dir"}
+    assert lanes.lane_tenant(conn, (), "running", False, "babybear", opts) == "hermes"
+    made = kb.create_task(conn, title="x", assignee="default", tenant="babybear", **opts)
+    assert _task(conn, made)["tenant"] == "hermes"

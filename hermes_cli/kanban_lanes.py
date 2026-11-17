@@ -35,6 +35,7 @@ card creation); :func:`policy` raises it for the CLI.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -53,12 +54,15 @@ USER_CREATORS = frozenset({"user", "dashboard"})
 # strands the card they were filed for.
 RECOVERY_CREATORS = frozenset({"kanban-recovery", "kanban-no-progress"})
 DEFAULT_LANE = "other"
-# A card waiting at a lane gate: never started, in triage, carrying the gate mark. The no-runs clause keeps a
-# card that was released by another verb, ran, and was later sent back to triage from reading as held again.
+# A card waiting at a lane gate: in triage with the gate mark, never started and never released. ``promote`` and
+# ``unblock`` leave ``block_kind`` in place, so the mark alone would make a card that was released by one of
+# them (or admitted, ran, and was later sent back to triage by a spend or no-progress stop) read as held again.
 def held_sql(alias: str = "tasks") -> str:
     # COALESCE: a NULL block_kind must make this false, not NULL, or ``NOT (held)`` drops every unmarked card.
     return (f"{alias}.status = 'triage' AND COALESCE({alias}.block_kind, '') = 'lane_gate' "
-            f"AND NOT EXISTS (SELECT 1 FROM task_runs hr WHERE hr.task_id = {alias}.id)")
+            f"AND NOT EXISTS (SELECT 1 FROM task_runs hr WHERE hr.task_id = {alias}.id) "
+            f"AND NOT EXISTS (SELECT 1 FROM task_events he WHERE he.task_id = {alias}.id "
+            f"AND he.kind IN ('lane_admitted', 'promoted_manual', 'unblocked'))")
 
 
 HELD = held_sql()
@@ -134,8 +138,8 @@ def _lane(name, raw) -> Lane:
     if unknown := sorted(set(raw) - known):
         raise ValueError(f"lane {name}: unknown key(s) {', '.join(map(str, unknown))}")
     share = raw.get("share", 0)
-    if type(share) not in (int, float) or share < 0:
-        raise ValueError(f"lane {name}: share must be a nonnegative number")
+    if type(share) not in (int, float) or not math.isfinite(share) or share < 0:
+        raise ValueError(f"lane {name}: share must be a finite nonnegative number")
     per_day = raw.get("admit_per_day")
     if per_day is not None and (type(per_day) is not int or per_day < 0):
         raise ValueError(f"lane {name}: admit_per_day must be a nonnegative integer")
@@ -178,13 +182,24 @@ def policy() -> Optional[Policy]:
     return parse(admission_policy())
 
 
+_WARNED: set = set()
+
+
 def safe_policy() -> Optional[Policy]:
-    """:func:`policy` for creation and dispatch: a malformed mapping is logged and reads as no lanes."""
+    """:func:`policy` for creation and dispatch: an unreadable or malformed mapping reads as no lanes.
+
+    Logged once per distinct error per process: this runs on every create, rank and triage check.
+    """
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+
     try:
         return policy()
-    except Exception:  # health: allow BLE001 -- an unreadable or malformed config must never stop card creation
-        _LOG.warning("kanban.admission.lanes is unreadable or malformed; lanes are off until it is fixed",
-                     exc_info=True)
+    # ConfigBackendUnavailable is a SystemExit, so ``Exception`` alone would let a config outage stop creation.
+    except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- config must never stop creation
+        key = f"{type(exc).__name__}: {exc}"
+        if key not in _WARNED:
+            _WARNED.add(key)
+            _LOG.warning("kanban.admission.lanes is unreadable or malformed; lanes are off until it is fixed: %s", key)
         return None
 
 
@@ -232,13 +247,23 @@ def _agent_task(opts: dict) -> Optional[str]:
         or os.environ.get("HERMES_KANBAN_TASK") or None
 
 
-def _by_user(opts: dict) -> bool:
-    """Created by the person, not an agent: a user creator label and no worker card behind the call.
+def _human_shell() -> bool:
+    """Whether this process is a person's shell, not an agent's terminal (chat, cron or worker)."""
+    from hermes_cli.kanban_cli_actor import cli_actor
 
-    ``hermes kanban create`` writes ``created_by='user'`` for every caller, so the label alone would let any
-    worker shell skip the gate and the cap; a worker's shell carries its card in the environment.
+    return cli_actor() == "user"
+
+
+def _by_user(opts: dict) -> bool:
+    """Created by the person, not an agent.
+
+    ``hermes kanban create`` writes ``created_by='user'`` for every caller, so that label counts only from a
+    human shell with no worker card behind it; the dashboard's own label is the person by construction.
     """
-    return opts.get("created_by") in USER_CREATORS and _agent_task(opts) is None
+    creator = opts.get("created_by")
+    if creator not in USER_CREATORS or _agent_task(opts) is not None:
+        return False
+    return creator != "user" or _human_shell()
 
 
 def _creator_row(conn, opts):
@@ -268,8 +293,8 @@ def _gated(conn, pol: Policy, lane_name: str, opts: dict) -> bool:
     """An agent-filed card in a gated lane waits for admission; the user's own cards and alarms do not."""
     from hermes_cli.kanban_admission_score import _alarm_key
 
-    lane = pol.lanes.get(lane_name)
-    if lane is None or not lane.gated or _by_user(opts) or opts.get("created_by") in RECOVERY_CREATORS:
+    lane = pol.lanes[pol.lane_of(lane_name)]  # a tenant that names no lane is the default lane, gate included
+    if not lane.gated or _by_user(opts) or opts.get("created_by") in RECOVERY_CREATORS:
         return False
     key = opts.get("idempotency_key")
     filed_by_agent = bool(_agent_task(opts)) or opts.get("created_by") in lane.creators \
@@ -286,7 +311,20 @@ def _gated(conn, pol: Policy, lane_name: str, opts: dict) -> bool:
 
 
 def lane_tenant(conn, parents, initial_status, triage, tenant, opts) -> Optional[str]:
-    """The tenant :func:`initial_state` will store, for callers that must match existing cards before creating."""
+    """The tenant ``create_task(**opts)`` will store, for callers that must match existing cards before creating.
+
+    ``create_task`` classifies on its resolved project repository, so resolve it the same way here.
+    """
+    from hermes_cli import kanban_db as kb
+
+    opts = dict(opts)
+    if "project_repo" not in opts:
+        try:
+            opts["project_repo"] = kb._resolve_project_link(
+                conn, opts.get("project_id"), opts.get("project_source_task_id"),
+                opts.get("workspace_kind") or "scratch", opts.get("workspace_path"))[2]
+        except (ValueError, LookupError, sqlite3.Error):
+            opts["project_repo"] = None  # creation will raise the same error with its own message
     return initial_state(conn, parents, initial_status, triage, tenant, opts)[1]
 
 
@@ -377,22 +415,26 @@ def admit(conn, task_id: str, *, actor: str, reason: str, budget: bool = True) -
         waiting = any(state not in ("done", "archived") for _pid, state in kb.parent_states(conn, task_id))
         conn.execute("UPDATE tasks SET status = ?, block_kind = NULL WHERE id = ?",
                      ("todo" if waiting else "ready", task_id))
-        kb._append_event(conn, task_id, ADMITTED, {"lane": row["tenant"], "actor": actor, "reason": reason,
+        pol = safe_policy()
+        lane = row["tenant"] if pol is None else pol.lane_of(row["tenant"])  # the lane whose budget this spends
+        kb._append_event(conn, task_id, ADMITTED, {"lane": lane, "actor": actor, "reason": reason,
                                                    "budget": 1 if budget else 0})
     return True
 
 
 def release_blocker(conn, parent_id: str, child_id: str) -> None:
-    """A gate-held card that another lane's open, runnable card now waits on is admitted outside the budget.
+    """A gate-held card that another lane's runnable card now waits on is admitted outside the budget.
 
-    Not when the waiting card is itself held, and not for a title the lane never auto-admits.
+    Not for a parked or held waiter, and not for a title the lane never auto-admits.
     """
     parent = conn.execute(f"SELECT title, tenant FROM tasks WHERE id = ? AND {HELD}", (parent_id,)).fetchone()
     if parent is None:
         return
-    child = conn.execute(f"SELECT tenant, status IN {_OPEN} AS open, ({HELD}) AS held FROM tasks WHERE id = ?",
+    # Runnable: a waiter parked in triage, blocked or scheduled is not waiting to run. This also covers a
+    # waiter that is itself being created held (its gate mark is written after its parent links).
+    child = conn.execute("SELECT tenant FROM tasks WHERE id = ? AND status IN ('todo', 'ready', 'running', 'review')",
                          (child_id,)).fetchone()
-    if child is None or not child["open"] or child["held"]:
+    if child is None:
         return
     pol = enforced()
     if pol is None or pol.lane_of(child["tenant"]) == pol.lane_of(parent["tenant"]):
