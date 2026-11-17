@@ -555,6 +555,13 @@ async function recoverEndedLiveTurn(runtimeId: string) {
   const recovery = {}
   endedTurnRecoveries.set(runtimeId, recovery)
 
+  // The turn this recovery is for: a prompt sent during a re-read delay starts
+  // another turn, which this one must not stamp.
+  const tailPrompt = () =>
+    $sessionStates.get()[runtimeId]?.messages.findLast(message => message.role === 'user' && !message.hidden)?.id
+
+  const prompt = tailPrompt()
+
   try {
     for (let attempt = 0; ; attempt += 1) {
       const storedSessionId = $sessionStates.get()[runtimeId]?.storedSessionId ?? null
@@ -574,7 +581,7 @@ async function recoverEndedLiveTurn(runtimeId: string) {
         // No answer from the store: read again below.
       }
 
-      if (endedTurnRecoveries.get(runtimeId) !== recovery) {
+      if (endedTurnRecoveries.get(runtimeId) !== recovery || tailPrompt() !== prompt) {
         return
       }
 
@@ -594,7 +601,12 @@ async function recoverEndedLiveTurn(runtimeId: string) {
 
       const state = $sessionStates.get()[runtimeId]
 
-      if (endedTurnRecoveries.get(runtimeId) !== recovery || !state || isLiveTurnAwaitingEvents(state)) {
+      if (
+        endedTurnRecoveries.get(runtimeId) !== recovery ||
+        !state ||
+        isLiveTurnAwaitingEvents(state) ||
+        tailPrompt() !== prompt
+      ) {
         return
       }
     }

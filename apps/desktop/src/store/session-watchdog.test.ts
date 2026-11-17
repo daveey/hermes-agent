@@ -498,6 +498,45 @@ describe('live turn event silence', () => {
     expect(card('rt-revived')).toBeUndefined()
   })
 
+  it('does not stamp a newer turn that began while the store was being re-read', async () => {
+    $activeSessionId.set('rt-next')
+    publishSessionState(
+      'rt-next',
+      state({
+        awaitingResponse: true,
+        busy: true,
+        messages: [{ id: 'u1', parts: [textPart('first')], role: 'user' }],
+        storedSessionId: 's-next',
+        turnLive: true
+      })
+    )
+    backend(
+      async () => ({ sessions: [] }),
+      vi.fn(async () => false)
+    )
+    noteSessionEvent('rt-next')
+
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+
+    // The user sends again; that turn stops at an approval prompt with a tool-only bubble.
+    publishSessionState('rt-next', {
+      ...$sessionStates.get()['rt-next']!,
+      awaitingResponse: false,
+      busy: true,
+      messages: [
+        { id: 'u1', parts: [textPart('first')], role: 'user' },
+        { id: 'u2', parts: [textPart('second')], role: 'user' },
+        { id: 'a2', parts: [], role: 'assistant' }
+      ],
+      needsInput: true,
+      turnLive: true
+    })
+
+    await vi.advanceTimersByTimeAsync(ENDED_TURN_STORE_RETRY_MS.reduce((sum, ms) => sum + ms, 0))
+
+    expect(card('rt-next')).toBeUndefined()
+  })
+
   it('leaves a background session to read its history when opened', async () => {
     publishSessionState('rt-bg', state({ awaitingResponse: true, busy: true, storedSessionId: 's-bg', turnLive: true }))
     const refreshTranscript = vi.fn()

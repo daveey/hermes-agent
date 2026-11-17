@@ -54,16 +54,16 @@ const DRAFT_SUPERSEDING_EVENT_TYPES = new Set([
   'tool.start'
 ])
 
-// The turn's own stream output: any of these after a "turn ended without a
+// The turn producing NEW output: any of these after a "turn ended without a
 // reply" stamp proves that stamp wrong (store/session-states disproveNoReplyNotice).
+// Closing frames (message.complete, tool.complete) are left out: a late or
+// replayed one says nothing about a turn that really ended without a reply.
 const TURN_OUTPUT_EVENT_TYPES = new Set([
-  'message.complete',
   'message.delta',
   'message.interim',
   'message.start',
   'reasoning.delta',
   'thinking.delta',
-  'tool.complete',
   'tool.generating',
   'tool.start'
 ])

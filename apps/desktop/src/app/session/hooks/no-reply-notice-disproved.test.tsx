@@ -93,18 +93,12 @@ describe('a no-reply notice on a turn that is still producing', () => {
     expect(notice()).toBeUndefined()
   })
 
-  it('stays for a frame that is not turn output', () => {
+  it.each(['session.info'] as const)('stays for a %s frame, which is not new output', type => {
     const { result } = mount()
 
     stamp()
 
-    act(() =>
-      result.current.handleGatewayEvent({
-        session_id: runtimeId,
-        type: 'session.info',
-        payload: {}
-      } as GatewayEvent)
-    )
+    act(() => result.current.handleGatewayEvent({ session_id: runtimeId, type, payload: {} } as GatewayEvent))
 
     expect(notice()?.error).toBe(NO_REPLY_ERROR)
   })
