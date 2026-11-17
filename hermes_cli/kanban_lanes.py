@@ -62,7 +62,7 @@ def held_sql(alias: str = "tasks") -> str:
     return (f"{alias}.status = 'triage' AND COALESCE({alias}.block_kind, '') = 'lane_gate' "
             f"AND NOT EXISTS (SELECT 1 FROM task_runs hr WHERE hr.task_id = {alias}.id) "
             f"AND NOT EXISTS (SELECT 1 FROM task_events he WHERE he.task_id = {alias}.id "
-            f"AND he.kind IN ('lane_admitted', 'promoted_manual', 'unblocked', 'triage_swept', 'decomposed'))")
+            f"AND he.kind IN ('lane_admitted', 'promoted_manual', 'unblocked', 'triage_swept', 'decomposed', 'specified'))")
 
 
 HELD = held_sql()
@@ -199,6 +199,7 @@ def safe_policy() -> Optional[Policy]:
         pol = policy()
     except ValueError as exc:
         _warn(exc)
+        _LAST_GOOD.clear()  # the config was read and is wrong: an older policy must not come back later
         return None
     # ConfigBackendUnavailable is a SystemExit, so ``Exception`` alone would let a config outage stop creation.
     except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- config must never stop creation
@@ -282,7 +283,14 @@ def cli_creator(args, label: str) -> str:
     else asking for one is stored as ``agent``. Unchanged when no lanes are configured."""
     if label not in USER_CREATORS or safe_policy() is None:
         return label
-    return label if getattr(args, "_slash_typed", False) or _human_shell() else "agent"
+    return label if cli_person(args) else "agent"
+
+
+def cli_person(args) -> bool:
+    """Whether a CLI call is the person's: a slash command they typed (which runs inside a process that
+    carries agent session markers) or a human shell. Known limit: an agent that strips its environment, for
+    example over ssh, looks like a human shell."""
+    return bool(getattr(args, "_slash_typed", False)) or _human_shell()
 
 
 def _by_user(opts: dict) -> bool:

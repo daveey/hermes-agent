@@ -113,12 +113,23 @@ def _assign(args) -> int:
 
 
 def _admit(args) -> int:
+    """The person's admit is theirs to make and outside the daily budget. An agent's goes through the same
+    limits as a planner's (``admit_per_day``, ``never_admit``) and spends the budget."""
     from hermes_cli.kanban_cli_actor import cli_actor
 
+    reason = args.reason or ""
     with kbc.connect_closing() as conn:
-        # The user's own admit does not spend the daily budget; an agent's does.
-        actor = cli_actor()
-        done = lanes.admit(conn, args.task_id, actor=actor, reason=args.reason or "", budget=actor != "user")
+        if lanes.cli_person(args):
+            done = lanes.admit(conn, args.task_id, actor="user", reason=reason, budget=False)
+        else:
+            from hermes_cli import kanban_lanes_plan as plan
+
+            result = plan.apply(conn, [{"action": "admit", "card": args.task_id,
+                                        "reason": reason or f"admitted by {cli_actor()}"}])
+            if result["rejected"]:
+                print(f"{args.task_id}: {result['rejected'][0]['why']}")
+                return 1
+            done = True
     print(f"{args.task_id}: {'admitted' if done else 'not held at a lane gate'}")
     return 0 if done else 1
 

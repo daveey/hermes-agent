@@ -218,11 +218,20 @@ def test_cli_create_label_is_untouched_without_lanes(conn, monkeypatch):
     assert _stored(conn, "no lanes")["created_by"] == "user"
 
 
-def test_an_agents_cli_admit_spends_the_budget(conn, configured, monkeypatch):
-    from hermes_cli import kanban_cli_actor
+def _typed(*argv):
+    """A slash command the person typed, through the real slash entry point."""
+    return kanban.run_slash(" ".join(argv), human_typed=True)
 
+
+def test_an_agents_cli_admit_is_limited_like_the_planners_and_a_typed_one_is_the_persons(conn, configured, monkeypatch):
     parent = base._hermes_parent(conn)
-    held = _held(conn, parent)
-    monkeypatch.setattr(kanban_cli_actor, "cli_actor", lambda: "agent (chat c1)")
-    assert cli("lanes", "admit", held) == 0
-    assert lanes.admitted_today(conn, "hermes") == 1
+    cards = [_held(conn, parent, f"infra {i}") for i in range(4)]
+    guard = _held(conn, parent, "Lifecycle guard false refusal")
+    monkeypatch.setattr(lanes, "_human_shell", lambda: False)  # every call below runs in an agent-marked process
+    assert cli("lanes", "admit", guard) == 1  # never_admit
+    assert cli("lanes", "admit", cards[0]) == 0 and cli("lanes", "admit", cards[1]) == 0
+    assert cli("lanes", "admit", cards[2]) == 1  # admit_per_day is 2
+    assert lanes.admitted_today(conn, "hermes") == 2
+    _typed("lanes", "admit", cards[2])  # the person, typing in a chat
+    assert base._task(conn, cards[2])["status"] == "ready"
+    assert lanes.admitted_today(conn, "hermes") == 2
