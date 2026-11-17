@@ -22,8 +22,7 @@ def fleet(monkeypatch):
 
 @pytest.fixture
 def board_maps_access(monkeypatch):
-    """The Board after it maps declared access (ssh:mbp/ssh:mini/hub:read) to pool labels; until then core keeps
-    those cards home (``BOARD_PLACEABLE_ACCESS`` is empty), so the attestation logic below is dormant."""
+    """Explicit full Board support for tests of the independent attestation fences."""
     from hermes_cli import kanban_placement_coordination as coord
     monkeypatch.setattr(coord, "BOARD_PLACEABLE_ACCESS", frozenset(coord.ACCESS_LABELS))
 
@@ -458,6 +457,7 @@ def test_declared_access_stays_home_until_the_board_maps_it(fleet, monkeypatch, 
     """Every eligible member attests every label, yet the Board would leave an enrolled card queued
     (``task_requirement_unsupported``): keep it home-only, where it at least runs."""
     from hermes_cli import kanban_placement_coordination as coord
+    monkeypatch.setattr(coord, "BOARD_PLACEABLE_ACCESS", frozenset({"hub:read", "hub:write"}))
     cfg, entry, machines = fleet
     cfg["carried_requires"] = ["terminal"]
     cfg["worker_pools"]["hub"] = ["held", "worker"]
@@ -474,8 +474,9 @@ def test_declared_access_stays_home_until_the_board_maps_it(fleet, monkeypatch, 
     assert coord.stranded(card, cfg, coord.REASON) == ["worker"]
 
 
-@pytest.mark.parametrize("requires", [["hub:read"], ["hub:write"], ["terminal", "file", "hub:read", "hub:write"]])
-def test_declared_hub_access_is_board_placeable(fleet, requires):
+@pytest.mark.parametrize("requires", [["ssh:mini"], ["ssh:mbp"], ["hub:read"], ["hub:write"],
+                                      ["terminal", "file", "hub:read", "hub:write", "ssh:mini", "ssh:mbp"]])
+def test_declared_access_is_board_placeable(fleet, requires):
     """Use the real supported-access set, not the broader hypothetical Board fixture."""
     from hermes_cli import kanban_placement_coordination as coord
     cfg, entry, machines = fleet
@@ -484,7 +485,7 @@ def test_declared_hub_access_is_board_placeable(fleet, requires):
     machines["held"] = {**entry, "labels": [], "hold": True}
     assert coord.board_refusal(requires) is None
     labels = coord.access_requirements(requires)
-    assert labels == {"capability:" + r.replace(":", "-") for r in requires if r.startswith("hub:")}
+    assert labels == {"capability:" + r.replace(":", "-") for r in requires if r.startswith(("hub:", "ssh:"))}
     entry["labels"] += list(labels)
     assert reason("read the log", cfg, requires) is None
     card = {"placement_policy": "worker-first-v1", "title": "Read the log", "body": "read the log",
@@ -496,6 +497,25 @@ def test_declared_hub_access_is_board_placeable(fleet, requires):
         assert coord.claim_refusal(card, "worker") == coord.REASON
         entry["labels"].append(label)
     assert coord.attested(["held", "worker"], labels) is True
+
+
+def test_board_access_allowlist_is_exact():
+    from hermes_cli import kanban_placement_coordination as coord
+    assert coord.BOARD_PLACEABLE_ACCESS == {"hub:read", "hub:write", "ssh:mini", "ssh:mbp"}
+
+
+@pytest.mark.parametrize("access", ["ssh:mini", "ssh:mbp"])
+@pytest.mark.parametrize("field,value", [("last_seen", 0), ("hold", True), ("labels", [])])
+def test_ssh_claim_refuses_expired_held_or_revoked_attestation(fleet, access, field, value):
+    from hermes_cli import kanban_placement_coordination as coord
+    cfg, entry, _ = fleet
+    entry["labels"] += ACCESS
+    card = {"placement_policy": "worker-first-v1", "title": "Read evidence", "requires": [access]}
+    assert reason("read evidence", cfg, [access]) is None
+    assert coord.claim_refusal(card, "worker") is None
+    entry[field] = value
+    assert reason("read evidence", cfg, [access]) == coord.REASON
+    assert coord.claim_refusal(card, "worker") == coord.REASON
 
 
 @pytest.mark.parametrize("text", [

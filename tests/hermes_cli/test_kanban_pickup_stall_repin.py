@@ -273,17 +273,20 @@ def test_declared_hub_write_needs_the_hyphenated_label_a_worker_attests(board):
 
 
 @pytest.mark.parametrize("access", ["ssh:mbp", "ssh:mini"])
-def test_declared_ssh_access_refuses_the_pool_queue_with_the_board_reason(board, access):
-    """t_01a1d2b4b091e158: workers attest ``capability:ssh-mbp``/``ssh-mini``, but the Board's pool selection cannot
-    place ssh access, so a pool move would leave the card in task_requirement_unsupported."""
+def test_declared_ssh_access_uses_the_attested_pool_queue(board, access):
+    """The deployed Board maps these exact requirements; do not discard access to move a card."""
     from hermes_cli import kanban_placement_coordination as coord
     board.set(board.target, requires=json.dumps([access]))
     label = coord.requirement_label(access)
     machines = _pooled(worker_2={"labels": [*_worker(X)["labels"], POOL, label]})
     assert rp.pool_refusal(M, machines, rp._need(board.conn.execute(
         "SELECT * FROM tasks WHERE id = ?", (board.target,)).fetchone()), NOW) is None  # a worker qualifies
-    why = board.why(runs_on=[POOL], machines=machines)
-    assert why is not None and coord.BOARD_REASON in why, why
+    assert board.why(runs_on=[POOL], machines=machines) is None
+    assert label in board.why(runs_on=[POOL], machines=_pooled())
+    # Pool admission is structural: it may queue while stale, but claim-time freshness still refuses execution.
+    assert board.why(runs_on=[POOL], machines=_pooled(worker_2={
+        **machines[X], "last_seen": NOW - 301_000})) is None
+    assert board.why(runs_on=[POOL], machines=_pooled(worker_2={**machines[X], "hold": True})) is not None
 
 
 @pytest.mark.parametrize("stored", ['{"a":1}', '"ssh:mbp"', '["terminal", 3]', "null", "not json"])
@@ -475,6 +478,34 @@ def test_the_alarms_run_re_places_a_listed_card_onto_the_pool_queue(held, monkey
         out = _move(tid, [POOL])
         assert out.get("ok") is True, out
         assert place._pin(hub.conn, tid) == [POOL]
+    assert kb.get_task(hub.conn, alarm).status == "running"
+
+
+@pytest.mark.parametrize("access", ["ssh:mini", "ssh:mbp"])
+def test_the_alarm_tool_moves_attested_ssh_without_dropping_access(held, monkeypatch, access):
+    hub, _worker_gw, alarm, (a, _b), _unlisted = held
+    required = ["terminal", "git", access]
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET requires = ? WHERE id = ?", (json.dumps(required), a))
+    pooled = {**support.MACHINES[X], "labels": [*support.MACHINES[X]["labels"], POOL,
+                                               "capability:terminal", "capability:git"]}
+    monkeypatch.setitem(support.MACHINES, X, pooled)
+    hub.enter()
+    out = _move(a, [POOL])
+    assert out.get("ok") is not True, out
+    assert place._pin(hub.conn, a) == [f"machine:{M}"]
+    label = "capability:" + access.replace(":", "-")
+    monkeypatch.setitem(support.MACHINES, X, {**pooled, "labels": [*pooled["labels"], label]})
+    hub.enter()
+    out = _move(a, [POOL])
+    assert out.get("ok") is True, out
+    assert place._pin(hub.conn, a) == [POOL]
+    stored = hub.conn.execute("SELECT requires FROM tasks WHERE id = ?", (a,)).fetchone()[0]
+    assert json.loads(stored) == required
+    [moved] = [json.loads(e[0]) for e in hub.conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'moved'", (a,))]
+    assert moved["pickup_stall_alarm"] == alarm and moved["stalled_machine"] == M
+    assert support.MACHINES[M]["hold"] is True
     assert kb.get_task(hub.conn, alarm).status == "running"
 
 

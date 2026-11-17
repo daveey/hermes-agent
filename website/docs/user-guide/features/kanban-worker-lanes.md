@@ -48,6 +48,23 @@ structured `metadata.hermes.requires_toolsets` / `requires_tools` (the fields th
 its visibility) do count: `terminal`, `file` and `kanban` toolsets, or a tool those toolsets own,
 are added to the card's requirements, even to an explicit `[]`.
 
+#### Attested SSH access on the worker pool (fork)
+
+The Board and core support exactly `ssh:mini` and `ssh:mbp`, mapped respectively to
+operator-owned `capability:ssh-mini` and `capability:ssh-mbp` registry labels. Deploy
+Board support before enabling these declarations in core. Other SSH spellings are not
+supported by Board pool selection. Preserve the exact `requires` list during a pool move;
+removing access requirements is not an assignment repair.
+
+These labels attest that access was granted, not that an SSH connection currently works.
+They do not install credentials or grant new permissions. On revocation or broken access,
+remove the corresponding operator registry label; selection and claim recheck it. Existing
+registry/heartbeat and metrics freshness checks remain mandatory for execution. Labels
+have no separate credential-expiry timestamp, and the registry read and claim transaction
+are not atomic with a concurrent label removal. A scoped pickup alarm may queue a listed
+card away from a held worker without lifting that hold; structural queue admission is not
+proof that a fresh, eligible worker has claimed it.
+
 #### Declaring requirements (`kanban.require_capability_declaration`)
 
 With `kanban.require_capability_declaration: true` (fork setting; default `false`; read from the

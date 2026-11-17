@@ -75,8 +75,8 @@ ACCESS_LABELS = {"ssh:mbp": "capability:ssh-mbp", "ssh:mini": "capability:ssh-mi
 # Declared access must mirror the Board's worker/src/worker_placement.ts supportedRequirement
 # and requirementLabel contract. Deploy Board support before extending this set: otherwise
 # enrolled cards queue forever with task_requirement_unsupported despite attested access.
-# SSH requirements remain unsupported; read and write each require their own attestation.
-BOARD_PLACEABLE_ACCESS: frozenset = frozenset({"hub:read", "hub:write"})
+# Each host's SSH access and hub read/write require their own operator attestation.
+BOARD_PLACEABLE_ACCESS: frozenset = frozenset({"hub:read", "hub:write", "ssh:mini", "ssh:mbp"})
 BOARD_REASON = "declared access the Board cannot place"
 
 

@@ -18,13 +18,6 @@ __all__ = ["conn"]
 fleet = helpers.fleet
 
 
-@pytest.fixture(autouse=True)
-def _board_maps_access(monkeypatch):
-    """These contracts only matter once the Board places declared access (core keeps it home until then)."""
-    from hermes_cli import kanban_placement_coordination as coordination
-    monkeypatch.setattr(coordination, "BOARD_PLACEABLE_ACCESS", frozenset(coordination.ACCESS_LABELS))
-
-
 def card(body, requires=()):
     return {"title": "Check remote evidence", "body": body, "requires": list(requires)}
 

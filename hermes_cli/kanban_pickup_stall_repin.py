@@ -210,9 +210,9 @@ def scope_refusal(conn: sqlite3.Connection, alarm: Any, target: Any, runs_on: An
     except ValueError as exc:
         return str(exc)
     if labels == [pool_label()]:
-        # A worker may attest ssh access, but the Board's pool selection cannot place it, nor a requires or skills it
-        # cannot read (not a JSON list of strings): the card would sit in task_requirement_unsupported or
-        # task_metadata_invalid instead of leaving the stalled machine. A pool worker must also carry skill:<s>.
+        # Declared access must have Board selection support; malformed requires/skills also cannot be placed.
+        # Otherwise the card sits in task_requirement_unsupported or task_metadata_invalid instead of leaving
+        # the stalled machine. A pool worker must also carry skill:<s>.
         from hermes_cli.kanban_placement_coordination import board_refusal
         if why := malformed_requires(target) or malformed_skills(target) or board_refusal(_requires(target)):
             return f"{target['id']} cannot go to {pool_label()}: {why}"
