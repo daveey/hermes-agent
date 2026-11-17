@@ -301,7 +301,7 @@ def _instrument(monkeypatch, home, clock, reader_defers):
 
     monkeypatch.setattr(server, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
     monkeypatch.setattr(kri, "_clock", lambda: clock[0])
-    monkeypatch.setattr(server, "_launch_home", home)
+    monkeypatch.setattr(server, "_launch_home", lambda: home)
     ins = SimpleNamespace(errors=[], delivered=[], computes=Counter(), calls=Counter(), cpu_by_name=Counter())
     monkeypatch.setattr(server, "_notif_log_failure", lambda *args: ins.errors.append(repr(args)))
 
@@ -461,6 +461,11 @@ def _run_cell(home, peers, monkeypatch, cell, reader_defers=True, *, churn=False
     seed = _seed(home, cell, wal_holders)
     clock = [1000.0]
     ins = _instrument(monkeypatch, home, clock, reader_defers)
+    if not retry:
+        from tui_gateway import notification_remote_retry
+        # Install before the poller imports its local deadline alias, including
+        # warm-up. Index deferral remains enabled and bounded in this control.
+        monkeypatch.setattr(notification_remote_retry, "deadline", lambda *a: None)
     registry = process_registry.ProcessRegistry()
     monkeypatch.setattr(process_registry, "process_registry", registry)
     scheduler = PollerScheduler(clock, process_registry_awaiting.take_ready)
@@ -504,10 +509,6 @@ def _run_cell(home, peers, monkeypatch, cell, reader_defers=True, *, churn=False
                 assert cx.plan[first_window][1] == cx.plan[second_window][1] == 0
                 cx.replica_due.update({7: first_window, 17: second_window})
                 cx.churn_until = start + 12.0
-            if not retry:
-                from tui_gateway import notification_remote_retry
-                # Counterfactual retains the actual index's four-second deferral.
-                monkeypatch.setattr(notification_remote_retry, "deadline", lambda *a: None)
             unguarded.enter_context(_production_io())  # the measured window only
             spans_before, load_before = loop_accounting.counters(), os.getloadavg()
             for tick in range(int(SECONDS / TICK)):
@@ -632,8 +633,8 @@ def test_h4_intervening_key_churn(row_home, monkeypatch, record_property, retry)
     assert evidence["max_latency_s"] <= 12.0, evidence
     if retry:
         assert evidence["computes"].get("reader", 0) == 0, evidence
-        assert evidence["calls"].get("notifications.poll_kanban_retry", 0) > 0, evidence
+        assert evidence["calls"].get("notifications.poll_kanban_remote_retry", 0) > 0, evidence
         assert evidence["row_core"] <= 0.007, evidence
     else:
         assert evidence["computes"].get("reader", 0) > 0, evidence
-        assert evidence["calls"].get("notifications.poll_kanban_retry", 0) == 0, evidence
+        assert evidence["calls"].get("notifications.poll_kanban_remote_retry", 0) == 0, evidence
