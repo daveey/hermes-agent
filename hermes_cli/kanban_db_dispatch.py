@@ -1895,6 +1895,12 @@ def _dispatch_lane_task(
     from hermes_cli.kanban_llm_pacing_dispatch import hold as _pacing_hold  # quota-pace governor [daveey]
     if _pacing_hold(conn, row, lane, result, dry_run=dry_run):  # pool ahead of pace: wait, unclaimed
         return False
+    from hermes_cli.kanban_start_gate import hold as _start_gate_hold  # plugin start gate (token throttle) [daveey]
+    gate_reason = _start_gate_hold(task_id=task_id, lane=lane, assignee=assignee, board=board)
+    if gate_reason is not None:  # a plugin holds this start: wait, unclaimed, asked again next tick
+        result.respawn_guarded.append((task_id, gate_reason))
+        _record_clock_hold(conn, result, task_id, gate_reason)
+        return False
 
     def _count_spawn(name: str) -> None:
         # Later rows in this tick respect the per-profile cap; subsequent ticks re-query from the DB.

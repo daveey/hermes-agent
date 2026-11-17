@@ -170,6 +170,10 @@ VALID_HOOKS: set[str] = {
     # spawn; completed/blocked fire in the WORKER (or whichever process drove it). Kwargs: task_id,
     # board, assignee, run_id, profile_name; completed adds summary, blocked adds reason.
     "kanban_task_claimed", "kanban_task_completed", "kanban_task_blocked",
+    # kanban_start_gate (hermes_cli.kanban_start_gate): asked by the DISPATCHER right before each claim, inline in
+    # the tick. Kwargs: task_id, lane, assignee, board. Return {"hold": True, "reason": "<word>"} to keep the card
+    # ready and unclaimed this tick (guard reason ``start_gate:<word>``); any other return starts it. Fail open.
+    "kanban_start_gate",
     # Kanban worker/mutation/tick observers; returns ignored; fire sites short-circuit on
     # has_hook(). Kwargs: task_id, profile_name, board, assignee, run_id plus, per hook:
     # worker_spawned (DISPATCHER, after PID persisted, inside the dispatch lock — stay fast):
