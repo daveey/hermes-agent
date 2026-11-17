@@ -32,7 +32,7 @@ with sqlite3.connect(':memory:') as conn:
         conn.execute('INSERT INTO tasks VALUES (?, ?, ?, ?)', (str(i), i, 'running', kb._host_prefix() + 'fixture'))
         conn.execute('INSERT INTO task_events VALUES (?, ?, ?, ?)',
                      (str(i), i, 'run_route', json.dumps({'model': 'claude-opus-5-5', 'provider': 'anthropic'})))
-    cfg = lp.PacingConfig()
+    cfg = lp.PacingConfig(pace_starts=True)
     pace = pd.pace_for(conn, 'anthropic', cfg, now)
     average = pd.avg_running('anthropic', now, cfg)
     print(json.dumps({'pace': pace.as_dict(), 'average': average,

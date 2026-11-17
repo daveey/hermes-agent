@@ -18,7 +18,7 @@ board = helpers.board
 @pytest.mark.parametrize('deferrable', [False, True])
 def test_paced_headroom_has_a_one_run_floor(average, deferrable):
     pace = lp.PoolPace('openai-codex', lp.PACED, 0.15)
-    assert lp.admit_limit(pace, average, deferrable=deferrable, cfg=lp.PacingConfig()) == 1
+    assert lp.admit_limit(pace, average, deferrable=deferrable, cfg=lp.PacingConfig(pace_starts=True)) == 1
 
 
 @pytest.mark.parametrize('deferrable', [False, True])
@@ -38,7 +38,7 @@ def test_far_wall_reroutes_before_pacing_and_destination_limits_claims(
     monkeypatch.setattr(tier, 'load_tier_config', lambda: LIVE_CFG)
     monkeypatch.setattr(walls, 'active_walls', lambda **kw: {'openai-codex': float(clock[0] + 6 * 86400)})
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *a, **kw: None)
-    monkeypatch.setattr(pd, 'load_config', lp.PacingConfig)
+    monkeypatch.setattr(pd, 'load_config', lambda: lp.PacingConfig(pace_starts=True))
     monkeypatch.setattr(pd, 'avg_running', lambda *a: 0)
     consulted = []
 

@@ -83,7 +83,8 @@ def test_registered_config_defaults_match_the_governor_defaults():
     assert lp.config_from(DEFAULT_CONFIG["kanban"]["llm_pacing"]) == lp.PacingConfig()
     assert set(DEFAULTS) == {"enabled", "target_percent", "reserve_five_hour_percent", "reserve_seven_day_percent",
                              "providers", "read_interval_seconds", "rate_window_seconds", "min_rate_span_seconds",
-                             "deferrable_share"}
+                             "deferrable_share", "pace_starts"}
+    assert DEFAULTS["pace_starts"] is False  # slots, not the burn rate, decide how many cards run
 
 
 # --- dispatch fixtures --------------------------------------------------------------------------------------
@@ -133,7 +134,7 @@ def _skips(conn, tid):
 # --- 1. paced holds are recorded skips ----------------------------------------------------------------------
 
 def test_paced_hold_records_a_skip_the_notices_and_diagnostics_name(paced_board, monkeypatch):
-    _config(paced_board)
+    _config(paced_board, kanban={"llm_pacing": {"pace_starts": True}})
     _paced_reads(monkeypatch)
     monkeypatch.setattr(qp, "_running_and_limit", lambda *_a: (1, 7))  # free slots: the unrecorded case
     monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
@@ -199,7 +200,7 @@ def test_held_pool_skip_carries_the_reset(paced_board, monkeypatch):
 
 def test_dry_run_records_the_hold_on_the_result_only(paced_board, monkeypatch):
     monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
-    _config(paced_board)
+    _config(paced_board, kanban={"llm_pacing": {"pace_starts": True}})
     _paced_reads(monkeypatch)
     with kbc.connect() as conn:
         tid = _opus(conn, "paced")
@@ -212,7 +213,7 @@ def test_dry_run_records_the_hold_on_the_result_only(paced_board, monkeypatch):
 
 def test_paced_limit_is_a_share_of_recent_concurrency_counted_against_running_cards(paced_board, monkeypatch):
     """avg 4 running x factor 0.625 -> limit 2: two cards start, the third waits for a running one to end."""
-    _config(paced_board)
+    _config(paced_board, kanban={"llm_pacing": {"pace_starts": True}})
     _paced_reads(monkeypatch)
     _seed_concurrency(4)
     with kbc.connect() as conn:
@@ -226,7 +227,7 @@ def test_paced_limit_is_a_share_of_recent_concurrency_counted_against_running_ca
 
 def test_deferrable_card_gets_only_its_share_of_the_paced_limit(paced_board, monkeypatch):
     """Limit 2, deferrable share 0.5 -> 1: the normal card starts, the negative-priority card then waits."""
-    _config(paced_board)
+    _config(paced_board, kanban={"llm_pacing": {"pace_starts": True}})
     _paced_reads(monkeypatch)
     _seed_concurrency(4)
     with kbc.connect() as conn:
@@ -243,14 +244,15 @@ ROUTE = {"billing": "subscription", "weight": 1, "eligible": True, "funding_veri
          "capabilities": {"tools": True, "streaming": True, "context_tokens": 1000000}}
 
 
-def _class_config(home, *providers):
+def _class_config(home, *providers, pace_starts=False):
     routes = [dict(ROUTE, provider=p, model=f"{p}-deep") for p in providers]
-    _config(home, model_routing={"enabled": True, "routes": {"deep": routes}})
+    _config(home, model_routing={"enabled": True, "routes": {"deep": routes}},
+            kanban={"llm_pacing": {"pace_starts": pace_starts}})
 
 
 def test_class_selector_is_paced_on_its_class_providers(paced_board, monkeypatch):
     monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
-    _class_config(paced_board, "anthropic")
+    _class_config(paced_board, "anthropic", pace_starts=True)
     _paced_reads(monkeypatch)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="deep", assignee="default", model_override="class:deep",
@@ -261,7 +263,7 @@ def test_class_selector_is_paced_on_its_class_providers(paced_board, monkeypatch
 
 def test_class_selector_with_an_ungoverned_route_always_starts(paced_board, monkeypatch):
     """Any ungoverned candidate admits the card: it may run there whatever the governed pools say."""
-    _class_config(paced_board, "anthropic", "zai")
+    _class_config(paced_board, "anthropic", "zai", pace_starts=True)
     _paced_reads(monkeypatch)  # every pool, zai included, reads paced
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="deep", assignee="default", model_override="class:deep",

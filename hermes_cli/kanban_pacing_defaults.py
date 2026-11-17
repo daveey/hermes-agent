@@ -10,6 +10,11 @@ pins the two together). Before claiming a card the dispatcher holds it when its 
 - ``read_interval_seconds``: usage read cadence per Hermes home. ``rate_window_seconds``: burn-rate and
   average-concurrency lookback. ``min_rate_span_seconds``: shortest sample span a burn slope is measured over.
 - ``deferrable_share``: share of a paced limit review-lane, negative-priority and woken cards may use.
+- ``pace_starts``: false (default) = the governor never holds a start for the pool's burn rate: how many cards run
+  is the worker slots' business, how many tokens they burn is a token throttle's (2026-11-17: with both pools
+  ``paced`` every host was cut to one run per provider, 3 of 18 slots busy and 130 cards waiting, while the pools
+  still had over two account-weeks left). ``paced`` is still judged, stored and shown; only ``held`` (no account
+  under its reserve) stops starts. true = the earlier behaviour: a paced pool limits this host's concurrency.
 """
 
 DEFAULTS = {
@@ -22,4 +27,5 @@ DEFAULTS = {
     "rate_window_seconds": 3600,
     "min_rate_span_seconds": 600,
     "deferrable_share": 0.5,
+    "pace_starts": False,
 }

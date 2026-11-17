@@ -13,6 +13,7 @@ before any claim (:func:`hold`). Pool math and the incident are in ``kanban_llm_
 * The read-only notice reader :func:`paced_pools` reads usage never, writes nothing and holds nothing.
 * Any read or resolve fault starts the card (fail open, warned once per interval).
 * ``kanban.llm_pacing.enabled: false`` restores the ungoverned behaviour.
+* ``kanban.llm_pacing.pace_starts`` (default false): only a ``held`` pool stops a start; true also limits on ``paced``.
 """
 from __future__ import annotations
 

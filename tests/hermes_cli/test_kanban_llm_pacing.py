@@ -21,6 +21,7 @@ board = _board_fixture
 OPUS = "claude-opus-5-5"
 HOUR, DAY = 3600.0, 86400.0
 CFG = lp.PacingConfig()
+PACING = lp.PacingConfig(pace_starts=True)  # the opt-in mode: a paced pool limits this host's starts
 
 
 def _r(account, kind, used, reset_in, ts):
@@ -93,15 +94,15 @@ def test_no_readable_account_fails_open():
 
 def test_paced_limit_scales_recent_concurrency_and_defers_low_tier_first():
     pace = lp.PoolPace("anthropic", lp.PACED, 0.5)
-    assert lp.admit_limit(pace, 6, deferrable=False, cfg=CFG) == 3
-    assert lp.admit_limit(pace, 6, deferrable=True, cfg=CFG) == 1
-    assert lp.admit_limit(lp.PoolPace("anthropic", lp.OPEN, 2.0), 6, deferrable=True, cfg=CFG) is None
+    assert lp.admit_limit(pace, 6, deferrable=False, cfg=PACING) == 3
+    assert lp.admit_limit(pace, 6, deferrable=True, cfg=PACING) == 1
+    assert lp.admit_limit(lp.PoolPace("anthropic", lp.OPEN, 2.0), 6, deferrable=True, cfg=PACING) is None
 
 
 def test_just_behind_pace_ramps_from_recent_concurrency():
     pace = lp.PoolPace("anthropic", lp.OPEN, 1.5)
-    assert lp.admit_limit(pace, 4, deferrable=False, cfg=CFG) == 6
-    assert lp.admit_limit(pace, 0, deferrable=False, cfg=CFG) == 1  # off a hold: one run, then grow
+    assert lp.admit_limit(pace, 4, deferrable=False, cfg=PACING) == 6
+    assert lp.admit_limit(pace, 0, deferrable=False, cfg=PACING) == 1  # off a hold: one run, then grow
 
 
 def test_capped_window_burns_nothing_and_a_fresh_burst_counts_at_once():
@@ -150,8 +151,44 @@ def _opus_card(conn, title="work", **kw):
     return kb.create_task(conn, title=title, assignee="default", model_override=OPUS, provider_override="anthropic", **kw)
 
 
-def test_pool_ahead_of_pace_defers_spawns(paced_board, monkeypatch):
+def test_pool_ahead_of_pace_starts_cards_by_default(paced_board, monkeypatch):
+    """The default: a burn rate never holds a start. Slots decide concurrency; a token throttle the token rate."""
     _write_cfg(paced_board)
+    _usage(monkeypatch, 70, 6 * DAY)  # 70% in the week's first day: paced
+    monkeypatch.setattr(pd, "local_running", lambda *_a: 5)  # already well past the paced mode's limit
+    with kbc.connect() as conn:
+        a, b = _opus_card(conn, "a"), _opus_card(conn, "b")
+        seen, result = _dispatch(conn)
+        events = [e for t in (a, b) for e in kb.list_events(conn, t) if e.kind == pd.EVENT_KIND]
+        stored = pd.pace_for(conn, "anthropic", pd.load_config(), time.time())
+    assert sorted(seen) == sorted([a, b]) and not result.respawn_guarded and events == []
+    assert stored.state == lp.PACED  # still judged and stored, for the panel and the runway
+
+
+def test_held_pool_still_stops_starts_by_default(paced_board, monkeypatch):
+    _write_cfg(paced_board)
+    _usage(monkeypatch, 90, 6 * DAY)  # past the weekly reserve: no account has headroom
+    with kbc.connect() as conn:
+        tid = _opus_card(conn)
+        seen, result = _dispatch(conn)
+    assert seen == [] and (tid, lp.GUARD_REASON) in result.respawn_guarded
+
+
+def test_admit_limit_without_pace_starts_limits_only_a_held_pool():
+    off = lp.PacingConfig()
+    assert off.pace_starts is False and lp.config_from({}).pace_starts is False
+    assert lp.config_from({"pace_starts": True}).pace_starts is True
+    assert lp.config_from({"pace_starts": "yes"}).pace_starts is False  # only a real true opts in
+    for average in (0, 1, 6):
+        for deferrable in (False, True):
+            assert lp.admit_limit(lp.PoolPace("anthropic", lp.PACED, 0.04), average, deferrable=deferrable, cfg=off) is None
+            assert lp.admit_limit(lp.PoolPace("anthropic", lp.OPEN, 1.5), average, deferrable=deferrable, cfg=off) is None
+            assert lp.admit_limit(lp.PoolPace("anthropic", lp.HELD, 0.0), average, deferrable=deferrable, cfg=off) == 0
+            assert lp.admit_limit(lp.PoolPace("anthropic", lp.UNKNOWN), average, deferrable=deferrable, cfg=off) is None
+
+
+def test_pool_ahead_of_pace_defers_spawns(paced_board, monkeypatch):
+    _write_cfg(paced_board, llm_pacing={"pace_starts": True})
     _usage(monkeypatch, 70, 6 * DAY)  # 70% in the week's first day: ~490% projected at reset
     monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
     with kbc.connect() as conn:

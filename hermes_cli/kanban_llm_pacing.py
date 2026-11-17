@@ -45,6 +45,7 @@ class PacingConfig:
     rate_window: int = 3600
     min_rate_span: int = 600
     deferrable_share: float = 0.5
+    pace_starts: bool = False  # true = a paced (or ramping open) pool limits this host's concurrent runs
 
 
 def _num(value: Any, default: float) -> float:
@@ -71,6 +72,7 @@ def config_from(section: Any) -> PacingConfig:
         rate_window=int(_num(raw.get("rate_window_seconds"), base.rate_window)),
         min_rate_span=int(_num(raw.get("min_rate_span_seconds"), base.min_rate_span)),
         deferrable_share=min(1.0, max(0.0, _num(raw.get("deferrable_share"), base.deferrable_share))),
+        pace_starts=raw.get("pace_starts", base.pace_starts) is True,
     )
 
 
@@ -208,11 +210,16 @@ def admit_limit(pace: PoolPace, avg_running: float, *, deferrable: bool, cfg: Pa
     (factor < ``OPEN_RAMP_FACTOR``) the host may grow to ``factor`` x its recent concurrency (at least one run),
     so a pool coming off a hold ramps up instead of bursting back into the wall. PACED also has headroom:
     retain a one-run floor after the deferrable share, otherwise idle hosts remain at zero forever. HELD
-    alone means no readable headroom and keeps a zero allowance."""
+    alone means no readable headroom and keeps a zero allowance.
+
+    Without ``cfg.pace_starts`` (the default) only HELD limits: a burn rate never holds a start. Concurrency
+    belongs to the worker slots and the token rate to a throttle; the pace is still judged and stored."""
     if pace.state == UNKNOWN or (pace.state == OPEN and (pace.factor is None or pace.factor >= OPEN_RAMP_FACTOR)):
         return None
     if pace.state == HELD:
         return 0
+    if not cfg.pace_starts:
+        return None
     if pace.state == OPEN:
         return max(1, math.ceil(max(0.0, avg_running) * float(pace.factor or 1.0)))
     limit = math.floor(max(0.0, avg_running) * float(pace.factor or 0.0))

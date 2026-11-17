@@ -8,6 +8,7 @@ recomputed with the production formula.
 """
 from __future__ import annotations
 
+import dataclasses
 import pytest
 
 from hermes_cli import kanban_llm_pacing as lp
@@ -57,7 +58,7 @@ def test_no_reset_usage_decides_paced_versus_open_and_the_admission_limit():
     pace = _pool(lp.FIVE_HOUR, 60, 15, HOUR, 75)
     assert pace.state == lp.PACED
     assert pace.factor == pytest.approx(0.8667, abs=1e-4)
-    assert lp.admit_limit(pace, 10, deferrable=False, cfg=CFG) == 8  # floor(10 * 0.8667); the mutant allows 12
+    assert lp.admit_limit(pace, 10, deferrable=False, cfg=dataclasses.replace(CFG, pace_starts=True)) == 8  # floor(10 * 0.8667); the mutant allows 12
 
 
 def test_no_reset_account_over_target_does_not_cancel_other_headroom():
