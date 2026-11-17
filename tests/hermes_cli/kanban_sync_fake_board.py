@@ -451,6 +451,8 @@ class FakeHub:
     def ops(self, board: str, ops: list[dict]) -> dict:
         self._check()
         self.svc.calls.append(("ops", board, ops))
+        if len(ops) > 200:  # the real Board's request limit
+            raise ksc.HubError(400, '{"error":"ops must be a list of <= 200"}')
         b = self.svc.board(board)
         results = []
         for op in ops:

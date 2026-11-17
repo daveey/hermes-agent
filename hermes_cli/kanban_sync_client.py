@@ -662,6 +662,19 @@ class PushResult:
     deferred: int = 0
 
 
+def _within_batch(conn: sqlite3.Connection, rows: list[dict], wire: list[dict],
+                  gateway: str) -> tuple[list[dict], list[dict], list[tuple[dict, str]]]:
+    """``(rows, wire, parents)`` trimmed so parents + rows fit one request. The Board refuses more than PUSH_BATCH
+    ops (400), and the parents ride on top of a full batch: one unacknowledged card behind 200 pending rows failed
+    every round with 201 ops and nothing left the hub for 7 h (2026-11-17). The dropped rows go in the next batch."""
+    parents = _unacked_parents(conn, rows, gateway)
+    if len(parents) + len(rows) > PUSH_BATCH:
+        rows = rows[:max(1, PUSH_BATCH - len(parents))]
+        wire = wire[:len(rows)]
+        parents = _unacked_parents(conn, rows, gateway)
+    return rows, wire, parents
+
+
 def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primary: bool,
          max_batches: int = MAX_BATCHES_PER_ROUND, before_head: bool = False,
          seen: Optional[dict] = None) -> PushResult:
@@ -689,7 +702,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
         with write_txn(conn):
             from hermes_cli.kanban_terminal_guard import strip_stale_push  # no wake reopens a done card [daveey]
             wire = [strip_stale_push(conn, translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway))) for r in rows]
-            parents = _unacked_parents(conn, rows, gateway)
+            rows, wire, parents = _within_batch(conn, rows, wire, gateway)
             wire = [op for op, _tid in parents] + wire
         try:
             resp = hub.ops(board, wire)
