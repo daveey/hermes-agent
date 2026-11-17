@@ -526,12 +526,14 @@ def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcrip
             conn.execute("UPDATE notices SET legacy_seen=1, notice_key=? WHERE session=? AND ref=? AND state=?",
                          (key, session_key, row["ref"], row["state"]))
             continue
+        retired = []
         with conn:
             if not conn.in_transaction:
                 conn.execute('BEGIN IMMEDIATE')
             from tui_gateway.kanban_remote_identity import moved_claim
             moved = moved_claim(conn, session=session_key, ref=row['ref'], state=row['state'],
-                                now=now, notice_key=key, swept_key=None, transcript_has=transcript_has)
+                                now=now, notice_key=key, swept_key=None, transcript_has=transcript_has,
+                                retired=retired)
             if moved is not None:
                 continue
             cur = conn.execute(
@@ -541,6 +543,8 @@ def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcrip
                 (pid, start, key, session_key, row["ref"], row["state"]))
             if cur.rowcount == 1:
                 out.append(_notice_item(card, session_key, me, profile, now))
+        for claim_id in retired:
+            _forget_woken(claim_id)
     if stale:
         logger.info("remote kanban: left %d delivered notice(s) unreoffered "
                     "(older than %.0fh, or not in the replica)", stale, FRESH_S / 3600)
@@ -570,16 +574,20 @@ def _claim_notice(conn, *, session, ref, state, now, fresh, notice_key, task_id,
                   swept_key: Optional[tuple] = None,
                   settle_reason: str | _ExpiredReason = "stale") -> str:
     """Serialize logical alias inspection and claim reservation across consumers."""
+    retired = []
     with conn:
         if not conn.in_transaction:
             conn.execute('BEGIN IMMEDIATE')
-        return _claim_notice_locked(conn, session=session, ref=ref, state=state, now=now, fresh=fresh,
+        verdict = _claim_notice_locked(conn, session=session, ref=ref, state=state, now=now, fresh=fresh,
                                     notice_key=notice_key, task_id=task_id, transcript_has=transcript_has,
-                                    swept_key=swept_key, settle_reason=settle_reason)
+                                    swept_key=swept_key, settle_reason=settle_reason, retired=retired)
+    for claim_id in retired:
+        _forget_woken(claim_id)
+    return verdict
 
 
 def _claim_notice_locked(conn, *, session, ref, state, now, fresh, notice_key, task_id, transcript_has,
-                         swept_key=None, settle_reason: str | _ExpiredReason = "stale"):
+                         retired, swept_key=None, settle_reason: str | _ExpiredReason = "stale"):
     """``offer`` a new or orphaned claim, ``acked`` when the transcript already has it, else ``skip``.
 
     A fresh claim is in flight (delivered=0, this process's pid + start). It becomes delivered only in
@@ -602,7 +610,8 @@ def _claim_notice_locked(conn, *, session, ref, state, now, fresh, notice_key, t
     if row is None or (not row['delivered'] and not _holder_alive(row['holder_pid'], row['holder_start'])):
         from tui_gateway.kanban_remote_identity import moved_claim
         moved = moved_claim(conn, session=session, ref=ref, state=state, now=now,
-                            notice_key=notice_key, swept_key=swept_key, transcript_has=transcript_has)
+                            notice_key=notice_key, swept_key=swept_key, transcript_has=transcript_has,
+                            retired=retired)
         if moved is not None:
             return moved
     if row is None:
@@ -1388,7 +1397,10 @@ def _deliver_link(owner, key, task, link, *, me, ref, state, path, live, session
                                                 fresh=True, notice_key=event_key, task_id=str(task['id']),
                                                 swept_key=memo_key,
                                                 transcript_has=lambda k, t: notice_in_transcript(db, tip, k, t))
-                    if verdict not in ('offer', 'acked'):
+                    if verdict == 'acked':
+                        _remember_delivered(memo_key)
+                        return
+                    if verdict != 'offer':
                         return
                 from tui_gateway.kanban_notice_session_store import notice_writer
                 with contextlib.ExitStack() as cleanup:

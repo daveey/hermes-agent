@@ -52,6 +52,22 @@ def test_moved_observation_keeps_earliest_late_window(tmp_path, caplog):
         assert row == (krn.SETTLED, 'expired')
 
 
+@pytest.mark.parametrize('ages, expected', [([None, 20], None), ([20, 10], 10), ([10, 20], 10)])
+def test_moved_observation_inherits_unknown_or_earliest_alias(tmp_path, ages, expected):
+    from tui_gateway import kanban_remote_observations as observations
+    ledger = tmp_path / 'ledger.db'
+    task = {'id': 't_dup', 'status': 'done', 'completed_at': 100}
+    key = 'default/default/t_dup'
+    observations._persist('source', [('worker-6', key, task)], ledger, 100)
+    with sqlite3.connect(ledger) as conn:
+        conn.execute('UPDATE observations SET first_seen=?', (ages[0],))
+        conn.execute('INSERT INTO observations VALUES (?,?,?,?)',
+                     ('source', f'worker-7/{key}', krn._notice_state(task), ages[1]))
+    observations._persist('source', [('hub', key, task)], ledger, 110)
+    with sqlite3.connect(ledger) as conn:
+        assert conn.execute('SELECT first_seen FROM observations WHERE ref=?', (f'hub/{key}',)).fetchone() == (expected,)
+
+
 def test_dead_holder_old_home_transcript_key_is_not_reoffered(tmp_path, monkeypatch):
     now = time.time()
     hub = once._hub(tmp_path, now)
@@ -106,6 +122,30 @@ def test_passive_claim_contention_never_falls_back_to_unclaimed_write(tmp_path, 
         assert krn.sweep_remote_notices(replica_path=hub, gateway='macbook', session_db=opener,
                                         ledger=ledger, now=now, waker=None) == []
         assert db.get_messages(once.CHAT) == []
+
+
+def test_passive_transcript_ack_keeps_receipt_without_rewriting(tmp_path, monkeypatch):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    _move(hub, 'worker-6')
+    with sqlite3.connect(hub) as conn:
+        task = json.loads(conn.execute('SELECT data FROM replica').fetchone()[0])
+    key, metadata, text = krn._sweep_payload('worker-6', 'default/default/t_dup', task,
+                                           'macbook', 'default', once.CHAT)
+    with once._chat(tmp_path) as (db, opener):
+        once._turn_row(db, once.CHAT, text, metadata)
+        def fail(*args, **kwargs):
+            raise OSError('already present; unnecessary append failed')
+        monkeypatch.setattr(db, 'append_kanban_notice', fail)
+        krn.sweep_remote_notices(replica_path=hub, gateway='macbook', session_db=opener,
+                                 ledger=ledger, now=now, waker=None)
+        with sqlite3.connect(ledger) as conn:
+            assert conn.execute('SELECT delivered, notice_key FROM notices').fetchall() == [(krn.DELIVERED, key)]
+        _move(hub, 'hub')
+        assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 1,
+                           transcript_has=lambda k, _: k == key) == []
+        assert len(db.get_messages(once.CHAT)) == 1
 
 
 def test_passive_failed_write_releases_claim_for_retry(tmp_path, monkeypatch):
@@ -243,6 +283,31 @@ def test_moved_woken_claim_recovers_only_after_turn_ends(tmp_path, running):
             assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 11,
                                transcript_has=lambda *_: False) == []
     finally:
+        krn._forget_woken(claim_id)
+
+
+def test_ended_alias_survives_successor_transaction_rollback(tmp_path):
+    ledger = tmp_path / 'ledger.db'
+    old_ref = 'worker-6/default/default/t_dup'
+    new_ref = 'hub/default/default/t_dup'
+    args = dict(session=once.CHAT, state='done@1', now=10, fresh=True, task_id='t_dup')
+    conn = krn._ledger(ledger)
+    claim_id = (once.CHAT, old_ref, 'done@1')
+    try:
+        assert krn._claim_notice(conn, ref=old_ref, notice_key='old-key',
+                                 transcript_has=lambda *_: False, **args) == 'offer'
+        krn._track_woken(claim_id, {'running': False})
+        def interrupted(key, _task):
+            if key == 'new-key':
+                raise OSError('successor reservation interrupted')
+            return False
+        with pytest.raises(OSError, match='successor reservation interrupted'):
+            krn._claim_notice(conn, ref=new_ref, notice_key='new-key', transcript_has=interrupted, **args)
+        assert conn.execute('SELECT ref FROM notices').fetchone()['ref'] == old_ref
+        assert krn._claim_notice(conn, ref=new_ref, notice_key='new-key',
+                                 transcript_has=lambda *_: False, **args) == 'offer'
+    finally:
+        conn.close()
         krn._forget_woken(claim_id)
 
 

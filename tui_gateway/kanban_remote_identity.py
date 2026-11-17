@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-def moved_claim(conn, *, session, ref, state, now, notice_key, swept_key, transcript_has):
+def moved_claim(conn, *, session, ref, state, now, notice_key, swept_key, transcript_has, retired):
     """Settle an already delivered home alias, or leave its live custodian alone."""
     from tui_gateway import kanban_remote_notices as notices
 
@@ -27,9 +27,9 @@ def moved_claim(conn, *, session, ref, state, now, notice_key, swept_key, transc
             notices._swept_row(conn, swept_key, 'moved')
         return 'moved'
     for row in (alias for alias in aliases if not alias['delivered']):
-        if (row['ref'] in ended and row['notice_key'] and transcript_has is not None
-                and notices._forget_woken((session, row['ref'], state))):
-            # The caller's claim transaction also reserves the successor before releasing this fence.
+        if row['ref'] in ended and row['notice_key'] and transcript_has is not None:
+            # Retire the in-memory receipt only after the reservation transaction commits.
+            retired.append((session, row['ref'], state))
             conn.execute('DELETE FROM notices '
                          'WHERE session=? AND ref=? AND state=? AND delivered=0',
                          (session, row['ref'], state))
