@@ -73,7 +73,8 @@ def iter_printed_shell_payloads(
     # or arguments carrying `$(`, backticks, `<(`… are never masked), so a real sink survives
     # (self-heal lifecycleguard-f82a8e8dd311).
     if not shell_sink and not output_reaches_shell(
-            guard._mask_data_sink_arguments(guard.join_line_continuations(command))):
+            guard._mask_data_sink_arguments(guard.join_line_continuations(command)),
+            binding_source=command):
         return
     seen: set[str] = set()
 

@@ -10,7 +10,7 @@ from cron.lifecycle_guard import scan_gateway_lifecycle
 from tools.shell_heredoc import output_reaches_shell, strip_inert_heredoc_bodies
 
 
-@pytest.mark.parametrize("prefix", ["", "revision ", "${v:-revision} "])
+@pytest.mark.parametrize("prefix", ["", "revision "])
 @pytest.mark.parametrize("parens", ["(", "(("])
 @pytest.mark.parametrize("producer", ["$(printf revision)", "`printf revision`"])
 def test_quoted_parentheses_are_data(tmp_path, prefix, parens, producer):
@@ -69,6 +69,8 @@ def test_arithmetic_output_remains_a_sink():
 @pytest.mark.parametrize("command", [
     'bash -c "bash <(printf payload)"',
     'echo "bash <(printf payload)"',  # preserve the existing broad direct-sink policy
+    'echo "${v:-revision} ($(printf revision))"',
+    'echo "${v:-revision} (`printf revision`)"',
     'unknown "revision ($(printf revision))"',
     './"($(printf payload))"',
     'echo "$(echo \"revision ($(printf revision))\")"',

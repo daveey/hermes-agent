@@ -519,7 +519,21 @@ _DATE_REBIND_RE = re.compile(
     re.MULTILINE)
 
 
-def output_reaches_shell(command: str) -> bool:
+def _echo_binding_uncertain(command: str) -> bool:
+    """Only certify ordinary builtin echo, never inferred command identities.
+
+    This raw-source overapproximation deliberately includes comments and heredoc
+    data. Quote concatenation, functions, dynamic words and caller-mutating
+    builtins must not disappear when another pass masks data arguments.
+    """
+    if "\\" in command or re.search(r"\$(?!\()", command):
+        return True
+    words = command.replace("'", "").replace('"', "")
+    return bool(_DATE_REBIND_RE.search(words) or re.search(
+        r"\(\s*\)|\b(?:function|eval|trap|read|unset|unalias|shopt)\b", words))
+
+
+def output_reaches_shell(command: str, *, binding_source: str | None = None) -> bool:
     """Whether some command's output in *command* may be run as shell code (see
     ``_SHELL_SINK_RE``). Deliberately broad: a match only stops treating consumer heredoc bodies
     and printed string literals as data (the lifecycle walk then scans them as commands); it never
@@ -530,6 +544,7 @@ def output_reaches_shell(command: str) -> bool:
     from tools.shell_comments import mask_root_comment_lines
 
     date_exempt = not _DATE_REBIND_RE.search(command)
+    echo_uncertain = _echo_binding_uncertain(command if binding_source is None else binding_source)
     command = mask_root_comment_lines(command)
     sink = _SHELL_SINK_NUMERIC_RE if date_exempt else _SHELL_SINK_RE
     # The regex sees a substitution only in command position; inside arithmetic bash also runs
@@ -542,7 +557,7 @@ def output_reaches_shell(command: str) -> bool:
     # Literal '(' inside a double-quoted word is not a shell command boundary.
     # Use the existing heredoc/expansion-aware lexical walk, and only its complete
     # successful proof; a flat quote pass would misread quotes in heredoc data.
-    if -1 in quoted_parens:
+    if echo_uncertain or -1 in quoted_parens:
         quoted_parens.clear()
     lexical = list(command)
     for index in quoted_parens:
@@ -785,7 +800,7 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
             stdin.intact = False
         command_start = body_cursor
     result = _apply_replacements(command, replacements)
-    if replacements and output_reaches_shell(result):
+    if replacements and output_reaches_shell(result, binding_source=command):
         # Some output here may be run as shell code (`( python3 - <<'PY' … ) | bash`, `f | bash`,
         # `eval "$(…)"`): a consumer's body may be the shell's program, so mask nothing.
         return command
