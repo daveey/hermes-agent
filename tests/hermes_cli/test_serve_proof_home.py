@@ -158,15 +158,25 @@ def test_abbreviated_token_file_flag_is_rejected_by_parser(sentinel, args):
     (``hermes_cli.main`` imports config at module level, so the parser rejects it after that import;
     the tripwire here is the first parse that yields a token file, before ``cmd_dashboard``.)"""
     before = _snapshot(sentinel)
-    env = _clean_env(sentinel, 'HERMES_AGENT_TOOL_CALL', {'HERMES_DESKTOP': '1'})
+    # Unlike the config-tripwire launches above, this one runs main's real boot. Its default-plugin
+    # step would start a detached installer that fetches the live catalog and publishes it into the
+    # sentinel's cache AFTER this subprocess returns (an atomic temp + rename that outlives the test).
+    # That install is unrelated to the parser contract, so the fixture opts out of lazy installs.
+    env = _clean_env(sentinel, 'HERMES_AGENT_TOOL_CALL',
+                     {'HERMES_DESKTOP': '1', 'HERMES_DISABLE_LAZY_INSTALLS': '1'})
     result = subprocess.run([sys.executable, '-c', _PARSE_BOUNDARY, *args], env=env, cwd=ROOT,
                             capture_output=True, text=True, encoding='utf-8', timeout=30, check=False)
     assert result.returncode == 2, (result.stdout, result.stderr)
     assert 'PARSED_TOKEN_FILE=' not in result.stdout
     assert 'unrecognized arguments' in result.stderr
+    # Tripwire: spawn_install marks its request before it forks, so a detached installer is visible.
+    assert not (sentinel / 'cache' / 'default-plugins.rerun').exists()
     # main's startup seeds default home files for every command; the recovery state is untouched.
-    after = _snapshot(sentinel)
-    assert {name: after.get(name) for name in before} == before
+    # Read exactly the recovery files (a missing one reads as None and fails): enumerating the whole
+    # home would also read other writers' transient files, which the contract says nothing about.
+    after = {name: (sentinel / name).read_bytes() if (sentinel / name).exists() else None
+             for name in before}
+    assert after == before
 
 
 @pytest.mark.parametrize('args', [['dashboard', '--port', '0', '--no-open'], ['serve', '--port', '0']])
