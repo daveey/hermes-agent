@@ -226,8 +226,39 @@ _HOP_DATA_COMMANDS = frozenset({
 })
 
 
-def _hop_data_command(name: Optional[str]) -> bool:
-    return name is not None and (name in _HOP_DATA_COMMANDS or bool(_PYTHON_RE.fullmatch(name)))
+_PYTHON_FLAG_RE = re.compile(r"-[bBdEhiIOPqRsSuvVx]+")
+_PYTHON_VALUE_FLAG_RE = re.compile(r"-[bBdEhiIOPqRsSuvVx]*[WX](.*)")
+
+
+def _python_reads_program_from_stdin(arguments: list[str]) -> bool:
+    """Whether ``python <arguments>`` runs its program from stdin (``python3 -``, bare
+    ``python3``, flags that take no code). ``-c``/``-m``/a script operand runs other code
+    that may hand stdin to a shell (``python3 -c 'os.execlp("bash", "bash")'``; review
+    5941029921 B1); unknown and long options fail closed too."""
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        if word == "-":
+            return True
+        if word == "--":
+            return index + 1 >= len(arguments) or arguments[index + 1] == "-"
+        if _PYTHON_FLAG_RE.fullmatch(word):
+            index += 1
+            continue
+        value = _PYTHON_VALUE_FLAG_RE.fullmatch(word)
+        if value is not None:
+            index += 1 if value.group(1) else 2  # `-Wignore` / `-W ignore`
+            continue
+        return False  # -c, -m, --long options, a script operand
+    return index == len(arguments)  # bare `python3` (a value flag missing its value: closed)
+
+
+def _hop_data_command(name: Optional[str], arguments: list[str]) -> bool:
+    if name is None:
+        return False
+    if _PYTHON_RE.fullmatch(name):
+        return _python_reads_program_from_stdin(arguments)
+    return name in _HOP_DATA_COMMANDS
 
 
 def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
@@ -266,7 +297,8 @@ def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
             return True  # an ssh hop feeding a shell, or a user switch's shell (`su -l`, `sudo -i`)
         if name in ("sudo", "su", "runuser", "doas"):
             return True  # a user switch on the remote side: fail closed rather than model it
-        if hops > 1 and index is not None and name != "ssh" and not _hop_data_command(name):
+        if hops > 1 and index is not None and name != "ssh" and not _hop_data_command(
+                name, _split_redirections(view[index + 1:])[0]):
             return True  # past the first hop only known data consumers read stdin as data
     return False
 

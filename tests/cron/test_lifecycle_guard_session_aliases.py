@@ -3,6 +3,7 @@ walked text (``alias -p`` + ``shopt -s expand_aliases`` in ``_snapshot_bootstrap
 every command runs with them. The guard must hear about them from the backend."""
 
 import json
+import os
 import subprocess
 from types import SimpleNamespace
 from typing import Any
@@ -836,6 +837,12 @@ _MULTI_HOP_DATA_CONSUMERS = [
     "ssh h1 \"ssh h2 'cd /tmp && python3 -'\" < {py}",
     "ssh h1 'ssh h2 python3.12 -' < {py}",
     "ssh h1 'ssh h2 tee /tmp/takeover.py' < {py}",
+    # Python reading its program from stdin, with option flags that take no code (review
+    # 5941029921 B1 keeps these as data; only -c/-m/script launchers fail closed).
+    "ssh h1 'ssh h2 python3' < {py}",
+    "ssh h1 'ssh h2 python3 -u -' < {py}",
+    "ssh h1 'ssh h2 python3 -IB -X utf8 -W ignore -' < {py}",
+    "ssh h1 'ssh h2 python3 -Wignore -Xdev -' < {py}",
 ]
 
 
@@ -902,7 +909,51 @@ _MULTI_HOP_SHELLS = [
     "ssh h1 'ssh h2 kubectl exec -i p -- bash' < {script}",
     "ssh h1 'ssh h2 xargs -0 bash' < {script}",
     "ssh h1 \"ssh h2 'cd /tmp && bash'\" < {script}",
+    # Python is a data consumer only when stdin is its program: a -c/-m/script launcher may
+    # hand stdin to a shell (`python3 -c 'os.execlp("bash", "bash")'`; review 5941029921 B1).
+    "ssh h1 \"ssh h2 'python3 -c x'\" < {script}",
+    "ssh h1 \"ssh h2 'python3 -Ic x'\" < {script}",
+    "ssh h1 \"ssh h2 'python3 -u -c x -'\" < {script}",
+    "ssh h1 \"ssh h2 'python3 -cx'\" < {script}",
+    "ssh h1 'ssh h2 python3 -m pty' < {script}",
+    "ssh h1 'ssh h2 python3 -mpty' < {script}",
+    "ssh h1 'ssh h2 python3 run.py' < {script}",
+    "ssh h1 'ssh h2 python3 -X utf8 run.py' < {script}",
+    "ssh h1 'ssh h2 python3 --check-hash-based-pycs never -' < {script}",
+    "ssh h1 \"bash -c 'python3 -c x'\" < {script}",
+    "ssh h1 \"ssh h2 'bash -c \\\"python3 -m pty\\\"'\" < {script}",
 ]
+
+
+@pytest.mark.parametrize("consumer", [
+    "python3 -c 'import os; os.execlp(\"bash\", \"bash\")'",
+    "python3 -c 'import subprocess; subprocess.run([\"bash\"], check=True)'",
+])
+@pytest.mark.parametrize("aliases", [frozenset(), frozenset({"zz"}), None])
+def test_multi_hop_python_launcher_executes_stdin_as_shell(tmp_path, consumer, aliases):
+    """Review 5941029921 B1, executed for real: a `python3 -c` launcher behind a second ssh hop
+    hands the stdin file to bash, so the guard keeps walking it (a script over the scan cap
+    refuses) instead of reading it as Python data."""
+    import shlex
+    import subprocess
+    huge = tmp_path / "huge.sh"
+    huge.write_text("# padding\n" * 130000 + 'printf "REVIEW_MARKER\\n"\n')
+    startup = tmp_path / "startup.sh"
+    startup.write_text("shopt -s expand_aliases\nalias t='true; '\n")
+    script = tmp_path / "input.sh"
+    script.write_text(f"t ( bash {shlex.quote(str(huge))} )\n")
+    with script.open() as stream:
+        ran = subprocess.run(["bash", "-c", consumer], stdin=stream, text=True,
+                             capture_output=True, timeout=10, check=False,
+                             env={**os.environ, "BASH_ENV": str(startup)})
+    assert (ran.returncode, ran.stdout, ran.stderr) == (0, "REVIEW_MARKER\n", "")
+    command = ("ssh h1 " + shlex.quote("ssh h2 " + shlex.quote(consumer))
+               + " < " + shlex.quote(str(script)))
+    unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path), session_aliases=aliases)
+    assert unsafe and refusal is not None and "scan cap" in refusal, (command, aliases, refusal)
+    huge.write_text('printf "CLEAN\\n"\n')
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path), session_aliases=aliases) == (
+        False, None)
 
 
 @pytest.mark.parametrize("shape", _MULTI_HOP_SHELLS)
