@@ -690,9 +690,9 @@ class SessionDB(
         self._token_writer_thread: Optional[threading.Thread] = None
         self._token_writer_stop = self._token_writer_busy = False
         self._token_atexit_hook: Optional[Callable[[], None]] = None
-        # Opened via hermes_state_registry.acquire(): close() releases a refcount instead.
-        # Set True when this instance is opened via hermes_state_registry.acquire(). Makes close() a no-op so the
-        # registry (not individual callers) controls the connection lifecycle (#90837).
+        # acquire() binds the release callback before enabling shared ownership.
+        # close() releases a refcount; the registry controls physical teardown.
+        self._shared_registry_release: Callable[[SessionDB], bool]
         self._shared_registry_owned = False
         initialization_complete = False
         try:
@@ -1715,8 +1715,7 @@ class SessionDB(
         sites return their reference instead of leaking it.
         """
         if self._shared_registry_owned:
-            from hermes_state_registry import release
-            release(self)
+            self._shared_registry_release(self)
             return
         self._stop_token_writer()
         hook, self._token_atexit_hook = self._token_atexit_hook, None

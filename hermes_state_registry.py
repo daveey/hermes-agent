@@ -244,6 +244,10 @@ def acquire(db_path: Optional[Path] = None) -> SessionDB:
         try:
             with lifecycle_lock:
                 db = _open_session_db(path)
+                # close() also runs from __del__ after sys.modules is cleared.
+                # Retain the release operation: a late import can deadlock on
+                # an import lock still held by a suspended daemon at shutdown.
+                db._shared_registry_release = release
                 db._shared_registry_owned = True
                 identity = _stat_db_file_identity(path)
         except BaseException:
