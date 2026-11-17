@@ -58,6 +58,7 @@ from hermes_cli.kanban_claim_cli import cmd_claim as _cmd_claim  # moved; re-exp
 from hermes_cli.kanban_source_cli import cmd_source_release as _cmd_source_release
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
 from hermes_cli.kanban_admission_explain import cmd_queue as _cmd_queue
+from hermes_cli.kanban_lanes_cli import command as _cmd_lanes
 from hermes_cli.kanban_assignees_cli import cmd_assignees as _cmd_assignees  # moved; re-exported for callers
 from hermes_cli.kanban_archive_scope import (  # moved here from this module; re-exported for callers
     _capability_owner_waiting_card, _creator_task_id, _is_stranded_runs_on_copy,
@@ -1851,7 +1852,7 @@ _HANDLERS = {
     "assignees": _cmd_assignees, "notify-subscribe": _cmd_notify_subscribe,
     "notify-list": _cmd_notify_list, "notify-unsubscribe": _cmd_notify_unsubscribe,
     "context": _cmd_context, "specify": _cmd_specify, "decompose": _cmd_decompose,
-    "gc": _cmd_gc, "sync": _cmd_sync, "queue": _cmd_queue, "spend-budget": _spend_budget_cli.command,
+    "gc": _cmd_gc, "sync": _cmd_sync, "queue": _cmd_queue, "spend-budget": _spend_budget_cli.command, "lanes": _cmd_lanes,
 }
 
 

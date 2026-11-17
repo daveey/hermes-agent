@@ -1549,6 +1549,36 @@ hermes kanban create "nightly backup audit" \
 
 The dispatcher refuses to re-spawn a ready task when it hit an auth error (401, invalid API key, unauthorized, billing) on the previous run (`blocker_auth`), or completed a run successfully within the guard window (`recent_success`), or a recent task comment links to a GitHub PR (`active_pr`). Two cooldowns hold a card without ever counting against it: `rate_limit_cooldown` after a quota-wall requeue and `infrastructure_cooldown` after the host refused to place the worker (no restart-safe systemd scope — see [Workers and systemd cgroups](#workers-and-systemd-cgroups)); both share the `HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS` window (default 300 s). Quota / rate-limit / 429 text in `last_failure_error` always takes the `rate_limit_cooldown` path, even when a later non-failure run superseded the `rate_limited` one; once the cooldown elapses the stamp is cleared and the card retries. A quota wall is never `blocker_auth` and never escalates to a human block kind, and a legacy guard-hold block on a quota error is released automatically once another card completes after it. This prevents repeat worker storms on the same bug or task while a human catches up. See the `respawn_guarded` row in the [event reference](#event-reference).
 
+## Project lanes
+
+Lanes split worker time between projects. A card's lane is its `tenant`; the installation-root `config.yaml` names the lanes under `kanban.admission.lanes`. With no `lanes` mapping nothing changes.
+
+```yaml
+kanban:
+  admission:
+    lane_default: other          # lane of a card nothing else places (must be a configured lane)
+    agent_priority_cap: 100      # stored priority ceiling for cards the user did not create
+    lanes:
+      babybear: {share: 35, describe: "Baby Bear app and firmware"}
+      hermes:
+        share: 20
+        gated: true              # cards filed by other cards or by detectors start held in triage
+        admit_per_day: 50
+        match: {creators: [self-heal], key_prefixes: ["ci-main-watch:"], repos: [hermes-agent], self_work: true}
+        gate_exempt: ['independent review']
+        never_admit: ['lifecycle guard']
+      other: {share: 10}
+```
+
+- **Classification** happens once, at creation: an explicit `tenant`, then a lane whose `match` fits (creator name, idempotency-key prefix, repository directory name, or a declared `self_work`), then the parent's or creating card's lane, then `lane_default` with a `lane_unclassified` event. Every decision is a `lane_assigned` event with its source.
+- **Shares are targets, not ceilings.** Under contention each free slot goes to the lane running the fewest cards relative to its `share`; inside a lane the admission score decides. A lane with nothing ready lends its share. Land-turn owners, `urgent`/`capacity` cards and alarm cards are not reordered. `paused: true` stops a lane's cards from being dispatched.
+- **The gate.** In a `gated` lane a card filed by another card, or by a `match` creator or key prefix, starts in `triage` with `block_kind = lane_gate` until it is admitted. The user's own cards (`created_by: user`), alarm-keyed and `urgent` cards, and `gate_exempt` titles under an admitted creating card are not held. A held card that an open card of another lane is linked to wait on is admitted at once, outside the budget. The stale-triage sweep leaves held cards alone.
+- **Priority cap.** `agent_priority_cap` bounds the stored priority of a card the user did not create, at creation.
+
+`hermes kanban lanes` (default `show`) prints target against actual share of run-hours over `--hours` (default 6), running, ready, held and open cards per lane; on a synced board it reads the fleet replica unless `--local`. `held` and `unclassified` list cards; `assign <id> <lane>`, `admit <id>`, `pin <id> [--off]` and `set <lane> [--share N] [--admit-per-day N] [--pause|--resume]` are the controls; `explain <id>` says which lane a card is in and why it waits.
+
+`hermes kanban lanes apply <file|->` applies a planner's JSON action list. Each action is validated on its own and refused with a reason when it breaks a limit: `admit` (at most `admit_per_day` per local day, never a `never_admit` title), `merge` (a held card into an open card of the same lane; it stays held), `reprioritize` (0 to 1000, never a pinned card), `relane` (only a card placed by inheritance or by default, never through a gate) and `note`. Every action except `note` needs a one-line `reason`; one plan applies at most 50 actions.
+
 The stuck detector distinguishes intentional `llm_pacing` waits and `worker_load_pressure` from unexplained zero-spawn ticks. Expected waits log `kanban dispatch held` at INFO, with provider running/limit and the next real reset (or the condition rechecked next tick); foreign `labels_mismatch` rows do not turn a fully explained local wait into a stall. A refresh deadline alone cannot justify a pacing hold: an idle zero-limit pool without a future reset remains actionable. Within one dispatcher tenure, a continuously observed card waiting for 15 minutes (or 15 minutes beyond its first real reset) emits `kanban admission prolonged` at WARNING, even if other cards start. This reports lack of admission for that card, not lack of progress by running workers. Warnings repeat at most every five minutes; a new dispatcher tenure starts a new observation window.
 
 To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` — the output lists `Guarded (<reason>): <task id>` per held card (and `respawn_guarded`, `rate_limited`, `skipped_locked`, `memory_pressure` with `--json`). The gateway's and the standalone daemon's "dispatcher stuck" warning also names what the last tick held back, e.g. `Last tick held back: active_pr=1`.
