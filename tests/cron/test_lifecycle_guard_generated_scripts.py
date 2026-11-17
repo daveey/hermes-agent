@@ -99,6 +99,17 @@ def test_unpredictable_writer_then_execute_fails_closed(tmp_path, big, template)
     assert _differential(tmp_path, command)
 
 
+@pytest.mark.parametrize("command", [
+    'echo "$PAYLOAD" > F; bash F',
+    'printf "%s\\n" "${PAYLOAD}" > F; bash F',
+    'cat > F <<EOF\n$PAYLOAD\nEOF\nbash F',
+    'cat <<< "$PAYLOAD" > F; bash F',
+])
+def test_parameter_expanded_writer_fails_closed(tmp_path, big, monkeypatch, command):
+    monkeypatch.setenv("PAYLOAD", big)
+    assert _differential(tmp_path, command)
+
+
 @pytest.mark.parametrize("transport", _WRITE_THEN_RUN)
 def test_generated_lifecycle_command_is_refused(tmp_path, transport):
     (tmp_path / "sub").mkdir()

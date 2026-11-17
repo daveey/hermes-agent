@@ -47,8 +47,11 @@ if TYPE_CHECKING:
 
 # Marks a write whose content the guard cannot know.
 UNKNOWN: None = None
-# Text that makes a heredoc body or argument produce output decided only when it runs.
-_DYNAMIC_MARKS = ("$(", "`", "<(", ">(")
+# Parameter expansion also changes emitted bytes; do not mistake $NAME/${NAME} for
+# literal script text. Segment views lose quoting, so dollar-bearing printer and
+# here-string arguments conservatively count as unknown even if originally quoted.
+# Quoted heredoc bodies retain their literal-content exception below.
+_DYNAMIC_MARKS = ("$", "`", "<(", ">(")
 _STDIN_COPIERS = frozenset({"cat", "tee"})
 _PRINTERS = frozenset({"echo", "printf"})
 # File copiers: what lands at the destination is another file's content, so it is unknown here.
