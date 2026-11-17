@@ -8,8 +8,13 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_start_gate as gate
 from hermes_cli import lifecycle
 from hermes_cli import plugins
-from tests.hermes_cli.test_kanban_llm_pacing import _dispatch, _opus_card, paced_board
-from tests.hermes_cli.test_kanban_model_tier import _write_cfg, board
+from tests.hermes_cli import test_kanban_llm_pacing as pacing
+from tests.hermes_cli import test_kanban_model_tier as model_tier
+from tests.hermes_cli.test_kanban_llm_pacing import _dispatch, _opus_card
+from tests.hermes_cli.test_kanban_model_tier import _write_cfg
+
+board = model_tier.board  # one unsynced gateway: every card is its own to lease
+paced_board = pacing.paced_board  # that board with the governor's caches cleared
 
 
 def _hook(monkeypatch, answers, seen=None):

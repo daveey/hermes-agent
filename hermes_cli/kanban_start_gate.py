@@ -43,3 +43,18 @@ def hold(*, task_id: str, lane: str, assignee: Optional[str], board: Optional[st
     except (RuntimeError, ValueError, TypeError, LookupError, AttributeError, OSError) as exc:  # fail open
         logger.warning("kanban start gate: hook failed (%s: %s); starting ungated", type(exc).__name__, exc)
     return None
+
+
+def pre_claim_hold(conn: Any, row: Any, lane: str, result: Any, *, assignee: Optional[str], board: Optional[str],
+                   dry_run: bool = False) -> bool:
+    """The dispatcher's last two waits before a claim: the quota governor (``kanban_llm_pacing_dispatch.hold``, which
+    records its own event) and then the plugin start gate, recorded as a guard hold on ``result``."""
+    from hermes_cli.kanban_llm_pacing_dispatch import hold as pacing_hold
+
+    if pacing_hold(conn, row, lane, result, dry_run=dry_run):  # pool held (or, with pace_starts, ahead of pace)
+        return True
+    reason = hold(task_id=row["id"], lane=lane, assignee=assignee, board=board)
+    if reason is None:
+        return False
+    result.respawn_guarded.append((row["id"], reason))  # asked again next tick; nothing is persisted
+    return True

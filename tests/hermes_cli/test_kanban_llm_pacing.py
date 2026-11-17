@@ -311,11 +311,15 @@ def test_only_kanban_dispatch_consults_the_governor():
     users = sorted(str(p.relative_to(root)) for top in ("agent", "gateway", "cron", "hermes_cli", "tui_gateway")
                    if (root / top).is_dir() for p in (root / top).rglob("*.py")
                    if "kanban_llm_pacing" in p.read_text(encoding="utf-8-sig", errors="ignore"))
-    assert users == ["hermes_cli/kanban_db_dispatch.py", "hermes_cli/kanban_db_edit.py",
+    # The dispatcher reaches the governor through kanban_start_gate.pre_claim_hold (its last waits before a claim).
+    assert users == ["hermes_cli/kanban_db_edit.py",
                      "hermes_cli/kanban_dispatch_maintenance.py",
                      "hermes_cli/kanban_llm_pacing.py", "hermes_cli/kanban_llm_pacing_dispatch.py",
                      "hermes_cli/kanban_paced_reroute.py",
-                     "hermes_cli/kanban_parent_unclaimed.py", "hermes_cli/kanban_worker_node.py"]
+                     "hermes_cli/kanban_parent_unclaimed.py", "hermes_cli/kanban_start_gate.py",
+                     "hermes_cli/kanban_worker_node.py"]
+    assert _governor_names(root / "hermes_cli/kanban_start_gate.py") == {"kanban_llm_pacing_dispatch": {"hold"}}
+    assert "kanban_start_gate import pre_claim_hold" in (root / "hermes_cli/kanban_db_dispatch.py").read_text(encoding="utf-8-sig")
     assert _governor_names(root / "hermes_cli/kanban_dispatch_maintenance.py") == {
         "kanban_llm_pacing_dispatch": {"refresh_pools"}}
     assert _governor_names(root / "hermes_cli/kanban_parent_unclaimed.py") == NOTICE_VIEW
