@@ -336,6 +336,12 @@ async def run_in_pool(executor, ctx, func, *args, source="gateway:run_in_executo
         return await loop.run_in_executor(executor, ctx.run, func, *args)
     if executor is None:  # ``run_in_executor(None, ...)`` semantics: the loop's (scope-aware) default
         executor = _scoped_loops[loop]
+    # This path submits directly, bypassing BaseEventLoop.run_in_executor's
+    # accounting hook. Keep the submitted function named on its physical thread;
+    # Scope subtracts any route/pass CPU the function already accounts itself.
+    from hermes_cli import loop_accounting
+    if loop_accounting.scopes_enabled():
+        func = loop_accounting.scoped_call("thread", func, args)
     future = submit_tracked(executor, ctx.run, func, *args, registry=registry,
                             home=current_home(), source=source, kind="gateway_pool")
     return await asyncio.wrap_future(future, loop=loop)

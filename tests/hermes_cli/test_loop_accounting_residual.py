@@ -168,6 +168,41 @@ def test_executor_scope_names_a_context_run_submission_by_its_function():
     assert not any(k.endswith("Context.run") for k in la.counters())
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_gateway_direct_pool_submission_is_named(monkeypatch, tmp_path, enabled):
+    from contextvars import copy_context
+    from hermes_cli import local_work_threads as threads
+    from hermes_cli.local_work import Registry
+
+    registry = Registry(homes=[str(tmp_path)])
+    monkeypatch.setattr(threads, "installed_registry", lambda: registry)
+    monkeypatch.setattr(threads, "current_home", lambda: str(tmp_path))
+    monkeypatch.setitem(la._state, "scopes", enabled)
+    if enabled:
+        la.instrument_executors()
+
+    def direct_job():
+        _burn(0.03)
+        with la.pass_("direct.inner"):
+            _burn(0.03)
+        return 42
+
+    async def main():
+        assert await threads.run_in_pool(None, copy_context(), direct_job) == 42
+
+    asyncio.run(main())
+    names = {k: v for k, v in la.counters().items() if k.endswith("direct_job")}
+    if enabled:
+        assert len(names) == 1, la.counters()
+        st = next(iter(names.values()))
+        assert st["runs"] == 1
+        assert 0.025 <= st["cpu_s"] < 0.05
+        assert 0.055 <= la.snapshot()["process"]["accounted_cpu_s"] < 0.09
+    else:
+        assert not names
+    assert registry.snapshot().active == 0
+
+
 def test_executor_scope_does_not_double_count_an_accounted_route():
     la.instrument_executors()
 
