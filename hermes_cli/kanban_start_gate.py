@@ -40,6 +40,6 @@ def hold(*, task_id: str, lane: str, assignee: Optional[str], board: Optional[st
         for answer in invoke_hook(HOOK, task_id=task_id, lane=lane, assignee=assignee, board=board):
             if isinstance(answer, dict) and answer.get("hold") is True:
                 return _reason(answer.get("reason"))
-    except Exception as exc:  # health: allow BLE001 -- a plugin fault never holds a card (fail open)
+    except (RuntimeError, ValueError, TypeError, LookupError, AttributeError, OSError) as exc:  # fail open
         logger.warning("kanban start gate: hook failed (%s: %s); starting ungated", type(exc).__name__, exc)
     return None
