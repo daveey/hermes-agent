@@ -182,6 +182,21 @@ def test_ten_boards_failing_on_one_dns_cause_file_one_card_naming_every_board_an
     assert len(_cards(home)) == 1 and _comments(home, card["id"]) == []  # the same incident files once
 
 
+def test_replicated_foreign_host_incident_is_not_adopted(home, monkeypatch):
+    """Both hosts see the same replicated owner rows; only same-host reports may coalesce."""
+    monkeypatch.setattr(host_outage.socket, "gethostname", lambda: "host-a")
+    first = host_outage.report([("bb", "DNS failed", "t_frozen_a")], fresh=True, cause="dns")
+    monkeypatch.setattr(host_outage.socket, "gethostname", lambda: "host-b")
+    second = host_outage.report([("runners", "DNS failed", "t_frozen_b")], fresh=True, cause="dns")
+    assert first and second and first != second
+    assert len(_cards(home)) == 2
+    assert _comments(home, first) == []
+    again = host_outage.report([("metta", "DNS failed", "t_frozen_late")], fresh=False, cause="dns")
+    assert again == second
+    assert "t_frozen_late" in _comments(home, second)[0]
+    assert _comments(home, first) == []
+
+
 def test_an_unrelated_board_failure_keeps_its_own_card(home):
     host = Host(home, TEN + ["ledger"])
     host.run(1)

@@ -72,7 +72,8 @@ def report(entries: list[tuple[str, str, str]], *, fresh: bool, cause: str) -> O
         "is understood (precedent: t_01a1e1174026210f)."
     )
     comment = (("New incident: " if fresh else "Also affected: ") + detail + "\n\n" + sections)
-    return outbox_age.report(SLUG, detail, key=replica_age.KEY, author=replica_age.AUTHOR, body=body,
+    # Owner rows replicate across hosts: a fleet-wide key would adopt another host's incident.
+    return outbox_age.report(f"{SLUG}:{host}", detail, key=replica_age.KEY, author=replica_age.AUTHOR, body=body,
                              what="Board unreachable", comment=comment,
                              title=f"Kanban sync: {host} cannot reach the Board ({cause}); "
                                    f"{len(entries)} board replica(s) stale 20+ awake min")
