@@ -46,6 +46,7 @@ from hermes_cli import kanban_sync_backlog as backlog  # page budget per pull; b
 from hermes_cli import kanban_sync_outbox_age as outbox_age  # oldest pending op: status, WARNING, defect card
 from hermes_cli.kanban_sync_backlog import BUSY_RETRY_S, PULL_PAGE_BUDGET, Pulled
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
+from hermes_cli import kanban_sync_cpu as sync_cpu
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
@@ -286,6 +287,7 @@ class Hub(HubRoutesMixin):
                 raise BoardBudgetExhausted("Board request budget exhausted")
         return timeout
 
+    @sync_cpu.board_call
     def _call(self, method: str, path: str, body: Optional[dict] = None, *, replay_safe: bool = False) -> dict:
         timeout = self._remaining()
         data = None if body is None else json.dumps(body).encode()
@@ -1487,8 +1489,9 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     from hermes_cli.machine_metrics_sender import MetricsSender, board_post
     sender = MetricsSender(metrics, board_post(ident))
     sender.start()
+    rounds = sync_cpu.iterations(keep_running)
     try:
-        while keep_running():
+        for _round in rounds:
             boards = board_paths()
             sweep_gone_board_handles()  # a removed board is never read again: close what it pins (2026-11-13)
             for slug, _path in boards:
@@ -1531,6 +1534,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                 remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
             sync_timing.wait(wait_for_work, wake, [p for _s, p in boards], remaining, keep_running)
     finally:
+        rounds.close()
         links.stop()
         _LINKS_RUNNER = None  # no stale runner for the next loop's tests to wait on
         sender.close()

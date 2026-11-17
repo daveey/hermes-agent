@@ -595,14 +595,17 @@ def board_start(slug: str, results: list) -> tuple:
     """Start one board's service: the timing diagnostics' token (None while off) and its ``loop_accounting``
     pass ``sync.board/<slug>`` (always on: runs, rows pulled, busy skips, errors, CPU)."""
     from hermes_cli import loop_accounting
+    from hermes_cli.kanban_sync_cpu import service
     diag = _DIAG.board_start(slug, results)
     acct = loop_accounting.pass_(f"sync.board/{slug}")
+    partition = service(f"board/{slug}")
+    partition.__enter__()
     acct.__enter__()  # last: nothing between here and the caller's ``finally: board_end`` can raise
-    return diag, acct, len(results)
+    return diag, acct, len(results), partition
 
 
 def board_end(token: tuple, results: list) -> None:
-    diag, acct, before = token
+    diag, acct, before, partition = token
     try:
         _DIAG.board_end(diag, results)
     finally:
@@ -613,6 +616,7 @@ def board_end(token: tuple, results: list) -> None:
             acct.skip()
         failed = result is None or (bool(getattr(result, "error", None)) and not skipped)
         acct.__exit__(RuntimeError if failed else None, None, None)
+        partition.__exit__(None, None, None)
 
 
 def report(fn: Callable[[], Any]) -> Any:
