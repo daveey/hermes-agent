@@ -14,6 +14,7 @@ import {
   clearAllSessionStates,
   LIVE_TURN_EVENT_SILENCE_MS,
   LIVE_TURN_PROBE_TIMEOUT_MS,
+  liveTurnCheckLine,
   liveTurnVerdict,
   noteSessionEvent,
   publishSessionState,
@@ -486,5 +487,48 @@ describe('liveTurnVerdict', () => {
     expect(liveTurnVerdict(snapshot, 'e')).toBe('unknown')
     expect(liveTurnVerdict({}, 'a')).toBe('unknown')
     expect(liveTurnVerdict(null, 'a')).toBe('unknown')
+  })
+
+  // A backend can key its rows by the stored session id while this window
+  // addresses the chat by a runtime id: the chat's turn is still running.
+  it('finds the turn by the stored session id when no row carries the runtime id', () => {
+    const snapshot = {
+      sessions: [
+        { id: '20261111_055255_6e01c3', session_key: '20261111_055255_6e01c3', status: 'working' },
+        { id: 'other', session_key: '20261101_012339_5a8ef0', status: 'idle' }
+      ]
+    }
+
+    expect(liveTurnVerdict(snapshot, '8957fcb7', '20261111_055255_6e01c3')).toBe('running')
+    expect(liveTurnVerdict(snapshot, '8957fcb7', '20261101_012339_5a8ef0')).toBe('ended')
+    expect(liveTurnVerdict(snapshot, '8957fcb7', 'not-listed')).toBe('ended')
+    expect(liveTurnVerdict(snapshot, '8957fcb7')).toBe('ended')
+  })
+
+  it('prefers the row carrying the runtime id over a stored-id match', () => {
+    const snapshot = {
+      sessions: [
+        { id: 'stale', session_key: 'stored', status: 'working' },
+        { id: 'mine', session_key: 'stored', status: 'idle' }
+      ]
+    }
+
+    expect(liveTurnVerdict(snapshot, 'mine', 'stored')).toBe('ended')
+  })
+})
+
+describe('liveTurnCheckLine', () => {
+  it('names the row the verdict was read from, or that none matched', () => {
+    const snapshot = { sessions: [{ id: 'k', session_key: 'stored', status: 'working', last_active: 100 }] }
+
+    expect(liveTurnCheckLine(snapshot, 'rt', 'stored', 130_000)).toBe(
+      '[silent-turn] runtime=rt stored=stored verdict=running rows=1 match=session_key row=k status=working idle_s=30'
+    )
+    expect(liveTurnCheckLine(snapshot, 'rt', 'elsewhere', 130_000)).toBe(
+      '[silent-turn] runtime=rt stored=elsewhere verdict=ended rows=1 match=none'
+    )
+    expect(liveTurnCheckLine(null, 'rt', null, 130_000)).toBe(
+      '[silent-turn] runtime=rt stored=- verdict=unknown rows=- match=none'
+    )
   })
 })

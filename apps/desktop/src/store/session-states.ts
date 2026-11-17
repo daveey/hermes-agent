@@ -100,6 +100,7 @@ import {
 import {
   holdsTurnClaim,
   isLiveTurnAwaitingEvents,
+  liveTurnCheckLine,
   liveTurnLastActiveMs,
   type LiveTurnStatusResponse,
   type LiveTurnVerdict,
@@ -402,7 +403,14 @@ function clearEventSilence(runtimeId: string) {
   }
 }
 
-export { holdsTurnClaim, isLiveTurnAwaitingEvents, liveTurnLastActiveMs, type LiveTurnVerdict, liveTurnVerdict }
+export {
+  holdsTurnClaim,
+  isLiveTurnAwaitingEvents,
+  liveTurnCheckLine,
+  liveTurnLastActiveMs,
+  type LiveTurnVerdict,
+  liveTurnVerdict
+}
 
 /** [daveey] The backend's activity decides the quiet hint for a running turn.
  *  The renderer watchdog only measures events reaching THIS window, and a turn
@@ -456,9 +464,29 @@ async function checkLiveTurn(runtimeId: string): Promise<LiveTurnCheck> {
       LIVE_TURN_PROBE_TIMEOUT_MS
     )
 
-    return { lastActiveMs: liveTurnLastActiveMs(response, runtimeId), verdict: liveTurnVerdict(response, runtimeId) }
-  } catch {
+    const storedSessionId = $sessionStates.get()[runtimeId]?.storedSessionId ?? null
+
+    logSilentTurnCheck(liveTurnCheckLine(response, runtimeId, storedSessionId, Date.now()))
+
+    return {
+      lastActiveMs: liveTurnLastActiveMs(response, runtimeId, storedSessionId),
+      verdict: liveTurnVerdict(response, runtimeId, storedSessionId)
+    }
+  } catch (error) {
+    logSilentTurnCheck(
+      `[silent-turn] runtime=${runtimeId} verdict=unknown request_failed=${error instanceof Error ? error.name : 'error'}`
+    )
+
     return { lastActiveMs: null, verdict: 'unknown' }
+  }
+}
+
+function logSilentTurnCheck(line: string) {
+  try {
+    console.info(line)
+    window.hermesDesktop?.logLine?.(line)
+  } catch {
+    // logging must never change a verdict
   }
 }
 

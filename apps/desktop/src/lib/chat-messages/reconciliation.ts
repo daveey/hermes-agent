@@ -1,4 +1,5 @@
 import { attachmentTolerantUserText, sameAttachmentTurn } from './attachment-turn'
+import { withoutDisprovedNoReplyNotice } from './no-reply'
 import { chatMessageText } from './parts'
 import type { ChatMessage, ChatMessagePart } from './types'
 
@@ -583,8 +584,9 @@ function insertPreservedErrorRuns(
 
 export function preserveLocalAssistantErrors(
   nextMessages: ChatMessage[],
-  currentMessages: ChatMessage[]
+  localMessages: ChatMessage[]
 ): ChatMessage[] {
+  const currentMessages: ChatMessage[] = withoutDisprovedNoReplyNotice(nextMessages, localMessages)
   const reconciled: ChatMessage[] = reconcileLocalAssistantTimeline(nextMessages, currentMessages)
   const merged: ChatMessage[] = mergeStoredAssistantErrors(reconciled, currentMessages)
   const preserveIds: Set<string> = localAssistantErrorIdsToPreserve(merged, currentMessages)
