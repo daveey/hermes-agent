@@ -467,7 +467,7 @@ class SessionAuthority:
         return AdmissionReceipt(row['admission_id'], SessionRef(self.profile_id, row['target_session_id']),
                                 row['seq'], status, outcome, row['owner_epoch'] or self.epoch, row['generation'])
 
-    def _pending_receipt(self, row):
+    def _pending_receipt(self, row, *, interactive=None):
         # Only public input text crosses the viewer boundary, never the
         # private native envelope's routing or authorization provenance.
         payload = row['payload']
@@ -476,16 +476,16 @@ class SessionAuthority:
             text = payload.get('native_text_v1', {}).get('event', {}).get('text', '')
         from gateway.session_queued_controls import queued_controls
         return PendingAdmission(**vars(self._receipt(row)), input_id=row['request_id'], text=text,
-                                controls=queued_controls(self, row), steering=row['outcome'] == STEERING)
+                                controls=queued_controls(self, row, interactive=interactive), steering=row['outcome'] == STEERING)
 
-    def _publish_pending(self, ref):
+    def _publish_pending(self, ref, *, prepared=None):
         from gateway.session_retirement import restore_retired
         restore_retired(self, ref.session_id)  # input committed after its conversation retired
         live = self.sessions[ref.session_id]
         from gateway.session_queued_controls import pending_rows
         with live.event_stream.lock:
-            handle = self._handle(ref)
-            pending = [asdict(self._pending_receipt(row)) for row in pending_rows(self, ref)]
+            handle, pending = prepared if prepared is not None else (
+                self._handle(ref), [asdict(self._pending_receipt(row)) for row in pending_rows(self, ref)])
             # Turns bump runtime_revision without any session.updated event, so
             # this is the only place a viewer learns the CAS revision a later
             # prepared mutation must present.
@@ -1236,15 +1236,16 @@ class SessionAuthority:
         if checkpoint is not None:
             from gateway.session_update_pause import resume_checkpoint
             return await resume_checkpoint(self, ref, live, first), first
+        from gateway.session_claim_publication import stamp_claim
         row = await tracked_write(self, partial(claim_session_input, self.db, epoch=self.epoch,
                                                 session_id=ref.session_id, _guard=self._admission_gate(), _eligible=eligible,
                                                 head=first['admission_id'] if first is not None else None),
-                                  then=partial(self._stamp_claim, ref, live))
+                                  then=partial(stamp_claim, self, ref, live))
         # Input scheduled while this claim's transaction ran may postdate its read: re-read
         # instead of letting the drain exit idle over a committed admission.
         return (False if row is None and live.rescan else row), first
 
-    def _stamp_claim(self, ref, live, row):
+    def _stamp_claim(self, ref, live, row, *, publish_pending=True):
         """The claim's execution stamp, in the same tracked task as its commit: no observer (or
         retirement's join) ever sees a committed claim that no execution stamp names."""
         if row:  # None or False (the head changed under the write) claimed nothing
@@ -1258,7 +1259,8 @@ class SessionAuthority:
                 from gateway.session_automation import admission_display
                 live.event_stream.publish(ref.session_id, admission_display(row.get('payload') or {}),
                                           event_type='message.start')
-                self._publish_pending(ref)
+                if publish_pending:
+                    self._publish_pending(ref)
         return row
 
     def _drain_stopping(self, ref, live):
