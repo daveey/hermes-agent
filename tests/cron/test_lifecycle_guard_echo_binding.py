@@ -28,7 +28,7 @@ _DEFINITIONS = [
 def test_rebound_echo_real_shell_and_public_scanner(tmp_path, definition, producer):
     marker = tmp_path / "marker"
     payload = tmp_path / "payload"
-    payload.write_text("#!/bin/bash\nprintf reached > " + shlex.quote(str(marker)) + "\n", encoding="utf-8")
+    payload.write_text("#!/usr/bin/env bash\nprintf reached > " + shlex.quote(str(marker)) + "\n", encoding="utf-8")
     payload.chmod(0o700)
     definitions = tmp_path / "definitions"
     definitions.write_text('echo() { bash -c "$1"; }\n', encoding="utf-8")
