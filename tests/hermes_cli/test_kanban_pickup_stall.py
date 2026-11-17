@@ -350,11 +350,16 @@ def test_same_cause_burst_refreshes_all_targets_without_comment_churn(gws, monke
     clock[0] += 1
     kps.file_repairs(worker.conn, WORKER, cards)
     assert len(kb.list_comments(worker.conn, tid)) == len(comments)
-    # Real new pickup evidence must still reach the open incident.
+    # Repeated skips update only tick bookkeeping, not material evidence.
     cards[0]["skip"].update(last_at=clock[0] * 1000, passes=2)
+    assert kps.file_repairs(worker.conn, WORKER, cards) == [tid]
+    assert len(kb.list_comments(worker.conn, tid)) == len(comments)
+    # A changed target title is material and must still reach the open incident.
+    cards[0]["title"] = "changed target evidence"
     assert kps.file_repairs(worker.conn, WORKER, cards) == [tid]
     updated = kb.list_comments(worker.conn, tid)
     assert len(updated) == len(comments) + 1
+    assert "changed target evidence" in updated[-1].body
     assert "2 pass(es)" in updated[-1].body
     clock[0] += 60
     kps.file_repairs(worker.conn, WORKER, cards)
