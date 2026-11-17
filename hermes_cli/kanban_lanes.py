@@ -204,7 +204,8 @@ def safe_policy() -> Optional[Policy]:
     # ConfigBackendUnavailable is a SystemExit, so ``Exception`` alone would let a config outage stop creation.
     except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- config must never stop creation
         _warn(exc)
-        return _LAST_GOOD[0] if _LAST_GOOD else None
+        kept = list(_LAST_GOOD)  # one read: another thread may clear the list between a check and an index
+        return kept[0] if kept else None
     _LAST_GOOD[:] = [pol]
     return pol
 
@@ -455,7 +456,8 @@ def admit(conn, task_id: str, *, actor: str, reason: str, budget: bool = True) -
         if row is None:
             return False
         waiting = any(state not in ("done", "archived") for _pid, state in kb.parent_states(conn, task_id))
-        conn.execute("UPDATE tasks SET status = ?, block_kind = NULL WHERE id = ?",
+        # Pinned to triage: an admit only ever moves a parked card, never a running one.
+        conn.execute("UPDATE tasks SET status = ?, block_kind = NULL WHERE id = ? AND status = 'triage'",
                      ("todo" if waiting else "ready", task_id))
         pol = safe_policy()
         lane = row["tenant"] if pol is None else pol.lane_of(row["tenant"])  # the lane whose budget this spends

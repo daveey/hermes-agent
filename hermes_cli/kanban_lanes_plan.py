@@ -78,7 +78,7 @@ def _admit(conn, pol, action, row, state) -> Optional[str]:
     used = state["used"].setdefault(lane.name, lanes.admitted_today(conn, lane.name, now=state["now"]))
     if lane.admit_per_day is not None and used >= lane.admit_per_day:
         return f"lane {lane.name} admit budget spent ({used}/{lane.admit_per_day} today)"
-    lanes.admit(conn, row["id"], actor=ACTOR, reason=action["reason"])
+    lanes.admit(conn, row["id"], actor=state["actor"], reason=action["reason"])
     state["used"][lane.name] = used + 1
     return None
 
@@ -130,9 +130,10 @@ def _relane(conn, pol, action, row, _state) -> Optional[str]:
 _HANDLERS = {"admit": _admit, "merge": _merge, "reprioritize": _reprioritize, "relane": _relane}
 
 
-def apply(conn, actions, *, now: Optional[float] = None, dry_run: bool = False) -> dict:
+def apply(conn, actions, *, now: Optional[float] = None, dry_run: bool = False, actor: str = ACTOR) -> dict:
     """Apply a planner's ``actions``; returns ``{"applied": [...], "rejected": [{..., "why"}], "notes": [...]}``.
 
+    ``actor`` is recorded on admissions (the planner by default; an agent's own ``lanes admit`` names itself).
     ``dry_run`` validates the shape only (budget and card checks need the writes of earlier actions): its
     ``applied`` list is what passed that check, and ``dry_run`` is true in the result.
     """
@@ -142,7 +143,7 @@ def apply(conn, actions, *, now: Optional[float] = None, dry_run: bool = False) 
     if not isinstance(actions, list):
         raise ValueError("actions must be a list")
     out: dict = {"applied": [], "rejected": [], "notes": [], "dry_run": dry_run}
-    state: dict = {"now": time.time() if now is None else now, "used": {}}
+    state: dict = {"now": time.time() if now is None else now, "used": {}, "actor": actor}
     for index, action in enumerate(actions):
         why = _refusal(conn, pol, action, index, state, out, dry_run)
         if why:

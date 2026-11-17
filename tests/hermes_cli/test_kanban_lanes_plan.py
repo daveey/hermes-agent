@@ -230,6 +230,10 @@ def test_an_agents_cli_admit_is_limited_like_the_planners_and_a_typed_one_is_the
     monkeypatch.setattr(lanes, "_human_shell", lambda: False)  # every call below runs in an agent-marked process
     assert cli("lanes", "admit", guard) == 1  # never_admit
     assert cli("lanes", "admit", cards[0]) == 0 and cli("lanes", "admit", cards[1]) == 0
+    event = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?",
+                                    (cards[0], lanes.ADMITTED)).fetchone()[0])
+    assert event["actor"].startswith("agent") or event["actor"] == "user"  # the caller, not the planner
+    assert event["actor"] != plan.ACTOR and event["budget"] == 1
     assert cli("lanes", "admit", cards[2]) == 1  # admit_per_day is 2
     assert lanes.admitted_today(conn, "hermes") == 2
     _typed("lanes", "admit", cards[2])  # the person, typing in a chat

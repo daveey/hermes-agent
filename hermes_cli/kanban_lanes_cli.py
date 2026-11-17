@@ -124,8 +124,9 @@ def _admit(args) -> int:
         else:
             from hermes_cli import kanban_lanes_plan as plan
 
+            actor = cli_actor()
             result = plan.apply(conn, [{"action": "admit", "card": args.task_id,
-                                        "reason": reason or f"admitted by {cli_actor()}"}])
+                                        "reason": reason or f"admitted by {actor}"}], actor=actor)
             if result["rejected"]:
                 print(f"{args.task_id}: {result['rejected'][0]['why']}")
                 return 1
