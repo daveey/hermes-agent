@@ -128,22 +128,29 @@ def _pin(args) -> int:
     return 0
 
 
-def _set(args) -> int:
+def set_lane(lane: str, *, share=None, admit_per_day=None, paused=None) -> None:
+    """Change one lane's share, daily admit budget or pause state in the root config; raises ValueError."""
     from hermes_cli.config import set_config_value
 
     pol = lanes.policy()
-    if pol is None or args.lane not in pol.lanes:
-        print(f"unknown lane: {args.lane}", file=sys.stderr)
-        return 2
-    changes = {"share": args.share, "admit_per_day": args.admit_per_day,
-               "paused": True if args.pause else False if args.resume else None}
+    if pol is None or lane not in pol.lanes:
+        raise ValueError(f"unknown lane: {lane}")
+    if share is not None and (type(share) not in (int, float) or share < 0):
+        raise ValueError("share must be a nonnegative number")
+    if admit_per_day is not None and (type(admit_per_day) is not int or admit_per_day < 0):
+        raise ValueError("admit_per_day must be a nonnegative integer")
+    changes = {"share": share, "admit_per_day": admit_per_day, "paused": paused}
     changes = {key: value for key, value in changes.items() if value is not None}
     if not changes:
-        print("nothing to set: give --share, --admit-per-day, --pause or --resume", file=sys.stderr)
-        return 2
+        raise ValueError("nothing to set: give a share, a daily admit budget, pause or resume")
     for key, value in changes.items():
-        set_config_value(f"kanban.admission.lanes.{args.lane}.{key}", str(value).lower())
+        set_config_value(f"kanban.admission.lanes.{lane}.{key}", str(value).lower())
     lanes.policy()  # a write that left the mapping malformed fails here, loudly
+
+
+def _set(args) -> int:
+    set_lane(args.lane, share=args.share, admit_per_day=args.admit_per_day,
+             paused=True if args.pause else False if args.resume else None)
     return 0
 
 
