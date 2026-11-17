@@ -434,7 +434,8 @@ def usage(conn, pol: Policy, *, window_s: int, now: Optional[float] = None) -> d
     cutoff = now - window_s
     out = {name: {"share": lane.share, "paused": lane.paused, "gated": lane.gated,
                   "admit_per_day": lane.admit_per_day, "run_seconds": 0, "runs": 0, "running": 0, "ready": 0,
-                  "held": 0, "open": 0, "oldest_ready_s": None, "admitted_today": 0}
+                  "held": 0, "open": 0, "oldest_ready_s": None, "admitted_today": 0, "done": 0, "cost_usd": 0.0,
+                  "tokens": 0, "usage_runs": 0}
            for name, lane in pol.lanes.items()}
     for tenant, seconds, runs in conn.execute(
             "SELECT t.tenant, SUM(MIN(COALESCE(r.ended_at, ?), ?) - MAX(r.started_at, ?)), COUNT(*) "
@@ -457,6 +458,23 @@ def usage(conn, pol: Policy, *, window_s: int, now: Optional[float] = None) -> d
             row["oldest_ready_s"] = age if row["oldest_ready_s"] is None else max(row["oldest_ready_s"], age)
         elif status == "triage" and kind == GATE_KIND:
             row["held"] += count
+    for tenant, count in conn.execute(
+            "SELECT tenant, COUNT(*) FROM tasks WHERE status = 'done' AND completed_at > ? GROUP BY tenant", (cutoff,)):
+        out[pol.lane_of(tenant)]["done"] += count
+    # Cost is what managed workers reported on their runs' receipts (kanban_spend_budget.usage_fields): an
+    # estimate, and only for runs that reported; ``usage_runs`` against ``runs`` says how much that covers.
+    for tenant, cost, tokens, runs in conn.execute(
+            "SELECT tenant, SUM(cost), SUM(tokens), COUNT(*) FROM ("
+            "SELECT t.tenant AS tenant, MAX(COALESCE(json_extract(e.payload, '$.usage.cost_usd'), 0)) AS cost, "
+            "MAX(COALESCE(json_extract(e.payload, '$.usage.input_tokens'), 0) "
+            "+ COALESCE(json_extract(e.payload, '$.usage.output_tokens'), 0)) AS tokens "
+            "FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.kind = 'worker_result' "
+            "AND e.created_at > ? AND json_extract(e.payload, '$.usage') IS NOT NULL "
+            "GROUP BY e.task_id, e.run_id) GROUP BY tenant", (cutoff,)):
+        row = out[pol.lane_of(tenant)]
+        row["cost_usd"] = round(row["cost_usd"] + float(cost or 0), 2)
+        row["tokens"] += int(tokens or 0)
+        row["usage_runs"] += runs
     total_share = sum(lane.share for lane in pol.lanes.values() if not lane.paused) or 1
     total_run = sum(row["run_seconds"] for row in out.values()) or 1
     for name, row in out.items():

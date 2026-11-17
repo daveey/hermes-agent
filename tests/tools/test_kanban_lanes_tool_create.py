@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from tests.tools.test_kanban_tools import worker_env  # noqa: F401  (fixture)
+from tests.tools.test_kanban_tools import worker_env  # the fixture
 
 
 def _configure():

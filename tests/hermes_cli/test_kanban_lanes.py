@@ -228,8 +228,14 @@ def test_usage_reports_target_actual_and_backlog(conn, configured):
     now = 1_000_000
     conn.execute("INSERT INTO task_runs (task_id, status, started_at, ended_at) VALUES (?, 'done', ?, ?)",
                  (parent, now - 7200, now - 3600))
+    run_id = conn.execute("SELECT MAX(id) FROM task_runs").fetchone()[0]
+    for cost in (1.0, 2.5):  # two receipts for one run: the larger is the run's total, not a second charge
+        conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+                     (parent, run_id, "worker_result",
+                      json.dumps({"usage": {"cost_usd": cost, "input_tokens": 1000, "output_tokens": 50}}), now - 3600))
     conn.commit()
     out = lanes.usage(conn, lanes.policy(), window_s=6 * 3600, now=now)
+    assert (out["hermes"]["cost_usd"], out["hermes"]["tokens"], out["hermes"]["usage_runs"]) == (2.5, 1050, 1)
     assert out["hermes"]["run_seconds"] == 3600 and out["hermes"]["actual"] == 1.0
     assert out["hermes"]["held"] == 1 and out["babybear"]["ready"] == 1
     assert round(out["babybear"]["target"], 3) == round(35 / 65, 3)
