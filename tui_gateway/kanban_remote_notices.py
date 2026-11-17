@@ -521,12 +521,21 @@ def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcrip
             conn.execute("UPDATE notices SET legacy_seen=1, notice_key=? WHERE session=? AND ref=? AND state=?",
                          (key, session_key, row["ref"], row["state"]))
             continue
-        cur = conn.execute(
-            "UPDATE notices SET delivered=0, holder_pid=?, holder_start=?, notice_key=?, legacy_seen=1 "
-            "WHERE session=? AND ref=? AND state=? AND delivered=1 AND IFNULL(legacy_seen,0)=0",
-            (pid, start, key, session_key, row["ref"], row["state"]))
-        if cur.rowcount == 1:
-            out.append(_notice_item(card, session_key, me, profile, now))
+        with conn:
+            if not conn.in_transaction:
+                conn.execute('BEGIN IMMEDIATE')
+            from tui_gateway.kanban_remote_identity import moved_claim
+            moved = moved_claim(conn, session=session_key, ref=row['ref'], state=row['state'],
+                                now=now, notice_key=key, swept_key=None, transcript_has=transcript_has)
+            if moved is not None:
+                continue
+            cur = conn.execute(
+                "UPDATE notices SET delivered=0, holder_pid=?, holder_start=?, notice_key=?, legacy_seen=1 "
+                "WHERE session=? AND ref=? AND state=? AND delivered=1 AND IFNULL(legacy_seen,0)=0 "
+                "AND notice_key IS NULL",
+                (pid, start, key, session_key, row["ref"], row["state"]))
+            if cur.rowcount == 1:
+                out.append(_notice_item(card, session_key, me, profile, now))
     if stale:
         logger.info("remote kanban: left %d delivered notice(s) unreoffered "
                     "(older than %.0fh, or not in the replica)", stale, FRESH_S / 3600)

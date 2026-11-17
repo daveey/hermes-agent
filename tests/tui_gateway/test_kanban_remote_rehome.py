@@ -188,6 +188,25 @@ def test_unconfirmed_legacy_delivery_does_not_suppress_moved_state(tmp_path):
     assert len(offered) == 1
 
 
+def test_legacy_returning_home_respects_live_successor(tmp_path):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    _move(hub, 'worker-6')
+    krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now)
+    with sqlite3.connect(ledger) as conn:
+        conn.execute('UPDATE notices SET delivered=1, notice_key=NULL, legacy_seen=0')
+    _move(hub, 'hub')
+    with once._chat(tmp_path) as (_db, opener):
+        waker = once._Waker('started')
+        krn.sweep_remote_notices(replica_path=hub, gateway='macbook', session_db=opener,
+                                 ledger=ledger, now=now + 10, waker=waker)
+        assert waker.calls == 1
+        _move(hub, 'worker-6')
+        assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 20,
+                           transcript_has=lambda *_: False) == []
+
+
 @pytest.mark.parametrize('running', [False, True])
 def test_moved_woken_claim_recovers_only_after_turn_ends(tmp_path, running):
     now = time.time()

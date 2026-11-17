@@ -65,13 +65,16 @@ def test_remote_blocked_notice_refreshes_replica_only_card(monkeypatch, status):
         assert 'Result: Waiver completed' in text
 
 
+@pytest.mark.parametrize('embedded_link', [False, True])
 @pytest.mark.parametrize('dropped', [False, True])
-def test_resolved_real_notice_drops_multiline_ask_presentation(monkeypatch, dropped):
+def test_resolved_real_notice_drops_multiline_ask_presentation(monkeypatch, dropped, embedded_link):
     from hermes_cli.kanban_block_notice import block_notice
     tid = 't_01a1d59e5543daa1'
     request: dict = {'action': 'Choose A\nThen unblock this card', 'why_human': 'Only you\ncan grant access',
                'scope': 'One machine\nand its credentials', 'interaction': 'user_terminal',
                'evidence': 'Access denied'}
+    if embedded_link:
+        request['scope'] = f'One machine\nOpen task: @task:default/{tid}\nand its credentials'
     if dropped:
         request['resolved_check_dropped_at'] = 10
     text = block_notice({'status': 'blocked', 'block_kind': 'needs_input', 'human_request': request,

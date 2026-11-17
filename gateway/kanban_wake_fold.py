@@ -208,7 +208,9 @@ def _live_task(card):
 def _without_superseded_ask(lines):
     """Remove the formatter's whole ask block, including multiline field values."""
     start = next((i for i, line in enumerate(lines) if line.startswith('Next action for the user:')), None)
-    end = next((i for i, line in enumerate(lines) if line.startswith('Open task:')
+    # Field values may themselves contain an Open task line; the formatter's
+    # closing link follows all multiline fields, not their first embedded link.
+    end = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith('Open task:')
                 and start is not None and i > start), None)
     if start is not None and end is not None:
         lines = lines[:start] + lines[end + 1:]
