@@ -44,7 +44,7 @@ def inherit_tool_priority(conn, args, creator_task_id):
 def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
                    tenant, workspace_kind, workspace_path, branch_name, project_id,
                    skills, goal_mode, model_override, provider_override, created_by, requires,
-                   placement_policy, human_request=None, placement_audit=None):
+                   placement_policy, human_request=None, placement_audit=None, lane=None):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_consent import snapshot
 
@@ -70,6 +70,8 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         "priority": conn.execute("SELECT priority FROM tasks WHERE id=?", (task_id,)).fetchone()[0],
         "consent_stops": snapshot(conn, task_id, creator_task_id),
     })
+    from hermes_cli.kanban_lanes import record as record_lane
+    record_lane(conn, task_id, lane)
     if isinstance(placement_audit, dict) and placement_audit.get("hub_admission"):
         kb._append_event(conn, task_id, "hub_admission", placement_audit["hub_admission"])
     if status == "blocked":

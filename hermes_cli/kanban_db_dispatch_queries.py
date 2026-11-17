@@ -38,7 +38,8 @@ def lane_rows(conn: sqlite3.Connection, status: str, *, marked_first: bool = Fal
         f"ORDER BY {DISPATCH_ORDER}"
     ).fetchall()
     from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
-    rows = order_with_remote_waiters(conn, rows)
+    from hermes_cli.kanban_lanes import drop_paused
+    rows = order_with_remote_waiters(conn, drop_paused(conn, rows))
     if marked_first:  # replica donation reorders within a class, never across the pool partition
         rows.sort(key=lambda row: row["admission_class"] not in ("capacity", "urgent"))
     return rows

@@ -17,6 +17,9 @@ def insert_link(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None
         "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
         (parent_id, child_id),
     )
+    from hermes_cli.kanban_lanes import release_blocker
+
+    release_blocker(conn, parent_id, child_id)
 
 
 def would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:

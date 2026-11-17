@@ -109,7 +109,7 @@ def sweep_stale_triage(
     swept: list[str] = []
     rows = conn.execute(
         "SELECT t.id, t.title, t.body, t.assignee, t.human_request, t.tenant FROM tasks t "
-        "WHERE t.status = 'triage' "
+        "WHERE t.status = 'triage' AND COALESCE(t.block_kind, '') != 'lane_gate' "
         "AND COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id), t.created_at) <= ? "
         "AND COALESCE((SELECT MAX(n.id) FROM task_events n WHERE n.task_id = t.id "
         f"AND n.kind IN ({_MARKS})), 0) > "

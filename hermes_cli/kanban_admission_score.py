@@ -278,4 +278,6 @@ def rank(conn: sqlite3.Connection, rows, *, now_ms: Optional[int] = None, weight
                                            tuple(sorted(weights.items())), tid in owners)))
     scored.sort(key=lambda item: (not item[1].turn_owner, -item[1].total, item[1].ready_since,
                                  metadata.get(item[0]["id"], ("normal", 0, 0))[2], item[0]["id"]))
-    return scored
+    from hermes_cli.kanban_lanes import order
+
+    return order(conn, scored)

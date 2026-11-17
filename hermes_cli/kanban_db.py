@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_priority, kanban_source_receipt as _sr, kanban_requeue_custody as _requeue_custody, kanban_core_update_requeue as _cu_requeue
+from hermes_cli import kanban_db_sync as _sync, kanban_park_pin as _park_pin, kanban_source_receipt as _sr, kanban_requeue_custody as _requeue_custody, kanban_core_update_requeue as _cu_requeue
 from hermes_cli.kanban_db_values import _first_line, _opt_int, _json_or_null
 from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import lazily: no cycle
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
@@ -1247,7 +1247,7 @@ def create_task(
 
         return create_with_origin(conn, origin_intent, creation_options)
 
-    from hermes_cli.kanban_db_graph import initial_task_state
+    from hermes_cli.kanban_lanes import initial_state as lane_state
     from hermes_cli.kanban_creator_chats import initialize_ownership
     from hermes_cli.kanban_pr_acceptance import validate_contract
     from hermes_cli.kanban_human_request import validate_initial_request
@@ -1333,7 +1333,7 @@ def create_task(
             # commit so the dispatcher never sees a half-built graph.
             with write_txn(conn, allow_nested=True):
                 run_insert_guard(conn, insert_guard)
-                task_status, tenant = initial_task_state(conn, parents, initial_status, triage, tenant)
+                task_status, tenant, lane = lane_state(conn, parents, initial_status, triage, tenant, locals())
                 # Project worktree: fresh dir under the repo + deterministic
                 # branch, instead of the random ``wt/<id>`` worker fallback.
                 if project_obj is not None and workspace_kind == "worktree":
@@ -1353,7 +1353,7 @@ def create_task(
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        task_id, title.strip(), body, assignee, task_status, kanban_priority.bounded(priority),
+                        task_id, title.strip(), body, assignee, task_status, lane.priority(priority),
                         created_by, now, workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key, _opt_int(max_runtime_seconds),
                         json.dumps(skills_list) if skills_list is not None else None,
@@ -1368,7 +1368,7 @@ def create_task(
                 from hermes_cli.kanban_db_creation import record_created
                 record_created(
                     conn, task_id, assignee=assignee, status=task_status, parents=parents,
-                    creator_task_id=creator_task_id, tenant=tenant, workspace_kind=workspace_kind,
+                    creator_task_id=creator_task_id, tenant=tenant, workspace_kind=workspace_kind, lane=lane,
                     workspace_path=workspace_path, branch_name=branch_name, project_id=project_id,
                     skills=skills_list, goal_mode=goal_mode, model_override=model_override,
                     provider_override=provider_override, created_by=created_by, requires=required,
