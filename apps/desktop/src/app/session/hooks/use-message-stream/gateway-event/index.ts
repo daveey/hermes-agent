@@ -14,7 +14,7 @@ import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { replayPendingApproval } from '@/store/prompts'
 import { setSessionProviderWait } from '@/store/provider-wait'
 import { isSessionGone } from '@/store/session-gone-latch'
-import { noteSessionEvent } from '@/store/session-states'
+import { disproveNoReplyNotice, noteSessionEvent } from '@/store/session-states'
 import { setSessionDraftingTool } from '@/store/tool-drafting'
 
 import { handleAdmittedMessageEvent } from './admitted-message'
@@ -51,6 +51,20 @@ const DRAFT_SUPERSEDING_EVENT_TYPES = new Set([
   'reasoning.delta',
   'thinking.delta',
   'tool.complete',
+  'tool.start'
+])
+
+// The turn's own stream output: any of these after a "turn ended without a
+// reply" stamp proves that stamp wrong (store/session-states disproveNoReplyNotice).
+const TURN_OUTPUT_EVENT_TYPES = new Set([
+  'message.complete',
+  'message.delta',
+  'message.interim',
+  'message.start',
+  'reasoning.delta',
+  'thinking.delta',
+  'tool.complete',
+  'tool.generating',
   'tool.start'
 ])
 
@@ -313,6 +327,10 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         // state — proves this session is still producing. Silence after the
         // last one force-settles a dead turn, partial payload included.
         if (sessionId) {
+          if (TURN_OUTPUT_EVENT_TYPES.has(event.type)) {
+            disproveNoReplyNotice(sessionId)
+          }
+
           noteSessionEvent(sessionId)
           retireTurnToolProgress(event.type, sessionId)
         }

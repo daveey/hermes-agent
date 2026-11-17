@@ -51,6 +51,7 @@ import {
   $sessionStates,
   $sessionTiles,
   confirmReconnectSettlesExcept,
+  disproveNoReplyNotice,
   noteSessionEvent,
   publishSessionState,
   SESSION_WATCHDOG_TIMEOUT_MS,
@@ -446,7 +447,9 @@ export async function reconcileTileTranscripts({
   }
 }
 
-/** Best-effort post-turn fallback when the live stream did not carry an answer. */
+/** Best-effort post-turn fallback when the live stream did not carry an answer.
+ *  Resolves true only when a stored page was read and applied: a superseded,
+ *  held or failed read says nothing about whether the turn has a reply. */
 export async function hydrateStoredSessionTranscript({
   attempts,
   storedSessionId,
@@ -459,11 +462,11 @@ export async function hydrateStoredSessionTranscript({
   runtimeSessionId: string
   storedProfile: ProfileScope
   updateSessionState: ActiveTranscriptRefreshDeps['updateSessionState']
-}): Promise<void> {
+}): Promise<boolean> {
   const replay = pendingSessionReplay(runtimeSessionId)
 
   if (replay && !(await replay)) {
-    return
+    return false
   }
 
   const messagesAtRequest = $sessionStates.get()[runtimeSessionId]?.messages
@@ -478,7 +481,7 @@ export async function hydrateStoredSessionTranscript({
     }
 
     if (superseded()) {
-      return
+      return false
     }
 
     try {
@@ -486,13 +489,13 @@ export async function hydrateStoredSessionTranscript({
       const replayAtReturn = pendingSessionReplay(runtimeSessionId)
 
       if (replayAtReturn && !(await replayAtReturn)) {
-        return
+        return false
       }
 
       // This fallback belongs to the completed turn, not any subsequent turn
       // that ran during the read or retry delay. Its todo restore is stale too.
       if (superseded()) {
-        return
+        return false
       }
 
       // A zero-row page over the populated turn is a transient read, not the
@@ -508,7 +511,7 @@ export async function hydrateStoredSessionTranscript({
       )
 
       if (superseded()) {
-        return
+        return false
       }
 
       updateSessionState(
@@ -553,11 +556,13 @@ export async function hydrateStoredSessionTranscript({
         clearActiveSessionTodos(runtimeSessionId)
       }
 
-      return
+      return true
     } catch {
       // Best-effort fallback when live stream payloads are empty.
     }
   }
+
+  return false
 }
 
 /** Reconcile one persisted transcript snapshot into the currently viewed session. */
@@ -875,6 +880,11 @@ export function rehydrateLiveSessionStatuses(
       // feeds the clock without claiming a spinner, since a lazy resume
       // builds with no turn at all.
       noteSessionEvent(runtimeSessionId)
+
+      if (working) {
+        // The backend lists the turn as running: a "no reply" stamp on it was wrong.
+        disproveNoReplyNotice(runtimeSessionId)
+      }
     }
 
     if (!working) {

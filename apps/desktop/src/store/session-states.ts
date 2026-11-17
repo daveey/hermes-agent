@@ -34,7 +34,8 @@ import {
 import { resolveRememberedActivePane, workspaceScopeKey } from '@/components/pane-shell/workspace-scope'
 import type { WorkspaceMode } from '@/contrib/types'
 import { dropBrowserProfilePrefs, migrateBrowserProfilePrefs } from '@/lib/browser-profile-prefs'
-import { finalizeInterruptedMessages, sealOpenToolParts } from '@/lib/chat-messages'
+import { type ChatMessage, finalizeInterruptedMessages, sealOpenToolParts } from '@/lib/chat-messages'
+import { isNoReplyNotice } from '@/lib/chat-messages/no-reply'
 import { tileFocusStampOnFocusChange } from '@/lib/session-timer-since'
 import { stableArray } from '@/lib/stable-array'
 import { type StopOrigin } from '@/lib/stop-origin'
@@ -374,7 +375,9 @@ interface LiveTurnBackend {
    *  owner, so this only answers for sessions it provably owns. */
   request: AmbientGatewayRequest
   /** Pull the stored transcript for an on-screen session whose turn the
-   *  backend reported ended, so a reply that finished there shows up here. */
+   *  backend reported ended, so a reply that finished there shows up here.
+   *  Resolving `false` means no stored page was applied (read failed, held or
+   *  superseded): the store has not said whether the turn has a reply. */
   refreshTranscript?: (runtimeId: string, storedSessionId: string) => Promise<unknown> | unknown
 }
 
@@ -542,21 +545,106 @@ function markTurnWithoutReply(runtimeId: string) {
   )
 }
 
-async function recoverEndedLiveTurn(runtimeId: string) {
-  const storedSessionId = $sessionStates.get()[runtimeId]?.storedSessionId ?? null
-  const refreshTranscript = liveTurnBackend?.refreshTranscript
+// Delays before re-reading the store for an ended turn whose first read did
+// not apply. After the last one the local transcript decides.
+export const ENDED_TURN_STORE_RETRY_MS = [2_000, 8_000, 20_000]
 
-  // Only a session on screen reads its history now; a background session
-  // reads it when the user opens it, like the running=false edge.
-  if (refreshTranscript && storedSessionId && runtimeReferenced(runtimeId, storedSessionId)) {
-    try {
-      await refreshTranscript(runtimeId, storedSessionId)
-    } catch {
-      // The local transcript still decides whether a reply arrived.
+const endedTurnRecoveries = new Map<string, object>()
+
+async function recoverEndedLiveTurn(runtimeId: string) {
+  const recovery = {}
+  endedTurnRecoveries.set(runtimeId, recovery)
+
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      const storedSessionId = $sessionStates.get()[runtimeId]?.storedSessionId ?? null
+      const refreshTranscript = liveTurnBackend?.refreshTranscript
+
+      // Only a session on screen reads its history now; a background session
+      // reads it when the user opens it, like the running=false edge.
+      if (!refreshTranscript || !storedSessionId || !runtimeReferenced(runtimeId, storedSessionId)) {
+        break
+      }
+
+      let applied = false
+
+      try {
+        applied = (await refreshTranscript(runtimeId, storedSessionId)) !== false
+      } catch {
+        // No answer from the store: read again below.
+      }
+
+      if (endedTurnRecoveries.get(runtimeId) !== recovery) {
+        return
+      }
+
+      // The retry card offers to run the prompt again, so it needs the store's
+      // word that the turn left no reply. A read that did not apply (the
+      // #silent-turn incident of 2026-11-17: the reply was stored, the read
+      // was dropped) is asked again before the local transcript decides.
+      if (applied || attempt >= ENDED_TURN_STORE_RETRY_MS.length) {
+        logSilentTurnCheck(
+          `[silent-turn] runtime=${runtimeId} stored=${storedSessionId} recovery store_read=${applied ? 'applied' : 'none'} attempts=${attempt + 1}`
+        )
+
+        break
+      }
+
+      await new Promise(resolve => setTimeout(resolve, ENDED_TURN_STORE_RETRY_MS[attempt]))
+
+      const state = $sessionStates.get()[runtimeId]
+
+      if (endedTurnRecoveries.get(runtimeId) !== recovery || !state || isLiveTurnAwaitingEvents(state)) {
+        return
+      }
+    }
+
+    markTurnWithoutReply(runtimeId)
+  } finally {
+    if (endedTurnRecoveries.get(runtimeId) === recovery) {
+      endedTurnRecoveries.delete(runtimeId)
     }
   }
+}
 
-  markTurnWithoutReply(runtimeId)
+/** The backend, or the turn's own stream, showed a turn still producing after
+ *  it was stamped "ended without a reply": the stamp was wrong, so it and its
+ *  Retry leave. A pending store re-read for that turn is dropped too. */
+export function disproveNoReplyNotice(runtimeId: string) {
+  endedTurnRecoveries.delete(runtimeId)
+
+  const stamped = (messages: ChatMessage[]) => {
+    const tail = messages.findLastIndex(message => message.role === 'user' && !message.hidden)
+
+    return messages.some((message, index) => index > tail && isNoReplyNotice(message)) ? tail : null
+  }
+
+  if (stamped($sessionStates.get()[runtimeId]?.messages ?? []) === null) {
+    return
+  }
+
+  writeSessionState(runtimeId, state => {
+    const tail = stamped(state.messages)
+
+    if (tail === null) {
+      return state
+    }
+
+    return {
+      ...state,
+      messages: state.messages.flatMap((message, index) => {
+        if (index <= tail || !isNoReplyNotice(message)) {
+          return [message]
+        }
+
+        const { error: _error, errorSurface: _errorSurface, ...rest } = message
+
+        // The notice's own empty bubble carried nothing else.
+        return rest.parts.length ? [rest] : []
+      })
+    }
+  })
+  logSilentTurnCheck(`[silent-turn] runtime=${runtimeId} no_reply_notice=disproved`)
 }
 
 /** The silence window ran out: ask the backend. Running keeps the turn and

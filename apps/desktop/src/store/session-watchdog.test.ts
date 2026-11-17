@@ -12,6 +12,8 @@ import {
   $stalledSessionIds,
   $workingSessionIds,
   clearAllSessionStates,
+  disproveNoReplyNotice,
+  ENDED_TURN_STORE_RETRY_MS,
   LIVE_TURN_EVENT_SILENCE_MS,
   LIVE_TURN_PROBE_TIMEOUT_MS,
   liveTurnCheckLine,
@@ -382,6 +384,118 @@ describe('live turn event silence', () => {
 
     expect(refreshTranscript).toHaveBeenCalledWith('rt-screen', 's-screen')
     expect(card('rt-screen')).toBeUndefined()
+  })
+
+  it('does not offer a retry while the store has not said the turn had no reply', async () => {
+    $activeSessionId.set('rt-unread')
+    publishSessionState(
+      'rt-unread',
+      state({ awaitingResponse: true, busy: true, storedSessionId: 's-unread', turnLive: true })
+    )
+
+    // The first read is dropped (superseded, held or failed); the second lands the stored reply.
+    const refreshTranscript = vi
+      .fn<(runtimeId: string) => Promise<boolean>>()
+      .mockResolvedValueOnce(false)
+      .mockImplementationOnce(async runtimeId => {
+        publishSessionState(runtimeId, {
+          ...$sessionStates.get()[runtimeId]!,
+          messages: [{ id: 'stored-reply', parts: [textPart('finished on the backend')], role: 'assistant' }]
+        })
+
+        return true
+      })
+
+    backend(async () => ({ sessions: [] }), refreshTranscript)
+    noteSessionEvent('rt-unread')
+
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+
+    expect(refreshTranscript).toHaveBeenCalledTimes(1)
+    expect($workingSessionIds.get()).not.toContain('s-unread')
+    expect(card('rt-unread')).toBeUndefined()
+
+    await vi.advanceTimersByTimeAsync(ENDED_TURN_STORE_RETRY_MS[0])
+
+    expect(refreshTranscript).toHaveBeenCalledTimes(2)
+    expect(card('rt-unread')).toBeUndefined()
+    expect(chatMessageText($sessionStates.get()['rt-unread']!.messages[0])).toBe('finished on the backend')
+  })
+
+  it('falls back to the local transcript once every store read came back empty-handed', async () => {
+    $activeSessionId.set('rt-nostore')
+    publishSessionState(
+      'rt-nostore',
+      state({ awaitingResponse: true, busy: true, storedSessionId: 's-nostore', turnLive: true })
+    )
+
+    const refreshTranscript = vi.fn(async () => {
+      throw new Error('store unreachable')
+    })
+
+    backend(async () => ({ sessions: [] }), refreshTranscript)
+    noteSessionEvent('rt-nostore')
+
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+
+    const retries = ENDED_TURN_STORE_RETRY_MS.reduce((sum, ms) => sum + ms, 0)
+
+    await vi.advanceTimersByTimeAsync(retries - 1)
+    expect(card('rt-nostore')).toBeUndefined()
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(refreshTranscript).toHaveBeenCalledTimes(ENDED_TURN_STORE_RETRY_MS.length + 1)
+    expect(card('rt-nostore')?.errorSurface?.code).toBe('no_reply')
+  })
+
+  it('takes the retry card back when the turn it was stamped on turns out to be running', async () => {
+    $activeSessionId.set('rt-alive')
+    publishSessionState(
+      'rt-alive',
+      state({
+        awaitingResponse: true,
+        busy: true,
+        messages: [
+          { id: 'u1', parts: [textPart('resume')], role: 'user' },
+          { id: 'a1', parts: [{ type: 'text', text: '' }], pending: true, role: 'assistant' }
+        ],
+        storedSessionId: 's-alive',
+        streamId: 'a1',
+        turnLive: true
+      })
+    )
+    backend(async () => ({ sessions: [] }))
+    noteSessionEvent('rt-alive')
+
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+    expect(card('rt-alive')?.errorSurface?.code).toBe('no_reply')
+
+    disproveNoReplyNotice('rt-alive')
+
+    const messages = $sessionStates.get()['rt-alive']!.messages
+    expect(card('rt-alive')).toBeUndefined()
+    expect(messages.every(message => !message.error)).toBe(true)
+    expect(messages.map(message => message.id)).toEqual(['u1', 'a1'])
+  })
+
+  it('drops a pending store re-read once the turn is shown running', async () => {
+    $activeSessionId.set('rt-revived')
+    publishSessionState(
+      'rt-revived',
+      state({ awaitingResponse: true, busy: true, storedSessionId: 's-revived', turnLive: true })
+    )
+
+    const refreshTranscript = vi.fn(async () => false)
+
+    backend(async () => ({ sessions: [] }), refreshTranscript)
+    noteSessionEvent('rt-revived')
+
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+    disproveNoReplyNotice('rt-revived')
+    await vi.advanceTimersByTimeAsync(ENDED_TURN_STORE_RETRY_MS.reduce((sum, ms) => sum + ms, 0))
+
+    expect(refreshTranscript).toHaveBeenCalledTimes(1)
+    expect(card('rt-revived')).toBeUndefined()
   })
 
   it('leaves a background session to read its history when opened', async () => {

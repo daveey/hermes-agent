@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { buildToolView } from '@/components/assistant-ui/tool/fallback-model'
+import { textPart } from '@/lib/chat-messages'
+import { NO_REPLY_ERROR } from '@/lib/chat-messages/no-reply'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $activeSessionId, $selectedStoredSessionId, $unreadFinishedSessionIds } from '@/store/session'
 import {
@@ -49,6 +51,28 @@ describe('rehydrateLiveSessionStatuses — reaping vanished runtimes', () => {
     rehydrateLiveSessionStatuses({ sessions: [] })
 
     expect($workingSessionIds.get()).toEqual([])
+  })
+
+  it('takes back a "no reply" stamp when the snapshot lists that turn as working', () => {
+    publishSessionState('runtime-live', {
+      ...createClientSessionState('stored-live'),
+      messages: [
+        { id: 'u1', parts: [textPart('resume')], role: 'user' },
+        {
+          error: NO_REPLY_ERROR,
+          errorSurface: { code: 'no_reply', layer: 'runtime', retryable: true },
+          id: 'a1',
+          parts: [],
+          role: 'assistant'
+        }
+      ]
+    })
+
+    rehydrateLiveSessionStatuses({
+      sessions: [{ id: 'runtime-live', session_key: 'stored-live', status: 'working' }]
+    })
+
+    expect($sessionStates.get()['runtime-live']?.messages.map(message => message.id)).toEqual(['u1'])
   })
 
   it('fires the unread "your turn" marker for a vanished background session', () => {

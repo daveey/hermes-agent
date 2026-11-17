@@ -1542,7 +1542,8 @@ describe('an empty persisted page over a populated runtime', () => {
     })
 
     await vi.advanceTimersByTimeAsync(250)
-    await hydrated
+    // Applied: the caller may trust what the transcript now shows.
+    expect(await hydrated).toBe(true)
 
     expect(fixture.updateSessionState).toHaveBeenCalledTimes(1)
     expect(
@@ -1550,5 +1551,27 @@ describe('an empty persisted page over a populated runtime', () => {
         .get(ACTIVE_RUNTIME_ID)
         ?.messages.flatMap(message => message.parts.map(part => ('text' in part ? part.text : '')))
     ).toContain('a newer answer')
+  })
+
+  it('post-turn hydrate: reports a read that never applied, so no one treats the turn as replyless', async () => {
+    vi.useFakeTimers()
+    const fixture = makeRefresh()
+
+    fixture.state.messages = populated()
+    publishSessionState(ACTIVE_RUNTIME_ID, fixture.state)
+    vi.mocked(getLatestSessionMessages).mockRejectedValue(new Error('store unreachable'))
+
+    const hydrated = hydrateStoredSessionTranscript({
+      attempts: 2,
+      storedSessionId: ACTIVE_STORED_ID,
+      runtimeSessionId: ACTIVE_RUNTIME_ID,
+      storedProfile: 'default',
+      updateSessionState: fixture.updateSessionState
+    })
+
+    await vi.advanceTimersByTimeAsync(250)
+
+    expect(await hydrated).toBe(false)
+    expect(fixture.updateSessionState).not.toHaveBeenCalled()
   })
 })
