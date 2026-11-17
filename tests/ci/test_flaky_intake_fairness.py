@@ -95,7 +95,7 @@ def test_main_drains_durable_backlog_before_slow_discovery(tmp_path, monkeypatch
                    {"id": 1, "head_sha": "a" * 40})
     journal.close()
     board = Board()
-    monkeypatch.setattr(fk, "CliBoard", lambda *a: board)
+    monkeypatch.setattr(fk, "CliBoard", lambda *a, self_work_ci=False: board)
     monkeypatch.setattr(fk, "HubRelay", lambda *a, **kw: None)
     clock, observed = [0.0], []
     monkeypatch.setattr(fk.time, "monotonic", lambda: clock[0])

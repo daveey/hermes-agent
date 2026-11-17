@@ -169,7 +169,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         from hermes_cli.kanban_origin_adapter import command
         return command(args)
 
-    if action in {"origin-create", "origin-adopt", "ownership-snapshot", "selfwork-create", "selfwork-forward"}:
+    if action in {"origin-create", "origin-adopt", "ownership-snapshot", "selfwork-create", "selfwork-forward", "selfwork-producer"}:
         from hermes_cli.kanban_origin_owner import command
         return command(args)
 

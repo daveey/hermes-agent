@@ -19,8 +19,10 @@ from typing import Any
 
 try:
     from scripts.ci import flaky_artifact as fa
+    from scripts.ci import flaky_selfwork
 except ImportError:
     import flaky_artifact as fa  # type: ignore[no-redef]
+    import flaky_selfwork  # type: ignore[no-redef]
 
 PAGE_BYTES = 6000
 OWNER_CHECK_BYTES = 1024
@@ -201,6 +203,9 @@ class Journal:
             CREATE INDEX IF NOT EXISTS occurrences_page ON occurrences(page);
         """)
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(pages)")}
+        if "producer_request" not in columns:
+            self.db.execute("ALTER TABLE pages ADD COLUMN producer_request TEXT")
+            self.db.commit()
         if "attempted" not in columns:
             # Pre-marker pages might already have escaped. Preserve them immutably.
             self.db.execute("ALTER TABLE pages ADD COLUMN attempted INTEGER NOT NULL DEFAULT 1")
@@ -369,6 +374,10 @@ class Journal:
             self.rotate(repo, "page", str(page["id"]))
             key = f"ci-flaky-intake:{repo}:{page['day']}"
             try:
+                owner = flaky_selfwork.handle(self, board, repo, page)
+                if owner is not None:
+                    log.append(f"intake delivered {owner} page={page['id']}")
+                    continue
                 card, key, delivered = _incident_destination(board, key, page["card"], page["payload"])
                 if delivered:
                     self.acknowledge_page(page["id"], card)

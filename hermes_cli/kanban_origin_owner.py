@@ -130,6 +130,9 @@ def snapshot_command(args) -> int:
 
 
 def command(args) -> int:
+    if args.kanban_action == 'selfwork-producer':
+        from hermes_cli.kanban_selfwork_producer import command as producer_command
+        return producer_command(args)
     if args.kanban_action == 'selfwork-forward':
         from hermes_cli.kanban_selfwork_forward import command as forward_command
         return forward_command(args)

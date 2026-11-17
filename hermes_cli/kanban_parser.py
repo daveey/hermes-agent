@@ -199,6 +199,10 @@ _BOARD_SPECS = [
 
 # Top-level ``hermes kanban <action>`` records, in ``--help`` order.
 _SPECS = [
+    _cmd("selfwork-producer", [
+        _arg("--operation", choices=["capabilities", "prepare", "advance"], required=True),
+        _arg("--request-file", default="-", help="Producer JSON snapshot ('-' = stdin)"),
+    ], help="Versioned durable headless self-work producer receipts"),
     _cmd("init", help="Create kanban.db if missing (idempotent)"),
     _cmd("selfwork-forward", [
         _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),

@@ -87,17 +87,33 @@ class Board(Protocol):
 class CliBoard:
     """The host's Kanban board through ``hermes kanban`` (never its DB directly)."""
 
-    def __init__(self, hermes: str | list[str] = "hermes", assignee: str = "default") -> None:
+    def __init__(self, hermes: str | list[str] = "hermes", assignee: str = "default", *,
+                 self_work_ci: bool = False) -> None:
         self.hermes = [hermes] if isinstance(hermes, str) else list(hermes)
         self.assignee = assignee
+        self.self_work_ci = self_work_ci
+
+    def producer(self, operation: str, value: dict | None = None):
+        if operation == "capabilities":
+            if not self.self_work_ci or "selfwork-producer" not in self._run("--help"):
+                return False
+            result = json.loads(self._run("selfwork-producer", "--operation", operation))
+            if not isinstance(result, dict) or type(result.get("self_work_producer")) is not int:
+                raise RuntimeError("malformed producer capability; no legacy downgrade")
+            return result["self_work_producer"] == 1
+        return json.loads(self._run("selfwork-producer", "--operation", operation,
+                                    "--request-file", "-", stdin=json.dumps(value)))
 
     def _run(self, *args: str, stdin: str | None = None, board: str | None = None,
              extra_env: dict[str, str] | None = None) -> str:
         scope = ["--board", board] if board else []
         env = {**os.environ, **extra_env} if extra_env else None
-        if args[:1] == ("create",) and not (extra_env and "HERMES_KANBAN_TASK" in extra_env):
+        if args[:1] in (("create",), ("selfwork-producer",)) and not (extra_env and "HERMES_KANBAN_TASK" in extra_env):
             # A production create must not inherit a running worker's task as creator_task_id.
-            env = {k: v for k, v in (env or os.environ).items() if k not in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID")}
+            excluded = {"HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID"}
+            if args[:1] == ("selfwork-producer",):
+                excluded.add("HERMES_KANBAN_WORKER_TASK")
+            env = {k: v for k, v in (env or os.environ).items() if k not in excluded}
         proc = subprocess.run([*self.hermes, "kanban", *scope, *args], input=stdin, capture_output=True,
                               text=True, timeout=120, check=False, env=env)
         if proc.returncode == 2 and args[0] == "create":
@@ -1040,7 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"flaky_kanban: {len(entries)} flaky test id(s)")
         return 0
 
-    board = CliBoard(args.hermes, args.assignee)
+    board = CliBoard(args.hermes, args.assignee, self_work_ci=True)
     relay = HubRelay(args.hub_db, args.hub_cli, wait=args.hub_wait)
     journal = None
     try:

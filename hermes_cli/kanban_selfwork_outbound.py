@@ -69,6 +69,11 @@ def prepare(args):
 
 def submit(args):
     home, body, request_id = prepare(args)
+    return send(home, body, request_id)
+
+
+def send(home, body, request_id):
+    """Send a previously frozen envelope; no policy or clock-derived rewrites."""
     from tools.environments.local import build_subprocess_env
     if 'creator' in body:
         origin = body['origin']

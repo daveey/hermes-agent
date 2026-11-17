@@ -6,6 +6,57 @@ or the card thread, is backlog truth. Its sibling `.intake.lock` serializes prod
 contains an initialization marker. Production additionally requires a UUID stored in SQLite
 and in a separately retained identity anchor. Never delete these files to reset a stuck poll.
 
+## Declared core producer receipts (v1)
+
+The production CLI opts in only for `softmax-universe/daveey-hermes` (and its
+`daveey/hermes` alias), declaring `{"version":1,"repository":"hermes-core","area":"ci","kind":"ci-flake"}`.
+The declaration belongs to this producer, not a title classifier. Other repositories,
+legacy `file_cards` callers, and exact-test owner matching keep their existing routes.
+
+Reusable state-adapter contract:
+
+1. Inspect `hermes kanban --help` for `selfwork-producer` before any submission.
+   Absence (including pre-self-work runtimes) permits the old undeclared path only
+   for work not already frozen. `hermes kanban selfwork-producer --operation capabilities`
+   returns `{"self_work_producer":1}`. A well-formed unsupported version likewise
+   permits the old path before submission; errors/malformed capability replies do not.
+2. `hermes kanban selfwork-producer --operation prepare --request-file -` accepts
+   JSON with exactly `title`, `body`, `assignee`, `idempotency_key`, and `self_work`.
+   It performs no submission and returns `{version:1,sender,home,body,request_id}`.
+   `home` is `{gateway,profile,board}`; `body.create` freezes those input fields,
+   home board and tenant. Persist this entire snapshot atomically before step 3.
+   The producer is headless: no ambient chat binding or worker creator is adopted.
+   Worker tasks must continue through their origin-forwarding API instead.
+3. `hermes kanban selfwork-producer --operation advance --request-file -` accepts
+   that **unchanged snapshot**, sends only through the configured courier and reads
+   the sender's durable `sent` ledger. It returns either
+   `{version:1,status:"pending",request_id,owner:null}` or
+   `{version:1,status:"completed",request_id,disposition:"create"|"append",owner:{gateway,profile,board,task_id}}`.
+   A caught transport/storage/validation error returns pending with `error` and may
+   omit request_id. Exit 0 alone is not delivery. Never downgrade any attempted
+   declared submission, regenerate it after midnight, or retry via local creation.
+
+Completion requires a matching frozen envelope, terminal courier `done` state and
+an authoritative `self_work_accepted` owner receipt (`ok`, `handoff_complete` true,
+`ownership_pending` false, exact request ID and create/append consistency). Append
+also requires its positive comment ID. The owner's primary idempotency key need
+not match the finding: many findings legitimately append to one owner. A queue ack,
+rejection, unknown or malformed result stays pending. Replay after loss of courier
+cache uses the same identity and the home's durable intake journal. Never edit a
+saved snapshot to repair a refusal: reconcile its cause at the owning service.
+
+CI persists the snapshot in `pages.producer_request` with `attempted=1` in one
+transaction, before transport. Each immutable manifest page is included in the
+submitted body and its digest suffixes the daily idempotency key. This freezes the
+occurrence payload across later manifest growth and day boundaries. The intake home
+continues to enforce daily area batching and its existing admission policies.
+Created pages are present in the owner's body; appended pages in the receipt-bound
+comment, so a second local comment is neither necessary nor safe. Occurrence owner
+readback is stored as `gateway/profile/board/task_id`, never an unqualified local ID.
+Previously attempted legacy pages retain their old recovery route rather than
+being resubmitted under a new declared identity. Retain the journal during rollback;
+pending declared pages require a runtime supporting v1 and cannot downgrade.
+
 ## One-time bootstrap
 
 Before deploying the new producer, run the new script once with the existing cursor path:
