@@ -81,7 +81,7 @@ def test_resolved_real_notice_drops_multiline_ask_presentation(monkeypatch, drop
                          'title': 'Keep work context'}, tid, 'default')
     assert 'Next action for the user:' in text
     item = {'ref': f'worker-6/default/default/{tid}', 'state': 'blocked@1', 'event_key': 'key',
-            'text': text + '\nKeep other context'}
+            'text': text + '\nKeep other context\nOpen task: @task:default/t_other'}
     monkeypatch.setattr(kanban_wake_fold, '_live_task', lambda _: ('ready', ''))
     card = kro._metadata(item)['kanban_cards'][0]
     result = kanban_wake_fold._compose([card], GUIDANCE, strict=True)

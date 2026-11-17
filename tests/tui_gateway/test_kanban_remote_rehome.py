@@ -188,6 +188,24 @@ def test_unconfirmed_legacy_delivery_does_not_suppress_moved_state(tmp_path):
     assert len(offered) == 1
 
 
+def test_legacy_home_recovers_after_moved_successor_fails(tmp_path):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    _move(hub, 'worker-6')
+    krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now)
+    with sqlite3.connect(ledger) as conn:
+        conn.execute('UPDATE notices SET delivered=1, notice_key=NULL, legacy_seen=0')
+    _move(hub, 'hub')
+    [new] = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 10,
+                        transcript_has=lambda *_: False)
+    krn.release(new, ledger=ledger)
+    _move(hub, 'worker-6')
+    offered = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 20,
+                          transcript_has=lambda *_: False)
+    assert len(offered) == 1
+
+
 def test_legacy_returning_home_respects_live_successor(tmp_path):
     now = time.time()
     hub = once._hub(tmp_path, now)

@@ -502,14 +502,19 @@ def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcrip
     if not rows:
         return []
     by_state = {}
+    logical_states = set()
     for card in cards:
         task = card["task"]
+        logical_states.add((str(task['id']), _notice_state(task)))
         by_state[(f"{card['gw']}/{card['key']}", _notice_state(task))] = card
     pid, start = _my_holder()
     stale = 0
     out = []
     for row in rows:
         card = by_state.get((row["ref"], row["state"]))
+        if (card is None and (row['ref'].rsplit('/', 1)[-1], row['state']) in logical_states
+                and now - float(row['at'] or 0) <= FRESH_S):
+            continue  # a moved, unconfirmed legacy claim must remain recoverable if its successor fails
         if card is None or now - float(row["at"] or 0) > FRESH_S:
             stale += 1
             conn.execute("UPDATE notices SET legacy_seen=1 WHERE session=? AND ref=? AND state=?",

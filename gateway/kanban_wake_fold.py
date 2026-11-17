@@ -205,17 +205,18 @@ def _live_task(card):
         return task.status, summary.strip()
 
 
-def _without_superseded_ask(lines):
+def _without_superseded_ask(lines, task_id=''):
     """Remove the formatter's whole ask block, including multiline field values."""
     start = next((i for i, line in enumerate(lines) if line.startswith('Next action for the user:')), None)
-    # Field values may themselves contain an Open task line; the formatter's
-    # closing link follows all multiline fields, not their first embedded link.
-    end = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].startswith('Open task:')
-                and start is not None and i > start), None)
+    # Prefer this card's closing link over embedded links and unrelated trailing context.
+    ends = [i for i, line in enumerate(lines) if line.startswith('Open task:')
+            and start is not None and i > start]
+    matching = [i for i in ends if task_id and lines[i].rstrip().endswith('/' + task_id)]
+    end = (matching or ends)[-1] if ends else None
     if start is not None and end is not None:
         lines = lines[:start] + lines[end + 1:]
     return [line for line in lines if not line.startswith((
-        'Next action for the user:', 'Why only the user:', 'Scope:', 'Open task:',
+        'Next action for the user:', 'Why only the user:', 'Scope:',
         'Automatic detection stopped', 'Automatic detection had stopped for an earlier version of this ask;',
         'Your step is still needed. Filed ask, historical wording',
         "Use the owner Desktop session's user-terminal flow;"))]
@@ -249,7 +250,7 @@ def refresh_card(card, *, strict=False):
     out = [f"[kanban] Task {card['task_id']} {label}.",
            f'Note: an earlier wake for this card said "{earlier}"; that no longer holds. Live status: {status}.']
     rest = lines[1:] if _LEGACY_HEAD.match(head) else lines
-    rest = _without_superseded_ask(rest)
+    rest = _without_superseded_ask(rest, card['task_id'])
     out.extend(rest)
     if status == 'done' and result and not any(line.startswith('Result:') for line in rest):
         out.insert(2, 'Result: ' + result.splitlines()[0][:400])
@@ -292,7 +293,7 @@ def _guidance(text, cards):
     tail = '\n'.join(rest).rstrip()
     if tail and text.find(tail, pos) < 0 and f"[kanban] Task {last.get('task_id')} " in text:
         # A relabel removes the obsolete ask; an ask-only tail becomes a one-line card.
-        tail = '\n'.join(_without_superseded_ask(rest)).rstrip()
+        tail = '\n'.join(_without_superseded_ask(rest, last['task_id'])).rstrip()
     if tail:
         end = text.find(tail, pos)
         if end < 0:
