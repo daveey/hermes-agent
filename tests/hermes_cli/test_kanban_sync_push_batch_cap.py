@@ -65,3 +65,31 @@ def test_full_batch_plus_unacked_parent_stays_within_the_limit_and_drains(live, 
     assert out.sent == client.PUSH_BATCH + extra
     assert _pending(live) == 0
     assert tid in svc.board(BOARD)["rows"]["tasks"]
+
+
+def test_a_card_whose_own_row_is_trimmed_off_does_not_push_the_request_over_the_limit(live):
+    """Review of PR #3484: X is unacked with 100 comments and no outbox row of its own; T is unacked with 99
+    comments and its own tasks upsert as the 200th row. The first parent pass finds 1 parent (X), the trim to 199
+    rows drops T's own row, and T then needs a synthesized parent too: 199 + 2 = 201 unless the fit is re-checked."""
+    x = kb.create_task(live, title="x", assignee="worker")
+    for i in range(100):
+        kb.add_comment(live, x, "default", f"x {i}")
+    t = kb.create_task(live, title="t", assignee="worker")
+    for i in range(99):
+        kb.add_comment(live, t, "default", f"t {i}")
+    with kbc.write_txn(live):
+        own = dict(live.execute("SELECT * FROM kanban_sync_outbox WHERE table_name = 'tasks' AND row_uid = ? "
+                                "ORDER BY created_at, rowid LIMIT 1", (t,)).fetchone())
+        live.execute("DELETE FROM kanban_sync_outbox WHERE table_name != 'task_comments'")
+        own["created_at"] = live.execute("SELECT MAX(created_at) FROM kanban_sync_outbox").fetchone()[0] + 1
+        live.execute(f"INSERT INTO kanban_sync_outbox ({', '.join(own)}) VALUES ({', '.join('?' * len(own))})",
+                     list(own.values()))
+        live.execute("UPDATE tasks SET sync_version = NULL WHERE id IN (?, ?)", (x, t))
+    assert _pending(live) == client.PUSH_BATCH
+    svc = FakeService()
+    client.push(live, svc.hub(ME), BOARD, ME, primary=False)
+    client.push(live, svc.hub(ME), BOARD, ME, primary=False)  # a trimmed short selection finishes next round
+    sizes = [len(ops) for kind, _board, ops in svc.calls if kind == "ops"]
+    assert sizes and max(sizes) <= client.PUSH_BATCH
+    assert _pending(live) == 0
+    assert {x, t} <= set(svc.board(BOARD)["rows"]["tasks"])

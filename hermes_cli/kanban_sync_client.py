@@ -668,8 +668,10 @@ def _within_batch(conn: sqlite3.Connection, rows: list[dict], wire: list[dict],
     ops (400), and the parents ride on top of a full batch: one unacknowledged card behind 200 pending rows failed
     every round with 201 ops and nothing left the hub for 7 h (2026-11-17). The dropped rows go in the next batch."""
     parents = _unacked_parents(conn, rows, gateway)
-    if len(parents) + len(rows) > PUSH_BATCH:
-        rows = rows[:max(1, PUSH_BATCH - len(parents))]
+    # Re-checked after every trim: a card whose own tasks row fell off the tail is no longer "in the batch", so
+    # the next pass can return more parents than the last. Rows shrink each pass; one row has at most two parents.
+    while len(parents) + len(rows) > PUSH_BATCH and len(rows) > 1:
+        rows = rows[:max(1, min(len(rows) - 1, PUSH_BATCH - len(parents)))]
         wire = wire[:len(rows)]
         parents = _unacked_parents(conn, rows, gateway)
     return rows, wire, parents
