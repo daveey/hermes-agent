@@ -84,7 +84,7 @@ _MAX_NESTED_HEREDOC_DEPTH = 4
 # A command that (re)defines a consumer, wrapper or outer-shell name as a function or alias
 # anywhere (``python3() { bash; }``) may run a shell where the peeled word says "python": mask nothing.
 _SHADOWABLE_NAMES = (r"(?:python[\d.]*|osascript|cat|timeout|nice|ionice|nohup|setsid|stdbuf|env|command"
-                     r"|exec|eatmydata|sudo|doas|ssh|bash|sh|dash|zsh|ksh|echo|printf|set|tail|cut|ls)")
+                     r"|exec|eatmydata|sudo|doas|ssh|bash|sh|dash|zsh|ksh|echo|printf|set|head|tail|cut|ls)")
 _CONSUMER_SHADOW_RE = re.compile(
     rf"(?:^|[\s;&|(){{}}])(?:(?:function\s+)?{_SHADOWABLE_NAMES}\s*\(\s*\)"
     rf"|function\s+{_SHADOWABLE_NAMES}\s+\{{|alias\s+{_SHADOWABLE_NAMES}=)",
@@ -662,10 +662,30 @@ def heredoc_body_spans(command: str) -> list[tuple[int, int, int]]:
     return spans
 
 
+def _numeric_filter_suffix(line: str) -> bool:
+    """Certify only a complete numeric head/tail pipeline after one heredoc.
+
+    Like the existing interpreter certificate, this trusts unshadowed command
+    names, not arbitrary unknown aliases. Shell sinks and unknown suffix words
+    retain the ordinary conservative path. Raw syntax is intentional: quote
+    removal must not turn data punctuation into certified pipeline operators.
+    """
+    if line.count("<<") != 1:
+        return False
+    parsed = _parse_heredoc_operator(line, line.index("<<"))
+    suffix = line[parsed[0]:] if parsed else ""
+    return re.fullmatch(
+        r"[ \t]*(?:2>&1[ \t]*)?"
+        r"(?:\|[ \t]*(?:head|tail)[ \t]+(?:-[0-9]+|-n[ \t]+[0-9]+)[ \t]*)+",
+        suffix,
+    ) is not None
+
+
 def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: int = 0) -> str:
     """Mask heredoc bodies that are provably inert data (see module docstring).
 
-    ``nested=True`` (the lifecycle guard's executed-path walk only) also masks literal
+    ``nested=True`` (the lifecycle guard's executed-path walk only) also permits
+    numeric head/tail filter suffixes and masks literal
     unquoted data bodies with no expansion or escape characters, and data-consumer
     heredocs nested in the single quoted body of an outer heredoc a shell reads verbatim (``ssh h
     'bash -s' <<'R'``); the outer body's own lines stay visible. Text scanners keep the default:
@@ -717,7 +737,8 @@ def strip_inert_heredoc_bodies(command: str, *, nested: bool = False, _depth: in
             not any(char in command[start:terminator] for char in "$`\\")
             for start, terminator, _end in bodies
         )
-        if (all(quoted) or literal_data) and not post_heredoc_list_operator:
+        filtered = nested and _numeric_filter_suffix(command[command_start:command_end])
+        if (all(quoted) or literal_data) and (not post_heredoc_list_operator or filtered):
             consumer = _owner_runs_inert_consumer(command, command_start, command_end, owner_start)
         prefix_intact = stdin.before_heredoc(command, command_start, owner_start)
         if _depth and not prefix_intact:
