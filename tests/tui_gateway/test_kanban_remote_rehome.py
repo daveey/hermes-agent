@@ -246,6 +246,76 @@ def test_legacy_home_recovers_after_moved_successor_fails(tmp_path):
     assert len(offered) == 1
 
 
+def test_opposite_home_legacy_reoffers_are_serialized(tmp_path, monkeypatch):
+    import concurrent.futures
+    import threading
+    from tui_gateway import kanban_remote_identity as identity
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    with sqlite3.connect(hub) as db:
+        task = json.loads(db.execute('SELECT data FROM replica').fetchone()[0])
+    conn = krn._ledger(ledger)
+    state = krn._notice_state(task)
+    with conn:
+        for home in ['worker-6', 'hub']:
+            conn.execute('INSERT INTO notices (session, ref, state, at, delivered, legacy_seen) VALUES (?,?,?,?,1,0)',
+                         (once.CHAT, f'{home}/default/default/t_dup', state, now))
+    conn.close()
+    scanned = threading.Barrier(2)
+    start = threading.Barrier(2)
+    original = identity.moved_claim
+    def fenced(*args, **kwargs):
+        verdict = original(*args, **kwargs)
+        try:
+            scanned.wait(timeout=0.3)
+        except threading.BrokenBarrierError:
+            pass
+        return verdict
+    monkeypatch.setattr(identity, 'moved_claim', fenced)
+    def claim(home):
+        db = krn._ledger(ledger)
+        try:
+            start.wait(timeout=3)
+            return krn._reconcile_legacy(db, once.CHAT,
+                                         [{'gw': home, 'key': 'default/default/t_dup', 'task': task}],
+                                         now, lambda *_: False, 'macbook', 'default')
+        finally:
+            db.close()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        offers = list(executor.map(claim, ['worker-6', 'hub']))
+    assert sorted(map(len, offers)) == [0, 1]
+
+
+def test_legacy_reconciliation_preserves_replaced_keyed_receipt(tmp_path):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    [old] = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now)
+    with sqlite3.connect(ledger) as conn:
+        conn.execute('UPDATE notices SET delivered=1, notice_key=NULL, legacy_seen=0')
+    replaced = False
+    def transcript_has(*_):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            assert krn.release(old, ledger=ledger)
+            fresh = krn._ledger(ledger)
+            try:
+                assert krn._claim_notice(fresh, session=old['session'], ref=old['ref'], state=old['state'],
+                                         now=now, fresh=True, notice_key=old['event_key'], task_id='t_dup',
+                                         transcript_has=None) == 'offer'
+            finally:
+                fresh.close()
+            assert krn.ack(old, ledger=ledger)
+        return False
+    assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 1,
+                       transcript_has=transcript_has) == []
+    assert replaced
+    with sqlite3.connect(ledger) as conn:
+        assert conn.execute('SELECT delivered, notice_key FROM notices').fetchall() == [(krn.DELIVERED, old['event_key'])]
+
+
 def test_legacy_returning_home_respects_live_successor(tmp_path):
     now = time.time()
     hub = once._hub(tmp_path, now)
