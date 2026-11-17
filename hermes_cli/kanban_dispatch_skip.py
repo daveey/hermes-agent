@@ -228,6 +228,9 @@ def _tick_skips(result: Any) -> list[tuple[str, str, Any, Optional[float], dict[
     out += [(tid, PINNED_QUOTA_WALL, f"{model} ({provider})", until, {"model": model, "provider": provider})
             for tid, model, provider, until in getattr(result, "pinned_quota_held", ())]
     out += [(tid, LLM_PACED, detail, until, extra) for tid, detail, until, extra in getattr(result, LLM_PACED, ())]
+    from hermes_cli.kanban_start_gate import SKIP_REASON, word  # a plugin held the start (kanban_start_gate)
+    out += [(tid, SKIP_REASON, word(reason), None, {}) for tid, reason in getattr(result, "respawn_guarded", ())
+            if word(reason)]
     return out
 
 
@@ -303,6 +306,7 @@ def _stamp(epoch: Any, now: Optional[float] = None) -> str:
 _WORDS = {
     PINNED_QUOTA_WALL: "held: pinned model {detail} quota-walled",
     LLM_PACED: "held: LLM quota pacing ({detail} pool)",
+    "start_gate": "held: a plugin start gate holds card starts ({detail})",
     "per_profile_capped": "skipped: assignee {detail} is at its per-profile worker cap",
     "skipped_ineligible": "skipped: this machine cannot lease it ({detail})",
     "capsule_refused": "skipped: capsule admission refused it ({detail})",

@@ -632,7 +632,11 @@ def _paced(conn: sqlite3.Connection, replica: sqlite3.Connection, card: sqlite3.
     (t_01a1ddeb76e30be7: 9 paced codex cards hid a runnable anthropic card)."""
     from hermes_cli.kanban_llm_pacing_dispatch import pickup_hold
     held = pickup_hold(conn, replica, card)
-    return None if held is None else ("other", f"llm_paced: {held} (local dispatch would hold it)")
+    if held is not None:
+        return "other", f"llm_paced: {held} (local dispatch would hold it)"
+    from hermes_cli.kanban_start_gate import hold as start_gate_hold  # a plugin holds this machine's card starts
+    gated = start_gate_hold(task_id=card["id"], lane=card["status"], assignee=card["assignee"], board=None)
+    return None if gated is None else ("other", f"{gated} (local dispatch would hold it)")
 
 
 def _quota_held(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:

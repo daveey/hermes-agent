@@ -853,6 +853,8 @@ def _ready_hold_reason(task, events, cfg, now=None) -> Optional[str]:
         return "pinned_quota_wall"  # a fresh pin held on its live quota wall (kanban-dd62aef001)
     if _llm_paced_hold(events, now):
         return "llm_paced"  # the quota-pace governor holds it until its provider pool is back on pace
+    if _episode_skip(events).get("reason") == "start_gate":
+        return "start_gate"  # a plugin start gate (kanban_start_gate) held its last claim; asked again every tick
     return None
 
 
@@ -992,6 +994,9 @@ def _rule_held_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
                 "is the last recorded verdict, not a live one." if reason == "llm_paced" else
                 "Its explicit model pin is quota-walled and no same-class reroute applies; it starts when "
                 "the wall resets." if reason == "pinned_quota_wall" else
+                "A plugin start gate (kanban_start_gate hook, e.g. the token throttle while the fleet is over its "
+                "cap) held its last claim. The dispatcher asks again every tick and starts it when the plugin stops "
+                "holding; this is the last recorded verdict, not a live one." if reason == "start_gate" else
                 "A foreign machine:* pin waits for that machine (or a re-file)."),
         actions=[_cli_hint("Check dispatcher status", "hermes kanban diagnostics")],
         first_seen_at=since, last_seen_at=since, count=1,

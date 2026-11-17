@@ -50,6 +50,9 @@ def expected_holds(results, now):
         for tid, (reason, until) in res.clock_held.items():
             if reason in CLOCK_REASONS and now < until < 253402300799:
                 local[tid] = (f"{reason}; until {datetime.fromtimestamp(until, UTC).isoformat()}", until)
+        for tid, reason in res.respawn_guarded:
+            if str(reason).startswith("start_gate:"):  # a plugin start gate (kanban_start_gate): asked every tick
+                local[tid] = (f"{reason}; release when the plugin stops holding starts; recheck next tick", None)
         for tid, reason in res.claim_deferred:
             if reason == "worker_load_pressure":
                 local[tid] = ("worker_load_pressure; release when host pressure clears; recheck next tick", None)
