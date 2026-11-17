@@ -209,6 +209,28 @@ def test_moved_woken_claim_recovers_only_after_turn_ends(tmp_path, running):
         krn._forget_woken(claim_id)
 
 
+def test_return_home_after_ended_alias_and_failed_successor_retries(tmp_path):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    _move(hub, 'worker-6')
+    [old] = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now)
+    claim_id = (old['session'], old['ref'], old['state'])
+    _move(hub, 'hub')
+    krn._track_woken(claim_id, {'running': False})
+    try:
+        [new] = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 10,
+                            transcript_has=lambda *_: False)
+        krn.release(new, ledger=ledger)
+        _move(hub, 'worker-6')
+        offered = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 20,
+                              transcript_has=lambda *_: False)
+        assert len(offered) == 1
+        assert offered[0]['ref'] == old['ref']
+    finally:
+        krn._forget_woken(claim_id)
+
+
 @pytest.mark.parametrize('delivered', [False, True])
 def test_returning_old_home_respects_successor_custody(tmp_path, monkeypatch, delivered):
     now = time.time()

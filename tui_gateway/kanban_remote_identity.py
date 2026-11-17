@@ -30,7 +30,7 @@ def moved_claim(conn, *, session, ref, state, now, notice_key, swept_key, transc
         if (row['ref'] in ended and row['notice_key'] and transcript_has is not None
                 and notices._forget_woken((session, row['ref'], state))):
             # The caller's claim transaction also reserves the successor before releasing this fence.
-            conn.execute('UPDATE notices SET holder_pid=NULL, holder_start=NULL '
+            conn.execute('DELETE FROM notices '
                          'WHERE session=? AND ref=? AND state=? AND delivered=0',
                          (session, row['ref'], state))
             continue
