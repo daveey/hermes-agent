@@ -90,7 +90,7 @@ def receipt(frozen, row):
 
 def read_receipt(frozen):
     path = Path(os.environ.get('HERMES_HUB_STATE') or Path.home() / '.local/state/hermes-hub') / 'hub.db'
-    with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5) as db:
+    with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5) as db:  # noqa: kanban-lockguard (hub.db, not a board)
         db.row_factory = sqlite3.Row
         sender = db.execute("SELECT v FROM meta WHERE k='gateway'").fetchone()
         if sender is None or sender[0] != frozen['sender']:
