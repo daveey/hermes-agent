@@ -10,6 +10,7 @@ from hermes_cli.kanban_db_dispatch_queries import lane_rows
 from tests.hermes_cli import test_kanban_parent_first_dispatch as helpers
 
 conn = helpers.conn
+REAL_HUMAN_SHELL = lanes._human_shell  # the detector itself; the ``person`` fixture stubs the module's
 
 LANES = {
     "babybear": {"share": 35, "describe": "Baby Bear"},
@@ -28,6 +29,8 @@ def person(monkeypatch):
     for name in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK", "HERMES_TENANT"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(lanes, "_human_shell", lambda: True)
+    monkeypatch.setattr(lanes, "_LAST_GOOD", [])  # process state: the last policy read, and warnings already logged
+    monkeypatch.setattr(lanes, "_WARNED", set())
 
 
 @pytest.fixture
@@ -396,24 +399,13 @@ def test_forced_decompose_still_refuses_a_held_card(conn, configured):
     assert _task(conn, held)["status"] == "triage"
 
 
-def test_an_agent_session_shell_is_not_the_user(conn, configured, monkeypatch):
-    monkeypatch.setattr(lanes, "_human_shell", lambda: False)  # a chat or cron agent's terminal
-    tid = kb.create_task(conn, title="main is red", assignee="default", priority=1000, created_by="user",
-                         tenant="hermes", idempotency_key="ci-main-watch:1")
-    row = _task(conn, tid)
-    assert (row["status"], row["priority"]) == ("triage", 100)
-
-
 def test_human_shell_detection_reads_the_session_markers(monkeypatch):
-    from hermes_cli import kanban_lanes
-
-    monkeypatch.undo()  # the real detector, not this module's stand-in
     for name in ("HERMES_SESSION_KEY", "HERMES_SESSION_ID", "HERMES_SESSION_SOURCE", "HERMES_RPC_SOCKET",
                  "HERMES_KERNEL_SENTINEL", "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK"):
         monkeypatch.delenv(name, raising=False)
-    assert kanban_lanes._human_shell() is True
+    assert REAL_HUMAN_SHELL() is True
     monkeypatch.setenv("HERMES_SESSION_ID", "chat-1")
-    assert kanban_lanes._human_shell() is False
+    assert REAL_HUMAN_SHELL() is False
 
 
 def test_a_parked_or_held_waiter_does_not_release_a_held_card(conn, configured):
@@ -423,8 +415,9 @@ def test_a_parked_or_held_waiter_does_not_release_a_held_card(conn, configured):
     _parent, held = _held_card(conn)
     owner2 = kb.create_task(conn, title="p2", assignee="default", created_by="user", tenant="infra2")
     gated_child = kb.create_task(conn, title="needs it", assignee="default", creator_task_id=owner2,
-                                 parents=[held])
-    assert _task(conn, gated_child)["block_kind"] == lanes.GATE_KIND  # held in its own gated lane
+                                 tenant="infra2", parents=[held])
+    row = _task(conn, gated_child)
+    assert (row["tenant"], row["block_kind"]) == ("infra2", lanes.GATE_KIND)  # another lane, itself held
     assert _task(conn, held)["status"] == "triage"
     kb.create_task(conn, title="parked", assignee="default", tenant="babybear", created_by="user", triage=True,
                    parents=[held])
@@ -441,6 +434,7 @@ def test_a_tenant_that_names_no_lane_is_gated_as_the_default_lane(conn, configur
     child = kb.create_task(conn, title="follow-up", assignee="default", creator_task_id=old)
     row = _task(conn, child)
     assert (row["tenant"], row["status"], row["block_kind"]) == ("legacy-team", "triage", lanes.GATE_KIND)
+    assert [r["id"] for r in lanes.held(conn, "other")] == [child] and lanes.held(conn, "babybear") == []
 
 
 def test_a_promoted_card_sent_back_to_triage_before_it_ran_is_not_held(conn, configured):
@@ -458,8 +452,38 @@ def test_non_finite_and_negative_shares_are_rejected(share):
         lanes.parse({"lanes": {"other": {"share": share}}})
 
 
-def test_lane_tenant_resolves_what_creation_will_store(conn, configured):
+def test_lane_tenant_matches_what_creation_stores_for_a_workspace_repo(conn, configured):
     opts = {"created_by": "default", "workspace_path": "/src/hermes-agent", "workspace_kind": "dir"}
     assert lanes.lane_tenant(conn, (), "running", False, "babybear", opts) == "hermes"
     made = kb.create_task(conn, title="x", assignee="default", tenant="babybear", **opts)
     assert _task(conn, made)["tenant"] == "hermes"
+
+
+def test_a_card_the_sweep_released_is_not_held_again(conn, configured):
+    from hermes_cli.kanban_triage_sweep import sweep_stale_triage
+
+    _parent, held = _held_card(conn)
+    conn.execute("UPDATE tasks SET created_at = created_at - 100000")
+    conn.execute("UPDATE task_events SET created_at = created_at - 100000")
+    conn.commit()
+    configured(lane_shadow=True)
+    assert held in sweep_stale_triage(conn)
+    configured()
+    conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (held,))
+    conn.commit()
+    assert lanes.held(conn) == []
+
+
+def test_an_unreadable_config_keeps_the_last_policy_and_a_malformed_one_turns_lanes_off(conn, configured, monkeypatch):
+    from hermes_cli import kanban_admission_pools as pools
+
+    assert lanes.safe_policy() is not None
+    real = pools.admission_policy
+    monkeypatch.setattr(pools, "admission_policy", lambda: (_ for _ in ()).throw(OSError("backend down")))
+    parent = _hermes_parent(conn)
+    child = kb.create_task(conn, title="follow-up", assignee="default", creator_task_id=parent,
+                           workspace_path="/src/hermes-agent")
+    assert _task(conn, child)["status"] == "triage"  # the gate stays shut through the outage
+    monkeypatch.setattr(pools, "admission_policy", real)
+    configured({"Bad Name": {"share": 1}})
+    assert lanes.safe_policy() is None

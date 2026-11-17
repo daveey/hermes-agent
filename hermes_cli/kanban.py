@@ -58,6 +58,7 @@ from hermes_cli.kanban_claim_cli import cmd_claim as _cmd_claim  # moved; re-exp
 from hermes_cli.kanban_source_cli import cmd_source_release as _cmd_source_release
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
 from hermes_cli.kanban_admission_explain import cmd_queue as _cmd_queue
+from hermes_cli.kanban_lanes import cli_creator as _lane_creator
 from hermes_cli.kanban_lanes_cli import command as _cmd_lanes
 from hermes_cli.kanban_assignees_cli import cmd_assignees as _cmd_assignees  # moved; re-exported for callers
 from hermes_cli.kanban_archive_scope import (  # moved here from this module; re-exported for callers
@@ -262,7 +263,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review", "reopen", "resume", "quota-release", "source-release",
-    "gc", "origin-bind", "origin-create", "origin-adopt", "sync", "supervisor-requests", "spend-budget",
+    "gc", "origin-bind", "origin-create", "origin-adopt", "sync", "supervisor-requests", "spend-budget", "lanes",
 })
 
 _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
@@ -475,7 +476,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 chat_origin=origin.ref if origin else getattr(args, "origin_session", None),
                 # [daveey] Same declaration gate as the kanban_create tool, for agent/worker shells only.
                 require_declaration=(in_worker or _agent_invoked()) and declaration_required(),
-                created_by=args.created_by or _profile_author(),
+                created_by=_lane_creator(args, args.created_by or _profile_author()),
                 workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
                 project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
                 admission_class=getattr(args, "admission_class", "normal"),
@@ -579,7 +580,7 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
         created = ks.create_swarm(
             conn, goal=args.goal, workers=workers, verifier_assignee=args.verifier,
             synthesizer_assignee=args.synthesizer, tenant=args.tenant,
-            created_by=args.created_by or _profile_author(), priority=args.priority,
+            created_by=_lane_creator(args, args.created_by or _profile_author()), priority=args.priority,
             idempotency_key=getattr(args, "idempotency_key", None),
         )
     if getattr(args, "json", False):

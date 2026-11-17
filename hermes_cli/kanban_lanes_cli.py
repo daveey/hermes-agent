@@ -116,8 +116,9 @@ def _admit(args) -> int:
     from hermes_cli.kanban_cli_actor import cli_actor
 
     with kbc.connect_closing() as conn:
-        # The user's own admit does not spend the planner's daily budget.
-        done = lanes.admit(conn, args.task_id, actor=cli_actor(), reason=args.reason or "", budget=False)
+        # The user's own admit does not spend the daily budget; an agent's does.
+        actor = cli_actor()
+        done = lanes.admit(conn, args.task_id, actor=actor, reason=args.reason or "", budget=actor != "user")
     print(f"{args.task_id}: {'admitted' if done else 'not held at a lane gate'}")
     return 0 if done else 1
 

@@ -62,7 +62,7 @@ def held_sql(alias: str = "tasks") -> str:
     return (f"{alias}.status = 'triage' AND COALESCE({alias}.block_kind, '') = 'lane_gate' "
             f"AND NOT EXISTS (SELECT 1 FROM task_runs hr WHERE hr.task_id = {alias}.id) "
             f"AND NOT EXISTS (SELECT 1 FROM task_events he WHERE he.task_id = {alias}.id "
-            f"AND he.kind IN ('lane_admitted', 'promoted_manual', 'unblocked'))")
+            f"AND he.kind IN ('lane_admitted', 'promoted_manual', 'unblocked', 'triage_swept', 'decomposed'))")
 
 
 HELD = held_sql()
@@ -183,24 +183,36 @@ def policy() -> Optional[Policy]:
 
 
 _WARNED: set = set()
+_LAST_GOOD: list = []
 
 
 def safe_policy() -> Optional[Policy]:
-    """:func:`policy` for creation and dispatch: an unreadable or malformed mapping reads as no lanes.
+    """:func:`policy` for creation and dispatch; never raises.
 
-    Logged once per distinct error per process: this runs on every create, rank and triage check.
+    A malformed mapping reads as no lanes (the config says something, and it is wrong). A config that cannot
+    be read at all (backend outage, I/O error) keeps the last policy this process read, so an outage does not
+    open the gate; with none read yet it is no lanes. Logged once per distinct error per process.
     """
     from hermes_cli.config_backend import ConfigBackendUnavailable
 
     try:
-        return policy()
+        pol = policy()
+    except ValueError as exc:
+        _warn(exc)
+        return None
     # ConfigBackendUnavailable is a SystemExit, so ``Exception`` alone would let a config outage stop creation.
     except (Exception, ConfigBackendUnavailable) as exc:  # health: allow BLE001 -- config must never stop creation
-        key = f"{type(exc).__name__}: {exc}"
-        if key not in _WARNED:
-            _WARNED.add(key)
-            _LOG.warning("kanban.admission.lanes is unreadable or malformed; lanes are off until it is fixed: %s", key)
-        return None
+        _warn(exc)
+        return _LAST_GOOD[0] if _LAST_GOOD else None
+    _LAST_GOOD[:] = [pol]
+    return pol
+
+
+def _warn(exc) -> None:
+    key = f"{type(exc).__name__}: {exc}"
+    if key not in _WARNED:
+        _WARNED.add(key)
+        _LOG.warning("kanban.admission.lanes is unreadable or malformed: %s", key)
 
 
 def enforced() -> Optional[Policy]:
@@ -242,9 +254,19 @@ def _rule_lane(pol: Policy, opts: dict) -> Optional[str]:
 
 
 def _agent_task(opts: dict) -> Optional[str]:
-    """The card whose worker is creating this one: the explicit creator, else the worker shell's own card."""
-    return opts.get("creator_task_id") or os.environ.get("HERMES_KANBAN_WORKER_TASK") \
-        or os.environ.get("HERMES_KANBAN_TASK") or None
+    """The card whose worker is creating this one: the explicit creator, else the card this process owns.
+
+    A delegated child or a cron run beside a worker inherits ``HERMES_KANBAN_TASK`` without owning the card, so
+    the environment counts only in the dispatcher-owned worker context.
+    """
+    if creator := opts.get("creator_task_id"):
+        return creator
+    owned = os.environ.get("HERMES_KANBAN_WORKER_TASK") or os.environ.get("HERMES_KANBAN_TASK")
+    if not owned:
+        return None
+    from agent.delegation_context import is_dispatcher_owned_worker_context
+
+    return owned if is_dispatcher_owned_worker_context() else None
 
 
 def _human_shell() -> bool:
@@ -254,16 +276,19 @@ def _human_shell() -> bool:
     return cli_actor() == "user"
 
 
-def _by_user(opts: dict) -> bool:
-    """Created by the person, not an agent.
+def cli_creator(args, label: str) -> str:
+    """``created_by`` for a CLI create. ``--created-by`` defaults to ``user`` for every caller and takes any
+    string, so the user labels are kept only for a person: a typed slash command or a human shell. Anything
+    else asking for one is stored as ``agent``. Unchanged when no lanes are configured."""
+    if label not in USER_CREATORS or safe_policy() is None:
+        return label
+    return label if getattr(args, "_slash_typed", False) or _human_shell() else "agent"
 
-    ``hermes kanban create`` writes ``created_by='user'`` for every caller, so that label counts only from a
-    human shell with no worker card behind it; the dashboard's own label is the person by construction.
-    """
-    creator = opts.get("created_by")
-    if creator not in USER_CREATORS or _agent_task(opts) is not None:
-        return False
-    return creator != "user" or _human_shell()
+
+def _by_user(opts: dict) -> bool:
+    """Created by the person: a user label (the CLI keeps those for people only, see :func:`cli_creator`; the
+    dashboard writes its own) and no worker card behind the call."""
+    return opts.get("created_by") in USER_CREATORS and _agent_task(opts) is None
 
 
 def _creator_row(conn, opts):
@@ -319,12 +344,20 @@ def lane_tenant(conn, parents, initial_status, triage, tenant, opts) -> Optional
 
     opts = dict(opts)
     if "project_repo" not in opts:
-        try:
-            opts["project_repo"] = kb._resolve_project_link(
-                conn, opts.get("project_id"), opts.get("project_source_task_id"),
-                opts.get("workspace_kind") or "scratch", opts.get("workspace_path"))[2]
-        except (ValueError, LookupError, sqlite3.Error):
-            opts["project_repo"] = None  # creation will raise the same error with its own message
+        kind, project = opts.get("workspace_kind"), opts.get("project_id")
+        board = {}
+        if (project is None and kind != "scratch") or opts.get("workspace_path") is None:
+            try:
+                board = kb._board_meta_for(opts.get("board"))
+            except Exception:  # health: allow BLE001 -- create_task ignores an unreadable board the same way
+                board = {}
+        if project is None and kind != "scratch":
+            project = (board.get("project_id") or "").strip() or None
+        project, _obj, repo, kind = kb._resolve_project_link(
+            conn, project, opts.get("project_source_task_id"), kind or "scratch", opts.get("workspace_path"))
+        opts["project_repo"] = repo
+        if opts.get("workspace_path") is None and repo is None and kind in {"dir", "worktree"}:
+            opts["workspace_path"] = board.get("default_workdir")
     return initial_state(conn, parents, initial_status, triage, tenant, opts)[1]
 
 
@@ -382,12 +415,13 @@ def assign(conn, task_id: str, lane: str, *, source: str, reason: str, pol: Opti
 
 
 def held(conn, lane: Optional[str] = None) -> list[sqlite3.Row]:
-    """Cards waiting at a lane gate, oldest first."""
-    sql = f"SELECT id, title, tenant, priority, created_at, created_by FROM tasks WHERE {HELD}"
-    params: tuple = ()
-    if lane is not None:
-        sql, params = sql + " AND tenant = ?", (lane,)
-    return conn.execute(sql + " ORDER BY created_at, id", params).fetchall()
+    """Cards waiting at a lane gate, oldest first; ``lane`` filters by the lane a card counts in."""
+    rows = conn.execute(f"SELECT id, title, tenant, priority, created_at, created_by FROM tasks WHERE {HELD} "
+                        "ORDER BY created_at, id").fetchall()
+    if lane is None:
+        return rows
+    pol = safe_policy()
+    return [row for row in rows if (row["tenant"] if pol is None else pol.lane_of(row["tenant"])) == lane]
 
 
 def day_start(now: Optional[float] = None) -> int:

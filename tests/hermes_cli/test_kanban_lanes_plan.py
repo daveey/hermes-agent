@@ -187,3 +187,42 @@ def test_set_lane_writes_the_root_config_from_a_profile(conn, configured, monkey
     assert "lanes" not in (profile / "config.yaml").read_text()
     with pytest.raises(ValueError):
         kanban_lanes_cli.set_lane("babybear", share=-1)
+
+
+def _stored(conn, title):
+    return conn.execute("SELECT status, priority, created_by, tenant FROM tasks WHERE title=?", (title,)).fetchone()
+
+
+def test_cli_create_keeps_the_user_label_only_for_a_person(conn, configured, monkeypatch, capsys):
+    hermes = ["--assignee", "default", "--tenant", "hermes", "--priority", "1000",
+              "--idempotency-key"]
+    assert cli("create", "typed by me", *hermes, "ci-main-watch:1") == 0
+    assert tuple(_stored(conn, "typed by me")) == ("ready", 1000, "user", "hermes")
+    monkeypatch.setattr(lanes, "_human_shell", lambda: False)  # a chat or cron agent's terminal
+    assert cli("create", "agent default label", *hermes, "ci-main-watch:2") == 0
+    assert tuple(_stored(conn, "agent default label")) == ("triage", 100, "agent", "hermes")
+    assert cli("create", "agent claims dashboard", *hermes, "ci-main-watch:3", "--created-by", "dashboard") == 0
+    assert tuple(_stored(conn, "agent claims dashboard")) == ("triage", 100, "agent", "hermes")
+    # A person typing /kanban create inside a chat runs in a process that carries session markers.
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers())
+    args = parser.parse_args(["kanban", "create", "typed in chat", *hermes, "ci-main-watch:4"])
+    args._slash_typed = True
+    assert kanban.kanban_command(args) == 0
+    assert tuple(_stored(conn, "typed in chat")) == ("ready", 1000, "user", "hermes")
+
+
+def test_cli_create_label_is_untouched_without_lanes(conn, monkeypatch):
+    monkeypatch.setattr(lanes, "_human_shell", lambda: False)
+    assert cli("create", "no lanes", "--assignee", "default") == 0
+    assert _stored(conn, "no lanes")["created_by"] == "user"
+
+
+def test_an_agents_cli_admit_spends_the_budget(conn, configured, monkeypatch):
+    from hermes_cli import kanban_cli_actor
+
+    parent = base._hermes_parent(conn)
+    held = _held(conn, parent)
+    monkeypatch.setattr(kanban_cli_actor, "cli_actor", lambda: "agent (chat c1)")
+    assert cli("lanes", "admit", held) == 0
+    assert lanes.admitted_today(conn, "hermes") == 1
