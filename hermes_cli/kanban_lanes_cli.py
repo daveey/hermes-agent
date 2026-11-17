@@ -42,7 +42,7 @@ def snapshot(conn, *, hours: float, local: bool = False) -> dict:
     for name, lane in pol.lanes.items():
         rows[name]["describe"] = lane.describe
     return {"configured": True, "window_hours": hours, "scope": "fleet" if replica is not None else "local",
-            "default": pol.default, "agent_priority_cap": pol.priority_cap, "lanes": rows,
+            "default": pol.default, "agent_priority_cap": pol.priority_cap, "shadow": pol.shadow, "lanes": rows,
             "planner": plan.read_notes()}
 
 
@@ -53,7 +53,8 @@ def _pct(value: float) -> str:
 def render(snap: dict) -> str:
     if not snap["configured"]:
         return "no lanes configured (kanban.admission.lanes)"
-    lines = [f"lanes over the last {snap['window_hours']:g} h ({snap['scope']})",
+    mode = "; shadow: reporting only, nothing is held or reordered" if snap.get("shadow") else ""
+    lines = [f"lanes over the last {snap['window_hours']:g} h ({snap['scope']}{mode})",
              f"{'lane':12} {'target':>6} {'actual':>6} {'run-h':>7} {'running':>7} {'ready':>5} {'held':>5} "
              f"{'open':>5}  notes"]
     for name, row in snap["lanes"].items():

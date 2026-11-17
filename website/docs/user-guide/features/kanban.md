@@ -1557,6 +1557,7 @@ Lanes split worker time between projects. A card's lane is its `tenant`; the ins
 kanban:
   admission:
     lane_default: other          # lane of a card nothing else places (must be a configured lane)
+    lane_shadow: false           # true = classify and report only: nothing is held, capped or reordered
     agent_priority_cap: 100      # stored priority ceiling for cards the user did not create
     lanes:
       babybear: {share: 35, describe: "Baby Bear app and firmware"}
@@ -1573,6 +1574,7 @@ kanban:
 - **Classification** happens once, at creation: an explicit `tenant`, then a lane whose `match` fits (creator name, idempotency-key prefix, repository directory name, or a declared `self_work`), then the parent's or creating card's lane, then `lane_default` with a `lane_unclassified` event. Every decision is a `lane_assigned` event with its source.
 - **Shares are targets, not ceilings.** Under contention each free slot goes to the lane running the fewest cards relative to its `share`; inside a lane the admission score decides. A lane with nothing ready lends its share. Land-turn owners, `urgent`/`capacity` cards and alarm cards are not reordered. `paused: true` stops a lane's cards from being dispatched.
 - **The gate.** In a `gated` lane a card filed by another card, or by a `match` creator or key prefix, starts in `triage` with `block_kind = lane_gate` until it is admitted. The user's own cards (`created_by: user`), alarm-keyed and `urgent` cards, and `gate_exempt` titles under an admitted creating card are not held. A held card that an open card of another lane is linked to wait on is admitted at once, outside the budget. The stale-triage sweep leaves held cards alone.
+- **Shadow mode.** `lane_shadow: true` is the step before enforcement: cards are classified and `hermes kanban lanes` reports them, and each `lane_assigned` event records `would_gate`, but the gate, the cap, the lane ordering and `paused` do nothing.
 - **Priority cap.** `agent_priority_cap` bounds the stored priority of a card the user did not create, at creation.
 
 `hermes kanban lanes` (default `show`) prints target against actual share of run-hours over `--hours` (default 6), running, ready, held and open cards per lane; on a synced board it reads the fleet replica unless `--local`. `held` and `unclassified` list cards; `assign <id> <lane>`, `admit <id>`, `pin <id> [--off]` and `set <lane> [--share N] [--admit-per-day N] [--pause|--resume]` are the controls; `explain <id>` says which lane a card is in and why it waits.

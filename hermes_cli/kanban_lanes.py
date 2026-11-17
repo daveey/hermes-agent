@@ -5,6 +5,7 @@ A card's lane is ``tasks.tenant``. ``kanban.admission.lanes`` in the installatio
     kanban:
       admission:
         lane_default: other          # lane of a card nothing else places
+        lane_shadow: false           # true = classify and report only: no gate, no cap, no reordering
         agent_priority_cap: 100      # stored priority ceiling for cards the user did not create
         lanes:
           babybear: {share: 35, describe: "..."}
@@ -22,6 +23,10 @@ parent's or creating card's lane, then the default) and holds a gated lane's age
 ``block_kind='lane_gate'``. Ordering (:func:`order`) gives each free slot to the lane running the fewest cards
 relative to its share; a lane with nothing ready lends its share, so shares are targets and never ceilings.
 :func:`usage` reports target against actual.
+
+``lane_shadow: true`` is the rollout step before enforcement: cards are classified and reported, and each
+``lane_assigned`` event says whether the card would have been held (``would_gate``), but nothing is held, capped,
+reordered or paused.
 
 With no ``lanes`` mapping every function here is a no-op: creation, ordering and the triage sweep are unchanged.
 A malformed mapping is logged and treated as absent on the creation and dispatch paths (a config typo must not stop
@@ -68,6 +73,7 @@ class Policy:
     lanes: dict
     default: str
     priority_cap: Optional[int]
+    shadow: bool = False
 
     def lane_of(self, tenant) -> str:
         return tenant if tenant in self.lanes else self.default
@@ -80,6 +86,7 @@ class Decision:
     source: Optional[str] = None
     gated: bool = False
     cap: Optional[int] = None
+    would_gate: bool = False
 
     def priority(self, value: int) -> int:
         from hermes_cli.kanban_priority import bounded
@@ -145,7 +152,10 @@ def parse(admission: dict) -> Optional[Policy]:
     cap = admission.get("agent_priority_cap")
     if cap is not None and type(cap) is not int:
         raise ValueError("kanban.admission.agent_priority_cap must be an integer")
-    return Policy(lanes, default, cap)
+    shadow = admission.get("lane_shadow", False)
+    if type(shadow) is not bool:
+        raise ValueError("kanban.admission.lane_shadow must be true or false")
+    return Policy(lanes, default, cap, shadow)
 
 
 def policy() -> Optional[Policy]:
@@ -233,8 +243,10 @@ def initial_state(conn, parents, initial_status, triage, tenant, opts) -> tuple[
         return status, inherited, Decision()
     lane, source = _classify(conn, pol, tenant, inherited, opts)
     gated = status in ("ready", "todo") and _gated(conn, pol, lane, opts)
+    if pol.shadow:
+        return status, lane, Decision(lane, source, would_gate=gated)
     cap = None if opts.get("created_by") == USER else pol.priority_cap
-    return ("triage" if gated else status), lane, Decision(lane, source, gated, cap)
+    return ("triage" if gated else status), lane, Decision(lane, source, gated, cap, gated)
 
 
 def record(conn, task_id: str, decision: Optional[Decision]) -> None:
@@ -243,7 +255,8 @@ def record(conn, task_id: str, decision: Optional[Decision]) -> None:
         return
     from hermes_cli.kanban_db import _append_event
 
-    _append_event(conn, task_id, ASSIGNED, {"lane": decision.lane, "source": decision.source})
+    _append_event(conn, task_id, ASSIGNED, {"lane": decision.lane, "source": decision.source,
+                                            "would_gate": decision.would_gate})
     if decision.source == "unclassified":
         _append_event(conn, task_id, UNCLASSIFIED, {"lane": decision.lane})
     if decision.gated:
@@ -381,7 +394,7 @@ def order(conn, scored: list, *, pol: Optional[Policy] = None) -> list:
     Cards of a paused lane sort last (``drop_paused`` removes them from dispatch). No lanes = unchanged.
     """
     pol = safe_policy() if pol is None else pol
-    if pol is None or len(scored) < 2:
+    if pol is None or pol.shadow or len(scored) < 2:
         return scored
     lanes, alarms = _candidate_lanes(conn, pol, [row["id"] for row, _parts in scored])
     front, queues, paused = [], {}, []
@@ -413,7 +426,7 @@ def order(conn, scored: list, *, pol: Optional[Policy] = None) -> list:
 def drop_paused(conn, rows: list) -> list:
     """Dispatch candidates minus cards of a paused lane (alarm and marked cards are never paused)."""
     pol = safe_policy()
-    if pol is None or not rows or not any(lane.paused for lane in pol.lanes.values()):
+    if pol is None or pol.shadow or not rows or not any(lane.paused for lane in pol.lanes.values()):
         return rows
     lanes, alarms = _candidate_lanes(conn, pol, [row["id"] for row in rows])
 

@@ -239,3 +239,21 @@ def test_usage_reports_target_actual_and_backlog(conn, configured):
     assert out["hermes"]["run_seconds"] == 3600 and out["hermes"]["actual"] == 1.0
     assert out["hermes"]["held"] == 1 and out["babybear"]["ready"] == 1
     assert round(out["babybear"]["target"], 3) == round(35 / 65, 3)
+
+
+def test_shadow_classifies_and_reports_but_holds_caps_and_reorders_nothing(conn, configured):
+    configured(lane_shadow=True)
+    parent = _hermes_parent(conn)
+    child = kb.create_task(conn, title="follow-up", assignee="default", priority=1000, creator_task_id=parent,
+                           workspace_path="/src/hermes-agent")
+    row = _task(conn, child)
+    assert (row["status"], row["tenant"], row["priority"], row["block_kind"]) == ("ready", "hermes", 1000, None)
+    payload = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?",
+                                      (child, lanes.ASSIGNED)).fetchone()[0])
+    assert payload["would_gate"] is True and lanes.GATED not in _kinds(conn, child)
+    conn.execute("UPDATE tasks SET status='running' WHERE id=?", (parent,))
+    conn.commit()
+    bb = _ready_in(conn, "babybear", "bb")
+    assert _order(conn) == [child, bb]  # plain score order; enforced, the idle Baby Bear lane would go first
+    configured()
+    assert _order(conn) == [bb, child]

@@ -3628,7 +3628,7 @@ kanban:
     cpu_busy_below_pct: 50   # absent/null = gate off (default)
 ```
 
-`kanban.admission.lanes`, `kanban.admission.lane_default` and `kanban.admission.agent_priority_cap` (all default unset: off) configure project lanes; see [Project lanes](features/kanban.md#project-lanes).
+`kanban.admission.lanes`, `kanban.admission.lane_default`, `kanban.admission.lane_shadow` and `kanban.admission.agent_priority_cap` (all default unset: off) configure project lanes; see [Project lanes](features/kanban.md#project-lanes).
 
 `kanban.admission.cpu_busy_below_pct` (default unset: off) turns on the measured-CPU admission gate on a host that takes overflow work from the Board's worker-first placement. It is read only from the installation-root `config.yaml`, never from a profile override. When set:
 
