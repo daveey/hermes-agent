@@ -35,6 +35,21 @@ def run_bash(tmp_path, command):
     )
 
 
+def bash_reads_env_for(tmp_path, command):
+    """Whether this host's Bash runs the $ENV file for ``command``.
+
+    macOS /bin/bash 3.2.57 skips $ENV for ``bash --posix -ic CMD`` (also with ``-o posix`` or
+    POSIXLY_CORRECT, relative or absolute path) but runs it for ``sh -ic CMD`` and
+    ``bash --posix -i script``. Bash 5 (CI) runs it for all of them. Only the real-shell
+    premise depends on the host: the scanner must flag the shape everywhere, because a
+    gateway may run either Bash.
+    """
+    if " --posix -ic " not in f" {command} ":
+        return True
+    major = run_bash(tmp_path, "bash -c 'echo \"${BASH_VERSINFO[0]}\"'").stdout.strip()
+    return int(major) >= 4
+
+
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("command", SHAPES)
 def test_startup_script_marker_and_clean_twin(tmp_path, command):
@@ -44,8 +59,11 @@ def test_startup_script_marker_and_clean_twin(tmp_path, command):
     startup.write_text("touch ran\n")
     result = run_bash(tmp_path, command)
     assert result.returncode == 0, result.stderr
-    assert marker.exists(), result.stderr
-    marker.unlink()
+    if bash_reads_env_for(tmp_path, command):
+        assert marker.exists(), result.stderr
+        marker.unlink()
+    else:
+        assert not marker.exists(), "this Bash now runs $ENV here: drop the exception"
     startup.write_text("hermes gateway restart\n")
     assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (True, None)
     startup.write_text("touch ran\n")
