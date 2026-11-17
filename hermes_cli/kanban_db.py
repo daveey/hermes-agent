@@ -3444,12 +3444,12 @@ def decomposition_refusal(conn: sqlite3.Connection, task_id: str) -> Optional[st
     set or any ``task_runs`` row) carries shipped work and handoffs the LLM does
     not see; re-decomposing it from its body re-implements the shipped feature.
     A ``block_loop_detected`` escalation is a wait for a human, not a request
-    for a new spec. Either way the exit is ``hermes kanban promote`` /
-    ``kanban_unblock`` (triage -> ready). [daveey]
+    for a new spec. Either way the exit is ``hermes kanban promote`` / ``kanban_unblock`` (triage -> ready). [daveey]
     """
+    from hermes_cli.kanban_lanes import gate_refusal
     row = conn.execute("SELECT started_at FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    if row is None:
-        return None
+    if row is None or (held := gate_refusal(conn, task_id)):
+        return held if row is not None else None
     ran = row["started_at"] is not None or conn.execute(
         "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (task_id,),
     ).fetchone() is not None

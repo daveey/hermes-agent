@@ -46,8 +46,22 @@ _LOG = logging.getLogger(__name__)
 
 ASSIGNED, UNCLASSIFIED, GATED, ADMITTED = "lane_assigned", "lane_unclassified", "lane_gated", "lane_admitted"
 GATE_KIND = "lane_gate"
-USER = "user"
+# Creator labels a person's own surfaces write: the CLI in a human shell and the dashboard. A soft policy
+# input, not authorization: an agent shell that writes "user" is caught by ``_by_user`` below.
+USER_CREATORS = frozenset({"user", "dashboard"})
+# Kernel recovery cards (resume requester, no-progress stop) exist to get a stuck card moving; holding them
+# strands the card they were filed for.
+RECOVERY_CREATORS = frozenset({"kanban-recovery", "kanban-no-progress"})
 DEFAULT_LANE = "other"
+# A card waiting at a lane gate: never started, in triage, carrying the gate mark. The no-runs clause keeps a
+# card that was released by another verb, ran, and was later sent back to triage from reading as held again.
+def held_sql(alias: str = "tasks") -> str:
+    # COALESCE: a NULL block_kind must make this false, not NULL, or ``NOT (held)`` drops every unmarked card.
+    return (f"{alias}.status = 'triage' AND COALESCE({alias}.block_kind, '') = 'lane_gate' "
+            f"AND NOT EXISTS (SELECT 1 FROM task_runs hr WHERE hr.task_id = {alias}.id)")
+
+
+HELD = held_sql()
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 _OPEN = "('triage', 'todo', 'scheduled', 'ready', 'running', 'blocked', 'review')"
 
@@ -168,9 +182,32 @@ def safe_policy() -> Optional[Policy]:
     """:func:`policy` for creation and dispatch: a malformed mapping is logged and reads as no lanes."""
     try:
         return policy()
-    except ValueError:
-        _LOG.warning("kanban.admission.lanes is malformed; lanes are off until it is fixed", exc_info=True)
+    except Exception:  # health: allow BLE001 -- an unreadable or malformed config must never stop card creation
+        _LOG.warning("kanban.admission.lanes is unreadable or malformed; lanes are off until it is fixed",
+                     exc_info=True)
         return None
+
+
+def enforced() -> Optional[Policy]:
+    """The policy when lanes are configured and not in shadow mode, else None."""
+    pol = safe_policy()
+    return None if pol is None or pol.shadow else pol
+
+
+def held_exclusion(alias: str = "tasks") -> str:
+    """SQL (on table alias ``alias``) that keeps gate-held cards out of a triage consumer while the gate is enforced;
+    empty when lanes are off or in shadow, so held cards left behind by a rollback are swept like any other."""
+    return f" AND NOT ({held_sql(alias)})" if enforced() is not None else ""
+
+
+def gate_refusal(conn, task_id: str) -> Optional[str]:
+    """Why a card must not be specified, decomposed or swept: it waits at an enforced lane gate."""
+    if enforced() is None:
+        return None
+    row = conn.execute(f"SELECT 1 FROM tasks WHERE id = ? AND {HELD}", (task_id,)).fetchone()
+    if row is None:
+        return None
+    return f"task waits at its lane gate; release it with `hermes kanban lanes admit {task_id}`"
 
 
 # ── creation ────────────────────────────────────────────────────────────────
@@ -189,18 +226,37 @@ def _rule_lane(pol: Policy, opts: dict) -> Optional[str]:
     return None
 
 
+def _agent_task(opts: dict) -> Optional[str]:
+    """The card whose worker is creating this one: the explicit creator, else the worker shell's own card."""
+    return opts.get("creator_task_id") or os.environ.get("HERMES_KANBAN_WORKER_TASK") \
+        or os.environ.get("HERMES_KANBAN_TASK") or None
+
+
+def _by_user(opts: dict) -> bool:
+    """Created by the person, not an agent: a user creator label and no worker card behind the call.
+
+    ``hermes kanban create`` writes ``created_by='user'`` for every caller, so the label alone would let any
+    worker shell skip the gate and the cap; a worker's shell carries its card in the environment.
+    """
+    return opts.get("created_by") in USER_CREATORS and _agent_task(opts) is None
+
+
 def _creator_row(conn, opts):
-    creator = opts.get("creator_task_id")
+    creator = _agent_task(opts)
     if not creator:
         return None
     return conn.execute("SELECT tenant, status, block_kind FROM tasks WHERE id = ?", (creator,)).fetchone()
 
 
 def _classify(conn, pol: Policy, given, inherited, opts) -> tuple[str, str]:
-    if given:
+    """``given`` is the user's explicit lane. An agent's is only a hint: workers inherit ``HERMES_TENANT`` from
+    their card and pass it on every create, so a ``match`` rule must win over it."""
+    if given and _by_user(opts):
         return given, "given"
     if lane := _rule_lane(pol, opts):
         return lane, "rule"
+    if given:
+        return given, "inherited"
     if not inherited and (row := _creator_row(conn, opts)) is not None:
         inherited = row["tenant"]
     if inherited:
@@ -213,10 +269,10 @@ def _gated(conn, pol: Policy, lane_name: str, opts: dict) -> bool:
     from hermes_cli.kanban_admission_score import _alarm_key
 
     lane = pol.lanes.get(lane_name)
-    if lane is None or not lane.gated or opts.get("created_by") == USER:
+    if lane is None or not lane.gated or _by_user(opts) or opts.get("created_by") in RECOVERY_CREATORS:
         return False
     key = opts.get("idempotency_key")
-    filed_by_agent = bool(opts.get("creator_task_id")) or opts.get("created_by") in lane.creators \
+    filed_by_agent = bool(_agent_task(opts)) or opts.get("created_by") in lane.creators \
         or _key_matches(lane, key)
     if not filed_by_agent or _alarm_key(key) or opts.get("admission_class") == "urgent":
         return False
@@ -227,6 +283,11 @@ def _gated(conn, pol: Policy, lane_name: str, opts: dict) -> bool:
         if row is not None and not (row["status"] == "triage" and row["block_kind"] == GATE_KIND):
             return False
     return True
+
+
+def lane_tenant(conn, parents, initial_status, triage, tenant, opts) -> Optional[str]:
+    """The tenant :func:`initial_state` will store, for callers that must match existing cards before creating."""
+    return initial_state(conn, parents, initial_status, triage, tenant, opts)[1]
 
 
 def initial_state(conn, parents, initial_status, triage, tenant, opts) -> tuple[str, Optional[str], Decision]:
@@ -245,7 +306,7 @@ def initial_state(conn, parents, initial_status, triage, tenant, opts) -> tuple[
     gated = status in ("ready", "todo") and _gated(conn, pol, lane, opts)
     if pol.shadow:
         return status, lane, Decision(lane, source, would_gate=gated)
-    cap = None if opts.get("created_by") == USER else pol.priority_cap
+    cap = None if _by_user(opts) else pol.priority_cap
     return ("triage" if gated else status), lane, Decision(lane, source, gated, cap, gated)
 
 
@@ -284,11 +345,10 @@ def assign(conn, task_id: str, lane: str, *, source: str, reason: str, pol: Opti
 
 def held(conn, lane: Optional[str] = None) -> list[sqlite3.Row]:
     """Cards waiting at a lane gate, oldest first."""
-    sql = ("SELECT id, title, tenant, priority, created_at, created_by FROM tasks "
-           "WHERE status = 'triage' AND block_kind = ?")
-    params: tuple = (GATE_KIND,)
+    sql = f"SELECT id, title, tenant, priority, created_at, created_by FROM tasks WHERE {HELD}"
+    params: tuple = ()
     if lane is not None:
-        sql, params = sql + " AND tenant = ?", (GATE_KIND, lane)
+        sql, params = sql + " AND tenant = ?", (lane,)
     return conn.execute(sql + " ORDER BY created_at, id", params).fetchall()
 
 
@@ -311,8 +371,7 @@ def admit(conn, task_id: str, *, actor: str, reason: str, budget: bool = True) -
     from hermes_cli import kanban_db as kb
 
     with kb.write_txn(conn, allow_nested=True):
-        row = conn.execute("SELECT tenant FROM tasks WHERE id = ? AND status = 'triage' AND block_kind = ?",
-                           (task_id, GATE_KIND)).fetchone()
+        row = conn.execute(f"SELECT tenant FROM tasks WHERE id = ? AND {HELD}", (task_id,)).fetchone()
         if row is None:
             return False
         waiting = any(state not in ("done", "archived") for _pid, state in kb.parent_states(conn, task_id))
@@ -324,17 +383,22 @@ def admit(conn, task_id: str, *, actor: str, reason: str, budget: bool = True) -
 
 
 def release_blocker(conn, parent_id: str, child_id: str) -> None:
-    """A gate-held card that another lane's open card now waits on is admitted outside the budget."""
-    rows = {r["id"]: r for r in conn.execute(
-        f"SELECT id, tenant, status, block_kind, status IN {_OPEN} AS open FROM tasks WHERE id IN (?, ?)",
-        (parent_id, child_id))}
-    parent, child = rows.get(parent_id), rows.get(child_id)
-    if parent is None or child is None or not child["open"]:
+    """A gate-held card that another lane's open, runnable card now waits on is admitted outside the budget.
+
+    Not when the waiting card is itself held, and not for a title the lane never auto-admits.
+    """
+    parent = conn.execute(f"SELECT title, tenant FROM tasks WHERE id = ? AND {HELD}", (parent_id,)).fetchone()
+    if parent is None:
         return
-    if parent["status"] != "triage" or parent["block_kind"] != GATE_KIND:
+    child = conn.execute(f"SELECT tenant, status IN {_OPEN} AS open, ({HELD}) AS held FROM tasks WHERE id = ?",
+                         (child_id,)).fetchone()
+    if child is None or not child["open"] or child["held"]:
         return
-    pol = safe_policy()
+    pol = enforced()
     if pol is None or pol.lane_of(child["tenant"]) == pol.lane_of(parent["tenant"]):
+        return
+    lane = pol.lanes[pol.lane_of(parent["tenant"])]
+    if any(p.search(parent["title"] or "") for p in lane.never_admit):
         return
     admit(conn, parent_id, actor="link", reason=f"{child_id} in lane {pol.lane_of(child['tenant'])} waits on it",
           budget=False)
@@ -389,7 +453,7 @@ def _candidate_lanes(conn, pol: Policy, ids: list[str]) -> tuple[dict[str, str],
 def order(conn, scored: list, *, pol: Optional[Policy] = None) -> list:
     """Reorder ``kanban_admission_score.rank``'s sorted ``(row, breakdown)`` list by lane share.
 
-    Land-turn owners, marked classes and alarm cards keep their place at the front. Every other pick goes to
+    Land-turn owners, marked classes and alarm cards go first, in their score order, ahead of every lane pick. Every other pick goes to
     the lane with the fewest ``(running + already picked) / share``; inside a lane the score order is kept.
     Cards of a paused lane sort last (``drop_paused`` removes them from dispatch). No lanes = unchanged.
     """
@@ -469,8 +533,6 @@ def usage(conn, pol: Policy, *, window_s: int, now: Optional[float] = None) -> d
             row["ready"] += count
             age = now - int(oldest or now)
             row["oldest_ready_s"] = age if row["oldest_ready_s"] is None else max(row["oldest_ready_s"], age)
-        elif status == "triage" and kind == GATE_KIND:
-            row["held"] += count
     for tenant, count in conn.execute(
             "SELECT tenant, COUNT(*) FROM tasks WHERE status = 'done' AND completed_at > ? GROUP BY tenant", (cutoff,)):
         out[pol.lane_of(tenant)]["done"] += count
@@ -488,6 +550,8 @@ def usage(conn, pol: Policy, *, window_s: int, now: Optional[float] = None) -> d
         row["cost_usd"] = round(row["cost_usd"] + float(cost or 0), 2)
         row["tokens"] += int(tokens or 0)
         row["usage_runs"] += runs
+    for tenant, count in conn.execute(f"SELECT tenant, COUNT(*) FROM tasks WHERE {HELD} GROUP BY tenant"):
+        out[pol.lane_of(tenant)]["held"] += count
     total_share = sum(lane.share for lane in pol.lanes.values() if not lane.paused) or 1
     total_run = sum(row["run_seconds"] for row in out.values()) or 1
     for name, row in out.items():

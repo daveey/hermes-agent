@@ -90,9 +90,9 @@ def admit(conn, *, request_id, authority, local_gateway, options, now, create_gu
         prior = replay(conn, request_id, request)
         if prior is not None:
             return prior
-        from hermes_cli.kanban_db_graph import initial_task_state
-        tenant = initial_task_state(conn, tuple(options.get('parents', ())), options.get('initial_status', 'running'),
-                                    options.get('triage', False), options.get('tenant'))[1]
+        from hermes_cli.kanban_lanes import lane_tenant
+        tenant = lane_tenant(conn, tuple(options.get('parents', ())), options.get('initial_status', 'running'),
+                             options.get('triage', False), options.get('tenant'), options)
         decision = batch.choose(conn, value, now=now, tenant=tenant)
         if decision.disposition == 'append':
             receipt = batch.append(conn, decision, value, request_id=request_id,
@@ -145,8 +145,9 @@ def append_existing(conn, *, request_id, authority, options, request, now):
         prior = replay(conn, request_id, request)
         if prior is not None:
             return prior
-        tenant = initial_task_state(conn, tuple(options.get('parents', ())), options.get('initial_status', 'running'),
-                                    options.get('triage', False), options.get('tenant'))[1]
+        from hermes_cli.kanban_lanes import lane_tenant
+        tenant = lane_tenant(conn, tuple(options.get('parents', ())), options.get('initial_status', 'running'),
+                             options.get('triage', False), options.get('tenant'), options)
         if batch.choose(conn, value, now=now, tenant=tenant).disposition != 'append':
             return None
         return admit(conn, request_id=request_id, authority=authority, local_gateway=authority,

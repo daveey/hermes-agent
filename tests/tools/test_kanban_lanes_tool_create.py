@@ -35,7 +35,8 @@ def _configure():
     from hermes_constants import get_default_hermes_root
 
     doc = {"kanban": {"admission": {"agent_priority_cap": 100, "lanes": {
-        "hermes": {"share": 1, "gated": True}, "other": {"share": 1}}}}}
+        "hermes": {"share": 1, "gated": True, "match": {"key_prefixes": ["ci-main-watch:"]}},
+        "product": {"share": 1}, "other": {"share": 1}}}}}
     (Path(get_default_hermes_root()) / "config.yaml").write_text(json.dumps(doc))
 
 
@@ -67,3 +68,26 @@ def test_tool_created_card_without_lanes_is_unchanged(worker_card):
         row = conn.execute("SELECT status, tenant, block_kind FROM tasks WHERE id=?",
                            (result["task_id"],)).fetchone()
     assert tuple(row) == ("ready", None, None)
+
+
+def test_worker_in_another_lane_filing_a_rule_matched_card_is_held(worker_card, monkeypatch):
+    """Workers pass their own card's lane (HERMES_TENANT) on every create; a match rule must still win."""
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_lanes as lanes
+    from tools import kanban_tools as kt
+
+    _configure()
+    with kbc.connect() as conn:
+        conn.execute("UPDATE tasks SET tenant='product' WHERE id=?", (worker_card,))
+        conn.commit()
+    monkeypatch.setenv("HERMES_TENANT", "product")
+    result = json.loads(kt._handle_create({"title": "main is red", "assignee": "test-worker",
+                                           "idempotency_key": "ci-main-watch:abc"}))
+    assert "error" not in result, result
+    with kbc.connect() as conn:
+        row = conn.execute("SELECT status, tenant, block_kind FROM tasks WHERE id=?", (result["task_id"],)).fetchone()
+    assert tuple(row) == ("triage", "hermes", lanes.GATE_KIND)
+    plain = json.loads(kt._handle_create({"title": "product follow-up", "assignee": "test-worker"}))
+    with kbc.connect() as conn:
+        row = conn.execute("SELECT status, tenant FROM tasks WHERE id=?", (plain["task_id"],)).fetchone()
+    assert tuple(row) == ("ready", "product")

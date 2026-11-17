@@ -203,6 +203,10 @@ def specify_task(
     task, reason = _load_triage_task(task_id)
     if task is None:
         return SpecifyOutcome(task_id, False, reason)
+    from hermes_cli.kanban_lanes import gate_refusal
+    with kbc.connect_closing() as conn:
+        if held := gate_refusal(conn, task_id):
+            return SpecifyOutcome(task_id, False, held)
 
     raw, reason = _call_aux(
         "specify", task_id, aux_task="triage_specifier", system=_SYSTEM_PROMPT,
@@ -241,7 +245,8 @@ def specify_task(
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Task ids eligible for specification; ``tenant`` narrows the sweep."""
     from hermes_cli.kanban_goal_recovery import current_park
+    from hermes_cli.kanban_lanes import gate_refusal
 
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-        return [t.id for t in tasks if not current_park(conn, t.id)]
+        return [t.id for t in tasks if not current_park(conn, t.id) and not gate_refusal(conn, t.id)]

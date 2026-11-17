@@ -21,6 +21,13 @@ LANES = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _human_shell(monkeypatch):
+    """These tests create cards as a person would; a worker running the suite carries its own card in the env."""
+    for name in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKER_TASK", "HERMES_TENANT"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def configured(conn, monkeypatch):
     def write(mapping=None, **admission):
@@ -257,3 +264,122 @@ def test_shadow_classifies_and_reports_but_holds_caps_and_reorders_nothing(conn,
     assert _order(conn) == [child, bb]  # plain score order; enforced, the idle Baby Bear lane would go first
     configured()
     assert _order(conn) == [bb, child]
+
+
+def _held_card(conn, title="infra"):
+    parent = _hermes_parent(conn)
+    return parent, kb.create_task(conn, title=title, assignee="default", creator_task_id=parent,
+                                  workspace_path="/src/hermes-agent")
+
+
+def test_decompose_and_specify_leave_held_cards_alone_while_enforced(conn, configured):
+    from hermes_cli import kanban_decompose, kanban_specify
+
+    _parent, held = _held_card(conn)
+    plain = kb.create_task(conn, title="needs a spec", assignee="default", triage=True, tenant="babybear",
+                           created_by="user")
+    assert "lane gate" in kb.decomposition_refusal(conn, held)
+    assert kb.decomposition_refusal(conn, plain) is None
+    assert kanban_decompose.list_triage_ids() == [plain]
+    assert kanban_specify.list_triage_ids() == [plain]
+    assert kanban_specify.specify_task(held).ok is False
+    assert _task(conn, held)["status"] == "triage"
+    configured(lane_shadow=True)  # rolled back: a held card is ordinary triage again
+    assert kb.decomposition_refusal(conn, held) is None
+    assert set(kanban_decompose.list_triage_ids()) == {plain, held}
+
+
+def test_rollback_lets_the_sweep_take_held_cards(conn, configured):
+    from hermes_cli.kanban_triage_sweep import sweep_stale_triage
+
+    _parent, held = _held_card(conn)
+    conn.execute("UPDATE tasks SET created_at = created_at - 100000")
+    conn.execute("UPDATE task_events SET created_at = created_at - 100000")
+    conn.commit()
+    assert held not in sweep_stale_triage(conn)
+    configured(lane_shadow=True)
+    assert held in sweep_stale_triage(conn)
+
+
+def test_worker_shell_create_is_an_agent_whatever_created_by_says(conn, configured, monkeypatch):
+    parent = _hermes_parent(conn)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", parent)
+    shelled = kb.create_task(conn, title="x", assignee="default", priority=1000, created_by="user",
+                             workspace_path="/src/hermes-agent")
+    row = _task(conn, shelled)
+    assert (row["status"], row["priority"], row["block_kind"]) == ("triage", 100, lanes.GATE_KIND)
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    dash = kb.create_task(conn, title="mine", assignee="default", priority=500, created_by="dashboard",
+                          workspace_path="/src/hermes-agent")
+    row = _task(conn, dash)
+    assert (row["status"], row["priority"]) == ("ready", 500)
+
+
+def test_rule_wins_over_a_tenant_an_agent_passed(conn, configured):
+    bb = kb.create_task(conn, title="bb", assignee="default", created_by="user", tenant="babybear")
+    by_key = kb.create_task(conn, title="main is red", assignee="default", creator_task_id=bb, tenant="babybear",
+                            idempotency_key="ci-main-watch:abc")
+    row = _task(conn, by_key)
+    assert (row["tenant"], row["status"]) == ("hermes", "triage")
+    passed = kb.create_task(conn, title="bb follow-up", assignee="default", creator_task_id=bb, tenant="babybear")
+    assert _task(conn, passed)["tenant"] == "babybear"
+    payload = json.loads(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?",
+                                      (passed, lanes.ASSIGNED)).fetchone()[0])
+    assert payload["source"] == "inherited"  # the planner may still move it
+
+
+def test_classified_by_self_work_declaration_matches_what_intake_looks_up(conn, configured):
+    opts = {"self_work": {"area": "x"}, "created_by": "default"}
+    assert lanes.lane_tenant(conn, (), "running", False, None, opts) == "hermes"
+    assert lanes.lane_tenant(conn, (), "running", False, None, {"created_by": "default"}) == "other"
+
+
+def test_recovery_cards_are_not_held(conn, configured):
+    parent = _hermes_parent(conn)
+    tid = kb.create_task(conn, title="Unstick core work", assignee="default", creator_task_id=parent,
+                         created_by="kanban-recovery", tenant="hermes")
+    assert _task(conn, tid)["status"] == "ready"
+
+
+def test_link_release_needs_a_runnable_waiter_and_respects_never_admit(conn, configured):
+    parent, held = _held_card(conn)
+    other_held = kb.create_task(conn, title="more infra", assignee="default", creator_task_id=parent,
+                                workspace_path="/src/hermes-agent")
+    kb.link_tasks(conn, held, other_held)  # the waiter is itself held, and in the same lane
+    assert _task(conn, held)["status"] == "triage"
+    guard = kb.create_task(conn, title="Lifecycle guard false refusal", assignee="default",
+                           creator_task_id=parent, workspace_path="/src/hermes-agent")
+    bb = _ready_in(conn, "babybear", "bb")
+    kb.link_tasks(conn, guard, bb)
+    assert _task(conn, guard)["status"] == "triage"
+    bb2 = _ready_in(conn, "babybear", "bb2")
+    kb.link_tasks(conn, held, bb2)  # the kanban link path, not create(parents=...)
+    assert _task(conn, held)["status"] == "ready"
+
+
+def test_a_card_that_ran_and_returned_to_triage_is_not_held(conn, configured):
+    _parent, held = _held_card(conn)
+    ok, _why = kb.promote_task(conn, held, actor="user")
+    assert ok
+    conn.execute("INSERT INTO task_runs (task_id, status, started_at, ended_at) VALUES (?, 'done', 1, 2)", (held,))
+    conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (held,))  # a spend or no-progress stop
+    conn.commit()
+    assert lanes.held(conn) == [] and not lanes.admit(conn, held, actor="user", reason="x")
+
+
+def test_capacity_and_alarm_cards_go_ahead_of_lane_picks(conn, configured):
+    normal = _ready_in(conn, "babybear", "bb", priority=900)
+    capacity = kb.create_task(conn, title="free a slot", assignee="default", tenant="hermes", created_by="user",
+                              admission_class="capacity", admission_frees="frees: one worker slot")
+    alarm = kb.create_task(conn, title="stalled", assignee="default", tenant="hermes", created_by="user",
+                           idempotency_key="pickup-stall:t_1")
+    order = _order(conn)
+    assert set(order[:2]) == {capacity, alarm} and order[2] == normal
+
+
+def test_unreadable_config_does_not_break_creation(conn, configured):
+    from hermes_constants import get_default_hermes_root
+
+    (Path(get_default_hermes_root()) / "config.yaml").write_text("kanban: [unclosed")
+    tid = kb.create_task(conn, title="still works", assignee="default")
+    assert _task(conn, tid)["status"] == "ready"

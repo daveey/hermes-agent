@@ -21,9 +21,11 @@ def _fleet(conn, local: bool):
         return None
     from hermes_cli import kanban_worker_node as wn
 
+    import sqlite3
+
     try:
         return wn.open_replica(conn)
-    except RuntimeError:
+    except (RuntimeError, sqlite3.Error, OSError):
         return None
 
 
@@ -114,7 +116,8 @@ def _admit(args) -> int:
     from hermes_cli.kanban_cli_actor import cli_actor
 
     with kbc.connect_closing() as conn:
-        done = lanes.admit(conn, args.task_id, actor=cli_actor(), reason=args.reason or "")
+        # The user's own admit does not spend the planner's daily budget.
+        done = lanes.admit(conn, args.task_id, actor=cli_actor(), reason=args.reason or "", budget=False)
     print(f"{args.task_id}: {'admitted' if done else 'not held at a lane gate'}")
     return 0 if done else 1
 
@@ -130,8 +133,17 @@ def _pin(args) -> int:
 
 
 def set_lane(lane: str, *, share=None, admit_per_day=None, paused=None) -> None:
-    """Change one lane's share, daily admit budget or pause state in the root config; raises ValueError."""
-    from hermes_cli.config import set_config_value
+    """Change one lane's share, daily admit budget or pause state; raises ValueError.
+
+    Written to the installation-root ``config.yaml``, the file the policy is read from, whatever profile the
+    caller runs under: a profile's own config never holds lanes.
+    """
+    import copy
+    from pathlib import Path
+
+    from hermes_constants import get_default_hermes_root
+    from hermes_cli.config import atomic_config_write
+    from hermes_cli.config_backend import read_config_doc_readonly
 
     pol = lanes.policy()
     if pol is None or lane not in pol.lanes:
@@ -140,13 +152,20 @@ def set_lane(lane: str, *, share=None, admit_per_day=None, paused=None) -> None:
         raise ValueError("share must be a nonnegative number")
     if admit_per_day is not None and (type(admit_per_day) is not int or admit_per_day < 0):
         raise ValueError("admit_per_day must be a nonnegative integer")
+    if paused is not None and type(paused) is not bool:
+        raise ValueError("paused must be true or false")
     changes = {"share": share, "admit_per_day": admit_per_day, "paused": paused}
     changes = {key: value for key, value in changes.items() if value is not None}
     if not changes:
         raise ValueError("nothing to set: give a share, a daily admit budget, pause or resume")
-    for key, value in changes.items():
-        set_config_value(f"kanban.admission.lanes.{lane}.{key}", str(value).lower())
-    lanes.policy()  # a write that left the mapping malformed fails here, loudly
+    path = Path(get_default_hermes_root()) / "config.yaml"
+    doc = copy.deepcopy(read_config_doc_readonly(path))
+    spec = doc["kanban"]["admission"]["lanes"]
+    if spec[lane] is None:
+        spec[lane] = {}
+    spec[lane].update(changes)
+    lanes.parse(doc["kanban"]["admission"])  # refuse to write a mapping the policy would reject
+    atomic_config_write(path, doc)
 
 
 def _set(args) -> int:
@@ -176,7 +195,7 @@ def _explain(args) -> int:
 
     with kbc.connect_closing() as conn:
         pol = lanes.policy()
-        row = conn.execute("SELECT id, title, tenant, status, block_kind FROM tasks WHERE id = ?",
+        row = conn.execute(f"SELECT id, title, tenant, status, ({lanes.HELD}) AS held FROM tasks WHERE id = ?",
                            (args.task_id,)).fetchone()
         if pol is None or row is None:
             print("no lanes configured" if pol is None else f"no such task: {args.task_id}")
@@ -184,7 +203,7 @@ def _explain(args) -> int:
         lane = pol.lanes[pol.lane_of(row["tenant"])]
         load = lanes._running(conn, pol)
         data = {"id": row["id"], "lane": lane.name, "source": plan.lane_source(conn, row["id"]),
-                "status": row["status"], "held_at_gate": row["block_kind"] == lanes.GATE_KIND,
+                "status": row["status"], "held_at_gate": bool(row["held"]),
                 "paused": lane.paused, "pinned": plan.pinned(conn, row["id"]),
                 "running_per_share": {name: (round(load[name] / spec.share, 3) if spec.share else None)
                                       for name, spec in pol.lanes.items()}}

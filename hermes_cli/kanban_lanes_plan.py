@@ -65,21 +65,21 @@ def _card(conn, task_id):
                         (task_id,)).fetchone()
 
 
-def _held(row) -> bool:
-    return row["status"] == "triage" and row["block_kind"] == lanes.GATE_KIND
+def _held(conn, row) -> bool:
+    return conn.execute(f"SELECT 1 FROM tasks WHERE id = ? AND {lanes.HELD}", (row["id"],)).fetchone() is not None
 
 
 def _admit(conn, pol, action, row, state) -> Optional[str]:
-    if not _held(row):
+    if not _held(conn, row):
         return "card is not held at a lane gate"
     lane = pol.lanes[pol.lane_of(row["tenant"])]
     if any(p.search(row["title"] or "") for p in lane.never_admit):
         return f"lane {lane.name} never auto-admits this kind of card"
-    used = state.setdefault(lane.name, lanes.admitted_today(conn, lane.name, now=state["now"]))
+    used = state["used"].setdefault(lane.name, lanes.admitted_today(conn, lane.name, now=state["now"]))
     if lane.admit_per_day is not None and used >= lane.admit_per_day:
         return f"lane {lane.name} admit budget spent ({used}/{lane.admit_per_day} today)"
     lanes.admit(conn, row["id"], actor=ACTOR, reason=action["reason"])
-    state[lane.name] = used + 1
+    state["used"][lane.name] = used + 1
     return None
 
 
@@ -87,7 +87,7 @@ def _merge(conn, pol, action, row, _state) -> Optional[str]:
     from hermes_cli import kanban_db as kb
 
     target = _card(conn, action.get("into"))
-    if not _held(row):
+    if not _held(conn, row):
         return "only a gate-held card can be merged"
     if target is None or target["id"] == row["id"] or target["status"] not in _OPEN:
         return "merge target must be another open card"
@@ -121,7 +121,7 @@ def _relane(conn, pol, action, row, _state) -> Optional[str]:
         return f"unknown lane: {lane}"
     if lane_source(conn, row["id"]) not in _MOVABLE:
         return "lane was given or set by a rule; only the user moves it"
-    if _held(row) or pol.lanes[lane].gated:
+    if pol.lanes[lane].gated or pol.lanes[pol.lane_of(row["tenant"])].gated:
         return "a move into or out of a gated lane is the user's"
     lanes.assign(conn, row["id"], lane, source="llm", reason=action["reason"], pol=pol)
     return None
@@ -133,15 +133,16 @@ _HANDLERS = {"admit": _admit, "merge": _merge, "reprioritize": _reprioritize, "r
 def apply(conn, actions, *, now: Optional[float] = None, dry_run: bool = False) -> dict:
     """Apply a planner's ``actions``; returns ``{"applied": [...], "rejected": [{..., "why"}], "notes": [...]}``.
 
-    ``dry_run`` validates the shape only (budget and card checks need the writes of earlier actions).
+    ``dry_run`` validates the shape only (budget and card checks need the writes of earlier actions): its
+    ``applied`` list is what passed that check, and ``dry_run`` is true in the result.
     """
     pol = lanes.policy()
     if pol is None:
         raise ValueError("no lanes are configured (kanban.admission.lanes)")
     if not isinstance(actions, list):
         raise ValueError("actions must be a list")
-    out: dict = {"applied": [], "rejected": [], "notes": []}
-    state: dict = {"now": time.time() if now is None else now}
+    out: dict = {"applied": [], "rejected": [], "notes": [], "dry_run": dry_run}
+    state: dict = {"now": time.time() if now is None else now, "used": {}}
     for index, action in enumerate(actions):
         why = _refusal(conn, pol, action, index, state, out, dry_run)
         if why:
@@ -169,7 +170,10 @@ def _refusal(conn, pol, action, index, state, out, dry_run) -> Optional[str]:
     if row is None:
         return "no such card"
     if not dry_run:
-        why = _HANDLERS[kind](conn, pol, action, row, state)
+        try:
+            why = _HANDLERS[kind](conn, pol, action, row, state)
+        except (ValueError, RuntimeError) as exc:  # a refused link or edit is this action's refusal, not the plan's
+            why = str(exc)
         if why:
             return why
     out["applied"].append(action)

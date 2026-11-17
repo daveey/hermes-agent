@@ -12,6 +12,7 @@ from tests.hermes_cli import test_kanban_lanes as base
 
 conn = base.conn
 configured = base.configured
+_human_shell = base._human_shell
 
 
 def cli(*args):
@@ -119,6 +120,9 @@ def test_cli_show_set_admit_apply_round_trip(conn, configured, capsys, tmp_path)
     assert base._task(conn, held)["status"] == "ready"
     assert plan.read_notes()["notes"] == [{"lane": "babybear", "text": "nothing ready"}]
     assert cli("lanes", "admit", held) == 1  # no longer held
+    other = _held(conn, parent, "second")
+    assert cli("lanes", "admit", other) == 0 and base._task(conn, other)["status"] == "ready"
+    assert lanes.admitted_today(conn, "hermes") == 1  # the planner's admit; the user's own is outside the budget
     assert cli("lanes", "set", "nope", "--share", "1") == 2
     assert cli("lanes", "explain", held) == 0 and "lane hermes" in capsys.readouterr().out
 
@@ -132,3 +136,54 @@ def test_cli_create_is_classified(conn, configured, capsys):
     assert base._task(conn, loose)["tenant"] == "other"
     assert cli("lanes", "unclassified", "--json") == 0
     assert [c["id"] for c in json.loads(capsys.readouterr().out)] == [loose]
+
+
+def test_a_merge_the_graph_refuses_is_one_refusal_and_the_plan_goes_on(conn, configured):
+    parent = base._hermes_parent(conn)
+    held = _held(conn, parent, "fix the watcher again")
+    kb.link_tasks(conn, held, parent)  # parent already waits on the held card: merging into it would be a cycle
+    card = base._ready_in(conn, "babybear", "bb", priority=10)
+    result = plan.apply(conn, [{"action": "merge", "card": held, "into": parent, "reason": "dup"},
+                               {"action": "reprioritize", "card": card, "priority": 300, "reason": "next"}])
+    assert len(result["rejected"]) == 1 and [a["card"] for a in result["applied"]] == [card]
+    assert base._task(conn, card)["priority"] == 300
+
+
+def test_a_lane_named_now_keeps_its_own_budget(conn, configured):
+    mapping = json.loads(json.dumps(base.LANES))
+    mapping["now"] = {"share": 5, "gated": True, "admit_per_day": 1}
+    configured(mapping)
+    parent = kb.create_task(conn, title="p", assignee="default", created_by="user", tenant="now")
+    held = [kb.create_task(conn, title=f"n{i}", assignee="default", creator_task_id=parent) for i in range(2)]
+    result = plan.apply(conn, [{"action": "admit", "card": c, "reason": "go"} for c in held])
+    assert [a["card"] for a in result["applied"]] == held[:1]
+    assert "budget spent (1/1" in _why(result)[0]
+
+
+def test_relane_never_leaves_a_gated_lane_and_dry_run_says_so(conn, configured):
+    parent = base._hermes_parent(conn)
+    child = kb.create_task(conn, title="Independent review of core work", assignee="default",
+                           creator_task_id=parent, tenant="hermes")
+    assert base._task(conn, child)["status"] == "ready"
+    result = plan.apply(conn, [{"action": "relane", "card": child, "lane": "other", "reason": "escape"}])
+    assert not result["applied"] and base._task(conn, child)["tenant"] == "hermes"
+    dry = plan.apply(conn, [{"action": "relane", "card": child, "lane": "other", "reason": "escape"}], dry_run=True)
+    assert dry["dry_run"] is True
+
+
+def test_set_lane_writes_the_root_config_from_a_profile(conn, configured, monkeypatch):
+    from hermes_constants import get_default_hermes_root
+    from hermes_cli import kanban_lanes_cli
+
+    root = get_default_hermes_root()
+    profile = root / "profiles" / "x"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("{}")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    assert get_default_hermes_root() == root
+    kanban_lanes_cli.set_lane("babybear", paused=True, share=50)
+    lane = lanes.policy().lanes["babybear"]
+    assert (lane.paused, lane.share) == (True, 50.0)
+    assert "lanes" not in (profile / "config.yaml").read_text()
+    with pytest.raises(ValueError):
+        kanban_lanes_cli.set_lane("babybear", share=-1)
