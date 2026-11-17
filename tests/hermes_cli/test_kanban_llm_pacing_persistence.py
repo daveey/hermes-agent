@@ -64,7 +64,7 @@ def test_dispatch_rate_history_survives_process_restart(tmp_path):
     assert restarted['pace']['factor'] == pytest.approx(0.5833)
     assert restarted['average'] == 4
     assert restarted['limit'] == 2
-    saved = json.loads((state / 'llm_pacing.json').read_text())['anthropic']
+    saved = json.loads((state / 'llm_pacing.json').read_text(encoding='utf-8-sig'))['anthropic']
     assert saved['samples'] == [
         [1799996400, 'a', 'seven_day', 54, 1800036000],
         [1800000000, 'a', 'seven_day', 60, 1800036000],

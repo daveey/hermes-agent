@@ -310,7 +310,7 @@ def test_only_kanban_dispatch_consults_the_governor():
     root = pathlib.Path(pd.__file__).resolve().parents[1]
     users = sorted(str(p.relative_to(root)) for top in ("agent", "gateway", "cron", "hermes_cli", "tui_gateway")
                    if (root / top).is_dir() for p in (root / top).rglob("*.py")
-                   if "kanban_llm_pacing" in p.read_text(encoding="utf-8", errors="ignore"))
+                   if "kanban_llm_pacing" in p.read_text(encoding="utf-8-sig", errors="ignore"))
     assert users == ["hermes_cli/kanban_db_dispatch.py", "hermes_cli/kanban_db_edit.py",
                      "hermes_cli/kanban_dispatch_maintenance.py",
                      "hermes_cli/kanban_llm_pacing.py", "hermes_cli/kanban_llm_pacing_dispatch.py",
@@ -338,7 +338,7 @@ REROUTE_VIEW = {"kanban_llm_pacing_dispatch": {"held_pools"}}
 def _governor_names(path: pathlib.Path) -> dict[str, set[str]]:
     """Each governor module ``path`` imports, with every name it imports from it or reads off it as ``alias.name``.
     A dotted ``import`` of one, or its alias used any other way (passed on, stored), is listed as such."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     aliases: dict[str, str] = {}
     names: dict[str, set[str]] = {}
