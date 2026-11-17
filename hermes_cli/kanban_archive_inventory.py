@@ -27,7 +27,9 @@ def file_hash(stream):
 
 def entry(name, mode, directory, digest):
     parts = PurePosixPath(name).parts
-    if (".git" in parts and not directory and parts[-1] == ".git") or name.endswith("/objects/info/alternates"):
+    if ((".git" in parts and not directory and parts[-1] == ".git")
+            or name.endswith(("/objects/info/alternates", "/.git/commondir"))
+            or name == ".git/commondir"):
         raise ValueError("external Git metadata")
     return [name, mode & 0o777, "dir" if directory else "file", digest]
 
