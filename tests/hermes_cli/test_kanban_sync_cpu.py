@@ -131,14 +131,33 @@ def test_board_facade_records_local_work_and_restores(measured, monkeypatch):
 
 def test_iteration_includes_wait_cpu_and_closes_on_early_return(measured):
     clock, records = measured
-    rounds = cpu.iterations(lambda: True)
-    try:
+    with cpu.iterations(lambda: True) as rounds:
         next(rounds)
         clock[0] += 5  # local work, including CPU consumed by wait_for_work
-    finally:
-        rounds.close()
     assert values(records, "loop")["sync.cpu.local"] == 5
+    assert len(records) == 3
+    assert all(not data["error"] and data["error_kind"] is None for _, data in records)
     assert cpu._local.frames == ()
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_iteration_completion_counts_and_predicate_boundary(measured, count):
+    clock, records = measured
+    completed = 0
+
+    def keep_running():
+        assert getattr(cpu._local, "frames", ()) == ()
+        assert len(records) == completed * 3
+        clock[0] += 10  # predicate CPU is outside the iteration, as before
+        return completed < count
+
+    with cpu.iterations(keep_running) as rounds:
+        for _ in rounds:
+            clock[0] += 2
+            completed += 1
+    assert len(records) == count * 3
+    assert all(not data["error"] for _, data in records)
+    assert sum(data["cpu_s"] for name, data in records if name == "sync.cpu.total/loop") == count * 2
 
 
 def test_inflight_service_is_not_published_until_complete(measured):

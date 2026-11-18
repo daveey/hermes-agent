@@ -9,7 +9,7 @@ are nested subsets, NOT additive. All three counters use the same completed-serv
 boundary; readers reconciling snapshots must require equal runs (record publishes
 separately). The local counter alone is a directly measured exclusive CPU total.
 """
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import wraps
 import os
 import threading
@@ -66,12 +66,17 @@ def board_call(fn):
     return wrapped
 
 
+@contextmanager
 def iterations(keep_running):
-    """Bracket each complete loop iteration, including its bounded wait.
+    """Own iteration services in the caller's scope, including its bounded wait.
 
-    The caller closes this generator in finally so an early return/exception
-    closes the suspended service immediately, without relying on garbage collection.
+    The stack sees the caller's real exit, not GeneratorExit from closing a
+    suspended generator. Completed iterations publish before the next predicate.
     """
-    while keep_running():
-        with service("loop"):
-            yield
+    with ExitStack() as scope:
+        def rounds():
+            while keep_running():
+                scope.enter_context(service("loop"))
+                yield
+                scope.close()
+        yield rounds()

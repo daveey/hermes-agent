@@ -1491,61 +1491,60 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     from hermes_cli.machine_metrics_sender import MetricsSender, board_post
     sender = MetricsSender(metrics, board_post(ident))
     sender.start()
-    rounds = sync_cpu.iterations(keep_running)
     try:
-        for _round in rounds:
-            boards = board_paths()
-            sweep_gone_board_handles()  # a removed board is never read again: close what it pins (2026-11-13)
-            for slug, _path in boards:
-                if slug not in watchers or not watchers[slug].is_alive():
-                    watcher = FeedWatcher(ident, slug, wake, keep_running, on_change=work.changed,
-                                          on_state=work.feed_state)
-                    watchers[slug] = threading.Thread(target=watcher.run, daemon=True, name=f"kanban-feed-{slug}")
-                    watchers[slug].start()
-            selected = sync_timing.select(work.select, boards, time.monotonic(), outbox_pending)
-            selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
-            selected += [b for b in backlog.due(boards) if b not in selected]  # a pull backlog drains round by round
-            picked = time.monotonic()  # a board backing off a failed round waits for it, whatever else is due
-            selected = [b for b in selected if not work.backing_off(b[0], picked)]
-            outbox_age.round_started()
-            results = sync_all_once(hub, boards=selected)
-            ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
-            if ahead:
-                _log.error("kanban sync: a newer core migrated this host's board; giving up the sync role")
-                on_give_up(runstate, ident.gateway, "gave up the sync role: ", [(r.board, r.error) for r in ahead])
-                return
-            runstate.clear()  # a completed round: the loop runs
-            ended = time.monotonic()
-            for r in results:
-                if r.skipped:
-                    work.changed(r.board)  # run it again after BUSY_RETRY_S, as a changed board
-                    continue
-                work.finished(r.board, not r.error, ended)  # a failure backs the board off (kanban_sync_work)
-                if r.push and (r.push.sent or r.push.rejected):
-                    _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
-                              r.push.sent, r.push.rejected)
-            # WARNING: an unsent edit older than 10 min after a good round (a skipped round judges nothing)
-            outbox_age.after_round([r for r in results if not r.skipped], boards)
-            if time.monotonic() >= next_links and links.request(boards):  # busy: ask again next iteration
-                next_links = time.monotonic() + LINKS_EVERY_S
-            sync_timing.report(sender.loop_report)
-            # From this round's results: a board that stopped behind the head reruns at once; one a tick held is
-            # retried shortly (a skipped board's stale behind flag would otherwise spin with zero wait).
-            remaining = 0.0 if any(r.behind for r in results) else max(0.0, work.deadline - time.monotonic())
-            if any(r.skipped for r in results):
-                remaining = min(remaining, BUSY_RETRY_S)
-            now = time.monotonic()
-            ready = [(s, p) for s, p in boards if not work.backing_off(s, now)]
-            deferred_due = next_deferred_repair(ready)
-            if deferred_due is not None:
-                remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
-            # Failed boards' outboxes and deferred repairs wait for backoff; neither may force a zero wait.
-            retry_in = work.next_retry(now)
-            if retry_in is not None:
-                remaining = min(remaining, retry_in)
-            sync_timing.wait(wait_for_work, wake, [p for _, p in ready], remaining, keep_running)
+        with sync_cpu.iterations(keep_running) as rounds:
+            for _round in rounds:
+                boards = board_paths()
+                sweep_gone_board_handles()  # a removed board is never read again: close what it pins (2026-11-13)
+                for slug, _path in boards:
+                    if slug not in watchers or not watchers[slug].is_alive():
+                        watcher = FeedWatcher(ident, slug, wake, keep_running, on_change=work.changed,
+                                              on_state=work.feed_state)
+                        watchers[slug] = threading.Thread(target=watcher.run, daemon=True, name=f"kanban-feed-{slug}")
+                        watchers[slug].start()
+                selected = sync_timing.select(work.select, boards, time.monotonic(), outbox_pending)
+                selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
+                selected += [b for b in backlog.due(boards) if b not in selected]  # a pull backlog drains round by round
+                picked = time.monotonic()  # a board backing off a failed round waits for it, whatever else is due
+                selected = [b for b in selected if not work.backing_off(b[0], picked)]
+                outbox_age.round_started()
+                results = sync_all_once(hub, boards=selected)
+                ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
+                if ahead:
+                    _log.error("kanban sync: a newer core migrated this host's board; giving up the sync role")
+                    on_give_up(runstate, ident.gateway, "gave up the sync role: ", [(r.board, r.error) for r in ahead])
+                    return
+                runstate.clear()  # a completed round: the loop runs
+                ended = time.monotonic()
+                for r in results:
+                    if r.skipped:
+                        work.changed(r.board)  # run it again after BUSY_RETRY_S, as a changed board
+                        continue
+                    work.finished(r.board, not r.error, ended)  # a failure backs the board off (kanban_sync_work)
+                    if r.push and (r.push.sent or r.push.rejected):
+                        _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
+                                  r.push.sent, r.push.rejected)
+                # WARNING: an unsent edit older than 10 min after a good round (a skipped round judges nothing)
+                outbox_age.after_round([r for r in results if not r.skipped], boards)
+                if time.monotonic() >= next_links and links.request(boards):  # busy: ask again next iteration
+                    next_links = time.monotonic() + LINKS_EVERY_S
+                sync_timing.report(sender.loop_report)
+                # From this round's results: a board that stopped behind the head reruns at once; one a tick held is
+                # retried shortly (a skipped board's stale behind flag would otherwise spin with zero wait).
+                remaining = 0.0 if any(r.behind for r in results) else max(0.0, work.deadline - time.monotonic())
+                if any(r.skipped for r in results):
+                    remaining = min(remaining, BUSY_RETRY_S)
+                now = time.monotonic()
+                ready = [(s, p) for s, p in boards if not work.backing_off(s, now)]
+                deferred_due = next_deferred_repair(ready)
+                if deferred_due is not None:
+                    remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))
+                # Failed boards' outboxes and deferred repairs wait for backoff; neither may force a zero wait.
+                retry_in = work.next_retry(now)
+                if retry_in is not None:
+                    remaining = min(remaining, retry_in)
+                sync_timing.wait(wait_for_work, wake, [p for _, p in ready], remaining, keep_running)
     finally:
-        rounds.close()
         links.stop()
         _LINKS_RUNNER = None  # no stale runner for the next loop's tests to wait on
         sender.close()

@@ -418,6 +418,44 @@ def test_mid_loop_schema_ahead_give_up_is_recorded_and_not_overwritten(kanban_ho
     assert "stopped" not in described
 
 
+@pytest.mark.parametrize("failure", [None, RuntimeError, KeyboardInterrupt])
+def test_loop_cpu_early_exit_labels_and_partitions(kanban_home, pre_rename_live, svc, monkeypatch, failure):
+    from hermes_cli import kanban_sync_cpu as cpu
+    from types import SimpleNamespace
+
+    clock, records = [0.0], []
+    monkeypatch.setattr(cpu.time, "thread_time", lambda: clock[0])
+    monkeypatch.setattr(cpu.loop_accounting, "record", lambda name, **kw: records.append((name, kw)))
+    boom = failure("round failed") if failure else None
+
+    @cpu.board_call
+    def board_call():
+        clock[0] += 3
+
+    def round_once(hub, boards):
+        clock[0] += 2
+        board_call()
+        if boom is not None:
+            raise boom
+        return [SimpleNamespace(board=BOARD, error="SchemaAhead: tasks: newer_field")]
+
+    monkeypatch.setattr(ksc, "sync_all_once", round_once)
+    if failure:
+        with pytest.raises(failure) as raised:
+            _run_sync_loop(kanban_home, svc, monkeypatch, rounds=3)
+        assert raised.value is boom
+    else:
+        assert _run_sync_loop(kanban_home, svc, monkeypatch, rounds=3) == []
+    loop = [(name, data) for name, data in records if name.endswith("/loop")]
+    assert len(loop) == 3  # exactly one completed run in each partition
+    assert {name: data["cpu_s"] for name, data in loop} == {
+        "sync.cpu.local/loop": 2, "sync.cpu.board_call/loop": 3, "sync.cpu.total/loop": 5}
+    assert all(data["error"] == bool(failure) for _, data in loop)
+    assert all(data["error_kind"] == (failure.__name__ if failure else None) for _, data in loop)
+    assert cpu._local.frames == ()
+    assert not cpu._local.in_call
+
+
 def test_sync_loop_crash_is_recorded_and_reraised(kanban_home, pre_rename_live, svc, monkeypatch):
     boom = RuntimeError("board exploded")
 
