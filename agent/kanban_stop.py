@@ -8,6 +8,7 @@ instead of exiting.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Iterable, Optional
 
@@ -19,15 +20,17 @@ from agent.delegation_context import owned_kanban_task
 # finalize prompts tell builders to call it) and ``kanban_request_changes`` returns it to
 # ``ready`` (the sdlc-review skill tells reviewers to). Nudging after either asks a worker
 # that did the right thing to ``kanban_complete`` a card it must not close.
-_TERMINAL_KANBAN_TOOLS = frozenset({
-    "kanban_complete",
-    "kanban_block",
-    "kanban_schedule",
-    "kanban_continue",
-    "kanban_move",
-    "kanban_request_review",
-    "kanban_request_changes",
-})
+_TERMINAL_KANBAN_TOOLS = frozenset(
+    {
+        "kanban_complete",
+        "kanban_block",
+        "kanban_schedule",
+        "kanban_continue",
+        "kanban_move",
+        "kanban_request_review",
+        "kanban_request_changes",
+    }
+)
 
 _DEFAULT_MAX_ATTEMPTS = 2
 
@@ -36,7 +39,12 @@ def kanban_stop_nudge_enabled() -> bool:
     """On when ``HERMES_KANBAN_TASK`` is set for the dispatcher-owned worker, unless
     ``HERMES_KANBAN_STOP_NUDGE`` disables it. In-process delegate_task children and cron runs
     inherit the env var but own no board task and carry no kanban toolset."""
-    if (os.environ.get("HERMES_KANBAN_STOP_NUDGE") or "").strip().lower() in {"0", "false", "no", "off"}:
+    if (os.environ.get("HERMES_KANBAN_STOP_NUDGE") or "").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
         return False
     return bool(owned_kanban_task())
 
@@ -47,7 +55,9 @@ def _tool_call_name(tc: Any) -> str:
         fn = tc.get("function")
         return str((fn.get("name") if isinstance(fn, dict) else tc.get("name")) or "")
     fn = getattr(tc, "function", None)
-    return str((getattr(fn, "name", "") if fn is not None else getattr(tc, "name", "")) or "")
+    return str(
+        (getattr(fn, "name", "") if fn is not None else getattr(tc, "name", "")) or ""
+    )
 
 
 def session_called_kanban_terminal(messages: Iterable[dict] | None) -> bool:
@@ -55,11 +65,26 @@ def session_called_kanban_terminal(messages: Iterable[dict] | None) -> bool:
     for msg in filter(lambda m: isinstance(m, dict), messages or ()):
         role = msg.get("role")
         if role == "assistant" and any(
-            _tool_call_name(tc) in _TERMINAL_KANBAN_TOOLS for tc in msg.get("tool_calls") or []
+            _tool_call_name(tc) in _TERMINAL_KANBAN_TOOLS
+            for tc in msg.get("tool_calls") or []
         ):
             return True
         if role == "tool" and str(msg.get("name") or "") in _TERMINAL_KANBAN_TOOLS:
             return True
+        if role == "tool" and msg.get("name") == "kanban_contain":
+            # Attempted stops and descendant stops do not end the actor's run.
+            result = msg.get("content")
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except (ValueError, TypeError):
+                    result = None
+            if (
+                isinstance(result, dict)
+                and result.get("ok") is True
+                and result.get("terminal_for_run") is True
+            ):
+                return True
     return False
 
 
@@ -102,4 +127,8 @@ def build_kanban_stop_nudge(
     )
 
 
-__all__ = ["build_kanban_stop_nudge", "kanban_stop_nudge_enabled", "session_called_kanban_terminal"]
+__all__ = [
+    "build_kanban_stop_nudge",
+    "kanban_stop_nudge_enabled",
+    "session_called_kanban_terminal",
+]

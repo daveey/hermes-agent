@@ -51,8 +51,12 @@ receipt and run closure. Persisted Board membership prevents an enrolled board
 from falling back to local authority when configuration changes or networking
 fails.
 
-An enrolled board requires the authenticated Board containment context protocol
-(version 1) and matching canonical containment operations. Preparation reads only
+An enrolled board first requires authenticated GET-only
+`/v2/boards/<board>/containment/capability`: protocol `1`, receipt envelopes `[1]`,
+task marker `containment_episode`, and resume predicates `["authority", "producer"]`.
+Missing, unreadable or incompatible advertisements refuse before mutation, never
+falling back locally. It also requires containment context protocol version 1 and
+matching canonical containment operations. Preparation reads only
 lifecycle coordinates and a producer baseline. The Board rechecks authorization;
 replica fields, a claimed origin or an ordinary sync-applying flag never grant
 release authority. Upgrade and verify both components before live application.

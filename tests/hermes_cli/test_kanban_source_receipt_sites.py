@@ -296,6 +296,11 @@ WRAPPED = {
     "hermes_cli/kanban_awaiting.py::escalate",  # Q2: reuses the enclosing ending's staged receipt
 }
 INVOLUNTARY = {  # no receipt: custody becomes ``retained`` (fail closed)
+    # Containment is a retained-source stop, not completion/publication. The
+    # local-only path never syncs a portable source claim; replica restoration
+    # projects canonical containment and must not manufacture a publish receipt.
+    "hermes_cli/kanban_containment_lifecycle.py::contain_local",
+    "hermes_cli/kanban_containment_replica.py::restore_page",
     "hermes_cli/kanban_failure_accounting.py::_record_task_failure",
     "hermes_cli/kanban_manual_reclaim.py::_reclaim",
     "hermes_cli/kanban_db.py::release_stale_claims",
@@ -311,6 +316,8 @@ INVOLUNTARY = {  # no receipt: custody becomes ``retained`` (fail closed)
 }
 # Sites the scan cannot prove off-``running`` from SQL text alone, each checked by hand.
 NOT_FROM_RUNNING = {
+    "hermes_cli/kanban_containment_lifecycle.py::resume_local": "requires unclaimed triage under the writer transaction",
+    "hermes_cli/kanban_containment_replica.py::_restore_released": "only restores unclaimed non-human triage projections",
     "hermes_cli/kanban_assignment_routing.py::route": "runs inside block_task after apply_block_update left running",
     "hermes_cli/kanban_db.py::recompute_ready": "re-promotes todo/blocked/scheduled cards only",
     "hermes_cli/kanban_terminal_guard.py::enforce_after_apply": "puts a held card back to done/archived; skips running",

@@ -16,15 +16,16 @@ def _schema(name, description, properties, required):
 
 
 CONTAIN_SCHEMA = _schema("kanban_contain",
-    "End an admitted agent run in protected NON-HUMAN triage without completing work, satisfying dependencies, "
-    "dispatching review or asking a human. Can also contain an unclaimed descendant. Resume requires the exact "
+    "Contain an admitted run without satisfying dependencies. Protected NON-HUMAN triage preserves all open edges "
+    "without dispatching review or asking a human. Can also contain an unclaimed descendant. Resume requires the exact "
     "episode and a live scoped authority or genuinely new producer completion; generic unblock cannot release it. "
     "Synced boards refuse until canonical containment capability is installed. After terminal_for_run=true, stop.",
     {"task_id": {"type": "string"}, "authority": {"type": "string"},
      "producer": {"type": "string"}, "summary": {"type": "string", "minLength": 1, "maxLength": 2000}},
     ["authority", "summary"])
 RESUME_SCHEMA = _schema("kanban_resume_contained",
-    "Explicit episode-bound resume by an admitted live authority run or genuinely new completed producer run. "
+    "Resume an exact contained episode with authenticated evidence. Requires a live scoped authority "
+    "or genuinely new completed producer run. "
     "Preserves independent spend/human holds and every dependency edge; does not complete the task.",
     {"task_id": {"type": "string"}, "episode": {"type": "string"},
      "kind": {"type": "string", "enum": ["authority", "producer"]}}, ["task_id", "episode"])

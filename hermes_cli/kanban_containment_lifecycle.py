@@ -1,7 +1,7 @@
 """Transaction owner for local non-human containment.
 
-Staged internal API, not registered with CLI/tools yet. Synced boards deliberately
-refuse: local attestations cannot substitute for authenticated Board custody.
+Shared by CLI/tools through the admitted-agent service. Synced boards deliberately
+refuse this local-only owner: local attestations cannot replace Board custody.
 """
 from __future__ import annotations
 
