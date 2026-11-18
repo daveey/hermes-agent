@@ -789,24 +789,6 @@ def _skip_reason(conn: sqlite3.Connection, card: sqlite3.Row, own: str, machines
                  mode: str, review_enabled: bool,
                  profile_exists: Optional[Callable[[str], bool]]) -> Optional[tuple[str, Optional[str]]]:
     """None when this machine may copy ``card``; else ``(reason, detail)`` (reason ``""``: nothing to record)."""
-    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (card["id"],)).fetchone():
-        return "", None  # already here
-    if (mode == "explicit" or card["status"] == "review") and card["runs_on"] is None:
-        return "", None  # a default-placement review stays with its creator
-    if card["status"] == "review" and not review_enabled:
-        return "other", "review dispatch disabled"
-    refused = eligible(dict(card), own, machines)
-    if refused is not None:
-        return ("hold" if refused == "held" else "capability_missing"), refused
-    if profile_exists is not None and card["assignee"] and not profile_exists(card["assignee"]):
-        return "profile_ineligible", f"no profile {card['assignee']!r} here"
-    # [daveey] Never claim a card this machine's profile cannot satisfy: it would run, then fail its own
-    # handoffs here (t_01a184ac93d31979). Left on the Board for a machine that can.
-    from hermes_cli.kanban_runs_on_capabilities import claim_refusal
-    refusal = claim_refusal(dict(card), me=own)
-    if refusal is not None:
-        return "capability_missing", str(refusal)
-    from hermes_cli.kanban_workspace_source import pickup_skip  # inert unless kanban.workspace_source is enabled
-    if (source_skip := pickup_skip(conn, card, own)) is not None:
-        return "capability_missing", source_skip
-    return None
+    from hermes_cli.kanban_pickup_gate import decide
+    return decide(card, conn, own, machines, mode=mode, review_enabled=review_enabled,
+                  profile_exists=profile_exists, placement=eligible)
