@@ -1521,10 +1521,12 @@ def _place_remote(args: dict, *, assignee: str, skills, parents, project_id, ses
 
 
 from hermes_cli.kanban_db_creation import tool_creation_audit as _creation_audit, inherit_tool_priority
+from hermes_cli.kanban_origin_admission import tool_create as _native_tool_create
 
 
 @_kanban_handler("kanban_create")
 @publication_scope
+@_native_tool_create
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
     # Only an explicitly local create is board-scoped: any other placement or an origin binding can write a

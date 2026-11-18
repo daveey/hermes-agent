@@ -1183,7 +1183,7 @@ def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str
 
 from hermes_cli.kanban_db_creation import default_ready_assignee as _default_ready_assignee
 from hermes_cli.kanban_selfwork import admitted_contract
-
+from hermes_cli import kanban_origin_admission as native_admission
 
 @publication_scope
 def create_task(
@@ -1233,6 +1233,7 @@ def create_task(
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
+    native_admission.check_entry(conn, origin_intent)
     self_work = admitted_contract(conn, self_work)
     validate_admission_class(admission_class, admission_frees)
     validate_creation(placement_policy, runs_on=runs_on, workspace_kind=workspace_kind,
@@ -1295,12 +1296,8 @@ def create_task(
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
-    # Idempotency check BEFORE the write txn (no lock held); a concurrent-create race may insert twice.
-    if idempotency_key:
-        from hermes_cli.kanban_db_creation import existing_creation_key, reject_reserved_key
-        reject_reserved_key(idempotency_key, created_by)
-        if row := existing_creation_key(conn, idempotency_key):
-            return row["id"]
+    if existing := native_admission.early_existing(conn, idempotency_key, created_by):
+        return existing
 
     if validate_workspace and workspace_kind == "worktree" and not project_id:
         from hermes_cli.kanban_db_workspace import (
@@ -1332,6 +1329,8 @@ def create_task(
             # allow_nested: graph builders compose create_task under one outer
             # commit so the dispatcher never sees a half-built graph.
             with write_txn(conn, allow_nested=True):
+                if existing := native_admission.existing(conn, idempotency_key):
+                    return existing
                 run_insert_guard(conn, insert_guard)
                 task_status, tenant, lane = lane_state(conn, parents, initial_status, triage, tenant, locals())
                 # Project worktree: fresh dir under the repo + deterministic
@@ -1376,6 +1375,7 @@ def create_task(
                 )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 initialize_ownership(conn, task_id, creator_task_id, parents, now, chat_origin, native_origin)
+                native_admission.require_receipt(conn, task_id)
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
