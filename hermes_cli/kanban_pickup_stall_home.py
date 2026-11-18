@@ -7,6 +7,8 @@ Only the hub files: alarm provenance names the observer, not the stopped home.
 from __future__ import annotations
 
 import re
+import sqlite3
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,11 +20,7 @@ _LOCAL_WORK = re.compile(
 
 
 def _scheduled_since(replica, row) -> int | None:
-    from hermes_cli.kanban_continuation import park_state
     from hermes_cli.kanban_wake_summary import wakes
-    park = park_state(replica, row["id"])
-    if park.get("event_id") is None or park.get("superseded"):
-        return None  # no unspent park in this replica: do not invent a deadline
     summary = wakes(replica, SimpleNamespace(**dict(row)), check_loaded=True)
     if not summary or summary["blocks_for_human"]:
         return None
@@ -53,8 +51,9 @@ def checkpoint_evidence(replica, task_id: str) -> str:
 
 def overdue(replica, machines: dict, *, now: float) -> dict[str, list[dict[str, Any]]]:
     """Group open scheduled/todo rows by held, revoked, or event-silent home."""
-    last_events = dict(replica.execute(
-        "SELECT origin_gateway, MAX(created_at) FROM task_events GROUP BY origin_gateway").fetchall())
+    recent_homes = {r[0] for r in replica.execute(
+        "SELECT DISTINCT origin_gateway FROM task_events WHERE created_at >= ?",
+        (now - GRACE_SECONDS,))}
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in replica.execute("SELECT * FROM tasks WHERE status IN ('scheduled', 'todo')"):
         home = row["created_on"]
@@ -63,8 +62,7 @@ def overdue(replica, machines: dict, *, now: float) -> dict[str, list[dict[str, 
         entry = machines.get(home) or {}
         held = bool(entry.get("hold"))
         revoked = entry.get("state") == "revoked"
-        seen = last_events.get(home)
-        silent = seen is None or now - seen > GRACE_SECONDS
+        silent = home not in recent_homes
         if not (held or revoked or silent):
             continue
         since = (_scheduled_since(replica, row) if row["status"] == "scheduled"
@@ -74,7 +72,7 @@ def overdue(replica, machines: dict, *, now: float) -> dict[str, list[dict[str, 
         groups.setdefault(home, []).append({
             "id": row["id"], "title": row["title"], "tenant": row["tenant"],
             "status": row["status"], "since": since,
-            "home_evidence": f"held={held}, revoked={revoked}, last Board event={seen}",
+            "home_evidence": f"held={held}, revoked={revoked}, no Board event within 30 minutes={silent}",
             "checkpoint": checkpoint_evidence(replica, row["id"]),
         })
     return {home: sorted(cards, key=lambda c: (c["since"], c["id"]))
@@ -94,12 +92,45 @@ HOWTO = (
 )
 
 
+_NEXT_SCAN: dict[tuple, float] = {}
+
+
+def periodic_sweep(conn, replica, own: str, *, now_ms: int) -> list[str]:
+    """Bound the full event aggregation to once a minute per observer board."""
+    from hermes_cli.kanban_sweep_gate import file_identity
+    if own != "hub":
+        return []
+    identity = file_identity(replica)
+    tick = time.monotonic()
+    if identity is not None and tick < _NEXT_SCAN.get(identity, 0):
+        return []
+    result = sweep(conn, replica, own, now_ms=now_ms)
+    if identity is not None:
+        if len(_NEXT_SCAN) >= 128:
+            _NEXT_SCAN.clear()
+        _NEXT_SCAN[identity] = tick + 60
+    return result
+
+
+def _fresh(replica, now: float) -> bool:
+    """Silence is meaningful only after a recent completed Board pull."""
+    try:
+        row = replica.execute("SELECT pulled_at FROM kanban_sync_state LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return False
+    from hermes_cli.kanban_replica_freshness import FRESH_SECONDS
+    # A pull may finish after the dispatcher captured now_ms, before this read.
+    return row is not None and type(row[0]) in (int, float) and -5 <= now - row[0] <= FRESH_SECONDS
+
+
 def sweep(conn, replica, own: str, *, now_ms: int) -> list[str]:
     from hermes_cli import kanban_pickup_stall as kps
     from hermes_cli import kanban_worker_node as wn
     if own != kps.OPERATOR_LANE:
         return []  # one observer; source-authenticated keys cannot impersonate a remote home
-    registry = wn.registry()
+    if not _fresh(replica, now_ms / 1000):
+        return []
+    registry = wn.registry(require_fresh=True)
     if registry is None:
         return []  # cannot establish current held/revoked registry evidence
     ids = []

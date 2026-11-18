@@ -27,6 +27,8 @@ def replica():
         CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, outcome TEXT,
                                 summary TEXT, ended_at INTEGER);
     """)
+    conn.execute("CREATE TABLE kanban_sync_state (pulled_at INTEGER)")
+    conn.execute("INSERT INTO kanban_sync_state VALUES (?)", (NOW,))
     yield conn
     conn.close()
 
@@ -113,7 +115,7 @@ def local(tmp_path, monkeypatch):
     from hermes_cli.kanban_db_connect import connect
     conn = connect(path)
     conn.execute("ALTER TABLE tasks ADD COLUMN runs_on TEXT")
-    monkeypatch.setattr(wn, "registry", lambda: {"machines": {"worker-2": {"hold": True}}})
+    monkeypatch.setattr(wn, "registry", lambda **kw: {"machines": {"worker-2": {"hold": True}}})
     yield conn
     conn.close()
 
@@ -139,3 +141,59 @@ def test_observer_is_hub_only(replica, local):
     card(replica)
     assert subject.sweep(local, replica, "worker-1", now_ms=NOW * 1000) == []
     assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("age", [601, -6, None])
+def test_stale_or_unknown_replica_never_vouches_for_silence(replica, local, age):
+    card(replica)
+    replica.execute("UPDATE kanban_sync_state SET pulled_at=?", (None if age is None else NOW - age,))
+    assert subject.sweep(local, replica, "hub", now_ms=NOW * 1000) == []
+
+
+def test_missing_registry_defers(replica, local, monkeypatch):
+    card(replica)
+    monkeypatch.setattr(wn, "registry", lambda **kw: None)
+    assert subject.sweep(local, replica, "hub", now_ms=NOW * 1000) == []
+
+
+def test_periodic_scan_is_bounded_and_restarts_for_replaced_file(replica, local, monkeypatch):
+    from hermes_cli import kanban_sweep_gate
+    subject._NEXT_SCAN.clear()
+    clock = [100.0]
+    identity = [("path", 1, 2)]
+    calls = []
+    monkeypatch.setattr(subject.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(kanban_sweep_gate, "file_identity", lambda conn: identity[0])
+    monkeypatch.setattr(subject, "sweep", lambda *a, **kw: calls.append(kw) or ["alarm"])
+    assert subject.periodic_sweep(local, replica, "hub", now_ms=NOW * 1000) == ["alarm"]
+    clock[0] = 159
+    assert subject.periodic_sweep(local, replica, "hub", now_ms=NOW * 1000) == []
+    clock[0] = 160
+    assert subject.periodic_sweep(local, replica, "hub", now_ms=NOW * 1000) == ["alarm"]
+    identity[0] = ("path", 1, 3)
+    assert subject.periodic_sweep(local, replica, "hub", now_ms=NOW * 1000) == ["alarm"]
+    assert len(calls) == 3
+    assert subject.periodic_sweep(local, replica, "worker-1", now_ms=NOW * 1000) == []
+
+
+def test_separate_homes_and_closed_incidents(replica, local):
+    card(replica, "one")
+    card(replica, "two", home="worker-7")
+    first = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    assert len(first) == 2
+    local.execute("UPDATE tasks SET status='done' WHERE id=?", (first[0],))
+    local.commit()
+    again = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    assert first[1] == again[1] and first[0] != again[0]
+
+
+def test_legacy_backstop_and_current_park(replica):
+    from hermes_cli.kanban_timed_park import implied_wake
+    card(replica, wake={})
+    expected = implied_wake({}, NOW - 86400)
+    row = replica.execute("SELECT * FROM tasks WHERE id='one'").fetchone()
+    assert subject._scheduled_since(replica, row) == expected
+    replica.execute("INSERT INTO task_events(task_id,kind,payload,created_at,origin_gateway) "
+                    "VALUES ('one','scheduled',?,?,'worker-2')",
+                    (json.dumps({"wake_at": NOW + 3600}), NOW - 10))
+    assert not subject.overdue(replica, {}, now=NOW)
