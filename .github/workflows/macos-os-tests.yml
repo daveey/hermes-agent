@@ -1,6 +1,6 @@
 name: macOS OS-marked tests (scheduled)
 
-# Runs the platforms("macos") / platforms("posix") tests on a real macOS host,
+# Runs unit tests in platforms("macos") / platforms("posix") files on a real macOS host,
 # on a schedule, against main. CI's tests-os lane (tests-os.yml) is off in this
 # fork (ci.yaml `if: false`: no GitHub-hosted macOS/Windows runner), so without
 # this nothing outside tests/hermes_state/ and the six Native memory paths ever
@@ -71,12 +71,7 @@ jobs:
         run: python3 scripts/ci/macos_os_tests_gate.py
 
   macos-os-tests:
-    name: macOS measurement (${{ matrix.selection }})
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        selection: [widened, cron]
+    name: macOS-only tests (mini)
     needs: gate
     if: needs.gate.outputs.run == 'true' && github.repository == 'softmax-universe/daveey-hermes'
     runs-on: [self-hosted, macOS, hermes-state]
@@ -96,10 +91,10 @@ jobs:
           # `all` intentionally excludes messaging; platform tests need its SDKs.
           extras: '["all", "messaging"]'
 
-      - name: Run macOS-marked tests
+      - name: Run macOS file selection
         # Same selection as tests-os.yml's macOS row: the helper narrows which
-        # files are imported; `-m "platforms and not integration"` decides which
-        # tests run (conftest skips foreign-OS specs). run_tests.sh fails the
+        # files are imported, including their unmarked unit tests. Conftest
+        # skips foreign-OS specs; GUI cases have their own lane. run_tests.sh fails the
         # run when nothing was collected, so an empty selection is never green.
         shell: bash
         run: |
@@ -110,36 +105,14 @@ jobs:
           LIST="$(mktemp "${RUNNER_TEMP:-/tmp}/macos-os-files.XXXXXX")"
           trap 'rm -rf "$HERMES_HOME" "$LIST"' EXIT
           /usr/bin/python3 scripts/ci/list_os_marked_tests.py macos > "$LIST"
-          MARKERS="not integration and not macos_login_session"
-          if [ "$SELECTION" = baseline ]; then
-            MARKERS="platforms and $MARKERS"
-          elif [ "$SELECTION" = cron ]; then
-            # Measure all cron tests, a conservative superset of real-Bash callers.
-            printf '%s\n' tests/cron/test_*.py > "$LIST"
-          fi
           test -s "$LIST"
-          mkdir -p "$RUNNER_TEMP/macos-measurement"
-          cp "$LIST" "$RUNNER_TEMP/macos-measurement/files.txt"
           echo "selected $(wc -l < "$LIST" | tr -d ' ') file(s)"
-          date -u
-          set +e
-          taskpolicy -c utility scripts/run_tests.sh --files-from "$LIST" -j 2 --file-retries 0 -- \
-            -m "$MARKERS" -v --tb=short -ra 2>&1 | tee "$RUNNER_TEMP/macos-measurement/tests.log"
-          status=${PIPESTATUS[0]}
-          date -u
-          exit "$status"
+          taskpolicy -c utility scripts/run_tests.sh --files-from "$LIST" -j 2 -- \
+            -m "not integration and not macos_login_session" --tb=short
         env:
-          SELECTION: ${{ matrix.selection }}
           OPENROUTER_API_KEY: ''
           OPENAI_API_KEY: ''
           NOUS_API_KEY: ''
-
-      - name: Preserve measurement logs
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: macos-measurement-${{ matrix.selection }}
-          path: ${{ runner.temp }}/macos-measurement/
 
   macos-login-session-tests:
     name: macOS login-session tests (mini)

@@ -61,7 +61,7 @@ def test_test_job_waits_for_the_gate_and_runs_the_marked_selection_on_the_mini()
     assert "scripts/ci/list_os_marked_tests.py macos" in command
     assert 'test -s "$LIST"' in command
     assert "taskpolicy -c utility scripts/run_tests.sh --files-from \"$LIST\" -j 2" in command
-    assert '-m "platforms and not integration and not macos_login_session"' in command
+    assert '-m "not integration and not macos_login_session"' in command
 
 
 @pytest.mark.parametrize("domain_status", [0, 125])
@@ -87,6 +87,36 @@ def test_login_session_job_is_gated_and_requires_a_real_gui_domain(domain_status
     assert 'test -s "$LIST"' in command
     assert "taskpolicy -c utility scripts/run_tests.sh" in command
     assert any(step.get("uses") == "./.github/actions/setup-pm" for step in job["steps"])
+
+
+@pytest.mark.parametrize("marker", ["macos", "windows"])
+def test_reusable_lane_preserves_windows_and_widens_only_macos(marker):
+    workflow = hermes_yaml.safe_load((ROOT / ".github/workflows/tests-os.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["os-tests"]
+    assert any(row["marker"] == marker for row in job["strategy"]["matrix"]["include"])
+    step = next(step for step in job["steps"] if step.get("name") == "Run ${{ matrix.marker }} tests")
+    command = step["run"]
+    assert '-m "$MARKERS"' in command
+    # Execute the actual selection branch, not a test-side copy of its conditions.
+    selection = command.split('MARKERS=', 1)
+    assert len(selection) == 2
+    shell = 'MARKERS=' + selection[1].split('scripts/run_tests.sh', 1)[0]
+    shell = shell.replace("${{ matrix.marker }}", marker)
+    result = subprocess.run(
+        ["bash", "-eu", "-c", shell + '\nprintf "%s" "$MARKERS"'],
+        capture_output=True, text=True, encoding="utf-8", check=True,
+    )
+    expected = "not integration and not macos_login_session" if marker == "macos" else "platforms and not integration"
+    assert result.stdout == expected
+
+
+def test_unmarked_darwin_regression_is_collected_in_widened_lane():
+    files, expression = _lane("macos-os-tests")
+    path = "tests/hermes_cli/test_loop_accounting.py"
+    node = path + "::test_without_procfs_snapshot_folds_exited_threads"
+    assert path in files
+    assert node in _collected([path], expression)
+    assert node not in _collected([path], "platforms and not integration")
 
 
 def test_session_runner_label_is_declared_for_actionlint():

@@ -6,6 +6,22 @@ import pytest
 from tests.cron import bash_execution as execution
 
 
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("script", ["bash ./r.sh", "bash 2>$(echo /dev/null) < ./r.sh"])
+@pytest.mark.parametrize("wrapper", ['echo "$(BODY)"', 'echo "$(echo "$(BODY)")"'])
+def test_original_case_substitution_premises_use_shared_native_gate(tmp_path, script, wrapper):
+    from tests.cron import test_lifecycle_guard_substitution_comments as original
+
+    args = (tmp_path, 'case x in x) echo " # ";; esac; SCRIPT', wrapper, script, True)
+    # Native proof: no mocked version or substitute Bash. Old Bash must report
+    # the shared reason; Linux Bash 5 must still execute the original assertions.
+    if execution.system_bash_major() < 4:
+        with pytest.raises(pytest.skip.Exception, match="execution premise requires /bin/bash >= 4"):
+            original.test_nested_quote_comment_boundary(*args)
+    else:
+        original.test_nested_quote_comment_boundary(*args)
+
+
 @pytest.mark.parametrize("major", [3, 4, 5])
 def test_version_gate(monkeypatch, major):
     monkeypatch.setattr(execution, "system_bash_major", lambda: major)
