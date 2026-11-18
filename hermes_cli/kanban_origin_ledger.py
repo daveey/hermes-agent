@@ -486,7 +486,12 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     # every card a stopped worker had finished went back to unknown 450 s after the stop
                     # (2026-11-16, workers 2, 5 and 7). The replica read keeps such a record released too
                     # (``kanban_scope_heartbeat.published_before_silence``).
-                    settled = current and released
+                    # [daveey] An explicit owner archive without a verified completion is settled the same way: the
+                    # card is closed (``closed`` below), and a sleeping owner must not turn it back into an unknown
+                    # obligation that keeps the origin chat waiting (hub chat 20261111_091916_d2d36a, 2026-11-18).
+                    # Only a newer owner record reopens it; an unproven or open record is never settled.
+                    settled = current and (released or (task.get('status') == 'archived'
+                                                         and bool(_owner_evidence(task))))
                     # A successful origin pull does not prove the owner could
                     # read this board. Consume the collector's qualified scope
                     # inventory; missing/ambiguous inventory is not healthy.
@@ -539,8 +544,8 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                                    'blocked', 'triage', 'done', 'archived')
                 # [daveey] A currently observed owner archive without a verified completion produces nothing: the
                 # card is closed, not completed. It neither waits nor counts as done, and never releases as done.
-                closed = bool(current and status == 'archived' and not released and _owner_evidence(task))
                 observed = current or settled
+                closed = bool(observed and status == 'archived' and not released and _owner_evidence(task))
                 if not observed or not known or (status in ('done', 'archived') and not released and not closed):
                     status = 'unknown'
                 from hermes_cli.kanban_completion_receipt_projection import remote_fields

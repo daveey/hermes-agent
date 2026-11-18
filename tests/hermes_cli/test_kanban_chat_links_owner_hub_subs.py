@@ -375,3 +375,19 @@ def test_task_chat_links_has_a_task_id_index_in_board_files_and_replicas_and_mig
         assert not ksc.schema_ahead(reopened)
     finally:
         reopened.close()
+
+
+def test_archived_card_publishes_no_owner_link_for_its_leftover_hub_sub_and_keeps_the_open_card_link(gws):
+    """A hub sub left on an archived card (the chat that placed it is long gone) writes no link, so it cannot keep
+    that chat waiting; an unrelated open card's sub for the same chat is untouched. [daveey]"""
+    gws.at(OWNER)
+    conn = gws.conns[OWNER]
+    archived = kb.create_task(conn, title="withdrawn", assignee="default")
+    open_card = kb.create_task(conn, title="still going", assignee="default")
+    _sub(conn, archived, "hub/default/chat-same", "shepherd")
+    _sub(conn, open_card, "hub/default/chat-same", "shepherd")
+    assert kb.archive_task(conn, archived)
+    links.reconcile(conn, BOARD, OWNER)
+    assert _owner_links(conn, archived) == []
+    assert _owner_links(conn, open_card) == [("hub", "default", "chat-same", "shepherd", 0)]
+    assert conn.execute("SELECT COUNT(*) FROM kanban_notify_subs WHERE task_id = ?", (open_card,)).fetchone()[0] == 1

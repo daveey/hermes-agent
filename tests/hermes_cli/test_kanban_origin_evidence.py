@@ -250,3 +250,64 @@ def test_owner_observation_proves_current_local_completion(board):
         # the collector's per-scope heartbeat, not a per-task stamp).
         assert observe(conn, task, now=2000) == observed
         assert task.get('origin_observation') is None
+
+
+def _quiet_owner(replica, last_ok):
+    with sqlite3.connect(replica) as db:
+        db.execute("UPDATE meta SET v=? WHERE k='last_ok'", (str(last_ok),))
+
+
+def _archive_published(world, board, *, completed):
+    path, replica, binding = world
+    with kbc.connect_closing() as conn:
+        tid = create_bound(conn, binding)
+        publish_observed(conn, replica, binding, version=3)
+        accept(world)
+        if completed:
+            assert kb.complete_task(conn, tid, summary='Built and tested')
+        assert kb.archive_task(conn, tid)
+        publish_observed(conn, replica, binding, version=4)
+    return path, replica
+
+
+@pytest.mark.parametrize('completed', [False, True])
+def test_owner_archive_stays_closed_when_the_owner_goes_quiet(world, board, completed):
+    """An explicit owner archive (no artifact verification) ends the origin wait, and the owner going quiet
+    afterwards (a sleeping laptop) does not turn it back into an unknown obligation: the archive is the owner's
+    latest published record, as a verified completion is (2026-11-18, hub chat 20261111_091916_d2d36a)."""
+    path, replica = _archive_published(world, board, completed=completed)
+    row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)[0]
+    assert row['status'] == 'archived' and not row['unfinished']
+    _quiet_owner(replica, 1500)  # owner silent past its heartbeat window, transport itself fresh
+    row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1501)[0]
+    assert row['status'] == 'archived' and not row['unfinished'] and not row['stale']
+    assert row.get('closed_uncompleted', False) is not completed
+
+
+def test_archive_not_yet_seen_stays_unknown_then_closes_on_catchup(world, board):
+    """Replica lag: until the owner's archive record arrives the card is not known closed; after the catch-up it is."""
+    path, replica, binding = world
+    with kbc.connect_closing() as conn:
+        tid = create_bound(conn, binding)
+        publish_observed(conn, replica, binding, version=3)
+        accept(world)
+        assert kb.archive_task(conn, tid)
+        # the replica still holds the pre-archive record and the owner is silent: nothing authoritative to trust
+        _quiet_owner(replica, 1500)
+        row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1501)[0]
+        assert row['unfinished'] and row['status'] == 'unknown'
+        publish_observed(conn, replica, binding, version=4, now=1500)
+    row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1501)[0]
+    assert row['status'] == 'archived' and not row['unfinished']
+
+
+def test_nonterminal_owner_going_quiet_still_waits(world, board):
+    path, replica, binding = world
+    with kbc.connect_closing() as conn:
+        create_bound(conn, binding)
+        publish_observed(conn, replica, binding, version=3)
+        accept(world)
+        publish_observed(conn, replica, binding, version=4)
+    _quiet_owner(replica, 1500)
+    row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1501)[0]
+    assert row['unfinished'] and row['status'] == 'unknown'
