@@ -125,12 +125,18 @@ def test_refusal_none_when_not_a_review_result(md):
     assert krc.refusal("Investigate the review contract: " + SHIP_BODY, md) is None
 
 
-@pytest.mark.parametrize("md", [None, {}, {"completion_receipt": {}}, {"published_pr": PR}])
+@pytest.mark.parametrize("md", [None, {}, {"completion_receipt": {}}])
 def test_ship_brief_requires_metadata_even_without_review_keys(md):
     result = krc.completion_refusal(SHIP_BODY, md, worker_run_id=1)
     assert result and result[1] == "review_contract"
     assert "metadata.verdict" in result[0]
     assert "metadata.reviewed_sha" in result[0]
+
+
+def test_review_brief_landing_handoff_remains_exempt():
+    # A real review-and-land card retained the original review brief after landing.
+    md = {"published_pr": PR, "merged_sha": SHA, "approved_head": SHA, "review_id": 123}
+    assert krc.refusal(SHIP_BODY, md) is None
 
 
 @pytest.mark.parametrize("key", ["verdict", "review_verdict", "review_outcome", "reviewed_sha", "reviewed_head",

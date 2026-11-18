@@ -112,7 +112,9 @@ def refusal(body: Optional[str], metadata: Any) -> Optional[str]:
     """The refusal text for a review result on a core-fork pull card that ship cannot read, else None."""
     # Ship's generated brief is a review assignment, even when a reviewer forgets every
     # metadata key. Other cards may merely discuss the contract or hand off a landing.
-    required = states_contract(body) and re.match(r"\s*Independent exact-head review of\b", body or "", re.IGNORECASE)
+    landing = isinstance(metadata, dict) and metadata.get("published_pr")
+    required = (not landing and states_contract(body)
+                and re.match(r"\s*Independent exact-head review of\b", body or "", re.IGNORECASE))
     if not required and not is_review_result(metadata):
         return None
     if states_contract(body):
