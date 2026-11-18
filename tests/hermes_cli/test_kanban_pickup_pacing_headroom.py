@@ -6,6 +6,8 @@ Local dispatch started one and pace-held nine, which were evicted and copied aga
 to the machine below that batch was recorded ``budget_exhausted`` although spawn slots were free and the real
 gate was pacing, so the pickup-stall alarm filed "Pickup queue full".
 """
+import dataclasses
+
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -23,6 +25,13 @@ pool = routing_support.pool
 strong_pattern = routing_support.strong_pattern
 PIN = [f"machine:{support.WORKER}"]
 BATCH = 10
+
+
+@pytest.fixture(autouse=True)
+def pace_starts_mode(monkeypatch):
+    """Exercise opt-in concurrency pacing; default pacing now governs reads only."""
+    real = lp.config_from
+    monkeypatch.setattr(lp, "config_from", lambda section: dataclasses.replace(real(section), pace_starts=True))
 
 
 @pytest.fixture
