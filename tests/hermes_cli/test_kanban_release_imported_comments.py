@@ -240,12 +240,13 @@ def _uid_ms(ms, salt):
 
 
 def _legacy_own_write(tid, *, drift_s=5, uid_gap_ms=6, mint_offset_ms=57, author=None, length=None,
-                      comment_id=None, event_uid=None, row_uid=None):
+                      comment_id=None, event_uid=None, row_uid=None, padding=""):
     """t_01a1a1dea9c64d6a shape (live: 5 s / 6 ms and 7 s / 1 ms): an add_comment row stamped before the
     write lock, its event after, no comment_uid, no run provenance, no transcript."""
     enable_sync(tid)
     body = "SOURCE-ONLY next-prefix manifest (subagent; no live DB)"
-    cid = comment(tid, session="20261111_193650_c64738", age=8 * 86400, body=body)
+    cid = comment(tid, session="20261111_193650_c64738", age=8 * 86400, body=body + padding)
+    body += padding  # the payload's len counts what the caller passed; the row stores it stripped
     with kbc.connect_closing() as conn:
         row = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
         ev_at = row["created_at"] + drift_s
@@ -325,3 +326,34 @@ def test_backfill_race_spare_row_cannot_stand_in(board, entry, capsys):
             conn.execute("DELETE FROM task_comments WHERE id=?", (cid,))  # not synced to this reader yet
     ok, output = release(board, entry, capsys, spare_id)
     assert not ok and "Comment data unavailable" in output, output
+
+
+@pytest.mark.parametrize("entry", ["promote", "unblock", "tool"])
+@pytest.mark.parametrize("padding", ["\n", "\r\n", " \n"])
+def test_legacy_own_write_with_stripped_padding(board, entry, padding, capsys):
+    """A legacy kanban_comment body ending in whitespace: payload len counts it, the row stores it stripped."""
+    cid = _legacy_own_write(board, padding=padding)
+    with kbc.connect_closing() as conn:
+        stored = conn.execute("SELECT body FROM task_comments WHERE id=?", (cid,)).fetchone()[0]
+    assert not stored.endswith(("\n", " "))
+    ok, output = release(board, entry, capsys, cid - 1)
+    assert not ok and "SOURCE-ONLY next-prefix" in output and "data unavailable" not in output, output
+    ok, output = release(board, entry, capsys, cid)
+    assert ok, output
+
+
+@pytest.mark.parametrize("entry", ["promote", "unblock", "tool"])
+@pytest.mark.parametrize("delta", [3, -1])
+def test_legacy_own_write_length_bound(board, entry, delta, capsys):
+    """Three or more extra characters, or a stored body longer than recorded, is a different text."""
+    import re
+    cid = _legacy_own_write(board)
+    with kbc.connect_closing() as conn:
+        with kbc.write_txn(conn):
+            ev = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='commented' "
+                              "AND json_extract(payload, '$.comment_id')=?", (board, cid)).fetchone()
+            payload = json.loads(ev["payload"])
+            payload["len"] += delta
+            conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(payload), ev["id"]))
+    ok, output = release(board, entry, capsys, cid + 1000)
+    assert not ok and "data unavailable" in output, re.sub(r"\s+", " ", output)[:300]

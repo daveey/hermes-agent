@@ -156,7 +156,9 @@ def _resolve(rows, event, payload, *, local_writer=False):
     Legacy synced events have no portable reference. Require acknowledgement of
     every plausible same-time/author row rather than guess among collisions.
     The timestamp tolerance covers the writer crossing a second between inserts;
-    body length cannot disambiguate because add_comment strips stored text.
+    body length alone cannot disambiguate (add_comment stores stripped text and
+    records the unstripped length); ``_own_write`` uses it only alongside the
+    event's own integer, author and write clocks.
     """
     if payload.get("comment_uid"):
         return [r for r in rows if "uid" in r.keys() and r["uid"] == payload["comment_uid"]]
@@ -173,6 +175,9 @@ def _resolve(rows, event, payload, *, local_writer=False):
 
 
 _LOCK_WAIT = 60  # seconds a legacy row stamp may precede its event (add_comment stamped it before the lock)
+# add_comment records len(body) but stores body.strip(): on the hub board 5901 of 5907 provable comments differ by
+# 0 and 6 by 1 (a trailing newline). 2 also admits "\r\n"; anything longer is a different text.
+_STRIPPED = 2
 
 
 def _uuid7_ms(uid):
@@ -191,8 +196,8 @@ def _own_write(rows, event, payload):
     the row's ``created_at`` seconds before its event's (5 s and 7 s on
     t_01a1a1dea9c64d6a), outside the one-second rule above. The row the event
     names is then bound only when all of these hold: its id is the event's
-    ``comment_id`` and its author and stored length are the event's ``author``
-    and ``len``; both uids are UUIDv7 within a second of each other; the
+    ``comment_id``, its author is the event's ``author`` and its stored length is
+    the event's ``len`` less at most ``_STRIPPED`` stripped characters; both uids are UUIDv7 within a second of each other; the
     event's uid was minted at its write (within 2 s of its own ``created_at``,
     which a sync-enable backfill days later is not); and the row stamp precedes
     the event by at most ``_LOCK_WAIT``.
@@ -212,7 +217,7 @@ def _own_write(rows, event, payload):
             continue
         row_ms = _uuid7_ms(row["uid"]) if "uid" in row.keys() else None
         if (row_ms is not None and abs(row_ms - event_ms) <= 1000
-                and row["author"] == author.strip() and len(row["body"]) == length
+                and row["author"] == author.strip() and 0 <= length - len(row["body"]) <= _STRIPPED
                 and 0 <= event["created_at"] - row["created_at"] <= _LOCK_WAIT):
             return [row]
     return []
