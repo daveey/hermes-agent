@@ -685,7 +685,7 @@ def test_busy_card_read_cannot_derive_done(db, board, monkeypatch, verdict, prio
     def busy(*args, **kwargs):
         raise BoardLifecycleBusy("database is locked: board lifecycle is busy")
 
-    monkeypatch.setattr(ksa, "session_tasks", busy)
+    monkeypatch.setattr(ksa, "session_outcome_tasks", busy)
     so.register_outcome_judge(lambda sid, text: verdict)
     out = so.refresh_outcome("chat", "turn_end", db=db)
     if prior_kind in ("waiting", "decision"):
@@ -704,7 +704,7 @@ def test_empty_card_list_cannot_override_open_counts(db, board, monkeypatch, sta
              HUMAN_REQUEST if status == "blocked" else None)
     # Counts retain an open obligation while the independently cached list misses it.
     assert ksa.active_task_counts().get("chat", 0) + ksa.blocked_task_counts().get("chat", 0) == 1
-    monkeypatch.setattr(ksa, "session_tasks", lambda *a, **kw: [])
+    monkeypatch.setattr(ksa, "session_outcome_tasks", lambda *a, **kw: [])
     out = so.derive_outcome("chat", db=db)
     assert (out["kind"], out.get("reason")) == ("unresolved", "card_read_failed")
 
@@ -715,7 +715,7 @@ def test_empty_card_list_checks_compression_ancestor_counts(db, board, monkeypat
     db.create_session("tip", source="desktop", parent_session_id="chat")
     db.append_message("tip", role="assistant", content=SUMMARY)
     add_card(board, "t_01a1d0b341560679", "chat", "triage")
-    monkeypatch.setattr(ksa, "session_tasks", lambda *a, **kw: [])
+    monkeypatch.setattr(ksa, "session_outcome_tasks", lambda *a, **kw: [])
     out = so.derive_outcome("tip", db=db)
     assert (out["kind"], out.get("reason")) == ("unresolved", "card_read_failed")
 
@@ -792,7 +792,7 @@ def test_same_sid_interleaved_card_reads_are_invocation_local(db, monkeypatch, f
             nested.append(so.derive_outcome(sid, db=db))
         return {}
 
-    monkeypatch.setattr(ksa, "session_tasks", cards)
+    monkeypatch.setattr(ksa, "session_outcome_tasks", cards)
     so.register_outcome_provider("interleave", provider)
     outer = so.derive_outcome("chat", db=db)
     failed, succeeded = (outer, nested[0]) if failed_outer else (nested[0], outer)
@@ -827,7 +827,7 @@ def test_busy_card_read_preserves_authority_but_not_silent_completion(db, monkey
     def busy(*args, **kwargs):
         raise BoardLifecycleBusy("database is locked: board lifecycle is busy")
 
-    monkeypatch.setattr(ksa, "session_tasks", busy)
+    monkeypatch.setattr(ksa, "session_outcome_tasks", busy)
     out = so.refresh_outcome("chat", "manual", db=db)
     if precedence == "declared":
         # A declared done cannot outrank an unread card any more than a counted open one.

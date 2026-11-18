@@ -1530,32 +1530,13 @@ def _board_slug(path: Path) -> str:
 def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -> list[dict[str, Any]]:
     """Tasks on one board that any of ``ids`` created or is a ``tui`` subscriber
     of, in ``statuses`` — the same pairs ``_read_counts`` counts."""
-    sid_ph = ",".join("?" for _ in ids)
-    st_ph = ",".join("?" for _ in statuses)
     with cached_ro(path) as conn, _execution_transaction(conn) as read_at:
         conn.row_factory = sqlite3.Row
         cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
         if "session_id" not in cols:
             return []  # explicitly supported pre-session schema
-        select = ", ".join(f"t.{c}" if c in cols else f"NULL AS {c}" for c in _TASK_FIELDS)
-        run_start = "NULL"
-        if "current_run_id" in cols and conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'").fetchone():
-            run_start = "(SELECT r.started_at FROM task_runs r WHERE r.id = t.current_run_id AND r.task_id = t.id)"
-        found: dict[str, dict[str, Any]] = {}
-        watch = _not_watch(conn)  # [daveey] a watch park is not the chat's open card (close-out gate)
-        for row in conn.execute(
-                f"SELECT {select}, {run_start} AS current_run_started_at FROM tasks t "
-                f"WHERE t.session_id IN ({sid_ph}) AND t.status IN ({st_ph}) AND {watch}", (*ids, *statuses)):
-            found[row["id"]] = {**dict(row), "via": "created"}
-        try:
-            for row in conn.execute(
-                    f"SELECT {select}, {run_start} AS current_run_started_at FROM kanban_notify_subs s "
-                    f"JOIN tasks t ON t.id = s.task_id WHERE s.platform = 'tui' AND {_counted_sub_clause(conn)} "
-                    f"AND s.chat_id IN ({sid_ph}) AND t.status IN ({st_ph}) AND {watch}", (*ids, *statuses)):
-                found.setdefault(row["id"], {**dict(row), "via": "subscribed"})
-        except sqlite3.Error:  # board predates notify subscriptions
-            pass
+        from hermes_cli.kanban_session_outcome_tasks import select_listed_local_tasks
+        found = select_listed_local_tasks(conn, ids, statuses)
         from hermes_cli.kanban_execution_source import assemble
         from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_scope
         gateway, profile = card_scope(path)
@@ -1626,19 +1607,17 @@ def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED
         t.setdefault("key", f"{t['board']}/{t['id']}")
     # [daveey] Cards on other gateways this lineage owns: the same rows the counts use, owner-qualified
     # (gateway/board/id), with ``stale``/``synced_at`` from the replica. One row per card.
-    wanted, seen = set(ids), set()
-    for card in _remote_cards(ids, statuses, stale_ok):
-        belongs = card['session'] in wanted or card.get('origin_session') in wanted
-        listed = card.get('status') in statuses or (card.get('status') in PENDING_RELEASE_STATUSES and card.get('unfinished'))
-        if belongs and listed and card['key'] not in seen:
-            seen.add(card["key"])
-            row = {**card, "session_id": card["session"]}
-            wait = _remote_wait(card)
-            if wait is not None:
-                row["wait"] = wait
-            out.append(row)
+    from hermes_cli.kanban_session_outcome_tasks import append_remote_listed_cards
+    append_remote_listed_cards(out, ids, statuses, stale_ok)
     from hermes_cli.kanban_execution_observations import add_cards
     return add_cards([dict(row) for row in out])
+
+
+def session_outcome_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED_STATUSES, *,
+                          stale_ok: bool = False) -> list[dict[str, Any]]:
+    """Listed cards for session outcome: same membership as ``session_tasks``, without sidebar enrichment."""
+    from hermes_cli.kanban_session_outcome_tasks import session_outcome_tasks as _impl
+    return _impl(session_ids, statuses, stale_ok=stale_ok)
 
 
 # [daveey] A "done" card can still need the user: its handoff admits part of the

@@ -30,6 +30,7 @@ _log = logging.getLogger("hermes_cli.kanban_session_activity")
 reuse_sink = threading.local()
 
 _tasks_memo: dict[tuple, list[dict[str, Any]]] = {}  # last good per-board task list, by (board, ids, statuses)
+_lean_tasks_memo: dict[tuple, list[dict[str, Any]]] = {}  # outcome lean reader; never the sidebar namespace
 _tasks_lock = threading.Lock()
 TASKS_MEMO_MAX = 512
 # One request's shared budget for re-reading busy boards that have no last good list for the query (well inside the
@@ -71,9 +72,23 @@ def board_reads(path: Path, key: tuple, hit: tuple | None, parked: bool, stalled
     return reads, complete, True
 
 
+def _memo(namespace: str) -> dict[tuple, list[dict[str, Any]]]:
+    return _lean_tasks_memo if namespace == "lean" else _tasks_memo
+
+
+def _row_copy(task: dict[str, Any], *, stale: bool = False) -> dict[str, Any]:
+    row = dict(task)
+    wait = row.get("wait")
+    if isinstance(wait, dict):
+        row["wait"] = dict(wait)
+    if stale:
+        row["stale"] = True
+    return row
+
+
 def session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...],
                   read: Callable[[Path, list[str], tuple[str, ...]], list[dict[str, Any]]], *,
-                  deadline: float | None = None) -> list[dict[str, Any]]:
+                  deadline: float | None = None, memo_namespace: str = "") -> list[dict[str, Any]]:
     """``read(path, ids, statuses)``, or on a busy board its last good list for the same query, every row ``stale``.
 
     A busy board with no last list for this query (a chat opened for the first time since the backend started) is
@@ -81,7 +96,12 @@ def session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...],
     for the board, and a lifecycle hold a little longer than that made ``/api/session-kanban-tasks`` 500 and the
     Desktop panel show "Task status unavailable" for every newly opened chat. The deadline belongs to the whole
     request (``request_deadline``), so several busy boards share one budget. ``None`` never retries: callers holding
-    a lock (the links projection under ``_links_lock``) must fail fast."""
+    a lock (the links projection under ``_links_lock``) must fail fast.
+
+    ``memo_namespace`` default empty keeps the sidebar key ``(path, ids, statuses)``. The outcome lean
+    reader uses ``lean`` so the two last-good lists cannot poison each other.
+    """
+    store = _memo(memo_namespace)
     key = (str(path), tuple(ids), tuple(statuses))
     while True:
         try:
@@ -91,23 +111,24 @@ def session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...],
             if not is_busy(exc):
                 raise
             with _tasks_lock:
-                last = _tasks_memo.get(key)
+                last = store.get(key)
             if last is not None:
                 _log.warning("kanban board %s busy; reused last counts kind=%s sqlite_code=%s pid=%s holder=%s",
                              path, *busy_details(exc))
-                return [{**t, "stale": True} for t in last]
+                return [_row_copy(t, stale=True) for t in last]
             now = time.monotonic()
             if deadline is None or now >= deadline:
                 raise
             time.sleep(min(FIRST_READ_RETRY_PAUSE_S, deadline - now))  # an instant busy error must not spin
     with _tasks_lock:
-        _tasks_memo.pop(key, None)
-        _tasks_memo[key] = tasks
-        while len(_tasks_memo) > TASKS_MEMO_MAX:
-            _tasks_memo.pop(next(iter(_tasks_memo)))
+        store.pop(key, None)
+        store[key] = [_row_copy(t) for t in tasks]
+        while len(store) > TASKS_MEMO_MAX:
+            store.pop(next(iter(store)))
     return tasks
 
 
 def reset() -> None:
     with _tasks_lock:
         _tasks_memo.clear()
+        _lean_tasks_memo.clear()

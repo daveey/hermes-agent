@@ -327,10 +327,10 @@ def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
     """(decision items, waits) from the cards these chats created or shepherd: a card parked on a
     validated ``human_request`` is a decision, every other open card is a wait."""
     from hermes_cli.kanban_human_request import needs_human
-    from hermes_cli.kanban_session_activity import LISTED_STATUSES, session_tasks
+    from hermes_cli.kanban_session_activity import LISTED_STATUSES, session_outcome_tasks
 
     decisions, waits = [], []
-    cards = session_tasks(ids, LISTED_STATUSES, stale_ok=True)
+    cards = session_outcome_tasks(ids, LISTED_STATUSES, stale_ok=True)
     if not cards:
         # The display list may be a stale-empty projection while the sidebar counts
         # already know about open work. Absence is not completion without agreement.

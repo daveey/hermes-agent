@@ -50,7 +50,7 @@ def test_actionable_block_entry_paths(path, case):
 def test_outcome_rejects_legacy_human_wait_without_evidence(monkeypatch):
     from hermes_cli import kanban_session_activity as activity
     import hermes_state_outcome as outcome
-    monkeypatch.setattr(activity, "session_tasks", lambda *a, **k: [dict(id="t_example", status="blocked", wait={"wait_state": "human"})])
+    monkeypatch.setattr(activity, "session_outcome_tasks", lambda *a, **k: [dict(id="t_example", status="blocked", wait={"wait_state": "human"})])
     decisions, waits = outcome._card_items(["chat"])
     assert decisions == []
     assert waits[0]["id"] == "t_example"
@@ -77,7 +77,7 @@ def test_deleted_card_is_agent_owned():
 def test_outcome_decision_keeps_full_validated_action(monkeypatch):
     from hermes_cli import kanban_session_activity as activity
     import hermes_state_outcome as outcome
-    monkeypatch.setattr(activity, "session_tasks", lambda *a, **k: [dict(
+    monkeypatch.setattr(activity, "session_outcome_tasks", lambda *a, **k: [dict(
         id="t_example", status="blocked", block_kind="needs_input", human_request=dict(ASK))])
     decisions, waits = outcome._card_items(["chat"])
     assert waits == []
