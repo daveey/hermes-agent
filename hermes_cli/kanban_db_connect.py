@@ -1121,6 +1121,7 @@ _LATER_TASK_COLUMNS = (
     # Typed operational reason; neither NULL nor capability implies a human ask.
     ("block_kind", "block_kind TEXT"),
     ("human_request", "human_request TEXT"),
+    ("containment_episode", "containment_episode TEXT"),
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
     # Spawn-time start fingerprint of worker_pid (PID-reuse guard; NULL = legacy row).
     ("worker_started_at", "worker_started_at INTEGER"),

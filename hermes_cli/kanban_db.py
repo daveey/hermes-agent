@@ -658,6 +658,7 @@ class Task:
     # VALID_BLOCK_KINDS or None (legacy); kept across unblock so a same-kind re-block reads as a loop.
     block_kind: Optional[str] = None
     human_request: Optional[dict] = None
+    containment_episode: Optional[str] = None  # Portable hold marker; never release authority.
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
     placement_policy: Optional[str] = None
@@ -689,22 +690,11 @@ class Task:
         )
 
 
-# Columns every schema version has (KeyError if the SELECT omitted them).
-_TASK_REQUIRED_COLUMNS = (
-    "id", "title", "body", "assignee", "status", "priority", "created_by",
-    "workspace_kind", "workspace_path", "claim_lock",
-)
-_TASK_EPOCH_COLUMNS = ("created_at", "started_at", "completed_at", "claim_expires", "last_heartbeat_at")
-# Later-added columns read as NULL when absent from the row.
-_TASK_OPTIONAL_COLUMNS = (
-    "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
-    "max_runtime_seconds", "current_run_id", "workflow_template_id",
-    "current_step_key", "max_retries", "session_id", "completion_contract", "placement_policy", "model_pin_mandatory",
-)
-# Text columns where "" is stored/read as "not set".
-_TASK_EMPTY_IS_NULL_COLUMNS = (
-    "model_override", "provider_override", "reasoning_effort", "goal_max_turns", "block_kind",
-)
+# Private aliases remain available to direct callers of the compatibility facade.
+from hermes_cli.kanban_task_fields import EMPTY_IS_NULL as _TASK_EMPTY_IS_NULL_COLUMNS
+from hermes_cli.kanban_task_fields import EPOCH as _TASK_EPOCH_COLUMNS
+from hermes_cli.kanban_task_fields import OPTIONAL as _TASK_OPTIONAL_COLUMNS
+from hermes_cli.kanban_task_fields import REQUIRED as _TASK_REQUIRED_COLUMNS
 
 
 @dataclass
@@ -879,6 +869,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- the SAME kind can be recognised as a loop.
     block_kind           TEXT,
     human_request        TEXT,
+    containment_episode  TEXT,
     -- Unblock-loop counter. Incremented each time a task is re-blocked for the
     -- same truly-blocked reason after having been unblocked. When it reaches
     -- BLOCK_RECURRENCE_LIMIT the task is routed to ``triage`` instead of

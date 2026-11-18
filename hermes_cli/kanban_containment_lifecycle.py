@@ -174,7 +174,7 @@ def contain_local(conn: sqlite3.Connection, *, target: dict, resume_policy: dict
                 raise ContainmentRefused("own containment requires the current running task")
         elif row[0] not in ("todo", "ready", "triage") or row[1] is not None or not _reachable(conn, actor_task, tid):
             raise ContainmentRefused("foreign containment requires an unclaimed descendant")
-        if reduce_events(_events(conn, tid), verify_release=lambda r, s: verified_release(conn, r, s)) is not None:
+        if guard.pending(conn, tid, verify_release=lambda r, s: verified_release(conn, r, s)):
             raise ContainmentRefused("task is already contained; resume its exact episode")
         _nominees(conn, target, spec)
         baseline = _baseline(conn, spec)
@@ -185,6 +185,7 @@ def contain_local(conn: sqlite3.Connection, *, target: dict, resume_policy: dict
             conn.execute("UPDATE tasks SET status='triage',current_run_id=NULL,completed_at=NULL,"
                          "claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,worker_started_at=NULL WHERE id=?", (tid,))
             episode = _append(conn, tid, "contained", payload)
+            conn.execute("UPDATE tasks SET containment_episode=? WHERE id=?", (episode, tid))
     return {"task_id": tid, "status": "triage", "episode": episode, "resume_policy": spec}
 
 
@@ -240,5 +241,6 @@ def resume_local(conn: sqlite3.Connection, *, target: dict, episode: str, actor_
             remaining = reduce_events(_events(conn, tid), verify_release=lambda r, s: verified_release(conn, r, s))
             from hermes_cli.kanban_spend_decision import pending as spend_pending
             landing = "triage" if remaining is not None or spend_pending(conn, tid) else kb._landing_status_after_parents(conn, tid)
-            conn.execute("UPDATE tasks SET status=? WHERE id=?", (landing, tid))
+            conn.execute("UPDATE tasks SET status=?,containment_episode=CASE WHEN ? THEN containment_episode ELSE NULL END "
+                         "WHERE id=?", (landing, remaining is not None, tid))
     return {"task_id": tid, "status": landing, "episode": episode, "release": receipt_uid}

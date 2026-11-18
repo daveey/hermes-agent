@@ -99,7 +99,7 @@ LOCAL_COLUMNS: dict[str, frozenset[str]] = {
 # ``ready_since``: when the card last became ready (ms), for the Board's ``home_grace`` placement rule.
 # ``workspace_source``/``workspace_custody``: Board-written only (``publish_source``, custody hooks); a push is refused.
 SERVER_COLUMNS: dict[str, frozenset[str]] = {
-    "tasks": frozenset({"created_on", "ready_since", "workspace_source", "workspace_custody"})}
+    "tasks": frozenset({"created_on", "ready_since", "workspace_source", "workspace_custody", "containment_episode"})}
 JSON_SERVER_COLUMNS: dict[str, frozenset[str]] = {"tasks": frozenset({"workspace_source", "workspace_custody"})}
 # Old columns an ADD-first rename migration keeps (``kanban_db_connect._RENAMED_TASK_COLUMNS``: the new column is
 # added and filled from the old one, which stays). Every board older than the rename holds them; only
