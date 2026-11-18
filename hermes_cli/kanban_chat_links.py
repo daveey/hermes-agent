@@ -582,14 +582,15 @@ def _ledger_owners(stale_ok: bool = False) -> dict[tuple[str, str], list[tuple[s
     return _ledger_index(stale_ok)[0]
 
 
-def _ledger_index(stale_ok: bool = False) -> tuple[dict[tuple[str, str], list[tuple[str, str, str, bool]]],
+def _ledger_index(stale_ok: bool = False, cards: Optional[list[dict[str, Any]]] = None) -> tuple[dict[tuple[str, str], list[tuple[str, str, str, bool]]],
                                                    list[dict[str, Any]]]:
     """``(_ledger_owners, the ledger's profile-board cards)`` from one origin-ledger projection; ``({}, [])`` when it
     cannot be read (both are additions to the replica's answer, never a reason to hide it)."""
     from hermes_cli.kanban_session_activity import _remote_links
     global _owners_memo
     try:
-        cards = _remote_links(stale_ok=True) if stale_ok else _remote_links()
+        if cards is None:
+            cards = _remote_links(stale_ok=True) if stale_ok else _remote_links()
     except Exception as exc:  # health: allow BLE001 -- the profile is a label; a failed ledger read must not hide cards
         _log.info("kanban chat links: owner profiles unavailable (%s: %s)", type(exc).__name__, exc)
         return {}, []
@@ -738,7 +739,7 @@ def _released_closed(card: dict[str, Any], statuses: tuple[str, ...]) -> bool:
 def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: tuple[str, ...] = OPEN_STATUSES,
                   replicas: Optional[list[tuple[str, Path]]] = None, *, now: Optional[float] = None,
                   ledger_fallback: bool = True, unreadable_out: Optional[list[str]] = None,
-                  stale_ok: bool = False) -> list[dict[str, Any]]:
+                  stale_ok: bool = False, origin_cards: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
     """This gateway's chats' (``session_ids``, one lineage; ``None`` = every chat) unreleased links to cards created
     on OTHER gateways, from every board's replica, shaped like the origin-ledger rows ``session_tasks`` appends.
 
@@ -794,7 +795,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
             rows, pulled, runs = hit
             stale = True
         if index is None and rows:
-            index = _ledger_index(stale_ok)
+            index = _ledger_index(stale_ok) if origin_cards is None else _ledger_index(stale_ok, origin_cards)
         owners = index[0] if index is not None else None
         for r in rows:
             if ids is not None and r["chat_session"] not in ids:
@@ -837,7 +838,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
         for r in _released_links(path, board, gateway, profile, ids, statuses):
             tid = str(r["id"])
             if index is None:
-                index = _ledger_index(stale_ok)
+                index = _ledger_index(stale_ok) if origin_cards is None else _ledger_index(stale_ok, origin_cards)
             owner, owner_profile, _named = _owner_of(index[0].get((board, tid), []), r["created_on"],
                                                      r["chat_session"])
             key = f"{owner or '?'}/{owner_profile}/{board}/{tid}"

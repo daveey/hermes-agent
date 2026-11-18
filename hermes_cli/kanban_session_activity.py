@@ -797,6 +797,7 @@ def _activity_fingerprint(*, include_shadows: bool = True) -> tuple:
     signature.extend((str(db), _board_content_key(db)) for db in _board_db_paths())
     if include_shadows:
         signature.extend(_shadow_fingerprint())
+        signature.extend(_origin_ledger_fingerprint())
     return tuple(signature)
 
 
@@ -861,10 +862,15 @@ _LINKS_MAX_AGE_S = 15.0
 
 def _links_fingerprint() -> tuple:
     """Every store the remote inventory reads except state.db (alias tips), which the TTL bounds instead."""
+    return (*_activity_fingerprint(include_shadows=False), *_origin_ledger_fingerprint())
+
+
+def _origin_ledger_fingerprint() -> tuple:
+    """Origin custody changes invalidate both link projection and cached zero counts."""
     from hermes_constants import get_hermes_home
 
     ledger = get_hermes_home() / 'kanban' / 'origin-ledger.db'
-    signature = list(_activity_fingerprint(include_shadows=False))
+    signature = []
     for path in (ledger, Path(str(ledger) + '-wal')):
         try:
             st = path.stat()
@@ -1578,14 +1584,14 @@ def _remote_cards(ids: list[str] | None, statuses: tuple[str, ...], stale_ok: bo
     The sidebar counts and ``session_tasks`` both read this, so they are one projection in either mode. [daveey]"""
     from hermes_cli import kanban_db_sync as _sync
     if _sync.sync_config().get("links_reader") == "replica":
-        from hermes_cli import kanban_chat_links as _links
+        from hermes_cli.kanban_origin_obligations import selected_remote_cards
         from hermes_cli import kanban_sync_client as _ksc
         try:
             gateway = _ksc.load_identity().gateway
         except _ksc.SyncUnavailable:
             gateway = None
         if gateway:
-            return _links.replica_cards(ids, gateway, statuses, stale_ok=stale_ok)
+            return selected_remote_cards(ids, gateway, statuses, stale_ok)
     return _remote_links(stale_ok=True) if stale_ok else _remote_links()
 
 

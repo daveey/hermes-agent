@@ -116,7 +116,7 @@ def unchanged_inputs(scope: tuple[str, ...]) -> tuple[float, tuple] | None:
     read_at = time.time()
     mono = time.monotonic()
     local = _ksa._activity_fingerprint(include_shadows=False)
-    full = local + _ksa._shadow_fingerprint()  # one read of each board serves both keys
+    full = local + _ksa._shadow_fingerprint() + _ksa._origin_ledger_fingerprint()  # one board read for both keys
     with _ksa._cache_lock:
         if not counts_fresh(scope, full, mono):
             return None
