@@ -401,3 +401,40 @@ def test_public_session_tasks_still_uses_the_full_memo_namespace(kanban_root, mo
     seen.clear()
     _lean()(["s1"])
     assert seen and seen[0] == "lean"
+
+
+def test_busy_reset_clears_both_namespaces(clock):
+    path, ids, statuses = Path("rb"), ["s1"], ("running",)
+
+    def ok(*a, **k):
+        return [{"id": "t1"}]
+
+    def busy_read(*a, **k):
+        raise BoardLifecycleBusy()
+
+    busy.session_tasks(path, ids, statuses, ok, deadline=clock.now + 3)
+    busy.session_tasks(path, ids, statuses, ok, deadline=clock.now + 3, memo_namespace="lean")
+    busy.reset()
+    for ns in ("", "lean"):
+        with pytest.raises(sqlite3.OperationalError):
+            busy.session_tasks(path, ids, statuses, busy_read, deadline=clock.now, memo_namespace=ns)
+
+
+def test_busy_memo_bound_applies_per_namespace_and_evicts_oldest(clock, monkeypatch):
+    monkeypatch.setattr(busy, "TASKS_MEMO_MAX", 2)
+
+    def ok(*a, **k):
+        return [{"id": "t"}]
+
+    def busy_read(*a, **k):
+        raise BoardLifecycleBusy()
+
+    for ns in ("", "lean"):
+        for n in range(3):
+            busy.session_tasks(Path(f"b{n}"), ["s"], ("running",), ok, deadline=clock.now + 3, memo_namespace=ns)
+    assert len(busy._tasks_memo) == 2 and len(busy._lean_tasks_memo) == 2
+    for ns in ("", "lean"):
+        with pytest.raises(sqlite3.OperationalError):
+            busy.session_tasks(Path("b0"), ["s"], ("running",), busy_read, deadline=clock.now, memo_namespace=ns)
+        assert busy.session_tasks(Path("b2"), ["s"], ("running",), busy_read, deadline=clock.now,
+                                  memo_namespace=ns)[0]["stale"] is True
