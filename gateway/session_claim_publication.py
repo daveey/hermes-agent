@@ -45,8 +45,14 @@ def _prepare(authority, ref, token):
 async def stamp_claim(authority, ref, live, row):
     # Stamp immediately after the commit, even if the subsequent storage read fails.
     # The encompassing tracked_write shields BOTH phases from observer cancellation.
-    authority._stamp_claim(ref, live, row, publish_pending=False)
+    authority._stamp_claim(ref, live, row, publish_pending=False, announce=False)
     if row:
+        from gateway.kanban_wake_fold import refresh_claimed
+        from gateway.session_automation import admission_display
+        # Execution custody is stamped before this off-loop read; presentation follows the refresh.
+        await asyncio.to_thread(refresh_claimed, row['payload'])
+        with live.event_stream.lock:
+            live.event_stream.publish(ref.session_id, admission_display(row['payload']), event_type='message.start')
         while True:
             with live.event_stream.lock:
                 token = _view_token(authority, ref, live)

@@ -332,6 +332,9 @@ def refresh_claimed(payload):
             # Strict: an unreadable card would fall back to its as-delivered text and undo the
             # relabel the fold already made, so any unreadable card leaves the whole text as it was.
             payload['text'] = _compose(cards, guidance, strict=True)
+            from gateway.session_automation import _DISPLAY_TEXT_LIMIT
+            text = payload['text']
+            descriptor['display_text'] = text if len(text) <= _DISPLAY_TEXT_LIMIT else text[:_DISPLAY_TEXT_LIMIT - 1] + '…'
     except Exception:  # health: allow BLE001 -- a refresh must never cost the wake itself
         logger.warning('kanban wake: claim-time relabel skipped; delivering the wake unchanged', exc_info=True)
 

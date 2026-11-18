@@ -1245,7 +1245,7 @@ class SessionAuthority:
         # instead of letting the drain exit idle over a committed admission.
         return (False if row is None and live.rescan else row), first
 
-    def _stamp_claim(self, ref, live, row, *, publish_pending=True):
+    def _stamp_claim(self, ref, live, row, *, publish_pending=True, announce=True):
         """The claim's execution stamp, in the same tracked task as its commit: no observer (or
         retirement's join) ever sees a committed claim that no execution stamp names."""
         if row:  # None or False (the head changed under the write) claimed nothing
@@ -1256,9 +1256,10 @@ class SessionAuthority:
                     'authority_epoch': self.epoch, 'execution_generation': row['generation'],
                     'admission_id': row['admission_id']}
                 self.executing[ref.session_id] = row['generation']
-                from gateway.session_automation import admission_display
-                live.event_stream.publish(ref.session_id, admission_display(row.get('payload') or {}),
-                                          event_type='message.start')
+                if announce:
+                    from gateway.session_automation import admission_display
+                    live.event_stream.publish(ref.session_id, admission_display(row.get('payload') or {}),
+                                              event_type='message.start')
                 if publish_pending:
                     self._publish_pending(ref)
         return row
