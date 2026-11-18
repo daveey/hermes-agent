@@ -9,12 +9,14 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
 import json
+import os
 
 from hermes_cli import kanban_origin_native as native
 
 @dataclass
 class _Admission:
     captured: object
+    gate: object = None
     admitted: set = field(default_factory=set)
 
 
@@ -26,11 +28,11 @@ class AdmissionRefused(ValueError):
 
 
 @contextmanager
-def strict_local_creation():
+def strict_local_creation(*, gate=None):
     captured = native.capture(None)
     if captured is None:
         raise AdmissionRefused("strict native creation requires a live interactive turn")
-    token = _current.set(_Admission(captured))
+    token = _current.set(_Admission(captured, gate=gate))
     try:
         yield
     finally:
@@ -43,6 +45,7 @@ def active():
 
 def check_tool(args, kw):
     if active() and (args.get("placement") != "local" or args.get("origin_session")
+                     or os.environ.get("HERMES_ORIGIN_SESSION")
                      or args.get("requires") or args.get("runs_on") or args.get("placement_policy")
                      or args.get("self_work") is not None or kw.get("origin_intent") is not None
                      or kw.get("selfwork_intent") is not None):
@@ -84,6 +87,8 @@ def require_receipt(conn, task_id):
     owner = {"gateway": gateway, "profile": profile, "board": board, "task_id": task_id}
     if binding["origin"] != context["origin"] or binding["owner"] != owner:
         raise AdmissionRefused("strict native creation receipt belongs to another origin or board")
+    if state.gate is not None:
+        state.gate.admit(task_id)
     state.admitted.add(task_id)
 
 

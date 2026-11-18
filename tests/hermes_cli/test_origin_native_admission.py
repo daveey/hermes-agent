@@ -188,6 +188,56 @@ def test_valid_receipt_with_wrong_owner_is_refused(turn):
             kb.create_task(conn, title="replay", idempotency_key="owner-key", native_origin=captured)
 
 
+def test_ambient_origin_refused_before_resolution(turn, monkeypatch):
+    monkeypatch.setenv("HERMES_ORIGIN_SESSION", "@session:default@here/ambient")
+    def forbidden(*args, **kwargs):
+        pytest.fail("ambient origin reached resolution")
+    monkeypatch.setattr(kanban_origin, "resolve", forbidden)
+    with admission.strict_local_creation():
+        result = create()
+    assert not result.get("ok"), result
+
+
+@pytest.mark.parametrize("revocation", ["turn", "receipt"])
+def test_idempotent_replay_revalidates_custody(turn, revocation):
+    with kbc.connect_closing() as conn:
+        captured = native.capture(None)
+        task = kb.create_task(conn, title="first", idempotency_key="revoke-key", native_origin=captured)
+        with admission.strict_local_creation():
+            if revocation == "turn":
+                turn.release()
+            else:
+                conn.execute("DELETE FROM origin_native_receipts WHERE task_id=?", (task,))
+                conn.commit()
+            before = snapshot(conn)
+            with pytest.raises(admission.AdmissionRefused):
+                kb.create_task(conn, title="replay", idempotency_key="revoke-key", native_origin=captured)
+            assert snapshot(conn) == before
+
+
+def test_copied_thread_context_preserves_live_turn(turn):
+    from contextvars import copy_context
+    from concurrent.futures import ThreadPoolExecutor
+    context = copy_context()
+    def in_thread():
+        with admission.strict_local_creation():
+            return create()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(context.run, in_thread).result(timeout=20)
+    assert result.get("ok"), result
+    with kbc.connect_closing() as conn:
+        assert native._receipt(conn, result["task_id"])["origin"]["session"] == fixtures.CHAT
+
+
+def test_uncopied_thread_has_no_authority(turn):
+    from concurrent.futures import ThreadPoolExecutor
+    def in_thread():
+        with pytest.raises(admission.AdmissionRefused), admission.strict_local_creation():
+            pytest.fail("thread acquired ambient authority")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(in_thread).result(timeout=20)
+
+
 def test_db_origin_intent_refused(turn):
     with kbc.connect_closing() as conn:
         with admission.strict_local_creation(), pytest.raises(admission.AdmissionRefused):
