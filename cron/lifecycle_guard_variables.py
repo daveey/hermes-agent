@@ -47,14 +47,20 @@ class VariableCandidates:
         self.computed_producer_shadow = False
         self.computed_producer_used = False
         self.values: dict[str, set[str]] = {}
+        self.unknown_values: set[str] = set()
+        self.computed_variables: set[str] = set()
         self.sinks: set[tuple[str, tuple[str, ...], int, str | None]] = set()
         self.emitted: set[tuple[str, str | None]] = set()
 
     def computed_unknown(self, aliases):
+        from cron.lifecycle_guard_computed import _PRODUCERS
+
+        if self.unknown_values & self.computed_variables:
+            return True
         # Later sourced definitions revoke earlier builtin-output assumptions.
         return self.unresolved_computed or (self.computed_producer_used and (
             self.computed_producer_shadow or aliases is None
-            or bool({'echo', 'printf', 'true'} & aliases)))
+            or bool(_PRODUCERS & aliases)))
 
     def payloads(self, command, cwd):
         from cron import lifecycle_guard as guard
@@ -73,6 +79,8 @@ class VariableCandidates:
                     # traversed by the ordinary walk, never reinterpreted here.
                     if not any(char in match[2] for char in '$`\x00'):
                         self.values.setdefault(match[1], set()).add(match[2])
+                    else:
+                        self.unknown_values.add(match[1])
                 elif not word.startswith('-'):
                     break
             index = guard._executed_command_index(words)

@@ -11,7 +11,11 @@ import re
 import shlex
 from dataclasses import dataclass
 
-from cron.lifecycle_guard_substitutions import _backtick_end, _paren_end
+from cron.lifecycle_guard_substitutions import (
+    _arithmetic_start, _backtick_end, _opener_end, _paren_end,
+)
+
+_PRODUCERS = frozenset({'echo', 'printf', 'true', ':'})
 
 _MARKER = '\x00computed'
 _DEFAULT = re.compile(r'([A-Za-z_][A-Za-z0-9_]*):?[-=](.*)', re.DOTALL)
@@ -95,9 +99,9 @@ def _expansion(text, index, quoted, bindings):
         if identity:
             variable = identity[1]
             values = tuple(bindings.get(variable, ())) or None
-    elif text.startswith('$(', index) and not text.startswith('$((', index):
+    elif (opener := _opener_end(text, index)) and not _arithmetic_start(text, index):
         end = _paren_end(text, index)
-        values = _printed(text[index + 2:end - 1]) if text[end - 1:end] == ')' else None
+        values = _printed(text[opener:end - 1]) if text[end - 1:end] == ')' else None
     elif text[index] == '`':
         end = _backtick_end(text, index)
         values = _printed(text[index + 1:end - 1]) if text[end - 1:end] == '`' else None
@@ -115,7 +119,7 @@ def _opaque_expansions(text, bindings):
             out.append(text[index:index + 2])
             index += 2
             continue
-        if quote != "'" and text.startswith('$((', index):
+        if quote != "'" and _arithmetic_start(text, index):
             end = _paren_end(text, index)
             if text[index:end].endswith('))'):
                 out.append('0')  # Arithmetic output cannot name a lifecycle executable.
@@ -167,9 +171,9 @@ def scan_computed_commands(command, *, cwd, executed, variable_source, budget, r
     if not executed or not variable_source:
         return False
     normalized = re.sub(r"[\"'\\\\]", '', command.replace('\\\n', ''))
-    if re.search(r'\b(?:function\s+(?:echo|printf|true)\b|(?:echo|printf|true)\s*\(\s*\))', normalized):
+    if re.search(r'(?:function\s+(?:echo|printf|true|:)(?=\s|\()|(?<![\w])(?:echo|printf|true|:)\s*\(\s*\))', normalized):
         budget.variable_candidates.computed_producer_shadow = True
-    if not any(s in command for s in ('${', '$(', '`')):
+    if '$' not in command and '`' not in command:
         return False
     from cron.lifecycle_guard_substitutions import separate_substitutions
 
@@ -191,13 +195,14 @@ def scan_computed_commands(command, *, cwd, executed, variable_source, budget, r
                 continue
             producer_unknown = (command[span.start:span.start + 2] != '${' and (
                 budget.variable_candidates.computed_producer_shadow or budget.alias_names is None
-                or bool({'echo', 'printf', 'true'} & budget.alias_names)))
+                or bool(_PRODUCERS & budget.alias_names)))
             if command[span.start:span.start + 2] != '${':
                 budget.variable_candidates.computed_producer_used = True
             if span.values is None or producer_unknown:
                 budget.variable_candidates.unresolved_computed = True
                 continue
             if span.variable:
+                budget.variable_candidates.computed_variables.add(span.variable)
                 # Register the set-variable reading with the existing sink graph:
                 # a later sourced file may supply its literal binding.
                 payload = command[:span.start] + '${' + span.variable + '}' + command[span.end:]
