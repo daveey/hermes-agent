@@ -1709,11 +1709,9 @@ def _contains_unsafe_gateway_action(
             walk_command, include_quoted=covered_quote_scope != quote_scope(cwd, executed, budget)))))
     nested_texts, nested_scripts, unresolved = collect_nested_shell_inputs(
         command, walk_command, cwd=cwd, budget=budget, session_payloads=session_payloads)
-    if refuse_unresolved_stdin(budget, unresolved, executed=executed):
-        return True
     from cron.lifecycle_guard_startup import scan_shell_inputs, script_working_directory
 
-    if scan_shell_inputs(
+    if refuse_unresolved_stdin(budget, unresolved, executed=executed) or scan_shell_inputs(
             walk_command, nested_texts, cwd=cwd, executed=executed, budget=budget,
             covered_scope=covered_quote_scope, recurse=recurse, source=source, variable_source=variable_source):
         return True
