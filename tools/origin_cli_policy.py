@@ -27,11 +27,27 @@ class _Policy:
         return result
 
     def create(self, args):
+        from agent.delegation_context import is_delegated_child_context
+        from model_tools import suppress_post_tool_call_hook
+        if is_delegated_child_context():
+            return {"ok": False, "error": "delegated children cannot use native CLI custody"}
+        # The terminal executor owns terminal's post event, not this new call's.
+        with suppress_post_tool_call_hook(False):
+            return self._create(args)
+
+    def _create(self, args):
         from model_tools import _select_tool_names, handle_function_call
         kwargs = self.kwargs()
         enabled = kwargs["enabled_tools"]
-        if enabled is None or "kanban_create" not in enabled:
+        if enabled is None or not {"kanban_create", "tool_call"}.intersection(enabled):
             return {"ok": False, "error": "kanban_create is not granted to this launch"}
+        if "kanban_create" not in enabled:
+            # Use the actual bridge, not a reconstructed grant. It revalidates
+            # the scoped raw catalog (including drops/availability), deferral,
+            # and concrete schema before redispatching through all create hooks.
+            return json.loads(handle_function_call("tool_call", {
+                "calls": [{"name": "kanban_create", "arguments": args}],
+            }, **kwargs))
         selected = _select_tool_names(kwargs["enabled_toolsets"], kwargs["disabled_toolsets"], quiet_mode=True)
         if "kanban_create" not in selected:
             return {"ok": False, "error": "kanban_create is not in this session's toolsets"}
