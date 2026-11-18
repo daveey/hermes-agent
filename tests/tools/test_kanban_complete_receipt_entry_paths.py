@@ -147,6 +147,47 @@ def test_tool_paths_preserve_review_contract_metadata(board, monkeypatch, call):
     assert json.loads(runs[-1][3]) == metadata
 
 
+@pytest.mark.parametrize("metadata", [
+    {"pr": 12}, {"reviewed_pr": 12},
+    {"contract_waiver": "Verified locally"},
+    {"verdict": "approved"}, {"verdict": "REQUEST_CHANGES"}, {"verdict": "pass"},
+    {"verdict": " requested-changes "},
+    {"findings": [{"severity": "low", "message": "Checked"}]},
+    {"findings": "No blocking findings"},
+    {"verdict": "approve", "reviewed_sha": "a" * 40,
+     "reviewed_pr": "https://github.com/example/project/pull/12", "findings": [],
+     "custom_evidence": {"checked": True}},
+    {"published_pr": "https://github.com/example/project/pull/12",
+     "landing_owner": "t_owner", "pr_left_open": {"reason": "Tracked separately"},
+     "contract_waiver": {"reason": "Verified locally"}},
+])
+def test_deferred_validation_preserves_reader_compatible_metadata(metadata):
+    from tools import kanban_tools
+    from tools.tool_search_validation import validate_deferred_call_args
+
+    # Validate the actual served schema, not direct handler dispatch (which skips it).
+    args = {"summary": "Assessment finished.", "metadata": metadata}
+    assert validate_deferred_call_args("kanban_complete", args) is None
+
+
+@pytest.mark.parametrize("key", [
+    "verdict", "reviewed_sha", "reviewed_pr", "pr", "published_pr", "findings",
+    "landing_owner", "pr_left_open", "contract_waiver",
+])
+@pytest.mark.parametrize("value", [
+    None, True, 12, 1.5, "legacy", [], [541, 1223],
+    {"blocking": [], "nits": ["x"]}, {"reason": None},
+])
+def test_deferred_review_declarations_preserve_free_form_shapes(key, value):
+    from tools import kanban_tools
+    from tools.tool_search_validation import validate_deferred_call_args
+
+    # These keys were unconstrained metadata on base. Descriptions guide producers;
+    # the unchanged completion readers, not this transport, enforce the contract.
+    args = {"summary": "Assessment finished.", "metadata": {key: value}}
+    assert validate_deferred_call_args("kanban_complete", args) is None
+
+
 def _cli(tid, value):
     from hermes_cli import kanban as cli
     return cli._cmd_complete(argparse.Namespace(

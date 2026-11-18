@@ -21,14 +21,13 @@ def test_served_complete_schema_declares_review_and_landing_contract():
     assert schema is not None
     meta = schema["parameters"]["properties"]["metadata"]
     props = meta["properties"]
-    assert props["verdict"]["enum"] == ["approve", "request_changes"]
-    for key in ("reviewed_sha", "reviewed_pr", "pr", "published_pr", "landing_owner"):
-        assert props[key]["type"] == "string"
-    assert props["findings"]["type"] == "array"
-    assert props["findings"]["items"] == {"type": "string"}
+    assert "approve or request_changes" in props["verdict"]["description"]
+    for key in ("verdict", "reviewed_sha", "reviewed_pr", "pr", "published_pr",
+                "findings", "landing_owner", "pr_left_open", "contract_waiver"):
+        assert set(props[key]) == {"description"}  # no new transport constraints
+        assert props[key]["description"]
     for key in ("pr_left_open", "contract_waiver"):
-        assert props[key]["type"] == "object"
-        assert props[key]["properties"]["reason"]["type"] == "string"
+        assert "reason" in props[key]["description"]
     assert meta.get("additionalProperties", True) is True
     assert not meta.get("required")
 
