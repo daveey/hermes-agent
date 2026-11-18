@@ -1,7 +1,6 @@
 """Local containment backstop; ingress authorization is deliberately separate.
 
-Not installed by normal connections until the lifecycle and sync capability
-contract is complete. Installing it is a fail-closed storage fence, not an API
+Registered by normal connections as a fail-closed storage fence, not an API
 for containing or resuming a card. Release verification is supplied by the
 canonical ingress owner, never inferred from generic lifecycle events.
 """
