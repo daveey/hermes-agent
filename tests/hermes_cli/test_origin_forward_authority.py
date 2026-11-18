@@ -67,7 +67,7 @@ def test_unknown_owner_not_authorized_by_matching_chat(authority):
 
 def test_missing_ledger_not_created(authority, tmp_path):
     path = tmp_path / "absent.db"
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(ValueError, match="origin_forward_binding_missing"):
         check(authority, ledger=path)
     assert not path.exists()
 

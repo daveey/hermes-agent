@@ -77,7 +77,7 @@ def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:
 
 
 def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional[str]) -> dict:
-    """Preserve the discovered chat owner, including a foreign gateway.
+    """Prefer a verified local chat owner; otherwise preserve the first foreign owner.
 
     Discovery is not authorization: foreign sessions are verified on their own
     gateway by the authenticated forward adapter, never in the worker's state.db.
@@ -89,13 +89,16 @@ def _placement_origin(conn, creator_task_id: Optional[str], session_id: Optional
         from hermes_cli.kanban_creator_chats import resolve_chats
         self_gw = reg.self_gateway()
         has_links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone()
+        foreign = None
         for owner in (resolve_chats(conn, creator_task_id) if has_links else []):
             gateway, session = owner["chat_gateway"], owner["chat_session"]
-            if gateway and gateway != self_gw:
-                return {"session_id": session, "origin_profile": owner.get("chat_profile") or "default",
-                        "origin_gateway": gateway}
+            if gateway and gateway != self_gw and foreign is None:
+                foreign = {"session_id": session, "origin_profile": owner.get("chat_profile") or "default",
+                           "origin_gateway": gateway}
             if self_gw and gateway == self_gw and _persisted_session_id(session):
                 return {"session_id": session, "origin_profile": owner.get("chat_profile") or None}
+        if foreign is not None:
+            return foreign
     if session_id and is_headless_session(session_id):
         return {"session_id": None, "origin_profile": None}
     return {"session_id": session_id, "origin_profile": None}

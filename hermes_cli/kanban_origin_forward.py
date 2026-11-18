@@ -15,6 +15,12 @@ from hermes_cli.kanban_origin_ledger import _binding_key, binding_hash, validate
 
 
 def _local_binding(ledger: Path, origin: dict, creator: dict) -> dict:
+    # lstat distinguishes an absent ledger from unreadable or dangling evidence.
+    # Only ENOENT is terminal; permission/I/O errors and failed opens stay pending.
+    try:
+        ledger.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError("origin_forward_binding_missing") from exc
     # Do not initialize an empty ledger and mistake it for authenticated custody.
     with closing(sqlite3.connect(ledger.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         rows = db.execute("SELECT binding_id,binding_hash,binding_json FROM origin_obligations WHERE released=0")

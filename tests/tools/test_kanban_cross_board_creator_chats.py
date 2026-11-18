@@ -131,6 +131,30 @@ def test_placed_worker_child_of_an_unresolved_creator_has_no_origin(placed, monk
     assert placed == [{"target": "hub", "origin_session": None, "origin_profile": "default"}]
 
 
+@pytest.mark.parametrize("order", [("away", "here"), ("here", "away")])
+def test_placed_mixed_owners_prefer_verified_local_chat(placed, monkeypatch, order):
+    with kbc.connect_closing() as conn:
+        creator = kb.create_task(conn, title="mixed creator", assignee="default", session_id=WORKER)
+        for gateway in order:
+            _link(conn, creator, gateway, None, CHAT)
+    _place(creator, monkeypatch)
+    assert placed == [{"target": "hub", "origin_session": CHAT, "origin_profile": "default"}]
+
+
+@pytest.mark.parametrize("local_session", [None, "unpersisted-local"])
+def test_unverified_local_does_not_replace_first_foreign(home, local_session):
+    from tools.kanban_tools_placement import _placement_origin
+
+    with kbc.connect_closing() as conn:
+        creator = kb.create_task(conn, title="foreign owners", assignee="default", session_id=WORKER)
+        _link(conn, creator, "away", "research", FOREIGN_CHAT)
+        if local_session:
+            _link(conn, creator, "here", None, local_session)
+        _link(conn, creator, "other", None, CHAT)
+        assert _placement_origin(conn, creator, WORKER) == {
+            "session_id": FOREIGN_CHAT, "origin_profile": "research", "origin_gateway": "away"}
+
+
 def test_placed_foreign_chat_without_creator_authority_refuses(placed, monkeypatch):
     """A foreign chat must never be silently dropped or stamped with this worker."""
     with kbc.connect_closing() as conn:
