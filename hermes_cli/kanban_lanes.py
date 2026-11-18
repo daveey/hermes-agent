@@ -549,31 +549,12 @@ def order(conn, scored: list, *, pol: Optional[Policy] = None) -> list:
     pol = safe_policy() if pol is None else pol
     if pol is None or pol.shadow or len(scored) < 2:
         return scored
+    from hermes_cli.kanban_lane_order import prepare, order_prepared
+
     lanes, alarms = _candidate_lanes(conn, pol, [row["id"] for row, _parts in scored])
-    front, queues, paused = [], {}, []
-    for index, item in enumerate(scored):
-        row, parts = item
-        lane = pol.lanes[lanes.get(row["id"], pol.default)]
-        if parts.turn_owner or parts.class_rank > 0 or row["id"] in alarms:
-            front.append(item)
-        elif lane.paused:
-            paused.append(item)
-        else:
-            queues.setdefault(lane.name, []).append((index, item))
-    if len(queues) < 2:
-        return front + [item for queue in queues.values() for _i, item in queue] + paused
-    load = _running(conn, pol)
-    out = []
-    while queues:
-        def cost(name):
-            share = pol.lanes[name].share
-            return (load[name] / share if share > 0 else float("inf"), queues[name][0][0])
-        name = min(queues, key=cost)
-        out.append(queues[name].pop(0)[1])
-        load[name] += 1
-        if not queues[name]:
-            del queues[name]
-    return front + out + paused
+    partition = prepare(scored, pol, lanes, alarms)
+    running = _running(conn, pol) if len(partition.queues) > 1 else {}
+    return order_prepared(partition, pol, running)
 
 
 def drop_paused(conn, rows: list) -> list:
