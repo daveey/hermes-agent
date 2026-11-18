@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 
+import { $apiRequestScope } from '@/api/client'
 import { getApiRequestConnection, getSession, listAllProfileSessions, listSidebarSessions, type SessionInfo } from '@/hermes'
 import { sameCronSignature } from '@/lib/session-signatures'
 import {
@@ -20,7 +21,7 @@ import {
   SIDEBAR_FILTERED_PAGE_SIZE,
   SIDEBAR_SESSIONS_PAGE_SIZE
 } from '@/store/layout'
-import { $sessionListFreshness, recordSessionListResult, staleSessionOwners } from '@/store/offline-sessions'
+import { $sessionListFreshness, recordSessionListResult, sessionOwnerIsFresh, staleSessionOwners } from '@/store/offline-sessions'
 import { messagingTotalsKey, normalizeProfileKey, sidebarProfileForScope } from '@/store/profile'
 import {
   $messagingSessions,
@@ -640,7 +641,17 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
     }
 
     const schedule = (state: Record<string, boolean>) => {
-      if (!staleSessionOwners(state).length) {
+      // A probe wildcard needs a list of that gateway, not unrelated cached rows.
+      // Scoped success repairs only that profile; keep other profiles fail-closed.
+      const connection = sidebarRequestConnection()
+      const sessionProfile = sidebarProfileForScope(profileScope)
+      const wildcard = `${connection?.trim() || 'local'}/*`
+
+      const eligible = staleSessionOwners(state).some(owner =>
+        !owner.endsWith('/*') || (owner === wildcard &&
+          (sessionProfile === 'all' || !sessionOwnerIsFresh(connection, sessionProfile, state))))
+
+      if (!eligible) {
         attempt = 0
         clear()
 
@@ -663,12 +674,14 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
     }
 
     const unsubscribe = $sessionListFreshness.subscribe(schedule)
+    const unsubscribeScope = $apiRequestScope.subscribe(() => schedule($sessionListFreshness.get()))
 
     return () => {
+      unsubscribeScope()
       unsubscribe()
       clear()
     }
-  }, [refreshSessions])
+  }, [refreshSessions, profileScope])
 
   return {
     loadMoreMessagingForPlatform,

@@ -4,7 +4,7 @@ import { Suspense } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DesktopConnectionsRegistry } from '@/global'
-import { type SessionInfo, setApiRequestConnection, type SidebarSessionsResponse } from '@/hermes'
+import { getApiRequestConnection, type SessionInfo, setApiRequestConnection, type SidebarSessionsResponse } from '@/hermes'
 import hubSyncPlugin from '@/plugins/hub-sync/plugin'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $cronJobs, setCronJobs } from '@/store/cron'
@@ -1634,6 +1634,49 @@ describe('re-lists while a failed list leaves owners stale', () => {
     }
   })
 
+  it.each(['all', 'default'])('does not retry an off-window probe owner; follows scope changes (%s)', async profileScope => {
+    const { recordSessionGatewayUnavailable, sessionOwnerIsFresh } = await import('@/store/offline-sessions')
+    vi.useFakeTimers()
+    const owner = row('remote', { connection_id: 'conn-mini' })
+    listSidebarSessions.mockImplementation(() => Promise.resolve(sidebar({
+      sessions: getApiRequestConnection() === 'conn-mini' ? [owner] : [row('mine', { connection_id: 'local' })]
+    })))
+    const { result, unmount } = renderHook(() => useSessionListActions({ profileScope }))
+
+    try {
+      await act(async () => { await result.current.refreshSessions() })
+      act(() => recordSessionGatewayUnavailable('conn-mini'))
+      const calls = listSidebarSessions.mock.calls.length
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_600_000) })
+      expect(listSidebarSessions.mock.calls.length).toBe(calls)
+      expect(sessionOwnerIsFresh('conn-mini', 'default')).toBe(false)
+      act(() => setApiRequestConnection('conn-mini'))
+      // Switching away cancels the pending recovery; switching back re-arms it.
+      await act(async () => { await vi.advanceTimersByTimeAsync(14_999) })
+      expect(listSidebarSessions.mock.calls.length).toBe(calls)
+      act(() => setApiRequestConnection(null))
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+      expect(listSidebarSessions.mock.calls.length).toBe(calls)
+      act(() => setApiRequestConnection('conn-mini'))
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+      expect(sessionOwnerIsFresh('conn-mini', 'default')).toBe(true)
+
+      if (profileScope === 'default') {
+        expect(sessionOwnerIsFresh('conn-mini', 'work')).toBe(false)
+      }
+
+      const recoveredCalls = listSidebarSessions.mock.calls.length
+      expect(recoveredCalls).toBeGreaterThan(calls)
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_600_000) })
+      expect(listSidebarSessions.mock.calls.length).toBe(recoveredCalls)
+    } finally {
+      unmount()
+      setApiRequestConnection(null)
+      vi.useRealTimers()
+      _resetOfflineSessionsForTests()
+    }
+  })
+
   it('re-lists after probe failure with bounded backoff, failing closed until the owner answers', async () => {
     const { recordSessionGatewayUnavailable, sessionOwnerIsFresh, staleSessionOwners } = await import('@/store/offline-sessions')
     _resetOfflineSessionsForTests()
@@ -1644,10 +1687,13 @@ describe('re-lists while a failed list leaves owners stale', () => {
     let failing = false
     listSidebarSessions.mockImplementation(({ connectionId }: { connectionId?: string }) => {
       if (connectionId === 'local') { return Promise.resolve(sidebar({ sessions: [local] })) }
+
       return failing ? Promise.reject(new Error('unreachable')) : Promise.resolve(sidebar({ sessions: [owner] }))
     })
+
     const remoteCalls = () => listSidebarSessions.mock.calls.filter((args: unknown[]) =>
       (args[0] as { connectionId?: string }).connectionId === undefined).length
+
     const painted = () => mergeOfflineFallback([owner, local], []).find(s => s.id === 'remote')
     const { result, unmount } = renderHook(() => useSessionListActions({ profileScope: 'all' }))
 
@@ -1671,6 +1717,7 @@ describe('re-lists while a failed list leaves owners stale', () => {
         expect(sessionOwnerIsFresh('local', 'default')).toBe(true)
         expect(painted()?.offline_cached).toBe(true)
       }
+
       expect(remoteCalls()).toBe(calls + 4)
       failing = false
       await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
