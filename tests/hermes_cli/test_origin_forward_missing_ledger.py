@@ -27,14 +27,15 @@ def test_adapter_missing_vs_unavailable(forwarding, authority, tmp_path, monkeyp
     ledger = home / "kanban/origin-ledger.db"
     if case != "absent_parent":
         ledger.parent.mkdir()
-    if case == "dangling":
-        ledger.symlink_to(home / "missing-target")
-    elif case == "directory":
-        ledger.mkdir()
-    elif case == "corrupt":
-        ledger.write_bytes(b"not a SQLite database" * 20)
-    elif case in ("permission", "open_race"):
-        ledger.write_bytes(authority[0].read_bytes())
+    setup = {
+        "dangling": lambda: ledger.symlink_to(home / "missing-target"),
+        "directory": ledger.mkdir,
+        "corrupt": lambda: ledger.write_bytes(b"not a SQLite database" * 20),
+        "permission": lambda: ledger.write_bytes(authority[0].read_bytes()),
+        "open_race": lambda: ledger.write_bytes(authority[0].read_bytes()),
+    }
+    if case in setup:
+        setup[case]()
 
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: home)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
