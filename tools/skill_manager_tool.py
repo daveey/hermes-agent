@@ -16,7 +16,7 @@ import re
 import shutil
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import hermes_yaml as yaml
 
@@ -183,7 +183,7 @@ def _validate_frontmatter(content: str) -> Optional[str]:
     return None
 
 
-# A SKILL.md write that grows the file past this share of the hard cap gets a ``size_warning``
+# A skill-file write that grows the file past this share of the hard cap gets a ``size_warning``
 # on EVERY growing write. The linter's ``oversized-body`` finding fires only on the write that
 # first crosses its soft budget, so without this a skill grew silently from ~24k to the 100k cap
 # and every later patch failed outright (babybear-development, 2026-10).
@@ -233,29 +233,38 @@ def _description_budget_error(content: str, before: Optional[str] = None) -> Opt
 
 def _validate_content_size(content: str, label: str = "SKILL.md") -> Optional[str]:
     if len(content) > MAX_SKILL_CONTENT_CHARS:
-        msg = (
+        over = len(content) - MAX_SKILL_CONTENT_CHARS
+        return (
             f"{label} content is {len(content):,} characters (limit: {MAX_SKILL_CONTENT_CHARS:,}). "
-            f"Consider splitting into a smaller SKILL.md with supporting files in references/ "
-            f"or templates/.")
-        if label == "SKILL.md":
-            over = len(content) - MAX_SKILL_CONTENT_CHARS
-            msg += (f" This write is {over:,} chars over; free well more than that so the next "
-                    f"write fits too. {_largest_sections_note(content)}{_SKILL_SPLIT_RECIPE}")
-        return msg
+            f"This write is {over:,} chars over; free well more than that so the next "
+            f"write fits too. {_largest_sections_note(content)}{_split_recipe(label)}")
     return None
 
 
-def _attach_size_warning(result: dict[str, Any], before: str, after: str) -> dict[str, Any]:
-    """Advisory on a SKILL.md write that GREW the file and leaves it past the warn share of the
+def _split_recipe(label: str) -> str:
+    if label == "SKILL.md":
+        return _SKILL_SPLIT_RECIPE
+    return (
+        "To make room, in ONE skill_manage batch: write_file a NEW supporting file with the text "
+        f"of one large section, then patch that section in {label} down to a pointer to the new "
+        "file, then your change. Ops apply in order, so the shrinking ops must come before the "
+        "growing one. Keep each file below the cap; split large sections further if needed. "
+        "For scripts or structured data, preserve valid syntax and update callers/references "
+        "instead of inserting a prose pointer.")
+
+
+def _attach_size_warning(result: dict[str, Any], before: str, after: str,
+                         label: str = "SKILL.md") -> dict[str, Any]:
+    """Advisory on a skill-file write that GREW the file and leaves it past the warn share of the
     hard cap: the next writes will start failing, so name the sections to move out now."""
     if len(after) <= len(before) or len(after) < _SKILL_SIZE_WARN_FRACTION * MAX_SKILL_CONTENT_CHARS:
         return result
     pct = len(after) * 100 // MAX_SKILL_CONTENT_CHARS
     result["size_warning"] = (
-        f"The write succeeded, but SKILL.md is now {len(after):,} chars, {pct}% of the "
+        f"The write succeeded, but {label} is now {len(after):,} chars, {pct}% of the "
         f"{MAX_SKILL_CONTENT_CHARS:,}-char hard cap. A write that crosses the cap fails. Stop growing "
-        f"SKILL.md: add new detail to references/ instead, and move a large section out soon. "
-        f"{_largest_sections_note(after)}{_SKILL_SPLIT_RECIPE}")
+        f"{label}: add new detail to another supporting file, and move a large section out soon. "
+        f"{_largest_sections_note(after)}{_split_recipe(label)}")
     return result
 def _description_of(content: Optional[str]) -> Optional[str]:
     """Normalized frontmatter description of a SKILL.md text; None when absent or unparseable."""
@@ -682,7 +691,7 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str | N
     # (oversized-body, incident-log-shape) — a clean patch attaches nothing and stays quiet.
     if not file_path:
         _attach_lint_findings(result, target, before=content)
-        _attach_size_warning(result, content, new_content)
+    _attach_size_warning(result, content, new_content, target_label)
     return result
 
 
@@ -743,13 +752,18 @@ def _write_file(name: str, file_path: str, file_content: str) -> dict[str, Any]:
     if guard:
         return guard
     target, err = _resolve_supporting_file(skill_dir, file_path)
-    if guard := err or _guarded_write(name, skill_dir, target, "write_file", file_path, file_content):
+    if err:
+        return err
+    target = cast(Path, target)  # successful resolution always returns a Path
+    before = target.read_text(encoding="utf-8-sig") if target.is_file() else ""
+    if guard := _guarded_write(name, skill_dir, target, "write_file", file_path, file_content):
         return guard
     result = {"success": True, "message": f"File '{file_path}' written to skill '{name}'.", "path": str(target)}
     # references/ is where per-session hoarding shows up; surface the sprawl finding on the write
     # that crosses the line so the review fork sees it in the same turn.
     if file_path.startswith("references/") and (skill_dir / "SKILL.md").exists():
         _attach_lint_findings(result, skill_dir / "SKILL.md")
+    _attach_size_warning(result, before, file_content, file_path)
     return result
 
 

@@ -219,7 +219,7 @@ class TestSizePressure:
     def test_batch_surfaces_size_warning(self, isolate_skills):
         content = _sectioned_skill("big4", {"A": 60_000})
         skill_manage(action="create", name="big4", content=content)
-        r = json.loads(skill_manage(action=None, name=None, operations=[
+        r = json.loads(skill_manage(action="", name="", operations=[
             {"action": "patch", "name": "big4", "old_string": "## A\n", "new_string": "## A\nx\n"}]))
         assert r["success"] is True
         assert "size_warning" in r["results"][0]
@@ -240,7 +240,7 @@ class TestSizePressure:
         content = _sectioned_skill("full2", {"Giant": 80_000, "Other": 19_000})
         skill_manage(action="create", name="full2", content=content)
         giant = "## Giant\n\n" + "z" * 80_000 + "\n\n"
-        r = json.loads(skill_manage(action=None, name=None, operations=[
+        r = json.loads(skill_manage(action="", name="", operations=[
             {"action": "write_file", "name": "full2", "file_path": "references/giant.md",
              "file_content": giant},
             {"action": "patch", "name": "full2", "old_string": giant,
@@ -249,6 +249,63 @@ class TestSizePressure:
              "new_string": "## Other\n" + "y" * 2_000 + "\n"},
         ]))
         assert r["success"] is True, r
+
+    @pytest.mark.parametrize("action", ["patch", "write_file"])
+    def test_reference_growth_warns_and_shrink_stays_quiet(self, isolate_skills, action):
+        skill_manage(action="create", name="ref-size", content=_make_skill_content(100))
+        path = "references/triage.md"
+        text = "## Large\n" + "x" * 60_000
+        first = json.loads(skill_manage(action="write_file", name="ref-size",
+                                       file_path=path, file_content=text))
+        assert path in first["size_warning"]
+        for suffix in ("more", "more again"):
+            grown = text + suffix
+            args = ({"old_string": text, "new_string": grown} if action == "patch"
+                    else {"file_content": grown})
+            result = json.loads(skill_manage(action=action, name="ref-size", file_path=path, **args))
+            assert result["success"] and path in result["size_warning"]
+            assert "## Large" in result["size_warning"]
+            text = grown
+        args = ({"old_string": text, "new_string": "small"} if action == "patch"
+                else {"file_content": "small"})
+        result = json.loads(skill_manage(action=action, name="ref-size", file_path=path, **args))
+        assert result["success"] and "size_warning" not in result
+
+    def test_reference_cap_recovery_batch_preserves_content(self, isolate_skills):
+        name, path = "ref-recover", "references/triage.md"
+        skill_manage(action="create", name=name, content=_make_skill_content(100))
+        section = "## Large\n" + "x" * 80_000 + "\n"
+        rest = "## Other\n" + "y" * 19_000
+        original = section + rest
+        skill_manage(action="write_file", name=name, file_path=path, file_content=original)
+        growth = {"action": "patch", "name": name, "file_path": path,
+                  "old_string": "## Other\n", "new_string": "## Other\n" + "z" * 2_000}
+        failed = json.loads(skill_manage(action="", name="", operations=[
+            {"action": "write_file", "name": name, "file_path": "references/rolled-back.md",
+             "file_content": "must be rolled back"}, growth]))
+        assert not failed["success"]
+        assert "chars over" in failed["error"] and "## Large" in failed["error"]
+        assert "patch that section in references/triage.md" in failed["error"]
+        assert "smaller SKILL.md" not in failed["error"]
+        source = isolate_skills / name / path
+        assert source.read_text() == original
+        assert not (source.parent / "rolled-back.md").exists()
+        result = json.loads(skill_manage(action="", name="", operations=[
+            {"action": "write_file", "name": name, "file_path": "references/large.md",
+             "file_content": section},
+            {"action": "patch", "name": name, "file_path": path,
+             "old_string": section, "new_string": "See large.md.\n"}, growth]))
+        assert result["success"], result
+        assert (isolate_skills / name / "references/large.md").read_text() == section
+        assert source.read_text() == "See large.md.\n" + rest.replace("## Other\n", growth["new_string"])
+
+
+    def test_reference_equal_size_rewrite_is_quiet(self, isolate_skills):
+        skill_manage(action="create", name="equal-size", content=_make_skill_content(100))
+        for char in ("x", "y"):
+            result = json.loads(skill_manage(action="write_file", name="equal-size",
+                                            file_path="references/a.md", file_content=char * 60_000))
+        assert result["success"] and "size_warning" not in result
 
     def test_section_sizes_ignore_fenced_headings(self):
         from tools.skill_manager_tool import _section_sizes
