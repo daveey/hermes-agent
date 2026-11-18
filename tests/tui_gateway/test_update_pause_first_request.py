@@ -1,4 +1,4 @@
-"""[daveey] t_01a1d31bf400d56c: the gateway marks only continuation turns (kind ``auto_continue``) as able to yield
+"""[daveey] The gateway marks continuations and durably secured own-marker notices as able to yield
 to a core-update pause before their first model request, for that turn alone (see
 tests/agent/test_step_boundary_pause_first_request.py for the agent side)."""
 
