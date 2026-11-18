@@ -269,7 +269,7 @@ def _profile_author() -> str:
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "init", "create", "swarm", "assign", "reclaim", "move", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
-    "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair", "recover",
+    "schedule", "unblock", "contain", "resume-contained", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review", "reopen", "resume", "quota-release", "source-release",
     "gc", "origin-bind", "origin-forward", "origin-create", "origin-adopt", "sync", "supervisor-requests", "spend-budget", "lanes",
@@ -1859,6 +1859,7 @@ _HANDLERS = {
     "comment": _cmd_comment, "attach": _cmd_attach,
     "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
     "complete": _cmd_complete, "edit": _cmd_edit, "reopen": _cmd_reopen, "block": _cmd_block,
+    **dict.fromkeys(("contain", "resume-contained"), lambda a: importlib.import_module("hermes_cli.kanban_containment_cli").command(a)),
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote, "resume": _cmd_resume, "quota-release": _cmd_quota_release,

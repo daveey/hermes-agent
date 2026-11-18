@@ -21,6 +21,10 @@ class DeliveryUnknown(RuntimeError):
 
     code = "containment_delivery_unknown"
 
+    def __init__(self, message: str, *, request_uid: str | None = None, episode: str | None = None):
+        super().__init__(message)
+        self.request_uid, self.episode = request_uid, episode
+
 
 def canonical_event(evidence: Any, *, board: str, uid: str, task: str, kind: str) -> dict:
     """Validate the authenticated /evidence response, not a shape-only replica.
@@ -117,6 +121,8 @@ def deliver(conn: sqlite3.Connection, hub: Any, *, request: str) -> dict:
     if hub.ident.gateway != gateway:
         raise ContainmentRefused("containment request belongs to a different enrolled gateway")
     op = json.loads(raw)
+    if confirmed < 0:
+        raise ContainmentRefused("Board previously refused this exact containment request")
     if not confirmed:
         response = hub.ops(board, [op])
         results = response.get("results") if isinstance(response, dict) else None
@@ -125,6 +131,10 @@ def deliver(conn: sqlite3.Connection, hub: Any, *, request: str) -> dict:
             raise DeliveryUnknown("Board reply did not identify the exact containment request; recover it")
         verdict = results[0]
         if verdict.get("status") == "rejected":
+            from hermes_cli import kanban_db as kb
+            with kb.write_txn(conn):
+                conn.execute("UPDATE containment_delivery SET confirmed=-1 WHERE request_uid=? AND op_json=?",
+                             (request, raw))
             raise ContainmentRefused("Board refused containment: " + str(verdict.get("reason") or "unknown"))
         if verdict.get("status") not in ("applied", "merged"):
             raise DeliveryUnknown("Board containment disposition is unknown; recover the same request")

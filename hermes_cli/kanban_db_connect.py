@@ -81,6 +81,8 @@ def _sqlite_connect(path: Path, *, check_same_thread: bool = True) -> sqlite3.Co
         # Explicit PRAGMA (besides connect(timeout=)) so it is observable and
         # survives wrapper changes; PRAGMA assignments can't bind parameters.
         conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+        from hermes_cli.kanban_containment_connections import register
+        register(conn)
     except BaseException:
         # A half-open connection would leak its fd AND leave a stale entry in the
         # connect_tracked registry (cleared only on close), permanently blocking

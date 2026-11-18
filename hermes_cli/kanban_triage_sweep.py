@@ -133,8 +133,9 @@ def sweep_stale_triage(
     # arbitrate supervisor creation across gateways, even when neither has synced yet.
     from hermes_cli.kanban_spend_decision import pending as spend_decision_pending, safe_ensure_producer
     copies = foreign_ids(conn)
+    from hermes_cli.kanban_containment_connections import held as containment_held
     for row in rows:
-        if row["id"] in copies:
+        if row["id"] in copies or containment_held(conn, row["id"]):
             continue
         if spend_decision_pending(conn, row["id"]):
             safe_ensure_producer(conn, row["id"])
@@ -159,7 +160,7 @@ def sweep_stale_triage(
         if _TRIAGE_BRIEF.strip() not in body:
             body += _TRIAGE_BRIEF
         with _kb.write_txn(conn):
-            if spend_decision_pending(conn, row["id"]):
+            if spend_decision_pending(conn, row["id"]) or containment_held(conn, row["id"]):
                 continue
             cur = conn.execute(
                 "UPDATE tasks SET status = 'ready', assignee = ?, body = ? WHERE id = ? AND status = 'triage'",

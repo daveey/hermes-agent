@@ -367,8 +367,9 @@ def decompose_task(
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
     from hermes_cli.kanban_lanes import gate_refusal
+    from hermes_cli.kanban_containment_connections import refusal as containment_refusal
     with kbc.connect_closing() as conn:
-        if held := gate_refusal(conn, task_id):
+        if held := (containment_refusal(conn, task_id) or gate_refusal(conn, task_id)):
             return DecomposeOutcome(task_id, False, held)
     if not force:
         with kbc.connect_closing() as conn:

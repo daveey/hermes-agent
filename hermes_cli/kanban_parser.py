@@ -856,6 +856,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                     "list` to see all boards.")
     actions = kanban_parser.add_subparsers(dest="kanban_action")
     _add_commands(actions, _SPECS)
+    from hermes_cli.kanban_containment_cli import add_parsers
+    add_parsers(actions)
     # Root-scoped: bypasses ``kanban_command`` (board override / auto-init) via the subparser default.
     actions.choices["quiet-hold"].set_defaults(func=lambda a: __import__("hermes_cli.kanban_quiet", fromlist=["entry"]).entry(a))
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)

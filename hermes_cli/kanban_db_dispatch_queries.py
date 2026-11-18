@@ -37,6 +37,8 @@ def lane_rows(conn: sqlite3.Connection, status: str, *, marked_first: bool = Fal
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         f"ORDER BY {DISPATCH_ORDER}"
     ).fetchall()
+    from hermes_cli.kanban_containment_connections import drop_held
+    rows = drop_held(conn, rows)
     from hermes_cli.kanban_dispatch_priority import order_with_remote_waiters
     from hermes_cli.kanban_lanes import drop_paused
     rows = order_with_remote_waiters(conn, drop_paused(conn, rows))

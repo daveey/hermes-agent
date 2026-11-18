@@ -38,6 +38,7 @@ from hermes_cli.kanban_db_event import Event  # public kb.Event; helpers import 
 from hermes_cli.kanban_worker_placement import resolved_db_placement, validate_creation
 from hermes_cli import kanban_dup_detector as _dup_detector, kanban_placement_forward as _placement_fwd  # no cycle
 from hermes_cli import kanban_run_end_lease as _run_end_lease  # stdlib-only at import: no cycle
+from hermes_cli import kanban_containment_connections as _containment
 from hermes_cli.kanban_host_identity import is_local_claim as _claim_is_local
 from hermes_cli.kanban_db_dispatch_queries import DISPATCH_ORDER  # stdlib-only at import: no cycle
 from hermes_cli.kanban_terminal_guard import unblock_refusal  # stdlib-only at import: no cycle; re-exported for plugins
@@ -1933,7 +1934,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             # The home gateway owns readiness and missing-parent maintenance.
             # A retained worker copy may still claim ready work, but must not
             # publish a second promotion or expire the owner's missing streak.
-            if task_id in copies:
+            if task_id in copies or _containment.held(conn, task_id):
                 continue
             # A spend stop leaves only on a recorded decision (kanban_spend_decision.pending). The triage clause
             # above would read an older ``gave_up`` as the stop: promote here, re-triage in the hold, every tick.
@@ -2025,13 +2026,13 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     # [daveey] Refuse a held fence, and a lock-free hub CPU advisory (final gate is under the lock), before the lease.
-    if admission_hold_set(task_id) or hub_cpu_advisory(task_id, conn=conn):
+    if _containment.held(conn, task_id) or admission_hold_set(task_id) or hub_cpu_advisory(task_id, conn=conn):
         return None
     gate = _sync.claim_gate(conn, task_id, expires)
     if gate.deferred:
         return None
     with gate, claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
-        if not admitted or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
+        if not admitted or _containment.held(conn, task_id) or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
             return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
@@ -2066,13 +2067,13 @@ def claim_review_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
-    if admission_hold_set(task_id) or hub_cpu_advisory(task_id, conn=conn):  # [daveey] before the Board-service lease (see claim_task)
+    if _containment.held(conn, task_id) or admission_hold_set(task_id) or hub_cpu_advisory(task_id, conn=conn):  # [daveey] before the Board-service lease (see claim_task)
         return None
     gate = _sync.claim_gate(conn, task_id, expires, lane="review")
     if gate.deferred:
         return None
     with gate, claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
-        if not admitted or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
+        if not admitted or _containment.held(conn, task_id) or (admission_check is not None and admission_check()):  # [daveey] same txn as the CAS
             return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
@@ -2117,7 +2118,7 @@ _RUN_OUTCOME_TERMINAL_STATUS = {
     "blocked": "blocked",
     "dependency_wait": "blocked",
     # The run's own checkpoint (kanban_continuation) or timed park stops its loop; a park is no ownership loss.
-    "continued": "continued", "scheduled": "scheduled",  # [daveey]
+    "continued": "continued", "scheduled": "scheduled", "contained": "contained",  # [daveey]
 }
 
 
@@ -3439,7 +3440,7 @@ def decomposition_refusal(conn: sqlite3.Connection, task_id: str) -> Optional[st
     """
     from hermes_cli.kanban_lanes import gate_refusal
     row = conn.execute("SELECT started_at FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    if row is None or (held := gate_refusal(conn, task_id)):
+    if row is None or (held := (_containment.refusal(conn, task_id) or gate_refusal(conn, task_id))):
         return held if row is not None else None
     ran = row["started_at"] is not None or conn.execute(
         "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (task_id,),

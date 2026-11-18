@@ -52,9 +52,26 @@ def pending(conn: sqlite3.Connection, task_id: str, *, verify_release: Callable 
         if marker and marker[0] is not None:
             observed.add(marker[0])
     known = {event["uid"] for event in events if event["kind"] == "contained"}
+    from hermes_cli.kanban_containment_requests import pending as request_pending
+    if request_pending(conn, task_id, known):
+        return True
     if observed - known:
         return True
     return reduce_events(events, verify_release=verify_release) is not None
+
+
+def register(conn: sqlite3.Connection, *, verify_release: Callable | None = None) -> None:
+    """Register per-connection functions without schema writes or network I/O."""
+    conn.create_function("kanban_containment_held", 1,
+                         lambda task: int(pending(conn, task, verify_release=verify_release)))
+    conn.create_function("kanban_containment_write", 1,
+                         lambda task: int(conn.in_transaction and _WRITE.get() == (id(conn), task)))
+    from hermes_cli import kanban_containment_replica as replica
+    conn.create_function("kanban_containment_sync_task", 1, lambda task: replica.task_permit(conn, task))
+    conn.create_function("kanban_containment_sync_event", 4,
+                         lambda uid, task, kind, payload: replica.event_permit(conn, uid, task, kind, payload))
+    conn.create_function("kanban_containment_sync_edge", 2, lambda parent, child: replica.edge_permit(conn, parent, child))
+    replica.register(conn)
 
 
 def install(conn: sqlite3.Connection, *, verify_release: Callable[
@@ -65,10 +82,7 @@ def install(conn: sqlite3.Connection, *, verify_release: Callable[
     Every writer connection must register the functions before opening a fenced
     DB. A connection without them fails closed at SQLite, not open on restart.
     """
-    conn.create_function("kanban_containment_held", 1,
-                         lambda task: int(pending(conn, task, verify_release=verify_release)))
-    conn.create_function("kanban_containment_write", 1,
-                         lambda task: int(conn.in_transaction and _WRITE.get() == (id(conn), task)))
+    register(conn, verify_release=verify_release)
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn, allow_nested=True):
         _install_schema(conn)
@@ -93,24 +107,33 @@ def _triggers(conn: sqlite3.Connection) -> None:
     permit = "kanban_containment_write"
     fail = "SELECT RAISE(ABORT,'containment_pending');"
     protected = "('contained','containment_released')"
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(task_events)")]
+    new_uid = "NEW.uid" if "uid" in columns else "NULL"
     statements = {
         "task_update": ("BEFORE UPDATE OF status,current_run_id,completed_at,containment_episode ON tasks",
                         f"{held}(OLD.id) AND (OLD.status IS NOT NEW.status OR OLD.current_run_id IS NOT NEW.current_run_id "
-                        "OR OLD.completed_at IS NOT NEW.completed_at OR OLD.containment_episode IS NOT NEW.containment_episode) AND ("
+                        "OR OLD.completed_at IS NOT NEW.completed_at OR OLD.containment_episode IS NOT NEW.containment_episode) "
+                        "AND NOT kanban_containment_sync_task(OLD.id) AND ("
                         f"NOT {permit}(OLD.id) OR NEW.status != 'triage' "
                         "OR NEW.current_run_id IS NOT NULL OR NEW.completed_at IS NOT NULL)"),
         "task_delete": ("BEFORE DELETE ON tasks", f"{held}(OLD.id)"),
         "event_insert": ("BEFORE INSERT ON task_events",
-                         f"NEW.kind IN {protected} AND NOT {permit}(NEW.task_id)"),
+                         f"NEW.kind IN {protected} AND NOT {permit}(NEW.task_id) "
+                         f"AND NOT kanban_containment_sync_event({new_uid},NEW.task_id,NEW.kind,NEW.payload)"),
         "event_delete": ("BEFORE DELETE ON task_events", f"OLD.kind IN {protected}"),
     }
-    columns = [r[1] for r in conn.execute("PRAGMA table_info(task_events)")]
     same = " AND ".join(f'OLD."{c}" IS NEW."{c}"' for c in columns if c != "uid")
     uid_fill = (f"OLD.uid IS NULL AND NEW.uid IS NOT NULL AND ({same})" if "uid" in columns else "0")
+    replica_same = ("OLD.uid IS NEW.uid AND OLD.task_id IS NEW.task_id AND OLD.kind IS NEW.kind "
+                    "AND OLD.payload IS NEW.payload AND kanban_containment_sync_event(NEW.uid,NEW.task_id,NEW.kind,NEW.payload)"
+                    if "uid" in columns else "0")
     statements["event_update"] = ("BEFORE UPDATE ON task_events",
-                                  f"(OLD.kind IN {protected} OR NEW.kind IN {protected}) AND NOT ({uid_fill})")
+                                  f"(OLD.kind IN {protected} OR NEW.kind IN {protected}) AND NOT ({uid_fill}) "
+                                  f"AND NOT ({replica_same})")
     for op, refs in (("insert", ("NEW",)), ("delete", ("OLD",)), ("update", ("OLD", "NEW"))):
         condition = " OR ".join(f"{held}({ref}.{end}_id)" for ref in refs for end in ("parent", "child"))
+        if op == "insert":
+            condition = f"({condition}) AND NOT kanban_containment_sync_edge(NEW.parent_id,NEW.child_id)"
         statements[f"edge_{op}"] = (f"BEFORE {op.upper()} ON task_links", condition)
     for name, (operation, condition) in statements.items():
         conn.execute(f"DROP TRIGGER IF EXISTS containment_{name}")

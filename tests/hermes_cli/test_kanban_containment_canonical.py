@@ -135,7 +135,7 @@ def test_malformed_or_rejected_disposition_is_not_success(board, case):
     }[case]
     with pytest.raises((canonical.DeliveryUnknown, ContainmentRefused)):
         canonical.deliver(board, hub, request=request)
-    assert board.execute("SELECT confirmed FROM containment_delivery").fetchone()[0] == 0
+    assert board.execute("SELECT confirmed FROM containment_delivery").fetchone()[0] == (-1 if case == "rejected" else 0)
 
 
 @pytest.mark.parametrize("path,value", [

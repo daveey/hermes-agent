@@ -1305,6 +1305,8 @@ def apply_remote_changes(
     that transaction; a change it refuses is skipped. [daveey]"""
     from hermes_cli.kanban_db_connect import write_txn
     result = ApplyResult(cursor=new_cursor, local_pending_wins=local_pending_wins)
+    from hermes_cli import kanban_containment_replica as containment
+    containment.prepare_apply(conn, changes)
     with write_txn(conn):
         result.revision_before = _repair_revision(conn)
         # Serialize with set_mode(off): a feed fetched before detach must not
@@ -1318,7 +1320,10 @@ def apply_remote_changes(
                 if keep is not None and not keep(conn, change):
                     result.skipped += 1
                     continue
-                _apply_one(conn, change, own, result)
+                with containment.projection(conn, change):
+                    _apply_one(conn, change, own, result)
+            retained = containment.restore_page(conn, changes)
+            result.hooks = [hook for hook in result.hooks if hook[1] not in retained]
             if result.left_terminal or result.reopened:  # a wake never reopens a done card [daveey]
                 from hermes_cli.kanban_terminal_guard import enforce_after_apply
                 enforce_after_apply(conn, result.left_terminal, result.reopened)

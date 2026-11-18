@@ -440,6 +440,10 @@ class Hub(HubRoutesMixin):
         from urllib.parse import quote
         return self._call("GET", f"/v2/boards/{board}/snapshot?table={table}&after={quote(after)}&limit={limit}")
 
+    def containment_context(self, board: str, task: str, producer: str | None = None) -> dict:
+        query = urllib.parse.urlencode({"task": task, **({"producer": producer} if producer is not None else {})})
+        return self._call("GET", f"/v2/boards/{urllib.parse.quote(board, safe='')}/containment/context?{query}")
+
     def row_evidence(self, board: str, table: str, uid: str) -> dict:
         """Exact authoritative row/deletion/history evidence, never a replica lookup."""
         from urllib.parse import urlencode
@@ -899,6 +903,8 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             return Pulled(total, status_changed=changed)
         # [daveey] The pre-filter above can miss a local edit committed after it read the outbox (a claim in
         # flight): ``local_pending_wins`` checks again inside the apply transaction.
+        from hermes_cli.kanban_containment_replica import certify_page
+        certify_page(conn, hub, board, changes)
         applied = sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
                                             local_pending_wins=True)
         changed.update(getattr(applied, "status_changed", None) or {})
@@ -926,6 +932,8 @@ def resync(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool, p
             if partition is not None:
                 changes = own_partition(conn, changes, partition)
             cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
+            from hermes_cli.kanban_containment_replica import certify_page
+            certify_page(conn, hub, board, changes)
             sync.apply_remote_changes(conn, changes, new_cursor=cursor, board=board, observers=observers,
                                       local_pending_wins=True)  # [daveey] an unpushed local edit outlives a rebuild
             count += len(rows)
