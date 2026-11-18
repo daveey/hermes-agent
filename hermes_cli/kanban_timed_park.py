@@ -210,4 +210,6 @@ def park(
     # [daveey] ``probe_host``: another gateway runs this probe (a relay to the home); it registers it there.
     kwc.set_check(conn, task_id, wake_check, check_every, now=now,
                   register_here=kwc.probe_here(conn, probe_host))
+    from hermes_cli.kanban_done_tail import post_notice
+    post_notice(conn, task_id, reason=reason, awaiting=record, run_id=run_id)
     return True

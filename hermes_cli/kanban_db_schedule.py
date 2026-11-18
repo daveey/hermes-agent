@@ -101,6 +101,8 @@ def schedule_task(
             "awaiting": record, **meta,
         }, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check, check_every, register_here=kwc.probe_here(conn, host))
+        from hermes_cli.kanban_done_tail import post_notice
+        post_notice(conn, task_id, reason=reason, watch=watch, awaiting=record, run_id=run_id)
         return noted.keep(True)
 
 

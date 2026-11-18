@@ -244,6 +244,7 @@ gateway:
       block_loop_detected: "ismételt blokkolások után triázsra irányítva; orkesztrációs figyelmet igényel"
       dependency_parent_unclaimed: "has a parent card waiting with no worker"
       chat_wait_unclaimed: "is ready with no worker claiming it"
+      park_progress_notice: "előrehaladásról számolt be várakozás közben; nincs befejezve"
       spend_budget_decision_ready: "elérte a költségkeretét; újraindítási vagy archiválási döntésre vár"
       status_default: "állapota megváltozott"
       status_joiner: ", "

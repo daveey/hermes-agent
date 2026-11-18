@@ -58,7 +58,8 @@ TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "st
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
 _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "dependency_parent_unclaimed", "chat_wait_unclaimed", "request_withdrawn", "failure_finalized", "resolved_check_broken", "resolved_check_lost")
-TERMINAL_KINDS = (*TERMINAL_KINDS, "failure_finalized", "spend_budget_decision_ready")
+TERMINAL_KINDS = (*TERMINAL_KINDS, "failure_finalized", "spend_budget_decision_ready", "park_progress_notice")
+_WAKE_KINDS = (*_WAKE_KINDS, "park_progress_notice")
 _WAKE_KINDS = (*_WAKE_KINDS, "spend_budget_decision_ready")
 
 
@@ -627,6 +628,12 @@ def _fmt_parent_unclaimed(ev, n) -> tuple:
     return f"⏳ {n.head}: {notice_text(ev.payload)}", None, None
 
 
+def _fmt_park_progress(ev, n) -> tuple:
+    from hermes_cli.kanban_done_tail import notice_text
+    body = notice_text(ev.payload)
+    return f"ℹ {n.head}: {body}", body, None
+
+
 def _fmt_chat_wait(ev, n) -> tuple:
     from hermes_cli.kanban_chat_wait import notice_text
     return f"⏳ {n.head}: {notice_text(ev.payload)}", None, None
@@ -667,6 +674,7 @@ def _fmt_request_withdrawn(ev, n):
 # intentionally silent (no formatter), and excluded from _WAKE_KINDS so they
 # never wake the creator.
 _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
+    "park_progress_notice": _fmt_park_progress,
     "request_withdrawn": _fmt_request_withdrawn,
     "resolved_check_broken": _fmt_resolved_check_drop,
     "resolved_check_lost": _fmt_resolved_check_drop,

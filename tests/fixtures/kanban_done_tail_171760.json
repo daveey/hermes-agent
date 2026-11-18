@@ -1,0 +1,16 @@
+{
+  "reason": "SCHEDULED_UNTIL=2026-11-04T20:00:00-08:00 — Everything else is done: phase 5 merged as Metta-AI/ask-eve PR #10 (merge cbc54bc, head 672c991, 19:36 PDT 10-28; TR PASS, Eve merge OK, CI green), #250 Slack summary posted (ts 1793250930.214389), wt-256 removed. Only step left: close askevepodcast#256 and #250, which can't be done while GitHub keeps the askevepodcast account suspended (API 404 at 22:15 PDT). On wake: comment on both issues \"Shipped in Metta-AI/ask-eve#10 (merge cbc54bc) after the repo move; phases #267, #276, #282, #294, Metta-AI#10\", close them with gh issue close via token-broker user/github, read back state=closed, then complete with the metadata from this run. If Eve says the old repo is retired for good, complete noting the issues can't be closed. Don't repost the Slack summary.",
+  "timed_park": true,
+  "requested_kind": "time",
+  "wake_at": 1793851200,
+  "resume_status": "ready",
+  "wake_check": "/Users/daveey/design/askeve-redesign/askevepodcast_up.sh",
+  "check_every": 3600,
+  "awaiting": {
+    "kind": "external",
+    "ref": "GitHub Support reinstatement of the askevepodcast account",
+    "why": "gh api repos/askevepodcast/ask-eve returns 404 (account suspended since 2026-10-28 02:20 PDT)",
+    "premise": "44ba0fb3b1c1dba8",
+    "probe": "ca2d877b072d10f7"
+  }
+}

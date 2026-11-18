@@ -241,6 +241,7 @@ gateway:
       block_loop_detected: "routed to triage after repeated blocks; orchestration attention needed"
       dependency_parent_unclaimed: "has a parent card waiting with no worker"
       chat_wait_unclaimed: "is ready with no worker claiming it"
+      park_progress_notice: "thuairiscigh dul chun cinn agus í ar feitheamh; níl sí críochnaithe"
       spend_budget_decision_ready: "shroich sé a bhuiséad; ag fanacht le cinneadh athsheolta nó cartlannaithe"
       status_default: "status changed"
       status_joiner: ", "

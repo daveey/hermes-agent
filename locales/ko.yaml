@@ -241,6 +241,7 @@ gateway:
       block_loop_detected: "routed to triage after repeated blocks; orchestration attention needed"
       dependency_parent_unclaimed: "has a parent card waiting with no worker"
       chat_wait_unclaimed: "is ready with no worker claiming it"
+      park_progress_notice: "대기 중 진행 상황을 보고했습니다. 아직 완료되지 않았습니다"
       spend_budget_decision_ready: "지출 예산에 도달했습니다. 재개 또는 보관 결정을 기다립니다"
       status_default: "status changed"
       status_joiner: ", "
