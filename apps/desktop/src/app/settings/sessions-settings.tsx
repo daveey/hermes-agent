@@ -46,6 +46,8 @@ function newSessionShortcut(): null | string {
 
 const DEFAULT_AUTO_ARCHIVE_DAYS = 3
 
+const rowIdentity = (row: SessionInfo): string => `${row.connection_id || ''}\0${row.profile || 'default'}\0${row.id}`
+
 interface SessionsSettingsProps {
   subpage?: string
 }
@@ -80,6 +82,7 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
   const [paging] = useState(() => ({
     cursor: null as ArchivedPager | null,
     pages: 0,
+    // Keyed like the cursor's rows: two profiles can hold the same session id.
     removed: new Set<string>(),
     removedAtStart: 0,
     started: false
@@ -108,8 +111,17 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
 
         paging.cursor = pager
         paging.pages = pages
+
+        if (paging.removed.size !== removedAtStart) {
+          // A row was removed while this read was out: its offsets are already
+          // off by one, so read the same pages again rather than list a gap.
+          await readPages(0)
+
+          return
+        }
+
         // The cursor back-fills live pins onto an archived page; this list is archived rows only.
-        setLocalSessions(pager.sessions.filter(row => row.archived && !paging.removed.has(row.id)))
+        setLocalSessions(pager.sessions.filter(row => row.archived && !paging.removed.has(rowIdentity(row))))
         setHasMore(pager.hasMore)
       } catch (err) {
         notifyError(err, s.failedLoad)
@@ -143,7 +155,7 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
 
       try {
         await setSessionArchived(session.id, false, session.profile)
-        paging.removed.add(session.id)
+        paging.removed.add(rowIdentity(session))
         setLocalSessions(prev => prev.filter(s => s.id !== session.id))
         // Surface it again in the sidebar without waiting for a full refresh, and
         // lift any optimistic eviction so the grouped tree shows it again too.
@@ -185,7 +197,7 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
         // stored tip and the durable lineage root — the journal keys on the
         // stored id and the row may carry either.
         purgeInFlightTurnJournals([session.id, session._lineage_root_id])
-        paging.removed.add(session.id)
+        paging.removed.add(rowIdentity(session))
         setLocalSessions(prev => prev.filter(s => s.id !== session.id))
         triggerHaptic('warning')
       } catch (err) {

@@ -45,8 +45,10 @@ export function useArchivedView(active: boolean) {
     firstLoad: loading && sessions.length === 0,
     hasMore,
     loadMore,
-    /** A click's own read, not a background refresh: that must not disable the row. */
-    loadingMore,
+    /** A click's own read, not a background refresh: that must not disable the row.
+     *  Tied to the store's flag too, so a read stranded by a scope switch (the
+     *  store drops its flag at once) does not hold the new scope's row disabled. */
+    loadingMore: loadingMore && loading,
     /** The Archived view's value while it is showing, the live list's otherwise. */
     pick: <T>(archived: T, live: T): T => (active ? archived : live),
     sessions

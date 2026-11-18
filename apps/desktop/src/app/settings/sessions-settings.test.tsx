@@ -127,6 +127,77 @@ describe('SessionsSettings archived list paging', () => {
     expect(screen.queryByText('chat a')).toBeNull()
   })
 
+  it('reads again when a row is unarchived while a load-more is out', async () => {
+    const server = [archived('a'), archived('b'), archived('c')]
+    let release!: () => void
+
+    listAllProfileSessions.mockReset().mockImplementation(async (...args: unknown[]) => ({
+      sessions: server.slice((args[6] as number) / 500, (args[6] as number) / 500 + 1),
+      total: server.length
+    }))
+    vi.mocked(setSessionArchived).mockImplementation(async id => {
+      server.splice(
+        server.findIndex(row => row.id === id),
+        1
+      )
+
+      return { ok: true }
+    })
+
+    render(<SessionsSettings />)
+    await screen.findByText('chat a')
+
+    // The second page is held while 'a' is unarchived underneath it.
+    listAllProfileSessions.mockImplementationOnce(async () => {
+      const rows = server.slice(1, 2)
+
+      await new Promise<void>(resolve => (release = resolve))
+
+      return { sessions: rows, total: 3 }
+    })
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: en.sidebar.loadMore })))
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: en.settings.sessions.unarchive })))
+    await act(async () => release())
+
+    // Without the re-read the list is just 'b' with 'c' still offered; it must hold both.
+    expect(await screen.findByText('chat c')).toBeTruthy()
+    expect(screen.getByText('chat b')).toBeTruthy()
+    expect(screen.queryByText('chat a')).toBeNull()
+  })
+
+  it("keeps another profile's row with the same id after one is unarchived", async () => {
+    const mine = { ...archived('same'), profile: 'default', title: 'mine' }
+    const theirs = { ...archived('same'), profile: 'work', title: 'theirs' }
+    const server = [mine, theirs, archived('z')]
+
+    listAllProfileSessions.mockReset().mockImplementation(async (...args: unknown[]) => ({
+      sessions: (args[6] as number) === 0 ? server.slice(0, 2) : server.slice(2),
+      total: 500 + server.length
+    }))
+    vi.mocked(setSessionArchived).mockImplementation(async (_id, _archived, profile) => {
+      server.splice(
+        server.findIndex(row => row.profile === profile),
+        1
+      )
+
+      return { ok: true }
+    })
+
+    const { container } = render(<SessionsSettings />)
+    await screen.findByText('mine')
+
+    const row = container.querySelector('#archived-session-same') as HTMLElement
+
+    const unarchive = Array.from(row.querySelectorAll('button')).find(button =>
+      button.textContent?.includes(en.settings.sessions.unarchive)
+    ) as HTMLElement
+
+    await act(async () => fireEvent.click(unarchive))
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: en.sidebar.loadMore })))
+
+    expect(await screen.findByText('theirs')).toBeTruthy()
+  })
+
   it('lists automated archived rows too, whatever the sidebar preference', async () => {
     render(<SessionsSettings />)
 

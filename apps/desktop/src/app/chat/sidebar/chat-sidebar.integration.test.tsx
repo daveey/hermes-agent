@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { $apiRequestScope } from '@/api/client'
 import { group, split } from '@/components/pane-shell/tree/model'
 import { $layoutTree, noteActiveTreeGroup } from '@/components/pane-shell/tree/store'
 import { SidebarProvider } from '@/components/ui/sidebar'
@@ -372,6 +373,33 @@ describe('ChatSidebar Archived view paging', () => {
     await screen.findByText('Old one')
 
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+  })
+
+  it('does not keep the load-more row disabled for a new scope while the old read is stranded', async () => {
+    let stranded = false
+
+    listAllProfileSessions.mockReset().mockImplementation(async (...args: unknown[]) => {
+      if ((args[6] as number) > 0) {
+        stranded = true
+
+        // The old scope's second page never comes back within this test.
+        return new Promise(() => {})
+      }
+
+      return { sessions: [archivedRow('old-one', 'Old one')], total: 16_899 }
+    })
+
+    renderSidebar('/', 'chat')
+    await screen.findByText('Old one')
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Load more' })))
+    await waitFor(() => expect(stranded).toBe(true))
+
+    await act(async () => $apiRequestScope.setKey('connectionId', 'other-gateway'))
+
+    await waitFor(() =>
+      expect((screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement).disabled).toBe(false)
+    )
+    $apiRequestScope.setKey('connectionId', null)
   })
 
   it('does not call an archive that is still loading empty', async () => {
