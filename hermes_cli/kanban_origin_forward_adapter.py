@@ -34,11 +34,19 @@ def receive(request):
         # Construct lazily: durable replay needs neither a live lease nor network.
         return read_lease(Hub(load_identity()), board, task)
 
+    def inventory():
+        # Decode failures describe unavailable remote evidence, not a bad caller
+        # request. Keep this normalization inside the inventory-read boundary.
+        try:
+            return Hub(load_identity()).machines()
+        except (ValueError, RecursionError) as exc:
+            raise ValueError("origin_forward_inventory_unavailable") from exc
+
     from hermes_cli.kanban_origin_native import lookup as native_lookup
     outbound = prepare(request, path=home / "kanban/origin-forward.db",
                        native_lookup=lambda origin, creator: native_lookup(origin, creator, gateway=gateway),
                        ledger=home / "kanban/origin-ledger.db", gateway=gateway, profile=profile,
-                       inventory_lookup=lambda: Hub(load_identity()).machines(),
+                       inventory_lookup=inventory,
                        lease_lookup=lookup, now_ms=lambda: int(time.time() * 1000),
                        session_exists=lambda sid: bool(_resolve_session(home / "state.db", sid)))
     return {"status": "prepared", "handoff_complete": False, "outbound": outbound}
