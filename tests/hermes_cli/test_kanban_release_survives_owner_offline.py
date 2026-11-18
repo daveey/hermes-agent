@@ -111,3 +111,89 @@ def test_origin_bound_settled_completion_needs_a_fresh_hub_sync(world, board):
     path, replica = _bound_done(world)
     row = _project(path, replica, 1001 + 37 * 3600)  # this gateway has not pulled for 37 h
     assert row['status'] == 'unknown' and row['unfinished']
+
+
+# ---------------------------------------------------------------- the Board removed the owner machine
+
+
+def _remove_owner(replica, when, path=None):
+    """The Board drops the owner gateway: its info row and every task record leave the replica. Another gateway
+    keeps publishing, so the replica is not empty. With ``path``, the ledger first observes the owner's last record
+    (as every live projection does), so the removal comes after that observation."""
+    if path is not None:
+        _project(path, replica, 1001)
+    with sqlite3.connect(replica) as db:
+        db.execute("DELETE FROM replica WHERE gw='owner'")
+        db.execute("INSERT OR REPLACE INTO replica VALUES ('other','gateway','info',1,?)",
+                   (json.dumps({'gateway': 'other', 'task_scopes': []}),))
+        db.execute("UPDATE meta SET v=? WHERE k='last_ok'", (str(when),))
+
+
+def test_a_removed_owners_verified_completion_stays_released(world, board):
+    path, replica = _bound_done(world)
+    _remove_owner(replica, 5000, path)
+    row = _project(path, replica, 5001)
+    assert (row['status'], row['unfinished'], row['stale']) == ('done', False, False)
+
+
+def test_a_removed_owners_unverified_completion_stays_unknown(world, board):
+    path, replica = _bound_done(world, verified_completion=False)
+    _remove_owner(replica, 5000, path)
+    row = _project(path, replica, 5001)
+    assert row['status'] == 'unknown' and row['unfinished']
+
+
+def test_an_offline_owner_with_its_info_row_is_not_removed(world, board):
+    """Only a missing info row AND no record means removed: an owner that is merely offline keeps its info row."""
+    path, replica = _bound_done(world, verified_completion=False)
+    with sqlite3.connect(replica) as db:
+        db.execute("DELETE FROM replica WHERE gw='owner' AND coll='tasks'")
+        db.execute("UPDATE meta SET v='5000' WHERE k='last_ok'")
+    row = _project(path, replica, 5001)
+    assert row['status'] == 'unknown' and row['unfinished']
+
+
+def test_a_stale_replica_proves_no_removal(world, board):
+    path, replica = _bound_done(world)
+    _remove_owner(replica, 1000, path)
+    row = _project(path, replica, 1000 + 37 * 3600)  # no pull for 37 h
+    assert row['status'] == 'unknown' and row['unfinished']
+
+
+@pytest.mark.parametrize('same_created', [True, False])
+def test_a_rehomed_card_drops_the_binding_to_the_removed_owner(world, board, same_created):
+    path, replica = _bound_done(world, verified_completion=False)
+    _, _, binding = world
+    with sqlite3.connect(replica) as db:  # the fixture's record has no created_at: give the card one
+        task = json.loads(db.execute("SELECT data FROM replica WHERE coll='tasks' AND gw='owner'").fetchone()[0])
+        task['created_at'] = 1234
+        db.execute("UPDATE replica SET data=?, version=6 WHERE coll='tasks' AND gw='owner'", (json.dumps(task),))
+    _remove_owner(replica, 5000, path)
+    moved = {**{k: v for k, v in task.items() if k != 'origin_observation'}, 'gateway': 'other', 'status': 'running'}
+    if not same_created:
+        moved['created_at'] = (task.get('created_at') or 0) + 1
+    key = '/'.join((binding['owner']['profile'], binding['owner']['board'], binding['owner']['task_id']))
+    with sqlite3.connect(replica) as db:
+        db.execute("INSERT INTO replica VALUES ('other','tasks',?,1,?)", (key, json.dumps(moved)))
+    from hermes_cli import kanban_origin_ledger as ledger
+    rows = ledger.project(path, replica=replica, gateway='origin', profile='default', now=5001)
+    if same_created:
+        assert rows == [], 'the new owner publishes the card: the binding to the removed owner is not projected'
+    else:
+        assert len(rows) == 1 and rows[0]['status'] == 'unknown', 'another card that reuses the id proves nothing'
+
+
+
+def test_a_removed_owners_open_card_stays_unknown(world, board):
+    """Its last observed status could be out of date by the time the machine was removed: never shown as current."""
+    from hermes_cli import kanban_db_connect as kbc
+    from tests.hermes_cli.test_kanban_origin_evidence import create_bound, publish_observed
+    from tests.hermes_cli.test_kanban_origin_ledger import accept
+    path, replica, binding = world
+    with kbc.connect_closing() as conn:
+        create_bound(conn, binding)
+        publish_observed(conn, replica, binding, version=3)
+        accept(world)
+    _remove_owner(replica, 5000, path)
+    row = _project(path, replica, 5001)
+    assert (row['status'], row['unfinished'], row['stale']) == ('unknown', True, True)

@@ -407,6 +407,79 @@ def refresh_observations(path: Path, replica: Path, *, timeout: float = 5) -> No
         source.close()
 
 
+def _owner_scope(source: sqlite3.Connection, infos: dict, owner: dict) -> tuple:
+    """``(readable, heartbeat, window)`` of the owner's exact (profile, board) scope in its collector's
+    ``gateway/info`` row. Decoded once per owner gateway per projection (``infos``). [daveey]"""
+    gw_info = infos.get(owner['gateway'])
+    if gw_info is None:
+        inventory = source.execute(
+            "SELECT data FROM replica WHERE gw=? AND coll='gateway' AND key='info'",
+            (owner['gateway'],)).fetchone()
+        try:
+            gw_info = infos[owner['gateway']] = (json.loads(inventory[0]) if inventory else {}, None)
+        except (ValueError, TypeError) as exc:
+            gw_info = infos[owner['gateway']] = (None, exc)
+    try:
+        if gw_info[1] is not None:
+            raise gw_info[1]
+        info = gw_info[0]
+        scopes = info.get('task_scopes')
+        if not isinstance(scopes, list):
+            scopes = []
+        matching = [s for s in scopes if isinstance(s, dict)
+                    and (s.get('profile'), s.get('board')) == (owner['profile'], owner['board'])]
+        readable = (info.get('gateway') == owner['gateway'] and len(matching) == 1
+                    and matching[0].get('state') == 'ok')
+        heartbeat = matching[0].get('observed_at') if readable else None
+        return readable, heartbeat, scope_window(info)
+    except (ValueError, TypeError, AttributeError):
+        return False, None, SCOPE_HEARTBEAT_FLOOR_S
+
+
+def _listed_gateways(source: sqlite3.Connection | None) -> frozenset:
+    """Gateways a fresh replica still knows: an info row or any task record. An offline owner keeps its info row; a
+    machine removed from the Board has neither. Empty when there is no fresh replica (nothing counts as removed)."""
+    if source is None:
+        return frozenset()
+    return frozenset(str(r[0]) for r in source.execute(
+        "SELECT DISTINCT gw FROM replica WHERE coll IN ('gateway','tasks')"))
+
+
+def _removed_owner(source, listed: frozenset, owner: dict, task: dict, me: tuple) -> bool | None:
+    """True when this binding's owner is a machine the Board removed and its stored observation of the card is closed
+    (done or archived), so that observation is its final word; None when the card was re-homed and the binding is not
+    projected; False otherwise. [daveey]
+
+    Workers 2-8, 2026-11-18: 29 MacBook and 4 hub obligations stayed unknown for good after the Board dropped their
+    owners with every record; 30 were verified completions this ledger had already released. Another gateway
+    publishing the same card (board, id, created_at) owns it now: its own record speaks for the card. This
+    gateway's own cards and an empty or stale replica (``listed`` empty) never count as removed."""
+    if not listed or owner['gateway'] in listed or (owner['gateway'], owner['profile']) == me:
+        return False
+    if _published_elsewhere(source, owner, task):
+        return None
+    # Only a closed card's last word is final: an open one could have moved on before the removal, so it stays unknown.
+    return task.get('status') in ('done', 'archived')
+
+
+def _published_elsewhere(source: sqlite3.Connection, owner: dict, task: dict) -> bool:
+    """Another gateway's replica record of this card: same board and id, same non-null ``created_at`` (a re-home
+    keeps it; an unrelated card that reuses the id does not). [daveey]"""
+    created = task.get('created_at')
+    if created is None or isinstance(created, bool) or not isinstance(created, (int, float, str)):
+        return False
+    pattern = '*/' + owner['board'] + '/' + owner['task_id']
+    for (data,) in source.execute(
+            "SELECT data FROM replica WHERE coll='tasks' AND gw != ? AND key GLOB ?", (owner['gateway'], pattern)):
+        try:
+            other = json.loads(data)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(other, dict) and other.get('created_at') == created:
+            return True
+    return False
+
+
 def _lock_busy(exc: sqlite3.Error) -> bool:
     code = getattr(exc, "sqlite_errorcode", None)
     if code is not None:
@@ -456,6 +529,9 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
         fresh = False
     result = []
     infos: dict[str, tuple] = {}  # owner gateway -> (decoded gateway/info, or the error decoding it)
+    # [daveey] Gateways the fresh replica still knows (an info row or any task record). An offline owner keeps its
+    # info row; a machine removed from the Board has neither (``removed`` below). Read once per projection.
+    listed = _listed_gateways(source if fresh else None)
     try:
         with closing(_ro(path)) as conn:
             from hermes_cli.kanban_origin_legacy import aliases_for_projection
@@ -497,36 +573,18 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     # inventory; missing/ambiguous inventory is not healthy.
                     # [daveey] Decoded once per owner gateway per projection, not once per obligation: the info row
                     # lists every scope the owner collects, and every hub card re-decoded it under ``_links_lock``.
-                    gw_info = infos.get(owner['gateway'])
-                    if gw_info is None:
-                        inventory = source.execute(
-                            "SELECT data FROM replica WHERE gw=? AND coll='gateway' AND key='info'",
-                            (owner['gateway'],)).fetchone()
-                        try:
-                            gw_info = infos[owner['gateway']] = (json.loads(inventory[0]) if inventory else {}, None)
-                        except (ValueError, TypeError) as exc:
-                            gw_info = infos[owner['gateway']] = (None, exc)
-                    try:
-                        if gw_info[1] is not None:
-                            raise gw_info[1]
-                        info = gw_info[0]
-                        scopes = info.get('task_scopes')
-                        if not isinstance(scopes, list):
-                            scopes = []
-                        matching = [s for s in scopes if isinstance(s, dict)
-                                    and (s.get('profile'), s.get('board')) == (owner['profile'], owner['board'])]
-                        readable = (info.get('gateway') == owner['gateway'] and len(matching) == 1
-                                    and matching[0].get('state') == 'ok')
-                        heartbeat = matching[0].get('observed_at') if readable else None
-                        window = scope_window(info)
-                    except (ValueError, TypeError, AttributeError):
-                        readable, heartbeat, window = False, None, SCOPE_HEARTBEAT_FLOOR_S
+                    readable, heartbeat, window = _owner_scope(source, infos, owner)
                     # Owner liveness: the collector's per-scope heartbeat (one record per sync) proves it read
                     # this whole board recently, so an unchanged, current task record is still observed. The
                     # per-task stamp is accepted too, for records published before scope heartbeats existed.
                     live = (_recent(heartbeat, now, window)
                             or _recent(_owner_evidence(task).get('observed_at'), now))
                     current = current and readable and live
+                # [daveey] An owner the Board removed (``_removed_owner``): a re-homed card's binding is dropped, and
+                # otherwise its stored observation is its last word (``final``), as a current record would be.
+                final = _removed_owner(source, listed, owner, task, (gateway, profile))
+                if final is None:
+                    continue
                 if (owner['gateway'], owner['profile']) == (gateway, profile):
                     from hermes_cli.kanban_origin_local import observe_local_binding
                     local = observe_local_binding(binding, profile=profile, now=now)
@@ -544,6 +602,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                                    'blocked', 'triage', 'done', 'archived')
                 # [daveey] A currently observed owner archive without a verified completion produces nothing: the
                 # card is closed, not completed. It neither waits nor counts as done, and never releases as done.
+                current = current or final
                 observed = current or settled
                 closed = bool(observed and status == 'archived' and not released and _owner_evidence(task))
                 if not observed or not known or (status in ('done', 'archived') and not released and not closed):
