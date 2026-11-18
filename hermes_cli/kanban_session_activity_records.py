@@ -40,6 +40,43 @@ def _retire_moved(card: dict[str, Any], moved: dict[str, Any]) -> bool:
     return any(gw != card.get('gateway') for gw in gateways)
 
 
+class OwnerSink:
+    """``owners_out`` sink for ``_release_removed_owners``: borrows a projection's owner set, and takes a full
+    read's one-shot generator as a set at once (the tasks it walks are folded afterwards)."""
+    def __init__(self):
+        self.value = ()
+
+    def update(self, value):
+        self.value = value if hasattr(value, '__contains__') else set(value)
+
+
+def _release_removed_owners(carried: list[dict[str, Any]], owners, moved: dict[str, Any]) -> list[dict[str, Any]]:
+    """Remembered rows of an owner gateway a FRESH replica no longer carries at all, last reported done or archived:
+    released, as the owner reported them. [daveey]
+
+    The Board drops a removed machine's records. Its cards were then remembered rows with no record left to attest
+    them, ``unknown`` forever: 1,231 finished cards in 68 hub chats and 1,409 in 28 MacBook chats after workers 2-8
+    were removed (2026-11-18). Absence of ONE record is still never closure (a live owner publishing other cards
+    keeps its rows as they are, see ``_retire_moved``); this is the absence of the whole owner: no task record from
+    that gateway and no fresh scope heartbeat, in a replica that is not stale (``owners`` is filled only then). An
+    open, unknown-status or unqualified row is left alone, and so is everything while the replica is stale.
+    ``owners`` is the projection's ``(gateway, board, id)`` set; it is walked only when a candidate row exists."""
+    wanted = [i for i, c in enumerate(carried) if c.get('status') == 'unknown' and c.get('ownership_state') == 'qualified'
+              and c.get('reported_status') in ('done', 'archived') and not c.get('released') and c.get('gateway')]
+    if not wanted or not moved:
+        return carried
+    publishing = {owner[0] for owner in owners}
+    if not publishing:  # a read that carries no task record at all proves nothing about who is gone
+        return carried
+    publishing |= {scope[0] for scope in moved.get('live_scopes', ())}
+    out = list(carried)
+    for i in wanted:
+        if carried[i]['gateway'] not in publishing:
+            out[i] = {**carried[i], 'status': carried[i]['reported_status'], 'unfinished': False, 'released': True,
+                      'owner_removed': True}
+    return out
+
+
 def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, dict[str, Any]]) -> None:
     """Merge each unqualified ``board/id`` record into its proven profile-qualified twin, in place.
 

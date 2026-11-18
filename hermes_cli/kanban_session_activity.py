@@ -38,7 +38,8 @@ from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES,
 from hermes_cli.kanban_session_activity_release import owner_attests_terminal as _owner_attests_terminal
 from hermes_cli.kanban_db_sync import sync_enabled as _board_sync_enabled
 from hermes_cli.kanban_scope_heartbeat import scope_heartbeats as _scope_heartbeats
-from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases, _moved_evidence, _retire_moved
+from hermes_cli.kanban_session_activity_records import (OwnerSink as _OwnerSink, _fold_legacy_aliases, _moved_evidence,
+                                                          _release_removed_owners, _retire_moved)
 from hermes_cli.kanban_session_activity_attention import AttentionCache as _AttentionCache
 from hermes_cli.kanban_session_activity_attention import run_checks as _run_done_checks
 from hermes_cli.kanban_session_activity_card_details import _add_card_details
@@ -1078,9 +1079,9 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
             raise FileNotFoundError("no hub.db")
         qualified: set[tuple[str, str, str]] = set()
         from hermes_cli.kanban_replica_aggregates import BorrowedSet, remembered_publications
-        closed = BorrowedSet()
+        closed, owners = BorrowedSet(), _OwnerSink()
         moved: dict[str, Any] = {}
-        cards = _read_remote_links(path, qualified_out=qualified, closed_out=closed, moved_out=moved)
+        cards = _read_remote_links(path, qualified_out=qualified, closed_out=closed, moved_out=moved, owners_out=owners)
         remembered_publications(moved, previous)
     except Exception as exc:  # a broken replica must never break the sidebar
         if previous is None:
@@ -1100,7 +1101,7 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
     # may attest closed) under its qualified key. [daveey]
     qualified_now = {(c["session"], c.get("gateway"), c.get("board"), c.get("id"))
                      for c in cards if c.get("ownership_state") == "qualified"}
-    cards.extend(reconcile_carry([{**c, "stale": True} for c in (previous or [])
+    cards.extend(_release_removed_owners(reconcile_carry([{**c, "stale": True} for c in (previous or [])
                  if (c["session"], c["key"]) not in present
                  # Successful reads migrate graph-inferred cache entries only.
                  # Receipt-backed obligations remain in the separate ledger.
@@ -1112,7 +1113,7 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                  and not (c.get("ownership_state") == "unknown"
                           and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now)
                  # Fresh replica: the named owner publishes the scope without it, another gateway owns the card.
-                 and not _retire_moved(c, moved)]))
+                 and not _retire_moved(c, moved)]), owners.value, moved))
     if _snapshot_saved != (scope, cards):
         # The durable snapshot only speeds a cold start. Losing a write race (database is locked) must not
         # fail this read: the sidebar would mark every row kanban_unknown. The next changed read retries.
