@@ -89,6 +89,36 @@ def test_host_ticks_ignore_registry_clock_and_report_new_targets(gws, monkeypatc
     assert "t_fedcba9876543210" in kb.list_comments(worker.conn, first)[-1].body
 
 
+def test_count_fluctuations_only_report_cap_crossings(gws, monkeypatch):
+    _, worker = gws
+    worker.enter()
+    registry = support.wn.registry()
+    entry = registry["machines"][support.WORKER]
+    entry.update(hold=False, max_card_runs=14, metrics={"active_card_runs": 1})
+    monkeypatch.setattr(support.wn, "registry", lambda: registry)
+    card = {"id": "t_0123456789abcdef", "title": "Pending task", "tenant": None,
+            "since_ms": 1000, "skip": {"reason": "budget_exhausted", "detail": "no slot",
+                                      "first_at": 1000, "last_at": 1000, "passes": 1}}
+    first = pickup.file_repairs(worker.conn, support.WORKER, [card], now=1200)[0]
+    for tick in range(20):
+        entry["metrics"]["active_card_runs"] = tick % 14
+        pickup.file_repairs(worker.conn, support.WORKER, [card], now=1260 + tick * 60)
+    assert len(kb.list_comments(worker.conn, first)) == 1
+    for count, expected in [(14, 2), (15, 2), (20, 2), (13, 3), (0, 3)]:
+        entry["metrics"]["active_card_runs"] = count
+        pickup.file_repairs(worker.conn, support.WORKER, [card], now=2500)
+        assert len(kb.list_comments(worker.conn, first)) == expected
+    card["id"] = "t_fedcba9876543210"
+    pickup.file_repairs(worker.conn, support.WORKER, [card], now=2560)
+    assert len(kb.list_comments(worker.conn, first)) == 4
+    entry["hold"] = True
+    pickup.file_repairs(worker.conn, support.WORKER, [card], now=2620)
+    assert len(kb.list_comments(worker.conn, first)) == 5
+    entry["max_card_runs"] = 15
+    pickup.file_repairs(worker.conn, support.WORKER, [card], now=2680)
+    assert len(kb.list_comments(worker.conn, first)) == 6
+
+
 def test_distinct_subjects_have_distinct_incidents(gws):
     _, worker = gws
     assert fire(worker) != fire(worker, "hold")

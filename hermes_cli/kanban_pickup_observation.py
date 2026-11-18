@@ -7,7 +7,13 @@ _STAMP = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
 
 
 def evidence(body: str) -> str:
-    """Keep reasons, targets, counts and registry state; discard only rendered tick fields."""
+    """Keep reasons, targets and registry state; compare run counts by capacity band."""
+    body = re.sub(
+        r"^(Registry entry for [^\n]+: .*\bmax_card_runs=)(\d+)"
+        r"(, active_card_runs=)(\d+)(\.)$",
+        lambda m: f"{m[1]}{m[2]}{m[3]}{'at/over' if int(m[4]) >= int(m[2]) else 'under'}{m[5]}",
+        body, flags=re.MULTILINE,
+    )
     body = re.sub(r"(, ready )\d+( min,)", r"\1<elapsed>\2", body)
     body = re.sub(r"(pinned to machine:[^,\n]+, for )\d+( min \(threshold )", r"\1<elapsed>\2", body)
     body = re.sub(r", last " + _STAMP + r", \d+ pass\(es\)", ", last <tick>, <ticks> pass(es)", body)
