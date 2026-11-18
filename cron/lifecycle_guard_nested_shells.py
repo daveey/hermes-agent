@@ -322,7 +322,7 @@ def _nested_shell_input(view: list[str], hops: int = 1) -> Optional[tuple[str, O
             lambda word: word.startswith("-"), view[index + 1:]))
         peeled = _peel_transparent_prefixes(view, index, limit=1)
         if peeled == index:
-            return _shell_input(view, index, name, login_exec)
+            return _shell_input(view, index, name, login_exec, hops)
         index = peeled
     return None
 
@@ -361,9 +361,10 @@ def _launcher_shell_input(
 
 
 def _shell_input(
-    view: list[str], index: int, name: str, login_exec: bool,
+    view: list[str], index: int, name: str, login_exec: bool, hops: int = 1,
 ) -> Optional[tuple[str, Optional[str]]]:
-    """``_nested_shell_input`` for the unwrapped command *name* at *index*: ssh or a shell."""
+    """``_nested_shell_input`` for the unwrapped command *name* at *index*: ssh or a shell
+    (*hops*: the ssh hop depth, see ``_remote_reads_stdin``)."""
     arguments = _split_redirections(view[index + 1:])[0]
     if name == "ssh":
         from tools.shell_heredoc import _SSH_VALUE_OPTIONS
