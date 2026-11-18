@@ -57,6 +57,13 @@ def send_compatible(send, sample, on_counters_rejected=None):
     except HubError as exc:
         if exc.status != 400:
             raise
+        # A rejected safety observation is UNKNOWN on every downgrade, not a
+        # reason to disable unrelated throughput counters. Never replay its zero.
+        persistent = ("persistent_jobs", "persistent_jobs_at_ms")
+        if any(k in sample for k in persistent):
+            from hermes_cli.machine_cpu_metrics import FIELDS as CPU
+            return send_compatible(send, {k: v for k, v in sample.items()
+                                          if k not in persistent and k not in CPU}, on_counters_rejected)
         if "tokens_by_model" in sample:
             # A scalar-capable Board may predate the model map. Keep its counters
             # enabled, and never restamp the already attempted CPU sample.
