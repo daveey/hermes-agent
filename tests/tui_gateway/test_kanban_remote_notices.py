@@ -380,7 +380,9 @@ def test_sweep_skips_persisted_notices_without_opening_store_even_after_restart(
         for suffix in ("-wal", "-shm"):
             ledger.with_name(ledger.name + suffix).unlink(missing_ok=True)
         krn._reset_for_tests()
-        assert len(sweep()) == 2
+        assert sweep() == []  # transcript recovery restores receipts without another write
+        with sqlite3.connect(ledger) as conn:
+            assert conn.execute('SELECT delivered FROM notices').fetchall() == [(krn.DELIVERED,)] * 2
         assert len(opens) == 4 and len(db.get_messages(CHAT)) == 1
         krn._reset_for_tests()
         assert sweep() == [] and len(opens) == 4
