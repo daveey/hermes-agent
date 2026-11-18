@@ -218,6 +218,16 @@ def test_cli_create_label_is_untouched_without_lanes(conn, monkeypatch):
     assert _stored(conn, "no lanes")["created_by"] == "user"
 
 
+def test_shadow_mode_stores_the_label_the_caller_gave(conn, configured, monkeypatch):
+    configured(lane_shadow=True)
+    monkeypatch.setattr(lanes, "_human_shell", lambda: False)  # an agent's terminal
+    assert cli("create", "agent in shadow", "--assignee", "default", "--priority", "900") == 0
+    row = _stored(conn, "agent in shadow")
+    assert (row["created_by"], row["status"], row["priority"]) == ("user", "ready", 900)
+    assert cli("create", "claims dashboard", "--assignee", "default", "--created-by", "dashboard") == 0
+    assert _stored(conn, "claims dashboard")["created_by"] == "dashboard"
+
+
 def _typed(*argv):
     """A slash command the person typed, through the real slash entry point."""
     return kanban.run_slash(" ".join(argv), human_typed=True)

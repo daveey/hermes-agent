@@ -281,8 +281,11 @@ def _human_shell() -> bool:
 def cli_creator(args, label: str) -> str:
     """``created_by`` for a CLI create. ``--created-by`` defaults to ``user`` for every caller and takes any
     string, so the user labels are kept only for a person: a typed slash command or a human shell. Anything
-    else asking for one is stored as ``agent``. Unchanged when no lanes are configured."""
-    if label not in USER_CREATORS or safe_policy() is None:
+    else asking for one is stored as ``agent``. Only while lanes are enforced: with no lanes, or in shadow mode,
+    the label is stored as given, because shadow changes nothing an agent or a reader can observe on a card
+    beyond its lane. (Shadow's ``would_gate`` therefore reads a chat or cron agent's terminal create as the
+    person's; worker shells and tool creates are still recognised by their card.)"""
+    if label not in USER_CREATORS or enforced() is None:
         return label
     return label if cli_person(args) else "agent"
 
