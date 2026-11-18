@@ -295,7 +295,12 @@ class _Pending:
 _pending: dict[tuple, _Pending] = {}
 
 
-def observe(replica: Path, ledger, now: float, _follow: bool = True) -> dict[tuple, float | None]:
+def observe(replica: Path, ledger, now: float) -> dict[tuple, float | None]:
+    """Observe a replica, sharing persistence with callers of the same snapshot."""
+    return _observe(replica, ledger, now, follow=True)
+
+
+def _observe(replica: Path, ledger, now: float, *, follow: bool) -> dict[tuple, float | None]:
     """Only changed replica snapshots decode cards and touch the observation ledger.
 
     An unchanged replica change key (the observer's data_version) skips the replica read entirely; a key is kept
@@ -307,7 +312,9 @@ def observe(replica: Path, ledger, now: float, _follow: bool = True) -> dict[tup
     [daveey] A caller whose snapshot (same signature, replica file and ledger file) is already being persisted
     waits for that answer: it is the one a memo hit would return. Each notice poller (5-7 per backend on
     hermes-hub, 11-13) otherwise re-ran the whole pass over every terminal card while the first one still held
-    the ledger (21 replica changes -> 79 passes). If the leader fails, the waiter persists once itself.
+    the ledger (21 replica changes -> 79 passes). Failed leaders retry through the same flight election.
+    A waiter gives a leader 30 seconds, then persists independently so a stalled leader cannot strand peers.
+    This bounds only the shared wait, not the fallback ledger write.
     """
     from tui_gateway.kanban_remote_notices import ledger_path
     from tui_gateway.kanban_replica_observer import file_identity, fingerprint
@@ -352,7 +359,7 @@ def observe(replica: Path, ledger, now: float, _follow: bool = True) -> dict[tup
             waiting = _pending.get(key)
             leading: _Pending | None = None
             generation = 0
-            if not (_follow and signature is not None and ident is not None and waiting is not None
+            if not (follow and signature is not None and ident is not None and waiting is not None
                     and waiting.token == token and waiting.owner != threading.get_ident() and not extra):
                 waiting = None
                 flight.lane.pending = []  # this caller writes them; a failed write puts them back
@@ -361,10 +368,10 @@ def observe(replica: Path, ledger, now: float, _follow: bool = True) -> dict[tup
                 if leading is not None:
                     _pending[key] = leading
     if waiting is not None:
-        waiting.done.wait()  # holds no lock; the leader sets it in ``finally``
+        completed = waiting.done.wait(timeout=30)  # no lock held; the leader signals in finally
         if waiting.fresh is not None:
             return waiting.fresh
-        return observe(replica, ledger, now, _follow=False)  # the leader failed: persist this snapshot here
+        return _observe(replica, ledger, now, follow=completed)  # retry together unless the leader stalled
     # [daveey] The ledger write runs without ``_lock``: holding it there kept every notice poller waiting on one
     # poller's transaction. ``cards`` is this call's own snapshot, so the answer is the one it would have had under
     # the lock; only the newest snapshot started for ``key`` publishes its memo, and only after its commit.

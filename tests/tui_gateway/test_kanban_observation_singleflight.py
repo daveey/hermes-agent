@@ -7,6 +7,7 @@ import sqlite3
 import json
 import pytest
 
+from tests.waiting import wait_until
 from tests.tui_gateway.test_kanban_remote_arrival import CHAT, _card
 from tests.tui_gateway.test_kanban_remote_observations_lock import NOW, _move, _world
 from tui_gateway import kanban_remote_notices as krn
@@ -70,10 +71,7 @@ def test_concurrent_snapshot_is_singleflight_outside_publication_lock(tmp_path, 
 
     def save(*args):
         persisted.append(threading.get_ident())
-        for _ in range(4000):
-            if len(waiting) >= CALLERS - 1:
-                break
-            threading.Event().wait(0.005)
+        wait_until(lambda: len(waiting) >= CALLERS - 1, timeout=20, what="snapshot followers")
         return real_persist(*args)
 
     def poll(_):
