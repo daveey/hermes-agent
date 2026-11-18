@@ -1,8 +1,17 @@
+import fs from 'node:fs'
+
 import { describe, expect, it } from 'vitest'
 
-import fixture from './fixtures/hub-sync-sessions-prefetch-projection.json'
 import { markInboxSessions } from './transcript-cache-host'
 import { type HubSessionRecord, MIN_REFETCH_MS, needsRefresh, selectPrefetchTargets } from './transcript-prefetch'
+
+const fixture: {
+  full: { available: boolean; sessions: HubSessionRecord[] }
+  inbox: Parameters<typeof markInboxSessions>[1]
+  prefetch_fields: string[]
+} = JSON.parse(
+  fs.readFileSync(new URL('./fixtures/hub-sync-sessions-prefetch-projection.json', import.meta.url), 'utf8')
+)
 
 // Fixed server contract: copy only existing fields; Inbox is injected by the host, never projected.
 const fields = [

@@ -4,8 +4,12 @@ import path from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import fixture from './fixtures/hub-sync-sessions-prefetch-projection.json'
 import { installTranscriptCache, markInboxSessions } from './transcript-cache-host'
+import type { HubSessionRecord } from './transcript-prefetch'
+
+const fixture: { full: { sessions: HubSessionRecord[] } } = JSON.parse(
+  fs.readFileSync(new URL('./fixtures/hub-sync-sessions-prefetch-projection.json', import.meta.url), 'utf8')
+)
 
 const dirs: string[] = []
 
