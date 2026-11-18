@@ -258,6 +258,7 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     can rotate session_key mid-turn).  A surviving marker means the process died mid-turn.
     The key is published before the disk write so an interrupt racing startup can retire
     it; the post-write cancel check closes the inverse race (Stop landed first, no file)."""
+    session["_first_request_prompt_secured"] = False
     marker_home = _session_home(session)
     marker_key = str(session.get("session_key") or "")
     marker_attempt = int(session.pop("_auto_continue_attempt", 0) or 0)
@@ -304,6 +305,7 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
             # this turn was started with, so the exit journal stops reporting those separately.
             exit_keeps = session.get("_exit_keeps_turn_marker") and not session.get(USER_STOP_AT_EXIT)
             marker_cancelled = bool(session.get("_turn_cancel_requested")) and not exit_keeps
+            session["_first_request_prompt_secured"] = bool(recorded and not marker_cancelled)
             if recorded:  # only verified persistence secures the carried notices; a failed write keeps custody
                 unsecured = session.get(COMPLETION_UNSECURED) or {}
                 for pid in carried:
@@ -1026,8 +1028,11 @@ def _invoke_agent(
     pause_key = effective_pause_key(session, st.marker_key)
     agent.step_boundary_pause = boundary_pause_hook(session, pause_key, carried=not st.marker_key) \
         if pause_key else None
-    # [daveey] t_01a1d31bf400d56c: a continuation may yield before its first model request (it redoes nothing).
-    agent.update_pause_first_request = bool(st.marker_key) and display_kind == "auto_continue"
+    # A notice can redo its first request only when its own FULL prompt is durable. Carried,
+    # failed or truncated markers cannot recover this input after a pre-turn pause.
+    notice_secured = (display_kind == "kanban_notice" and session.pop("_first_request_prompt_secured", False)
+                      and st.own_marker is not None and st.own_marker.get("prompt") == text)
+    agent.update_pause_first_request = bool(st.marker_key) and (display_kind == "auto_continue" or bool(notice_secured))
     _mid_tool_stop = None
     if pause_key:
         install_clarify_pause_provider()  # a blocked clarify is withdrawn so the pause can land
