@@ -182,17 +182,28 @@ def _uuid7_ms(uid):
 
 
 def _same_write(row, event):
-    """Row and event uids minted within a second: the same tolerance as ``created_at``, on a clock that is right.
+    """Row and event written in one ``add_comment`` transaction, proven by write clocks.
 
     Legacy ``add_comment`` stamped the row's ``created_at`` before waiting for the
-    write lock and the event's after it, so the two integers drift by seconds
-    (5 s and 7 s seen live) while their UUIDv7 uids, minted inside the one
-    transaction, sit milliseconds apart.
+    write lock and the event's after it, so the integers drift by seconds (5 s and
+    7 s seen live) while the UUIDv7 uids, minted inside the transaction, sit
+    milliseconds apart. A uid only records the write when it was minted then: the
+    sync-enable backfill gives every old row and event a uid of the enable instant,
+    so the event's uid time must agree with its own ``created_at`` (a floor, so
+    within [0, 2 s)), the row must be stamped at most ``_LOCK_DRIFT`` before the
+    event, and the two uids within a second.
     """
     keys = row.keys()
     row_ms = _uuid7_ms(row["uid"]) if "uid" in keys else None
     event_ms = _uuid7_ms(event["uid"]) if "uid" in event.keys() else None
-    return row_ms is not None and event_ms is not None and abs(row_ms - event_ms) <= 1000
+    if row_ms is None or event_ms is None:
+        return False
+    minted_at_write = 0 <= event_ms - event["created_at"] * 1000 < 2000
+    drift = event["created_at"] - row["created_at"]
+    return minted_at_write and 0 <= drift <= _LOCK_DRIFT and abs(row_ms - event_ms) <= 1000
+
+
+_LOCK_DRIFT = 60  # seconds a legacy row stamp may precede its event (write-lock wait)
 
 
 def cli_guard(args, tid, verb):

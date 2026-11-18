@@ -228,7 +228,7 @@ def _lock_drift(tid, drift_s, uid_gap_ms):
     cid = comment(tid, session="peer-session", age=8 * 86400, body="Ladder run note from a subagent")
     with kbc.connect_closing() as conn:
         row = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
-        ms = row["created_at"] * 1000 + 300
+        ms = (row["created_at"] + drift_s) * 1000 + 300  # live shape: both uids minted at the event time
         with kbc.write_txn(conn):
             conn.execute("UPDATE task_comments SET uid=? WHERE id=?", (_uid_at(ms), cid))
             ev = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='commented' "
@@ -280,3 +280,45 @@ def test_comment_row_is_stamped_inside_the_write_lock(board, monkeypatch):
         ev_at = conn.execute("SELECT created_at FROM task_events WHERE task_id=? AND kind='commented' "
                              "AND json_extract(payload, '$.comment_id')=?", (board, cid)).fetchone()[0]
     assert row_at == ev_at == 1794426074
+
+
+def _uid_salted(ms, salt):
+    h = f"{ms:012x}" + f"7{salt:03x}" + "8" + f"{salt:03x}" + f"{salt:012x}"
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+
+
+@pytest.mark.parametrize("entry", ["promote", "unblock", "tool"])
+@pytest.mark.parametrize("row_age", [8 * 86400, 2 * 86400 + 30])
+def test_backfilled_uids_never_bind_a_spare_row(board, entry, row_age, capsys):
+    """Adversarial review of #3629: sync-enable backfill mints one instant for old rows and events.
+
+    An eventless row (``_insert_comment``: specify, decompose) by the same author must not stand in
+    for a foreign comment that has not synced, however close the backfilled uids are.
+    """
+    enable_sync(board)
+    now = int(time.time())
+    enabled_ms = (now - 3600) * 1000
+    spare = sync.RemoteChange(1, "task_comments", _uid_salted(enabled_ms + 2, 1), "upsert",
+                              {"task_id": board, "author": "default",
+                               "body": "Specified -- updated body and promoted to todo.",
+                               "created_at": now - row_age}, 1, "", "peer")
+    payload = {"author": "default", "len": 40, "comment_id": 77, "writer_kind": "agent",
+               "writer_session": "peer-session"}
+    event = sync.RemoteChange(2, "task_events", _uid_salted(enabled_ms + 5, 2), "upsert",
+                              {"task_id": board, "kind": "commented", "created_at": now - 2 * 86400,
+                               "payload": json.dumps(payload)}, 1, "", "peer")
+    with kbc.connect_closing() as conn:
+        assert sync.apply_remote_changes(conn, [spare, event], new_cursor=2, observers=False).applied == 2
+        spare_id = conn.execute("SELECT id FROM task_comments WHERE uid=?", (spare.uid,)).fetchone()[0]
+    before = snapshot(board)
+    ok, output = release(board, entry, capsys, spare_id)
+    assert not ok and "Comment data unavailable" in output, output
+    assert snapshot(board) == before
+
+
+@pytest.mark.parametrize("drift_s", [-2, 61])
+def test_uid_rule_bounds_row_drift(board, drift_s, capsys):
+    """Co-minted uids alone do not bind a row stamped after its event or more than a lock wait before it."""
+    cid = _lock_drift(board, drift_s, 6)
+    ok, output = release(board, "promote", capsys, cid + 1000)
+    assert not ok and "data unavailable" in output, output
