@@ -154,7 +154,10 @@ def test_review_lane_after_a_closed_episode_selects_independent_model(board, mon
         kb.reclaim_task(conn, tid, reason='test')
         task = kb.get_task(conn, tid)
         assert tier.resolve_dispatch_tier(conn, task, lane='ready')[:2] == PEER
-        assert tier.resolve_dispatch_tier(conn, task, lane='review') == (*PEER, 'review_unpinned')
+        from hermes_cli.kanban_review_model import ReviewModelUnavailable
+        # Both the original pin and the concrete rerouted author are excluded.
+        with pytest.raises(ReviewModelUnavailable):
+            tier.resolve_dispatch_tier(conn, task, lane='review')
         assert (task.model_override, task.provider_override) == PIN
         # Only the preceding ready run was quota-rerouted; review is its own policy.
         assert len(_events(conn, tid, 'model_reroute')) == 1
@@ -487,10 +490,10 @@ def test_review_unpinned_on_a_walled_provider_moves_to_a_free_independent_review
         assert tier.resolve_dispatch_tier(conn, task, lane='review') == (*PIN, 'review_unpinned')  # no wall yet
         _known_codex_wall(monkeypatch, evidence, float(clock[0] + 55 * 3600))
         assert tier.resolve_dispatch_tier(conn, task, lane='review') == (
-            *GROK, 'review_unpinned+wall:openai-codex')
+            *GROK, 'review_unpinned')
         # Admission (before the first spawn) pins the free reviewer on the in-memory task and records it.
         reason = tier.apply_model_tier(conn, task, lane='review')
-        assert reason == 'review_unpinned+wall:openai-codex'
+        assert reason == 'review_unpinned'
         assert (task.model_override, task.provider_override) == GROK
         tier_event = _events(conn, tid, 'model_tier')[-1]
         assert (tier_event['model'], tier_event['provider'], tier_event['implementer_model']) == (*GROK, PEER[0])
@@ -499,9 +502,8 @@ def test_review_unpinned_on_a_walled_provider_moves_to_a_free_independent_review
 
 
 @pytest.mark.parametrize('case', ['no_alternative', 'alternative_walled', 'marker'])
-def test_review_unpinned_keeps_its_route_without_a_free_alternative(board, monkeypatch, case):
-    """Never a second wall: with every other independent reviewer walled (or none), or a ``require_model``
-    line, the review keeps its route, as before."""
+def test_review_resolution_excludes_walls_before_rerouting(board, monkeypatch, case):
+    """A known author set requires an unwalled independent reviewer at resolution."""
     clock = _clock(monkeypatch)
     config, _ = _deep(monkeypatch)
     if case != 'no_alternative':
@@ -514,7 +516,12 @@ def test_review_unpinned_keeps_its_route_without_a_free_alternative(board, monke
         monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': until})
     with kbc.connect() as conn:
         tid = _review_card(conn, body='must review on astra\nrequire_model: true' if case == 'marker' else None)
-        assert tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane='review') == (*PIN, 'review_unpinned')
+        if case == 'marker':
+            assert tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane='review') == (*GROK, 'review_unpinned')
+        else:
+            from hermes_cli.kanban_review_model import ReviewModelUnavailable
+            with pytest.raises(ReviewModelUnavailable):
+                tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane='review')
 
 
 GROK_MINI = ('grok-5-mini', 'xai-oauth')
@@ -537,10 +544,14 @@ def test_review_unpinned_skips_an_alternative_walled_only_in_the_live_pool(board
     monkeypatch.setattr(walls, 'live_quota_wall', lambda p, m: until if (m, p) == GROK else None)
     with kbc.connect() as conn:
         tid = _review_card(conn)
+        if case == 'none_free':
+            from hermes_cli.kanban_review_model import ReviewModelUnavailable
+            with pytest.raises(ReviewModelUnavailable):
+                tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane='review')
+            return
         route = tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane='review')
         assert route[:2] != GROK
-        assert route == ((*GROK_MINI, 'review_unpinned+wall:openai-codex') if case == 'later_free'
-                         else (*PIN, 'review_unpinned'))
+        assert route == (*GROK_MINI, 'review_unpinned')
 
 
 # --- the mandatory mark: create, set-model, tool, sync ---------------------------------------------

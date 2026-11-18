@@ -81,8 +81,8 @@ def _review_peer(conn, task, cfg, held, now, *, registered=False):
     ``registered`` (override fallbacks) also requires this host's routing registry to accept it, as the
     refused-override fallback does: a handoff's own model may sit outside the registry's deep routes."""
     from hermes_cli import kanban_provider_walls as pw
-    from hermes_cli.kanban_review_model import _implementer_model, independent_routes, registry_refusal
-    implementer = _implementer_model(conn, task)
+    from hermes_cli.kanban_review_model import implementer_models, independent_routes, registry_refusal
+    implementer = implementer_models(conn, task)
     if not implementer:
         return None
     assignee = getattr(task, "assignee", None)
@@ -164,6 +164,9 @@ def paced_route(conn: sqlite3.Connection, task: Any, base: tuple, *, lane: str,
         return None
     if not moved:
         return None
+    from hermes_cli.kanban_review_model import implementer_models, is_review_run, mandatory_reviewer_pin
+    if is_review_run(conn, task, lane) and (mandatory_reviewer_pin(task) or moved[0] in implementer_models(conn, task)):
+        return None  # a review peer is never an implementer, and a mandatory reviewer pin never moves
     return moved[0], moved[1], f"{base[2]}+{REASON}:{moved[2]}"
 
 

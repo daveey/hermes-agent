@@ -82,7 +82,7 @@ def test_dispatch_receipt_and_owner_use_review_model_without_changing_row(board)
         assert stored.model_override == SONNET
         assert tier.owner_model_pin(conn, stored) == (OPUS, "anthropic")
         assert events[-1] == {"model": OPUS, "provider": "anthropic", "reason": "review_unpinned",
-                              "lane": "review", "implementer_model": SONNET}
+                              "lane": "review", "implementer_model": SONNET, "implementer_models": [SONNET]}
 
 
 @pytest.mark.parametrize("failure", ["no_route", "receipt_write", "bad_metadata", "class_pin"])
@@ -175,12 +175,12 @@ def test_pinned_review_not_gated_by_default_tier(board, cfg):
 
 
 @pytest.mark.parametrize("metadata,expected", [
-    ({"review_model": SONNET}, (SONNET, "anthropic", "review_override")),
+    ({"review_model": SONNET}, (OPUS, "anthropic", "review_unpinned")),
     ({"review_model": "custom", "review_provider": "custom-provider"},
      ("custom", "custom-provider", "review_override")),
-    ({"review_model": "class:deep"}, ("class:deep", "auto", "review_override")),
+    ({"review_model": "class:deep"}, (OPUS, "anthropic", "review_override")),
 ])
-def test_explicit_review_override_wins_even_over_independence(board, metadata, expected):
+def test_explicit_review_override_preserves_independence(board, metadata, expected):
     cfg = config(board)
     with kbc.connect() as conn:
         t = task(conn)
@@ -220,7 +220,7 @@ def test_disabled_routing_cannot_choose_deep_model(board):
 def test_unroutable_override_does_not_restore_pin(board, monkeypatch):
     from hermes_cli.kanban_review_model import ReviewModelUnavailable
     cfg = config(board)
-    monkeypatch.setattr(tier, "class_unroutable_reason", lambda model: "routing_disabled")
+    monkeypatch.setattr(tier, "class_unroutable_reason", lambda model, config=None: "routing_disabled")
     with kbc.connect() as conn:
         t = task(conn)
         kb.claim_task(conn, t.id)

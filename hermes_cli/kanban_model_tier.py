@@ -88,7 +88,8 @@ def resolve_model_tier(
     would have run on anyway (its own pin or the profile's model); ``reason`` names the rule that decided."""
     cfg = load_tier_config() if cfg is None else cfg
     default_model = _str(cfg.get("default_model"))
-    if lane == "review" or REVIEW_SKILL in (getattr(task, "skills", None) or []):
+    from hermes_cli.kanban_review_model import is_review_run
+    if is_review_run(conn, task, lane):
         from hermes_cli.kanban_review_model import resolve_review_model
         review = resolve_review_model(conn, task, cfg)
         if review is not None:
@@ -217,8 +218,8 @@ def owner_model_pin(conn: sqlite3.Connection, task: Any) -> tuple[Optional[str],
         except (TypeError, ValueError):
             payload = {}
         from hermes_cli import kanban_db as _kb
-        review = REVIEW_SKILL in (getattr(task, "skills", None) or []) or (
-            _kb._retry_status_for_run(conn, task.id, run_id) == "review")
+        from hermes_cli.kanban_review_model import is_review_run
+        review = is_review_run(conn, task, _kb._retry_status_for_run(conn, task.id, run_id))
         if review and model and (not isinstance(payload, dict) or not _str(payload.get("model"))):
             from hermes_cli.kanban_review_model import ReviewModelUnavailable
             raise ReviewModelUnavailable("Review owner requires a current-run model_tier receipt")
@@ -304,7 +305,12 @@ def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
     """One read-only route decision for preview and actual admission."""
     from hermes_cli.kanban_quota_episode import active, decision
     base = resolve_model_tier(conn, task, lane=lane, cfg=cfg)
+    from hermes_cli.kanban_review_model import implementer_models, is_review_run, mandatory_reviewer_pin
+    if is_review_run(conn, task, lane) and mandatory_reviewer_pin(task):
+        return base  # a mandatory reviewer pin never moves: not off a wall, an episode or a hold
     _, route = decision(conn, task, lane=lane, cfg=cfg, base=base)
+    if route and is_review_run(conn, task, lane) and route[0] in implementer_models(conn, task):
+        route = None
     if base[2] == 'pinned':
         from hermes_cli.kanban_pin_reroute import REASON, pinned_route
         if not route and not active(conn, task.id):
@@ -354,7 +360,7 @@ def _review_off_wall(conn, task, base, cfg):
     days, and the reviewer exited 75 into the wall."""
     import time
     from hermes_cli import kanban_provider_walls as pw
-    from hermes_cli.kanban_review_model import _implementer_model, independent_routes
+    from hermes_cli.kanban_review_model import implementer_models, independent_routes
     model, provider = _str(base[0]), pw._norm(base[1])
     if not model or not provider or provider == 'auto' or pw.requires_model(task):
         return None
@@ -362,7 +368,7 @@ def _review_off_wall(conn, task, base, cfg):
     walled = pw.active_walls(now=now)
     if not (walled.get(provider) or pw.live_quota_wall(provider, model)):
         return None
-    implementer = _implementer_model(conn, task)
+    implementer = implementer_models(conn, task)
     if not implementer:
         return None
     for alt_model, alt_provider in independent_routes(implementer, cfg, getattr(task, 'assignee', None)):
@@ -394,7 +400,9 @@ def _class_alternate_off_wall(conn, task, base):
     if not until:
         return None
     route = alternate_route(conn, task, {provider: until}, base, now)
-    if not route or pw.live_quota_wall(route[1], route[0]):
+    from hermes_cli.kanban_review_model import implementer_models, is_review_run
+    excluded = implementer_models(conn, task) if is_review_run(conn, task, getattr(task, "status", "")) else set()
+    if not route or route[0] in excluded or pw.live_quota_wall(route[1], route[0]):
         return None
     return route[0], route[1], provider
 
@@ -410,8 +418,10 @@ def _paced_receipt(conn, task, reason, *, lane, cfg):
 
 
 def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
-    implementer_model = _str(getattr(task, "model_override", None)) or None
-    is_review = lane == "review" or REVIEW_SKILL in (getattr(task, "skills", None) or [])
+    from hermes_cli.kanban_review_model import _implementer_model, implementer_models, is_review_run, validate_pace_offer
+    is_review = is_review_run(conn, task, lane)
+    excluded = implementer_models(conn, task) if is_review else set()
+    implementer_model = _implementer_model(conn, task) if is_review else None
     try:
         model, provider, reason = resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg)
     except Exception as exc:
@@ -454,6 +464,7 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
     from hermes_cli.kanban_pace_reroute import REASON as _PACED, take as _take_pace_move
     moved = _take_pace_move(getattr(task, "id", ""), (model, provider))
     if moved:
+        validate_pace_offer(moved[0], excluded)
         model, provider = moved[0], moved[1]
         reason = f"{reason}+{_PACED}:{moved[2]}"
     origin = (getattr(task, "model_override", None), getattr(task, "provider_override", None))
@@ -470,6 +481,7 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                        "lane": lane}
             if is_review:
                 payload["implementer_model"] = implementer_model
+                payload["implementer_models"] = sorted(excluded)
                 if paced:
                     payload["paced"] = paced
                 if reason == "review_override_refused":

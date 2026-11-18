@@ -316,7 +316,8 @@ def test_only_kanban_dispatch_consults_the_governor():
                      "hermes_cli/kanban_dispatch_maintenance.py",
                      "hermes_cli/kanban_llm_pacing.py", "hermes_cli/kanban_llm_pacing_dispatch.py",
                      "hermes_cli/kanban_paced_reroute.py",
-                     "hermes_cli/kanban_parent_unclaimed.py", "hermes_cli/kanban_start_gate.py",
+                     "hermes_cli/kanban_parent_unclaimed.py", "hermes_cli/kanban_review_model.py",
+                     "hermes_cli/kanban_start_gate.py",
                      "hermes_cli/kanban_worker_node.py"]
     assert _governor_names(root / "hermes_cli/kanban_start_gate.py") == {"kanban_llm_pacing_dispatch": {"hold"}}
     assert "kanban_start_gate import pre_claim_hold" in (root / "hermes_cli/kanban_db_dispatch.py").read_text(encoding="utf-8-sig")
@@ -327,6 +328,7 @@ def test_only_kanban_dispatch_consults_the_governor():
     assert _governor_names(root / "hermes_cli/kanban_db_edit.py") == EDIT_VIEW
     assert _governor_names(root / "hermes_cli/kanban_worker_node.py") == PICKUP_VIEW
     assert _governor_names(root / "hermes_cli/kanban_paced_reroute.py") == REROUTE_VIEW
+    assert _governor_names(root / "hermes_cli/kanban_review_model.py") == REROUTE_VIEW
 
 
 # What the stall notice may take from the governor: no hold(), no usage read, no state write.

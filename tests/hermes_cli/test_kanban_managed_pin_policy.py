@@ -329,8 +329,7 @@ def test_repeated_identical_review_refusal_moves_to_a_visible_block(board, monke
 @pytest.mark.parametrize('override', [None, FABLE])
 @pytest.mark.parametrize('receipt', ['run_route', 'worker_result'])
 def test_rerouted_pin_reviewer_is_distinct_from_the_model_that_ran(board, override, receipt):
-    """Finding (b): under ``pinned+pin_quota_reroute`` the card's pin is not the model that ran. Preferring
-    the pin let ``_distinct_deep(pin)`` choose the rerouted implementer (here gpt-6.1-sol) as its reviewer."""
+    """Both the pin and concrete rerouted author are excluded; neither may review."""
     from hermes_cli.kanban_db_dispatch import dispatch_once
     conn, _ = board
     _second_deep_route()
@@ -339,4 +338,8 @@ def test_rerouted_pin_reviewer_is_distinct_from_the_model_that_ran(board, overri
     _receipts(conn, tid, **({'route': ran} if receipt == 'run_route' else {'ran': ran}))
     seen = []
     dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
-    assert seen == ['claude-opus-5-5']
+    assert seen == []
+    task = kb.get_task(conn, tid)
+    assert task.status == 'review' and task.consecutive_failures == 0
+    failed = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'spawn_failed'][-1]
+    assert 'claude-opus-5-5' in failed['error'] and 'gpt-6.1-sol' in failed['error']

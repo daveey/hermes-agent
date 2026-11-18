@@ -17,6 +17,7 @@ from hermes_cli import kanban_paced_reroute as paced
 from hermes_cli import kanban_parent_unclaimed as kpu
 from hermes_cli import kanban_queue_position as kqp
 from hermes_cli import kanban_provider_walls as walls
+from hermes_cli import kanban_review_model as review
 from tests.hermes_cli import test_kanban_pin_reroute as pin_tests
 from tests.hermes_cli.test_kanban_quota_episode import board as board  # noqa: PLC0414 -- the self-alias is load-bearing: it suppresses F811 for the pytest fixture parameter shadowing this import
 
@@ -162,7 +163,7 @@ def test_no_unheld_unwalled_peer_keeps_the_base_route(board, clock, monkeypatch,
         assert _route(conn, pin_tests._pinned_card(conn)) == (None, None, 'pinned')
 
 
-@pytest.mark.parametrize('route', ['default', 'pinned', 'review'])
+@pytest.mark.parametrize('route', ['default', 'pinned'])
 def test_a_peer_with_no_live_pool_on_this_host_is_skipped(board, clock, monkeypatch, route):
     """t_01a1deaf95f5b885: a registry peer this host holds no credential for (xai-oauth before the hub relay mints it
     to a worker) would launch a run that cannot authenticate. The move skips it to the next serving peer, else keeps
@@ -170,10 +171,7 @@ def test_a_peer_with_no_live_pool_on_this_host_is_skipped(board, clock, monkeypa
     _deep(monkeypatch, {'llm_pacing': {'providers': ['anthropic', 'openai-codex', 'xai-oauth']}}, grok=True)
     _pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
-        if route == 'review':
-            tid, lane, reason = pin_tests._review_card(conn), 'review', 'review_unpinned'
-            base = PIN
-        elif route == 'pinned':
+        if route == 'pinned':
             tid, lane, reason = pin_tests._pinned_card(conn), 'ready', 'pinned'
             base = (None, None)
         else:
@@ -190,26 +188,42 @@ def test_a_peer_with_no_live_pool_on_this_host_is_skipped(board, clock, monkeypa
         assert _route(conn, tid, lane) == (*base, reason)
 
 
+def test_a_review_peer_with_no_live_pool_on_this_host_is_skipped(board, clock, monkeypatch):
+    """The same walk for a review route moved by ``paced_route`` itself (the base resolver already skips every held
+    pool, so the move is exercised on an explicit base route that sits on a held one)."""
+    _deep(monkeypatch, {'llm_pacing': {'providers': ['anthropic', 'openai-codex', 'xai-oauth']}}, grok=True)
+    _pools(clock, openai_codex=('held', HELD_FAR))
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, pin_tests._review_card(conn))  # the implementer ran opus
+        base, cfg = (*PIN, 'review_unpinned'), tier.load_tier_config()
+        first = paced.paced_route(conn, task, base, lane='review', cfg=cfg)
+        assert first is not None and first[:2] == GROK and first[2] == 'review_unpinned+paced:openai-codex'
+        UNSERVED.add(GROK[1])
+        assert paced.paced_route(conn, task, base, lane='review', cfg=cfg) is None  # opus authored: never its peer
+
+
 def test_review_unpinned_on_a_held_provider_moves_to_a_free_independent_reviewer(board, clock, monkeypatch):
     _deep(monkeypatch, {'llm_pacing': {'providers': ['anthropic', 'openai-codex', 'xai-oauth']}}, grok=True)
     with kbc.connect() as conn:
         tid = pin_tests._review_card(conn)
         assert _route(conn, tid, lane='review') == (*PIN, 'review_unpinned')  # nothing held yet
         _pools(clock, openai_codex=('held', HELD_FAR))
-        assert _route(conn, tid, lane='review') == (*GROK, 'review_unpinned+paced:openai-codex')
+        assert _route(conn, tid, lane='review') == (*GROK, 'review_unpinned')  # the base resolver skips held pools
         task = kb.get_task(conn, tid)
-        assert tier.apply_model_tier(conn, task, lane='review') == 'review_unpinned+paced:openai-codex'
+        assert tier.apply_model_tier(conn, task, lane='review') == 'review_unpinned'
         assert (task.model_override, task.provider_override) == GROK
         _pools(clock, openai_codex=('held', HELD_FAR), xai_oauth=('held', HELD_FAR))
-        assert _route(conn, tid, lane='review') == (*PIN, 'review_unpinned')  # every reviewer held: keep
+        with pytest.raises(review.ReviewModelUnavailable):  # every independent reviewer held: nobody independent
+            _route(conn, tid, lane='review')
 
 
-def test_review_unpinned_with_require_model_keeps_its_held_route(board, clock, monkeypatch):
+def test_require_model_on_the_implementation_card_does_not_pin_its_reviewer(board, clock, monkeypatch):
+    """``require_model`` pins the card's own (implementer) model; the independent reviewer still skips held pools."""
     _deep(monkeypatch, grok=True)
     _pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = pin_tests._review_card(conn, body=walls.REQUIRE_MODEL_MARKER)
-        assert _route(conn, tid, lane='review') == (*PIN, 'review_unpinned')
+        assert _route(conn, tid, lane='review') == (*GROK, 'review_unpinned')
 
 
 @pytest.mark.parametrize('case', ['stale_read', 'pacing_off', 'ungoverned', 'class_selector'])
@@ -270,7 +284,7 @@ def test_a_sqlite_fault_in_the_probe_propagates(board, clock, monkeypatch):
 
 
 @pytest.mark.parametrize('block', ['walled', 'live_wall'])
-def test_review_unpinned_skips_a_walled_independent_reviewer(board, clock, monkeypatch, block):
+def test_review_unpinned_with_every_independent_reviewer_held_or_walled_is_unavailable(board, clock, monkeypatch, block):
     _deep(monkeypatch, grok=True)
     _pools(clock, openai_codex=('held', HELD_FAR))
     if block == 'walled':
@@ -278,7 +292,8 @@ def test_review_unpinned_skips_a_walled_independent_reviewer(board, clock, monke
     else:
         monkeypatch.setattr(walls, 'live_quota_wall', lambda p, m: float(clock[0] + 3600) if p == 'xai-oauth' else None)
     with kbc.connect() as conn:
-        assert _route(conn, pin_tests._review_card(conn), lane='review') == (*PIN, 'review_unpinned')
+        with pytest.raises(review.ReviewModelUnavailable):  # astra held, grok walled, opus authored
+            _route(conn, pin_tests._review_card(conn), lane='review')
 
 
 @pytest.mark.parametrize('card', ['class_pin', 'strong_tier_pattern'])

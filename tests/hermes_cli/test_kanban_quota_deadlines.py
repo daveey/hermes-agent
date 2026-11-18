@@ -37,6 +37,8 @@ def _claim(conn, lane):
     host = kb._claimer_id().split(':', 1)[0]
     claim = kb.claim_review_task if lane == 'review' else kb.claim_task
     task = claim(conn, tid, claimer=f'{host}:owner')
+    kb._append_event(conn, tid, 'run_route', {'lane': lane, 'model': 'class:deep'},
+                     run_id=task.current_run_id)
     dispatch._set_worker_pid(conn, tid, _dead_pid())
     with kb.write_txn(conn):
         kb._append_event(conn, tid, 'worker_bound', {'pid': os.getpid(), 'claim_lock': task.claim_lock,

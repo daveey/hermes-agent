@@ -20,7 +20,7 @@ def test_class_provider_roundtrip(board, provider):
         metadata = {"review_model": "class:deep", "review_provider": provider}
         assert kb.request_review(conn, task.id, metadata=metadata)
         assert tier.resolve_model_tier(conn, task, lane="review", cfg=cfg) == (
-            "class:deep", "auto", "review_override")
+            helpers.OPUS, "anthropic", "review_override")
         assert kb.get_task(conn, task.id).model_override == helpers.SONNET
 
 
@@ -34,7 +34,7 @@ def test_historical_board_default_handoff(board):
         conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=?", (
             json.dumps({"review_model": "class:deep", "review_provider": "board-default"}), task.id))
         assert tier.resolve_model_tier(conn, task, lane="review", cfg=cfg) == (
-            "class:deep", "auto", "review_override")
+            helpers.OPUS, "anthropic", "review_override")
 
 
 @pytest.mark.parametrize("metadata", [

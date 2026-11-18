@@ -364,11 +364,25 @@ def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts, *, picke
     reason = str(reason or "")
     base = (model, provider, reason.split("+", 1)[0] if reason.startswith("default+") else reason)
     deferrable = is_deferrable(conn, task, lane)
+    from hermes_cli.kanban_review_model import implementer_models, is_review_run, mandatory_reviewer_pin
+    reviewing = is_review_run(conn, task, lane)
+    if reviewing and mandatory_reviewer_pin(task):
+        return None  # a mandatory reviewer pin is never moved by the pace governor
+    excluded = implementer_models(conn, task) if reviewing else set()
     for _ in range(len(cfg.providers) + 4):  # every probe excludes one more provider: bounded
-        moved = alternate_route(conn, task, {**unusable, **paced}, base, now)
+        if reviewing and excluded:
+            from hermes_cli.kanban_paced_reroute import _review_peer
+            from hermes_cli.kanban_model_tier import load_tier_config
+            moved = _review_peer(conn, task, load_tier_config(), {**unusable, **paced}, now,
+                                 registered=reason.startswith("review_override"))
+        else:
+            moved = alternate_route(conn, task, {**unusable, **paced}, base, now)
         if not moved:
             return None
         target = pw._norm(moved[1])
+        if moved[0] in excluded:
+            unusable[target] = now
+            continue
         if target in paced or target in unusable:
             return None  # the probe ignored its walls: never trust it
         if not pw.live_pool_serving(target, moved[0]) or pw.live_quota_wall(target, moved[0]):
