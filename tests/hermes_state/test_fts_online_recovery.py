@@ -366,11 +366,9 @@ def test_damage_outside_the_search_index_is_refused(tmp_path):
     with open(path, "r+b") as fh:
         fh.seek((root - 1) * page)
         fh.write(b"\x0f" * 64)
-    db = SessionDB.__new__(SessionDB)  # a full open would quarantine on the damaged canonical table first
     from hermes_state_fts_online import OnlineRecoveryRefused, plan_online_recovery
-    with pytest.raises(OnlineRecoveryRefused):
+    with pytest.raises(OnlineRecoveryRefused):  # a full open would quarantine on the damaged canonical table first
         plan_online_recovery(path)
-    del db
     with _raw(path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'messages_fts_trigram_data'").fetchone()[0] == 1
 
@@ -428,3 +426,105 @@ def test_an_index_damaged_so_badly_that_integrity_check_fails_is_refused(tmp_pat
                                 ).fetchone()[0] == 1
     finally:
         db.close()
+
+
+_MASTER = [(2, "table", "sessions"), (3, "table", "messages"), (80, "table", "messages_fts_trigram_data"),
+           (81, "table", "messages_fts_trigram_idx"), (90, "table", "messages_fts_data")]
+
+
+@pytest.mark.parametrize("lines,unlink", [
+    (["Tree 80 page 2 cell 3: 2nd reference to page 7", "Page 9: never used"], ["messages_fts_trigram"]),
+    (['fts5: corruption found reading blob 12 from table "messages_fts"'], []),  # page structure sound: drain
+    (["Tree 80 page 2: x", "Tree 90 page 4: y"], ["messages_fts", "messages_fts_trigram"]),
+    (["ok"], []),
+])
+def test_plan_unlinks_exactly_the_named_families(lines, unlink):
+    from hermes_state_fts_online import plan_from_check
+    plan = plan_from_check(lines, _MASTER)
+    assert plan["unlink"] == unlink
+    assert sorted(plan["unlink"] + plan["trash"]) == ["messages_fts", "messages_fts_trigram"]
+
+
+@pytest.mark.parametrize("lines", [
+    ["Tree 1 page 1 cell 3: 2nd reference to page 41"],          # the schema table itself
+    ["Tree 99 page 5: 2nd reference to page 6"],                 # a root this snapshot cannot name
+    ["Tree 3 page 7 cell 0: 2nd reference to page 80"],          # a canonical table
+    ["Freelist: 2nd reference to page 5"],
+    ["Tree 80 page 2: x"] * 100_000,                              # the check stopped at its limit
+])
+def test_plan_refuses_what_it_cannot_attribute(lines):
+    from hermes_state_fts_online import OnlineRecoveryRefused, plan_from_check
+    with pytest.raises(OnlineRecoveryRefused):
+        plan_from_check(lines, _MASTER)
+
+
+def test_family_of_full_matches_shadow_names():
+    assert family_of("messages_fts_trigram_docsize") == "messages_fts_trigram"
+    assert family_of("messages_fts_config") == "messages_fts"
+    assert family_of("messages_fts_notes") is None and family_of("messages_ftsnot") is None
+    assert family_of("fts_v22_trash_messages_fts_data_1") is None
+
+
+def test_a_page_shared_with_a_canonical_table_is_never_freed(tmp_path, monkeypatch):
+    """The trigram index points at a page of `messages`. Whichever structure SQLite names, the recovery either
+    refuses or unlinks the trigram family; it never drains it, and `messages` keeps every row."""
+    import struct
+
+    path = tmp_path / "state.db"
+    _seed(path)
+    before = _canonical(path)
+    conn = _raw(path)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    root = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = 'messages_fts_trigram_data'").fetchone()[0]
+    victim = conn.execute("SELECT pageno FROM dbstat WHERE name = 'messages' AND pagetype = 'leaf' ORDER BY pageno "
+                          "LIMIT 1").fetchone()[0]
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    _mark_fail_open(conn)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.close()
+    with open(path, "r+b") as fh:
+        fh.seek((root - 1) * page_size)
+        page = bytearray(fh.read(page_size))
+        assert page[0] == 5
+        page[8:12] = struct.pack(">I", victim)
+        fh.seek((root - 1) * page_size)
+        fh.write(page)
+    monkeypatch.setattr(SessionDB, "_foreign_state_db_holders", lambda self: [(424242, str(path))])
+    db = _open_stale(path)
+    try:
+        recovered = db.retry_deferred_fts_recovery()
+        if recovered:
+            _drain(db)
+    finally:
+        db.close()
+    assert _canonical(path)[:len(before)] == before
+    with _raw(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'fts_v22_trash_messages_fts_trigram%'"
+                            ).fetchone()[0] == 0
+    if recovered:
+        lines, _master = _integrity_lines(path)
+        assert not [l for l in lines if "2nd reference" in l]
+
+
+def test_one_shot_rebuild_never_drops_a_tree_that_shares_a_page(tmp_path):
+    """No other holder, so the one-shot rebuild runs at open. On the hub's damage shape its DROP would succeed and free
+    the shared page twice; it must step aside, and the retry recovers online instead."""
+    path = tmp_path / "state.db"
+    _seed(path)
+    before = _canonical(path)
+    _break_trigram_btree(path)
+    db = SessionDB(db_path=path)
+    try:
+        assert db._fts_stale is True and db._fts_oneshot_failed is True
+        with _raw(path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'messages_fts_trigram_data'"
+                                ).fetchone()[0] == 1  # not dropped
+        db._fts_stale_retry_after = 0.0
+        assert db.retry_deferred_fts_recovery() is True
+        _drain(db)
+        assert db.search_messages("alphaword")
+    finally:
+        db.close()
+    assert _canonical(path)[:len(before)] == before
+    lines, _master = _integrity_lines(path)
+    assert not [l for l in lines if "2nd reference" in l or l.startswith("Freelist")]

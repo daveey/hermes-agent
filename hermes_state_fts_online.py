@@ -52,43 +52,43 @@ logger = logging.getLogger("hermes_state")
 
 # Wall time one housekeeping tick may spend on backfill / teardown chunks (each chunk its own short transaction).
 FTS_BACKFILL_TICK_BUDGET_S = 5.0
+# A refused plan (damage outside the index) is not re-checked by the automatic retry for this long.
+ONLINE_REFUSAL_MEMO_S = 6 * 3600.0
 FAMILIES = ("messages_fts", "messages_fts_trigram")
 TRASH_PREFIX = "fts_v22_trash_"  # the optimize-storage teardown drains every table with this prefix
-_FTS5_TABLE_RE = re.compile(r'from table "([^"]+)"')
+
+
+_FAMILY_OBJECT_RE = re.compile(r"(messages_fts(?:_trigram)?)(?:_data|_idx|_content|_docsize|_config)?")
 
 
 def family_of(name: str) -> Optional[str]:
-    """The FTS index family an object name belongs to (``messages_fts_trigram*`` before ``messages_fts*``)."""
-    if name == "messages_fts_trigram" or name.startswith("messages_fts_trigram_"):
-        return "messages_fts_trigram"
-    if name == "messages_fts" or name.startswith("messages_fts_"):
-        return "messages_fts"
-    return None
+    """The FTS index family a vtable or shadow-table name belongs to; None for anything else (full match on the
+    FTS5 shadow suffixes, so a lookalike table is never swept in)."""
+    m = _FAMILY_OBJECT_RE.fullmatch(name or "")
+    return m.group(1) if m else None
 
 
 class OnlineRecoveryRefused(Exception):
     """The plan step found a reason not to touch the store."""
 
 
-def plan_online_recovery(db_path) -> dict:
-    """Step 1: ``{"unlink": [...families], "trash": [...families], "problems": n}`` from one read-only whole-file
-    integrity_check. Raises :class:`OnlineRecoveryRefused` on damage outside the FTS families (or a check that
-    cannot complete), which an index rebuild cannot fix."""
-    from hermes_state_holders import read_only_db_uri
+_CHECK_LIMIT = 100_000
+
+
+def plan_from_check(lines, master) -> dict:
+    """The decision of :func:`plan_online_recovery` from integrity_check output and the ``(rootpage, type, name)``
+    rows of the same snapshot. Raises :class:`OnlineRecoveryRefused` unless every problem line is attributable.
+
+    Safety rests on how SQLite reports a shared page: the free-page list is walked first and every page is named
+    against the SECOND structure that reaches it. So a family not named by any line shares no page with anything
+    reached after it, and anything reached before it was named itself: a canonical tree (refused here), the other
+    family (unlinked, never read again) or nothing. Draining an unnamed family therefore frees only its own pages.
+    That argument needs every line mapped and the walk complete, hence the refusals below."""
     from hermes_state_repair import _INTEGRITY_TREE_RE, integrity_damage_is_structural
 
-    try:
-        conn = sqlite3.connect(read_only_db_uri(db_path), uri=True, timeout=30.0)
-    except sqlite3.Error as exc:
-        raise OnlineRecoveryRefused(f"cannot open state.db read-only: {exc}") from exc
-    try:
-        master = [tuple(r) for r in conn.execute("SELECT rootpage, type, name FROM sqlite_master WHERE rootpage > 0")]
-        lines = [line for r in conn.execute("PRAGMA integrity_check(100000)") for line in str(r[0]).splitlines()]
-    except sqlite3.DatabaseError as exc:
-        raise OnlineRecoveryRefused(f"integrity_check could not complete: {exc}") from exc
-    finally:
-        conn.close()
     problems = [line for line in lines if line not in ("ok", "*** in database main ***")]
+    if len(problems) >= _CHECK_LIMIT - 1:
+        raise OnlineRecoveryRefused(f"integrity_check stopped at its {_CHECK_LIMIT}-error limit; later trees unchecked")
     if integrity_damage_is_structural(problems, master):
         raise OnlineRecoveryRefused("integrity_check reports damage outside the search indexes: "
                                     + "; ".join(problems[:3]))
@@ -96,11 +96,38 @@ def plan_online_recovery(db_path) -> dict:
     damaged = set()
     for line in problems:
         tree = _INTEGRITY_TREE_RE.search(line)
-        named = _FTS5_TABLE_RE.search(line)  # FTS5's own xIntegrity lines name the vtable
-        family = family_of(by_root.get(int(tree.group(1)), "")) if tree else family_of(named.group(1)) if named else None
-        if family:
-            damaged.add(family)
-    return {"unlink": sorted(damaged), "trash": [f for f in FAMILIES if f not in damaged], "problems": len(problems)}
+        if not tree:
+            continue  # "Page N: never used", FTS5 xIntegrity blob lines: no page is shared
+        name = by_root.get(int(tree.group(1)))
+        family = family_of(name or "")
+        if family is None:  # Tree 1 (sqlite_schema) or a root this snapshot cannot name
+            raise OnlineRecoveryRefused(f"integrity_check names a tree outside the search indexes: {line}")
+        damaged.add(family)
+    return {"unlink": sorted(damaged), "trash": [f for f in FAMILIES if f not in damaged], "problems": len(problems),
+            "roots": {name: int(rp) for rp, _type, name in master if family_of(name)}}
+
+
+def plan_online_recovery(db_path) -> dict:
+    """Step 1: ``{"unlink": [...], "trash": [...], "problems": n, "roots": {...}}`` from one read-only whole-file
+    integrity_check and the schema of the same read snapshot (see :func:`plan_from_check`). Raises
+    :class:`OnlineRecoveryRefused` when it cannot prove the plan safe."""
+    from hermes_state_holders import read_only_db_uri
+
+    try:
+        conn = sqlite3.connect(read_only_db_uri(db_path), uri=True, timeout=30.0, isolation_level=None)
+    except sqlite3.Error as exc:
+        raise OnlineRecoveryRefused(f"cannot open state.db read-only: {exc}") from exc
+    try:
+        conn.execute("BEGIN")  # one read snapshot for the schema and the check
+        master = [tuple(r) for r in conn.execute("SELECT rootpage, type, name FROM sqlite_master WHERE rootpage > 0")]
+        lines = [line for r in conn.execute(f"PRAGMA integrity_check({_CHECK_LIMIT})")
+                 for line in str(r[0]).splitlines()]
+        conn.execute("COMMIT")
+    except sqlite3.DatabaseError as exc:
+        raise OnlineRecoveryRefused(f"integrity_check could not complete: {exc}") from exc
+    finally:
+        conn.close()
+    return plan_from_check(lines, master)
 
 
 def _sql_names(names) -> str:
@@ -159,9 +186,12 @@ class SessionFtsOnlineRecoveryMixin:
                     logger.warning("Online FTS recovery skipped: legacy inline FTS layout (run "
                                    "`hermes sessions optimize-storage`).")
                     return False
+            if not force and time.monotonic() < getattr(self, "_fts_online_refused_until", 0.0):
+                return False  # a whole-file check of a large store is not repeated every retry
             try:
                 plan = plan_online_recovery(self.db_path)
             except OnlineRecoveryRefused as exc:
+                self._fts_online_refused_until = time.monotonic() + ONLINE_REFUSAL_MEMO_S
                 logger.error("Online FTS recovery refused (%s): %s. `hermes sessions recover` rebuilds the store "
                              "offline.", reason, exc)
                 return False
@@ -172,6 +202,16 @@ class SessionFtsOnlineRecoveryMixin:
                     if self._conn is None:
                         return False
                     cursor = self._conn.cursor()
+                    # The plan ran without the lock: a peer may have recovered meanwhile (its new tables must not get
+                    # this plan), or the index objects may have moved. Re-check both under the authority.
+                    if not force and self._adopt_peer_fts_state_locked(cursor):
+                        return True
+                    roots = {r[0]: int(r[1]) for r in cursor.execute(
+                        "SELECT name, rootpage FROM sqlite_master WHERE rootpage > 0").fetchall() if family_of(r[0])}
+                    if roots != plan["roots"]:
+                        logger.info("Online FTS recovery: the index objects changed since the plan; the next retry "
+                                    "plans again.")
+                        return False
                     trigram = self._trigram_tokenizer_available(cursor)
                     tables = [(r[0], (r[1] or "").startswith("CREATE VIRTUAL")) for r in cursor.execute(
                         "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name").fetchall()]

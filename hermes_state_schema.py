@@ -574,6 +574,23 @@ class SessionSchemaMixin:
         )
         return True
 
+    def _oneshot_drop_is_safe(self) -> bool:
+        """False when the whole-file plan names a damaged index tree (the retry then takes the online path, which
+        unlinks it unread) or cannot attribute the damage (nothing may be freed; ``hermes sessions recover``)."""
+        from hermes_state_fts_online import OnlineRecoveryRefused, plan_online_recovery
+
+        try:
+            plan = plan_online_recovery(self.db_path)
+        except OnlineRecoveryRefused as exc:
+            logger.error("Stale FTS rebuild skipped: %s. `hermes sessions recover` rebuilds the store offline.", exc)
+            return False
+        if plan["unlink"]:
+            self._fts_oneshot_failed = True
+            logger.error("Stale FTS rebuild skipped: integrity_check names damaged index tree(s) %s, which a DROP could "
+                         "free twice; the next retry recovers online (unlinks them unread).", ", ".join(plan["unlink"]))
+            return False
+        return True
+
     @staticmethod
     def _fts_deferral_futile(cursor: sqlite3.Cursor) -> bool:
         """The stored holder-deferral record says waiting is futile (``_defer_stale_fts_for_holders``)."""
@@ -681,7 +698,13 @@ class SessionSchemaMixin:
 
     def _recover_stale_fts_locked(self, cursor: sqlite3.Cursor, *, legacy: bool) -> bool:
         """Body of :meth:`_recover_stale_fts`; caller holds rebuild authority. One write
-        transaction, so no canonical writer slips between rebuild and trigger restoration."""
+        transaction, so no canonical writer slips between rebuild and trigger restoration.
+
+        Guarded by the online recovery's whole-file plan (hermes_state_fts_online): when an index tree shares a
+        page with another structure (the hub's 2026-11-18 damage), DROP can succeed and free that page twice, and
+        the doubly freed page is later handed to canonical data. A named family or a refused plan skips the DROP."""
+        if not legacy and not self._oneshot_drop_is_safe():
+            return False
         try:
             trigram_present = self._fts_table_probe(cursor, "messages_fts_trigram") is True
         except (sqlite3.DatabaseError, UnicodeDecodeError):
