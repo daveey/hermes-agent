@@ -28,6 +28,16 @@ def lane_admission_refused(conn: sqlite3.Connection, task_id: str, assignee: str
     if (code := dispatch_refusal(conn, task_id, assignee, spawn_fn, dry_run=dry_run)) is not None:
         result.capsule_refused.append((task_id, code))
         return True
+    if budget_refused(conn, task_id, result, dry_run=dry_run):
+        return True
+    # A fresh card pinned to a quota-walled model would only spawn into the wall (kanban_dispatch_skip). [daveey]
+    from hermes_cli.kanban_dispatch_skip import hold_pinned_quota
+    return hold_pinned_quota(conn, task_id, result, lane=lane)
+
+
+def budget_refused(conn: sqlite3.Connection, task_id: str, result, *, dry_run: bool) -> bool:
+    """Home-owned budget decision, independent of this machine's ability to lease the card."""
+    # Both hold functions reject foreign copies and recheck state under the write lock.
     # No-progress budget: N runs in a row that only parked again leave the lane (kanban_no_progress). [daveey]
     from hermes_cli.kanban_no_progress import hold as no_progress_hold
     if not dry_run and (held := no_progress_hold(conn, task_id)) is not None:
@@ -39,9 +49,7 @@ def lane_admission_refused(conn: sqlite3.Connection, task_id: str, assignee: str
     if not dry_run and (held := spend_hold(conn, task_id)) is not None:
         result.no_progress_held.append((task_id, f"spend_budget:{held}"))
         return True
-    # A fresh card pinned to a quota-walled model would only spawn into the wall (kanban_dispatch_skip). [daveey]
-    from hermes_cli.kanban_dispatch_skip import hold_pinned_quota
-    return hold_pinned_quota(conn, task_id, result, lane=lane)
+    return False
 
 
 def capsule_claim_check(conn: sqlite3.Connection, task_id: str, assignee: str, spawn_fn):

@@ -45,6 +45,14 @@ def eligible_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], status: str
     return kept
 
 
+def hold_ineligible_budgets(conn: sqlite3.Connection, result, *, dry_run: bool) -> None:
+    """Placement is an execution filter, not a home-board budget exemption."""
+    from hermes_cli.kanban_db_dispatch_admission import budget_refused
+
+    for task_id, _reason in result.skipped_ineligible:
+        budget_refused(conn, task_id, result, dry_run=dry_run)
+
+
 def note_unplaceable(conn: sqlite3.Connection, task_id: str) -> None:
     """One ``skipped_unplaceable`` event when no known machine satisfies the card's ``runs_on``: the skip was in
     the tick result only, so t_01a1a521638d0a78 (runs_on ["hermes-hub"]) sat ready for days with nothing on the

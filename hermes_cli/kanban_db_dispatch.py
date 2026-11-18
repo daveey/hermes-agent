@@ -2184,15 +2184,15 @@ def _dispatch_once_locked(
         except Exception:
             _kb._log.debug("kanban dispatch: triage sweep failed", exc_info=True)
     unjudged = _kb._sync.worker_pickup(conn, pickup_budget(result, spawn_budget), dry_run, _profile_exists_fn) or ()
-    # Cards this machine cannot lease (runs_on for another machine, ...) are never candidates: before 10-28 a
-    # review card pinned to the hub sat first in the MacBook's review lane, took the review reservation every
-    # tick, and the Board refused its lease every tick, so the eligible ready queue never started.
+    # Placement filters executors, not home budget decisions; refused cards must still be checked below.
+    # Otherwise a worker-only card has no decision owner: workers correctly skip foreign-copy budgets.
     from hermes_cli.kanban_hub_admission_claim import screened_lanes
     all_ready, all_review, unjudged = screened_lanes(conn, dry_run, review_dispatch_enabled(), unjudged)
     result.admission_deferred = sorted(unjudged)
-    from hermes_cli.kanban_db_dispatch_preclaim import eligible_rows as _eligible_rows
+    from hermes_cli.kanban_db_dispatch_preclaim import eligible_rows as _eligible_rows, hold_ineligible_budgets
     ready_rows = _eligible_rows(conn, all_ready, "ready", result)
     review_rows = _eligible_rows(conn, all_review, "review", result) if all_review else []
+    hold_ineligible_budgets(conn, result, dry_run=dry_run)
     result.lane_candidates = len(all_ready) + len(all_review)
     # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
     # skipped_unassigned — "busy, retry later" differs from "needs routing".
