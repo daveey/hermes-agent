@@ -218,25 +218,7 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     _flag(sessions_optimize_storage, "--force",
         help="Run even while another Hermes process (gateway, Desktop, dashboard, cron) holds state.db — rewriting the store under a live writer can leave every agent refusing turns until all writers are stopped; the rebuild then paces itself so that process stays responsive (much slower)")
 
-    sessions_repair = sessions_subparsers.add_parser(
-        "repair", help="Repair a malformed state.db schema so hidden sessions reappear",
-        description="Recover a state.db whose schema is malformed (e.g. 'table "
-            "messages_fts already exists'), which makes Desktop/Dashboard show "
-            "no sessions. A backup is made first; sessions and messages are "
-            "preserved and the FTS search index is rebuilt if needed.")
-    _flag(sessions_repair, "--check-only",
-        help="Only report whether the database opens cleanly; do not modify it")
-    _flag(sessions_repair, "--no-backup", help="Skip the timestamped backup copy (not recommended)")
-
-    sessions_repair_search = sessions_subparsers.add_parser(
-        "repair-search", help="Rebuild a stale or damaged full-text search index while Hermes keeps running",
-        description="Unlink and recreate the session search indexes in one short transaction (the old index "
-            "pages are not read, so a damaged index is no obstacle), then backfill existing messages in short "
-            "chunks. No other process needs to stop; search falls back to substring matching for messages not yet "
-            "re-indexed. The old pages stay allocated until a VACUUM or `hermes sessions recover`.")
-    _flag(sessions_repair_search, "--force", help="Run even when the index is not marked stale")
-    _flag(sessions_repair_search, "--wait", help="Run the backfill here until it finishes instead of leaving it to "
-          "the gateway")
+    _add_repair_parsers(sessions_subparsers)
 
     sessions_set_journal_mode = sessions_subparsers.add_parser(
         "set-journal-mode", help="Convert state.db between journal_mode=WAL and DELETE offline (every holder stopped)",
@@ -402,3 +384,26 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
         return cmd_sessions(_args, sessions_parser=sessions_parser)
 
     sessions_parser.set_defaults(func=_dispatch_sessions)
+
+
+def _add_repair_parsers(sessions_subparsers):
+    """`sessions repair` and `sessions repair-search` (kept out of build_sessions_parser's size cap)."""
+    sessions_repair = sessions_subparsers.add_parser(
+        "repair", help="Repair a malformed state.db schema so hidden sessions reappear",
+        description="Recover a state.db whose schema is malformed (e.g. 'table "
+            "messages_fts already exists'), which makes Desktop/Dashboard show "
+            "no sessions. A backup is made first; sessions and messages are "
+            "preserved and the FTS search index is rebuilt if needed.")
+    _flag(sessions_repair, "--check-only",
+        help="Only report whether the database opens cleanly; do not modify it")
+    _flag(sessions_repair, "--no-backup", help="Skip the timestamped backup copy (not recommended)")
+
+    sessions_repair_search = sessions_subparsers.add_parser(
+        "repair-search", help="Rebuild a stale or damaged full-text search index while Hermes keeps running",
+        description="Unlink and recreate the session search indexes in one short transaction (the old index "
+            "pages are not read, so a damaged index is no obstacle), then backfill existing messages in short "
+            "chunks. No other process needs to stop; search falls back to substring matching for messages not yet "
+            "re-indexed. The old pages stay allocated until a VACUUM or `hermes sessions recover`.")
+    _flag(sessions_repair_search, "--force", help="Run even when the index is not marked stale")
+    _flag(sessions_repair_search, "--wait", help="Run the backfill here until it finishes instead of leaving it to "
+          "the gateway")

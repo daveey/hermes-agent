@@ -198,19 +198,27 @@ def test_futile_holder_deferral_goes_online_without_a_failed_rebuild(tmp_path, m
 
 
 def test_backfill_tick_respects_its_time_budget(tmp_path, monkeypatch):
+    import hermes_state_fts_online
+
     path = tmp_path / "state.db"
     _seed(path, sessions=1, per=4)
     db = SessionDB(db_path=path)
     try:
         db.set_meta("fts_rebuild_high_water", "999999")
         db.set_meta("fts_rebuild_progress", "0")
+        clock = [100.0]
+        monkeypatch.setattr(hermes_state_fts_online.time, "monotonic", lambda: clock[0])
         calls = []
-        monkeypatch.setattr(db, "fts_rebuild_step", lambda: calls.append(1) or time.sleep(0.05) or True)
-        started = time.monotonic()
-        assert db.advance_fts_backfill(budget_s=0.2) is True
-        assert time.monotonic() - started < 0.5
-        assert 2 <= len(calls) <= 6
-        assert db.advance_fts_backfill(budget_s=0) is True and len(calls) <= 6
+
+        def step():  # each chunk "costs" 0.25 s of the fake clock (exact in binary floating point)
+            calls.append(1)
+            clock[0] += 0.25
+            return True
+
+        monkeypatch.setattr(db, "fts_rebuild_step", step)
+        assert db.advance_fts_backfill(budget_s=1.0) is True
+        assert len(calls) == 4  # 1.0 s budget / 0.25 s per chunk
+        assert db.advance_fts_backfill(budget_s=0) is True and len(calls) == 4  # no budget, no chunk
     finally:
         db.close()
 
