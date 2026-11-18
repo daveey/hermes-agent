@@ -107,3 +107,65 @@ def test_disabled_schedules_nothing(timers, monkeypatch):
     assert not ar.schedule("k", text="a", display_kind="kanban_notice", display_metadata={}, due=NOW, cause="c",
                            persisted=True, now=NOW)
     assert not timers
+
+
+# [daveey] provider-169ae0ed1f: a replay refused by a quota wall that still holds is re-armed at its new reset.
+# Hub chat 20261101_012339_5a8ef0, Nov 17: the replay fired at the 11:09:59Z reset, the provider still refused
+# (credits_required; pool rebooked 12:10:12Z), the replay gave up, and the notice waited 8.5 h for a manual "resume".
+def _replay_meta(attempt=1):
+    return {"task_ids": [TASK], ar.REPLAY_METADATA_KEY: {"attempt": attempt, "failed_at": NOW - 4000, "cause": "c",
+                                                         "deliveries": 1}}
+
+
+def test_a_replay_refused_by_a_wall_that_still_holds_waits_for_the_new_reset(timers):
+    wall = {"error": "HTTP 429: Subscription quota unavailable for anthropic/m; resets at x",
+            "failure_resets_at": NOW + 3600}
+    plan = ar.plan_turn_failure("kanban_notice", _replay_meta(), "x", wall, now=NOW)
+    assert plan.retry and plan.due == NOW + 3600
+    assert "Gave up" not in plan.line and "attempt 2 of" in plan.line
+    # the cap: the last allowed attempt gives up even on a wall
+    last = ar.plan_turn_failure("kanban_notice", _replay_meta(ar.WALL_REPLAYS_MAX), "x", wall, now=NOW)
+    assert not last.retry and last.line.endswith(f"Gave up after {ar.WALL_REPLAYS_MAX} retries.")
+
+
+@pytest.mark.parametrize("result", [
+    {"error": "lease"},  # not a wall: the work itself failed
+    {"error": "429", "failure_resets_at": NOW - 5},  # the reset passed: the wall is not what refused it
+    {"error": "429", "failure_resets_at": NOW + 2 * 86400},  # too far out: the notice is stale by then
+    {"error": "429", "failure_resets_at": True},
+])
+def test_any_other_replay_failure_still_gives_up(timers, result):
+    plan = ar.plan_turn_failure("kanban_notice", _replay_meta(), "x", result, now=NOW)
+    assert not plan.retry and plan.line.endswith("Gave up after one retry.")
+
+
+def test_the_rearmed_replay_carries_the_deliveries_not_the_old_note(timers, monkeypatch):
+    original = f"{TASK} done"
+    item = ar._Item(original, "kanban_notice", {"task_ids": [TASK], "display_text": "card"}, False, "c", NOW - 4000)
+    text, kind, meta = ar.replay_payload([item])
+    st = types.SimpleNamespace(display_kind=kind, display_metadata=meta, automation_text=text, marker_key="k",
+                               automation_plan=None)
+    st.automation_plan = ar.plan_turn_failure(kind, meta, text, {"error": "429", "failure_resets_at": NOW + 3600},
+                                              now=NOW)
+    ar.schedule_for_turn({"session_key": "k"}, st)
+    assert ar.pending("k")
+    entry = ar._entries["k"]
+    assert [i.text for i in entry.items] == [original] and entry.items[0].attempt == 1
+    text2, _, meta2 = ar.replay_payload(entry.items)
+    assert text2.count("[Hermes: automatic retry") == 1 and text2.endswith(original)
+    assert meta2[ar.REPLAY_METADATA_KEY]["attempt"] == 2 and meta2["display_text"] == "Retry: card"
+    assert meta2[ar.REPLAY_METADATA_KEY]["failed_at"] == NOW - 4000
+
+
+def test_a_replay_wake_refused_by_a_wall_that_still_holds_is_rearmed(timers, monkeypatch):
+    monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
+    reset = ar.time.time() + 3600
+    ar.replay_failed_wake("k", "[Hermes: automatic retry of 1 automated delivery that failed at 01:50 PT (c). "
+                          "This is the only retry. Check the current state before redoing anything.]\n\nbody",
+                          {"agent_error": "quota", "agent_failure": {"failure_resets_at": reset}},
+                          "kanban_notice", _replay_meta(), "notice-closeout")
+    assert ar.pending("k") and [i.text for i in ar._entries["k"].items] == ["body"]
+    ar.reset()
+    ar.replay_failed_wake("k", "body", {"agent_error": "quota", "agent_failure": {}}, "kanban_notice",
+                          _replay_meta(), "notice-closeout")
+    assert not ar.pending("k")

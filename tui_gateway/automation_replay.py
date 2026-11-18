@@ -16,7 +16,11 @@ This module is the retry owner between the two, bounded so it cannot loop either
 - a later turn in the chat that succeeds cancels the replay when the failed delivery is already in the transcript
   (that turn's context carried it); a delivery that never reached the transcript (an agent build failure) is kept;
 - the replay is marked (``display_metadata[REPLAY_METADATA_KEY]``): its own failure gives up, records it and
-  schedules nothing.
+  schedules nothing, except when a typed quota/route wall that still holds refused it (a ``failure_resets_at``
+  still ahead, within ``WALL_HORIZON_S``): then the wall, not the work, failed, so it waits for the new reset, at
+  most ``WALL_REPLAYS_MAX`` replays in all (``rewall_due``; hub chat 20261101_012339_5a8ef0, Nov 17: the replay
+  fired at the recorded reset, the provider still refused and rebooked an hour, the replay gave up and the notice
+  waited 8.5 h for a manual "resume", provider-169ae0ed1f).
 
 The timers live in this process: a backend restart drops a pending replay (the boot sweeps and the notice
 guarantee own that case). The boundary row an automation turn leaves says what failed and what happens next
@@ -48,11 +52,18 @@ BUSY_RECHECK_S = 60.0
 # replay that first fired just after the stamp is still pending when the window ends (10 x 60 s gave up at
 # 600 s of a 660 s window; review t_01a1cfcca83f9266).
 BUSY_RECHECKS_MAX = math.ceil((SUCCESSOR_YIELD_UNKNOWN_S + BUSY_RECHECK_S) / BUSY_RECHECK_S)
+# [daveey] A replay refused by a quota/route wall that still holds waits for the new reset: at most this many
+# replays in all, and only for a reset at most this far out (a notice is stale after a day).
+WALL_REPLAYS_MAX = 3
+WALL_HORIZON_S = 86400.0
 # Tests switch this off (tests/tui_gateway/conftest.py) so no real timer outlives the test that armed it.
 ENABLED = True
 
 _TASK_ID = re.compile(r"\bt_[0-9a-f]{8,}\b")
 _CAUSE_MAX_CHARS = 200
+_NOTE_HEAD = "[Hermes: automatic retry of "
+_NOTE_TAIL = "Check the current state before redoing anything.]\n\n"
+_RETRY_PREFIX = "Retry: "
 
 
 @dataclass
@@ -63,6 +74,7 @@ class _Item:
     persisted: bool  # the delivery's row is in the transcript, so a later successful turn carries it
     cause: str
     failed_at: float
+    attempt: int = 0  # replays this delivery already had (a wall-refused replay re-armed: ``rewall_due``)
 
 
 @dataclass
@@ -92,6 +104,43 @@ def is_automation(display_kind: Any) -> bool:
 
 def is_replay(display_metadata: Any) -> bool:
     return isinstance(display_metadata, dict) and bool(display_metadata.get(REPLAY_METADATA_KEY))
+
+
+def replay_attempt(display_metadata: Any) -> int:
+    """Which replay this turn is (1 for the first), 0 for a turn that is not a replay."""
+    if not is_replay(display_metadata):
+        return 0
+    marker = display_metadata.get(REPLAY_METADATA_KEY)
+    attempt = marker.get("attempt") if isinstance(marker, dict) else None
+    return attempt if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0 else 1
+
+
+def rewall_due(display_metadata: Any, resets_at: Any, now: float) -> float | None:
+    """[daveey] When a replay that failed gets another one: only when a typed quota/route wall that still holds
+    refused it (``resets_at`` ahead of ``now``, at most ``WALL_HORIZON_S`` out) and fewer than
+    ``WALL_REPLAYS_MAX`` replays ran. Then it is due at that reset; any other replay failure gives up (None)."""
+    reset = _number(resets_at)
+    if reset is None or reset <= now or reset > now + WALL_HORIZON_S:
+        return None
+    if replay_attempt(display_metadata) >= WALL_REPLAYS_MAX:
+        return None
+    return replay_due(now, reset)
+
+
+def _unwrap_replay(text: Any, display_metadata: Any, failed_at: float) -> tuple[str, dict, float, int]:
+    """A failed replay's deliveries as they were before ``replay_payload`` wrapped them: ``(text, metadata,
+    first failed_at, replays spent)``, so a re-armed replay carries one note, not one per attempt."""
+    meta = dict(display_metadata) if isinstance(display_metadata, dict) else {}
+    marker = meta.pop(REPLAY_METADATA_KEY, None)
+    attempt = replay_attempt({REPLAY_METADATA_KEY: marker}) if marker else 0
+    first = _number(marker.get("failed_at")) if isinstance(marker, dict) else None
+    shown = meta.get("display_text")
+    if isinstance(shown, str) and shown.startswith(_RETRY_PREFIX):
+        meta["display_text"] = shown[len(_RETRY_PREFIX):]
+    body = text if isinstance(text, str) else ""
+    if body.startswith(_NOTE_HEAD) and _NOTE_TAIL in body:
+        body = body.split(_NOTE_TAIL, 1)[1]
+    return body, meta, (first if first is not None else failed_at), attempt
 
 
 def failure_cause(error: Any) -> str:
@@ -174,10 +223,19 @@ def replay_failed_wake(key: str, text: str, session: dict, display_kind: str | N
         return
     cause = failure_cause(session.get("agent_error") or "agent build failed")
     what = subject(display_kind, meta, text)
+    now = time.time()
+    resets_at = trusted_resets_at(session.get("agent_failure"))
     if is_replay(meta):
-        logger.warning("automation-replay: %s", failure_line(what, cause, gave_up=True))
+        due = rewall_due(meta, resets_at, now)
+        if due is None:
+            logger.warning("automation-replay: %s", failure_line(what, cause, gave_up=True,
+                                                                 retries=replay_attempt(meta)))
+            return
+        body, inner, failed_at, attempt = _unwrap_replay(text, meta, now)
+        schedule(key, text=body, display_kind=str(display_kind), display_metadata=inner, due=due,
+                 cause=f"{label}: {cause}", persisted=False, attempt=attempt, failed_at=failed_at)
         return
-    due = replay_due(time.time(), trusted_resets_at(session.get("agent_failure")))
+    due = replay_due(now, resets_at)
     schedule(key, text=text, display_kind=str(display_kind), display_metadata=meta, due=due,
              cause=f"{label}: {cause}", persisted=False)
 
@@ -226,11 +284,14 @@ def format_when(ts: float, now: float | None = None) -> str:
 
 
 def failure_line(what: str, cause: str, *, due: float | None = None, gave_up: bool = False,
-                 now: float | None = None) -> str:
+                 now: float | None = None, attempt: int = 1, retries: int = 1) -> str:
     head = f"Couldn't process {what}: {cause}."
+    if due is not None and attempt > 1:
+        return (f"{head} The quota wall still holds: retrying at {format_when(due, now)} "
+                f"(attempt {attempt} of {WALL_REPLAYS_MAX}).")
     if due is not None:
         return f"{head} Retrying once at {format_when(due, now)}."
-    return f"{head} Gave up after one retry."
+    return f"{head} Gave up after {'one retry' if retries <= 1 else f'{retries} retries'}."
 
 
 def plan_turn_failure(display_kind: Any, display_metadata: Any, text: Any, result: Any,
@@ -242,7 +303,11 @@ def plan_turn_failure(display_kind: Any, display_metadata: Any, text: Any, resul
     cause = failure_cause(result.get("error") or result.get("final_response"))
     what = subject(display_kind, display_metadata, text)
     if is_replay(display_metadata):
-        return Plan(False, None, failure_line(what, cause, gave_up=True, now=now), cause)
+        attempt = replay_attempt(display_metadata)
+        due = rewall_due(display_metadata, result.get("failure_resets_at"), now)
+        if due is None:
+            return Plan(False, None, failure_line(what, cause, gave_up=True, now=now, retries=attempt), cause)
+        return Plan(True, due, failure_line(what, cause, due=due, now=now, attempt=attempt + 1), cause)
     # Any failure gets its one replay, "non-retryable" ones too: the classifier judges a provider call, and the
     # turns this owns failed on Hermes-side walls it reads as client errors (the chat ownership lease refusal of
     # the 19 lost notices was "Non-retryable client error"). One bounded replay costs one turn at most.
@@ -269,13 +334,15 @@ def _cancel_timer(entry: _Entry) -> None:
 
 def schedule(session_key: str, *, text: str, display_kind: str, display_metadata: dict | None, due: float,
              cause: str, persisted: bool, now: float | None = None,
-             fire: Callable[[str], None] | None = None) -> bool:
-    """Arm (or join) this chat's one pending replay. True when it is pending after the call."""
+             fire: Callable[[str], None] | None = None, attempt: int = 0, failed_at: float | None = None) -> bool:
+    """Arm (or join) this chat's one pending replay. True when it is pending after the call. ``attempt`` is the
+    replays the delivery already had (a wall-refused replay re-armed), ``failed_at`` its first failure."""
     key = str(session_key or "")
     if not ENABLED or not key or not isinstance(text, str) or not text.strip() or not is_automation(display_kind):
         return False
     now = time.time() if now is None else now
-    item = _Item(text, display_kind, dict(display_metadata or {}), persisted, cause, now)
+    item = _Item(text, display_kind, dict(display_metadata or {}), persisted, cause,
+                 now if failed_at is None else failed_at, attempt)
     fire = fire or _fire
     with _lock:
         entry = _entries.get(key)
@@ -337,15 +404,17 @@ def replay_payload(items: list) -> tuple[str, str, dict]:
     first = items[0]
     failed_at = min(item.failed_at for item in items)
     causes = "; ".join(dict.fromkeys(item.cause for item in items))
-    note = (f"[Hermes: automatic retry of {len(items)} automated deliver{'y' if len(items) == 1 else 'ies'} "
-            f"that failed at {format_when(failed_at)} ({causes}). This is the only retry. Check the current state "
-            "before redoing anything.]")
-    text = note + "\n\n" + "\n\n---\n\n".join(item.text for item in items)
-    marker = {"attempt": 1, "failed_at": failed_at, "cause": causes, "deliveries": len(items)}
+    attempt = max(item.attempt for item in items) + 1
+    which = ("This is the only retry." if attempt == 1 else
+             f"This is retry {attempt} of {WALL_REPLAYS_MAX}: a quota wall refused the earlier ones.")
+    note = (f"{_NOTE_HEAD}{len(items)} automated deliver{'y' if len(items) == 1 else 'ies'} "
+            f"that failed at {format_when(failed_at)} ({causes}). {which} {_NOTE_TAIL}")
+    text = note + "\n\n---\n\n".join(item.text for item in items)
+    marker = {"attempt": attempt, "failed_at": failed_at, "cause": causes, "deliveries": len(items)}
     if len(items) == 1:
         meta = {**first.display_metadata, REPLAY_METADATA_KEY: marker}
         if isinstance(meta.get("display_text"), str) and meta["display_text"]:
-            meta["display_text"] = f"Retry: {meta['display_text']}"
+            meta["display_text"] = f"{_RETRY_PREFIX}{meta['display_text']}"
         return text, first.display_kind, meta
     kind = "kanban_notice" if any(item.display_kind == "kanban_notice" for item in items) else first.display_kind
     shown = [str(item.display_metadata.get("display_text") or "") for item in items]
@@ -356,7 +425,7 @@ def replay_payload(items: list) -> tuple[str, str, dict]:
                 task_ids.append(tid)
     meta: dict = {REPLAY_METADATA_KEY: marker}
     if any(shown):
-        meta["display_text"] = "Retry: " + " · ".join(s for s in shown if s)
+        meta["display_text"] = _RETRY_PREFIX + " · ".join(s for s in shown if s)
     if task_ids:
         meta["task_ids"] = task_ids
     return text, kind, meta
@@ -408,8 +477,12 @@ def schedule_for_turn(session: dict, st: Any) -> None:
     if not plan.retry:
         logger.warning("automation-replay: %s in %s", plan.line, key)
         return
-    schedule(key, text=getattr(st, "automation_text", ""), display_kind=st.display_kind,
-             display_metadata=getattr(st, "display_metadata", None), due=plan.due, cause=plan.cause, persisted=True)
+    text, meta = getattr(st, "automation_text", ""), getattr(st, "display_metadata", None)
+    attempt, failed_at = 0, None
+    if is_replay(meta):  # a wall refused the replay (``rewall_due``): re-arm the deliveries it wrapped
+        text, meta, failed_at, attempt = _unwrap_replay(text, meta, time.time())
+    schedule(key, text=text, display_kind=st.display_kind, display_metadata=meta, due=plan.due, cause=plan.cause,
+             persisted=True, attempt=attempt, failed_at=failed_at)
 
 
 def _fire(key: str) -> None:
