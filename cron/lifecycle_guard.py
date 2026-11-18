@@ -1821,6 +1821,8 @@ def scan_gateway_lifecycle(
             command, cwd=cwd, depth=0, visited=set(), budget=budget,
             read_remote_script=read_remote_script, source=source,
         )
+        if not unsafe and budget.variable_candidates.computed_unknown(budget.alias_names):
+            return True, 'an unresolved computed executable cannot be scanned safely'
         return unsafe, budget.refusal if unsafe else None
     except (SubstitutionNestingLimit, RecursionError):
         # Frame walkers can exhaust Python's stack before the substitution budget.

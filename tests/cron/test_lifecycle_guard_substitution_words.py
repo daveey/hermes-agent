@@ -48,7 +48,13 @@ def test_substitution_execution(tmp_path, command):
 def test_clean_substitution_execution(tmp_path, command):
     _tree(tmp_path)
     assert not _bash_runs(tmp_path, command)
-    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+    verdict = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    if command == '`python3 ./clean.py`':
+        # A lifecycle-clean producer does not prove its output is a safe
+        # executable. Computed command output is now refused when unresolved.
+        assert verdict[0] and verdict[1] and 'computed' in verdict[1]
+    else:
+        assert verdict == (False, None)
 
 
 @pytest.mark.parametrize('command', [
