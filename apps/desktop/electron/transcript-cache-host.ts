@@ -314,9 +314,11 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
         // The replica lives on this Mac: read it from the primary without spawning one.
         const descriptor = await deps.backendFor(deps.registry().primary || 'local', { passive: true })
 
-        const body = await deps.getJson(descriptor, `/api/plugins/hub-sync/sessions?limit=${HUB_LIST_LIMIT}`, {
-          timeoutMs: 8_000
-        })
+        const body = await deps.getJson(
+          descriptor,
+          `/api/plugins/hub-sync/sessions?limit=${HUB_LIST_LIMIT}&projection=prefetch`,
+          { timeoutMs: 8_000 }
+        )
 
         if (body?.available === false || !Array.isArray(body?.sessions)) {
           return null

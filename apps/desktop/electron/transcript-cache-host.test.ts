@@ -4,6 +4,7 @@ import path from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import fixture from './fixtures/hub-sync-sessions-prefetch-projection.json'
 import { installTranscriptCache, markInboxSessions } from './transcript-cache-host'
 
 const dirs: string[] = []
@@ -14,7 +15,7 @@ afterEach(() => {
   }
 })
 
-function install() {
+function install(fullResponse = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'transcript-cache-host-'))
   dirs.push(dir)
 
@@ -24,6 +25,10 @@ function install() {
 
   const getJson = vi.fn(async (descriptor: any, requestPath: string) => {
     if (requestPath.startsWith('/api/plugins/hub-sync/sessions')) {
+      if (fullResponse) {
+        return { ...fixture.full, sessions: fixture.full.sessions.filter(record => ['old', 'new'].includes(record.id)) }
+      }
+
       return {
         sessions: [
           { activity: 2, gateway: 'mini', id: 'm1', message_count: 3, profile: 'default' },
@@ -52,6 +57,21 @@ function install() {
 }
 
 describe('transcript cache host', () => {
+  it('requests the prefetch projection while accepting older servers full responses', async () => {
+    const { getJson, host } = install(true)
+
+    try {
+      expect(await host.prefetcher.tick()).toMatchObject({ fetched: 2, targets: 2 })
+      expect(getJson).toHaveBeenCalledWith(
+        { connectionId: 'local' },
+        '/api/plugins/hub-sync/sessions?limit=2000&projection=prefetch',
+        { timeoutMs: 8_000 }
+      )
+    } finally {
+      host.stop()
+    }
+  })
+
   it('prefetch rides warm remote pool entries (passive) and may start the local backend', async () => {
     const { backendFor, host } = install()
 
