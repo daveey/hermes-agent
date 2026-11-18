@@ -131,8 +131,9 @@ from tools import kanban_tools
 turn = fixtures.turn
 
 
+@pytest.mark.parametrize("entrypoint", ["client", "cli"])
 @pytest.mark.parametrize("revoke", [False, True])
-def test_real_subprocess_uses_only_parent_custody(turn, monkeypatch, tmp_path, revoke):
+def test_real_subprocess_uses_only_parent_custody(turn, monkeypatch, tmp_path, revoke, entrypoint):
     import subprocess
     import sys
     from tools import origin_cli_bridge as bridge
@@ -149,9 +150,15 @@ def test_real_subprocess_uses_only_parent_custody(turn, monkeypatch, tmp_path, r
             turn.release()
         env = build_subprocess_env(scrub_secrets=True)
         env["PYTHONPATH"] = os.getcwd()
-        result = subprocess.run([sys.executable, str(script), launch.locator],
+        env[bridge.ENV_KEY] = launch.locator
+        argv = ([sys.executable, "-m", "hermes_cli.main", "kanban", "create", "subprocess child",
+                 "--assignee", "default", "--no-requires", "--json"] if entrypoint == "cli"
+                else [sys.executable, str(script), launch.locator])
+        result = subprocess.run(argv,
                                 env=env, pass_fds=(launch.child_fd,), capture_output=True,
-                                text=True, encoding="utf-8", timeout=10, check=True)
+                                text=True, encoding="utf-8", timeout=20, check=False)
+        assert result.returncode == (2 if revoke and entrypoint == "cli" else 0), result.stderr
+        assert result.stdout.strip(), (result.returncode, result.stderr)
         value = json.loads(result.stdout)
         assert bool(value.get("ok")) is (not revoke), value
         with kbc.connect_closing() as conn:

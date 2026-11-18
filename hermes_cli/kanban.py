@@ -171,6 +171,14 @@ def kanban_command(args: argparse.Namespace) -> int:
             "are fenced from board writes by design; make the change with the agent's kanban_* "
             "tools, e.g. kanban_comment, kanban_block, kanban_link, kanban_unlink, kanban_create)"))
 
+    # Native requests execute only in the owning parent, before any child-side
+    # board initialization or publication scope can write local state.
+    if action == "create":
+        from hermes_cli.kanban_cli_native import offered_create
+        bridged = offered_create(args)
+        if bridged is not None:
+            return bridged
+
     # Origin obligations are profile-local, not current-board state; do not
     # auto-initialize a board or route by a worker's inherited board override.
     if module := _ORIGIN_COMMANDS.get(action):
