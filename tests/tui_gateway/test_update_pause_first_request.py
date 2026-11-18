@@ -60,7 +60,8 @@ def test_a_notice_with_its_own_durable_prompt_may_yield(home):
 def test_a_notice_without_a_successful_marker_write_cannot_yield(home, monkeypatch, stale):
     from tui_gateway.turn_marker import record_turn_start
     if stale:
-        assert record_turn_start(home, "session-key", "an earlier notice")
+        # Same text isolates write custody from the independent full-prompt equality guard.
+        assert record_turn_start(home, "session-key", "go")
     monkeypatch.setattr(server, "record_turn_start", lambda *a, **k: False)
     seen, _ = _submit(home, display_kind="kanban_notice")
     assert seen == [(False, True)]
