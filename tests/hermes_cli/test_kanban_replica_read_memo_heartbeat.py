@@ -94,6 +94,12 @@ def test_a_refreshed_heartbeat_extends_reuse_past_the_first_cutoff(world):
 
 def test_expiry_flips_release_exactly_after_the_window(world):
     path, _, statements, clock = world
+    # The card is published after the owner's last beat (1000.0): no clean read stands behind it, so only a fresh
+    # heartbeat releases it. One published at or before that beat stays released through the owner's silence
+    # (test_kanban_release_survives_owner_silence.py).
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE replica SET updated_at = 1000500 WHERE key = 'work/build/t_done'")
+    tick(path, clock, 1001.0)  # a hub pull after that publication, so the card's ``synced_at`` no longer moves
     read(path, clock)
     tick(path, clock, 1000.0 + WINDOW)  # fresh uses <=: still fresh at the boundary
     statements.clear()

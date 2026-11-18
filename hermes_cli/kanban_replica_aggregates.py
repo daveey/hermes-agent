@@ -10,6 +10,13 @@ class EvidenceSet(AbstractSet):
         self.relevant = frozenset(relevant)
         self.scalars, self.kind, self.stale, self.fresh = scalars, kind, stale, fresh
 
+    def _closed(self, packed, scope) -> bool:
+        """A bystander scalar whose owner stands behind its verified terminal record (as ``_apply`` judges a staged
+        row): fresh, or silent since a beat at or after the record's publication."""
+        from hermes_cli import kanban_scope_heartbeat as hb
+        row = marshal.loads(packed)
+        return bool(row[6] & 2) and hb.attests(self.fresh, scope, (row[3] or 0) / 1000.0)
+
     def _keys(self):
         if self.stale:
             return
@@ -17,7 +24,7 @@ class EvidenceSet(AbstractSet):
             profile, board, tid = key.split('/')
             if self.kind == 'owners':
                 yield gw, board, tid
-            elif (gw, profile, board) in self.fresh and marshal.loads(packed)[6] & 2:
+            elif self._closed(packed, (gw, profile, board)):
                 yield gw, profile, board, tid
 
     def __iter__(self):
@@ -39,7 +46,7 @@ class EvidenceSet(AbstractSet):
         if self.kind == 'closed' and isinstance(key, tuple) and len(key) == 4:
             gw, profile, board, tid = key
             packed = self.scalars.get((gw, f'{profile}/{board}/{tid}'))
-            return packed is not None and (gw, profile, board) in self.fresh and bool(marshal.loads(packed)[6] & 2)
+            return packed is not None and self._closed(packed, (gw, profile, board))
         return any(candidate == key for candidate in self._keys())
 
 
@@ -121,4 +128,4 @@ def snapshot(state):
         seen[gw] = max(seen.get(gw, 0.0), (updated or 0) / 1000.0)
     return {'owners': EvidenceSet(() if stale else state.owners, scalars, 'owners', stale, fresh),
             'closed': EvidenceSet(state.closed, scalars, 'closed', stale, fresh), 'seen': seen,
-            'moved': {} if stale else {'published': Published(state.published_out, scalars), 'live_scopes': fresh}}
+            'moved': {} if stale else {'published': Published(state.published_out, scalars), 'live_scopes': frozenset(fresh)}}

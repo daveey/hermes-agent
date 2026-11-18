@@ -10,7 +10,7 @@ Key inputs (union for one origin ``(gateway, profile)``):
     liveness-normalized semantic token (``kanban_annotation_semantic``): ``activity_at``/``activity_kind`` and a
     valid observation's ``task_hash`` restamp do not move the key;
   * the scoped origin-ledger snapshot token and its raw current-match bits;
-  * gateway info rows with every ``observed_at`` clock replaced by its freshness verdict at now (the owner's
+  * gateway info rows with every fresh ``observed_at`` clock replaced by its freshness verdict at now (the owner's
     ``scope_window``, as ``scope_heartbeats`` judges it), and the replica's ``last_ok`` stale verdict at now
     (``HUB_STALE_AFTER_S``) plus ``offline_since``. A clock that only advances never moves the key; a freshness flip
     does, even with no new row. (180 s buckets of each owner's clock moved the key once per bucket per owner: with
@@ -63,7 +63,9 @@ def _infos(rows: tuple, now: float) -> list:
         def fresh(clock, window=window):
             if isinstance(clock, float) and not math.isfinite(clock):
                 raise ValueError("nonfinite clock")
-            return None if clock is None else hb.fresh(clock, now, window)
+            # A quiet owner's last beat decides which of its records stand (``published_before_silence``), so the
+            # clock itself is keyed once it is no longer fresh; it does not move while the owner stays silent.
+            return None if clock is None else (hb.fresh(clock, now, window) or clock)
         # A collector's heartbeat period jitters by seconds; it only sizes a >=450 s window.
         if isinstance(info, dict) and isinstance(info.get("scope_heartbeat_period_s"), (int, float)):
             info = dict(info, scope_heartbeat_period_s=round(info["scope_heartbeat_period_s"] / 60))

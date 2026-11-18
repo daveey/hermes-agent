@@ -30,6 +30,7 @@ from collections import ChainMap
 from dataclasses import dataclass, field
 from typing import Any
 
+from hermes_cli import kanban_scope_heartbeat as _scope_hb
 from hermes_cli.kanban_session_activity_records import _fold_legacy_aliases
 from hermes_cli.kanban_session_activity_release import record_attests_terminal
 
@@ -277,7 +278,7 @@ def _apply(s: _State, rk: tuple, st: _Stage) -> None:
     s.seen_rows.setdefault(gw, {})[rk] = st.seen
     if gw not in s.seen_dirty:
         s.seen[gw] = max(s.seen.get(gw, 0.0), st.seen)
-    if st.attest is not None and not stale and st.attest in fresh:
+    if st.attest is not None and not stale and _scope_hb.attests(fresh, st.attest, st.seen):
         s.released.add(tk)
         if st.verified:
             s.closed.add(tk)

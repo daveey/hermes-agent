@@ -73,6 +73,59 @@ def scope_heartbeats(info_rows: list[tuple[str, str]]) -> dict[tuple[str, str, s
             and type(scopes[0].get('observed_at')) in (int, float)}
 
 
-def fresh_scopes(heartbeats: dict[tuple[str, str, str], tuple[float, float]], now: float) -> frozenset:
-    """The ``scope_heartbeats`` keys ``fresh`` at ``now``: all a replica projection learns from the heartbeats."""
-    return frozenset(key for key, (beat, window) in heartbeats.items() if fresh(beat, now, window))
+def published_before_silence(last_beat: Any, now: float, published_at: Any) -> bool:
+    """A record its owner published at or before the owner's LAST clean read of that scope, for an owner that has
+    been silent since (``last_beat`` is past its window). [daveey]
+
+    The owner read the whole scope cleanly after publishing the record and left it as it is; nothing newer exists,
+    because a silent owner publishes nothing. So the record is the owner's standing answer, not a guess about a
+    partitioned owner's present. A future-dated beat, a record with no publication time and a record published after
+    the last beat prove nothing. Hub chat 20261110_185031_4f5f4b: workers 2, 5 and 7 were shut down on 2026-11-16 and
+    the 2,376 cards they had finished (every one published before their last beat) read "done, release pending" in
+    their origin chats from then on."""
+    return (type(last_beat) in (int, float) and type(published_at) in (int, float)
+            and 0 < published_at <= last_beat <= now)
+
+
+class ScopeVerdicts(frozenset):
+    """The scopes ``fresh`` at one instant (the set itself) plus, for every other scope with a heartbeat, that last
+    beat (``quiet``: ``frozenset((scope, beat))``). Equal and hashed on both, so a projection keyed on it is rebuilt
+    when a scope goes quiet or a quiet owner beats again; a silent owner's beat never moves, so its key is stable."""
+    __slots__ = ("_beats", "quiet")
+
+    def __new__(cls, live=(), quiet=()):
+        self = super().__new__(cls, live)
+        self.quiet = frozenset(quiet)
+        self._beats = dict(self.quiet)
+        return self
+
+    def __eq__(self, other):
+        return (frozenset.__eq__(self, other) is True
+                and self.quiet == (other.quiet if isinstance(other, ScopeVerdicts) else frozenset()))
+
+    def __ne__(self, other):
+        return not self == other
+
+    def __hash__(self):
+        return hash((frozenset.__hash__(self), self.quiet))
+
+    def last_beat(self, scope) -> float | None:
+        return self._beats.get(scope)
+
+
+def attests(verdicts, scope, published_at: Any) -> bool:
+    """Whether ``scope``'s owner stands behind a record published at ``published_at``: its heartbeat is fresh, or it
+    has been silent since a beat at or after that publication (``published_before_silence``). ``verdicts`` is a
+    ``ScopeVerdicts`` (which holds no future-dated beat); a plain set of fresh scopes knows no quiet beat."""
+    if scope in verdicts:
+        return True
+    last = verdicts.last_beat(scope) if isinstance(verdicts, ScopeVerdicts) else None
+    return published_before_silence(last, last, published_at)
+
+
+def fresh_scopes(heartbeats: dict[tuple[str, str, str], tuple[float, float]], now: float) -> ScopeVerdicts:
+    """The ``scope_heartbeats`` keys ``fresh`` at ``now``, and the last beat of the others (``ScopeVerdicts``): all a
+    replica projection learns from the heartbeats."""
+    live = [key for key, (beat, window) in heartbeats.items() if fresh(beat, now, window)]
+    return ScopeVerdicts(live, ((key, beat) for key, (beat, _window) in heartbeats.items()
+                                if key not in set(live) and type(beat) in (int, float) and beat <= now))

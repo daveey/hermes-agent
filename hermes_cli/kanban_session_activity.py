@@ -706,7 +706,8 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
                 raise ValueError('replica task identity mismatch')
             key = (str(gw), owner_profile, board, tid)
             raw[key] = t
-            if _owner_attests_terminal(t, str(gw), owner_profile, board, heartbeats, now, stale, evidence):
+            if _owner_attests_terminal(t, str(gw), owner_profile, board, heartbeats, now, stale, evidence,
+                                       published_at=(updated or 0) / 1000.0):
                 released.add(key)
                 if closed_out is not None and evidence.get('verified') is True:
                     closed_out.add(key)

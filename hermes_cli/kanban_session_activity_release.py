@@ -27,7 +27,7 @@ def unreleased_obligation(card: dict[str, Any]) -> bool:
 
 def owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | None, board: str,
                            heartbeats: dict[tuple[str, str, str], tuple[float, float]], now: float, stale: bool,
-                           evidence: dict[str, Any]) -> bool:
+                           evidence: dict[str, Any], published_at: float | None = None) -> bool:
     """The owner itself, recently, published this card as closed.
 
     Release needs all of: a fresh hub sync; a profile-qualified record whose own identity fields match its
@@ -38,11 +38,17 @@ def owner_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | N
     cards (``done``/``archived`` are not counted), applied only to evidence the owner signed. Pre-ledger
     cards had no other release path, so every one of them stayed open forever. ``evidence`` is the task's
     ``_owner_evidence`` (``_decode_replica_task``). [daveey]
+
+    An owner that has gone silent keeps the releases it attested while it was alive: a record it published at or
+    before its last clean read of the scope (``published_at``, the replica row's ``updated_at`` in seconds) is still
+    its standing answer (``kanban_scope_heartbeat.published_before_silence``). Its heartbeat window only bounds how
+    long a NEWER word may be missing; without this, shutting a worker down un-released every card it ever finished.
     """
     if stale or owner_profile is None or not record_attests_terminal(task, gw, owner_profile, board, evidence):
         return False
     beat = heartbeats.get((gw, owner_profile, board))
-    return beat is not None and _scope_hb.fresh(beat[0], now, beat[1])
+    return beat is not None and (_scope_hb.fresh(beat[0], now, beat[1])
+                                 or _scope_hb.published_before_silence(beat[0], now, published_at))
 
 
 def record_attests_terminal(task: dict[str, Any], gw: str, owner_profile: str | None, board: str,
