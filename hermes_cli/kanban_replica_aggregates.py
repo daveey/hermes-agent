@@ -69,15 +69,15 @@ def remembered_publications(moved, previous):
     published = moved.get('published')
     if isinstance(published, Published):
         keys = set()
-        live_gateways = {scope[0] for scope in moved.get('live_scopes', ())}
+        known = moved.get('known_gateways')  # None: this evidence cannot tell a removed owner from an offline one
         for card in previous or ():
             # Match _retire_moved's eligibility before touching publication keys.
             if card.get('ownership_state') != 'qualified' or card.get('created_at') is None:
                 continue
             scope = (card.get('gateway'), card.get('owner_profile'), card.get('board'))
-            # ...or _release_removed_owners': an owner with no live scope at all may be gone, and its row is then
-            # retired when another gateway publishes the card.
-            if scope not in moved.get('live_scopes', ()) and card.get('gateway') in live_gateways:
+            # ...or _release_removed_owners': the row of an owner the Board no longer lists is retired when another
+            # gateway publishes the card.
+            if scope not in moved.get('live_scopes', ()) and (known is None or card.get('gateway') in known):
                 continue
             key = (card.get('board'), card.get('id'), card.get('created_at'))
             try:
@@ -131,4 +131,5 @@ def snapshot(state):
         seen[gw] = max(seen.get(gw, 0.0), (updated or 0) / 1000.0)
     return {'owners': EvidenceSet(() if stale else state.owners, scalars, 'owners', stale, fresh),
             'closed': EvidenceSet(state.closed, scalars, 'closed', stale, fresh), 'seen': seen,
-            'moved': {} if stale else {'published': Published(state.published_out, scalars), 'live_scopes': frozenset(fresh)}}
+            'moved': {} if stale else {'published': Published(state.published_out, scalars), 'live_scopes': frozenset(fresh),
+                                       'publishing': frozenset(seen)}}

@@ -13,13 +13,14 @@ import pytest
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_session_activity as activity
-from hermes_cli.kanban_session_activity_records import OwnerSink, _release_removed_owners
+from hermes_cli.kanban_session_activity_records import _release_removed_owners
 from tests.hermes_cli import test_kanban_replica_read_memo as memo_helpers
 from tests.hermes_cli.test_kanban_replica_read_memo import card
 from tests.hermes_cli.test_kanban_replica_read_memo_heartbeat import ok, set_info, tick
 
 hub = memo_helpers.hub
-FRESH = {'published': {}, 'live_scopes': frozenset({('alive', 'work', 'build')})}
+FRESH = {'published': {}, 'live_scopes': frozenset({('alive', 'work', 'build')}),
+         'known_gateways': frozenset({'alive', 'other'}), 'publishing': frozenset({'publishes'})}
 
 
 def row(tid, gateway, reported, **extra):
@@ -32,7 +33,7 @@ def test_only_finished_rows_of_a_wholly_absent_owner_are_released():
     rows = [row('t_done', 'gone', 'done'), row('t_arch', 'gone', 'archived'), row('t_open', 'gone', 'running'),
             row('t_none', 'gone', None), row('t_unq', 'gone', 'done', ownership_state='unknown'),
             row('t_pub', 'publishes', 'done'), row('t_beat', 'alive', 'done')]
-    out = _release_removed_owners(rows, {('publishes', 'build', 't_other')}, FRESH)
+    out = _release_removed_owners(rows, FRESH)
     got = {r['id']: (r['status'], r['released'], r['unfinished'], r.get('owner_removed', False)) for r in out}
     assert got == {'t_done': ('done', True, False, True), 't_arch': ('archived', True, False, True),
                    't_open': ('unknown', False, True, False), 't_none': ('unknown', False, True, False),
@@ -42,27 +43,15 @@ def test_only_finished_rows_of_a_wholly_absent_owner_are_released():
     assert rows[0]['status'] == 'unknown', 'the remembered rows are not edited in place'
 
 
-def test_a_stale_or_empty_replica_releases_nothing():
+def test_a_stale_replica_releases_nothing():
     rows = [row('t_done', 'gone', 'done')]
-    assert _release_removed_owners(rows, (), FRESH) == rows, 'no owner set and no heartbeat: the read proves nothing'
-    assert _release_removed_owners(rows, {('publishes', 'build', 't_x')}, {}) == rows, 'stale: no moved evidence'
-    assert _release_removed_owners(rows, (), {}) == rows
-
-
-def test_owner_sink_takes_a_generator_once_and_borrows_a_set():
-    sink = OwnerSink()
-    assert tuple(sink.value) == ()
-    owners = frozenset({('a', 'b', 't')})
-    sink.update(owners)
-    assert sink.value is owners
-    sink.update(o for o in [('a', 'b', 't')])
-    assert sink.value == {('a', 'b', 't')} and list(sink.value) == list(sink.value)
+    assert _release_removed_owners(rows, {}) == rows, 'stale: no moved evidence'
 
 
 def put(path, gateway, tid, seq, **extra):
     with sqlite3.connect(path) as db:
         db.execute("INSERT INTO replica VALUES (?,'tasks',?,1,?,?,1000000)",
-                   (gateway, f'work/build/{tid}', seq, json.dumps(card(tid, gateway=gateway, **extra))))
+                   (gateway, f'work/build/{tid}', seq, json.dumps(card(tid, gateway=gateway, **{'created_at': 100 + seq, **extra}))))
 
 
 @pytest.fixture
@@ -194,13 +183,26 @@ def test_a_stale_read_keeps_an_earlier_release(world):
     assert by_id(activity._legacy_remote_links())['t_done'] == ('done', True, True)
 
 
-def test_released_rows_are_restored_by_the_pure_rule_when_the_owner_publishes():
-    released = _release_removed_owners([row('t_done', 'gone', 'done')], {('other', 'build', 't_x')}, FRESH)
+def test_released_rows_are_restored_by_the_pure_rule_when_the_owner_is_listed_again():
+    released = _release_removed_owners([row('t_done', 'gone', 'done')], FRESH)
     assert released[0]['owner_removed'] is True
-    assert _release_removed_owners(released, {('other', 'build', 't_x')}, FRESH) == released, 'stable while it is gone'
-    back = _release_removed_owners(released, {('gone', 'build', 't_new')}, FRESH)
+    assert _release_removed_owners(released, FRESH) == released, 'stable while it is gone'
+    back = _release_removed_owners(released, {**FRESH, 'known_gateways': FRESH['known_gateways'] | {'gone'}})
     assert back == [row('t_done', 'gone', 'done')]
-    assert _release_removed_owners(released, (), {}) == released and _release_removed_owners(released, (), FRESH) == released
+    assert _release_removed_owners(released, {}) == released, 'a stale read neither makes nor takes back'
+
+
+def test_without_the_list_of_known_gateways_nothing_counts_as_removed():
+    rows = [row('t_done', 'gone', 'done')]
+    evidence = {k: v for k, v in FRESH.items() if k != 'known_gateways'}
+    assert _release_removed_owners(rows, evidence) == rows
+    listed = {**FRESH, 'known_gateways': FRESH['known_gateways'] | {'gone'}}
+    assert _release_removed_owners(rows, listed) == rows, 'offline, not removed'
+
+
+def test_a_malformed_created_at_proves_nothing_and_does_not_raise():
+    rows = [row('t_bad', 'gone', 'ready', created_at=[1]), row('t_live', 'alive', 'done', created_at=[1], owner_profile='work')]
+    assert _release_removed_owners(rows, FRESH) == rows
 
 
 def test_a_live_owners_closed_card_that_left_its_scope_is_released_as_aged_out(world):

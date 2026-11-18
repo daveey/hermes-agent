@@ -123,6 +123,12 @@ def attests(verdicts, scope, published_at: Any) -> bool:
     return published_before_silence(last, last, published_at)
 
 
+def known_gateways(info_rows) -> frozenset:
+    """Every gateway the replica holds a ``gateway/info`` row for, readable or not. An offline owner keeps its row
+    (its heartbeat just goes stale); a machine removed from the Board loses it."""
+    return frozenset(str(gw) for gw, _raw in info_rows)
+
+
 def fresh_scopes(heartbeats: dict[tuple[str, str, str], tuple[float, float]], now: float) -> ScopeVerdicts:
     """The ``scope_heartbeats`` keys ``fresh`` at ``now``, and the last beat of the others (``ScopeVerdicts``): all a
     replica projection learns from the heartbeats."""

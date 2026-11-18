@@ -38,7 +38,7 @@ from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES,
 from hermes_cli.kanban_session_activity_release import owner_attests_terminal as _owner_attests_terminal
 from hermes_cli.kanban_db_sync import sync_enabled as _board_sync_enabled
 from hermes_cli.kanban_scope_heartbeat import scope_heartbeats as _scope_heartbeats
-from hermes_cli.kanban_session_activity_records import (OwnerSink as _OwnerSink, _fold_legacy_aliases, _moved_evidence,
+from hermes_cli.kanban_session_activity_records import (_fold_legacy_aliases, _moved_evidence,
                                                           _release_removed_owners, _retire_moved)
 from hermes_cli.kanban_session_activity_attention import AttentionCache as _AttentionCache
 from hermes_cli.kanban_session_activity_attention import run_checks as _run_done_checks
@@ -581,6 +581,14 @@ _REPLICA_PROBE = ("SELECT count(*), count(seq), max(seq), total(seq), total(vers
                   "FROM replica WHERE coll = 'tasks'")
 
 
+def _note_known_gateways(moved_out: dict | None, info_rows: list) -> None:
+    """Add the gateways the replica holds an info row for to non-empty (not stale) moved evidence. Read on every
+    call and never memoized: an unrelated gateway's row must not rebuild a projection, and a removed owner is told
+    from an offline one by this list alone (``_release_removed_owners``). [daveey]"""
+    if moved_out:
+        moved_out['known_gateways'] = _scope_hb.known_gateways(info_rows)
+
+
 def _read_remote_links(path: Path, now: float | None = None, *,
                        qualified_out: set | None = None,
                        owners_out: set | None = None,
@@ -632,13 +640,16 @@ def _read_remote_links(path: Path, now: float | None = None, *,
                     moved_out.update(memo[9])
                 if closed_out is not None:
                     closed_out.update(memo[10])
+                _note_known_gateways(moved_out, info_rows)
                 return list(memo[3])  # cards are read-only, as in ``_links_cache``
         if key is not None:  # [daveey] a miss reads and re-projects only the rows whose seq moved
             from hermes_cli.kanban_replica_memo import finish
             view = _replica_rows.read(conn, path, version_column, probe, ident, me=me)
-            return finish(view, now, me, info_rows, last_ok, offline, key, stale,
+            cards = finish(view, now, me, info_rows, last_ok, offline, key, stale,
                           qualified_out=qualified_out, owners_out=owners_out,
                           moved_out=moved_out, closed_out=closed_out)
+            _note_known_gateways(moved_out, info_rows)
+            return cards
         else:
             # Aggregate raw text, not json(data): malformed task JSON retains its per-row decode semantics.
             # sqlite3 releases/reacquires the GIL per fetched row; under contention 12k rows can stall for 90s.
@@ -648,9 +659,11 @@ def _read_remote_links(path: Path, now: float | None = None, *,
     finally:
         conn.close()
     if key is None:
-        return _project_replica(path, now, me, rows, info_rows, last_ok, offline,
+        cards = _project_replica(path, now, me, rows, info_rows, last_ok, offline,
                                 qualified_out=qualified_out, owners_out=owners_out, moved_out=moved_out,
                                 closed_out=closed_out)
+        _note_known_gateways(moved_out, info_rows)
+        return cards
 
 
 
@@ -727,6 +740,7 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         owners_out.update((gw, board, tid) for gw, _, board, tid in tasks)
     if moved_out is not None and not stale:
         moved_out.update(_moved_evidence(tasks, heartbeats, now))
+        moved_out['publishing'] = frozenset(seen_at)  # every gateway with a task record (``_release_removed_owners``)
     blank_before = {key for key in tasks if key[1] is None}
     _fold_legacy_aliases(tasks, raw)
     # Only a proven-identity alias is the same card as its qualified twin (folded above, links carried
@@ -1085,9 +1099,9 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
             raise FileNotFoundError("no hub.db")
         qualified: set[tuple[str, str, str]] = set()
         from hermes_cli.kanban_replica_aggregates import BorrowedSet, remembered_publications
-        closed, owners = BorrowedSet(), _OwnerSink()
+        closed = BorrowedSet()
         moved: dict[str, Any] = {}
-        cards = _read_remote_links(path, qualified_out=qualified, closed_out=closed, moved_out=moved, owners_out=owners)
+        cards = _read_remote_links(path, qualified_out=qualified, closed_out=closed, moved_out=moved)
         remembered_publications(moved, previous)
     except Exception as exc:  # a broken replica must never break the sidebar
         if previous is None:
@@ -1119,7 +1133,7 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
                  and not (c.get("ownership_state") == "unknown"
                           and (c["session"], c.get("gateway"), c.get("board"), c.get("id")) in qualified_now)
                  # Fresh replica: the named owner publishes the scope without it, another gateway owns the card.
-                 and not _retire_moved(c, moved)]), owners.value, moved))
+                 and not _retire_moved(c, moved)]), moved))
     if _snapshot_saved != (scope, cards):
         # The durable snapshot only speeds a cold start. Losing a write race (database is locked) must not
         # fail this read: the sidebar would mark every row kanban_unknown. The next changed read retries.
