@@ -290,8 +290,42 @@ def _ensure_mcp_loop():
             return
         loop = _origin._mcp_loop = asyncio.new_event_loop()
         loop.set_exception_handler(_mcp_loop_exception_handler)
-        _origin._mcp_thread = threading.Thread(target=loop.run_forever, name="mcp-event-loop", daemon=True)
-        _origin._mcp_thread.start()
+        ready = threading.Event()
+        startup_lock = threading.Lock()
+        abandoned = exited = False
+
+        def run():
+            nonlocal exited
+            try:
+                loop.run_forever()
+            finally:
+                # Startup failure and thread exit agree on exactly one closer.
+                # Never take _core._lock here: the starting caller holds it.
+                with startup_lock:
+                    exited = True
+                    if abandoned:
+                        loop.close()
+
+        # Thread.start only confirms the thread exists. Publish readiness from an
+        # actual loop callback before discovery can schedule its first coroutine.
+        loop.call_soon(ready.set)
+        thread = _origin._mcp_thread = threading.Thread(target=run, name="mcp-event-loop", daemon=True)
+        try:
+            thread.start()
+            if not ready.wait(5) or not loop.is_running():
+                raise RuntimeError("MCP event loop did not become ready")
+        except BaseException:
+            _origin._mcp_loop = _origin._mcp_thread = None
+            with startup_lock:
+                abandoned = True
+                if exited or thread.ident is None:
+                    loop.close()
+                else:
+                    # The delayed thread will stop and close when it gets CPU.
+                    # Cleanup must not replace the original startup failure.
+                    with contextlib.suppress(RuntimeError):
+                        loop.call_soon_threadsafe(loop.stop)
+            raise
 
 
 def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
