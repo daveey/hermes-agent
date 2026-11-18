@@ -117,14 +117,16 @@ def _opaque_expansions(text, bindings):
             continue
         if quote != "'" and text.startswith('$((', index):
             end = _paren_end(text, index)
-            out.append('0')  # Arithmetic output cannot name a lifecycle executable.
-            index = end
-            continue
+            if text[index:end].endswith('))'):
+                out.append('0')  # Arithmetic output cannot name a lifecycle executable.
+                index = end
+                continue
         if not quote and text.startswith('((', index):
             end = index + _paren_end('$' + text[index:], 0) - 1
-            out.append(':')  # Arithmetic command contents are not executable words.
-            index = end
-            continue
+            if text[index:end].endswith('))'):
+                out.append(':')  # Only a closed arithmetic command is opaque.
+                index = end
+                continue
         if quote != "'" and (span := _expansion(text, index, bool(quote), bindings)):
             marker = f'{_MARKER}{len(expansions)}z'
             expansions[marker] = span
@@ -169,6 +171,14 @@ def scan_computed_commands(command, *, cwd, executed, variable_source, budget, r
         budget.variable_candidates.computed_producer_shadow = True
     if not any(s in command for s in ('${', '$(', '`')):
         return False
+    from cron.lifecycle_guard_substitutions import separate_substitutions
+
+    # Bodies execute even when their output is an assignment or data argument.
+    # Keep their original syntax/provenance; flattened token recovery loses it.
+    _, bodies = separate_substitutions(command)
+    for body in bodies:
+        if recurse(body, cwd, True, source):
+            return True
     opaque, expansions = _opaque_expansions(command, budget.variable_candidates.values)
     for segment in _structural_segments(opaque):
         words = segment[guard._peel_reserved_words(segment):]

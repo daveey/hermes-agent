@@ -8,6 +8,11 @@ from cron.lifecycle_guard import scan_gateway_lifecycle
 
 
 RUN = [
+    'x=$(${x:-hermes} gateway restart)',
+    'echo `${x:-hermes} gateway restart`',
+    'echo "$(echo "$(${x:-bash} ./r.sh)")"',
+    '((${x:-hermes} gateway restart); true)',
+    'echo $(( ${x:-hermes} gateway restart); true)',
     '${x:-hermes gateway restart}',
     '${x:-hermes} gateway restart',
     '$(echo hermes) gateway restart',
@@ -28,6 +33,11 @@ RUN = [
     '. ./producer.sh; $(echo echo) gateway restart',
 ]
 CLEAN = [
+    'x=$(${x:-echo} hi)',
+    'echo `${x:-echo} hi`',
+    'echo "$(echo "$(${x:-bash} ./clean.sh)")"',
+    '((${x:-echo} hi); true)',
+    'echo $(( ${x:-echo} hi); true)',
     '${x:-echo} hi',
     '$(echo echo) hi',
     '$(printf %s echo) hi',
