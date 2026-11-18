@@ -9,9 +9,15 @@ exact body and its paired successful result holds the source integer.
 
 Every step is fail-closed. Coverage is deliberately limited to direct
 ``kanban_comment`` calls whose result is a top-level JSON object. Wrapped
-``tool_call`` batches, ``cross_task`` comment actions, shell calls and redacted
-bodies are not interpreted (no recursive search of arbitrary JSON); a direct
-receipt of the same source integer under any other tool name refuses.
+``tool_call`` batches, ``cross_task`` comment actions and shell calls are not
+interpreted (no recursive search of arbitrary JSON); a direct receipt of the
+same source integer under any other tool name refuses.
+
+The retained call holds the body *before* the writer stored it, and
+``kanban_comment`` stores ``redact_sensitive_text(body, force=True)``. So a body
+matches as written or after that same forced redaction, nothing looser: a
+legacy comment quoting an E.164 number (stored as ``+141****0134``) is otherwise
+unprovable forever and refuses every ``--seen`` release of its card.
 """
 from __future__ import annotations
 
@@ -78,6 +84,12 @@ def _is_receipt(reply, task_id, source_id):
             and type(result.get('comment_id')) is int and result['comment_id'] == source_id)
 
 
+def _stored_forms(body):
+    """The body as written and as ``kanban_comment`` stores it (forced redaction, then strip)."""
+    from agent.redact import redact_sensitive_text
+    return {body.strip(), redact_sensitive_text(body, force=True).strip()}
+
+
 def resolve(rows, event, payload, transcript, *, board=None):
     """Bridge source integer to exact body, never to a receiver integer.
 
@@ -118,7 +130,8 @@ def resolve(rows, event, payload, transcript, *, board=None):
         start, end = math.floor(message['timestamp']), math.floor(reply['timestamp'])
         if not start <= event['created_at'] <= end:
             return []
-        candidates = [r for r in rows if r['body'] == args['body'].strip()
+        bodies = _stored_forms(args['body'])
+        candidates = [r for r in rows if r['body'] in bodies
                       and r['author'] == author.strip()
                       and start <= r['created_at'] <= event['created_at']]
     except (_Unprovable, ValueError, TypeError, KeyError, AttributeError, OverflowError):
