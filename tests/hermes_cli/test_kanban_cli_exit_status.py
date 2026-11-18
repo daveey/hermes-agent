@@ -58,3 +58,18 @@ def test_delegated_child_kanban_cli_refusal_returns_nonzero_exit_status(tmp_path
 
     assert refused.returncode == 1
     assert "delegate_task" in refused.stderr
+
+
+def test_delegated_child_cli_refuses_contain_and_resume_contained(tmp_path):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    created = _run_hermes(home, "kanban", "create", "containment adapter probe", "--json")
+    assert created.returncode == 0, created.stderr
+    task_id = json.loads(created.stdout)["id"]
+    for extra in (
+        ("contain", "--authority", task_id, "--summary", "fixture"),
+        ("resume-contained", task_id, "--episode", "01234567-89ab-7def-8123-456789abcdef"),
+    ):
+        refused = _run_hermes(home, "kanban", *extra, marker=True)
+        assert refused.returncode == 1, refused.stderr + refused.stdout
+        assert "delegate_task" in refused.stderr

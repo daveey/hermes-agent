@@ -159,3 +159,95 @@ def test_receipt_cache_immutable_and_foreign_board_not_authority(synced_conn):
     conn.execute("UPDATE kanban_sync_state SET board_id='other'")
     with pytest.raises(ContainmentRefused, match="different board"):
         replica.remember(conn, proof, board="fixture", task=target, uid=stop["event_uid"])
+
+
+def _released_unheld(conn):
+    target, child, stop, release, hub = scenario(conn)
+    marker = sync.RemoteChange(1, "tasks", target, "upsert",
+                               {"status": "triage", "containment_episode": stop["event_uid"]}, 100, "", "home")
+    apply(conn, hub, [marker, event(stop, hub, 2), event(release, hub, 3)])
+    assert not connections.held(conn, target)
+    return target, child, stop, release, hub
+
+
+@pytest.mark.parametrize("column,value", [
+    ("current_run_id", 1),
+    ("human_request", "{}"),
+    ("block_kind", "needs_input"),
+])
+def test_restore_released_does_not_ready_claimed_or_human_held_replica(synced_conn, column, value):
+    conn = synced_conn
+    target, *_ = _released_unheld(conn)
+    conn.execute(f"UPDATE tasks SET status='triage',{column}=? WHERE id=?", (value, target))
+    replica._restore_released(conn, target)
+    row = conn.execute("SELECT status,current_run_id,human_request,block_kind FROM tasks WHERE id=?",
+                       (target,)).fetchone()
+    assert row[0] == "triage"
+    kept = {"current_run_id": row[1], "human_request": row[2], "block_kind": row[3]}
+    assert kept[column] == value
+
+
+def test_stale_non_upsert_outbox_is_deleted_even_when_nonlifecycle_fields_remain(synced_conn):
+    conn = synced_conn
+    target, *_ = scenario(conn)
+    capture._clear_outbox(conn)
+    conn.execute(
+        "INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at) VALUES (?,?,?,?,?,?,1)",
+        ("dead-delete", "tasks", target, "delete", json.dumps({"title": "stale-delete"}), "0"),
+    )
+    conn.execute(
+        "INSERT INTO kanban_sync_outbox (op_id,table_name,row_uid,op,fields,hlc,created_at) VALUES (?,?,?,?,?,?,1)",
+        ("keep-upsert", "tasks", target, "upsert", json.dumps({"title": "keep"}), "0"),
+    )
+    from hermes_cli.kanban_containment_outbox import strip_lifecycle
+    strip_lifecycle(conn, target)
+    remaining = {row[0]: row[1] for row in conn.execute(
+        "SELECT op_id,op FROM kanban_sync_outbox WHERE row_uid=?", (target,))}
+    assert "dead-delete" not in remaining
+    assert remaining.get("keep-upsert") == "upsert"
+
+
+def test_corrupt_containment_delivery_json_holds(synced_conn):
+    from hermes_cli import kanban_containment_canonical as canonical
+    from hermes_cli import kanban_containment_requests as requests
+    conn = synced_conn
+    target, *_ = scenario(conn)
+    canonical._schema(conn)
+    conn.execute(
+        "INSERT INTO containment_delivery(request_uid,board,gateway,op_json,confirmed) VALUES (?,?,?,?,0)",
+        ("corrupt-req", "fixture", "worker", "{not-json",),
+    )
+    assert requests.pending(conn, target, set()) is True
+    assert connections.held(conn, target)
+
+
+def test_task_permit_does_not_authorize_a_different_held_uid(synced_conn):
+    conn = synced_conn
+    target, child, stop, _, hub = scenario(conn)
+    marker = sync.RemoteChange(1, "tasks", target, "upsert",
+                               {"status": "triage", "containment_episode": stop["event_uid"]}, 100, "", "home")
+    apply(conn, hub, [marker])
+    assert connections.held(conn, target)
+    other = sync.RemoteChange(2, "tasks", child, "upsert", {"status": "todo"}, 101, "", "home")
+    from hermes_cli.kanban_db_connect import write_txn
+    with write_txn(conn):
+        with replica.projection(conn, other):
+            with pytest.raises(sqlite3.IntegrityError, match="containment_pending"):
+                conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (target,))
+    assert kb.get_task(conn, target).status == "triage"
+
+
+def test_replica_restore_keeps_spend_hold_in_triage(synced_conn):
+    conn = synced_conn
+    target, child, stop, release, hub = scenario(conn)
+    marker = sync.RemoteChange(1, "tasks", target, "upsert",
+                               {"status": "triage", "containment_episode": stop["event_uid"]}, 100, "", "home")
+    apply(conn, hub, [marker, event(stop, hub, 2)])
+    with kb.write_txn(conn):
+        kb._append_event(conn, target, "spend_budget_triaged", {"fixture": True})
+    apply(conn, hub, [event(release, hub, 3)])
+    assert not connections.held(conn, target)
+    assert kb.get_task(conn, target).status == "triage"
+    assert kb.get_task(conn, child).status == "todo"
+    assert conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='spend_budget_triaged'",
+                        (target,)).fetchone()

@@ -190,3 +190,15 @@ def test_failed_release_transaction_does_not_leave_a_durable_permission(board, m
     assert board.execute("SELECT COUNT(*) FROM containment_attestations").fetchone()[0] == 0
     assert guard.pending(board, relay, verify_release=lifecycle_verifier(board))
     assert kb.get_task(board, relay).status == "triage"
+
+
+def test_resume_refuses_authority_that_became_a_transitive_descendant(board):
+    from hermes_cli import kanban_containment_lifecycle as lifecycle
+    relay, consumer, authority, target, spec = setup(board)
+    episode = contain(board, relay, target, spec)["episode"]
+    board.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (consumer, authority))
+    assert lifecycle._reachable(board, relay, authority)
+    with pytest.raises(lifecycle.ContainmentRefused, match="independently"):
+        release(board, target, episode, authority)
+    assert kb.get_task(board, relay).status == "triage"
+    assert kb.get_task(board, consumer).status == "todo"

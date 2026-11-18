@@ -193,6 +193,27 @@ def test_confirmed_request_never_answers_new_contain_or_release(board, monkeypat
     assert len(hub.posts) == 4
 
 
+def test_recover_stop_does_not_run_for_a_live_non_authority(board, monkeypatch):
+    from hermes_cli.kanban_containment_actor import Actor
+
+    target, authority, session, hub = setup(board, monkeypatch)
+    hub.drop_reply = True
+    with scoped_current_session_id(session), pytest.raises(DeliveryUnknown):
+        service.contain(board, authority=authority, summary="Fixture")
+    original = copy.deepcopy(hub.posts[0])
+    assert original[0]["op"] == "contain"
+    assert original[0]["actor_task"] == target
+    assert original[0]["payload"]["policy"]["authority"]["task_id"] == authority
+    hub.drop_reply = False
+    remote._recover_stop(
+        board, hub, "fixture",
+        Actor(original[0]["actor_task"], original[0]["actor_run_uid"]),
+        target, original[0]["event_uid"],
+    )
+    assert hub.posts == [original]
+    assert kb.get_task(board, target).status == "running"
+
+
 
 def test_cli_and_tool_unknown_receipts_expose_same_recovery_identity(board, monkeypatch, capsys):
     import argparse

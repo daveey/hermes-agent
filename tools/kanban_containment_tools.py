@@ -21,7 +21,8 @@ CONTAIN_SCHEMA = _schema("kanban_contain",
     "episode and a live scoped authority or genuinely new producer completion; generic unblock cannot release it. "
     "Synced boards refuse until canonical containment capability is installed. After terminal_for_run=true, stop.",
     {"task_id": {"type": "string"}, "authority": {"type": "string"},
-     "producer": {"type": "string"}, "summary": {"type": "string", "minLength": 1, "maxLength": 2000}},
+     "producer": {"type": "string"}, "summary": {"type": "string", "minLength": 1,
+        "description": "Bounded handoff summary; runtime rejects more than 2000 characters."}},
     ["authority", "summary"])
 RESUME_SCHEMA = _schema("kanban_resume_contained",
     "Resume an exact contained episode with authenticated evidence. Requires a live scoped authority "
