@@ -475,12 +475,12 @@ def test_remote_snapshot_is_authenticated_exhaustive_and_paged(live, svc, monkey
 
 
 @pytest.mark.parametrize("page", [
-    {"head": 1, "rows": [], "next": "", "more": True},          # claims more but cannot advance
-    {"head": 1, "rows": []},                                      # no completeness flag
-    {"head": 1, "rows": "nope", "more": False},                   # malformed
+    {"head": 1, "table": "tasks", "rows": [], "next": "", "more": True},          # claims more but cannot advance
+    {"head": 1, "table": "tasks", "rows": []},                                      # no completeness flag
+    {"head": 1, "table": "tasks", "rows": "nope", "more": False},                   # malformed
     {"rows": [], "more": False},                                  # no head
-    {"head": 1, "rows": [{"uid": "a"}], "more": True, "next": "a"},  # never ends (cap)
-    {"head": 1, "rows": [], "more": "no", "next": ""},            # non-boolean flag
+    {"head": 1, "table": "tasks", "rows": [{"uid": "a"}], "more": True, "next": "a"},  # never ends (cap)
+    {"head": 1, "table": "tasks", "rows": [], "more": "no", "next": ""},            # non-boolean flag
 ])
 def test_incomplete_or_malformed_snapshot_refuses(live, svc, monkeypatch, page):
     tid, _ = bad_card(live, svc, monkeypatch)
@@ -518,7 +518,7 @@ def test_hub_without_snapshot_route_refuses(live, svc, monkeypatch):
 def test_snapshot_cursor_must_advance(live, svc, monkeypatch):
     tid, _ = bad_card(live, svc, monkeypatch)
     hub = svc.hub(ME)
-    monkeypatch.setattr(hub, "snapshot_page", lambda *a, **k: {"head": 1, "rows": [], "next": "", "more": True})
+    monkeypatch.setattr(hub, "snapshot_page", lambda *a, **k: {"head": 1, "table": "tasks", "rows": [], "next": "", "more": True})
     assert "cursor" in plan_with(live, hub, tid)["refusal"]
 
 
@@ -527,7 +527,7 @@ def test_snapshot_page_cap_is_incomplete_even_when_cursor_advances(live, svc, mo
     monkeypatch.setattr(rk, "MAX_SNAPSHOT_PAGES", 3)
     hub = svc.hub(ME)
     monkeypatch.setattr(hub, "snapshot_page", lambda b, t, after="", *a: {
-        "head": 1, "rows": [{"uid": after + "a"}], "next": after + "a", "more": True})
+        "head": 1, "table": "tasks", "rows": [{"uid": after + "a"}], "next": after + "a", "more": True})
     assert "page cap" in plan_with(live, hub, tid)["refusal"]
 
 

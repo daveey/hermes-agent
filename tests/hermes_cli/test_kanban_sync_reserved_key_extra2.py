@@ -113,10 +113,10 @@ class _Cursor:
 
 
 @pytest.mark.parametrize("page_factory", [
-    lambda: types.MappingProxyType({"head": 1, "rows": [], "more": False}),
-    lambda: {"head": 1, "rows": {}, "more": False},
-    lambda: {"head": 1, "rows": [types.MappingProxyType({"uid": "a"})], "more": False},
-    lambda: {"head": 1, "rows": [], "more": 0},
+    lambda: types.MappingProxyType({"head": 1, "table": "tasks", "rows": [], "more": False}),
+    lambda: {"head": 1, "table": "tasks", "rows": {}, "more": False},
+    lambda: {"head": 1, "table": "tasks", "rows": [types.MappingProxyType({"uid": "a"})], "more": False},
+    lambda: {"head": 1, "table": "tasks", "rows": [], "more": 0},
 ], ids=["page_not_dict", "rows_not_list", "row_not_dict", "more_not_bool"])
 def test_snapshot_envelope_each_clause_refuses(live, svc, monkeypatch, page_factory):
     """snap_page_dict / snap_rows_list / snap_row_dict / snap_more_bool: shapes that only one clause rejects."""
@@ -132,7 +132,7 @@ def test_snapshot_next_cursor_must_be_a_string(live, svc, monkeypatch):
     """snap_next_str: a non-string cursor refuses; it must not be accepted and followed to a clean second page."""
     tid, _ = base.bad_card(live, svc, monkeypatch)
     hub = svc.hub(base.ME)
-    pages = [{"head": 1, "rows": [], "more": True, "next": _Cursor()}, {"head": 1, "rows": [], "more": False}]
+    pages = [{"head": 1, "table": "tasks", "rows": [], "more": True, "next": _Cursor()}, {"head": 1, "table": "tasks", "rows": [], "more": False}]
     monkeypatch.setattr(hub, "snapshot_page", lambda *a, **k: pages.pop(0))
     report = rk.plan(live, hub, base.BOARD, tid, base.GOOD, base.REASON)
     assert not report["eligible"], report

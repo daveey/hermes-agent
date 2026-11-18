@@ -287,6 +287,7 @@ def _remote_key_refusal(hub: Any, board: str, new_key: str) -> Optional[str]:
     from hermes_cli.kanban_sync_client import HubError, SyncUnavailable
     incomplete = "authoritative_snapshot_incomplete"
     after = ""
+    snapshot_head = None
     for _ in range(MAX_SNAPSHOT_PAGES):
         try:
             page = hub.snapshot_page(board, "tasks", after)
@@ -295,6 +296,12 @@ def _remote_key_refusal(hub: Any, board: str, new_key: str) -> Optional[str]:
         if (not isinstance(page, dict) or not isinstance(page.get("rows"), list) or not isinstance(page.get("head"), int)
                 or not isinstance(page.get("more"), bool) or not all(isinstance(r, dict) for r in page["rows"])):
             return incomplete + ": malformed page"
+        if page.get("table") != "tasks":
+            return incomplete + ": table identity mismatch"
+        if snapshot_head is None:
+            snapshot_head = page["head"]
+        if page["head"] != snapshot_head:
+            return incomplete + ": snapshot head changed"
         if any(r.get("idempotency_key") == new_key for r in page["rows"]):
             return "replacement_key_in_remote_use"
         if not page["more"]:
