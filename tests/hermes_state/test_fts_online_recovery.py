@@ -466,13 +466,12 @@ def test_family_of_full_matches_shadow_names():
 
 
 def test_a_page_shared_with_a_canonical_table_is_never_freed(tmp_path, monkeypatch):
-    """The trigram index points at a page of `messages`. Whichever structure SQLite names, the recovery either
-    refuses or unlinks the trigram family; it never drains it, and `messages` keeps every row."""
+    """The trigram index points at a page of `messages`: the shared page is named against `messages`, which no index
+    rebuild may touch."""
     import struct
 
     path = tmp_path / "state.db"
     _seed(path)
-    before = _canonical(path)
     conn = _raw(path)
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     root = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = 'messages_fts_trigram_data'").fetchone()[0]
@@ -492,18 +491,16 @@ def test_a_page_shared_with_a_canonical_table_is_never_freed(tmp_path, monkeypat
     monkeypatch.setattr(SessionDB, "_foreign_state_db_holders", lambda self: [(424242, str(path))])
     db = _open_stale(path)
     try:
-        recovered = db.retry_deferred_fts_recovery()
-        if recovered:
-            _drain(db)
+        # SQLite reaches the shared page from `messages` second and names Tree <messages>: damage outside the index,
+        # so the recovery refuses and touches nothing (only `hermes sessions recover` may rebuild this store).
+        assert db.retry_deferred_fts_recovery() is False
     finally:
         db.close()
-    assert _canonical(path)[:len(before)] == before
+    assert _meta(path, FTS_STALE_KEY) == "1"
     with _raw(path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'fts_v22_trash_messages_fts_trigram%'"
-                            ).fetchone()[0] == 0
-    if recovered:
-        lines, _master = _integrity_lines(path)
-        assert not [l for l in lines if "2nd reference" in l]
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'messages_fts_trigram_data'"
+                            ).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'fts_v22_trash_%'").fetchone()[0] == 0
 
 
 def test_one_shot_rebuild_never_drops_a_tree_that_shares_a_page(tmp_path):
@@ -528,3 +525,89 @@ def test_one_shot_rebuild_never_drops_a_tree_that_shares_a_page(tmp_path):
     assert _canonical(path)[:len(before)] == before
     lines, _master = _integrity_lines(path)
     assert not [l for l in lines if "2nd reference" in l or l.startswith("Freelist")]
+
+
+def test_an_unnamed_family_that_shared_a_page_with_an_unlinked_one_drains_cleanly(tmp_path, monkeypatch):
+    """The base index points at a trigram leaf: SQLite names only the base tree. Base is unlinked, trigram (unnamed)
+    is trashed and drained, freeing the formerly shared page once; the file ends with no double reference."""
+    import struct
+
+    path = tmp_path / "state.db"
+    _seed(path)
+    before = _canonical(path)
+    conn = _raw(path)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    root = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = 'messages_fts_data'").fetchone()[0]
+    victim = conn.execute("SELECT pageno FROM dbstat WHERE name = 'messages_fts_trigram_data' AND pagetype = 'leaf' "
+                          "ORDER BY pageno LIMIT 1").fetchone()[0]
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    _mark_fail_open(conn)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.close()
+    with open(path, "r+b") as fh:
+        fh.seek((root - 1) * page_size)
+        page = bytearray(fh.read(page_size))
+        assert page[0] == 5, "fixture needs a multi-page base index"
+        page[8:12] = struct.pack(">I", victim)
+        fh.seek((root - 1) * page_size)
+        fh.write(page)
+    from hermes_state_fts_online import plan_online_recovery
+    plan = plan_online_recovery(path)
+    monkeypatch.setattr(SessionDB, "_foreign_state_db_holders", lambda self: [(424242, str(path))])
+    db = _open_stale(path)
+    try:
+        assert db.retry_deferred_fts_recovery() is True
+        _drain(db)
+        assert db.search_messages("bravoword")
+    finally:
+        db.close()
+    assert "messages_fts" in plan["unlink"]
+    assert _canonical(path)[:len(before)] == before
+    lines, _master = _integrity_lines(path)
+    assert not [l for l in lines if "2nd reference" in l or l.startswith(("Freelist", "Tree"))]
+
+
+def test_a_refused_plan_is_remembered_by_the_one_shot_gate(tmp_path, monkeypatch):
+    import hermes_state_fts_online
+
+    path = tmp_path / "state.db"
+    _seed(path, sessions=1, per=10)
+    db = SessionDB(db_path=path)
+    try:
+        db.set_meta(FTS_STALE_KEY, "1")  # stale, so the online path does not just adopt a healthy store
+        calls = []
+
+        def refuse(db_path):
+            calls.append(1)
+            raise hermes_state_fts_online.OnlineRecoveryRefused("damage outside the index (test)")
+
+        monkeypatch.setattr(hermes_state_fts_online, "plan_online_recovery", refuse)
+        db._fts_cached_plan = None
+        assert db._oneshot_drop_is_safe(legacy=False) is False
+        assert db._oneshot_drop_is_safe(legacy=False) is False
+        assert db.recover_stale_fts_online(reason="test") is False
+        assert calls == [1]  # one whole-file check; the refusal is remembered for the gate and the online path
+        assert db.recover_stale_fts_online(reason="operator", force=True) is False and calls == [1, 1]
+    finally:
+        db.close()
+
+
+def test_retry_tick_plans_before_taking_the_session_lock(damaged, monkeypatch):
+    import hermes_state_fts_online
+
+    path, _before = damaged
+    db = _open_stale(path)
+    try:
+        real = hermes_state_fts_online.plan_online_recovery
+        held = []
+
+        def plan(db_path):
+            held.append(db._lock.locked())
+            return real(db_path)
+
+        monkeypatch.setattr(hermes_state_fts_online, "plan_online_recovery", plan)
+        db._fts_cached_plan = None
+        assert db.retry_deferred_fts_recovery() is True
+        assert held == [False]  # one check, outside the lock, shared by the gate and the online path
+    finally:
+        db.close()

@@ -574,20 +574,24 @@ class SessionSchemaMixin:
         )
         return True
 
-    def _oneshot_drop_is_safe(self) -> bool:
+    def _oneshot_drop_is_safe(self, *, legacy: bool) -> bool:
         """False when the whole-file plan names a damaged index tree (the retry then takes the online path, which
-        unlinks it unread) or cannot attribute the damage (nothing may be freed; ``hermes sessions recover``)."""
-        from hermes_state_fts_online import OnlineRecoveryRefused, plan_online_recovery
+        unlinks it unread; a legacy store stays on LIKE) or cannot attribute the damage (nothing may be freed;
+        ``hermes sessions recover``). A refusal is remembered (``ONLINE_REFUSAL_MEMO_S``); the retry tick computes
+        the plan before taking ``self._lock`` and this reuses it."""
+        from hermes_state_fts_online import OnlineRecoveryRefused
 
         try:
-            plan = plan_online_recovery(self.db_path)
+            plan = self._fts_plan()
         except OnlineRecoveryRefused as exc:
             logger.error("Stale FTS rebuild skipped: %s. `hermes sessions recover` rebuilds the store offline.", exc)
             return False
         if plan["unlink"]:
-            self._fts_oneshot_failed = True
+            self._fts_oneshot_failed = not legacy
             logger.error("Stale FTS rebuild skipped: integrity_check names damaged index tree(s) %s, which a DROP could "
-                         "free twice; the next retry recovers online (unlinks them unread).", ", ".join(plan["unlink"]))
+                         "free twice.%s", ", ".join(plan["unlink"]),
+                         " The next retry recovers online (unlinks them unread)." if not legacy else
+                         " Legacy layout: `hermes sessions recover` rebuilds the store offline.")
             return False
         return True
 
@@ -652,6 +656,11 @@ class SessionSchemaMixin:
         except sqlite3.Error:
             pass
         now = time.monotonic()
+        if now >= getattr(self, "_fts_stale_retry_after", 0.0):
+            # The whole-file check behind the DROP gate and the online plan runs here, before self._lock: on a large
+            # store it takes minutes, and every write of this process waits on that lock.
+            self.prepare_fts_plan()
+            now = time.monotonic()
         deferred_pids = getattr(self, "_fts_deferred_holder_pids", None)
         if now < getattr(self, "_fts_stale_retry_after", 0.0):
             # The backoff was earned by a specific holder set; once that set changes (the other
@@ -703,7 +712,7 @@ class SessionSchemaMixin:
         Guarded by the online recovery's whole-file plan (hermes_state_fts_online): when an index tree shares a
         page with another structure (the hub's 2026-11-18 damage), DROP can succeed and free that page twice, and
         the doubly freed page is later handed to canonical data. A named family or a refused plan skips the DROP."""
-        if not legacy and not self._oneshot_drop_is_safe():
+        if not self._oneshot_drop_is_safe(legacy=legacy):
             return False
         try:
             trigram_present = self._fts_table_probe(cursor, "messages_fts_trigram") is True

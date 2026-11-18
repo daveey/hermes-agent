@@ -113,8 +113,11 @@ def plan_online_recovery(db_path) -> dict:
     :class:`OnlineRecoveryRefused` when it cannot prove the plan safe."""
     from hermes_state_holders import read_only_db_uri
 
+    from hermes_cli.sqlite_safe_read import connect_tracked
+
     try:
-        conn = sqlite3.connect(read_only_db_uri(db_path), uri=True, timeout=30.0, isolation_level=None)
+        conn = connect_tracked(read_only_db_uri(db_path), uri=True, timeout=30.0, isolation_level=None,
+                               tracking_path=db_path)
     except sqlite3.Error as exc:
         raise OnlineRecoveryRefused(f"cannot open state.db read-only: {exc}") from exc
     try:
@@ -165,8 +168,38 @@ def online_recovery_script(*, unlink_tables, trash, trash_tables, trigram: bool,
     return "\n".join(p for p in parts if p)
 
 
+# A plan computed by the retry tick (outside ``self._lock``) is reused by the one-shot gate and the online path of the
+# same tick instead of a second whole-file check.
+_PLAN_REUSE_S = 300.0
+
+
 class SessionFtsOnlineRecoveryMixin:
     """See the module docstring. Mixed into ``SessionDB``."""
+
+    def _fts_plan(self, *, force: bool = False) -> dict:
+        """The current whole-file plan: a fresh cached one, else a new check. Raises OnlineRecoveryRefused, also
+        for a refusal remembered within ``ONLINE_REFUSAL_MEMO_S`` (unless *force*). Callers should not hold
+        ``self._lock`` when it may run a check (``prepare_fts_plan`` does that ahead of time)."""
+        now = time.monotonic()
+        if not force and now < getattr(self, "_fts_online_refused_until", 0.0):
+            raise OnlineRecoveryRefused(getattr(self, "_fts_online_refused_reason", "a recent plan refused"))
+        cached = getattr(self, "_fts_cached_plan", None)
+        if cached is not None and now - cached[0] < _PLAN_REUSE_S:
+            return cached[1]
+        try:
+            plan = plan_online_recovery(self.db_path)
+        except OnlineRecoveryRefused as exc:
+            self._fts_online_refused_until = now + ONLINE_REFUSAL_MEMO_S
+            self._fts_online_refused_reason = str(exc)
+            raise
+        self._fts_cached_plan = (now, plan)
+        return plan
+
+    def prepare_fts_plan(self) -> None:
+        """Run the whole-file check now, without holding ``self._lock`` (the retry tick calls this first, so the
+        check never stalls this process's writes). Never raises."""
+        with contextlib.suppress(OnlineRecoveryRefused, Exception):
+            self._fts_plan()
 
     def recover_stale_fts_online(self, *, reason: str, force: bool = False) -> bool:
         """Steps 1-2. True when done (or already done by a peer). Never raises; False leaves everything as it was.
@@ -186,12 +219,9 @@ class SessionFtsOnlineRecoveryMixin:
                     logger.warning("Online FTS recovery skipped: legacy inline FTS layout (run "
                                    "`hermes sessions optimize-storage`).")
                     return False
-            if not force and time.monotonic() < getattr(self, "_fts_online_refused_until", 0.0):
-                return False  # a whole-file check of a large store is not repeated every retry
             try:
-                plan = plan_online_recovery(self.db_path)
+                plan = self._fts_plan(force=force)
             except OnlineRecoveryRefused as exc:
-                self._fts_online_refused_until = time.monotonic() + ONLINE_REFUSAL_MEMO_S
                 logger.error("Online FTS recovery refused (%s): %s. `hermes sessions recover` rebuilds the store "
                              "offline.", reason, exc)
                 return False
@@ -234,6 +264,7 @@ class SessionFtsOnlineRecoveryMixin:
                     self._fts_deferred_holder_pids = None
                     self._fts_stale_retry_interval = 0.0
                     self._fts_chunk_rows = self._FTS_REBUILD_CHUNK_ROWS
+                    self._fts_cached_plan = None
                     high_water = cursor.execute(
                         "SELECT value FROM state_meta WHERE key = 'fts_rebuild_high_water'").fetchone()
             logger.warning(
