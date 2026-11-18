@@ -55,6 +55,15 @@ try:
     from scripts.ci import flaky_artifact_poll as fap
     from scripts.ci.flaky_intake import Journal
 except ImportError:  # run as a script: scripts/ci is sys.path[0]
+    # Pin this checkout right after scripts/ci, ahead of PYTHONPATH and site-packages. A managed install's
+    # dependency venv (what the hub cron runs this on) otherwise resolves hermes_cli to its generation's
+    # workspace snapshot, which lacks modules newer than the last dependency change (self-heal
+    # cron-d0f9004adc: `No module named 'hermes_cli.kanban_selfwork_producer'`).
+    # tests/ci/test_flaky_kanban_import_root.py.
+    _CHECKOUT = str(Path(__file__).resolve().parents[2])
+    if _CHECKOUT in sys.path:
+        sys.path.remove(_CHECKOUT)
+    sys.path.insert(1, _CHECKOUT)
     import flaky_artifact_poll as fap  # type: ignore[no-redef]
     from flaky_intake import Journal  # type: ignore[no-redef]
 
