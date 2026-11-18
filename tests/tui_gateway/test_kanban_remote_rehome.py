@@ -287,6 +287,37 @@ def test_opposite_home_legacy_reoffers_are_serialized(tmp_path, monkeypatch):
     assert sorted(map(len, offers)) == [0, 1]
 
 
+@pytest.mark.parametrize('legacy', [False, True])
+def test_collect_callback_failure_releases_earlier_unreturned_claim(tmp_path, monkeypatch, legacy):
+    now = time.time()
+    hub = once._hub(tmp_path, now)
+    ledger = tmp_path / 'ledger.db'
+    tasks = [{'id': tid, 'status': 'done', 'completed_at': now} for tid in ['t_first', 't_second']]
+    cards = [{'gw': 'worker-6', 'key': f"default/default/{task['id']}", 'task': task} for task in tasks]
+    monkeypatch.setattr(krn, '_chat_index', lambda *_a, **_kw: ('macbook', {once.CHAT: cards}, {}))
+    if legacy:
+        conn = krn._ledger(ledger)
+        with conn:
+            for card in cards:
+                conn.execute('INSERT INTO notices (session, ref, state, at, delivered, legacy_seen) '
+                             'VALUES (?,?,?,?,1,0)',
+                             (once.CHAT, f"worker-6/{card['key']}", krn._notice_state(card['task']), now))
+        conn.close()
+    calls = []
+    def fails_second(key, task_id):
+        calls.append((key, task_id))
+        if 't_second' in key:
+            raise OSError('second transcript unavailable')
+        return False
+    assert krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now,
+                       transcript_has=fails_second) == []
+    assert any('t_second' in key for key, _ in calls)
+    # Same holder must immediately retry, not wait for its process to die.
+    offered = krn.collect(once.CHAT, 'default', hub_db=hub, ledger=ledger, now=now + 1,
+                           transcript_has=lambda *_: False)
+    assert {item['ref'].rsplit('/', 1)[-1] for item in offered} == {'t_first', 't_second'}
+
+
 def test_legacy_reconciliation_preserves_replaced_keyed_receipt(tmp_path):
     now = time.time()
     hub = once._hub(tmp_path, now)

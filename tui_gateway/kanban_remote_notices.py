@@ -492,7 +492,7 @@ def _notice_item(card: dict, session_key: str, me: str, profile: str, now: Optio
 
 
 def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcript_has, me: str,
-                      profile: str) -> list:
+                      profile: str, *, offered=None) -> list:
     """Re-offer a pre-fix ``delivered=1`` row once, if it is still inside ``FRESH_S`` and in no transcript."""
     if transcript_has is None:
         return []
@@ -509,7 +509,7 @@ def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcrip
         by_state[(f"{card['gw']}/{card['key']}", _notice_state(task))] = card
     pid, start = _my_holder()
     stale = 0
-    out = []
+    out = [] if offered is None else offered
     for row in rows:
         card = by_state.get((row["ref"], row["state"]))
         if (card is None and (row['ref'].rsplit('/', 1)[-1], row['state']) in logical_states
@@ -627,7 +627,7 @@ def _claim_notice_locked(conn, *, session, ref, state, now, fresh, notice_key, t
                         ref, state, session)
             return "acked"
         if not fresh and isinstance(settle_reason, _ExpiredReason):
-            settle_reason = settle_reason()  # outside the write txn: it may scan the transcript
+            settle_reason = settle_reason()  # the logical claim transaction includes this transcript read
         reason = str(settle_reason)
         with conn:
             conn.execute(
@@ -737,6 +737,7 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
         return []
     now = time.time() if now is None else now
     profile = profile or "default"
+    out: list[dict] = []
     try:
         sids = (session_key, *lineage)
         if hub_db is None and ledger is None:  # the host's own replica: keep its published copy current
@@ -747,11 +748,10 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
         cards = [dict(c, sid=sid) for sid in sids for c in by_sid.get(sid, ())]
         if not cards:
             return []
-        out: list[dict] = []
         conn = _ledger(ledger)
         try:
             with conn:
-                out.extend(_reconcile_legacy(conn, session_key, cards, now, transcript_has, me, profile))
+                _reconcile_legacy(conn, session_key, cards, now, transcript_has, me, profile, offered=out)
             offered = {(item["ref"], item["state"]) for item in out}
             for card in cards:
                 from tui_gateway.kanban_remote_late import owner_time
@@ -807,6 +807,8 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
             return []
     except Exception:
         logger.debug("remote kanban collect failed", exc_info=True)
+        from tui_gateway.kanban_remote_late import release_undelivered
+        release_undelivered(out, ledger)
         return []
 
 

@@ -105,6 +105,14 @@ def test_remote_blocked_metadata_preserves_premise_and_board():
     assert card['board'] == 'research'
 
 
+@pytest.mark.parametrize('ref', ['', 'worker-6/default/t_card', 'worker-6/default/board/extra/t_card'])
+def test_remote_metadata_does_not_infer_board_from_malformed_ref(ref):
+    item = {'ref': ref, 'state': 'blocked@1', 'event_key': 'event', 'text': 'blocked'}
+    card = kro._metadata(item)['kanban_cards'][0]
+    assert card['board'] == ''
+    assert card['kinds'] == (['blocked'] if ref else [])
+
+
 @pytest.mark.parametrize(('state', 'kind'), [('done@1', 'completed'),
                                               ('request_withdrawn@1', 'request_withdrawn'), ('other@1', None)])
 def test_remote_outcome_metadata_never_relabels(monkeypatch, state, kind):
