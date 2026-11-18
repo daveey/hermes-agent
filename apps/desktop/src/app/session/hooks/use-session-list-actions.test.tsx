@@ -1634,25 +1634,55 @@ describe('re-lists while a failed list leaves owners stale', () => {
     }
   })
 
-  it('does not re-list a gateway the status probe marked unreachable', async () => {
-    const { _resetOfflineSessionsForTests, recordSessionGatewayUnavailable } = await import('@/store/offline-sessions')
+  it('re-lists after probe failure with bounded backoff, failing closed until the owner answers', async () => {
+    const { recordSessionGatewayUnavailable, sessionOwnerIsFresh, staleSessionOwners } = await import('@/store/offline-sessions')
     _resetOfflineSessionsForTests()
     vi.useFakeTimers()
-    listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('mine')] }))
+    setApiRequestConnection('conn-mini')
+    const owner = row('remote', { connection_id: 'conn-mini', outcome: { kind: 'done' } })
+    const local = row('mine', { connection_id: 'local' })
+    let failing = false
+    listSidebarSessions.mockImplementation(({ connectionId }: { connectionId?: string }) => {
+      if (connectionId === 'local') { return Promise.resolve(sidebar({ sessions: [local] })) }
+      return failing ? Promise.reject(new Error('unreachable')) : Promise.resolve(sidebar({ sessions: [owner] }))
+    })
+    const remoteCalls = () => listSidebarSessions.mock.calls.filter((args: unknown[]) =>
+      (args[0] as { connectionId?: string }).connectionId === undefined).length
+    const painted = () => mergeOfflineFallback([owner, local], []).find(s => s.id === 'remote')
     const { result, unmount } = renderHook(() => useSessionListActions({ profileScope: 'all' }))
 
     try {
-      await act(async () => {
-        await result.current.refreshSessions()
-      })
-      const calls = listSidebarSessions.mock.calls.length
+      await act(async () => { await result.current.refreshSessions() })
+      const calls = remoteCalls()
+      failing = true
       act(() => recordSessionGatewayUnavailable('conn-mini'))
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(120_000)
-      })
-      expect(listSidebarSessions.mock.calls.length).toBe(calls)
+      expect(staleSessionOwners()).toContain('conn-mini/*')
+      expect(sessionOwnerIsFresh('local', 'default')).toBe(true)
+      expect(painted()?.offline_cached).toBe(true)
+
+      // Repeated failures keep the row non-authoritative and cap retries at 60 seconds.
+      for (const delay of [15_000, 30_000, 60_000, 60_000]) {
+        const before = remoteCalls()
+        await act(async () => { await vi.advanceTimersByTimeAsync(delay - 1) })
+        expect(remoteCalls()).toBe(before)
+        await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+        expect(remoteCalls()).toBe(before + 1)
+        expect(sessionOwnerIsFresh('conn-mini', 'default')).toBe(false)
+        expect(sessionOwnerIsFresh('local', 'default')).toBe(true)
+        expect(painted()?.offline_cached).toBe(true)
+      }
+      expect(remoteCalls()).toBe(calls + 4)
+      failing = false
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+      expect(sessionOwnerIsFresh('conn-mini', 'default')).toBe(true)
+      expect(staleSessionOwners()).toEqual([])
+      expect(painted()?.offline_cached).not.toBe(true)
+      expect(painted()?.outcome?.kind).toBe('done')
+      await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+      expect(remoteCalls()).toBe(calls + 5)
     } finally {
       unmount()
+      setApiRequestConnection(null)
       vi.useRealTimers()
       _resetOfflineSessionsForTests()
     }

@@ -121,8 +121,8 @@ function publishFreshness(next: Record<string, boolean>, reason: string): void {
   }
 }
 
-/** [daveey] Owner keys a sidebar LIST marked stale (failed request, or an error naming them). A gateway the hub-sync
- *  status probe calls unreachable is not here: re-listing it would only flap against the probe. */
+/** [daveey] Owner keys a sidebar LIST marked stale (failed request, or an error naming them), plus the `<conn>/*` key of
+ *  a gateway the hub-sync status probe called unreachable: a re-list with backoff is the only thing that clears it. */
 const listStaleOwners = new Set<string>()
 
 /** [daveey] Owners whose last list failed (`connection/profile`) and are still stale. Only a successful list makes
@@ -146,6 +146,9 @@ export function recordSessionGatewayUnavailable(connection: string): void {
   )
 
   next[ownerKey(connection, '*')] = false
+  // [daveey] Probe failure invalidates retained rows, but probe success cannot make them authoritative again.
+  // Schedule the existing backoff re-list; only a successful list restores freshness.
+  listStaleOwners.add(ownerKey(connection, '*'))
   publishFreshness(next, `gateway-unavailable conn=${connection}`)
 }
 

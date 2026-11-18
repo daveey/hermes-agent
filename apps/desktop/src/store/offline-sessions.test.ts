@@ -14,8 +14,10 @@ import {
   mergeOfflineFallback,
   type OfflineReplicaRecord,
   offlineSessionsFromReplica,
+  recordSessionGatewayUnavailable,
   recordSessionListResult,
   sessionOwnerIsFresh,
+  staleSessionOwners,
   syncedAgoLabel
 } from './offline-sessions'
 import { $ownerRowStamps, _resetOwnerRowStampsForTests, refreshOwnerRowStamps, type StampFetcher } from './owner-row-stamps'
@@ -530,4 +532,19 @@ it('freshness and retained-row archive hiding stay scoped to the full owner', ()
   expect(merged.filter(row => row.is_active)).toHaveLength(2)
   hideOfflineSession(cached[1])
   expect(mergeOfflineFallback(previous, cached)).toEqual([previous[0], previous[2]])
+})
+
+describe('gateway-unavailable probe', () => {
+  beforeEach(() => _resetOfflineSessionsForTests())
+
+  // [daveey] Probe invalidation must also make the owner eligible for a recovery list.
+  it('leaves the gateway a stale owner so the backoff re-list runs until a list succeeds', () => {
+    recordSessionGatewayUnavailable('hermes-hub')
+    expect(sessionOwnerIsFresh('hermes-hub', 'default')).toBe(false)
+    expect(staleSessionOwners()).toEqual(['hermes-hub/*'])
+
+    recordSessionListResult([], [{ id: 's1', profile: 'default', connection_id: 'hermes-hub' } as SessionInfo], 'hermes-hub', 'all')
+    expect(sessionOwnerIsFresh('hermes-hub', 'default')).toBe(true)
+    expect(staleSessionOwners()).toEqual([])
+  })
 })
