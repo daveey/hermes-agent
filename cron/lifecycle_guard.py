@@ -219,7 +219,7 @@ def contains_host_interpreter_kill(text: str) -> bool:
     """Conservatively match when substitution nesting prevents a complete scan."""
     try:
         return _contains_host_interpreter_kill(text)
-    except SubstitutionNestingLimit:
+    except (SubstitutionNestingLimit, RecursionError):
         return True
 
 
@@ -428,7 +428,7 @@ def contains_gateway_lifecycle_command(text: str, *, mask_heredocs: bool = True)
     """Return a conservative match if substitution nesting prevents a complete scan."""
     try:
         return _contains_gateway_lifecycle_command(text, mask_heredocs=mask_heredocs)
-    except SubstitutionNestingLimit:
+    except (SubstitutionNestingLimit, RecursionError):
         return True
 
 
@@ -950,7 +950,7 @@ def contains_launchctl_submit_command(command: str) -> bool:
     """Return a conservative match if substitution nesting prevents a complete scan."""
     try:
         return _contains_launchctl_submit_command(command)
-    except SubstitutionNestingLimit:
+    except (SubstitutionNestingLimit, RecursionError):
         return True
 
 
