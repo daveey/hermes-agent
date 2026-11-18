@@ -322,3 +322,25 @@ def test_uid_rule_bounds_row_drift(board, drift_s, capsys):
     cid = _lock_drift(board, drift_s, 6)
     ok, output = release(board, "promote", capsys, cid + 1000)
     assert not ok and "data unavailable" in output, output
+
+
+@pytest.mark.parametrize("entry", ["promote", "unblock", "tool"])
+@pytest.mark.parametrize("variant", ["wrong_author", "non_v7_event", "non_v7_row"])
+def test_uid_rule_needs_author_and_v7_uids(board, entry, variant, capsys):
+    """The live lock-drift shape stays missing when the author differs or either uid is not UUIDv7."""
+    import uuid
+    cid = _lock_drift(board, 5, 6)
+    with kbc.connect_closing() as conn:
+        with kbc.write_txn(conn):
+            ev = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='commented' "
+                              "AND json_extract(payload, '$.comment_id')=?", (board, cid)).fetchone()
+            if variant == "wrong_author":
+                payload = json.loads(ev["payload"])
+                payload["author"] = "another"
+                conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(payload), ev["id"]))
+            elif variant == "non_v7_event":
+                conn.execute("UPDATE task_events SET uid=? WHERE id=?", (str(uuid.uuid4()), ev["id"]))
+            else:
+                conn.execute("UPDATE task_comments SET uid=? WHERE id=?", (str(uuid.uuid4()), cid))
+    ok, output = release(board, entry, capsys, cid + 1000)
+    assert not ok and "data unavailable" in output, output
