@@ -534,7 +534,7 @@ def test_pr_state_lookup_uses_broker_prefix_and_resolved_gh(kanban_home, monkeyp
     monkeypatch.setattr(prs.subprocess, "run",
                         lambda cmd, *a, **k: calls.append(cmd) or _Proc(0, json.dumps({"state": "MERGED"})))
     assert prs.pr_state(PR_A) == "MERGED"
-    assert calls == [[*prefix, "/home/x/bin/gh", "pr", "view", PR_A, "--json", "state,comments,headRefOid"]]
+    assert calls == [[*prefix, "/home/x/bin/gh", "pr", "view", PR_A, "--json", "state,comments,headRefOid,baseRefName"]]
 
     # Broken broker config: fall back to bare gh (still fail-closed on error), never raise.
     prs.clear_cache()

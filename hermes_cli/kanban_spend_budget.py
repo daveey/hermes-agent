@@ -304,6 +304,8 @@ def hold(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
         return None
     if over(spend(conn, task_id, as_of=now + 1), lim) is None:
         return None  # cheap read on every tick; the write lock is taken only for a card over budget
+    from hermes_cli import kanban_spend_pr_owner as owner
+    pr = owner.open_core_pr(conn, task_id)  # cached network read, only over budget and outside the write lock
     with kb.write_txn(conn):
         # Decide again under the lock, with a cutoff taken now: a hand-off or an override recorded since the read
         # above must win.
@@ -313,6 +315,13 @@ def hold(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
         spent = spend(conn, task_id, as_of=now + 1)
         which = over(spent, lim)
         if which is None:
+            return None
+        if pr is not None and pr in owner.published_prs(conn, task_id):
+            row = conn.execute(
+                "SELECT 1 FROM tasks WHERE id=? AND status IN ('ready','review') "
+                "AND current_run_id IS NULL AND " + _UNCLAIMED, (task_id, now)).fetchone()
+            if row is not None:
+                owner.record_spared(conn, task_id, pr, spent, describe(spent, lim, which, override=override))
             return None
         cur = conn.execute(
             "UPDATE tasks SET status = 'triage', claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "

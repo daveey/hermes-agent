@@ -37,6 +37,8 @@ GH_TIMEOUT_SECONDS = 20
 # url -> (state or None, monotonic expiry or None for "forever")
 _cache: dict[str, tuple[Optional[str], Optional[float]]] = {}
 _rejections: dict[str, str] = {}
+# Raw GitHub state/base, sharing the state lookup and its TTL (REJECTED is still OPEN on GitHub).
+_details: dict[str, tuple[Optional[str], Optional[str], float]] = {}
 # url -> (OPEN head sha or None, monotonic time of the gh read that saw it)
 _heads: dict[str, tuple[Optional[str], float]] = {}
 _SHA = re.compile(r"[0-9a-fA-F]{40}")
@@ -64,9 +66,10 @@ def _gh_pr_state(url: str) -> Optional[str]:
 
     The same read records the OPEN head for :func:`pr_head` (``_heads``), so the awaited-review
     release costs no second ``gh pr view``. [daveey]"""
+    _details.pop(norm_pr(url), None)  # a failed refresh must not retain an old OPEN/base
     gh = _gh_argv() or ["gh"]
     try:
-        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,comments,headRefOid"],
+        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,comments,headRefOid,baseRefName"],
                               stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=GH_TIMEOUT_SECONDS, check=False)
@@ -84,6 +87,8 @@ def _gh_pr_state(url: str) -> Optional[str]:
     state = state.upper() if isinstance(state, str) and state else None
     key = norm_pr(url)
     oid = data.get("headRefOid")
+    base = data.get("baseRefName")
+    _details[key] = (state, base if isinstance(base, str) else None, time.monotonic())
     _heads[key] = (oid.lower() if state == "OPEN" and isinstance(oid, str) and _SHA.fullmatch(oid) else None,
                    time.monotonic())
     _rejections.pop(key, None)
@@ -116,6 +121,21 @@ def pr_state(url: str) -> Optional[str]:
     state = _gh_pr_state(url)
     _store(key, state, now)
     return state
+
+
+def pr_details(url: str) -> tuple[Optional[str], Optional[str]]:
+    """Raw state and base from the existing cached read; unknown never proves an exemption."""
+    hit = _details.get(norm_pr(url))
+    if hit is not None and time.monotonic() - hit[2] < OPEN_TTL_SECONDS:
+        return hit[0], hit[1]
+    if hit is not None and hit[0] == "CLOSED":
+        # CLOSED can reopen: spend decisions need a bounded observation even though
+        # the historical duplicate-PR guard retains terminal results until restart.
+        _store(norm_pr(url), _gh_pr_state(url), time.monotonic())
+    else:
+        pr_state(url)
+    hit = _details.get(norm_pr(url))
+    return (hit[0], hit[1]) if hit is not None else (None, None)
 
 
 def pr_head(url: str, *, max_age: Optional[float] = None) -> Optional[str]:
@@ -617,3 +637,4 @@ def clear_cache() -> None:
     _cache.clear()
     _rejections.clear()
     _heads.clear()
+    _details.clear()

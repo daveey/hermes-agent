@@ -117,7 +117,7 @@ def test_pr_head_shares_pr_states_read(gh):
     assert kar.pr_head(URL) == HEAD
     assert prs.pr_state(URL) == "OPEN"
     assert len(gh.calls) == 1
-    assert gh.calls[0][-1] == "state,comments,headRefOid"
+    assert gh.calls[0][-1] == "state,comments,headRefOid,baseRefName"
 
 
 def test_pr_state_reuses_pr_heads_read(gh):

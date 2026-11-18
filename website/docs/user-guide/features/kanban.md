@@ -679,6 +679,17 @@ release a spend hold. Only a recorded manual promote (after splitting or
 re-scoping, if needed) or archive releases it; a promote starts a new budget
 window. Changing status or disabling the budget does not clear an existing hold.
 
+An over-budget card that **published** an OPEN PR on
+`softmax-universe/daveey-hermes` targeting `main` is spared from a new spend
+triage. Publication is evidenced by its own run's `published_pr` metadata or
+an owning-run canonical-ship publication comment, not a review or a bare PR
+mention. State/base use the dispatcher's existing cached GitHub read (up to
+five minutes old); unknown state or base retains normal enforcement. A
+`spend_budget_spared` event and comment record the PR, runs and tokens once
+per spend window. Counts keep accumulating: after merge/close, the next check
+with refreshed state enforces the normal cap. This does not spare `state` PRs,
+release an existing triage, or change the independent no-progress budget.
+
 Each stop records its producer in `spend_budget_decision_ready.producer`: owning chats
 receive one Kanban notice with spend and decision options, or a card with no
 chat gets one board-supervisor decision card. The supervisor uses
