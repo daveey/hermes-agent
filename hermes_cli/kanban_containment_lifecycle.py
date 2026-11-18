@@ -65,11 +65,14 @@ def _events(conn: sqlite3.Connection, task: str) -> list[dict]:
 def _actor(conn: sqlite3.Connection, task: str, run_uid: str) -> None:
     if not _uid(run_uid):
         raise ContainmentRefused("actor requires a portable current run identity")
-    row = conn.execute("SELECT t.status,t.current_run_id,r.id,r.ended_at,r.claim_expires "
+    row = conn.execute("SELECT t.status,t.current_run_id,r.id,r.ended_at,r.claim_expires,"
+                       "t.claim_expires,t.claim_lock,r.claim_lock "
                        "FROM tasks t JOIN task_runs r ON r.task_id=t.id WHERE t.id=? AND r.uid=?",
                        (task, run_uid)).fetchone()
+    now = time.time()
     if (row is None or row[0] != "running" or row[1] != row[2] or row[3] is not None
-            or row[4] is None or row[4] <= time.time()):
+            or row[4] is None or row[4] <= now or row[5] is None or row[5] <= now
+            or not row[6] or row[6] != row[7]):
         raise ContainmentRefused("actor is not the current live claimed run")
 
 
