@@ -53,6 +53,9 @@ def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict)
     protects the local value while allowing unrelated fields to converge; a fresh authoritative
     field appearance can queue a current-value restore, never replay the rejected historical row.
     """
+    from hermes_cli.kanban_sync_reserved_key import is_replacement
+    if is_replacement(conn, row["op_id"]):
+        return False  # keep the exact recovery refusal visible; never omit an approved recovery field
     if result.get("reason") != "forbidden_field" or row["op"] not in ("upsert", "import"):
         return False
     match = re.fullmatch(r"not writable on ([a-z_]+): ([a-z_]+(?:, [a-z_]+)*)", str(result.get("detail") or ""))

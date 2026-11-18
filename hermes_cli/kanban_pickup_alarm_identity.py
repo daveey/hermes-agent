@@ -14,11 +14,20 @@ _KEY = re.compile(r"(?:pickup-stall:([a-z0-9][a-z0-9-]{0,63}):[A-Za-z0-9._-]+|"
                   r"worker-resources-unknown:([a-z0-9][a-z0-9-]{0,63})):([1-9][0-9]*)")
 
 
+RESERVED_PREFIXES = ("pickup-stall:", "worker-resources-unknown:")
+DETECTOR = "pickup-stall-detector"
+
+
+def reserved(key: Any) -> bool:
+    """True for an idempotency key in the detector-only namespace (the Board fences it to the detector)."""
+    return isinstance(key, str) and key.startswith(RESERVED_PREFIXES)
+
+
 def refusal(card: Mapping[str, Any], machine: str) -> str | None:
     """Refuse the source or malformed detector-like rows; ordinary cards are unchanged."""
     key = card.get("idempotency_key")
-    detector = card.get("created_by") == "pickup-stall-detector"
-    if not detector and not (isinstance(key, str) and key.startswith(("pickup-stall:", "worker-resources-unknown:"))):
+    detector = card.get("created_by") == DETECTOR
+    if not detector and not reserved(key):
         return None
     match = _KEY.fullmatch(key) if isinstance(key, str) else None
     source = (match[1] or match[2]) if match else None

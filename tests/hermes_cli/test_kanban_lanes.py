@@ -108,6 +108,8 @@ def test_alarm_and_urgent_cards_skip_the_gate(conn, configured, extra):
     parent = _hermes_parent(conn)
     if extra.get("admission_class"):
         extra = {"admission_class": "urgent"}
+    else:
+        extra = {**extra, "created_by": "pickup-stall-detector"}  # the key namespace is the detector's alone
     tid = kb.create_task(conn, title="now", assignee="default", creator_task_id=parent,
                          workspace_path="/src/hermes-agent", **extra)
     assert _task(conn, tid)["status"] == "ready"
@@ -376,8 +378,8 @@ def test_capacity_and_alarm_cards_go_ahead_of_lane_picks(conn, configured):
     normal = _ready_in(conn, "babybear", "bb", priority=900)
     capacity = kb.create_task(conn, title="free a slot", assignee="default", tenant="hermes", created_by="user",
                               admission_class="capacity", admission_frees="frees: one worker slot")
-    alarm = kb.create_task(conn, title="stalled", assignee="default", tenant="hermes", created_by="user",
-                           idempotency_key="pickup-stall:t_1")
+    alarm = kb.create_task(conn, title="stalled", assignee="default", tenant="hermes",
+                           created_by="pickup-stall-detector", idempotency_key="pickup-stall:t_1")
     order = _order(conn)
     assert set(order[:2]) == {capacity, alarm} and order[2] == normal
 

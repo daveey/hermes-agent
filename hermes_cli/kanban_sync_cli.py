@@ -7,6 +7,9 @@
 - ``run``     one sync round now (the gateway runs it continuously while ``kanban.sync.enabled`` is on).
 - ``reconcile`` after the board file lost rows: upload what the service lacks, restore this gateway's rows the
   file lost, then diff (``hermes kanban recover`` runs it after a rebuild).
+- ``reserved-key`` one-card correction of a never-created local card whose ``pickup-stall:``/``worker-resources-unknown:``
+  idempotency key the Board refused: preview by default, ``--apply --expect TOKEN`` to apply (contract and limits in
+  ``kanban_sync_reserved_key``).
 """
 
 from __future__ import annotations
@@ -232,16 +235,41 @@ def _refill_history(args: argparse.Namespace) -> int:
     return 1 if any(r["unresolved"] or r.get("reason") for r in report.values()) else 0
 
 
+def _reserved_key(args: argparse.Namespace) -> int:
+    """Preview (default) or apply (``--apply --expect TOKEN``) one reserved-key correction; exit 1 when refused."""
+    from hermes_cli import kanban_sync_reserved_key as rk
+    reason = (getattr(args, "reason", None) or "").strip()
+    if not reason:
+        print("kanban sync: --reason TEXT is required (non-blank)")
+        return 2
+    if args.apply and not args.expect:
+        print("kanban sync: --apply needs --expect TOKEN from the preview")
+        return 2
+    slug = _board(args)
+    hub = ksc.Hub(ksc.load_identity())
+    conn = kbc.connect(_path(slug))
+    try:
+        if args.apply:
+            report = rk.apply(conn, hub, slug, args.task_id, args.new_key, args.expect, reason)
+        else:
+            report = rk.plan(conn, hub, slug, args.task_id, args.new_key, reason)
+    finally:
+        conn.close()
+    _print(report, args.json)
+    return 0 if report.get("action") in ("applied", "already_applied") or (
+        report.get("action") == "preview" and report.get("eligible")) else 1
+
+
 _ACTIONS = {"status": _status, "attach": _attach, "import": _import, "diff": _diff, "run": _run,
             "links": _links, "links-diff": _links_diff, "reconcile": _reconcile, "machine-links": _machine_links,
-            "refill-history": _refill_history}
+            "refill-history": _refill_history, "reserved-key": _reserved_key}
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
     action = getattr(args, "sync_action", None)
     if action not in _ACTIONS:
         print("usage: hermes kanban sync {status,attach,import,diff,run,links,links-diff,reconcile,machine-links,"
-              "refill-history} [--board B]")
+              "refill-history,reserved-key} [--board B]")
         return 2
     try:
         return _ACTIONS[action](args)

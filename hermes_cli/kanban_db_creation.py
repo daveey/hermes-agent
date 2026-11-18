@@ -10,6 +10,17 @@ def existing_creation_key(conn, key):
     ).fetchone()
 
 
+def reject_reserved_key(key, created_by) -> None:
+    """Refuse a detector-namespace idempotency key from an ordinary creator, before any lookup or write.
+
+    The Board fences ``pickup-stall:``/``worker-resources-unknown:`` keys to the pickup-stall detector and rejects
+    the whole never-created card (and every child op) otherwise. The detector itself is unchanged. Existing bad
+    cards are corrected only by ``hermes kanban sync reserved-key`` (``kanban_sync_reserved_key``)."""
+    from hermes_cli.kanban_pickup_alarm_identity import DETECTOR, reserved
+    if reserved(key) and created_by != DETECTOR:
+        raise ValueError(f"idempotency_key {key!r} is reserved for the pickup-stall detector; choose another key")
+
+
 def default_ready_assignee() -> str:
     """``kanban.default_assignee`` (config) or the ``default`` profile."""
     try:

@@ -5,7 +5,9 @@ import json
 import sqlite3
 
 from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_sync_reserved_key as reserved_key
 from hermes_cli.kanban_db_connect import write_txn
+from hermes_cli.kanban_pickup_alarm_identity import reserved
 
 
 def _local(conn, table, uid):
@@ -35,7 +37,8 @@ def _inputs(conn, rejected):
     row = _local(conn, table, uid)
     fields = client._row_fields(conn, table, row) if row else None
     original = json.loads(rejected["fields"])
-    task = uid if table == "tasks" else (fields or original).get("task_id")
+    task = (uid if table == "tasks" else uid.partition(">")[2] if table == "task_links"
+            else (fields or original).get("task_id"))
     identities = {(table, uid)}
     if task:
         identities.add(("tasks", task))
@@ -55,7 +58,8 @@ def _inputs(conn, rejected):
         "SELECT * FROM kanban_sync_outbox WHERE table_name='tasks' AND row_uid=?", (task,))] if task else []
     return {"row": dict(row) if row else None, "fields": fields, "task": task,
             "parent": dict(parent) if parent else None, "parent_ops": parent_ops,
-            "pending": pending, "tombstones": tombs, "run": dict(run_row) if run_row else None}
+            "pending": pending, "tombstones": tombs, "run": dict(run_row) if run_row else None,
+            "receipt": reserved_key.receipt_for_op(conn, rejected["op_id"])}
 
 
 def _evidence(hub, board, table, uid):
@@ -88,11 +92,18 @@ def _classify(op, before, evidence, parent_evidence, run_evidence=None):
     from hermes_cli import kanban_sync_client as client
     if before["pending"] or before["tombstones"]:
         return "unresolved", "pending local work or local tombstone"
+    gate = reserved_key.receipt_resolution(op, before, evidence, parent_evidence)
+    if gate and gate[0] != "conservative":  # a receipt names this op: it retires through the receipt or not at all
+        return gate
     if op["op"] == "release":
         if _moot_release(op, before, evidence, run_evidence):
             return "moot", "authoritative run already ended and does not hold the card's lease; nothing to release"
         return "unresolved", "no proof the released run already ended off this card's lease"
     fields = client._wire_fields(op["table_name"], json.loads(op["fields"]))
+    if reserved(fields.get("idempotency_key")) and fields["idempotency_key"] != (before["fields"] or {}).get("idempotency_key"):
+        # The card's key was rewritten after this write was refused: equality of the *current* values proves nothing
+        # about the original key. Only a verified supersession receipt (above) may retire it.
+        return "unresolved", "rejected write carries a reserved key the card no longer has; needs a verified receipt"
     remote, local = evidence.get("row"), before["row"]
     if op["op"] in ("upsert", "import") and evidence.get("state") == "live" and remote and local:
         version = remote.get("version")
@@ -138,7 +149,8 @@ def resolve_rejections(conn: sqlite3.Connection, hub, board: str) -> list[dict]:
         try:
             evidence = _evidence(hub, board, op["table_name"], op["row_uid"])
             parent = _evidence(hub, board, "tasks", before["task"]) if (
-                op["table_name"] == "task_chat_links" and before["task"]) else None
+                before["task"] and op["table_name"] != "tasks"
+                and (op["table_name"] == "task_chat_links" or before["receipt"])) else None
             run_uid = _release_run(op)
             run = _evidence(hub, board, "task_runs", run_uid) if run_uid else None
         except (HubError, SyncUnavailable, OSError, AttributeError, ValueError) as exc:

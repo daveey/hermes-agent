@@ -1295,10 +1295,10 @@ def create_task(
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
-    # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
-    # race may insert twice, the next lookup stabilises on the newest.
+    # Idempotency check BEFORE the write txn (no lock held); a concurrent-create race may insert twice.
     if idempotency_key:
-        from hermes_cli.kanban_db_creation import existing_creation_key
+        from hermes_cli.kanban_db_creation import existing_creation_key, reject_reserved_key
+        reject_reserved_key(idempotency_key, created_by)
         if row := existing_creation_key(conn, idempotency_key):
             return row["id"]
 

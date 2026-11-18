@@ -629,9 +629,11 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
     # Only omission custody suppresses resynthesis; ordinary parent backoff retains its old path.
     in_batch.update(r[0] for r in conn.execute(
         "SELECT row_uid FROM kanban_sync_omissions WHERE table_name='tasks' AND state!='delivered'"))
+    from hermes_cli.kanban_sync_reserved_key import replacement_children
+    recovering = replacement_children(conn)
     wanted: list[str] = []
     for r in rows:
-        if r["table_name"] == "tasks":
+        if r["table_name"] == "tasks" or r["op_id"] in recovering:
             continue
         if r["table_name"] == "task_links":
             if r["op"] != "upsert":
@@ -752,6 +754,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     from hermes_cli.kanban_sync_omissions import remap
                     new_id = sync.uuid7()
                     remap(conn, op_id, new_id)
+                    from hermes_cli.kanban_sync_reserved_key import remap as remap_key_recovery
+                    remap_key_recovery(conn, op_id, new_id)
                     conn.execute("UPDATE kanban_sync_outbox SET op_id = ?, attempts = attempts + 1, last_error = ?, "
                                  "retry_after = ? WHERE op_id = ?",
                                  (new_id, f"retrying: {reason}"[:500], int(time.time()) + _backoff_s(row["attempts"]), op_id))
@@ -1130,6 +1134,11 @@ def _send(live: sqlite3.Connection, hub: Hub, slug: str, gateway: str, mode: str
         from hermes_cli.kanban_sync_attachments import transfer_pending
         transfer_pending(live, hub, slug)
     from hermes_cli.kanban_sync_rejections import resolve_rejections
+    from hermes_cli.kanban_sync_reserved_key import advance
+    try:  # children of a corrected reserved-key card follow its accepted parent (no-op without a receipt)
+        advance(live, hub, slug)
+    except (HubError, SyncUnavailable, OSError) as exc:
+        _log.info("kanban sync: %s reserved-key advance deferred (%s)", slug, exc)
     result.rejection_resolutions += resolve_rejections(live, hub, slug)
 
 

@@ -30,7 +30,8 @@ def test_created_event_records_actual_stored_priority(conn, requested, stored):
 def test_decomposed_child_inherits_effective_priority_and_audits(conn, priority, key, expected):
     from hermes_cli.kanban_db_graph import _insert_decomposed_child
 
-    root = kb.create_task(conn, title='root', priority=priority, idempotency_key=key)
+    root = kb.create_task(conn, title='root', priority=priority, idempotency_key=key,
+                          created_by='pickup-stall-detector' if key else None)
     row = conn.execute('SELECT * FROM tasks WHERE id=?', (root,)).fetchone()
     child = _insert_decomposed_child(conn, root, row, {'title': 'child'}, 'test', 1800000000)
     assert conn.execute('SELECT priority FROM tasks WHERE id=?', (child,)).fetchone()[0] == expected
