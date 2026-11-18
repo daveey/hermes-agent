@@ -2,8 +2,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { setSessionArchived } from '@/hermes'
+import { deleteSession, setSessionArchived } from '@/hermes'
 import { en } from '@/i18n/en'
+import { confirm } from '@/store/confirm'
 import { $messagingSessions, $sessions, setMessagingSessions, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -13,6 +14,7 @@ vi.mock('@/i18n', () => ({ useI18n: () => ({ t: en }) }))
 
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
+  deleteSession: vi.fn().mockResolvedValue({ ok: true }),
   getHermesConfigRecord: vi.fn().mockResolvedValue({ config: {} }),
   setSessionArchived: vi.fn().mockResolvedValue(undefined)
 }))
@@ -25,6 +27,8 @@ vi.mock('@/api/sessions', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   listAllProfileSessions
 }))
+
+vi.mock('@/store/confirm', () => ({ confirm: vi.fn().mockResolvedValue(true) }))
 
 const selectDesktopPaths = vi.hoisted(() => vi.fn())
 
@@ -196,6 +200,55 @@ describe('SessionsSettings archived list paging', () => {
     await act(async () => fireEvent.click(screen.getByRole('button', { name: en.sidebar.loadMore })))
 
     expect(await screen.findByText('theirs')).toBeTruthy()
+  })
+
+  // Hub review of #3557: the row a click removes is one profile's, and with the whole archive
+  // on one page there is no later read to bring a wrongly removed sibling back.
+  describe('same session id in two profiles, whole archive on one page', () => {
+    const mine = { ...archived('same'), profile: 'default', title: 'mine' }
+    const theirs = { ...archived('same'), profile: 'work', title: 'theirs' }
+
+    const rowButtons = (title: string) =>
+      Array.from((screen.getByText(title).closest('#archived-session-same') as HTMLElement).querySelectorAll('button'))
+
+    beforeEach(() => {
+      listAllProfileSessions.mockReset().mockResolvedValue({ sessions: [mine, theirs], total: 2 })
+      vi.mocked(setSessionArchived).mockReset().mockResolvedValue({ ok: true })
+    })
+
+    it("keeps the other profile's row on screen right after an unarchive", async () => {
+      render(<SessionsSettings />)
+      await screen.findByText('mine')
+
+      const unarchive = rowButtons('mine').find(button =>
+        button.textContent?.includes(en.settings.sessions.unarchive)
+      ) as HTMLElement
+
+      await act(async () => fireEvent.click(unarchive))
+
+      await waitFor(() => expect(screen.queryByText('mine')).toBeNull())
+      expect(screen.getByText('theirs')).toBeTruthy()
+      expect(setSessionArchived).toHaveBeenCalledWith('same', false, 'default')
+      expect(screen.queryByRole('button', { name: en.sidebar.loadMore })).toBeNull()
+    })
+
+    it("keeps the other profile's row on screen right after a delete", async () => {
+      vi.mocked(confirm).mockResolvedValue(true)
+      vi.mocked(deleteSession).mockResolvedValue({ ok: true })
+
+      render(<SessionsSettings />)
+      await screen.findByText('theirs')
+
+      const remove = rowButtons('theirs').find(
+        button => button.getAttribute('aria-label') === en.settings.sessions.deletePermanently
+      ) as HTMLElement
+
+      await act(async () => fireEvent.click(remove))
+
+      await waitFor(() => expect(screen.queryByText('theirs')).toBeNull())
+      expect(screen.getByText('mine')).toBeTruthy()
+      expect(deleteSession).toHaveBeenCalledWith('same', 'work')
+    })
   })
 
   it('lists automated archived rows too, whatever the sidebar preference', async () => {

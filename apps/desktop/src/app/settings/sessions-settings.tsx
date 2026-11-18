@@ -151,12 +151,12 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
 
   const unarchive = useCallback(
     async (session: SessionInfo) => {
-      setBusyId(session.id)
+      setBusyId(rowIdentity(session))
 
       try {
         await setSessionArchived(session.id, false, session.profile)
         paging.removed.add(rowIdentity(session))
-        setLocalSessions(prev => prev.filter(s => s.id !== session.id))
+        setLocalSessions(prev => prev.filter(s => rowIdentity(s) !== rowIdentity(session)))
         // Surface it again in the sidebar without waiting for a full refresh, and
         // lift any optimistic eviction so the grouped tree shows it again too.
         untombstoneSessions([session.id, session._lineage_root_id])
@@ -184,7 +184,7 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
         return
       }
 
-      setBusyId(session.id)
+      setBusyId(rowIdentity(session))
 
       try {
         await deleteSession(session.id, session.profile)
@@ -198,7 +198,7 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
         // stored id and the row may carry either.
         purgeInFlightTurnJournals([session.id, session._lineage_root_id])
         paging.removed.add(rowIdentity(session))
-        setLocalSessions(prev => prev.filter(s => s.id !== session.id))
+        setLocalSessions(prev => prev.filter(s => rowIdentity(s) !== rowIdentity(session)))
         triggerHaptic('warning')
       } catch (err) {
         notifyError(err, s.deleteFailed)
@@ -240,10 +240,10 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
         <div className="grid gap-1">
           {sessions.map(session => {
             const label = pathLeaf(session.cwd)
-            const busy = busyId === session.id
+            const busy = busyId === rowIdentity(session)
 
             return (
-              <div className="scroll-mt-6 rounded-lg" id={`archived-session-${session.id}`} key={session.id}>
+              <div className="scroll-mt-6 rounded-lg" id={`archived-session-${session.id}`} key={rowIdentity(session)}>
                 <ListRow
                   action={
                     <div className="flex items-center gap-1.5">
