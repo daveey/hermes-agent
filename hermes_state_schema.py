@@ -555,7 +555,9 @@ class SessionSchemaMixin:
             logger.error(
                 "state.db FTS repair has been blocked by the same holder(s) for %d deferrals over %.0f min "
                 "(%s); waiting is futile. Stop ONLY the other holder(s) — this process keeps running and its "
-                "own retry admits the rebuild within %.0fs of the holder leaving. `hermes doctor` shows this.",
+                "own retry admits the rebuild within %.0fs of the holder leaving — or let its next retry run the "
+                "online recovery, which needs no holder to stop (`hermes sessions repair-search` runs it now). "
+                "`hermes doctor` shows this.",
                 holders_attempts, (now - holders_since) / 60.0,
                 ", ".join(f"pid {pid}: {_holder_cmdline(pid)}" for pid in holder_pids), _FTS_STALE_RETRY_SECONDS,
             )
@@ -571,6 +573,17 @@ class SessionSchemaMixin:
             foreign_holders, attempts,
         )
         return True
+
+    @staticmethod
+    def _fts_deferral_futile(cursor: sqlite3.Cursor) -> bool:
+        """The stored holder-deferral record says waiting is futile (``_defer_stale_fts_for_holders``)."""
+        try:
+            row = cursor.execute("SELECT value FROM state_meta WHERE key = ? LIMIT 1",
+                                 (FTS_REBUILD_DEFERRAL_KEY,)).fetchone()
+        except sqlite3.Error:
+            return False
+        record = safe_json_loads(row[0]) if row else None
+        return isinstance(record, dict) and record.get("futile") is True
 
     def _recover_stale_fts(self, cursor: sqlite3.Cursor, *, legacy: bool, timeout_seconds=None) -> bool:
         """Atomically rebuild stale base/trigram indexes and resume syncing. *timeout_seconds*
@@ -611,6 +624,16 @@ class SessionSchemaMixin:
             return False
         if self.read_only or self._conn is None:
             return False
+        # A peer (another process on this store) may have recovered the index already, e.g. with the online
+        # recovery: adopt its state instead of rebuilding again (a one-shot rebuild would undo its chunked
+        # backfill under one long write lock). One indexed read per tick while stale.
+        try:
+            with self._lock:
+                if self._conn is not None and self._adopt_peer_fts_state_locked(self._conn.cursor()):
+                    self._fts_stale_retry_interval = 0.0
+                    return True
+        except sqlite3.Error:
+            pass
         now = time.monotonic()
         deferred_pids = getattr(self, "_fts_deferred_holder_pids", None)
         if now < getattr(self, "_fts_stale_retry_after", 0.0):
@@ -639,7 +662,17 @@ class SessionSchemaMixin:
                     self._fts_stale_retry_interval = 0.0
                 with contextlib.suppress(sqlite3.Error):
                     self._conn.commit()
-                return recovered
+                online = None
+                if not recovered and not legacy:
+                    if getattr(self, "_fts_oneshot_failed", False):
+                        online = "the one-shot rebuild failed with a database error"
+                    elif self._fts_deferral_futile(cursor):
+                        online = "the one-shot rebuild is blocked by resident holders (futile deferral)"
+            if online is not None:
+                # The one-shot path cannot finish here; the online one needs neither an exclusive store nor a
+                # readable old index (hermes_state_fts_online).
+                return self.recover_stale_fts_online(reason=online)
+            return recovered
         except Exception:
             logger.warning(
                 "In-process retry of the deferred stale state.db FTS rebuild failed; will retry later.", exc_info=True,
@@ -684,6 +717,8 @@ class SessionSchemaMixin:
             # Stale indexes must stay detached even on builds whose DDL transaction behavior differs.
             self._drop_all_fts_triggers(cursor)
             self._conn.commit()
+            # The next in-process retry takes the online path (a damaged index fails this DROP every time).
+            self._fts_oneshot_failed = True
             logger.error(
                 "Automatic rebuild of stale FTS indexes failed (%s); "
                 "canonical writes remain enabled with FTS detached.", exc,

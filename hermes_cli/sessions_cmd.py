@@ -1120,6 +1120,35 @@ def _cmd_optimize_storage(db, args):
         print("  (VACUUM was skipped or failed — run `hermes sessions optimize` later to reclaim freed space.)")
 
 
+def _cmd_repair_search(db, args):
+    """`hermes sessions repair-search`: the online FTS recovery (hermes_state_fts_online) on this store, now.
+    Needs no other process to stop. The chunked backfill then runs from the gateway housekeeping tick, or here
+    with --wait."""
+    stale = db.get_meta("fts_stale") is not None
+    if not stale and not getattr(args, "force", False):
+        status = db.fts_rebuild_status()
+        print("✓ The search index is not stale; nothing to repair."
+              + (f" Backfill in progress: {status['indexed']:,}/{status['total']:,} ({status['percent']}%)." if status else ""))
+        return 0
+    if not db.recover_stale_fts_online(reason="operator: hermes sessions repair-search"):
+        print("✗ Online search-index recovery did not run (see the log: quarantined store, legacy layout, or another "
+              "process holds the rebuild lock).")
+        return 1
+    status = db.fts_rebuild_status() or {}
+    print(f"✓ Search indexes recreated; new messages are indexed from now on. Backfill of "
+          f"{status.get('total', 0):,} existing messages is claimed.")
+    print("  The old index pages stay allocated until a VACUUM or `hermes sessions recover`.")
+    if not getattr(args, "wait", False):
+        print("  A running gateway completes the backfill a few seconds per minute; `--wait` runs it here.")
+        return 0
+    while db.advance_fts_backfill(budget_s=5.0):
+        status = db.fts_rebuild_status()
+        if status:
+            print(f"  backfill {status['indexed']:,}/{status['total']:,} ({status['percent']}%)", flush=True)
+    print("✓ Backfill complete.")
+    return 0
+
+
 def _cmd_repair_routing(db, args):
     records = db.find_orphaned_gateway_sessions(max_gap_s=getattr(args, "max_gap_seconds", None))
     adoptable = [r for r in records if r["adoptable"]]
@@ -1397,6 +1426,7 @@ _DB_HANDLERS = {
     "retitle-skills": _cmd_retitle_skills, "browse": _cmd_browse, "optimize": _cmd_optimize,
     "clean-markers": _cmd_clean_markers, "optimize-storage": _cmd_optimize_storage,
     "repair-routing": _cmd_repair_routing, "repair-prompts": _cmd_repair_prompts, "stats": _cmd_stats,
+    "repair-search": _cmd_repair_search,
     "refresh-prompts": _cmd_refresh_prompts,
     "mute": lambda db, a: _outcome_cmd().cmd_mute(db, a, True),
     "unmute": lambda db, a: _outcome_cmd().cmd_mute(db, a, False),

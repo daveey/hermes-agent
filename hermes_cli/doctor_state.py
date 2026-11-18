@@ -86,8 +86,9 @@ def _render_state_db_stats(stats: dict, holders=None, host_note: str = "") -> li
         if deferral.get("futile"):
             lines.append(("warn", f"state.db FTS repair is blocked by the same holder(s) PID(s) {pids} for "
                           f"{deferral.get('holders_attempts') or '?'} consecutive deferral(s); waiting is futile",
-                          "(stop ONLY the listed process(es) — the host gateway keeps running and its own "
-                          "retry rebuilds within a minute of the holder leaving)"))
+                          "(the host gateway's next retry rebuilds online with every holder running, or run "
+                          "'hermes sessions repair-search' now; alternatively stop ONLY the listed process(es) and "
+                          "the gateway's own retry rebuilds within a minute of the holder leaving)"))
         else:
             lines.append(("warn", f"state.db FTS repair is blocked after {deferral.get('attempts') or '?'} deferral(s) "
                           f"by PID(s) {pids}",

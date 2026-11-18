@@ -4287,6 +4287,18 @@ def _housekeeping_deferred_fts_retry() -> None:
                     getattr(_sdb, "db_path", "state.db"))
 
 
+def _housekeeping_fts_backfill() -> None:
+    """Advance a claimed chunked FTS backfill (online recovery, interrupted optimize) a bounded time per tick on
+    the shared instances; no-op without a claim. Each chunk is one short write transaction
+    (hermes_state_fts_online)."""
+    from hermes_state_registry import borrow_live_shared_session_dbs
+    with borrow_live_shared_session_dbs() as _session_dbs:
+        for _sdb in _session_dbs:
+            _advance = getattr(_sdb, "advance_fts_backfill", None)
+            if callable(_advance):
+                _advance()
+
+
 def _housekeeping_memory_trim() -> None:
     """Messaging-gateway counterpart to the TUI idle reaper; timer lane: full GC only once idle (#139763)."""
     from hermes_cli.mem_trim import trim_memory_when_idle
@@ -4372,6 +4384,7 @@ def _start_gateway_housekeeping(
         # profile's own (get_hermes_home()/load_config_readonly() bind to the scope).
         (1, "Plugin update check", profile_scoped_chore(runner, _housekeeping_plugin_update_check)),
         (1, "Deferred FTS retry tick", _housekeeping_deferred_fts_retry),
+        (1, "FTS backfill tick", _housekeeping_fts_backfill),
         (1, "gateway housekeeping memory trim", _housekeeping_memory_trim),
         (1, "MCP config reconcile", _mcp_config_reconciler(runner)),
         # Last: a real prune can hold this thread for a while; every other chore of the tick runs first.
