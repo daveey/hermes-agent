@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import time
+import uuid
 from datetime import UTC, datetime
 
 UNREAD_EXIT = 4
@@ -155,7 +156,8 @@ def _resolve(rows, event, payload, *, local_writer=False):
     Legacy synced events have no portable reference. Require acknowledgement of
     every plausible same-time/author row rather than guess among collisions.
     The timestamp tolerance covers the writer crossing a second between inserts;
-    body length cannot disambiguate because add_comment strips stored text.
+    UUIDv7 write times cover legacy rows stamped before the write lock (``_same_write``).
+    Body length cannot disambiguate because add_comment strips stored text.
     """
     if payload.get("comment_uid"):
         return [r for r in rows if "uid" in r.keys() and r["uid"] == payload["comment_uid"]]
@@ -166,8 +168,31 @@ def _resolve(rows, event, payload, *, local_writer=False):
         # the second timestamp. Local run provenance makes its integer usable.
         return [r for r in rows if r["id"] == payload.get("comment_id")
                 and r["author"] == payload["author"].strip()]
-    return [r for r in rows if abs(r["created_at"] - event["created_at"]) <= 1
+    return [r for r in rows if (abs(r["created_at"] - event["created_at"]) <= 1 or _same_write(r, event))
             and (not payload.get("author") or r["author"] == payload["author"].strip())]
+
+
+def _uuid7_ms(uid):
+    """Millisecond write time a UUIDv7 carries; None for any other value."""
+    try:
+        value = uuid.UUID(str(uid))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return value.int >> 80 if value.version == 7 else None
+
+
+def _same_write(row, event):
+    """Row and event uids minted within a second: the same tolerance as ``created_at``, on a clock that is right.
+
+    Legacy ``add_comment`` stamped the row's ``created_at`` before waiting for the
+    write lock and the event's after it, so the two integers drift by seconds
+    (5 s and 7 s seen live) while their UUIDv7 uids, minted inside the one
+    transaction, sit milliseconds apart.
+    """
+    keys = row.keys()
+    row_ms = _uuid7_ms(row["uid"]) if "uid" in keys else None
+    event_ms = _uuid7_ms(event["uid"]) if "uid" in event.keys() else None
+    return row_ms is not None and event_ms is not None and abs(row_ms - event_ms) <= 1000
 
 
 def cli_guard(args, tid, verb):

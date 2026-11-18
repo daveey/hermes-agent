@@ -123,13 +123,15 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
         raise ValueError(f"writer_kind must be 'agent' or 'human', not {writer_kind!r}")
     from hermes_cli.kanban_comment_origin import resolve_origin
     origin = resolve_origin(author, origin_gateway)
-    now = int(time.time())
     # [daveey] A comment written from inside a worker run records that run on its
     # ``commented`` event, so the live comment bridge can skip exactly the run's own notes
     # by id. Authorship cannot: workers and the chats steering them share a profile.
     # ``allow_nested=True``: graph builders (kanban_swarm blackboard seeding)
     # compose comment writes under one outer commit.
     with _kb.write_txn(conn, allow_nested=True):
+        # Stamped after the write lock, like the event: a stamp taken before it put the row
+        # seconds ahead of its event while another writer held the lock.
+        now = int(time.time())
         _kb._require_task(conn, task_id)
         if relayed_human:  # the card holder's own checks, atomic with the write (one relay per user turn)
             from hermes_cli.kanban_relayed_human import admit

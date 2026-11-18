@@ -93,11 +93,12 @@ def test_writer_redacted_body_is_proven_by_raw_receipt(board, entry, capsys):
     assert ok, output
 
 
+@pytest.mark.parametrize('entry', ['promote', 'unblock', 'tool'])
 @pytest.mark.parametrize('body', ['other body +14155550199 entirely', 'Mini operator: Keychain prompt confirmed by '
                                   '+14155559999 at restart.'])
-def test_redaction_does_not_widen_to_other_bodies(board, body, capsys):
+def test_redaction_does_not_widen_to_other_bodies(board, entry, body, capsys):
     """Only the writer's exact transform of the retained body matches; a different number stays missing."""
     cid, row, _raw, _stored = _redacted_delayed(board, 2)
     retain(receipt(board, row['created_at'], ('call-1', board, body)))
-    ok, output = release(board, 'promote', capsys, cid + 1000)
+    ok, output = release(board, entry, capsys, cid + 1000)
     assert not ok and 'data unavailable' in output, output

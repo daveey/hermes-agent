@@ -167,8 +167,12 @@ def test_delayed_legacy_local_writer(board, entry, broken, capsys):
                 payload["author"] = "another"
             if broken == "unhashable_run":
                 payload["writer_run_id"] = [run]
-            conn.execute("UPDATE task_events SET created_at=created_at+21, payload=? "
-                         "WHERE task_id=? AND kind='commented'", (json.dumps(payload), board))
+            # Both clocks drift 21 s: with co-minted uids the row is provable by write time alone
+            # (test_legacy_lock_drift_resolves_by_uid_write_time), and this test is about run provenance.
+            row_ms = int(conn.execute("SELECT created_at FROM task_comments WHERE id=?", (cid,)).fetchone()[0]) * 1000
+            conn.execute("UPDATE task_comments SET uid=? WHERE id=?", (_uid_at(row_ms), cid))
+            conn.execute("UPDATE task_events SET created_at=created_at+21, uid=?, payload=? "
+                         "WHERE task_id=? AND kind='commented'", (_uid_at(row_ms + 21000), json.dumps(payload), board))
             if broken != "no_claim":
                 kb._append_event(conn, board, "claimed", {
                     "holder": "peer" if broken == "foreign" else "owner", "run_uid": "writer-run"})
@@ -209,3 +213,70 @@ def test_legacy_ambiguous_same_second_lists_all_candidates(board, capsys, monkey
     assert not ok and "do not release second" in output
     ok, output = release(board, "promote", capsys, second)
     assert ok, output
+
+
+def _uid_at(ms):
+    from hermes_cli.kanban_db_sync import uuid7
+    raw = uuid7().replace("-", "")
+    h = f"{ms:012x}" + raw[12:]
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+
+
+def _lock_drift(tid, drift_s, uid_gap_ms):
+    """t_01a1a1dea9c64d6a shape: no comment_uid, no transcript, row stamped `drift_s` before its event."""
+    enable_sync(tid)
+    cid = comment(tid, session="peer-session", age=8 * 86400, body="Ladder run note from a subagent")
+    with kbc.connect_closing() as conn:
+        row = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
+        ms = row["created_at"] * 1000 + 300
+        with kbc.write_txn(conn):
+            conn.execute("UPDATE task_comments SET uid=? WHERE id=?", (_uid_at(ms), cid))
+            ev = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='commented' "
+                              "AND json_extract(payload, '$.comment_id')=?", (tid, cid)).fetchone()
+            payload = json.loads(ev["payload"])
+            payload.pop("comment_uid", None)
+            payload.pop("writer_run_id", None)
+            payload.pop("writer_run_uid", None)
+            conn.execute("UPDATE task_events SET created_at=?, uid=?, payload=? WHERE id=?",
+                         (row["created_at"] + drift_s, _uid_at(ms + uid_gap_ms), json.dumps(payload), ev["id"]))
+    return cid
+
+
+@pytest.mark.parametrize("entry", ["promote", "unblock", "tool"])
+@pytest.mark.parametrize("drift_s,uid_gap_ms", [(5, 6), (7, 1)])
+def test_legacy_lock_drift_resolves_by_uid_write_time(board, entry, drift_s, uid_gap_ms, capsys):
+    """Replay of the two live events (5 s / 6 ms and 7 s / 1 ms): proven by uid time, acknowledged by --seen."""
+    cid = _lock_drift(board, drift_s, uid_gap_ms)
+    ok, output = release(board, entry, capsys, cid - 1)
+    assert not ok and "Ladder run note" in output and "data unavailable" not in output, output
+    ok, output = release(board, entry, capsys, cid)
+    assert ok, output
+
+
+@pytest.mark.parametrize("uid_gap_ms", [1500, 60000])
+def test_legacy_uid_time_far_apart_stays_missing(board, uid_gap_ms, capsys):
+    cid = _lock_drift(board, 5, uid_gap_ms)
+    ok, output = release(board, "promote", capsys, cid + 1000)
+    assert not ok and "data unavailable" in output, output
+
+
+def test_comment_row_is_stamped_inside_the_write_lock(board, monkeypatch):
+    """The producer half: a 5 s wait for the write lock no longer separates row and event stamps."""
+    import contextlib
+    clock = [1794426069.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    real = kb.write_txn
+
+    @contextlib.contextmanager
+    def slow_lock(conn, *args, **kwargs):
+        clock[0] += 5  # waiting for another writer's lock
+        with real(conn, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(kb, "write_txn", slow_lock)
+    with kbc.connect_closing() as conn:
+        cid = kb.add_comment(conn, board, "default", "stamped late", writer_kind="agent", writer_session="w")
+        row_at = conn.execute("SELECT created_at FROM task_comments WHERE id=?", (cid,)).fetchone()[0]
+        ev_at = conn.execute("SELECT created_at FROM task_events WHERE task_id=? AND kind='commented' "
+                             "AND json_extract(payload, '$.comment_id')=?", (board, cid)).fetchone()[0]
+    assert row_at == ev_at == 1794426074

@@ -15,9 +15,11 @@ same source integer under any other tool name refuses.
 
 The retained call holds the body *before* the writer stored it, and
 ``kanban_comment`` stores ``redact_sensitive_text(body, force=True)``. So a body
-matches as written or after that same forced redaction, nothing looser: a
-legacy comment quoting an E.164 number (stored as ``+141****0134``) is otherwise
-unprovable forever and refuses every ``--seen`` release of its card.
+matches as written or after that same forced redaction: a legacy comment quoting
+an E.164 number (stored as ``+141****0134``) is otherwise unprovable forever and
+refuses every ``--seen`` release of its card. Masking is many-to-one, so a row
+with the same masked text can stand in for a missing one; it is the exact text
+the call stored, and when the true row syncs the two candidates refuse again.
 """
 from __future__ import annotations
 
@@ -134,6 +136,6 @@ def resolve(rows, event, payload, transcript, *, board=None):
         candidates = [r for r in rows if r['body'] in bodies
                       and r['author'] == author.strip()
                       and start <= r['created_at'] <= event['created_at']]
-    except (_Unprovable, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+    except (_Unprovable, ValueError, TypeError, KeyError, AttributeError, OverflowError, ImportError):
         return []
     return candidates if len(candidates) == 1 else []
