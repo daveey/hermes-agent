@@ -68,8 +68,8 @@ jobs:
     # Before 2026-10-29, two slices on the shared hermes-hub pool ran 42 min
     # + 19 min p50 queue each, ~75% of all CI runner-hours.
     #
-    # Pull requests usually run one slice of affected files (ci.yaml detect sizes the
-    # matrix, scripts/ci/affected_tests.py); every other event runs all twelve.
+    # Pull requests usually run a few half-size slices of affected files (ci.yaml detect
+    # sizes the matrix, scripts/ci/affected_tests.py); every other event runs all twelve.
     if: inputs.python
     name: Run tests (${{ inputs.python_changed != '' && 'affected, ' || '' }}${{ matrix.slice }}/${{ strategy.job-total }})
     runs-on: blacksmith-4vcpu-ubuntu-2404

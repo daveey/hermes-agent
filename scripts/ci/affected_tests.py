@@ -56,7 +56,10 @@ FULL_FRACTION = 0.4
 # Basenames too generic to mean one file when a test mentions them.
 GENERIC = {"__init__.py", "README.md", "index.ts", "index.js", "main.py", "utils.py", "config.py", "cli.py",
            "package.json", "SKILL.md", "types.ts", "constants.py"}
-SLICE_SECONDS = 16 * 240  # one affected slice holds about what a full-suite slice does (~12.9 h / MAX_SLICES)
+# One affected slice: 16 workers x ~2 min of per-file time, about half a full-suite slice (~12.9 h /
+# MAX_SLICES = ~3870 s). At 16 x 240 the first affected runs after #3589 took 8.2 and 8.8 min, their
+# slices 6-7 min each; half-size slices trade about twice the runners for a ~5-6 min pull request run.
+SLICE_SECONDS = 16 * 120
 MAX_SLICES = 12  # tests.yml's full-suite matrix (one 8 vCPU Blacksmith VM per slice)
 DEFAULT_FILE_SECONDS = 3.0
 
