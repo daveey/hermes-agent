@@ -146,6 +146,62 @@ def test_allowlist_is_bounded_and_has_inspected_desktop_poll_routes():
     assert hba.OTHER == "other"
 
 
+STATIC_SYNC_ROUTES = (
+    ("GET", "/api/plugins/hub-sync/sessions"),
+    ("GET", "/api/plugins/hub-sync/inbox"),
+    ("GET", "/api/plugins/hub-sync/tasks"),
+    ("GET", "/api/plugins/session-mentions/outbox"),
+    ("POST", "/api/plugins/session-mentions/result"),
+)
+
+
+@pytest.mark.parametrize("method,path", STATIC_SYNC_ROUTES)
+@pytest.mark.parametrize("suffix", ["", "/"])
+def test_static_sync_routes_attribute_asgi_bytes_without_query_values(method, path, suffix):
+    async def app(scope, receive, send):
+        await receive()
+        await _ok_app(scope, receive, send, chunks=[b"abc", b"de"])
+
+    _run(
+        _wrap(app),
+        _scope(method, path + suffix, query=b"cursor=private-cursor&user=private-user"),
+        _receive_body(b"request-private"),
+    )
+    snap = hba.snapshot()
+    key = f"{method} {path}"
+    assert set(snap["routes"]) == {hba.OTHER, key}
+    assert tuple(snap["routes"][key][k] for k in COUNTERS) == (
+        1, 1, 0, 0, 0, len(b"request-private"), 5,
+    )
+    assert snap["totals"] == snap["routes"][key]
+    assert all(value == 0 for value in snap["routes"][hba.OTHER].values())
+    assert snap["unclassified_inflight"] == 0
+    for private in ("private-cursor", "private-user", "request-private", "cursor=", "user="):
+        assert private not in repr(snap)
+
+
+@pytest.mark.parametrize("method,path", STATIC_SYNC_ROUTES)
+@pytest.mark.parametrize(
+    "variant,status",
+    [("wrong-method", 200), ("", 401), ("", 403), ("", 404),
+     ("/private-id", 200), ("-private-id", 200), ("//", 200), ("?private-query", 200)],
+)
+def test_static_sync_routes_reject_nonliteral_or_unsuccessful_asgi(method, path, variant, status):
+    request_method = ("POST" if method == "GET" else "GET") if variant == "wrong-method" else method
+    request_path = path if variant == "wrong-method" else path + variant
+
+    async def app(scope, receive, send):
+        await _ok_app(scope, receive, send, status=status, body=b"denied")
+
+    _run(_wrap(app), _scope(request_method, request_path, query=b"token=private-token"))
+    snap = hba.snapshot()
+    assert set(snap["routes"]) == {hba.OTHER}
+    assert tuple(snap["routes"][hba.OTHER][k] for k in COUNTERS) == (1, 1, 0, 0, 0, 0, 6)
+    assert snap["totals"] == snap["routes"][hba.OTHER]
+    for private in ("private-id", "private-query", "private-token"):
+        assert private not in repr(snap)
+
+
 def test_successful_2xx_matched_route_migrates_off_other():
     async def app(scope, receive, send):
         await _ok_app(scope, receive, send, body=b"hello")
