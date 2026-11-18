@@ -27,7 +27,8 @@ const {
   setSessionArchived,
   setSessionPinnedRemote,
   setSessionUnreadRemote,
-  listSidebarSessions
+  listSidebarSessions,
+  listAllProfileSessions
 } = await import('./sessions')
 
 const hermesApi = vi.mocked(client.hermesApi)
@@ -113,6 +114,21 @@ describe('session write reconnect safety', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('listAllProfileSessions automated rows', () => {
+  it('asks the backend to leave automated rows out only when told to', async () => {
+    hermesApi.mockResolvedValue({ sessions: [], total: 0 })
+
+    await listAllProfileSessions(500, 0, 'only', 'recent', 'all', { automated: 'exclude' }, 500)
+    await listAllProfileSessions(500, 0, 'only', 'recent', 'all', {}, 0)
+
+    const paths = hermesApi.mock.calls.map(([request]) => request.path)
+
+    expect(paths[0]).toContain('archived=only')
+    expect(paths[0]).toContain('&automated=exclude')
+    expect(paths[1]).not.toContain('automated')
   })
 })
 

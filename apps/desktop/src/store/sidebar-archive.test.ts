@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { $apiRequestScope } from '@/api/client'
 import type { SessionInfo } from '@/types/hermes'
 
-import { $sidebarShowArchived } from './layout'
+import { $sidebarShowArchived, $sidebarShowAutomated } from './layout'
 import {
   $archivedSessions,
   $archivedSessionsHasMore,
@@ -45,7 +45,7 @@ const page = (from: number, count: number): SessionInfo[] =>
 
 /** Read a cursor to its end, as a caller that wants the whole archive would. */
 async function listEveryArchivedSession(): Promise<SessionInfo[]> {
-  const pager = createArchivedPager()
+  const pager = createArchivedPager(true)
 
   while (pager.hasMore) {
     await pager.next()
@@ -58,6 +58,8 @@ let scopeSerial = 0
 
 beforeEach(() => {
   $sidebarShowArchived.set(false)
+  // Automated rows included unless a test says otherwise: the plain `{}` filter.
+  $sidebarShowAutomated.set(true)
   // A fresh scope per test: the switch drops the previous test's cursor and page count.
   $apiRequestScope.set({ connectionId: `reset-${(scopeSerial += 1)}`, profile: null })
   $apiRequestScope.set({ connectionId: null, profile: null })
@@ -408,6 +410,72 @@ describe('archived view paging', () => {
 
     expect(listAllProfileSessions).toHaveBeenCalledTimes(1)
     expect($archivedSessions.get()).toHaveLength(PAGE_SIZE)
+  })
+})
+
+// 2026-11-17: 15,432 of 16,899 archived rows were bot runs the sidebar then hid; 92 of the
+// first 500 were the user's own.
+describe('archived view and automated rows', () => {
+  it('asks for pages without automated rows while they are hidden', async () => {
+    $sidebarShowAutomated.set(false)
+    listAllProfileSessions.mockResolvedValue({ sessions: page(0, 2), total: 2 })
+
+    await loadArchivedSessions()
+
+    expect(listAllProfileSessions).toHaveBeenCalledWith(
+      PAGE_SIZE,
+      0,
+      'only',
+      'recent',
+      'all',
+      { automated: 'exclude' },
+      0
+    )
+  })
+
+  it('asks for every row while automated sessions are shown', async () => {
+    listAllProfileSessions.mockResolvedValue({ sessions: page(0, 2), total: 2 })
+
+    await loadArchivedSessions()
+
+    expect(listAllProfileSessions).toHaveBeenCalledWith(PAGE_SIZE, 0, 'only', 'recent', 'all', {}, 0)
+  })
+
+  it('starts the open view over when the preference flips, back at one page', async () => {
+    $sidebarShowArchived.set(true)
+    listAllProfileSessions.mockImplementation(async (...args: unknown[]) => ({
+      sessions: page(args[6] as number, PAGE_SIZE),
+      total: 4 * PAGE_SIZE
+    }))
+    await loadArchivedSessions()
+    await loadMoreArchivedSessions()
+    listAllProfileSessions.mockClear()
+
+    $sidebarShowAutomated.set(false)
+
+    expect($archivedSessions.get()).toEqual([])
+    await vi.waitFor(() => expect($archivedSessions.get()).toHaveLength(PAGE_SIZE))
+    expect(listAllProfileSessions).toHaveBeenCalledTimes(1)
+    expect(listAllProfileSessions).toHaveBeenCalledWith(
+      PAGE_SIZE,
+      0,
+      'only',
+      'recent',
+      'all',
+      { automated: 'exclude' },
+      0
+    )
+  })
+
+  it('drops the loaded rows without fetching when the preference flips with the view closed', async () => {
+    listAllProfileSessions.mockResolvedValue({ sessions: page(0, 2), total: 2 })
+    await loadArchivedSessions()
+    listAllProfileSessions.mockClear()
+
+    $sidebarShowAutomated.set(false)
+
+    expect($archivedSessions.get()).toEqual([])
+    expect(listAllProfileSessions).not.toHaveBeenCalled()
   })
 })
 

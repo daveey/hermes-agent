@@ -127,6 +127,14 @@ describe('SessionsSettings archived list paging', () => {
     expect(screen.queryByText('chat a')).toBeNull()
   })
 
+  it('lists automated archived rows too, whatever the sidebar preference', async () => {
+    render(<SessionsSettings />)
+
+    await screen.findByText('archived room')
+
+    expect(listAllProfileSessions).toHaveBeenCalledWith(500, 0, 'only', 'recent', 'all', {}, 0)
+  })
+
   it('offers no load-more when the first page is the whole archive', async () => {
     render(<SessionsSettings />)
 

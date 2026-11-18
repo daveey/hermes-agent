@@ -208,6 +208,33 @@ def stamp_automated(
     return rows
 
 
+def automated_policy_key(policy: AutomatedSourcePolicy) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """*policy* as a hashable cache-key part: a cached list made with ``automated=exclude`` is only
+    valid for the policy it was made under, and config.yaml changes without touching state.db."""
+    return tuple(policy), tuple(policy.interactive)
+
+
+def automated_listing_exclusion(
+    hermes_home: str | Path, db: Any, policy: AutomatedSourcePolicy | None = None,
+) -> tuple[bool, list[str]]:
+    """``(skip_store, exclude_sources)`` for a list that leaves automated rows out in SQL, so they
+    neither fill its pages nor count in its total [daveey]. ``skip_store``: the policy marks every
+    session automated (``"*"``), the store contributes nothing. Otherwise every source spelling the
+    store holds that :func:`is_automated_source` flags, so the SQL filter and the ``automated``
+    stamp agree row for row (the stamp folds case, ``NOT IN`` does not). A row with no source is
+    kept, as the stamp keeps it. Pinned rows are not exempt: the pin back-fill obeys the filter.
+    Why: 2026-11-17, 15,432 auto-archived bot rows in two profiles sat between a user's own
+    archived chats, 34 pages deep."""
+    if policy is None:
+        policy = automated_session_sources(hermes_home)
+    if not policy:
+        return False, []
+    if AUTOMATED_ALL_SOURCES in policy:
+        return True, []
+    held = db.session_count_by_source(include_archived=True)
+    return False, sorted(src for src in held if is_automated_source(src, policy))
+
+
 def subagent_listing_scope(
     hermes_home: str | Path, *, source: str | None = None, sources: list[str] | None = None,
     exclude_sources: list[str] | None = None,

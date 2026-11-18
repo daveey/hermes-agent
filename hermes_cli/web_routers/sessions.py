@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 
-from hermes_cli.session_listing import stamp_automated, subagent_listing_scope
+from hermes_cli.session_listing import automated_listing_exclusion, stamp_automated, subagent_listing_scope
 from hermes_cli.session_list_flight import SESSION_LIST_CACHE, data_stamp
 from hermes_cli.web_deps import late
 from hermes_cli.web_read_coalescing import coalesced_read
@@ -212,8 +212,11 @@ def get_sessions(
     limit: int = Query(20, ge=0, le=100), offset: int = Query(0, ge=0), min_messages: int = 0,
     archived: str = "exclude", order: str = "created", source: str | None = None, sources: str | None = None,
     exclude_sources: str | None = None, cwd_prefix: str | None = None, full: bool = False,
-    profile: Optional[str] = None):
+    automated: str = "include", profile: Optional[str] = None):
     """List sessions.
+
+    ``automated=exclude`` leaves out the rows this store's ``sessions.automated_sources`` /
+    ``interactive_sources`` policy marks automated, before paging and in ``total``.
 
     ``order=recent`` sorts by latest activity across the compression chain, so
     a long-running chat stays on page one after it auto-compresses onto a fresh
@@ -224,7 +227,11 @@ def get_sessions(
             status_code=400, detail="archived must be one of: exclude, only, include")
     if order not in ("created", "recent"):
         raise HTTPException(status_code=400, detail="order must be one of: created, recent")
-    args = (limit, offset, min_messages, archived, order, source, sources, exclude_sources, cwd_prefix, full, profile)
+    if automated not in ("include", "exclude"):
+        raise HTTPException(status_code=400, detail="automated must be one of: include, exclude")
+    # ``profile`` stays last: the cache key and the payload both read this tuple by position.
+    args = (limit, offset, min_messages, archived, order, source, sources, exclude_sources, cwd_prefix, full,
+            automated, profile)
     try:
         db_path = _session_db_path_for_profile(profile)
     except HTTPException:  # an unknown profile: the uncached path raises the same 400/404
@@ -269,7 +276,8 @@ list_router.add_api_route("/api/sessions", _sessions_http, methods=["GET"])
 
 
 def _list_sessions_payload(
-    limit, offset, min_messages, archived, order, source, sources, exclude_sources, cwd_prefix, full, profile,
+    limit, offset, min_messages, archived, order, source, sources, exclude_sources, cwd_prefix, full,
+    automated, profile,
 ) -> dict:
     """The ``GET /api/sessions`` body for already-validated params (uncached)."""
     profile_name = _cron_profile_home(profile)[0] if profile else None
@@ -285,6 +293,13 @@ def _list_sessions_payload(
             include_subagents, exclude_list = subagent_listing_scope(
                 Path(db.db_path).parent, source=source or None, sources=source_list or None,
                 exclude_sources=_csv(exclude_sources) or None)
+            if automated == "exclude":
+                skip, automated_sources = automated_listing_exclusion(Path(db.db_path).parent, db)
+                if skip:
+                    skipped = profile_name or _cron_default_profile()
+                    return {"sessions": [], "total": 0, "limit": limit, "offset": offset, "storage": (
+                        {skipped: STORAGE_CORRUPT} if storage_state(db.db_path) == STORAGE_CORRUPT else {})}
+                exclude_list = sorted({*(exclude_list or []), *automated_sources})
             scope = dict(
                 source=source or None, sources=source_list or None,
                 exclude_sources=exclude_list or None, cwd_prefix=(cwd_prefix or None),

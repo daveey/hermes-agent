@@ -92,7 +92,8 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
       // next page would skip a row per removal: read again from the top.
       const stale = paging.removed.size !== paging.removedAtStart
       const removedAtStart = paging.removed.size
-      const pager = paging.cursor && !stale ? paging.cursor : createArchivedPager()
+      // Every archived row, automated ones too: this is where the archive is managed.
+      const pager = paging.cursor && !stale ? paging.cursor : createArchivedPager(true)
       let pages = pager === paging.cursor ? paging.pages : 0
 
       try {

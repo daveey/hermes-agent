@@ -1892,3 +1892,33 @@ test('profileNamesOf: the named profiles of a /api/profiles listing, in order; a
   assert.deepEqual(profileNamesOf(null), [])
   assert.deepEqual(profileNamesOf(undefined), [])
 })
+
+test('the automated filter reaches every backend the unified list reads', async () => {
+  // The Archived view asks for pages without automated rows; a source that never
+  // hears the option pages its bot rows back in.
+  const asked: string[] = []
+  const searchParams = new URLSearchParams({ limit: '500', offset: '0', archived: 'only', automated: 'exclude' })
+
+  const record = async (path: string) => {
+    asked.push(path)
+
+    return { sessions: [], total: 0, profile_totals: {} }
+  }
+
+  await fetchPrimaryProfileSessions(searchParams, (_profile, path) => record(path), { prefixForMerge: true })
+  await fetchPrimaryProfileSessions(searchParams, (_profile, path) => record(path))
+  await fetchRegistrySessionRows(
+    [
+      { connectionId: 'gw', kind: 'remote', backends: [{ descriptor: 'remote', profileLabel: null }] },
+      { connectionId: 'mini', kind: 'local', backends: [{ descriptor: 'bb', profileLabel: 'bb-dev' }] }
+    ],
+    searchParams,
+    (_descriptor, path) => record(path)
+  )
+
+  assert.equal(asked.length >= 4, true)
+
+  for (const path of asked) {
+    assert.equal(new URL(path, 'http://x').searchParams.get('automated'), 'exclude', path)
+  }
+})

@@ -30,7 +30,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 
-from hermes_cli.session_listing import automated_session_sources, stamp_automated, subagent_listing_scope
+from hermes_cli.session_listing import (
+    automated_listing_exclusion, automated_policy_key, automated_session_sources, stamp_automated,
+    subagent_listing_scope)
 from hermes_cli.profile_session_scan_cache import ProfileSessionScanCache
 from hermes_cli.web_deps import late
 from hermes_cli.config import get_process_hermes_home
@@ -436,13 +438,17 @@ def get_profiles_sessions(
     # over-fetches ``limit + offset``.
     limit: int = Query(20, ge=0, le=500), offset: int = Query(0, ge=0), min_messages: int = 0,
     archived: str = "exclude", order: str = "recent", profile: str = "all",
-    source: str | None = None, sources: str | None = None, exclude_sources: str | None = None, full: bool = False):
+    source: str | None = None, sources: str | None = None, exclude_sources: str | None = None, full: bool = False,
+    automated: str = "include"):
     """Unified, read-only session list aggregated across ALL profiles: opens each profile's
     ``state.db`` directly (no dashboard backend per profile) and tags rows with their owning
     ``profile``. Rows omit ``system_prompt`` / ``model_config`` unless ``full=1`` — same
-    projection as ``/api/sessions``."""
+    projection as ``/api/sessions``. ``automated=exclude`` leaves out, per profile, the rows its
+    own automated-source policy marks automated (a wholly automated profile contributes nothing)."""
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(status_code=400, detail="archived must be one of: exclude, only, include")
+    if automated not in ("include", "exclude"):
+        raise HTTPException(status_code=400, detail="automated must be one of: include, exclude")
     if order not in ("created", "recent"):
         raise HTTPException(status_code=400, detail="order must be one of: created, recent")
 
@@ -472,10 +478,19 @@ def get_profiles_sessions(
             exclude_sources=_csv_list(exclude_sources) or None)
             if home is not None else (False, filters["exclude_sources"]))
         scoped = {**filters, "exclude_sources": exclude, "include_subagents": include_subagents}
-        cache_key = (per_profile, order, full, tuple(
+        # The policy is read here, not in the cached read: it lives in config.yaml, which changes
+        # without moving state.db's data_version, so it has to be part of the key.
+        policy = automated_session_sources(home) if automated == "exclude" and home is not None else None
+        cache_key = (per_profile, order, full, automated_policy_key(policy) if policy is not None else None, tuple(
             (key, tuple(value) if isinstance(value, list) else value) for key, value in scoped.items()))
 
-        def _read(db):
+        def _read(db, scoped=scoped, home=home, policy=policy):
+            if policy is not None:
+                skip, automated_sources = automated_listing_exclusion(home, db, policy)
+                if skip:
+                    return [], 0
+                scoped = {**scoped, "exclude_sources": sorted(
+                    {*(scoped["exclude_sources"] or []), *automated_sources}) or None}
             rows = db.list_sessions_rich(
                 limit=per_profile, offset=0, order_by_last_active=order == "recent",
                 # Same SQL-level blob skip as /api/sessions.

@@ -5,7 +5,7 @@ import { $apiRequestScope } from '@/api/client'
 import { listAllProfileSessions } from '@/api/sessions'
 import type { SessionInfo } from '@/types/hermes'
 
-import { $sidebarShowArchived } from './layout'
+import { $sidebarShowArchived, $sidebarShowAutomated } from './layout'
 import { $sessions } from './session'
 
 // The backend's `/api/profiles/sessions` page cap (`le=500`). The Electron
@@ -50,8 +50,15 @@ export interface ArchivedPager {
  * along even past the end, so once the cursor has covered `total`, a page
  * with no new archived row ends it too: a row archived or reordered mid-load
  * can leave the distinct count short for good.
+ *
+ * `includeAutomated: false` asks for pages without the rows each store marks
+ * automated. Bot profiles hold most of a deep archive, so leaving them in
+ * buries the user's own chats pages down. That drops every automated row,
+ * including the pinned or needs-attention ones the live sidebar would keep:
+ * those are listed again with "Show automated & test sessions" on.
  */
-export function createArchivedPager(): ArchivedPager {
+export function createArchivedPager(includeAutomated: boolean): ArchivedPager {
+  const filter = includeAutomated ? {} : ({ automated: 'exclude' } as const)
   const seen = new Set<string>()
   let archivedCount = 0
   let offset = 0
@@ -72,7 +79,7 @@ export function createArchivedPager(): ArchivedPager {
       return pager.sessions
     }
 
-    const page = await listAllProfileSessions(ARCHIVED_FETCH_PAGE_SIZE, 0, 'only', 'recent', 'all', {}, offset)
+    const page = await listAllProfileSessions(ARCHIVED_FETCH_PAGE_SIZE, 0, 'only', 'recent', 'all', filter, offset)
     const archivedBefore = archivedCount
     const sessions = [...pager.sessions]
 
@@ -159,7 +166,7 @@ async function runArchiveLoad(extend: boolean): Promise<void> {
     for (let pass = 0; pass < 2 && current(); pass += 1) {
       const continued = pager !== null
       const firstLoad = $archivedSessions.get().length === 0
-      pager ??= createArchivedPager()
+      pager ??= createArchivedPager($sidebarShowAutomated.get())
 
       while (read < wantedPages && pager.hasMore && current()) {
         const shown = $archivedSessions.get()
@@ -253,6 +260,14 @@ $apiRequestScope.listen(() => {
   }
 
   observedScope = scope
+  restartArchivedView()
+})
+
+// The loaded pages were asked for with or without automated rows; the other
+// answer is a different list, not a filter over this one.
+$sidebarShowAutomated.listen(restartArchivedView)
+
+function restartArchivedView(): void {
   // Strand whatever is reading the old scope: it may neither publish nor
   // count its pages against the new one.
   archiveGeneration += 1
@@ -266,7 +281,7 @@ $apiRequestScope.listen(() => {
   if ($sidebarShowArchived.get()) {
     void loadArchivedSessions()
   }
-})
+}
 
 /** Spend on a session — provider-reported price when we have one, our own
  *  estimate otherwise. */

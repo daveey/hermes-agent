@@ -134,6 +134,9 @@ export async function listSessions(
 export interface SessionSourceFilter {
   source?: string
   excludeSources?: string[]
+  /** 'exclude' leaves out the rows each store's own policy marks automated, before paging and
+   *  in `total` (a backend that predates the option ignores it and returns them). */
+  automated?: 'exclude'
 }
 
 export async function listAllProfileSessions(
@@ -151,11 +154,14 @@ export async function listAllProfileSessions(
     ? `&exclude_sources=${encodeURIComponent(filter.excludeSources.join(','))}`
     : ''
 
+  const automatedParam = filter.automated ? `&automated=${filter.automated}` : ''
+
   const result = await hermesApi<PaginatedSessions>({
     ...profileScoped(),
     path:
       `/api/profiles/sessions?limit=${limit}&offset=${Math.max(0, offset)}&min_messages=${Math.max(0, minMessages)}` +
-      `&archived=${archived}&order=${order}&profile=${encodeURIComponent(profile)}${sourceParam}${excludeParam}`,
+      `&archived=${archived}&order=${order}&profile=${encodeURIComponent(profile)}${sourceParam}${excludeParam}` +
+      automatedParam,
     timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
   })
 
