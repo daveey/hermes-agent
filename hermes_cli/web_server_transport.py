@@ -20,6 +20,11 @@ def transport_observed_app(app, *, proxy_headers: bool, forwarded_allow_ips):
     same interpreted client/scheme as before; only provenance reads the raw observation.
     """
     inner = ProxyHeadersMiddleware(app, trusted_hosts=forwarded_allow_ips) if proxy_headers else app
+    from hermes_cli.http_body_accounting import wrap_http_body_accounting
+
+    # Body-byte diagnostics wrap the interpreted app. No loop_accounting scope:
+    # inner ``accounted`` route passes remain the CPU names.
+    inner = wrap_http_body_accounting(inner)
 
     async def observed(scope, receive, send):
         if scope["type"] in ("http", "websocket"):

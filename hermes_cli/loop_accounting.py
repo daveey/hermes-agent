@@ -80,6 +80,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from hermes_cli import http_body_accounting, loop_callback_latency
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
@@ -534,6 +536,9 @@ def snapshot() -> dict[str, Any]:
         "threads": threads,
         "residual": _residual(threads, process_cpu, accounted_total, procfs),
         "loops": counters(),
+        "slow_callbacks": loop_callback_latency.snapshot(),
+        "http": http_body_accounting.snapshot(),
+        "diagnostic_code": loop_callback_latency.code_provenance(),
     }
 
 
@@ -743,6 +748,8 @@ def _final_write() -> None:
 
 def reset() -> None:
     """Clear every counter (tests)."""
+    loop_callback_latency.reset()
+    http_body_accounting.reset()
     with _lock:
         _stats.clear()
         _thread_accounted.clear()
@@ -915,12 +922,17 @@ def instrument_callbacks() -> bool:
     def _run(self):
         tid = _native_id()
         acc0 = _thread_accounted.get(tid, 0.0)
+        callback = self._callback  # cancellation may clear the handle during execution
+        w0 = _perf()
         c0 = _thread_time()
         try:
             return orig(self)
         finally:
             cpu = _thread_time() - c0
+            wall = _perf() - w0
             try:
+                if wall >= loop_callback_latency.THRESHOLD_S:
+                    loop_callback_latency.record(callback, wall, cpu, time.time())
                 st = _callback_stat(self._callback)
                 own = cpu - (_thread_accounted.get(tid, 0.0) - acc0)
                 st.runs += 1
