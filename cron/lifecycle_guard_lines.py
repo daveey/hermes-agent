@@ -27,10 +27,11 @@ def _quoted_end(text: str, start: int, closer: str, *, escapes: bool = True) -> 
     return len(text)
 
 
-def _double_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, str]:
+def _double_span(text: str, start: int, *, shlex_quotes: bool,
+                 breaks: list[int] | None = None) -> tuple[int, str]:
     """A substitution's quotes belong to its own frame, not the enclosing word."""
     pos = copied = start
-    parts = ['"']
+    parts = _OutputParts('"')
     while pos < len(text):
         char = text[pos]
         if char == "\\":
@@ -40,8 +41,11 @@ def _double_span(text: str, start: int, *, shlex_quotes: bool) -> tuple[int, str
             pos += 1
             break
         if char in "$`":
-            end, span = _expansion(text, pos, in_double=True, shlex_quotes=shlex_quotes)
+            nested = [] if breaks is not None else None
+            end, span = _expansion(text, pos, in_double=True, shlex_quotes=shlex_quotes,
+                                   breaks=nested)
             if span:
+                _shift_breaks(breaks, nested, _out_len(parts) + pos - copied)
                 if shlex_quotes:
                     span = span.replace("\\", "\\\\").replace('"', '\\"')
                 parts.extend((text[copied:pos], span))
@@ -404,7 +408,9 @@ def _parameter_span(text: str, start: int, *, shlex_quotes: bool,
             pos += 2
             continue
         if char == '"':
-            end, span = _double_span(text, pos + 1, shlex_quotes=shlex_quotes)
+            nested = [] if breaks is not None else None
+            end, span = _double_span(text, pos + 1, shlex_quotes=shlex_quotes, breaks=nested)
+            _shift_breaks(breaks, nested, _out_len(parts) + pos - copied)
             parts.extend((text[copied:pos], span))
             pos = copied = end
             continue
@@ -502,7 +508,8 @@ def _plain_word(text: str, pos: int) -> str | None:
 _CONTINUATION = re.compile(r"\\\r?\n[ \t]*")
 
 
-def _scan(text: str, *, split: bool, keep_comments: bool, shlex_quotes: bool = False) -> list[str]:
+def _scan(text: str, *, split: bool, keep_comments: bool, shlex_quotes: bool = False,
+          nested_breaks: bool = True) -> list[str]:
     """*text* as one string or (*split*) as logical lines: newlines outside quotes separate them
     (a quoted newline is data). Honors quotes and escapes. Comments are dropped, or with
     *keep_comments* kept without the backslashes they end with (no continuation)."""
@@ -519,7 +526,7 @@ def _scan(text: str, *, split: bool, keep_comments: bool, shlex_quotes: bool = F
                 and not text.startswith("$(", pos)):
             # Root $() traversal stays visible to logical-line consumers; only
             # nested opaque words need the substitution framed as a whole.
-            breaks: list[int] | None = [] if split and not in_double else None
+            breaks: list[int] | None = [] if split and nested_breaks else None
             end, span = _expansion(text, pos, in_double=in_double, shlex_quotes=shlex_quotes,
                                    breaks=breaks)
             if span:
@@ -600,4 +607,10 @@ def join_line_continuations(text: str) -> str:
 def _split_logical_lines(text: str) -> list[str]:
     """Split on newlines outside quotes (a quoted newline is data, not a separator); honors
     escapes and drops comments, so a quote in a comment opens nothing."""
-    return _scan(text, split=True, keep_comments=False)
+    lines = _scan(text, split=True, keep_comments=False)
+    if '${' in text:
+        # Also retain whole outer words: splitting inner commands must not erase
+        # the enclosing command's redirections, arguments, or heredoc context.
+        whole = _scan(text, split=True, keep_comments=False, nested_breaks=False)
+        lines = list(dict.fromkeys([*lines, *whole]))
+    return lines

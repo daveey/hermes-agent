@@ -1822,7 +1822,8 @@ def scan_gateway_lifecycle(
             read_remote_script=read_remote_script, source=source,
         )
         return unsafe, budget.refusal if unsafe else None
-    except SubstitutionNestingLimit:
+    except (SubstitutionNestingLimit, RecursionError):
+        # Frame walkers can exhaust Python's stack before the substitution budget.
         # Retrying the direct scanner would hit the same parser limit again.
         return True, 'the substitution nesting limit was reached'
     except Exception:
