@@ -232,6 +232,8 @@ def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
             out = {"active_card_runs": None}
     else:
         out = machine_admission_metrics.collect(active_card_runs)
+    from hermes_cli import machine_persistent_jobs
+    out.update(machine_persistent_jobs.collect())
     out.update(machine_drain_metrics.collect())
     out.update(machine_throughput_metrics.cached_counters())
     try:

@@ -52,6 +52,8 @@ def send_compatible(send, sample, on_counters_rejected=None):
     from hermes_cli.kanban_sync_client import HubError
     from hermes_cli.machine_throughput_metrics import FIELDS as COUNTERS
 
+    from hermes_cli.machine_persistent_jobs import fresh
+    sample = fresh(sample)
     try:
         return send(sample)
     except HubError as exc:
