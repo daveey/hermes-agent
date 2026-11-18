@@ -69,12 +69,15 @@ def remembered_publications(moved, previous):
     published = moved.get('published')
     if isinstance(published, Published):
         keys = set()
+        live_gateways = {scope[0] for scope in moved.get('live_scopes', ())}
         for card in previous or ():
             # Match _retire_moved's eligibility before touching publication keys.
             if card.get('ownership_state') != 'qualified' or card.get('created_at') is None:
                 continue
             scope = (card.get('gateway'), card.get('owner_profile'), card.get('board'))
-            if scope not in moved.get('live_scopes', ()):
+            # ...or _release_removed_owners': an owner with no live scope at all may be gone, and its row is then
+            # retired when another gateway publishes the card.
+            if scope not in moved.get('live_scopes', ()) and card.get('gateway') in live_gateways:
                 continue
             key = (card.get('board'), card.get('id'), card.get('created_at'))
             try:

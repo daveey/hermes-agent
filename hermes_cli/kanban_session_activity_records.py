@@ -40,6 +40,9 @@ def _retire_moved(card: dict[str, Any], moved: dict[str, Any]) -> bool:
     return any(gw != card.get('gateway') for gw in gateways)
 
 
+_INFERRED = ('owner_removed', 'aged_out')
+
+
 class OwnerSink:
     """``owners_out`` sink for ``_release_removed_owners``: borrows a projection's owner set, and takes a full
     read's one-shot generator as a set at once (the tasks it walks are folded afterwards)."""
@@ -64,24 +67,44 @@ def _release_removed_owners(carried: list[dict[str, Any]], owners, moved: dict[s
     ``owners`` is the projection's ``(gateway, board, id)`` set; it is walked only when a candidate row exists."""
     if not moved:
         return carried
-    # ``owner_removed`` is an inference, re-made on every fresh read, never a completion receipt: such a row is put
-    # back to its unresolved state first, so an owner that publishes or beats again (a reprovisioned machine, even
-    # one republishing this very card as running with its session links dropped) takes the release back.
-    rows = [({**{k: v for k, v in c.items() if k != 'owner_removed'}, 'status': 'unknown', 'unfinished': True,
-              'released': False} if c.get('owner_removed') else c) for c in carried]
-    wanted = [i for i, c in enumerate(rows) if c.get('status') == 'unknown' and c.get('ownership_state') == 'qualified'
-              and c.get('reported_status') in ('done', 'archived') and not c.get('released') and c.get('gateway')]
-    if not wanted:
+    # ``owner_removed`` and ``aged_out`` are inferences, re-made on every fresh read, never completion receipts: such
+    # a row is put back to its unresolved state first, so an owner that publishes or beats again (a reprovisioned
+    # machine, even one republishing this very card as running with its session links dropped) takes the release back.
+    rows = [({**{k: v for k, v in c.items() if k not in _INFERRED}, 'status': 'unknown', 'unfinished': True,
+              'released': False} if any(c.get(k) for k in _INFERRED) else c) for c in carried]
+    if all(c.get('released') for c in rows):
         return carried
-    publishing = {owner[0] for owner in owners}
-    if not publishing:  # a read that carries no task record at all proves nothing about who is gone
+    records = set(owners)
+    if not records:  # a read that carries no task record at all proves nothing about who is gone
         return carried
-    publishing |= {scope[0] for scope in moved.get('live_scopes', ())}
-    for i in wanted:
-        if rows[i]['gateway'] not in publishing:
-            rows[i] = {**rows[i], 'status': rows[i]['reported_status'], 'unfinished': False, 'released': True,
-                       'owner_removed': True}
-    return rows
+    live = moved.get('live_scopes', ())
+    publishing = {record[0] for record in records} | {scope[0] for scope in live}
+    published = moved.get('published', {})
+    out = []
+    for c in rows:
+        gw, qualified = c.get('gateway'), c.get('ownership_state') == 'qualified'
+        closed = c.get('status') == 'unknown' and c.get('reported_status') in ('done', 'archived')
+        if c.get('released') or not gw or not qualified:
+            out.append(c)
+        elif gw not in publishing:
+            # The owner is gone. Another gateway publishing the same card (board, id and created_at) is its real
+            # owner: this row was a worker node's copy, and that record speaks for the card (``_retire_moved``,
+            # which needs the named owner alive to say so). Hub, 2026-11-18: 44 cards listed open "on" removed
+            # workers; 36 were done or archived and 7 were live hub cards.
+            others = published.get((c.get('board'), c.get('id'), c.get('created_at')), ()) if c.get('created_at') is not None else ()
+            if any(other != gw for other in others):
+                continue
+            out.append({**c, 'status': c['reported_status'], 'unfinished': False, 'released': True,
+                        'owner_removed': True} if closed else c)
+        elif (closed and (gw, c.get('owner_profile'), c.get('board')) in live
+                and (gw, c.get('board'), c.get('id')) not in records):
+            # The owner is alive and has just read this exact scope cleanly, and it no longer publishes the card.
+            # A collector publishes every card of a scope except those archived past its recent window, so a
+            # card last reported done or archived that has left the scope is archived or deleted: closed.
+            out.append({**c, 'status': c['reported_status'], 'unfinished': False, 'released': True, 'aged_out': True})
+        else:
+            out.append(c)
+    return out
 
 
 def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, dict[str, Any]]) -> None:

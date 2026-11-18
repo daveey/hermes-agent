@@ -158,12 +158,31 @@ def test_a_reprovisioned_owner_republishing_the_card_running_without_links_takes
     assert by_id(activity._legacy_remote_links())['t_done'] == ('unknown', False, True)
 
 
-def test_a_fresh_heartbeat_alone_takes_the_release_back(world):
+def test_an_owner_back_with_a_clean_scope_and_no_such_card_keeps_it_closed_as_aged_out(world):
+    """The machine beats again and reads the card's exact scope cleanly without the card: a collector publishes
+    every card of a scope except those archived past its window, so the card is closed. It is no longer
+    ``owner_removed`` (the owner is back); it is ``aged_out``."""
     path, clock = world
     _removed_then_released(path, clock)
     with sqlite3.connect(path) as db:
         db.execute("INSERT INTO replica VALUES ('gone','gateway','info',1,62,?,0)",
                    (json.dumps({'gateway': 'gone', 'task_scopes': [ok(1015.0)]}),))
+    tick(path, clock, 1020.0)
+    rows = activity._legacy_remote_links()
+    done = next(r for r in rows if r['id'] == 't_done')
+    assert by_id(rows)['t_done'] == ('done', True, True) and done.get('aged_out') is True and 'owner_removed' not in done
+    assert by_id(rows)['t_open'] == ('running', False, True), 'its open card is still a remembered open row'
+
+
+@pytest.mark.parametrize('scope', [{**ok(1015.0), 'state': 'error'}, ok(1015.0, board='other'), ok(1.0)])
+def test_an_owner_back_without_a_clean_fresh_read_of_that_scope_takes_the_release_back(world, scope):
+    path, clock = world
+    _removed_then_released(path, clock)
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO replica VALUES ('gone','gateway','info',1,62,?,0)",
+                   (json.dumps({'gateway': 'gone', 'task_scopes': [scope]}),))
+        db.execute("INSERT INTO replica VALUES ('gone','tasks','work/other/t_else',1,63,?,1015000)",
+                   (json.dumps(card('t_else', gateway='gone', board='other', status='running', sessions=[])),))
     tick(path, clock, 1020.0)
     assert by_id(activity._legacy_remote_links())['t_done'] == ('unknown', False, True)
 
@@ -182,3 +201,53 @@ def test_released_rows_are_restored_by_the_pure_rule_when_the_owner_publishes():
     back = _release_removed_owners(released, {('gone', 'build', 't_new')}, FRESH)
     assert back == [row('t_done', 'gone', 'done')]
     assert _release_removed_owners(released, (), {}) == released and _release_removed_owners(released, (), FRESH) == released
+
+
+def test_a_live_owners_closed_card_that_left_its_scope_is_released_as_aged_out(world):
+    """Hub, 2026-11-18: 18 MacBook cards last reported archived, their records aged out of publication, stayed
+    remembered unknown rows although the MacBook was alive and publishing that scope."""
+    path, clock = world
+    put(path, 'alive', 't_arch', 70, status='archived')
+    put(path, 'alive', 't_busy', 71, status='running')
+    with sqlite3.connect(path) as db:  # never attested: no observation, so the rows are remembered unknown/open
+        pass
+    first = by_id(activity._legacy_remote_links())
+    assert first['t_arch'] == ('unknown', False, False)
+    with sqlite3.connect(path) as db:  # the archived card ages out of publication; so does the running card's record
+        db.execute("DELETE FROM replica WHERE gw = 'alive' AND key IN ('work/build/t_arch', 'work/build/t_busy')")
+    set_info(path, [ok(1010.0)], gw='alive', seq=901)
+    tick(path, clock, 1011.0)
+    rows = activity._legacy_remote_links()
+    got = by_id(rows)
+    assert got['t_arch'] == ('archived', True, True)
+    assert next(r for r in rows if r['id'] == 't_arch')['aged_out'] is True
+    assert got['t_busy'] == ('running', False, True), 'a card last reported open is never closed by absence'
+    # The owner's heartbeat goes stale: the inference is not made (and an earlier one is taken back).
+    tick(path, clock, 1010.0 + 40 * 3600)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE meta SET v = ? WHERE k = 'last_ok'", (str(clock['now']),))
+    assert by_id(activity._legacy_remote_links())['t_arch'] == ('unknown', False, True)
+
+
+def test_a_removed_owners_copy_of_a_card_another_gateway_publishes_is_retired(world):
+    """A worker node published its copy of a hub card as its own. With the worker removed, the row named an owner
+    that no longer exists while the real owner published the card all along."""
+    path, clock = world
+    put(path, 'gone', 't_copy', 80, status='ready', created_at=555)
+    put(path, 'gone', 't_copy_done', 81, status='done', created_at=556)
+    put(path, 'gone', 't_other_time', 82, status='ready', created_at=557)
+    with sqlite3.connect(path) as db:  # the real owner's records link no session of this origin
+        for seq, (tid, created) in enumerate([('t_copy', 555), ('t_copy_done', 556), ('t_other_time', 999)]):
+            db.execute("INSERT INTO replica VALUES ('alive','tasks',?,1,?,?,1000000)",
+                       (f'work/build/{tid}', 90 + seq, json.dumps(card(tid, gateway='alive', status='running',
+                                                                    created_at=created, sessions=[]))))
+    first = {r['id'] for r in activity._legacy_remote_links() if r['gateway'] == 'gone'}
+    assert {'t_copy', 't_copy_done', 't_other_time'} <= first
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM replica WHERE gw = 'gone'")
+    tick(path, clock, 1010.0)
+    rows = [r for r in activity._legacy_remote_links() if r['gateway'] == 'gone']
+    ids = {r['id'] for r in rows}
+    assert 't_copy' not in ids and 't_copy_done' not in ids, 'the real owner publishes them: the copies are retired'
+    assert 't_other_time' in ids, 'a different created_at is a different card'
+    assert 't_open' in ids, 'no other gateway publishes it: it stays a remembered open row'
