@@ -9,9 +9,13 @@ RUN = [
     'echo ' + DEEP + '; bash ./r.sh',
     'echo "${x:-${y:-"\'"} "$(true\nbash ./r.sh)"}"',
 ]
+RUN += [
+    'echo "${x:-${y:-"\'"} $(echo "$(true\nbash ./r.sh)")}"',
+    'echo "${x:-${y:-${z:-"\'"}} $(echo "$(true\nbash ./r.sh)")}"',
+]
 CLEAN = [
     "echo '" + DEEP + "'; python3 ./clean.py",
-    RUN[1].replace('bash ./r.sh', 'python3 ./clean.py'),
+    *(command.replace('bash ./r.sh', 'python3 ./clean.py') for command in RUN[1:]),
 ]
 
 

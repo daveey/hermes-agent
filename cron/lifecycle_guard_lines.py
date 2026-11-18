@@ -343,7 +343,8 @@ def _walk_command_span(text: str, start: int, shlex_quotes: bool,
             continue
         nested: list[int] | None = None
         if char == '"':
-            end, span = _double_span(text, pos + 1, shlex_quotes=shlex_quotes)
+            nested = [] if breaks is not None else None
+            end, span = _double_span(text, pos + 1, shlex_quotes=shlex_quotes, breaks=nested)
         elif char in "$`":
             nested = [] if breaks is not None else None
             end, span = _expansion(text, pos, in_double=False, shlex_quotes=shlex_quotes,
@@ -464,7 +465,7 @@ def _expansion(text: str, pos: int, *, in_double: bool, shlex_quotes: bool,
     """Return an opaque span, or an empty span when ordinary scanning should proceed.
 
     *breaks* collects command-separating newlines of nested ``$(...)`` frames (see
-    ``_command_span``); backtick bodies and double-quoted frames do not report them."""
+    ``_command_span``), including through double-quoted words; backtick bodies report none."""
     if text.startswith("${", pos):
         return _parameter_span(text, pos + 2, shlex_quotes=shlex_quotes, breaks=breaks)
     elif text.startswith("$(", pos) and not text.startswith("$((", pos):
