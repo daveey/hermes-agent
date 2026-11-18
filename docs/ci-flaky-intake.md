@@ -18,10 +18,11 @@ Reusable state-adapter contract:
 1. Inspect `hermes kanban --help` for `selfwork-producer` before any submission.
    Absence (including pre-self-work runtimes) permits the old undeclared path only
    for work not already frozen. `hermes kanban selfwork-producer --operation capabilities`
-   returns `{"self_work_producer":1}`. A well-formed unsupported version likewise
+   returns `{"self_work_producer":1,"self_work_producer_placement":1}`. A well-formed unsupported version likewise
    permits the old path before submission; errors/malformed capability replies do not.
 2. `hermes kanban selfwork-producer --operation prepare --request-file -` accepts
-   JSON with exactly `title`, `body`, `assignee`, `idempotency_key`, and `self_work`.
+   JSON with required `title`, `body`, `assignee`, `idempotency_key`, and `self_work`,
+   plus optional `runs_on` and `requires` string lists. No other create fields are allowed.
    It performs no submission and returns `{version:1,sender,home,body,request_id}`.
    `home` is `{gateway,profile,board}`; `body.create` freezes those input fields,
    home board and tenant. Persist this entire snapshot atomically before step 3.
@@ -35,6 +36,43 @@ Reusable state-adapter contract:
    A caught transport/storage/validation error returns pending with `error` and may
    omit request_id. Exit 0 alone is not delivery. Never downgrade any attempted
    declared submission, regenerate it after midnight, or retry via local creation.
+
+Placement-aware adapters must require both integer capability values to be `1`
+(not booleans); the older `{"self_work_producer":1}` does not advertise placement.
+Only before preparation or any declared attempt may an adapter choose its legacy
+route for a well-formed unsupported capability reply. Once prepared, retain the
+snapshot and retry only `advance` on a compatible runtime; never strip placement,
+regenerate a request, or fall back after errors. Minimal v1 snapshots remain valid,
+and consumers not needing placement may continue checking just the base capability.
+
+The optional lists use existing create label/capability validation, including empty
+lists; null, scalar strings and non-string members are rejected. Preparation and
+snapshot validation do not normalize, sort, deduplicate or insert omitted fields.
+The trusted receiver still applies normal create normalization and placement gates:
+explicit labels (even `runs_on: []`) need a synced intake board and eligible
+capabilities, not merely a producer capability advertisement. That advertisement
+is local-runtime support, not a health check of the remote intake. Receiver create
+refusals may surface only as `self_work_dispatch_pending`; persistent pending needs
+operator diagnosis of the intake's sync/placement gates, never a legacy fallback.
+Do not re-prepare an existing key with changed placement: courier/intake replay
+binds the original payload. Normalize legacy comma-separated or JSON-list CLI
+syntax into a list before preparation, not inside a saved snapshot. Label whitespace
+is validated using create normalization but retained in the snapshot itself.
+Same-area append preserves the existing owner's
+placement and requirements; requested placement applies only to a newly created task.
+
+State adapters must also account for these existing consumer differences:
+
+- `created_by` is not caller authority: the authenticated gateway supplies it. Put
+  producer attribution in the body rather than forwarding a legacy `--created-by`.
+- The owner is the full gateway/profile/board/task tuple, not necessarily a local
+  default-board task. Local `show` or SQLite lookups are not cross-home readback.
+- Appends can return an owner with another idempotency key. A successful append
+  already includes the submitted body; do not send a second legacy comment.
+- Freeze each evidence batch and key before transport, and mark only that batch
+  consumed after a completed receipt. Pending is not success even with exit zero.
+- CLI `--runs-on` strings must be converted to the equivalent string list before
+  preparation. Keep caller-selected labels and `requires` intact.
 
 Completion requires a matching frozen envelope, terminal courier `done` state and
 an authoritative `self_work_accepted` owner receipt (`ok`, `handoff_complete` true,

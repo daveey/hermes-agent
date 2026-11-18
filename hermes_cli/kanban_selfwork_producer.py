@@ -15,12 +15,29 @@ from pathlib import Path
 
 from hermes_cli.kanban_selfwork import SelfWorkError, contract
 
-CAPABILITY = {'self_work_producer': 1}
+CAPABILITY = {'self_work_producer': 1, 'self_work_producer_placement': 1}
+_CREATE_FIELDS = {'title', 'body', 'idempotency_key', 'assignee', 'self_work'}
+_PLACEMENT_FIELDS = {'runs_on', 'requires'}
 _NAME = re.compile(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}\Z')
 
 
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def _validate_placement(create):
+    from hermes_cli.kanban_capabilities import _required_capabilities
+    from hermes_cli.kanban_worker_node import normalize_runs_on
+
+    for field in _PLACEMENT_FIELDS & create.keys():
+        value = create[field]
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise SelfWorkError(f'producer {field} must be a string list')
+        # Validate with create semantics, but freeze the original bytes/order.
+        if field == 'runs_on':
+            normalize_runs_on(value)
+        else:
+            _required_capabilities(value, 'scratch')
 
 
 def prepare(create):
@@ -29,12 +46,13 @@ def prepare(create):
 
     if os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_KANBAN_WORKER_TASK'):
         raise SelfWorkError('headless producer cannot replace worker origin forwarding')
-    if not isinstance(create, dict) or set(create) - {'title', 'body', 'idempotency_key', 'assignee', 'self_work'}:
+    if not isinstance(create, dict) or set(create) - (_CREATE_FIELDS | _PLACEMENT_FIELDS):
         raise SelfWorkError('invalid producer create fields')
     if contract(create.get('self_work')) is None or not all(
         isinstance(create.get(k), str) and create[k].strip() for k in ('title', 'body', 'idempotency_key', 'assignee')
     ):
         raise SelfWorkError('producer requires declaration and nonempty create fields')
+    _validate_placement(create)
     config, sender, _, _ = _runtime()
     home = config.get('kanban', {}).get('self_work', {}).get('home')
     if (not isinstance(home, dict) or set(home) != {'gateway', 'profile', 'board'}
@@ -56,12 +74,13 @@ def validate(frozen):
             or not isinstance(body, dict) or set(body) != {'create'} or not isinstance(body['create'], dict)):
         raise SelfWorkError('invalid producer snapshot route')
     create = body['create']
-    if (set(create) != {'title', 'body', 'idempotency_key', 'assignee', 'self_work', 'board', 'tenant'}
+    if (set(create) - _PLACEMENT_FIELDS != _CREATE_FIELDS | {'board', 'tenant'}
             or create['board'] != home['board'] or contract(create['self_work']) is None
             or not all(isinstance(create[k], str) and create[k].strip()
                        for k in ('title', 'body', 'idempotency_key', 'assignee'))
             or frozen['request_id'] != 'sw-' + _digest({'sender': sender, 'home': home, 'key': create['idempotency_key']})):
         raise SelfWorkError('invalid producer snapshot payload')
+    _validate_placement(create)
 
 
 def receipt(frozen, row):
