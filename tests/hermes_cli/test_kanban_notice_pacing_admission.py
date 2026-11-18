@@ -353,6 +353,55 @@ def test_a_busy_pool_and_a_core_update_hold_still_come_first(hub):
     assert "core_update_hold" not in pooled, pooled
 
 
+def _claimed_by_the_pool(conn, n=3):
+    """``n`` same-label cards the pool claimed within 30 min: what makes a notice say matching_pool_busy."""
+    now = int(time.time())
+    for i in range(n):
+        claimed = pool_wait._card(conn, f"claimed {i}", now - 4000 + i)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (claimed,))
+            kb._append_event(conn, claimed, "claimed", {"holder": f"worker-{3 + i % 2}", "run_uid": f"r{i}"})
+
+
+@pytest.mark.parametrize("recorded", ["hub_only", "stale_paced_verdict"])
+@pytest.mark.parametrize("path", sorted(NOTICES))
+def test_a_held_pool_beats_same_label_claims_on_other_providers(hub, path, recorded):
+    """Defect agent-b460ba9d37 (hub, 2026-11-15 17:17Z): openai-codex went ``held`` (all accounts at 100% of the
+    7-day window, limit 0 on every worker) at 16:44Z, yet the stall notice for default-routed t_01a1e01b9645d70c said
+    "admission reason matching_pool_busy ... Not a placement problem ... Check current admission holds", because
+    workers had claimed two same-label cards routed to anthropic. The owner chat forecast pickup "as slots free up";
+    the card could not start until the codex reset days later. Claims on other providers prove nothing about a pool
+    that admits nothing: a held pool is named, with its until, ahead of the claim count. ``stale_paced_verdict``: the
+    card's newest capable skip still says ``paced`` (recorded once, before the hold), as on #3206 that morning."""
+    until = int(time.time()) + 5 * DAY
+    _store(("anthropic", lp.HELD, until))
+    tid = _hub_card(hub.conn)
+    if recorded == "stale_paced_verdict":
+        assert skips.record(hub.conn, tid, "llm_paced", detail="anthropic paced",
+                            extra={"providers": [{"provider": "anthropic", "state": "paced", "limit": 1,
+                                                  "running": 1}]})
+    _claimed_by_the_pool(hub.conn)
+    payload, text = NOTICES[path](hub.conn, tid)
+    assert payload["admission"]["status"] == "held", payload
+    assert payload["admission"]["providers"] == [{"provider": "anthropic", "state": "held", "until": until}], payload
+    stamp = time.strftime("%Y-%m-%d %H:%MZ", time.gmtime(until))
+    assert f"(anthropic held pool) until {stamp}" in text, text
+    assert "matching_pool_busy" not in text and "Not a placement problem" not in text, text
+    hint = pu.ready_hint(hub.conn, kb.get_task(hub.conn, tid), now=payload["observed_at"])
+    assert hint is not None and f"(anthropic held pool) until {stamp}" in hint, hint
+    assert "Not a placement problem" not in hint, hint
+
+
+def test_a_paced_pool_with_same_label_claims_stays_a_queue_wait(hub):
+    """The guard's boundary: a paced pool still admits starts (the claims show it), so the busy queue words stand."""
+    _store(("anthropic", lp.PACED))
+    tid = _hub_card(hub.conn)
+    _claimed_by_the_pool(hub.conn)
+    payload, text = _chat_wait(hub.conn, tid)
+    assert payload["admission"] == {"reason": "matching_pool_busy", "status": "queued"}, payload
+    assert "Not a placement problem" in text, text
+
+
 def test_this_hosts_update_hold_does_not_hide_a_pool_cards_pacing_wait(hub):
     """The incident shape (t_01a1e01b9645d70c): a pool card paced by the governor while the hub swaps its own
     core gets the pacing notice, not the hub's hold sentence."""
