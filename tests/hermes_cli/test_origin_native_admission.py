@@ -238,6 +238,20 @@ def test_uncopied_thread_has_no_authority(turn):
         pool.submit(in_thread).result(timeout=20)
 
 
+@pytest.mark.parametrize("args,kw", [
+    ({"placement_policy": "worker-first-v1"}, {}),
+    ({"self_work": {}}, {}),
+    ({}, {"origin_intent": {}}),
+    ({}, {"selfwork_intent": {}}),
+])
+def test_unsupported_paths_stop_before_wrapped_body(turn, args, kw):
+    @admission.tool_create
+    def forbidden(args, **kw):
+        pytest.fail("unsupported path reached wrapped create body")
+    with admission.strict_local_creation(), pytest.raises(admission.AdmissionRefused):
+        forbidden({"placement": "local", **args}, **kw)
+
+
 def test_db_origin_intent_refused(turn):
     with kbc.connect_closing() as conn:
         with admission.strict_local_creation(), pytest.raises(admission.AdmissionRefused):

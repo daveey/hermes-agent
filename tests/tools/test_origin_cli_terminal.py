@@ -12,6 +12,46 @@ from tests.hermes_cli import test_origin_native_admission as admission_fixtures
 turn = admission_fixtures.turn
 
 
+@pytest.mark.parametrize("missing", ["platform", "seqpacket", "cmsg", "poll"])
+def test_supported_requires_each_linux_primitive(monkeypatch, missing):
+    from tools import origin_cli_terminal as boundary
+    monkeypatch.setattr(boundary, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(boundary, "socket", SimpleNamespace(SOCK_SEQPACKET=5, MSG_CMSG_CLOEXEC=1))
+    monkeypatch.setattr(boundary, "select", SimpleNamespace(poll=object()))
+    assert boundary.supported()
+    if missing == "platform":
+        boundary.sys.platform = "unsupported"
+    elif missing == "poll":
+        del boundary.select.poll
+    else:
+        delattr(boundary.socket, "SOCK_SEQPACKET" if missing == "seqpacket" else "MSG_CMSG_CLOEXEC")
+    assert not boundary.supported()
+
+
+@pytest.mark.parametrize("missing", ["policy", "delegated"])
+def test_offer_does_not_inherit_absent_or_delegated_policy(turn, monkeypatch, missing):
+    from tools import origin_cli_terminal as boundary
+    from tools.environments.local import LocalEnvironment
+    monkeypatch.setattr(boundary, "supported", lambda: True)
+    monkeypatch.setattr(boundary, "current_policy", lambda: None if missing == "policy" else object())
+    monkeypatch.setattr("agent.delegation_context.is_delegated_child_context", lambda: missing == "delegated")
+    def forbidden(*args):
+        pytest.fail("ineligible caller reached Launch")
+    monkeypatch.setattr(boundary, "Launch", forbidden)
+    assert boundary.offer(object.__new__(LocalEnvironment), "local", None, "x") is None
+
+
+def test_offered_attempt_remains_marked_after_return(monkeypatch):
+    from tools import origin_cli_terminal as boundary
+    launch = SimpleNamespace(retire=list, close=lambda: None)
+    monkeypatch.setattr(boundary, "offer", lambda *a, **kw: launch)
+    attempt = []
+    result = boundary.execute(SimpleNamespace(execute=lambda *a, **kw: {"output": "ok"}), "cmd",
+                              env_type="local", task_id=None, attempt=attempt)
+    assert result == {"output": "ok"}
+    assert attempt == [True]
+
+
 def test_launch_executes_real_local_shell(turn, monkeypatch, tmp_path):
     from tools import origin_cli_terminal as boundary
     from tools.environments.local import LocalEnvironment
