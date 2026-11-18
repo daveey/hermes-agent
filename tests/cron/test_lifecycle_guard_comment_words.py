@@ -104,6 +104,9 @@ def _tree(tmp_path):
 
 
 def _bash_runs(tmp_path, command: str) -> bool:
+    from tests.cron.bash_execution import require_modern_system_bash
+
+    require_modern_system_bash()
     marker = tmp_path / "marker"
     marker.unlink(missing_ok=True)
     subprocess.run(["/bin/bash"], input=command + "\n", text=True, capture_output=True,

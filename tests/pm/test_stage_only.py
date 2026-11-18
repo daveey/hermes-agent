@@ -67,6 +67,26 @@ def _arm_lock(monkeypatch, artifacts):
     return lock
 
 
+@pytest.mark.parametrize("host,target,signed", [
+    ("darwin", "linux-arm64-bionic", False),
+    ("darwin", "darwin-arm64", True),
+    ("linux", "darwin-arm64", False),
+])
+def test_python_signing_requires_darwin_host_and_payload(tmp_path, monkeypatch, host, target, signed):
+    from types import SimpleNamespace
+    from pm import packages
+
+    package = packages.Python()
+    binary = tmp_path / "python"
+    calls = []
+    monkeypatch.setattr(packages, "sys", SimpleNamespace(platform=host))
+    monkeypatch.setattr(packages._BionicDebArm, "stage", lambda *args: None)
+    monkeypatch.setattr(package, "binary", lambda *args: binary)
+    monkeypatch.setattr("hermes_cli.macos_signing.sign_managed_python", calls.append)
+    package.stage(Store(tmp_path / "store"), tmp_path, "1.0", target)
+    assert calls == ([binary] if signed else [])
+
+
 TARGET = "linux-arm64-bionic"
 ENTRY = "stage-test-1.0-linux-arm64-bionic"
 

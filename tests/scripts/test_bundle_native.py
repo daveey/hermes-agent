@@ -796,7 +796,8 @@ def test_native_dispatch_child_environment(tmp_path, monkeypatch, cache_source, 
     ambient = tmp_path / "ambient"
     if cache_source != "default":
         monkeypatch.setenv("UV_CACHE_DIR", str(ambient))
-    cache = {"explicit": tmp_path / "explicit", "ambient": ambient, "default": uv_cache_dir()}[cache_source]
+    # macOS resolves the uv compatibility symlink to its .noindex directory.
+    cache = {"explicit": tmp_path / "explicit", "ambient": ambient, "default": uv_cache_dir()}[cache_source].resolve()
     compilers = {}
     for key, name in (("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")):
         home = tmp_path / ("custom" if explicit_compilers else "host") / name

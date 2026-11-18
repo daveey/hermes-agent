@@ -133,6 +133,9 @@ def test_data_and_watchers_remain_non_sinks(command):
 
 @pytest.mark.parametrize("shape", SHAPES[:3] + SHAPES[12:19] + QUOTE_SCOPE_SHAPES + PRIOR_EXPANSION_SHAPES)
 def test_real_bash_runs_recursive_index_payload(tmp_path, shape):
+    from tests.cron.bash_execution import require_modern_system_bash
+
+    require_modern_system_bash()
     # Execute only an isolated marker, never the user's lifecycle commands.
     payload = tmp_path / "big.sh"
     payload.write_text("# padding\n" * 140000 + "printf ran > marker\n", encoding="utf-8")

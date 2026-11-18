@@ -17,6 +17,10 @@ def test_comment_mask_preserves_generated_executed_payloads(tmp_path):
     executable = tmp_path / 'hermes'
     executable.write_text('#!/bin/sh\nprintf reached > seen\n', encoding='utf-8')
     executable.chmod(0o700)
+    # The parent subprocess supplies the hard timeout; macOS has no GNU timeout.
+    timeout = tmp_path / 'timeout'
+    timeout.write_text('#!/bin/sh\nshift\nexec "$@"\n', encoding='utf-8')
+    timeout.chmod(0o700)
     marker = tmp_path / 'seen'
     payload = "printf '%s %s %s' hermes '\"gateway\"' restart"
     comments = ['# inert; `auth`\n', '# unclosed \' \" $(\n', '# | bash\n']
