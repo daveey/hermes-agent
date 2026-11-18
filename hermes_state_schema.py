@@ -555,7 +555,7 @@ class SessionSchemaMixin:
             logger.error(
                 "state.db FTS repair has been blocked by the same holder(s) for %d deferrals over %.0f min "
                 "(%s); waiting is futile. Stop ONLY the other holder(s) — this process keeps running and its "
-                "own retry admits the rebuild within %.0fs of the holder leaving — or let its next retry run the "
+                "own retry admits the rebuild within %.0fs of the holder leaving. Meanwhile its retry runs the "
                 "online recovery, which needs no holder to stop (`hermes sessions repair-search` runs it now). "
                 "`hermes doctor` shows this.",
                 holders_attempts, (now - holders_since) / 60.0,
@@ -717,8 +717,11 @@ class SessionSchemaMixin:
             # Stale indexes must stay detached even on builds whose DDL transaction behavior differs.
             self._drop_all_fts_triggers(cursor)
             self._conn.commit()
-            # The next in-process retry takes the online path (a damaged index fails this DROP every time).
-            self._fts_oneshot_failed = True
+            # A corrupt image fails this DROP every time: the next in-process retry takes the online path. A
+            # transient lock or busy error does not (that retry would succeed, and needs no online recovery).
+            from hermes_state_errors import is_malformed_db_error
+            if is_malformed_db_error(exc):
+                self._fts_oneshot_failed = True
             logger.error(
                 "Automatic rebuild of stale FTS indexes failed (%s); "
                 "canonical writes remain enabled with FTS detached.", exc,

@@ -1122,30 +1122,45 @@ def _cmd_optimize_storage(db, args):
 
 def _cmd_repair_search(db, args):
     """`hermes sessions repair-search`: the online FTS recovery (hermes_state_fts_online) on this store, now.
-    Needs no other process to stop. The chunked backfill then runs from the gateway housekeeping tick, or here
-    with --wait."""
+    Needs no other process to stop. The chunked backfill and old-index teardown then run from the gateway
+    housekeeping tick, or here with --wait."""
     stale = db.get_meta("fts_stale") is not None
-    if not stale and not getattr(args, "force", False):
+    force = getattr(args, "force", False)
+    if not stale and not force:
         status = db.fts_rebuild_status()
         print("✓ The search index is not stale; nothing to repair."
-              + (f" Backfill in progress: {status['indexed']:,}/{status['total']:,} ({status['percent']}%)." if status else ""))
+              + (f" Backfill in progress: {status['indexed']:,}/{status['total']:,} ({status['percent']}%)."
+                 if status else ""))
         return 0
-    if not db.recover_stale_fts_online(reason="operator: hermes sessions repair-search"):
-        print("✗ Online search-index recovery did not run (see the log: quarantined store, legacy layout, or another "
-              "process holds the rebuild lock).")
+    if not db.recover_stale_fts_online(reason="operator: hermes sessions repair-search", force=force):
+        print("✗ Online search-index recovery did not run. See the log: damage outside the search index (use "
+              "`hermes sessions recover`), a quarantined store, the legacy layout, or another process holding the "
+              "rebuild lock.")
         return 1
     status = db.fts_rebuild_status() or {}
     print(f"✓ Search indexes recreated; new messages are indexed from now on. Backfill of "
           f"{status.get('total', 0):,} existing messages is claimed.")
-    print("  The old index pages stay allocated until a VACUUM or `hermes sessions recover`.")
     if not getattr(args, "wait", False):
-        print("  A running gateway completes the backfill a few seconds per minute; `--wait` runs it here.")
+        print("  A running gateway completes the backfill and frees the old index in short chunks every minute; "
+              "`--wait` runs it here.")
         return 0
+    last, stuck = None, 0
     while db.advance_fts_backfill(budget_s=5.0):
         status = db.fts_rebuild_status()
+        mark = (status or {}).get("indexed"), db.fts_online_work_pending()
+        stuck = stuck + 1 if mark == last else 0
+        last = mark
+        if stuck >= 12:
+            print("✗ No progress for a minute; stopping. The gateway retries; the log names the failing chunk.")
+            return 1
         if status:
             print(f"  backfill {status['indexed']:,}/{status['total']:,} ({status['percent']}%)", flush=True)
-    print("✓ Backfill complete.")
+        else:
+            print("  freeing the old index…", flush=True)
+    if db.get_meta("fts_stale") is not None or db.fts_online_work_pending():
+        print("✗ The backfill stopped before finishing (this handle went stale or was quarantined; see the log).")
+        return 1
+    print("✓ Backfill complete; the old index is freed.")
     return 0
 
 

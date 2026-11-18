@@ -97,6 +97,18 @@ no gateway is running and some other process holds the database.
 | `state.db.corrupt.<timestamp>.bak`, `*.malformed-backup` | Copies of a file Hermes found damaged before it repaired or quarantined it. | Do not restore them over `state.db` — they are the same damage. Keep for a report; safe to delete once you are back to normal. |
 | `state-snapshots/` | Quick snapshots `hermes update` and `hermes backup` take. | Restore with every Hermes process stopped; see [`hermes backup`](../reference/cli-commands.md#hermes-backup). |
 
+## Search stays slow or finds nothing new
+
+When the search index was damaged, or another process kept it from rebuilding, Hermes searches by substring
+until the index is rebuilt. The gateway does that on its own once waiting is futile; to do it now, with
+everything still running:
+
+```bash
+hermes sessions repair-search --wait
+```
+
+It refuses, and points to `hermes sessions recover`, when the damage is outside the search index.
+
 ## When the three steps do not work
 
 If every Hermes process is stopped, `hermes doctor` no longer lists a holder, and the

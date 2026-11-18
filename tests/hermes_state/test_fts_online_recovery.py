@@ -15,7 +15,7 @@ import pytest
 
 from hermes_state import SessionDB
 from hermes_state_common import FTS_REBUILD_DEFERRAL_KEY, FTS_STALE_KEY, _FTS_TRIGGERS
-from hermes_state_fts_online import online_recovery_script
+from hermes_state_fts_online import family_of, online_recovery_script
 from hermes_state_repair import integrity_damage_is_structural
 
 _OLD_WORDS = ["alphaword", "bravoword", "charlieword", "deltaword", "echoword"]
@@ -33,7 +33,7 @@ def _meta(path, key):
     return row[0] if row else None
 
 
-def _seed(path, sessions=4, per=60):
+def _seed(path, sessions=4, per=150):
     db = SessionDB(db_path=path)
     if not db._fts_enabled:
         db.close()
@@ -47,26 +47,45 @@ def _seed(path, sessions=4, per=60):
     db.close()
 
 
-def _break_trigram_btree(path):
-    """The hub's failure class: the trigram index's b-tree is unreadable at the page level, so DROP / 'delete-all'
-    / 'rebuild' raise "malformed" (corrupting its FTS blobs, as older tests do, leaves DROP working). Marks the
-    store stale with triggers detached, as the live fail-open does."""
-    conn = _raw(path)
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    root = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = 'messages_fts_trigram_data'").fetchone()[0]
-    page = conn.execute("PRAGMA page_size").fetchone()[0]
+def _mark_fail_open(conn):
+    """The live fail-open state: fts_stale set, FTS triggers detached."""
     for t in _FTS_TRIGGERS:
         conn.execute(f"DROP TRIGGER IF EXISTS {t}")
     conn.execute("INSERT INTO state_meta (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = '1'",
                  (FTS_STALE_KEY,))
+
+
+def _break_trigram_btree(path, where="shared"):
+    """``where="shared"``: the hub's damage shape. The trigram index's root page names one child page twice (and
+    loses another), so integrity_check completes and reports "2nd reference to page", "out of order" and "never
+    used" for that tree only. ``where="root"``: the root page is unreadable, so integrity_check itself fails."""
+    import struct
+
+    conn = _raw(path)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    root = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = 'messages_fts_trigram_data'").fetchone()[0]
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    _mark_fail_open(conn)
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     conn.close()
     with open(path, "r+b") as fh:
-        fh.seek((root - 1) * page)
-        fh.write(b"\x0f" * 64)  # not a b-tree page type
+        fh.seek((root - 1) * page_size)
+        page = bytearray(fh.read(page_size))
+        if where == "root":
+            page[:64] = b"\x0f" * 64
+        else:
+            assert page[0] == 5, "fixture needs a multi-page trigram index (interior table root)"
+            first_cell = struct.unpack(">H", page[12:14])[0]
+            page[8:12] = page[first_cell:first_cell + 4]  # right-most child := cell 0's child
+        fh.seek((root - 1) * page_size)
+        fh.write(page)
     with _raw(path) as conn:
-        with pytest.raises(sqlite3.DatabaseError):
-            conn.execute("DROP TABLE messages_fts_trigram")
+        try:
+            lines = [l for r in conn.execute("PRAGMA quick_check(50)") for l in str(r[0]).splitlines()]
+        except sqlite3.DatabaseError:
+            lines = None
+    if where == "shared":
+        assert any("2nd reference" in l for l in lines)
 
 
 def _canonical(path):
@@ -88,18 +107,27 @@ def _drain(db, limit_s=60.0):
 
 
 @pytest.fixture
-def damaged(tmp_path):
+def damaged(tmp_path, monkeypatch):
+    """The hub on 2026-11-18: a resident holder blocks the one-shot rebuild (and on this damage shape its DROP would
+    free the shared page twice), the trigram index is damaged, search is stale."""
     path = tmp_path / "state.db"
     _seed(path)
     before = _canonical(path)
     _break_trigram_btree(path)
+    monkeypatch.setattr(SessionDB, "_foreign_state_db_holders", lambda self: [(424242, str(path))])
     return path, before
 
 
 def _open_stale(path):
+    """Open, then age the holder deferral past the futility window (the record is recomputed on each deferral)."""
     db = SessionDB(db_path=path)
-    assert db._fts_stale is True  # the one-shot rebuild at open could not drop the damaged index
+    assert db._fts_stale is True
+    with _raw(path) as conn:
+        conn.execute("UPDATE state_meta SET value = json_set(value, '$.holders_since', ?, '$.holders_attempts', 50, "
+                     "'$.first_seen', ?) WHERE key = ?", (time.time() - 7200, time.time() - 7200,
+                                                         FTS_REBUILD_DEFERRAL_KEY))
     db._fts_stale_retry_after = 0.0
+    db._fts_deferred_holder_pids = None
     return db
 
 
@@ -122,6 +150,8 @@ def test_retry_tick_recovers_a_damaged_index_online_and_backfills(damaged):
 
         _drain(db)
         assert _meta(path, "fts_rebuild_high_water") is None and _meta(path, "fts_rebuild_progress") is None
+        with _raw(path) as conn:  # the healthy base index went to trash and was drained and dropped
+            assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'fts_v22_trash_%'").fetchone()[0] == 0
         with _raw(path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM messages_fts_docsize").fetchone()[0] == len(before) + 1
             eligible = conn.execute("SELECT COUNT(*) FROM messages WHERE role <> 'tool'").fetchone()[0]
@@ -195,6 +225,17 @@ def test_futile_holder_deferral_goes_online_without_a_failed_rebuild(tmp_path, m
         assert db.search_messages("alphaword")
     finally:
         db.close()
+    # A healthy index is drained, never abandoned: the file is fully clean for every whole-file consumer.
+    from hermes_cli.backup import verify_sqlite_integrity
+    from hermes_cli.backup_sqlite import preflight_state_db
+    from hermes_state_repair import _db_opens_cleanly
+
+    lines, _master = _integrity_lines(path)
+    assert lines == ["ok"]
+    assert _db_opens_cleanly(path) is None
+    assert verify_sqlite_integrity(path)["valid"] is True
+    snapshot = preflight_state_db(path.parent)
+    assert snapshot
 
 
 def test_backfill_tick_respects_its_time_budget(tmp_path, monkeypatch):
@@ -257,7 +298,9 @@ def test_script_unlinks_only_the_fts_family(tmp_path):
                                              "ESCAPE '\\' OR name = 'messages_ftsnot'")}
         family = "(name = 'messages_fts' OR name LIKE 'messages\\_fts\\_%' ESCAPE '\\')"
         roots = dict(conn.execute("SELECT name, rootpage FROM sqlite_master WHERE " + family))
-        conn.executescript(online_recovery_script(trigram=True))
+        names = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
+        conn.executescript(online_recovery_script(
+            unlink_tables=[n for n in names if family_of(n)], trash=[], trash_tables=[], trigram=True, stamp=1))
         after = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE name NOT LIKE 'messages\\_fts%' "
                                             "ESCAPE '\\' OR name = 'messages_ftsnot'")}
         new_roots = dict(conn.execute("SELECT name, rootpage FROM sqlite_master WHERE " + family))
@@ -306,5 +349,82 @@ def test_gateway_housekeeping_tick_advances_the_backfill(damaged, monkeypatch):
             assert time.monotonic() < deadline
         assert progress == "0"
         assert db.search_messages("bravoword")
+    finally:
+        db.close()
+
+
+def test_damage_outside_the_search_index_is_refused(tmp_path):
+    path = tmp_path / "state.db"
+    _seed(path, sessions=2, per=10)
+    with _raw(path) as conn:
+        for t in _FTS_TRIGGERS:
+            conn.execute(f"DROP TRIGGER IF EXISTS {t}")
+        conn.execute("INSERT INTO state_meta (key, value) VALUES (?, '1')", (FTS_STALE_KEY,))
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        root = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = 'sessions'").fetchone()[0]
+        page = conn.execute("PRAGMA page_size").fetchone()[0]
+    with open(path, "r+b") as fh:
+        fh.seek((root - 1) * page)
+        fh.write(b"\x0f" * 64)
+    db = SessionDB.__new__(SessionDB)  # a full open would quarantine on the damaged canonical table first
+    from hermes_state_fts_online import OnlineRecoveryRefused, plan_online_recovery
+    with pytest.raises(OnlineRecoveryRefused):
+        plan_online_recovery(path)
+    del db
+    with _raw(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'messages_fts_trigram_data'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("message,flag", [("database is locked", False), ("database disk image is malformed", True)])
+def test_only_a_corrupt_image_marks_the_one_shot_as_failed(tmp_path, message, flag):
+    path = tmp_path / "state.db"
+    _seed(path, sessions=1, per=4)
+    db = SessionDB(db_path=path)
+
+    class Cursor:
+        def execute(self, *_a, **_k):
+            return self
+
+        def fetchone(self):
+            return None
+
+        def executescript(self, _sql):
+            raise sqlite3.OperationalError(message) if "locked" in message else sqlite3.DatabaseError(message)
+
+    try:
+        db._fts_oneshot_failed = False
+        with db._lock:
+            assert db._recover_stale_fts_locked(Cursor(), legacy=False) is False
+        assert db._fts_oneshot_failed is flag
+    finally:
+        db.close()
+
+
+def test_cli_wait_never_reports_success_it_did_not_reach(damaged, capsys, monkeypatch):
+    from hermes_cli.sessions_cmd import _cmd_repair_search
+    path, _before = damaged
+    db = _open_stale(path)
+    try:
+        monkeypatch.setattr(db, "advance_fts_backfill", lambda budget_s=5.0: False)  # e.g. the handle went stale
+        assert _cmd_repair_search(db, argparse.Namespace(force=False, wait=True)) == 1
+        assert "stopped before finishing" in capsys.readouterr().out
+    finally:
+        db.close()
+
+
+def test_an_index_damaged_so_badly_that_integrity_check_fails_is_refused(tmp_path, monkeypatch):
+    """Root-page damage makes the whole-file check itself fail: without a complete map of which pages are shared,
+    nothing may be unlinked or freed."""
+    path = tmp_path / "state.db"
+    _seed(path)
+    _break_trigram_btree(path, where="root")
+    monkeypatch.setattr(SessionDB, "_foreign_state_db_holders", lambda self: [(424242, str(path))])
+    db = _open_stale(path)
+    try:
+        assert db.retry_deferred_fts_recovery() is False
+        assert _meta(path, FTS_STALE_KEY) == "1"
+        with _raw(path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'messages_fts_trigram_data'"
+                                ).fetchone()[0] == 1
     finally:
         db.close()
