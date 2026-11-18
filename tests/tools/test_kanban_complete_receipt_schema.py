@@ -13,6 +13,26 @@ import hermes_completion_receipt as hcr
 from tools.kanban_tools_schemas import KANBAN_COMPLETE_SCHEMA
 
 
+def test_served_complete_schema_declares_review_and_landing_contract():
+    from tools import kanban_tools
+    from tools.registry import registry
+
+    schema = registry.get_schema("kanban_complete")
+    assert schema is not None
+    meta = schema["parameters"]["properties"]["metadata"]
+    props = meta["properties"]
+    assert props["verdict"]["enum"] == ["approve", "request_changes"]
+    for key in ("reviewed_sha", "reviewed_pr", "pr", "published_pr", "landing_owner"):
+        assert props[key]["type"] == "string"
+    assert props["findings"]["type"] == "array"
+    assert props["findings"]["items"] == {"type": "string"}
+    for key in ("pr_left_open", "contract_waiver"):
+        assert props[key]["type"] == "object"
+        assert props[key]["properties"]["reason"]["type"] == "string"
+    assert meta.get("additionalProperties", True) is True
+    assert not meta.get("required")
+
+
 def _receipt_schema():
     meta = KANBAN_COMPLETE_SCHEMA["parameters"]["properties"]["metadata"]
     assert meta["type"] == "object"
@@ -167,10 +187,10 @@ def test_text_fields_advertise_the_writers_nonblank_no_control_rule():
 def test_kanban_complete_schema_stays_within_its_byte_budget():
     # KANBAN_COMPLETE_SCHEMA goes out on every worker request, and completion_receipt repeats TEXT_PATTERN on 15
     # fields (the cost note at TEXT_PATTERN). Budget the whole serialized schema, not the pattern's length, so
-    # growth anywhere is a decision: 10878 bytes at PR #2055, small headroom on top.
+    # Explicit review/landing keys cost ~0.9 KB but let schema-guided providers emit the required verdict.
     size = len(json.dumps(KANBAN_COMPLETE_SCHEMA).encode())
-    assert size <= 11000, (
-        f"KANBAN_COMPLETE_SCHEMA is {size} bytes, over its 11000-byte budget: every worker request carries it. "
+    assert size <= 11700, (
+        f"KANBAN_COMPLETE_SCHEMA is {size} bytes, over its 11700-byte budget: every worker request carries it. "
         "Trim it, or raise the budget deliberately and say why.")
 
 

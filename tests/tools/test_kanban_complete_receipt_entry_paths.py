@@ -133,6 +133,20 @@ def test_tool_paths_store_admitted_rejected_receipt(board, monkeypatch, call):
     assert projected["completion_receipt_source"]["ref"] == f"@task:default@src/{tid}"
 
 
+def test_tool_paths_preserve_review_contract_metadata(board, monkeypatch, call):
+    tid = _task(board, monkeypatch)
+    metadata = {
+        "verdict": "approve", "reviewed_sha": "a" * 40,
+        "reviewed_pr": "https://github.com/example/project/pull/1",
+        "findings": ["No blocking findings."], "custom_evidence": {"checked": True},
+    }
+    out = call({"summary": "Independent review finished.", "metadata": metadata})
+    assert not out.get("error"), out
+    status, _events, runs = _state(board, tid)
+    assert status == "done"
+    assert json.loads(runs[-1][3]) == metadata
+
+
 def _cli(tid, value):
     from hermes_cli import kanban as cli
     return cli._cmd_complete(argparse.Namespace(

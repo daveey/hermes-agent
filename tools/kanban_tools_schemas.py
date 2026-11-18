@@ -220,7 +220,18 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "attempt — {\"changed_files\": [...], \"tests_run\": 12, "
                 "\"findings\": [...]}. Surfaced to downstream "
                 "workers alongside ``summary``."
-        )), "properties": {"completion_receipt": _completion_receipt_schema()}},
+        )), "properties": {
+            "completion_receipt": _completion_receipt_schema(),
+            "verdict": {"type": "string", "enum": ["approve", "request_changes"]},
+            "reviewed_sha": _prop("string", "Full commit SHA independently reviewed."),
+            "reviewed_pr": _prop("string", "Exact URL of the independently reviewed PR."),
+            "pr": _prop("string", "PR URL referenced by this handoff."),
+            "published_pr": _prop("string", "Published PR URL; binds the completion contract."),
+            "findings": {"type": "array", "items": {"type": "string"}},
+            "landing_owner": _prop("string", "Open same-board landing task id for published_pr."),
+            "pr_left_open": {"type": "object", "properties": {"reason": {"type": "string"}}},
+            "contract_waiver": {"type": "object", "properties": {"reason": {"type": "string"}}},
+        }},
         "result": _prop("string", (
                 "Short result log line (legacy field, maps to "
                 "task.result). Use ``summary`` instead when "
