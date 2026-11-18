@@ -60,6 +60,34 @@ def test_wrong_reply_socket_is_rejected(echo_launch, family, kind):
     assert echo_launch.retire() == []
 
 
+@pytest.mark.parametrize("side,family,kind", [
+    ("reply", socket.AF_INET, socket.SOCK_SEQPACKET),
+    ("reply", socket.AF_UNIX, socket.SOCK_STREAM),
+    ("channel", socket.AF_INET, socket.SOCK_SEQPACKET),
+])
+def test_socket_predicates_stop_at_first_boundary(monkeypatch, echo_launch, side, family, kind):
+    class Socket:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def settimeout(self, timeout):
+            pass
+    fake = Socket()
+    fake.family, fake.type = family, kind
+    def forbidden(*args):
+        pytest.fail("invalid socket crossed its validation boundary")
+    monkeypatch.setattr(bridge.socket, "socket", lambda **kw: fake)
+    if side == "reply":
+        monkeypatch.setattr(bridge.select, "poll", forbidden)
+        echo_launch._handle(bridge._encode({"nonce": echo_launch._nonce, "args": {}}), 0, [42])
+        assert echo_launch.retire() == []
+    else:
+        monkeypatch.setattr(bridge.os, "dup", lambda fd: 42)
+        monkeypatch.setattr(bridge.socket, "socketpair", forbidden)
+        assert bridge.request(json.dumps({"fd": 42, "nonce": "x"}), {})["outcome"] == "outcome_unknown"
+
+
 def test_encode_limit_is_enforced():
     with pytest.raises(ValueError, match="too large"):
         bridge._encode("x" * bridge.LIMIT)

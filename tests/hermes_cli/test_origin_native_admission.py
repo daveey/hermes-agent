@@ -74,6 +74,25 @@ def test_real_tool_create_is_atomic(turn, monkeypatch, revocation):
             assert snapshot(conn) == before
 
 
+@pytest.mark.parametrize("missing", ["context", "scope", "binding"])
+def test_receipt_null_boundaries_refuse_before_admit(monkeypatch, missing):
+    origin = {"session": "fixture-chat"}
+    owner = {"gateway": "here", "profile": "default", "board": "default", "task_id": "fixture-task"}
+    context = None if missing == "context" else {"origin": origin}
+    primary = None if missing == "scope" else ("here", "default", "default")
+    binding = None if missing == "binding" else {"origin": origin, "owner": owner}
+    monkeypatch.setattr(native, "_primary_scope", lambda conn: primary)
+    monkeypatch.setattr(native, "_receipt", lambda conn, task: binding)
+    state = admission._Admission(SimpleNamespace(validated=lambda: context))
+    token = admission._current.set(state)
+    try:
+        with pytest.raises(admission.AdmissionRefused, match="lost custody"):
+            admission.require_receipt(object(), "fixture-task")
+        assert state.admitted == set()
+    finally:
+        admission._current.reset(token)
+
+
 def test_no_ambient_authority(turn):
     turn.release()
     with pytest.raises(admission.AdmissionRefused):
