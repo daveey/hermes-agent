@@ -353,9 +353,9 @@ class WorkerRPC:
                 with interrupt_at_deadline(link.ws):
                     link.send(self.request_id, message)
                     response = link.receive(remaining())
-            except (OSError, ConnectionClosed) as exc:
-                # A timed-out reply has no authority. Correlation discards it if
-                # it arrives later; durable writes never inherit this deadline.
+            except BaseException as exc:
+                # Cancellation also abandons an outcome-unknown observation.
+                # Never let its queued reply answer a subsequent durable write.
                 link.awaiting = None
                 # Never reuse this reply queue: the reader may already have
                 # queued a late observation while the timer was joining.
@@ -363,7 +363,9 @@ class WorkerRPC:
                 import socket
                 with contextlib.suppress(OSError):
                     link.ws.socket.shutdown(socket.SHUT_RDWR)
-                raise WorkerPersistenceError('origin_observation_unavailable') from exc
+                if isinstance(exc, (OSError, ConnectionClosed)):
+                    raise WorkerPersistenceError('origin_observation_unavailable') from exc
+                raise
             if 'error' in response:
                 raise WorkerPersistenceError(response['error'].get('message', 'origin_observation_refused'))
             return response['result']
