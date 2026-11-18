@@ -25,6 +25,21 @@ def test_refreshed_display_matches_bounded_model_text(monkeypatch, envelope, ext
     assert 'Next action for the user:' not in expected
     assert session_automation.admission_display(payload)['display_text'] == expected
 
+@pytest.mark.parametrize('envelope', ['local_automation_v1', 'native_text_v1'])
+def test_plain_local_wake_refresh_does_not_add_half_a_display_card(monkeypatch, envelope):
+    text = '[kanban] Task t_local blocked.'
+    descriptor = {'identity': json.dumps(['kanban-wake', 'fixture']),
+                  'kanban_cards': [{'task_id': 't_local', 'board': 'default',
+                                    'kinds': ['blocked'], 'text': text}]}
+    payload = {'text': text, envelope: descriptor if envelope == 'local_automation_v1'
+               else {'automation': descriptor}}
+    monkeypatch.setattr(kanban_wake_fold, '_live_task', lambda *a, **kw: ('ready', ''))
+    kanban_wake_fold.refresh_claimed(payload)
+    assert '[kanban] Task t_local ready.' in payload['text']
+    assert 'display_text' not in descriptor
+    session_automation.admission_display(payload)
+
+
 def test_preceding_link_keeps_intervening_context_once():
     lines = ['Open task: @task:default@hub/t_remote', 'Context before the ask',
              'Next action for the user: choose', 'Context after the ask']
