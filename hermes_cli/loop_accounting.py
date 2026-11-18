@@ -60,6 +60,12 @@ start; their sum matches ``process.cpu_s - process.accounted_cpu_s``). Residual 
 coroutine>`` (main-loop CPU outside any pass; 64 names then ``loop_cb/other``). A scope books only the CPU
 its nested passes did not. ``loop_accounting.scopes`` / ``loop_accounting.callbacks`` (config.yaml, both
 default on) switch the instrumentation off; hub A/B cost of both on: about +0.09% of a core.
+``families[f]`` also carries ``user_s`` / ``system_s`` (thread CPU split; a high system share is kernel time
+in wakeups and locks, not Python). ``residual.targets`` names the same unaccounted CPU per plain
+``threading.Thread(target=fn)`` (``module.qualname``, 64 names then ``other``; live threads at snapshot time,
+ended threads at the end of ``run``). It is an overlay, not additive with ``families``/``exited``.
+``loop_accounting.thread_targets`` (default on) switches it off; cost is one ``Thread.run`` wrapper: about
+3-6 µs of CPU per thread lifecycle (``tests/hermes_cli/test_loop_accounting_thread_targets.py`` pins <= 50 µs).
 
 **Cost.** One pass is two ``thread_time`` and two ``perf_counter`` reads, a thread-local depth and one
 uncontended lock: a few microseconds (``tests/hermes_cli/test_loop_accounting_bench.py`` pins <= 20 µs).
@@ -143,6 +149,9 @@ _stats: dict[str, _Stat] = {}
 _thread_accounted: dict[int, float] = {}  # native thread id -> CPU of its outermost passes
 _local = threading.local()
 _exited_tids: collections.deque = collections.deque()  # tids whose thread ended; folded under _lock
+_thread_targets: dict[int, str] = {}  # native id -> target name of a live ``threading.Thread`` we wrapped
+_target_exited: dict[str, dict[str, float]] = {}  # target name -> CPU/accounted CPU of its ended threads
+_thread_split: dict[int, tuple[float, float]] = {}  # native id -> (user_s, system_s) of the last Darwin read
 _started_at = time.time()
 _state: dict[str, Any] = {"role": None, "thread": None, "stop": None, "pid": os.getpid()}
 # Bumped by the at-fork hook in the child, with the child's thread and wall clocks at the fork: a pass opened
@@ -388,6 +397,12 @@ def _clk_tck() -> float:
 
 
 def _proc_stat_cpu(path: str, hz: float) -> Optional[tuple[str, float]]:
+    got = _proc_stat_split(path, hz)
+    return None if got is None else (got[0], got[1] + got[2])
+
+
+def _proc_stat_split(path: str, hz: float) -> Optional[tuple[str, float, float]]:
+    """(comm, user seconds, system seconds) from a ``/proc/.../stat`` file."""
     try:
         with open(path, encoding="ascii", errors="replace") as fh:
             raw = fh.read()
@@ -398,7 +413,7 @@ def _proc_stat_cpu(path: str, hz: float) -> Optional[tuple[str, float]]:
     if len(fields) < 13:
         return None
     comm = head.partition("(")[2]
-    return comm, (int(fields[11]) + int(fields[12])) / hz
+    return comm, int(fields[11]) / hz, int(fields[12]) / hz
 
 
 _FAMILY_SUFFIX = re.compile(r"([_\-\s]\d+|[_\-\s]?0x[0-9a-fA-F]+|[_\-\s][0-9a-fA-F]{8,})+$")
@@ -438,14 +453,18 @@ def _darwin_thread_cpu() -> list[tuple[int, str, float]]:
         if got <= 0:
             return []
         out = []
+        split: dict[int, tuple[float, float]] = {}
         for i in range(got // 8):
             info = _ThreadInfo()
             if lib.proc_pidinfo(pid, 15, ids[i], ctypes.addressof(info), ctypes.sizeof(info)) <= 0:  # THREADID64INFO
                 continue
             out.append((int(ids[i]), info.name.decode("utf-8", "replace"), (info.user + info.system) / 1e9))  # pth_*_time are already ns
+            split[int(ids[i])] = (info.user / 1e9, info.system / 1e9)
         total = sum(c for _, _, c in out)
         if total > (os.times().user + os.times().system) * 1.25 + 1.0:
             return []
+        _thread_split.clear()
+        _thread_split.update(split)  # user/system split of the same read, for thread_cpu()
         return out
     except Exception:  # health: allow BLE001 -- best effort; no per-thread counters is a documented state
         return []
@@ -467,16 +486,20 @@ def thread_cpu() -> list[dict[str, Any]]:
     except OSError:
         tids = []
     for tid in sorted(tids):
-        got = _proc_stat_cpu(f"{task_dir}/{tid}/stat", hz)
+        got = _proc_stat_split(f"{task_dir}/{tid}/stat", hz)
         if got is None:
             continue
-        comm, cpu = got
-        out.append({"tid": tid, "name": names.get(tid, comm), "cpu_s": round(cpu, 3),
+        comm, user, system = got
+        out.append({"tid": tid, "name": names.get(tid, comm), "cpu_s": round(user + system, 3),
+                    "user_s": round(user, 3), "system_s": round(system, 3),
                     "accounted_cpu_s": round(accounted_by.get(tid, 0.0), 6)})
     if not tids and sys.platform == "darwin":
         for tid, name, cpu in _darwin_thread_cpu():
-            out.append({"tid": tid, "name": names.get(tid) or name or "?", "cpu_s": round(cpu, 3),
-                        "accounted_cpu_s": round(accounted_by.get(tid, 0.0), 6)})
+            row = {"tid": tid, "name": names.get(tid) or name or "?", "cpu_s": round(cpu, 3),
+                   "accounted_cpu_s": round(accounted_by.get(tid, 0.0), 6)}
+            if tid in _thread_split:
+                row["user_s"], row["system_s"] = (round(v, 3) for v in _thread_split[tid])
+            out.append(row)
         tids = [t["tid"] for t in out]
     if not tids:  # no per-thread counters: list live accounted threads only (exited ones fold in snapshot())
         for tid, acc in sorted(accounted_by.items()):
@@ -563,8 +586,13 @@ def _residual(threads: list[dict[str, Any]], process_cpu: float, accounted_total
         f["threads"] += 1
         f["cpu_s"] += cpu
         f["accounted_cpu_s"] += t["accounted_cpu_s"]
+        if t.get("user_s") is not None:
+            f["user_s"] = f.get("user_s", 0.0) + t["user_s"]
+            f["system_s"] = f.get("system_s", 0.0) + (t.get("system_s") or 0.0)
     with _lock:
         exited_acc = _state.get("exited_accounted", 0.0)
+        live_targets = dict(_thread_targets)
+        gone_targets = {k: dict(v) for k, v in _target_exited.items()}
     exited = {"cpu_s": max(0.0, process_cpu - live), "accounted_cpu_s": exited_acc}
     total = 0.0
     for f in list(fams.values()) + [exited]:
@@ -572,8 +600,43 @@ def _residual(threads: list[dict[str, Any]], process_cpu: float, accounted_total
         total += f["unaccounted_cpu_s"]
         for k in ("cpu_s", "accounted_cpu_s", "unaccounted_cpu_s"):
             f[k] = round(f[k], 6)
-    out.update(families=fams, exited=exited, unaccounted_cpu_s=round(total, 6))
+        for k in ("user_s", "system_s"):
+            if k in f:
+                f[k] = round(f[k], 6)
+    out.update(families=fams, exited=exited, unaccounted_cpu_s=round(total, 6),
+               targets=_targets_residual(threads, live_targets, gone_targets))
     return out
+
+
+def _targets_residual(threads: list[dict[str, Any]], live: dict[int, str],
+                      gone: dict[str, dict[str, float]]) -> dict[str, dict[str, Any]]:
+    """The same unaccounted CPU seen per ``threading.Thread`` target (``instrument_thread_targets``): live
+    threads from this snapshot's per-thread CPU, ended ones from their final reading. An overlay on
+    ``families`` / ``exited``, NOT additive with them (a target's threads are also in their family or in
+    ``exited``); each thread's unaccounted CPU is clamped at 0 on its own."""
+    rows: dict[str, dict[str, float]] = {}
+
+    def row(key: str) -> dict[str, float]:
+        return rows.setdefault(key, {"live_threads": 0, "exited_threads": 0, "cpu_s": 0.0,
+                                     "accounted_cpu_s": 0.0, "unaccounted_cpu_s": 0.0})
+
+    for t in threads:
+        key = live.get(t["tid"])
+        if key is None:
+            continue
+        r = row(key)
+        cpu = t["cpu_s"] or 0.0
+        r["live_threads"] += 1
+        r["cpu_s"] += cpu
+        r["accounted_cpu_s"] += t["accounted_cpu_s"]
+        r["unaccounted_cpu_s"] += max(0.0, cpu - t["accounted_cpu_s"])
+    for key, g in gone.items():
+        r = row(key)
+        r["exited_threads"] += g["threads"]
+        r["cpu_s"] += g["cpu_s"]
+        r["accounted_cpu_s"] += g["accounted_cpu_s"]
+        r["unaccounted_cpu_s"] += g["unaccounted_cpu_s"]
+    return {k: {n: (round(v, 6) if isinstance(v, float) else v) for n, v in r.items()} for k, r in rows.items()}
 
 
 def _role_guess() -> str:
@@ -756,6 +819,8 @@ def reset() -> None:
         _exited_tids.clear()
         _cb_stats.clear()
         _cb_cache.clear()
+        _thread_targets.clear()
+        _target_exited.clear()
         _state.pop("exited_accounted", None)
 
 
@@ -950,8 +1015,75 @@ def instrument_callbacks() -> bool:
     return True
 
 
+MAX_TARGET_KEYS = 64  # distinct thread targets; later ones fold into TARGET_OTHER
+TARGET_OTHER = "other"
+
+
+def _target_key(target: Any) -> str:
+    """Name of a ``Thread`` target (``module.qualname``; a lambda also gets its line number)."""
+    name = _callable_name(target)
+    code = getattr(getattr(target, "__func__", target), "__code__", None)
+    if name.endswith("<lambda>") and code is not None:
+        name = f"{name}:{code.co_firstlineno}"
+    return name
+
+
+def instrument_thread_targets() -> bool:
+    """Name the CPU of every plain ``threading.Thread(target=fn)`` that ends up in no scope, per ``fn``
+    (``residual.targets``). Wraps ``Thread.run`` once; a thread costs one lock round at its start and one at
+    its end and nothing in between: a live thread's CPU is read at snapshot time and its final CPU when ``run``
+    returns, so a daemon loop that never exits is still named. Subclasses that override ``run`` (AnyIO
+    workers) and threads without a ``target`` are not wrapped. At most ``MAX_TARGET_KEYS`` names, then
+    ``other``. Idempotent."""
+    if _instrumented.get("threads"):
+        return False
+    _instrumented["threads"] = True
+    orig = threading.Thread.run
+
+    def run(self):
+        target = getattr(self, "_target", None)
+        if target is None:
+            return orig(self)
+        tid = _native_id()
+        key: Optional[str]
+        try:
+            key = _target_key(target)
+            with _lock:
+                if key not in _target_exited and key not in _thread_targets.values():
+                    if len({*_thread_targets.values(), *_target_exited}) >= MAX_TARGET_KEYS:
+                        key = TARGET_OTHER
+                _thread_targets[tid] = key
+        except Exception:  # health: allow BLE001 -- naming a thread must never stop it
+            key = None
+            logger.debug("loop accounting: thread target not named", exc_info=True)
+        try:
+            return orig(self)
+        finally:
+            if key is not None:
+                try:
+                    cpu = _thread_time()
+                    with _lock:
+                        acc = _thread_accounted.get(tid, 0.0)
+                        if _thread_targets.get(tid) == key:
+                            del _thread_targets[tid]
+                        g = _target_exited.setdefault(key, {"threads": 0, "cpu_s": 0.0, "accounted_cpu_s": 0.0,
+                                                            "unaccounted_cpu_s": 0.0})
+                        g["threads"] += 1
+                        g["cpu_s"] += cpu
+                        g["accounted_cpu_s"] += min(acc, cpu)
+                        g["unaccounted_cpu_s"] += max(0.0, cpu - acc)
+                except Exception:  # health: allow BLE001 -- accounting must never break a thread's exit
+                    logger.debug("loop accounting: thread exit booking failed", exc_info=True)
+
+    run._la_orig = orig  # type: ignore[attr-defined]
+    threading.Thread.run = run  # type: ignore[method-assign]
+    return True
+
+
 def uninstrument() -> None:
-    """Undo :func:`instrument_executors` / :func:`instrument_callbacks` (tests)."""
+    """Undo :func:`instrument_executors` / :func:`instrument_callbacks` / :func:`instrument_thread_targets` (tests)."""
+    if _instrumented.pop("threads", None):
+        threading.Thread.run = threading.Thread.run._la_orig  # type: ignore[attr-defined,method-assign]
     if _instrumented.pop("executors", None):
         import asyncio.base_events as be
         be.BaseEventLoop.run_in_executor = be.BaseEventLoop.run_in_executor._la_orig  # type: ignore[attr-defined]
@@ -1016,9 +1148,12 @@ def instrument() -> None:
         instrument_plugins()
     if _setting("callbacks", CALLBACKS_DEFAULT):
         instrument_callbacks()
+    if _setting("thread_targets", THREAD_TARGETS_DEFAULT):
+        instrument_thread_targets()
 
 
 CALLBACKS_DEFAULT = True
+THREAD_TARGETS_DEFAULT = True  # per-target thread naming: two lock rounds per thread lifetime, see the docstring
 
 
 def _after_fork_child() -> None:
@@ -1028,6 +1163,8 @@ def _after_fork_child() -> None:
     _thread_accounted.clear()
     _cb_stats.clear()
     _cb_cache.clear()
+    _thread_targets.clear()
+    _target_exited.clear()
     _started_at = time.time()
     _state.pop("exited_accounted", None)
     _state.update(thread=None, stop=None, pid=os.getpid(), role=None)
