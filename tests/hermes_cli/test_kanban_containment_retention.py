@@ -26,14 +26,15 @@ def _protected(conn, task):
                         "('contained','containment_released')", (task,)).fetchone()[0]
 
 
-def test_gc_events_prunes_board_and_retains_protected_history(board):
+def test_gc_events_prunes_board_and_retains_protected_history(board, monkeypatch):
     relay = _released_done(board)
     other = kb.create_task(board, title="Unrelated", assignee="default")
     assert kb.claim_task(board, other, claimer="default")
     assert kb.complete_task(board, other, summary="done")
     before = _protected(board, relay)
     assert before == 2
-    time.sleep(1.2)
+    cutoff = time.time() + 10
+    monkeypatch.setattr(kb.time, "time", lambda: cutoff)
     assert kb.gc_events(board, older_than_seconds=0) > 0
     assert board.execute("SELECT COUNT(*) FROM task_events WHERE task_id=?", (other,)).fetchone()[0] == 0
     assert _protected(board, relay) == before
