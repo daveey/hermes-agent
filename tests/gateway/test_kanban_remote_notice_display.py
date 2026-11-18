@@ -6,7 +6,7 @@ from tests.gateway.test_kanban_wake_fold import _local_chat, _automation
 
 
 @pytest.mark.parametrize('envelope', ['local_automation_v1', 'native_text_v1'])
-@pytest.mark.parametrize('extra', ['', 'x' * 20000])
+@pytest.mark.parametrize('extra', ['', 'x' * 20000], ids=['short', 'truncated'])
 def test_refreshed_display_matches_bounded_model_text(monkeypatch, envelope, extra):
     tid = 't_remote'
     text = 'Blocked\nNext action for the user: choose\nContext' + extra
@@ -24,6 +24,13 @@ def test_refreshed_display_matches_bounded_model_text(monkeypatch, envelope, ext
     assert 'Live status: archived' in expected
     assert 'Next action for the user:' not in expected
     assert session_automation.admission_display(payload)['display_text'] == expected
+
+def test_preceding_link_keeps_intervening_context_once():
+    lines = ['Open task: @task:default@hub/t_remote', 'Context before the ask',
+             'Next action for the user: choose', 'Context after the ask']
+    assert kanban_wake_fold._without_superseded_ask(lines, 't_remote') == [
+        lines[0], lines[1], lines[3]]
+
 
 @pytest.mark.asyncio
 async def test_standalone_archived_replica_display(tmp_path, monkeypatch):
