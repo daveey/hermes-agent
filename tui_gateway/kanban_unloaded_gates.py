@@ -104,6 +104,14 @@ def _notices(live: frozenset = frozenset()) -> Inputs:
             orphans = []
             for sub in subscriptions(conn, _KANBAN_NOTIFY_KINDS):
                 chat = str(sub.get('chat_id') or '')
+                if sub.get('inflight_from') is not None and _claim_held(conn, sub, _KANBAN_NOTIFY_KINDS):
+                    # A live holder's fresh claim with nothing deliverable past its cursor: the sweep does nothing
+                    # for it until the holder dies, the claim ages out or an event arrives, and every probe
+                    # re-evaluates all three. Three of these held the hub's pass hot every 30 s (t_01a1dfa94f2251cd).
+                    orphans.append((str(sub.get('task_id')), chat, 'held', sub.get('inflight_from'),
+                                    sub.get('last_event_id'), sub.get('inflight_pid'), sub.get('inflight_start'),
+                                    sub.get('inflight_at')))
+                    continue
                 if sub.get('inflight_from') is None and chat in live:
                     continue
                 if sub.get('inflight_from') is None and _orphan_chat(conn, sub, chat):
@@ -113,6 +121,22 @@ def _notices(live: frozenset = frozenset()) -> Inputs:
             # An orphan is part of the key: a new one (or one whose cursor moved) runs the sweep once.
             keys.append((str(path), tuple(sorted(orphans, key=repr))))
     return Inputs(tuple(keys), pending=False)
+
+
+def _claim_held(conn, sub: dict, kinds) -> bool:
+    """True when this in-flight claim needs nothing from the sweep right now: its holder is alive, the claim is
+    younger than ``NOTIFY_CLAIM_STALE_S`` and still holds a deliverable event (``recover_orphaned_notify_claims``
+    would leave it alone: ``_recovery_due`` is None), and no event of ``kinds`` lies past its cursor (so
+    ``unseen_events_for_sub`` is empty and ``_sweep_sub`` returns before delivering). Any doubt is False (hot)."""
+    from hermes_cli import kanban_db_notify as kbn
+
+    key = kbn._sub_key(sub['task_id'], sub['platform'], sub['chat_id'], sub.get('thread_id'))
+    if kbn._recovery_due(conn, sub, key) is not None:
+        return False
+    marks = ','.join('?' * len(kinds)) if kinds else ''
+    return conn.execute('SELECT 1 FROM task_events WHERE task_id = ? AND id > ?'
+                        + (f' AND kind IN ({marks})' if marks else '') + ' LIMIT 1',
+                        (sub['task_id'], int(sub['last_event_id']), *(kinds or ()))).fetchone() is None
 
 
 def _orphan_chat(conn, sub: dict, chat: str) -> bool:
@@ -185,15 +209,27 @@ def _guarantee() -> Inputs:
             for row in rows(db, sql):
                 meta = _decode(row['display_metadata'])
                 closeout = meta.get('closeout')
-                digest.update(repr((row['sid'], row['msg_id'], row['timestamp'], row['last_active'],
-                                    row['display_metadata'])).encode())
                 last = row['last_active']
+                # ``candidates()`` reads last_active only through the lookback test below, so the key carries that
+                # verdict, not the raw time: a chat that is talking commits it every few seconds, and the raw value
+                # re-armed the pass every 30 s (t_01a1dfa94f2251cd). The verdict is re-evaluated by every probe.
+                recent = isinstance(last, (int, float)) and last >= now - ng.LOOKBACK_S
+                digest.update(repr((row['sid'], row['msg_id'], row['timestamp'], recent,
+                                    row['display_metadata'])).encode())
                 if (not (isinstance(closeout, dict) and closeout.get('state') == 'deferred')
                         and (last is None or (isinstance(last, (int, float)) and last < now - ng.LOOKBACK_S))):
                     # ``candidates()`` never offers a non-deferred row whose chat was last active before
                     # LOOKBACK_S. Time only moves it further out; a write that revives it changes
                     # ``last_active`` and so the digest. A 3-day-old notice with no close-out held the whole
                     # pass hot on the hub (73 s of CPU per 600 s window, H2 run 132120).
+                    continue
+                # A notice still inside GRACE_S is not offered by ``candidates()`` (its poller has time): not work
+                # until ``timestamp + GRACE_S``, which is a clock, not a write. The hub's constant stream of fresh
+                # done-notices kept this pass hot for five of every six minutes (t_01a1dfa94f2251cd).
+                stamped = row['timestamp']
+                if (closeout is None and isinstance(stamped, (int, float)) and not isinstance(stamped, bool)
+                        and math.isfinite(stamped) and stamped > now - ng.GRACE_S):
+                    due = min(due, stamped + ng.GRACE_S)
                     continue
                 # Held/live and budget-only candidates remain hot: neither an
                 # active-session lease nor an hourly charge requires a DB write.
@@ -293,12 +329,20 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
             return Inputs()
     ledger = remote.ledger_path()
     ledger_stamp = None
+    held: set = set()
     if ledger.exists():
         with reader(ledger) as conn:
             ledger_stamp = _revision(conn)
-            # Holder-death and stale-claim recovery: only a claim WITH a holder is ever settled by the sweep.
-            if conn.execute('SELECT 1 FROM notices WHERE delivered=0 AND holder_pid IS NOT NULL LIMIT 1').fetchone():
-                return Inputs()
+            # Holder-death and stale-claim recovery: only a claim WITH a holder is ever settled by the sweep. A
+            # claim whose holder is ANOTHER live process is left alone by every path of the sweep (it reads "skip"
+            # until that holder acks or dies), and liveness is re-read by every probe; this process's own claim, a
+            # dead holder and an unreadable row are work. One live foreign claim held the hub's pass hot every 30 s
+            # (t_01a1dfa94f2251cd).
+            for row in conn.execute('SELECT session, ref, state, holder_pid, holder_start FROM notices '
+                                    'WHERE delivered=0 AND holder_pid IS NOT NULL').fetchall():
+                if remote._holder_is_me(row[3]) or not remote._holder_alive(row[3], row[4]):
+                    return Inputs()
+                held.add(tuple(row))
     # The key is what the pass would read, not the replica's commit counter: the hub's replica commits several
     # task-row writes a second, and almost none touches a card this host owes a notice for (t_01a1dfa94f2251cd).
     # ``observe`` records this host's first sighting of EVERY terminal state, linked or not, and a later link must
@@ -307,31 +351,43 @@ def _remote(live: frozenset = frozenset()) -> Inputs:
     token = _replica_token(path)
     if token is None:
         return Inputs()
-    memo_key = (str(path), me, token, str(ledger), ledger_stamp, live, epoch)
+    memo_key = (str(path), me, token, str(ledger), ledger_stamp, live, epoch, frozenset(held))
     hit = _remote_memo.get('inputs')
     if hit is not None and hit[0] == memo_key:
-        return hit[1]
+        # An archived chat un-archiving moves no replica row, no ledger row: re-read each parked chat per probe.
+        if all(_chat_inert(profile, sid) for profile, sid in hit[2]):
+            return hit[1]
+        return Inputs()
     _remote_memo.pop('inputs', None)
     cards, _states = remote._sweep_snapshot(path, me)
     watch = _replica_watch.get(str(path))
     if watch is not None:  # a later non-terminal write to one of these (a reopened card) must not be skipped
         _replica_watch[str(path)] = (*watch[:2], frozenset(f'{owner}/{key}' for owner, key, _t, _l in cards))
+    parked: set = set()
     if ledger_stamp is None:
         if cards:
             return Inputs()
     else:
         with reader(ledger) as conn:
-            if cards and not _cards_settled(conn, cards, live, str(Path(path).resolve())):
+            if cards and not _cards_settled(conn, cards, live, str(Path(path).resolve()),
+                                            held=frozenset((r[0], r[1], r[2]) for r in held), parked=parked):
                 return Inputs()
     digest = hashlib.sha256()
     digest.update(repr((token, epoch)).encode())
     for owner, key, task, links in cards:
         digest.update(repr((owner, key, remote._notice_state(task),
                             tuple((link.get('profile'), link.get('session')) for link in links))).encode())
-    result = Inputs((str(path), me, digest.hexdigest(), str(ledger), ledger_stamp), pending=False)
-    if fingerprint(path) != stamp:
-        return Inputs()  # never publish a quiet proof across a concurrent replica write or replacement
-    _remote_memo['inputs'] = (memo_key, result)
+    result = Inputs((str(path), me, digest.hexdigest(), str(ledger), ledger_stamp, frozenset(held),
+                     frozenset(parked)), pending=False)
+    # Never publish a quiet proof across a replacement or a write the sweep could act on. The hub's replica commits
+    # several rows a second, almost none of them a card this host owes anything for: comparing the raw commit stamp
+    # made the cold read (about 2 s of CPU) lose that race every time, so the proof was never published and every
+    # pass paid it again (t_01a1dfa94f2251cd). The semantic token is what the proof is keyed on.
+    after = fingerprint(path)
+    if after is None or (getattr(after, 'ident', None), getattr(after, 'generation', None),
+                         getattr(after, 'signature', None)) != identity or _replica_token(path) != token:
+        return Inputs()
+    _remote_memo['inputs'] = (memo_key, result, frozenset(parked))
     return result
 
 
@@ -408,7 +464,22 @@ def _replica_token(path):
     return token
 
 
-def _cards_settled(conn, cards, live, source: str = '', now: float | None = None) -> bool:
+def _chat_inert(profile, sid) -> bool:
+    """True when ``_deliver_link`` returns for this chat before it claims or writes anything, and will keep doing so
+    until the chat itself changes: it is archived or moved to another gateway (``chat_skip_reason``). Eleven of the
+    hub's twelve unsettled links were of archived chats, held for the whole 72 h late window, and kept the pass
+    hot and cold every 30 s (t_01a1dfa94f2251cd). Unreadable or missing is not proof: False."""
+    from tui_gateway import kanban_remote_notices as remote
+    from tui_gateway.notice_fanout import chat_skip_reason
+    try:
+        with remote._session_db(profile, sid) as (db, _tip):
+            return db is not None and chat_skip_reason(db, sid) is not None
+    except Exception:  # health: allow BLE001 -- unknown is hot
+        return False
+
+
+def _cards_settled(conn, cards, live, source: str = '', now: float | None = None, held=frozenset(),
+                   parked: set | None = None) -> bool:
     """True when every notice the sweep could deliver already has a settled ledger row, so the pass has nothing to
     deliver, claim, wait on or count. Anything unproven (a link without a settled row, an open chat, whose poller
     the sweep notes) keeps the pass hot. Blank and placement-placeholder links are dropped by the delivery
@@ -425,8 +496,13 @@ def _cards_settled(conn, cards, live, source: str = '', now: float | None = None
                 continue
             if sid in live:
                 return False
+            if (sid, ref, state) in held:
+                continue  # a live foreign holder owns it: the sweep skips it (see ``_remote``)
             if not remote._ledger_settled(conn, (sid,), ref, state) and not _expired_unobserved(
                     conn, source, task, ref, state, now):
+                if parked is not None and _chat_inert(profile, sid):
+                    parked.add((str(profile), str(sid)))  # re-read by every probe, memo hit or not
+                    continue
                 return False
     return True
 

@@ -256,8 +256,7 @@ def test_delegation_recovery_due_is_a_fixed_offset_from_now(store, clock):
 
 # ------------------------------------------------------------------------------ busy / slot / pending hot
 @pytest.mark.parametrize('closeout, ts', [
-    (..., 1000.0),                                                        # never claimed (even inside grace)
-    (..., 999999.0),
+    (..., 1.0),                                                           # never claimed, past grace
     ({'state': 'busy'}, 1000.0),                                          # legacy final busy: re-offered
     ({'state': 'deferred', 'retry_at': 1000.0, 'busy_attempts': 2}, 1.0),  # timed busy deferral
     ({'state': 'deferred', 'retry_at': 9e9, 'busy_attempts': 1}, 1.0),     # busy deferral, far future
@@ -334,7 +333,7 @@ def test_remote_pending_inputs_stay_hot(monkeypatch, tmp_path):
     from tui_gateway import kanban_replica_observer as observer
     ledger = tmp_path / 'ledger.db'
     with contextlib.closing(sqlite3.connect(ledger)) as conn:
-        conn.execute('CREATE TABLE notices(delivered INTEGER, holder_pid INTEGER)')
+        conn.execute('CREATE TABLE notices(session TEXT, ref TEXT, state TEXT, delivered INTEGER, holder_pid INTEGER, holder_start INTEGER)')
         conn.commit()
     monkeypatch.setattr(kanban_origin, '_hub_db', lambda: tmp_path / 'hub.db')
     monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: ['me'])
@@ -355,10 +354,27 @@ def test_remote_pending_inputs_stay_hot(monkeypatch, tmp_path):
         assert gates.probe('remote_notices').pending  # a woken running flag is not a DB commit
     finally:
         remote._woken.clear()
+    import os
+    import subprocess
+    dead = subprocess.Popen(['true'])
+    dead.wait()
     with contextlib.closing(sqlite3.connect(ledger)) as conn:
-        conn.execute('INSERT INTO notices(delivered, holder_pid) VALUES (0, 123)')
+        conn.execute('INSERT INTO notices(delivered, holder_pid) VALUES (0, ?)', (dead.pid,))
         conn.commit()
-    assert gates.probe('remote_notices').pending  # a HELD undelivered ledger row: stale-claim recovery
+    assert gates.probe('remote_notices').pending  # a DEAD holder's undelivered ledger row: stale-claim recovery
+    with contextlib.closing(sqlite3.connect(ledger)) as conn:
+        conn.execute('UPDATE notices SET holder_pid = ?', (os.getpid(),))
+        conn.commit()
+    monkeypatch.setattr(remote, '_holder_is_me', lambda pid: True)
+    assert gates.probe('remote_notices').pending  # this process's own claim is work (it acks its woken turn)
+    monkeypatch.setattr(remote, '_holder_is_me', lambda pid: False)
+    monkeypatch.setattr(remote, '_holder_alive', lambda pid, start: True)
+    held = gates.probe('remote_notices')
+    assert not held.pending  # ANOTHER live process's claim: every sweep path skips it, liveness is re-read per probe
+    monkeypatch.setattr(remote, '_holder_alive', lambda pid, start: False)
+    assert gates.probe('remote_notices').pending  # ...and the moment that holder is gone the pass runs again
+    monkeypatch.setattr(remote, '_holder_alive', lambda pid, start: True)
+    assert not gates.probe('remote_notices').pending
     monkeypatch.setattr(observer, 'fingerprint', lambda p: None)
     assert gates.probe('remote_notices').pending  # unknown replica state
     monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: [''])
@@ -373,7 +389,7 @@ def test_remote_each_key_component_moves_the_key_independently(monkeypatch, tmp_
     from tui_gateway import kanban_replica_observer as observer
     ledger = tmp_path / 'ledger.db'
     with contextlib.closing(sqlite3.connect(ledger)) as conn:
-        conn.execute('CREATE TABLE notices(delivered INTEGER, holder_pid INTEGER)')
+        conn.execute('CREATE TABLE notices(session TEXT, ref TEXT, state TEXT, delivered INTEGER, holder_pid INTEGER, holder_start INTEGER)')
         conn.execute('INSERT INTO notices(delivered) VALUES (1)')
         conn.commit()
     state = {'fp': ('fp', 1), 'me': 'me', 'ledger': ledger}
@@ -639,3 +655,44 @@ def test_revision_sees_a_commit_made_through_the_same_handle(tmp_path):
         assert after != before  # total_changes still moves the key
     finally:
         conn.close()
+
+
+def test_guarantee_key_ignores_a_talking_chats_last_active(store, clock):
+    """The hub's chats commit ``last_active`` every few seconds; ``candidates()`` reads it only through the lookback
+    window, so a write that keeps it inside the window is not a change (t_01a1dfa94f2251cd)."""
+    db, seed = store
+    seed({'state': 'deferred', 'retry_at': 9000.0}, ts=1.0)
+    before = gates.probe('guarantee_pass')
+    assert not before.pending
+    time.sleep(0.01)
+    db._write_rowcount('UPDATE sessions SET last_activity_at = ? WHERE id = ?', (1.9e9, 'chat'))
+    after = gates.probe('guarantee_pass')
+    assert not after.pending and after.key == before.key
+
+
+def test_guarantee_key_moves_when_last_active_leaves_the_lookback_window(store, clock):
+    _db, seed = store
+    seed({'state': 'acked'}, ts=1.0)
+    before = gates.probe('guarantee_pass')
+    clock[0] = 10 ** 12  # far past last_active + LOOKBACK_S
+    after = gates.probe('guarantee_pass')
+    assert after.key != before.key
+
+
+def test_unclaimed_notice_inside_grace_is_a_clock_not_work(store, clock):
+    """``candidates()`` offers a notice only once it is GRACE_S old: until then a pass has nothing to do, and the
+    gate wakes exactly at ``timestamp + GRACE_S`` with no commit (the hub's fresh done-notices; t_01a1dfa94f2251cd)."""
+    _, seed = store
+    seed(..., ts=1000.0)
+    got = gates.probe('guarantee_pass')
+    assert not got.pending and got.due == 1000.0 + ng.GRACE_S
+    ran = []
+    work = lambda: ran.append(clock[0]) or []
+    gates.run('guarantee_pass', work, live=set())
+    clock[0] = 1000.0 + ng.GRACE_S - 1
+    gates.run('guarantee_pass', work, live=set())
+    assert ran == [1000.0]
+    clock[0] = 1000.0 + ng.GRACE_S  # offered from here: the pass runs, and stays hot until the notice is claimed
+    gates.run('guarantee_pass', work, live=set())
+    assert ran == [1000.0, 1000.0 + ng.GRACE_S]
+    assert gates.probe('guarantee_pass').pending

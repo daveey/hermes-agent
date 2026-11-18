@@ -600,8 +600,104 @@ def test_remote_concurrent_replica_write_does_not_publish(remote_host, monkeypat
     original = remote._sweep_snapshot
     def racing(*args):
         result = original(*args)
-        stamp[0] += 1
+        stamp[1][0] = (2, 2, 2)  # a task row the sweep can act on (terminal) is written during the cold read
+        stamp[2][:] = [('gw', 'k', {'id': 'k', 'status': 'done'})]
         return result
     monkeypatch.setattr(remote, '_sweep_snapshot', racing)
     assert gates._remote().pending
     assert 'inputs' not in gates._remote_memo
+
+
+# --- a live foreign holder's claim is not work (t_01a1dfa94f2251cd: the hub's three claims held every pass hot) ----
+
+def _claim(tid, *, pid, at=None):
+    """Mark the fixture sub in flight under ``pid``: it holds every event so far (nothing past its cursor)."""
+    with contextlib.closing(kbc.connect()) as conn, conn:
+        top = conn.execute('SELECT MAX(id) FROM task_events WHERE task_id = ?', (tid,)).fetchone()[0]
+        conn.execute('UPDATE kanban_notify_subs SET inflight_from = 0, inflight_pid = ?, inflight_at = ?, '
+                     'last_event_id = ? WHERE task_id = ?', (pid, time.time() if at is None else at, top, tid))
+
+
+def test_live_foreign_inflight_claim_does_not_hold_the_notice_sweep_hot(orphan):
+    import os
+    tid, _, calls = orphan
+    _claim(tid, pid=os.getppid())
+    ku.host_pass()
+    ku.host_pass()
+    ku.host_pass()
+    assert calls == ['notices']
+
+
+def test_live_inflight_claim_runs_when_its_holder_dies(orphan):
+    import os
+    import subprocess
+    tid, _, calls = orphan
+    _claim(tid, pid=os.getppid())
+    ku.host_pass()
+    ku.host_pass()
+    dead = subprocess.Popen(['true'])
+    dead.wait()
+    _claim(tid, pid=dead.pid)
+    ku.host_pass()
+    ku.host_pass()
+    assert calls == ['notices'] * 3  # one for the first sight, then every pass while a dead holder's claim awaits recovery
+
+
+def test_live_inflight_claim_runs_when_it_ages_out_or_an_event_arrives(orphan):
+    import os
+    tid, _, calls = orphan
+    _claim(tid, pid=os.getppid(), at=time.time() - 3600)  # past NOTIFY_CLAIM_STALE_S on first sight
+    ku.host_pass()
+    ku.host_pass()
+    assert calls == ['notices', 'notices']
+    _claim(tid, pid=os.getppid())
+    with contextlib.closing(kbc.connect()) as conn, conn:  # an event of a notified kind lies past the cursor
+        conn.execute('UPDATE kanban_notify_subs SET last_event_id = 0, inflight_from = 0 WHERE task_id = ?', (tid,))
+    ku.host_pass()
+    ku.host_pass()
+    assert calls == ['notices'] * 4
+
+
+def test_remote_probe_skips_while_another_live_process_holds_the_claim(remote_host, monkeypatch):
+    from tui_gateway import kanban_remote_notices as remote
+    gates, _, _, settle = remote_host
+    settle()
+    settle(session='chat-b', delivered=0, holder=4242)
+    monkeypatch.setattr(remote, '_holder_alive', lambda pid, start: True)
+    monkeypatch.setattr(remote, '_holder_is_me', lambda pid: False)
+    first = gates._remote()
+    assert not first.pending and gates._remote().key == first.key
+    monkeypatch.setattr(remote, '_holder_alive', lambda pid, start: False)
+    assert gates._remote().pending  # dead holder: stale-claim recovery
+    monkeypatch.setattr(remote, '_holder_alive', lambda pid, start: True)
+    monkeypatch.setattr(remote, '_holder_is_me', lambda pid: True)
+    assert gates._remote().pending  # our own claim: we ack it
+
+
+def test_remote_probe_live_holder_on_an_owed_card_is_settled_for_the_pass(remote_host, monkeypatch):
+    from tui_gateway import kanban_remote_notices as remote
+    gates, _, _, settle = remote_host
+    settle(delivered=0, holder=4242)  # the owed card's own notice is claimed by another live process
+    monkeypatch.setattr(remote, '_holder_alive', lambda pid, start: True)
+    monkeypatch.setattr(remote, '_holder_is_me', lambda pid: False)
+    assert not gates._remote().pending
+    monkeypatch.setattr(remote, '_holder_alive', lambda pid, start: False)
+    assert gates._remote().pending
+
+
+def test_remote_replica_commit_during_the_cold_read_still_publishes_the_proof(remote_host, monkeypatch):
+    """The hub's replica commits several rows a second; a write no owed card reads must not cost the proof."""
+    from tui_gateway import kanban_remote_notices as remote
+    gates, _, stamp, settle = remote_host
+    settle()
+    original = remote._sweep_snapshot
+
+    def racing(*args):
+        result = original(*args)
+        stamp[0] += 1  # a commit of the raw stamp ...
+        stamp[1][0] = (2, 2, 2)  # ... and one new, non-terminal task row nobody owes anything for
+        stamp[2][:] = [('gw', 'k', {'id': 'k', 'status': 'running'})]
+        return result
+    monkeypatch.setattr(remote, '_sweep_snapshot', racing)
+    assert not gates._remote().pending
+    assert 'inputs' in gates._remote_memo
