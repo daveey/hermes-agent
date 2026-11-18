@@ -85,6 +85,10 @@ def core(tmp_path_factory):
     handoff.write_text(text.replace(marker, marker + "    import attest_probe  # noqa: F401\n    return 0\n", 1))
     (dest / "attest_probe.py").write_text(PROBE_MODULE)
     _git(dest, "init", "-q")
+    # A commit may detach maintenance that repacks/removes loose objects while
+    # consumers copy this repository. Persist the policy so copies inherit it;
+    # _git intentionally drops the runner's GIT_CONFIG_* environment settings.
+    _git(dest, "config", "maintenance.auto", "false")
     _git(dest, "add", "-A")
     _git(dest, "commit", "-qm", "fixture")
     return dest
