@@ -66,7 +66,7 @@ def test_shared_budget_and_next_persist_has_own_receipt(tmp_path, monkeypatch):
         return {'kind': method, '_receipt': {'execution_id': 'exec', 'sequence': 1}} if method == 'worker.persist' else {'kind': method}
 
     def delay(request):
-        time.sleep(0.08)
+        time.sleep(0.08)  # health: allow HX013 -- per-reply latency must exhaust the shared RPC budget
 
     with socket_rpc(tmp_path, dispatch, delay, expect_disconnect=True) as rpc:
         @budget.bounded_record
