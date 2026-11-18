@@ -103,18 +103,42 @@ def _expansion(text, index, quoted, bindings):
         end = _paren_end(text, index)
         values = _printed(text[opener:end - 1]) if text[end - 1:end] == ')' else None
     elif text[index] == '`':
-        end = _backtick_end(text, index)
-        values = _printed(text[index + 1:end - 1]) if text[end - 1:end] == '`' else None
+        end = _backtick_end(text + '\x00', index)
+        if end > len(text):
+            return None  # An unclosed backtick cannot produce an executable word.
+        values = _printed(text[index + 1:end - 1])
     else:
         return None
     return Expansion(index, end, quoted, values, variable)
 
 
 def _opaque_expansions(text, bindings):
+    from cron.lifecycle_guard_lines import _bracket_end
+    # Assignment data is not an executable word. Nested substitutions have
+    # already been walked independently before this structural view is used.
     out, expansions = [], {}
     index, quote = 0, ''
     while index < len(text):
         ch = text[index]
+        if not quote and (not index or text[index - 1] in ' \t\n;&|('):
+            assignment = re.match(r'([A-Za-z_][A-Za-z_0-9]*)(?=\[|\+?=)', text[index:])
+            if assignment:
+                end = index + assignment.end()
+                if text[end:end + 1] == '[':
+                    bracket = _bracket_end(text, end)
+                    if bracket >= 0 and text.startswith(('=', '+='), bracket + 1):
+                        end = bracket + 1
+                if text.startswith(('=(', '+=('), end):
+                    paren = end + (2 if text[end] == '+' else 1)
+                    close = paren + _paren_end('$' + text[paren:], 0) - 1
+                    if text[close - 1:close] == ')':
+                        out.append(assignment[1] + '=')
+                        index = close
+                        continue
+                if end > index + assignment.end():
+                    out.append(assignment[1])
+                    index = end
+                    continue
         if ch == '\\' and quote != "'":
             out.append(text[index:index + 2])
             index += 2
@@ -184,6 +208,13 @@ def scan_computed_commands(command, *, cwd, executed, variable_source, budget, r
         if recurse(body, cwd, True, source):
             return True
     opaque, expansions = _opaque_expansions(command, budget.variable_candidates.values)
+    # Retain an additional executable reading after assignment syntax was
+    # normalized: legacy candidate discovery only peels scalar NAME=value.
+    normalized = opaque
+    for marker, span in expansions.items():
+        normalized = normalized.replace(marker, command[span.start:span.end])
+    if normalized != command and recurse(normalized, cwd, True, source):
+        return True
     for segment in _structural_segments(opaque):
         words = segment[guard._peel_reserved_words(segment):]
         words = guard._split_redirections(words)[0]
