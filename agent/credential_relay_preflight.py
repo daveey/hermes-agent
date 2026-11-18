@@ -49,7 +49,7 @@ def _wait(deadline: float) -> bool:
     return True
 
 
-def _claim_attempt(lock: Any, provider: str, cooldown: float) -> bool:
+def _claim_attempt(lock: Any, provider: str, cooldown: float, checked_at: float) -> bool:
     """Bound repeated failures across sessions without pretending a pull succeeded."""
     lock.seek(0)
     try:
@@ -59,10 +59,22 @@ def _claim_attempt(lock: Any, provider: str, cooldown: float) -> bool:
     if not isinstance(attempts, dict):
         attempts = {}
     last = attempts.get(provider)
+    count = 0
+    if isinstance(last, dict):
+        previous = last.get("checked_at")
+        count = last.get("count", 0)
+        count = min(16, max(0, count)) if type(count) is int else 0
+        if not isinstance(previous, (int, float)) or isinstance(previous, bool) or not math.isfinite(previous) or checked_at > previous:
+            last, count = None, 0
+        else:
+            last = last.get("attempted_at")
     now = time.time()
-    if isinstance(last, (int, float)) and 0 <= now - last < cooldown:
+    delay = min(3600.0, cooldown * 2 ** max(0, count - 1))
+    if isinstance(last, (int, float)) and not isinstance(last, bool) and 0 <= now - last < delay:
         return False
-    attempts[provider] = now
+    # Count attempts against the same successful receipt, never command exits.
+    # A newer receipt resets this even if it aged before the next request.
+    attempts[provider] = {"attempted_at": now, "checked_at": checked_at, "count": min(16, count + 1)}
     lock.seek(0)
     lock.truncate()
     json.dump(attempts, lock)
@@ -77,7 +89,8 @@ def _pull_locked(cmd: list[str], stamp: Path, provider: str, deadline: float, lo
     if current is None or not _stale(current):
         return
     remaining = deadline - time.monotonic()
-    if remaining <= 0 or not _claim_attempt(lock, provider, min(300.0, max(60.0, 2 * current[1]))):
+    cooldown = min(300.0, max(60.0, 2 * current[1]))
+    if remaining <= 0 or not _claim_attempt(lock, provider, cooldown, current[0]):
         return
     env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
     env.pop("PYTHONPATH", None)

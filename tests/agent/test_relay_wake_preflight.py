@@ -297,6 +297,60 @@ def test_disabled_during_pull_is_not_handed_out(home, monkeypatch):
     assert pinned_anthropic_pool_token(pool, entry.id) == (False, None)
 
 
+def test_no_receipt_backoff_grows_and_is_bounded(home, monkeypatch):
+    pre, agent, clock = _controlled(home, monkeypatch)
+    calls = []
+    monkeypatch.setattr(pre.subprocess, "run", lambda *a, **k: calls.append(k) or SimpleNamespace(returncode=0))
+    start = 0
+    for cooldown in [240, 480, 960, 1920, 3600, 3600]:
+        clock.elapsed = start
+        before = len(calls)
+        assert pins._request_key(agent) == pins.B_1
+        assert len(calls) == before + 1
+        assert clock.elapsed == pytest.approx(start + 30)
+        clock.elapsed = start + cooldown - 1
+        assert pins._request_key(_relay_agent(home)) == pins.B_1
+        assert len(calls) == before + 1
+        assert clock.elapsed == start + cooldown - 1
+        start += cooldown
+
+
+def test_backoff_is_provider_scoped_and_migrates_legacy_history(home, monkeypatch):
+    pre, _agent, clock = _controlled(home, monkeypatch)
+    path = home / "state" / "oauth-relay-repull.lock"
+    path.write_text(json.dumps({"anthropic": clock.time(), "openai-codex": 9876}))
+    with path.open("a+") as lock:
+        assert not pre._claim_attempt(lock, "anthropic", 240, 9000)
+        clock.elapsed = 240
+        assert pre._claim_attempt(lock, "anthropic", 240, 9000)
+        for start in [480, 960]:
+            clock.elapsed = start
+            assert pre._claim_attempt(lock, "anthropic", 240, 9000)
+        assert not pre._claim_attempt(lock, "anthropic", 240, 9000)
+        assert pre._claim_attempt(lock, "openai-codex", 240, 9000)
+        assert not pre._claim_attempt(lock, "anthropic", 240, 9000)
+    data = json.loads(path.read_text())
+    assert data["anthropic"]["count"] == 3
+    assert data["openai-codex"]["count"] == 1
+
+
+def test_new_success_resets_backoff_even_if_aged_before_request(home, monkeypatch):
+    pre, agent, clock = _controlled(home, monkeypatch)
+    calls = []
+    monkeypatch.setattr(pre.subprocess, "run", lambda *a, **k: calls.append(k) or SimpleNamespace(returncode=0))
+    for start in [0, 240, 720]:
+        clock.elapsed = start
+        assert pins._request_key(agent) == pins.B_1
+    # A real producer success between requests, already stale on the next call.
+    _receipt(home, 10760)
+    clock.elapsed = 1010
+    assert pins._request_key(agent) == pins.B_1
+    assert len(calls) == 4
+    clock.elapsed = 1250
+    assert pins._request_key(agent) == pins.B_1
+    assert len(calls) == 5  # reset to base, not the previous 960s cooldown
+
+
 def test_success_for_another_provider_does_not_complete_wait(home, monkeypatch):
     pre, agent, clock = _controlled(home, monkeypatch)
     path = home / "state" / "oauth-relay-success.json"
