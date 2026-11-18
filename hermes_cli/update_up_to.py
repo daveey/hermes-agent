@@ -20,6 +20,7 @@ from typing import Callable, NoReturn
 from hermes_cli.update_cmd_common import _record_stop
 
 FLAG = "--up-to"
+UP_TO_ACCEPTS_HEAD = True  # Text capability marker read by hermes-sync in the live core.
 
 #: (argparse dest, flag): flags that pick another target or do not apply an update.
 _INCOMPATIBLE = (
@@ -77,8 +78,8 @@ def select_target(git_cmd, root: Path, sha: str | None, current_branch: str, tar
     """The update target: *target_ref* unchanged without ``--up-to``; else *sha*, validated against
     the fetched ``origin/main`` and pinned as the run's ``expected_sha`` (receipt, completion).
 
-    Requires the checkout on branch main, *sha* a commit, HEAD a proper ancestor of it, and
-    *sha* on origin/main's first-parent line past HEAD. Exits 1 (after ``stop()``) otherwise.
+    Requires the checkout on branch main, *sha* a commit, HEAD an ancestor of it (or equal),
+    and *sha* on origin/main's first-parent line. Exits 1 (after ``stop()``) otherwise.
     """
     if sha is None:
         return target_ref
@@ -100,11 +101,12 @@ def select_target(git_cmd, root: Path, sha: str | None, current_branch: str, tar
     head = _out(git, ["rev-parse", "-q", "--verify", "HEAD^{commit}"])
     if not tip or not head:
         fail("origin/main or HEAD does not resolve")
-    if sha == head:
-        fail("the checkout is already at that commit")
     if git(["merge-base", "--is-ancestor", head, sha]).returncode != 0:
         fail(f"HEAD {head[:10]} is not an ancestor of it")
-    if sha not in _out(git, ["rev-list", "--first-parent", f"{head}..{tip}"]).split():
+    # An equal target still needs first-parent membership: being an ancestor via
+    # a merged side branch is not enough. Include HEAD only for the zero-move case.
+    line = tip if sha == head else f"{head}..{tip}"
+    if sha not in _out(git, ["rev-list", "--first-parent", line]).split():
         fail(f"not on origin/main's first-parent line after HEAD (origin/main is {tip[:10]})")
     count = _out(git, ["rev-list", "--count", f"{head}..{sha}"]) or "?"
     print(f"→ Updating up to {sha[:10]} (origin/main is {tip[:10]}; {count} commit(s))")

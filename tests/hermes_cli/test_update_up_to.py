@@ -116,6 +116,34 @@ def test_stops_at_the_first_parent_commit_on_main_without_upstream_sync_or_push(
     assert fork.seen.stops == []
 
 
+@pytest.mark.parametrize("advance", [False, True])
+def test_pin_at_head_finishes_without_moving_or_syncing(fork, advance, capsys):
+    git(fork.root, "reset", "-q", "--hard", fork.c)
+    origin = fork.root.parent / "origin"
+    git(origin, "reset", "-q", "--hard", fork.c)
+    git(fork.root, "fetch", "-q", "origin")
+    tip = _commit(origin, "later.txt", "later\n") if advance else fork.c
+
+    run(fork, "--up-to", fork.c)
+
+    assert head(fork) == (fork.c, "main")
+    assert git(fork.root, "rev-parse", "origin/main") == tip
+    assert fork.seen.upstream_prepared == [False]
+    assert fork.seen.upstream_synced == [] and fork.seen.pushed == []
+    assert fork.seen.armed == []
+    assert len(fork.completed) == 1
+    assert fork.completed[0]["expected_sha"] == fork.c
+    assert fork.completed[0]["completion_message"] == "✓ Already up to date!"
+    assert fork.seen.stops == []
+    assert "0 commit(s)" in capsys.readouterr().out
+
+
+def test_pin_at_head_off_first_parent_line_is_refused(fork, capsys):
+    git(fork.root, "reset", "-q", "--hard", fork.s)
+    out = _refused(fork, capsys, fork.s, head(fork))
+    assert "not on origin/main's first-parent line" in out
+
+
 def test_preflight_commit_point_and_marker_name_the_selected_commit_not_the_tip(fork, monkeypatch):
     pinned = []
     real_pull = update_cmd._pull_updates
@@ -157,11 +185,11 @@ def _refused(fork, capsys, sha, before):
 
 
 @pytest.mark.parametrize("case", [
-    "side-branch", "not-on-origin-main", "equals-head", "behind-head", "head-has-local-commit",
+    "side-branch", "not-on-origin-main", "behind-head", "head-has-local-commit",
     "unknown-commit",
 ])
 def test_refuses_a_commit_off_the_first_parent_line_or_not_past_head(fork, capsys, case):
-    sha = {"side-branch": fork.s, "equals-head": fork.a, "behind-head": fork.a,
+    sha = {"side-branch": fork.s, "behind-head": fork.a,
            "head-has-local-commit": fork.c, "unknown-commit": "0" * 40}.get(case)
     if case == "behind-head":
         git(fork.root, "reset", "-q", "--hard", fork.b)
@@ -174,7 +202,7 @@ def test_refuses_a_commit_off_the_first_parent_line_or_not_past_head(fork, capsy
     out = _refused(fork, capsys, sha, head(fork))
     expected = {"side-branch": "not on origin/main's first-parent line",
                 "not-on-origin-main": "not on origin/main's first-parent line",
-                "equals-head": "already at that commit", "behind-head": "is not an ancestor of it",
+                "behind-head": "is not an ancestor of it",
                 "head-has-local-commit": "is not an ancestor of it", "unknown-commit": "not a commit"}[case]
     assert expected in out
 
@@ -260,6 +288,8 @@ def test_capability_marker_names_the_flag():
 
     from hermes_cli.subcommands import update as parser_module
     assert '"--up-to"' in Path(parser_module.__file__).read_text(encoding="utf-8")
+    # This text marker likewise advertises the equal-HEAD extension to old sync runners.
+    assert "UP_TO_ACCEPTS_HEAD = True" in Path(update_up_to.__file__).read_text(encoding="utf-8")
 
 
 def test_a_failed_fast_forward_never_resets_or_detaches(fork, monkeypatch):
