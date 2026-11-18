@@ -34,13 +34,15 @@ import {
 import { $boardSlug, bindApi, boardPoll, boardPollMs, fetchBoard, rememberTaskOwner, useKanbanScope } from './api'
 import { $blockedSectionOpen, BlockedTasksSection } from './blocked-section'
 import { KanbanBoardPage } from './board'
+import { chipClickOpensBoard } from './chip-click'
 import { KANBAN_LOCALES } from './i18n'
 import { installOpenTaskHook } from './open-task'
 import { meterCounts, meterTotal, TaskMeter } from './status-meter'
 import { $newTaskLane, useKanban } from './ui'
 
 // Live task pill — a bar of open cards by state (status-meter.tsx) plus their
-// count, one glance at fleet activity from anywhere; clicks through to the board. Shares the board query (one cache, one poll with
+// count, one glance at fleet activity from anywhere; clicks through to the board unless a plugin takes the click
+// over (chip-click.ts). Shares the board query (one cache, one poll with
 // the page); hidden when nothing is in flight (or unloaded).
 function KanbanCount() {
   const k = useKanban()
@@ -72,7 +74,11 @@ function KanbanCount() {
           'inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] tabular-nums transition-colors',
           'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
         )}
-        onClick={() => host.navigate('/kanban')}
+        onClick={() => {
+          if (chipClickOpensBoard()) {
+            host.navigate('/kanban')
+          }
+        }}
         type="button"
       >
         <Codicon name="project" size="0.7rem" />
