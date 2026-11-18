@@ -260,7 +260,9 @@ def test_shape_corpus_catches_a_guard_that_keeps_masking_sink_bodies(tmp_path, m
              and case.sink in ("| bash", 'eval "$(…)"')]
     assert {case.nesting for case in cases} == set(corpus.SINK_NESTINGS)
     assert not corpus.violations(corpus.evaluate(tmp_path / "good", cases), lambda case: True)
-    monkeypatch.setattr(shell_heredoc, "output_reaches_shell", lambda command: False)
+    monkeypatch.setattr(
+        shell_heredoc, "output_reaches_shell", lambda command, *, binding_source=None: False,
+    )
     bad = corpus.violations(corpus.evaluate(tmp_path / "mutant", cases), lambda case: True)
     assert {case.nesting for case in bad} == set(corpus.SINK_NESTINGS)
 
