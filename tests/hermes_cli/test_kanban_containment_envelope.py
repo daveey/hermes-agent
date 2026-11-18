@@ -56,6 +56,9 @@ def test_old_review_resume_cannot_survive_a_containment_episode(board, phase):
     stop = board.execute("SELECT * FROM task_events WHERE uid=?", (episode,)).fetchone()
     assert "_recovery_history_v1" in json.loads(stop["payload"])
     if phase == "containment_released":
+        with kb.write_txn(board):
+            kb._append_event(board, relay, "blocked", {"resume_status": "review"})
+        assert kb._resume_status_from_events(board, relay) == "review"
         lifecycle.release(board, target, episode, authority)
         assert kb._resume_status_from_events(board, relay) == "ready"
     from hermes_cli.kanban_recovery_history import head

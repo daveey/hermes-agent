@@ -80,7 +80,11 @@ def test_resume_rejects_unauthorized_stale_or_tampered_evidence(board, case):
     episode = contain(board, relay, target, spec)["episode"]
     actor, uid = authority, run_uid(board, authority)
     if case == "wrong_actor":
-        actor = consumer
+        actor = kb.create_task(board, title="Unrelated live actor fixture", assignee="default")
+        assert kb.claim_task(board, actor, claimer="default")
+        from hermes_cli.kanban_db_sync import uuid7
+        uid = uuid7()
+        board.execute("UPDATE task_runs SET uid=? WHERE id=(SELECT current_run_id FROM tasks WHERE id=?)", (uid, actor))
     elif case == "stale_run":
         from hermes_cli.kanban_db_sync import uuid7
         uid = uuid7()

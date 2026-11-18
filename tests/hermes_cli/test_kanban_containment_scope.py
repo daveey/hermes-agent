@@ -21,6 +21,7 @@ board = helpers.board
     ("task_expired", "UPDATE tasks SET claim_expires=1 WHERE current_run_id=?"),
     ("task_no_expiry", "UPDATE tasks SET claim_expires=NULL WHERE current_run_id=?"),
     ("task_no_lock", "UPDATE tasks SET claim_lock=NULL WHERE current_run_id=?"),
+    ("both_no_lock", "UPDATE tasks SET claim_lock=NULL WHERE current_run_id=?"),
     ("task_wrong_lock", "UPDATE tasks SET claim_lock='another-holder' WHERE current_run_id=?"),
     ("task_not_running", "UPDATE tasks SET status='ready' WHERE current_run_id=?"),
     ("different_current", "UPDATE tasks SET current_run_id=NULL WHERE current_run_id=?"),
@@ -32,6 +33,10 @@ def test_actor_must_be_current_live_lease_not_just_a_run_record(board, mutation,
     rid = kb.get_task(board, relay).current_run_id
     if sql is not None:
         board.execute(sql, (rid,))
+    if mutation == "malformed_uid":
+        board.execute("UPDATE task_runs SET uid=? WHERE id=?", (uid, rid))
+    if mutation == "both_no_lock":
+        board.execute("UPDATE task_runs SET claim_lock=NULL WHERE id=?", (rid,))
     with pytest.raises(lifecycle.ContainmentRefused, match="actor"):
         lifecycle.contain_local(board, target=target, resume_policy=spec, actor_task=relay,
                                 actor_run_uid=uid, summary="Fixture")
@@ -72,6 +77,7 @@ def test_foreign_containment_does_not_overwrite_human_or_terminal_custody(board,
     relay, _, authority, target, spec = helpers.setup(board)
     assert kb.block_task(board, relay, reason="Fixture release")
     kb.link_tasks(board, authority, relay)
+    board.execute("UPDATE tasks SET status='todo' WHERE id=?", (relay,))
     board.execute(f"UPDATE tasks SET {field}=? WHERE id=?", (value, relay))
     with pytest.raises(lifecycle.ContainmentRefused):
         lifecycle.contain_local(board, target=target, resume_policy=spec, actor_task=authority,
