@@ -17,13 +17,13 @@ vi.mock('@/hermes', async importOriginal => ({
   setSessionArchived: vi.fn().mockResolvedValue(undefined)
 }))
 
-// The settings page loads its archived list through the paginating store helper,
+// The settings page reads its archived list through the store's page cursor,
 // which reads the sessions API module directly — mock that seam, not the barrel.
-const listEveryArchivedSession = vi.hoisted(() => vi.fn())
+const listAllProfileSessions = vi.hoisted(() => vi.fn())
 
-vi.mock('@/store/sidebar-archive', async importOriginal => ({
+vi.mock('@/api/sessions', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  listEveryArchivedSession
+  listAllProfileSessions
 }))
 
 const selectDesktopPaths = vi.hoisted(() => vi.fn())
@@ -53,7 +53,7 @@ const archivedMatrixSession = {
 beforeEach(() => {
   setSessions([])
   setMessagingSessions([])
-  listEveryArchivedSession.mockReset().mockResolvedValue([archivedMatrixSession])
+  listAllProfileSessions.mockReset().mockResolvedValue({ sessions: [archivedMatrixSession], total: 1 })
 })
 
 afterEach(() => {
@@ -71,6 +71,81 @@ describe('SessionsSettings unarchive', () => {
     expect($messagingSessions.get().map(session => session.id)).toEqual(['matrix-1'])
     expect($messagingSessions.get()[0]?.archived).toBe(false)
     expect($sessions.get()).toEqual([])
+  })
+})
+
+describe('SessionsSettings archived list paging', () => {
+  const archived = (id: string): SessionInfo => ({ ...archivedMatrixSession, id, title: `chat ${id}` })
+
+  // 2026-11-17: an archive of 16,899 rows was read to the end before any row was listed.
+  it('lists the first page of a deep archive and reads the next on request', async () => {
+    listAllProfileSessions
+      .mockReset()
+      .mockResolvedValueOnce({ sessions: [archived('a')], total: 16_899 })
+      .mockResolvedValueOnce({ sessions: [archived('b')], total: 16_899 })
+
+    render(<SessionsSettings />)
+
+    expect(await screen.findByText('chat a')).toBeTruthy()
+    expect(listAllProfileSessions).toHaveBeenCalledTimes(1)
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: en.sidebar.loadMore })))
+
+    expect(await screen.findByText('chat b')).toBeTruthy()
+    expect(screen.getByText('chat a')).toBeTruthy()
+    expect(listAllProfileSessions).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads again from the top after an unarchive, so the row that moved up is not skipped', async () => {
+    const server = [archived('a'), archived('b'), archived('c')]
+
+    // A one-row "page": the mock serves the row at the asked offset.
+    listAllProfileSessions.mockReset().mockImplementation(async (...args: unknown[]) => ({
+      sessions: server.slice((args[6] as number) / 500, (args[6] as number) / 500 + 1),
+      total: server.length
+    }))
+    vi.mocked(setSessionArchived).mockImplementation(async id => {
+      server.splice(
+        server.findIndex(row => row.id === id),
+        1
+      )
+
+      return { ok: true }
+    })
+
+    render(<SessionsSettings />)
+    await screen.findByText('chat a')
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: en.settings.sessions.unarchive })))
+    await waitFor(() => expect(screen.queryByText('chat a')).toBeNull())
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: en.sidebar.loadMore })))
+
+    // b moved to offset 0; the old cursor's next page (offset 500) would show only c.
+    expect(await screen.findByText('chat b')).toBeTruthy()
+    expect(screen.getByText('chat c')).toBeTruthy()
+    expect(screen.queryByText('chat a')).toBeNull()
+  })
+
+  it('offers no load-more when the first page is the whole archive', async () => {
+    render(<SessionsSettings />)
+
+    await screen.findByText('archived room')
+
+    expect(screen.queryByRole('button', { name: en.sidebar.loadMore })).toBeNull()
+  })
+
+  it('leaves out a live pinned chat the server back-filled onto the page', async () => {
+    listAllProfileSessions.mockReset().mockResolvedValue({
+      sessions: [archived('a'), { ...archived('pin'), archived: false, pinned: true }],
+      total: 1
+    })
+
+    render(<SessionsSettings />)
+
+    await screen.findByText('chat a')
+
+    expect(screen.queryByText('chat pin')).toBeNull()
   })
 })
 

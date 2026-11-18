@@ -28,7 +28,7 @@ import { notify, notifyError } from '@/store/notifications'
 import { $connection, applyConfiguredDefaultProjectDir, ensureDefaultWorkspaceCwd } from '@/store/session'
 import { untombstoneSessions } from '@/store/session-removal'
 import { forgetSessionUnread } from '@/store/session-unread'
-import { listEveryArchivedSession } from '@/store/sidebar-archive'
+import { type ArchivedPager, createArchivedPager } from '@/store/sidebar-archive'
 import type { HermesConfigRecord, SessionInfo } from '@/types/hermes'
 
 import { EmptyState, ListRow, SectionHeading, SettingsContent, SettingsSkeleton, ToggleRow } from './primitives'
@@ -69,23 +69,72 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
   const s = t.settings.sessions
   const [sessions, setLocalSessions] = useState<SessionInfo[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  // One page at a time: an archive can hold far more rows than a page can
+  // usefully list, and reading all of it first shows nothing until the end.
+  // `removed` holds rows unarchived or deleted here, so a page read while the
+  // server still lists them cannot bring them back.
+  const [paging] = useState(() => ({
+    cursor: null as ArchivedPager | null,
+    pages: 0,
+    removed: new Set<string>(),
+    removedAtStart: 0,
+    started: false
+  }))
 
-    try {
-      setLocalSessions(await listEveryArchivedSession())
-    } catch (err) {
-      notifyError(err, s.failedLoad)
-    } finally {
-      setLoading(false)
-    }
-  }, [s.failedLoad])
+  const readPages = useCallback(
+    async (more: number) => {
+      const target = paging.pages + more
+      // A removal shifts every later row up one offset, so the old cursor's
+      // next page would skip a row per removal: read again from the top.
+      const stale = paging.removed.size !== paging.removedAtStart
+      const removedAtStart = paging.removed.size
+      const pager = paging.cursor && !stale ? paging.cursor : createArchivedPager()
+      let pages = pager === paging.cursor ? paging.pages : 0
+
+      try {
+        while (pages < target && pager.hasMore) {
+          await pager.next()
+          pages += 1
+        }
+
+        if (pager !== paging.cursor) {
+          paging.removedAtStart = removedAtStart
+        }
+
+        paging.cursor = pager
+        paging.pages = pages
+        // The cursor back-fills live pins onto an archived page; this list is archived rows only.
+        setLocalSessions(pager.sessions.filter(row => row.archived && !paging.removed.has(row.id)))
+        setHasMore(pager.hasMore)
+      } catch (err) {
+        notifyError(err, s.failedLoad)
+      }
+    },
+    [paging, s.failedLoad]
+  )
 
   useEffect(() => {
-    void load()
-  }, [load])
+    // Only the first page loads on its own; a re-run (strict mode, a language
+    // switch) must not page further.
+    if (!paging.started) {
+      paging.started = true
+      void readPages(1).finally(() => setLoading(false))
+    }
+  }, [paging, readPages])
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore) {
+      return
+    }
+
+    setLoadingMore(true)
+    await readPages(1)
+    setLoadingMore(false)
+  }, [loadingMore, readPages])
 
   const unarchive = useCallback(
     async (session: SessionInfo) => {
@@ -93,6 +142,7 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
 
       try {
         await setSessionArchived(session.id, false, session.profile)
+        paging.removed.add(session.id)
         setLocalSessions(prev => prev.filter(s => s.id !== session.id))
         // Surface it again in the sidebar without waiting for a full refresh, and
         // lift any optimistic eviction so the grouped tree shows it again too.
@@ -106,7 +156,7 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
         setBusyId(null)
       }
     },
-    [s]
+    [paging, s]
   )
 
   const remove = useCallback(
@@ -134,6 +184,7 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
         // stored tip and the durable lineage root — the journal keys on the
         // stored id and the row may carry either.
         purgeInFlightTurnJournals([session.id, session._lineage_root_id])
+        paging.removed.add(session.id)
         setLocalSessions(prev => prev.filter(s => s.id !== session.id))
         triggerHaptic('warning')
       } catch (err) {
@@ -142,7 +193,7 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
         setBusyId(null)
       }
     },
-    [s]
+    [paging, s]
   )
 
   useDeepLinkHighlight({
@@ -163,14 +214,14 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
 
       <SectionHeading
         icon={Archive}
-        meta={sessions.length ? String(sessions.length) : undefined}
+        meta={sessions.length ? `${sessions.length}${hasMore ? '+' : ''}` : undefined}
         title={s.archivedTitle}
       />
       <p className="mb-2 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
         {s.archivedIntro}
       </p>
 
-      {sessions.length === 0 ? (
+      {sessions.length === 0 && !hasMore ? (
         <EmptyState description={s.emptyArchivedDesc} title={s.emptyArchivedTitle} />
       ) : (
         <div className="grid gap-1">
@@ -215,6 +266,19 @@ function ArchivedSessionsSettings({ includeDefaultDirectory }: { includeDefaultD
               </div>
             )
           })}
+          {hasMore && (
+            <Button
+              className="justify-self-start"
+              disabled={loadingMore}
+              onClick={() => void loadMore()}
+              size="sm"
+              type="button"
+              variant="textStrong"
+            >
+              {loadingMore && <Loader2 className="size-3.5 animate-spin" />}
+              <span>{t.sidebar.loadMore}</span>
+            </Button>
+          )}
         </div>
       )}
     </SettingsContent>

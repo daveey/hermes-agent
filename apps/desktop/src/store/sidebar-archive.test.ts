@@ -6,9 +6,11 @@ import type { SessionInfo } from '@/types/hermes'
 import { $sidebarShowArchived } from './layout'
 import {
   $archivedSessions,
+  $archivedSessionsHasMore,
   $archivedSessionsLoading,
-  listEveryArchivedSession,
-  loadArchivedSessions
+  createArchivedPager,
+  loadArchivedSessions,
+  loadMoreArchivedSessions
 } from './sidebar-archive'
 
 const listAllProfileSessions = vi.hoisted(() => vi.fn())
@@ -41,8 +43,23 @@ const pinnedRow = (id: string): SessionInfo => row(id, { archived: false, pinned
 const page = (from: number, count: number): SessionInfo[] =>
   Array.from({ length: count }, (_, i) => row(`a-${from + i}`))
 
+/** Read a cursor to its end, as a caller that wants the whole archive would. */
+async function listEveryArchivedSession(): Promise<SessionInfo[]> {
+  const pager = createArchivedPager()
+
+  while (pager.hasMore) {
+    await pager.next()
+  }
+
+  return pager.sessions
+}
+
+let scopeSerial = 0
+
 beforeEach(() => {
   $sidebarShowArchived.set(false)
+  // A fresh scope per test: the switch drops the previous test's cursor and page count.
+  $apiRequestScope.set({ connectionId: `reset-${(scopeSerial += 1)}`, profile: null })
   $apiRequestScope.set({ connectionId: null, profile: null })
   $archivedSessions.set([])
   listAllProfileSessions.mockReset()
@@ -170,7 +187,231 @@ describe('loadArchivedSessions', () => {
   })
 })
 
-describe('listEveryArchivedSession', () => {
+describe('archived view paging', () => {
+  // 2026-11-17: 16,899 archived rows across three gateways. Reading all of them before
+  // publishing any (34 pages, each slower than the last) left the view empty.
+  it('shows the first page of a deep archive without reading the rest', async () => {
+    listAllProfileSessions.mockResolvedValue({ sessions: page(0, PAGE_SIZE), total: 16_899 })
+
+    await loadArchivedSessions()
+
+    expect(listAllProfileSessions).toHaveBeenCalledTimes(1)
+    expect($archivedSessions.get()).toHaveLength(PAGE_SIZE)
+    expect($archivedSessionsHasMore.get()).toBe(true)
+    expect($archivedSessionsLoading.get()).toBe(false)
+  })
+
+  it('reports nothing more when the first page holds the whole archive', async () => {
+    listAllProfileSessions.mockResolvedValue({ sessions: page(0, 3), total: 3 })
+
+    await loadArchivedSessions()
+
+    expect($archivedSessionsHasMore.get()).toBe(false)
+    await loadMoreArchivedSessions()
+    expect(listAllProfileSessions).toHaveBeenCalledTimes(1)
+  })
+
+  it('appends one page per load-more, from the next offset', async () => {
+    listAllProfileSessions.mockImplementation(async (...args: unknown[]) => ({
+      sessions: page(args[6] as number, PAGE_SIZE),
+      total: 3 * PAGE_SIZE
+    }))
+
+    await loadArchivedSessions()
+    await loadMoreArchivedSessions()
+
+    expect(listAllProfileSessions).toHaveBeenCalledTimes(2)
+    expect(listAllProfileSessions).toHaveBeenNthCalledWith(2, PAGE_SIZE, 0, 'only', 'recent', 'all', {}, PAGE_SIZE)
+    expect($archivedSessions.get().map(session => session.id)).toEqual(page(0, 2 * PAGE_SIZE).map(s => s.id))
+    expect($archivedSessionsHasMore.get()).toBe(true)
+
+    await loadMoreArchivedSessions()
+
+    expect($archivedSessions.get()).toHaveLength(3 * PAGE_SIZE)
+    expect($archivedSessionsHasMore.get()).toBe(false)
+  })
+
+  it('re-reads every page the user loaded on a refresh', async () => {
+    listAllProfileSessions.mockImplementation(async (...args: unknown[]) => ({
+      sessions: page(args[6] as number, PAGE_SIZE),
+      total: 4 * PAGE_SIZE
+    }))
+
+    await loadArchivedSessions()
+    await loadMoreArchivedSessions()
+    listAllProfileSessions.mockClear()
+
+    await loadArchivedSessions()
+
+    expect(listAllProfileSessions).toHaveBeenCalledTimes(2)
+    expect($archivedSessions.get()).toHaveLength(2 * PAGE_SIZE)
+    expect($archivedSessionsHasMore.get()).toBe(true)
+  })
+
+  it('keeps the loaded rows and the offer when a load-more fails', async () => {
+    listAllProfileSessions
+      .mockResolvedValueOnce({ sessions: page(0, PAGE_SIZE), total: 2 * PAGE_SIZE })
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ sessions: page(PAGE_SIZE, PAGE_SIZE), total: 2 * PAGE_SIZE })
+
+    await loadArchivedSessions()
+    await loadMoreArchivedSessions()
+
+    expect($archivedSessions.get()).toHaveLength(PAGE_SIZE)
+    expect($archivedSessionsHasMore.get()).toBe(true)
+    expect($archivedSessionsLoading.get()).toBe(false)
+
+    await loadMoreArchivedSessions()
+
+    expect(listAllProfileSessions).toHaveBeenLastCalledWith(PAGE_SIZE, 0, 'only', 'recent', 'all', {}, PAGE_SIZE)
+    expect($archivedSessions.get()).toHaveLength(2 * PAGE_SIZE)
+  })
+
+  // Review of the first cut: archive/unarchive/delete edit $archivedSessions in place.
+  it('reads again from the top when the list was edited before a load-more', async () => {
+    const server = page(0, 3 * PAGE_SIZE)
+
+    listAllProfileSessions.mockImplementation(async (...args: unknown[]) => ({
+      sessions: server.slice(args[6] as number, (args[6] as number) + PAGE_SIZE),
+      total: server.length
+    }))
+
+    await loadArchivedSessions()
+    // What unarchiving a-0 does: the row leaves the list here and on the server.
+    $archivedSessions.set($archivedSessions.get().filter(session => session.id !== 'a-0'))
+    server.shift()
+    listAllProfileSessions.mockClear()
+
+    await loadMoreArchivedSessions()
+
+    const ids = $archivedSessions.get().map(session => session.id)
+
+    expect(listAllProfileSessions).toHaveBeenNthCalledWith(1, PAGE_SIZE, 0, 'only', 'recent', 'all', {}, 0)
+    expect(ids).not.toContain('a-0')
+    // a-500 moved into the first window; the old cursor would have skipped it.
+    expect(ids).toEqual(server.slice(0, 2 * PAGE_SIZE).map(session => session.id))
+  })
+
+  it('reads again from the top when the list is edited while a load-more is reading', async () => {
+    const server = page(0, 3 * PAGE_SIZE)
+    let release!: () => void
+
+    listAllProfileSessions.mockImplementation(async (...args: unknown[]) => ({
+      sessions: server.slice(args[6] as number, (args[6] as number) + PAGE_SIZE),
+      total: server.length
+    }))
+    await loadArchivedSessions()
+
+    listAllProfileSessions.mockImplementationOnce(async () => {
+      const rows = server.slice(PAGE_SIZE, 2 * PAGE_SIZE)
+
+      await new Promise<void>(resolve => (release = resolve))
+
+      return { sessions: rows, total: server.length + 1 }
+    })
+
+    const more = loadMoreArchivedSessions()
+
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    $archivedSessions.set($archivedSessions.get().filter(session => session.id !== 'a-0'))
+    server.shift()
+    release()
+    await more
+
+    expect($archivedSessions.get().map(session => session.id)).toEqual(
+      server.slice(0, 2 * PAGE_SIZE).map(session => session.id)
+    )
+    expect($archivedSessionsLoading.get()).toBe(false)
+  })
+
+  // sessions.changed refreshes can run back to back; a click must not be lost to one.
+  it('has a running refresh read the extra page when load-more is asked mid-refresh', async () => {
+    let release!: () => void
+
+    listAllProfileSessions.mockImplementation(async (...args: unknown[]) => ({
+      sessions: page(args[6] as number, PAGE_SIZE),
+      total: 4 * PAGE_SIZE
+    }))
+    await loadArchivedSessions()
+
+    listAllProfileSessions.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => (release = resolve))
+
+      return { sessions: page(0, PAGE_SIZE), total: 4 * PAGE_SIZE }
+    })
+
+    const refresh = loadArchivedSessions()
+
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+
+    const more = loadMoreArchivedSessions()
+    let moreDone = false
+    void more.then(() => (moreDone = true))
+
+    await Promise.resolve()
+    expect(moreDone).toBe(false)
+
+    release()
+    await Promise.all([refresh, more])
+
+    expect($archivedSessions.get()).toHaveLength(2 * PAGE_SIZE)
+    expect($archivedSessionsLoading.get()).toBe(false)
+  })
+
+  it('does not count a load-more stranded by a scope round trip against the scope it returns to', async () => {
+    let release!: () => void
+
+    listAllProfileSessions.mockImplementation(async (...args: unknown[]) => ({
+      sessions: page(args[6] as number, PAGE_SIZE),
+      total: 4 * PAGE_SIZE
+    }))
+    await loadArchivedSessions()
+
+    listAllProfileSessions.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => (release = resolve))
+
+      return { sessions: page(PAGE_SIZE, PAGE_SIZE), total: 4 * PAGE_SIZE }
+    })
+
+    const more = loadMoreArchivedSessions()
+
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    $apiRequestScope.setKey('profile', 'work')
+    $apiRequestScope.setKey('profile', null)
+    release()
+    await more
+
+    expect($archivedSessions.get()).toEqual([])
+    expect($archivedSessionsLoading.get()).toBe(false)
+
+    await loadArchivedSessions()
+
+    expect($archivedSessions.get()).toHaveLength(PAGE_SIZE)
+  })
+
+  it('drops the cursor on a scope switch, so the new scope starts at its first page', async () => {
+    listAllProfileSessions.mockImplementation(async (...args: unknown[]) => ({
+      sessions: page(args[6] as number, PAGE_SIZE),
+      total: 4 * PAGE_SIZE
+    }))
+
+    await loadArchivedSessions()
+    await loadMoreArchivedSessions()
+    $apiRequestScope.setKey('profile', 'work')
+
+    expect($archivedSessionsHasMore.get()).toBe(false)
+    listAllProfileSessions.mockClear()
+    await loadMoreArchivedSessions()
+    expect(listAllProfileSessions).not.toHaveBeenCalled()
+
+    await loadArchivedSessions()
+
+    expect(listAllProfileSessions).toHaveBeenCalledTimes(1)
+    expect($archivedSessions.get()).toHaveLength(PAGE_SIZE)
+  })
+})
+
+describe('createArchivedPager read to the end', () => {
   it('keeps paging when a live pin displaced the last archived row', async () => {
     listAllProfileSessions
       .mockResolvedValueOnce({ sessions: [pinnedRow('pin-x'), ...page(0, PAGE_SIZE - 1)], total: PAGE_SIZE })

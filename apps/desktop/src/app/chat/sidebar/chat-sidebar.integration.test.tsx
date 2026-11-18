@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -32,6 +32,7 @@ import {
   $workspaceCwdOwner
 } from '@/store/session'
 import { $removedSessionIds } from '@/store/session-removal'
+import { $archivedSessions } from '@/store/sidebar-archive'
 import { SIDEBAR_NAV_PREFS_AREA } from '@/store/sidebar-nav'
 import { makeSessionInfo } from '@/test/session-info'
 
@@ -40,6 +41,18 @@ import { type AppView, ROUTES_AREA, SIDEBAR_NAV_AREA } from '../../routes'
 import { $gatewayGroupCollapsed } from './gateway-group-preferences'
 
 import { ChatSidebar } from './index'
+
+// The Archived view reads its own pages through this one call; everything else in the module stays real.
+const listAllProfileSessions = vi.hoisted(() => vi.fn())
+
+vi.mock('@/api/sessions', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listAllProfileSessions
+}))
+
+beforeEach(() => {
+  listAllProfileSessions.mockReset().mockResolvedValue({ sessions: [], total: 0 })
+})
 
 const noop = () => {}
 
@@ -291,13 +304,88 @@ describe('ChatSidebar pinned empty state under filters', () => {
     expect(screen.getByText('Shift-click a chat to pin')).toBeTruthy()
   })
 
-  it('drops the pin hint in the Archived view when Pinned is empty', () => {
+  it('drops the pin hint in the Archived view when Pinned is empty', async () => {
     $sidebarShowArchived.set(true)
 
     renderSidebar('/', 'chat')
 
     expect(screen.queryByText('Shift-click a chat to pin')).toBeNull()
-    expect(screen.getAllByText('No sessions match these filters')).toHaveLength(2)
+    await waitFor(() => expect(screen.getAllByText('No sessions match these filters')).toHaveLength(2))
+  })
+})
+
+// 2026-11-17: with 16,899 archived rows the view read every page before listing any, and said
+// "No sessions match these filters" the whole time.
+describe('ChatSidebar Archived view paging', () => {
+  const archivedRow = (id: string, title: string) =>
+    makeSessionInfo({ archived: true, id, last_active: 2, profile: 'default', started_at: 1, title })
+
+  let previousShowAutomated: boolean
+
+  beforeEach(() => {
+    previousShowAutomated = $sidebarShowAutomated.get()
+    $sidebarShowAutomated.set(true)
+    $sidebarStatusFilter.set([])
+    $sidebarProjectFilter.set([])
+    $pinnedSessionIds.set([])
+    $sessions.set([])
+    $sessionsLoading.set(false)
+    $archivedSessions.set([])
+    $sidebarShowArchived.set(true)
+  })
+
+  afterEach(() => {
+    cleanup()
+    $sidebarShowAutomated.set(previousShowAutomated)
+    $sidebarShowArchived.set(false)
+    $archivedSessions.set([])
+    $sessionsLoading.set(true)
+    setSidebarAgentsGrouped(false)
+  })
+
+  it('lists the first page and reads the next one from the load-more row, whatever the grouping', async () => {
+    setSidebarAgentsGrouped(true)
+    listAllProfileSessions
+      .mockReset()
+      .mockResolvedValueOnce({ sessions: [archivedRow('old-one', 'Old one')], total: 16_899 })
+      .mockResolvedValueOnce({ sessions: [archivedRow('old-two', 'Old two')], total: 16_899 })
+
+    renderSidebar('/', 'chat')
+
+    expect(await screen.findByText('Old one')).toBeTruthy()
+    expect(listAllProfileSessions).toHaveBeenCalledTimes(1)
+
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Load more' })))
+
+    expect(await screen.findByText('Old two')).toBeTruthy()
+    expect(screen.getByText('Old one')).toBeTruthy()
+    // One page per click, even though it revealed a single row.
+    expect(listAllProfileSessions).toHaveBeenCalledTimes(2)
+    expect(listAllProfileSessions).toHaveBeenLastCalledWith(500, 0, 'only', 'recent', 'all', {}, 500)
+  })
+
+  it('offers no load-more row once the archive is fully listed', async () => {
+    listAllProfileSessions.mockReset().mockResolvedValue({ sessions: [archivedRow('old-one', 'Old one')], total: 1 })
+
+    renderSidebar('/', 'chat')
+
+    await screen.findByText('Old one')
+
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+  })
+
+  it('does not call an archive that is still loading empty', async () => {
+    let finish!: (page: unknown) => void
+    listAllProfileSessions.mockReset().mockImplementation(() => new Promise(resolve => (finish = resolve)))
+
+    renderSidebar('/', 'chat')
+
+    // Pinned has nothing to load, so it alone states its empty filter result.
+    expect(screen.getAllByText('No sessions match these filters')).toHaveLength(1)
+
+    await act(async () => finish({ sessions: [], total: 0 }))
+
+    await waitFor(() => expect(screen.getAllByText('No sessions match these filters')).toHaveLength(2))
   })
 })
 

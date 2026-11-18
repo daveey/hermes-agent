@@ -824,7 +824,7 @@ test('archived merged pages reach every archived row from older and current back
 
 test('a full page of newer live pins does not hide an older archived row from the Archived loader', async () => {
   // Greptile/@dokterdok on #140972: run the renderer loader's own stop rule
-  // (sidebar-archive.ts listEveryArchivedSession) over the merge path, with
+  // (sidebar-archive.ts createArchivedPager) over the merge path, with
   // enough live pins to fill a page, on both backend orderings.
   const archived = [{ id: 'old', profile: 'default', archived: true, pinned: false, last_active: 1 }]
 

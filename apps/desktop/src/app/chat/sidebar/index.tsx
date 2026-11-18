@@ -136,7 +136,6 @@ import { $removedSessionIds } from '@/store/session-removal'
 import { $workingSessionIds } from '@/store/session-states'
 import { ackAllSessionsRead } from '@/store/session-unread'
 import { markSessionUnread } from '@/store/session-unread-remote'
-import { $archivedSessions, loadArchivedSessions } from '@/store/sidebar-archive'
 import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
 import { $sidebarSessionRank, $sidebarSessionRankIds } from '@/store/sidebar-sort'
 
@@ -144,6 +143,7 @@ import { type AppView } from '../../routes'
 import type { SidebarNavItem } from '../../types'
 import { type NewSessionSplitHandler, startNewSessionDrag } from '../new-session-drag'
 
+import { useArchivedView } from './archived-view'
 import { SidebarSectionAddButton } from './chrome'
 import { SidebarContributedSections } from './contributed-sections'
 import { SidebarCronJobsSection } from './cron-jobs-section'
@@ -298,7 +298,8 @@ export function ChatSidebar({
   const showArchived = useStore($sidebarShowArchived)
   const showAutomated = useStore($sidebarShowAutomated)
   const cardRows = useStore($sidebarCardRows)
-  const archivedSessions = useStore($archivedSessions)
+  const archive = useArchivedView(showArchived)
+  const archivedSessions = archive.sessions
   const dotStates = useStore($sessionDotStateById)
   // The active sort key as an id order. The flat list applies it within its
   // dividers; groups apply it to their own lanes.
@@ -1279,13 +1280,14 @@ export function ChatSidebar({
   // rather than an exact count, so no COUNT(*) runs per refresh.
   const loadedSessionCount = showAllProfiles ? sessions.length : scopedSessions.length
 
-  // The archived view is its own (single, capped) query — paging the live
-  // sessions list from under it would just fold un-archived rows back in.
-  const hasMoreSessions =
-    !showArchived &&
-    (showAllProfiles
+  // The archived view pages its own cursor — paging the live sessions list
+  // from under it would just fold un-archived rows back in.
+  const hasMoreSessions = archive.pick(
+    archive.hasMore,
+    showAllProfiles
       ? Object.values(sessionProfilesTruncated).some(Boolean)
-      : Boolean(sessionProfilesTruncated[profileScope]))
+      : Boolean(sessionProfilesTruncated[profileScope])
+  )
 
   const displayRecentsCountRef = useRef(0)
   const loadedRecentsCountRef = useRef(0)
@@ -1329,14 +1331,6 @@ export function ChatSidebar({
       setRecentsLoadMorePending(false)
     }
   }, [onLoadMoreSessions, recentsLoadMorePending])
-
-  // Archived rows are excluded from the sessions query, so the view has to
-  // fetch its own set.
-  useEffect(() => {
-    if (showArchived) {
-      void loadArchivedSessions()
-    }
-  }, [showArchived])
 
   // Ranking by size is a question about the whole list ("what did I burn money
   // on"), so it drops the calendar dividers and ranks globally — "Today" above
@@ -1401,7 +1395,7 @@ export function ChatSidebar({
   // Skeletons mean "still loading", so they key off the UNFILTERED set. Keyed
   // off the filtered one, a filter that matches nothing showed skeletons on
   // every background refresh instead of the empty state.
-  const showSessionSkeletons = sessionsLoading && scopedSessions.length === 0
+  const showSessionSkeletons = archive.pick(archive.firstLoad, sessionsLoading && scopedSessions.length === 0)
 
   // [daveey] Cold-start timing: when this launch's sidebar first drew rows, and whether they were live or the boot
   // snapshot (hub.db rows / last projects tree) painted before the backend was up.
@@ -1753,11 +1747,12 @@ export function ChatSidebar({
                 footer={
                   // Hidden only when workspace-grouped — those groups page
                   // themselves. Profile groups don't: this one footer fetches the
-                  // next page, which grows every profile at once.
-                  !agentsGrouped && !showSessionSkeletons && hasMoreSessions ? (
+                  // next page, which grows every profile at once. Archived is
+                  // flat whatever the grouping, so it always pages here.
+                  archive.pick(true, !agentsGrouped) && !showSessionSkeletons && hasMoreSessions ? (
                     <SidebarLoadMoreRow
-                      loading={sessionsLoading || recentsLoadMorePending}
-                      onClick={() => void onLoadMoreRecents()}
+                      loading={archive.pick(archive.loadingMore, sessionsLoading || recentsLoadMorePending)}
+                      onClick={() => void archive.pick(archive.loadMore, onLoadMoreRecents)()}
                       // Recents are post-filtered to non-project sessions, so a
                       // backend page size (50) is not a truthful "rows you'll
                       // see" count. Use the generic label instead of a fake N.
