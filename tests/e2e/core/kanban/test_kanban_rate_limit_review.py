@@ -44,6 +44,7 @@ pytestmark = [
 # with a marker in the scratch home tells a reviewer's prompt apart without reading prompt wording.
 REVIEW_SKILL = "sdlc-review"
 REVIEW_MARK = "E2E_REVIEW_LANE_SKILL_5d21c9"
+REVIEW_MODEL = "fake-review-model"  # distinct from the implementer's fake-model
 RATE_LIMIT_EXIT_CODE = 75  # KANBAN_RATE_LIMIT_EXIT_CODE — documented worker exit contract
 MAX_TICKS = 6  # a healthy rate-limited card is done on tick 3; the rest prove "forever"
 
@@ -96,6 +97,7 @@ class TwoRoleModel:
         body = rec["body"]
         msgs = body.get("messages", [])
         role = "review" if REVIEW_MARK in json.dumps(msgs) else "impl"
+        assert body.get("model") == (REVIEW_MODEL if role == "review" else "fake-model")
         with self._lock:
             last = self.attempts[-1] if self.attempts else None
             if last is None or (last.tick, last.role) != (self.tick, role):
@@ -114,7 +116,10 @@ class TwoRoleModel:
         impl_no = sum(1 for a in self.attempts if a.role == "impl")
         if impl_no <= self.rate_limited_attempts:
             return Error(status=429, message="Rate limit exceeded: quota for this key", retry_after=0)
-        return ToolCall("kanban_request_review", {"summary": "implementation ready for review"})
+        return ToolCall("kanban_request_review", {
+            "summary": "implementation ready for review",
+            "metadata": {"review_model": REVIEW_MODEL, "review_provider": "custom"},
+        })
 
     def by_role(self, role: str) -> list[Attempt]:
         return [a for a in self.attempts if a.role == role]
