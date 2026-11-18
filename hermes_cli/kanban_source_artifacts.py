@@ -58,6 +58,11 @@ def _snapshot(raw):
     if not stat.S_ISREG(before.st_mode):
         raise ArtifactRefused("artifact_refused", "select a regular file, not a leaf symlink or special file")
     path = requested.resolve(strict=True)
+    from gateway.platforms.base import validate_media_delivery_path
+    # Check the original before moving bytes into trusted attachment storage.
+    # Do not accept a translated/different file in place of this inode.
+    if validate_media_delivery_path(str(path)) != str(path):
+        raise ArtifactRefused("artifact_refused", "selected original denied by delivery policy")
     if _denylisted(path.name):
         raise ArtifactRefused("artifact_refused", "selected path is not an allowed regular file")
     if _blob_secret_line(path.name.encode("utf-8")) is not None:
