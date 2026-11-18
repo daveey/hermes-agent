@@ -14,7 +14,7 @@ managed = managed_tests.managed
 
 
 @contextmanager
-def socket_rpc(home, dispatch, before_reply):
+def socket_rpc(home, dispatch, before_reply, *, expect_disconnect=False):
     from websockets.exceptions import ConnectionClosed
     from websockets.sync.client import connect
     from websockets.sync.server import serve
@@ -45,13 +45,16 @@ def socket_rpc(home, dispatch, before_reply):
             server.shutdown()
             thread.join(timeout=5)
             assert not thread.is_alive()
-    assert not errors
+    assert not errors or expect_disconnect
 
 
 @pytest.mark.parametrize('revoke', [False, True])
-def test_record_owner_stall_holds_board_writer(managed, tmp_path, monkeypatch, revoke):
+@pytest.mark.parametrize('bounded', [False, True])
+def test_record_owner_stall_holds_board_writer(managed, tmp_path, monkeypatch, revoke, bounded):
     """Controlled stall, not evidence of a historical production incident."""
     from hermes_cli import kanban_origin_native as native
+    from agent import origin_observation_budget as budget
+    monkeypatch.setattr(budget, 'RECORD_TIMEOUT', 0.05 if bounded else 2.0)
 
     path = tmp_path / 'board.db'
     with sqlite3.connect(path) as conn:
@@ -77,6 +80,7 @@ def test_record_owner_stall_holds_board_writer(managed, tmp_path, monkeypatch, r
         try:
             with sqlite3.connect(path, timeout=0.2) as other:
                 other.execute('BEGIN IMMEDIATE')
+                contention.append(('acquired', time.monotonic() - started))
         except sqlite3.OperationalError as exc:
             contention.append((str(exc), time.monotonic() - started))
         finally:
@@ -87,7 +91,7 @@ def test_record_owner_stall_holds_board_writer(managed, tmp_path, monkeypatch, r
     def inside():
         captured = native.capture(None)
         assert captured is not None
-        with socket_rpc(tmp_path, managed.rpc, before_reply) as rpc:
+        with socket_rpc(tmp_path, managed.rpc, before_reply, expect_disconnect=bounded) as rpc:
             original = managed.store.rpc
             managed.store.rpc = rpc
             rival = threading.Thread(target=contender)
@@ -99,15 +103,20 @@ def test_record_owner_stall_holds_board_writer(managed, tmp_path, monkeypatch, r
                     native.record(conn, 't_new', captured, 1)
                     elapsed = time.monotonic() - started
                     receipt = native._receipt(conn, 't_new')
-                assert (receipt is None) == revoke
+                assert (receipt is None) == (revoke or bounded)
+                assert managed.store.failure is None
+                if bounded:
+                    assert rpc.link is None  # late replies cannot become persistence receipts
+                    assert elapsed < 0.18
             finally:
                 release.set()
                 rival.join(timeout=5)
                 managed.store.rpc = original
             assert not rival.is_alive()
-        assert contention and contention[0][0] == 'database is locked'
-        assert elapsed >= contention[0][1]
-        assert calls == ['worker.nativeOrigin'] * (2 if revoke else 4)
+        assert contention and contention[0][0] == ('acquired' if bounded else 'database is locked')
+        if not bounded:
+            assert elapsed >= contention[0][1]
+        assert calls == ['worker.nativeOrigin'] * (1 if bounded else 2 if revoke else 4)
         # Once recording returns, the independently opened writer progresses.
         with sqlite3.connect(path, timeout=0.2) as other:
             other.execute('BEGIN IMMEDIATE')

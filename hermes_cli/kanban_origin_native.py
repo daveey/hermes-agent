@@ -10,6 +10,7 @@ import json
 import sqlite3
 
 from hermes_cli.kanban_origin_ledger import validate_binding
+from agent.origin_observation_budget import bounded_record, remaining
 
 
 def capture(creator_task_id, *, courier=False):
@@ -94,6 +95,7 @@ def _receipt(conn, task_id):
     return binding
 
 
+@bounded_record
 def record(conn, task_id, context, created_at):
     """Called inside create_task's transaction; no event or sync projection."""
     from agent.origin_turn_custody import CapturedOrigin
@@ -130,6 +132,7 @@ def record(conn, task_id, context, created_at):
     checked = captured.validated(conn) if type(captured) is CapturedWorkerOrigin else captured.validated()
     if checked != context:
         return
+    remaining()
     conn.execute("INSERT INTO origin_native_receipts VALUES (?,?,?,?)",
                  (task_id, json.dumps(binding, sort_keys=True), creator, created_at))
 

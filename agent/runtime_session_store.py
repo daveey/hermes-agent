@@ -292,6 +292,9 @@ class WorkerRPC:
             logger.warning('synchronous_rpc_on_event_loop: %s on thread %s; caller: %s',
                            method, threading.current_thread().name, _caller_summary())
             raise WorkerPersistenceError('synchronous_rpc_on_event_loop')
+        from agent.origin_observation_budget import remaining
+        if method in ('worker.nativeOrigin', 'worker.turnLease') and remaining() is not None:
+            return self._bounded_observation(method, params)
         from websockets.exceptions import ConnectionClosed
         with self.lock:
             self.request_id += 1
@@ -330,6 +333,39 @@ class WorkerRPC:
             if method in ('worker.register', 'worker.adopt') and params.get('pid') == os.getpid():
                 global _worker_process
                 _worker_process = True
+            return response['result']
+
+    def _bounded_observation(self, method, params):
+        """Optional record-time authority read on a link warmed by capture.
+
+        No discovery, ticketing, retry or close handshake under the board lock.
+        The normal persistence path redials a dead link with its usual patience.
+        """
+        from agent.origin_observation_budget import observation_lock, interrupt_at_deadline, remaining
+        from websockets.exceptions import ConnectionClosed
+        with observation_lock(self.lock):
+            link = self.link
+            if link is None or not link.reader.is_alive():
+                raise WorkerPersistenceError('origin_owner_link_cold')
+            self.request_id += 1
+            message = json.dumps({'jsonrpc': '2.0', 'id': self.request_id, 'method': method, 'params': params})
+            try:
+                with interrupt_at_deadline(link.ws):
+                    link.send(self.request_id, message)
+                    response = link.receive(remaining())
+            except (OSError, ConnectionClosed) as exc:
+                # A timed-out reply has no authority. Correlation discards it if
+                # it arrives later; durable writes never inherit this deadline.
+                link.awaiting = None
+                # Never reuse this reply queue: the reader may already have
+                # queued a late observation while the timer was joining.
+                self.link = None
+                import socket
+                with contextlib.suppress(OSError):
+                    link.ws.socket.shutdown(socket.SHUT_RDWR)
+                raise WorkerPersistenceError('origin_observation_unavailable') from exc
+            if 'error' in response:
+                raise WorkerPersistenceError(response['error'].get('message', 'origin_observation_refused'))
             return response['result']
 
 
@@ -606,13 +642,15 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
 
     def native_origin_observation(self, session_id, holder):
         """Fresh owner-classified source and publication lineage, never the write journal."""
-        with self.lock:
+        from agent.origin_observation_budget import observation_lock
+        with observation_lock(self.lock):
             self._session(session_id)
             return self.rpc('worker.nativeOrigin', **self.scope, holder=holder)
 
     def session_turn_lease_expires_at(self, session_id, holder):
         """Observe current owner authority, never replay a journaled lease receipt."""
-        with self.lock:
+        from agent.origin_observation_budget import observation_lock
+        with observation_lock(self.lock):
             self._session(session_id)
             result = self.rpc('worker.turnLease', **self.scope, holder=holder)
             return float(result['expires_at']) if result['expires_at'] is not None else None

@@ -25,6 +25,7 @@ class _ManagedCustody:
     def origin(self, custody):
         from agent.origin_worker_custody import _unexpired
         from agent.runtime_session_store import WorkerPersistenceError
+        from agent.origin_observation_budget import observation_lock
         from hermes_cli.kanban_session_provenance import _INTERACTIVE_SOURCES
         lease, pid, home, profile, gateway = custody
         agent, store = self.agent, self.store
@@ -47,7 +48,7 @@ class _ManagedCustody:
                 and lease.session_id in lineage)
 
         try:
-            with store.lock:
+            with observation_lock(store.lock):
                 sid = store.scope['session_id']
                 if not matches(sid):
                     return None
