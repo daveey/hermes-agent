@@ -635,6 +635,8 @@ def sweep(conn, *, now: Optional[float] = None) -> list[str]:
         return stranded
     try:
         resolve_sweep(conn, replica, own, now_ms=_now_ms(now))
+        from hermes_cli import kanban_pickup_stall_home as home_stalls
+        stranded += home_stalls.sweep(conn, replica, own, now_ms=_now_ms(now))
         cards = stalled(conn, replica, own, now=now)
     finally:
         replica.close()

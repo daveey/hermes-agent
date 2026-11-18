@@ -14,6 +14,7 @@ def evidence(body: str) -> str:
         lambda m: f"{m[1]}{m[2]}{m[3]}{'at/over' if int(m[4]) >= int(m[2]) else 'under'}{m[5]}",
         body, flags=re.MULTILINE,
     )
+    body = re.sub(r"(, (?:scheduled|todo), )\d+( minutes overdue )", r"\1<elapsed>\2", body)
     body = re.sub(r"(, ready )\d+( min,)", r"\1<elapsed>\2", body)
     body = re.sub(r"(pinned to machine:[^,\n]+, for )\d+( min \(threshold )", r"\1<elapsed>\2", body)
     body = re.sub(r", last " + _STAMP + r", \d+ pass\(es\)", ", last <tick>, <ticks> pass(es)", body)
