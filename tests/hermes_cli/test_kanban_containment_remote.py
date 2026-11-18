@@ -152,7 +152,7 @@ def test_live_authority_recovers_original_uncertain_stop_after_actor_expiry(boar
     assert kb.get_task(board, target).status == "ready"
 
 
-def test_known_rejection_removes_only_provisional_hold_and_is_not_reposted(board, monkeypatch):
+def test_known_rejection_allows_a_new_request_without_replaying_refused_bytes(board, monkeypatch):
     target, authority, session, hub = setup(board, monkeypatch)
     def reject(slug, operations):
         hub.posts.append(operations)
@@ -163,8 +163,35 @@ def test_known_rejection_removes_only_provisional_hold_and_is_not_reposted(board
             service.contain(board, authority=authority, summary="Fixture")
     from hermes_cli.kanban_containment_connections import held
     assert not held(board, target)
-    assert len(hub.posts) == 1
+    assert len(hub.posts) == 2
+    assert hub.posts[0][0]["client_op_id"] != hub.posts[1][0]["client_op_id"]
     board.execute("UPDATE tasks SET status='ready' WHERE id=?", (target,))
+
+
+def test_confirmed_request_never_answers_new_contain_or_release(board, monkeypatch):
+    from hermes_cli.kanban_containment_connections import held
+
+    relay, authority, session, hub = setup(board, monkeypatch)
+    child = board.execute("SELECT child_id FROM task_links WHERE parent_id=?", (relay,)).fetchone()[0]
+    episodes = []
+    for _ in range(2):
+        adopt(board, monkeypatch, relay, session)
+        before = len(hub.posts)
+        with scoped_current_session_id(session):
+            stop = service.contain(board, task_id=child, authority=authority, summary="Fixture")
+        episodes.append(stop["episode"])
+        assert len(hub.posts) == before + 1
+        assert held(board, child)
+        assert kb.get_task(board, child).status == "triage"
+        adopt(board, monkeypatch, authority, session)
+        with scoped_current_session_id(session):
+            released = service.resume(board, task_id=child, episode=stop["episode"])
+        assert released["status"] == "ready"
+        assert not held(board, child)
+        assert kb.get_task(board, child).status == "ready"
+    assert episodes[0] != episodes[1]
+    assert len(hub.posts) == 4
+
 
 
 def test_cli_and_tool_unknown_receipts_expose_same_recovery_identity(board, monkeypatch, capsys):

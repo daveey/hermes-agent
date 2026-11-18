@@ -78,7 +78,8 @@ def _replay(
     canonical._schema(conn)
     matches = []
     for request, raw in conn.execute(
-        "SELECT request_uid,op_json FROM containment_delivery WHERE board=?", (board,)
+        "SELECT request_uid,op_json FROM containment_delivery WHERE board=? AND confirmed=0",
+        (board,),
     ):
         op = json.loads(raw)
         if (
