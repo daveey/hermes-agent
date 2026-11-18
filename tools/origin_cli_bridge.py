@@ -5,13 +5,14 @@ transaction. A private reply socket per packet prevents sibling clients stealing
 responses. Retirement fences admission without waiting for slow tool execution.
 """
 from array import array
+from contextlib import contextmanager
 from contextvars import copy_context
 import json
 import os
 import secrets
 import select
 import socket
-from threading import Thread
+from threading import Lock, Thread
 
 from hermes_cli.kanban_origin_admission import strict_local_creation
 from hermes_cli.kanban_origin_cli_gate import LaunchGate
@@ -34,7 +35,12 @@ def _unknown():
 
 
 class Launch:
-    """Construct on the terminal caller thread; pass only child_fd to Popen."""
+    """Capture on the caller thread; use spawn_endpoint ownership for Popen.
+
+    This is not a sandbox: a shell can unset the locator and use legacy local
+    creation, but that path receives no trusted origin receipt. Environment
+    strings select a channel; they never establish origin custody.
+    """
     def __init__(self, task_id):
         from tools.thread_context import _callback_api
         self._ctx = copy_context()
@@ -46,6 +52,7 @@ class Launch:
         self._server, self._child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self._server.settimeout(0.1)
         self._closed = False
+        self._spawn_lock = Lock()
         self._requests = 0
         self._thread = Thread(target=self._serve, name="origin-cli-bridge", daemon=True)
         try:
@@ -63,9 +70,26 @@ class Launch:
     def locator(self):
         return json.dumps({"fd": self.child_fd, "nonce": self._nonce})
 
+    @contextmanager
+    def spawn_endpoint(self):
+        """Own a duplicate until Popen returns, never a borrowed fd number.
+
+        Retirement can finish while Popen stalls. Already acquired endpoints
+        stay valid, but the retired admission gate refuses their requests.
+        """
+        with self._spawn_lock:
+            if self._closed:
+                raise RuntimeError("CLI launch retired before spawn")
+            endpoint = self._child.dup()
+        with endpoint:
+            fd = endpoint.fileno()
+            yield fd, json.dumps({"fd": fd, "nonce": self._nonce})
+
     def retire(self):
-        reports = self._gate.retire()
-        self._closed = True
+        with self._spawn_lock:
+            reports = self._gate.retire()
+            self._closed = True
+            self._child.close()
         try:
             self._server.shutdown(socket.SHUT_RD)
         except OSError:
@@ -74,7 +98,6 @@ class Launch:
 
     def close(self):
         self.retire()
-        self._child.close()
         # Server owns its fd until its loop exits; never close underneath recvmsg.
 
     def _invoke(self, args, gate):

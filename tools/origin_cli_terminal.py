@@ -47,6 +47,9 @@ def execute(env, command, *, env_type, task_id, attempt=None, **kwargs):
     except Exception as exc:  # health: allow BLE001 -- convert every backend failure to a non-retryable outcome
         raise NoRetry("CLI custody launch failed; do not retry automatically. "
                       + json.dumps(reports)) from exc
+    except BaseException as exc:
+        exc.add_note("Native CLI admission; do not retry automatically: " + json.dumps(reports))
+        raise
     finally:
         launch.close()
     if reports:

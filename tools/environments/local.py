@@ -434,13 +434,16 @@ def build_subprocess_env(
             # exactly as they do in the launch process (``_apply_managed_env`` applies them last).
             restore_managed_env(env)
     if scrub_secrets:
-        return _sanitize_subprocess_env(env, dict(extra) if extra else None)
+        clean = _sanitize_subprocess_env(env, dict(extra) if extra else None)
+        clean.pop("HERMES_ORIGIN_CLI_BRIDGE", None)
+        return clean
     if inherit_profile_home:
         _apply_profile_home(env)
     if extra:
         env.update(extra)
     strip_supervised_process_identity(env)
     from agent.delegation_context import delegated_child_subprocess_env
+    env.pop("HERMES_ORIGIN_CLI_BRIDGE", None)
     return delegated_child_subprocess_env(env)
 
 
@@ -1240,8 +1243,7 @@ class LocalEnvironment(BaseEnvironment):
         bash = _find_bash()
         run_env = _make_run_env(self.env)
         run_env.pop(ENV_KEY, None)
-        if origin_cli_launch is not None:
-            run_env[ENV_KEY] = origin_cli_launch.locator
+
         # Login invocations (init_session's env snapshot) source the user's rc /
         # custom init files so nvm/asdf/pyenv land on PATH in the snapshot; then the
         # spawn env's dirs a resetting profile dropped are re-appended (#56634).
@@ -1259,14 +1261,19 @@ class LocalEnvironment(BaseEnvironment):
             return proc
         # Not spawn_owned: an awaited command needs no spawn-ledger entry; own_process_groups below hands
         # its group to the owner-death supervisor and _wait_for_process releases it.
-        proc = subprocess.Popen(
-            args, text=True, env=run_env, encoding="utf-8", errors="replace",
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-            # detached-spawn: ok — owned via own_process_groups right below
-            start_new_session=True, cwd=self.cwd,
-            **({"pass_fds": (origin_cli_launch.child_fd,)} if origin_cli_launch is not None else {}),
-            **({"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}))
+        from contextlib import nullcontext
+        endpoint = origin_cli_launch.spawn_endpoint() if origin_cli_launch is not None else nullcontext()
+        with endpoint as offered:
+            if offered is not None:
+                run_env[ENV_KEY] = offered[1]
+            proc = subprocess.Popen(
+                args, text=True, env=run_env, encoding="utf-8", errors="replace",
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+                # detached-spawn: ok — owned via own_process_groups right below
+                start_new_session=True, cwd=self.cwd,
+                **({"pass_fds": (offered[0],)} if offered is not None else {}),
+                **({"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}))
         if not _IS_WINDOWS:
             # The command dies with this process however it dies: a SIGKILLed / OOM-killed host left a
             # running `npm run dev` or `sleep` on init. Released once the wait returns (see below).
