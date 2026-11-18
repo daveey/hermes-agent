@@ -344,10 +344,9 @@ def backfill(conn: sqlite3.Connection) -> dict:
     from hermes_cli.kanban_db_notify import headless_sessions
     from hermes_cli.kanban_placement import is_placeholder_session
 
-    rows = conn.execute(
-        "SELECT t.id, t.session_id, e.payload FROM tasks t JOIN task_events e ON e.task_id=t.id "
-        "AND e.kind='created' WHERE NOT EXISTS (SELECT 1 FROM task_events done WHERE done.task_id=t.id "
-        "AND done.kind='creator_chats_resolved')").fetchall()
+    from hermes_cli.kanban_creator_empty import candidates, remember_empty, write_coverage
+
+    rows = candidates(conn)
     attempted, unresolved = [], []
     headless = headless_sessions(row["session_id"] for row in rows if row["session_id"])
     with _ReplicaReader(conn) as replica_reader:
@@ -355,12 +354,15 @@ def backfill(conn: sqlite3.Connection) -> dict:
             not row["session_id"] or str(row["session_id"]) in headless or is_placeholder_session(row["session_id"])
             for row in rows) else LinkVerdicts({}, None))
         with write_txn(conn):
+            covered = write_coverage(conn)
             for row in rows:
                 if row["session_id"] and not (str(row["session_id"]) in headless
                                               or is_placeholder_session(row["session_id"])):
                     continue
                 creator = json.loads(row["payload"] or "{}").get("creator_task_id")
                 if not creator:
+                    if covered:
+                        remember_empty(conn, row)
                     continue
                 inherit_chats(conn, row["id"], creator, replica_reader=replica_reader, verdicts=verdicts)
                 attempted.append(row["id"])

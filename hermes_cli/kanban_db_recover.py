@@ -60,7 +60,10 @@ _log = logging.getLogger(__name__)
 
 # Rows of these tables are never filled from an older backup: a sent outbox op filled back in would
 # be re-sent with stale fields, and sync state/cursors must reflect the live file only.
-_NO_FILL_TABLES = frozenset({"kanban_sync_outbox", "kanban_sync_state", "sqlite_sequence"})
+_NO_FILL_TABLES = frozenset({"kanban_sync_outbox", "kanban_sync_state", "sqlite_sequence",
+                             "kanban_creator_empty_events"})
+# Certificates are local/disposable: preserve DDL but never salvage their data.
+_DISPOSABLE_TABLES = frozenset({"kanban_creator_empty_events"})
 # Keys listed per table in the report (the counts are always complete).
 _REPORT_KEY_CAP = 200
 # How long a spawned recovery may run before the parent stops waiting for it.
@@ -436,6 +439,9 @@ def _build(snapshot: Path, out: Path, fill: Optional[Path], result: RecoveryResu
             dst.execute(str(sql))
         listed_by_table: dict[str, Listed] = {}
         for name, sql in tables:
+            if name in _DISPOSABLE_TABLES:
+                result.tables[name] = TableLoss()
+                continue
             inserted, _columns, failed, listed, stale = _salvage_table(src, dst, name, sql)
             listed_by_table[name] = listed
             loss = result.tables.setdefault(name, TableLoss())

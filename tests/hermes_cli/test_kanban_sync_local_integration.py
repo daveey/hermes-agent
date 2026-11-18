@@ -216,7 +216,10 @@ def test_pulled_parent_rows_refresh_only_changed_parent(mirrored, monkeypatch, t
 def test_links_pass_keeps_its_300s_floor(live, kanban_home, monkeypatch):
     from hermes_cli import kanban_chat_links
     from hermes_cli import kanban_session_activity as ksa
+    from hermes_cli.kanban_creator_empty import ensure
     sync.set_mode(live, "primary")
+    # Test the settled deadline, not the initial backfill schema invalidation.
+    assert ensure(live)
     monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [])
     ksc._LINKS_DONE.clear()
     now = [5000.0]
