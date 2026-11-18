@@ -116,3 +116,69 @@ def test_a_stale_replica_keeps_the_rows_unknown(world):
         db.execute("DELETE FROM replica WHERE gw = 'gone'")
     clock['now'] = 1000.0 + 40 * 3600  # no hub pull since: the replica is stale and proves nothing
     assert by_id(activity._legacy_remote_links())['t_done'] == ('unknown', False, True)
+
+
+def _removed_then_released(path, clock):
+    activity._legacy_remote_links()
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM replica WHERE gw = 'gone'")
+    tick(path, clock, 1010.0)
+    assert by_id(activity._legacy_remote_links())['t_done'] == ('done', True, True)
+
+
+@pytest.mark.parametrize('cold', [False, True])
+def test_an_owner_that_publishes_again_takes_the_release_back(world, cold):
+    """Review 5952178127: the release is an inference re-made on every fresh read, not a receipt."""
+    path, clock = world
+    _removed_then_released(path, clock)
+    put(path, 'gone', 't_new', 60, status='running')  # the machine is back and publishes another card
+    tick(path, clock, 1020.0)
+    if cold:
+        activity._reset_cache_for_tests()  # a new process: only the durable snapshot remembers the release
+    rows = activity._legacy_remote_links()
+    assert by_id(rows)['t_done'] == ('unknown', False, True)
+    done = next(r for r in rows if r['id'] == 't_done')
+    assert 'owner_removed' not in done and done['unfinished'] is True and done['reported_status'] == 'done'
+    with sqlite3.connect(path) as db:  # removed once more: released once more
+        db.execute("DELETE FROM replica WHERE gw = 'gone'")
+    tick(path, clock, 1030.0)
+    assert by_id(activity._legacy_remote_links())['t_done'] == ('done', True, True)
+
+
+@pytest.mark.parametrize('cold', [False, True])
+def test_a_reprovisioned_owner_republishing_the_card_running_without_links_takes_it_back(world, cold):
+    path, clock = world
+    _removed_then_released(path, clock)
+    with sqlite3.connect(path) as db:  # the exact card, running again, its session links dropped
+        db.execute("INSERT INTO replica VALUES ('gone','tasks','work/build/t_done',2,61,?,1015000)",
+                   (json.dumps(card('t_done', gateway='gone', status='running', sessions=[])),))
+    tick(path, clock, 1020.0)
+    if cold:
+        activity._reset_cache_for_tests()
+    assert by_id(activity._legacy_remote_links())['t_done'] == ('unknown', False, True)
+
+
+def test_a_fresh_heartbeat_alone_takes_the_release_back(world):
+    path, clock = world
+    _removed_then_released(path, clock)
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO replica VALUES ('gone','gateway','info',1,62,?,0)",
+                   (json.dumps({'gateway': 'gone', 'task_scopes': [ok(1015.0)]}),))
+    tick(path, clock, 1020.0)
+    assert by_id(activity._legacy_remote_links())['t_done'] == ('unknown', False, True)
+
+
+def test_a_stale_read_keeps_an_earlier_release(world):
+    path, clock = world
+    _removed_then_released(path, clock)
+    clock['now'] = 1010.0 + 40 * 3600
+    assert by_id(activity._legacy_remote_links())['t_done'] == ('done', True, True)
+
+
+def test_released_rows_are_restored_by_the_pure_rule_when_the_owner_publishes():
+    released = _release_removed_owners([row('t_done', 'gone', 'done')], {('other', 'build', 't_x')}, FRESH)
+    assert released[0]['owner_removed'] is True
+    assert _release_removed_owners(released, {('other', 'build', 't_x')}, FRESH) == released, 'stable while it is gone'
+    back = _release_removed_owners(released, {('gone', 'build', 't_new')}, FRESH)
+    assert back == [row('t_done', 'gone', 'done')]
+    assert _release_removed_owners(released, (), {}) == released and _release_removed_owners(released, (), FRESH) == released

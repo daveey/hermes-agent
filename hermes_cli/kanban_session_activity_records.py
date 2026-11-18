@@ -59,22 +59,29 @@ def _release_removed_owners(carried: list[dict[str, Any]], owners, moved: dict[s
     were removed (2026-11-18). Absence of ONE record is still never closure (a live owner publishing other cards
     keeps its rows as they are, see ``_retire_moved``); this is the absence of the whole owner: no task record from
     that gateway and no fresh scope heartbeat, in a replica that is not stale (``owners`` is filled only then). An
-    open, unknown-status or unqualified row is left alone, and so is everything while the replica is stale.
+    open, unknown-status or unqualified row is left alone, and so is everything while the replica is stale (an
+    earlier release included: a stale read neither makes nor takes back the inference).
     ``owners`` is the projection's ``(gateway, board, id)`` set; it is walked only when a candidate row exists."""
-    wanted = [i for i, c in enumerate(carried) if c.get('status') == 'unknown' and c.get('ownership_state') == 'qualified'
+    if not moved:
+        return carried
+    # ``owner_removed`` is an inference, re-made on every fresh read, never a completion receipt: such a row is put
+    # back to its unresolved state first, so an owner that publishes or beats again (a reprovisioned machine, even
+    # one republishing this very card as running with its session links dropped) takes the release back.
+    rows = [({**{k: v for k, v in c.items() if k != 'owner_removed'}, 'status': 'unknown', 'unfinished': True,
+              'released': False} if c.get('owner_removed') else c) for c in carried]
+    wanted = [i for i, c in enumerate(rows) if c.get('status') == 'unknown' and c.get('ownership_state') == 'qualified'
               and c.get('reported_status') in ('done', 'archived') and not c.get('released') and c.get('gateway')]
-    if not wanted or not moved:
+    if not wanted:
         return carried
     publishing = {owner[0] for owner in owners}
     if not publishing:  # a read that carries no task record at all proves nothing about who is gone
         return carried
     publishing |= {scope[0] for scope in moved.get('live_scopes', ())}
-    out = list(carried)
     for i in wanted:
-        if carried[i]['gateway'] not in publishing:
-            out[i] = {**carried[i], 'status': carried[i]['reported_status'], 'unfinished': False, 'released': True,
-                      'owner_removed': True}
-    return out
+        if rows[i]['gateway'] not in publishing:
+            rows[i] = {**rows[i], 'status': rows[i]['reported_status'], 'unfinished': False, 'released': True,
+                       'owner_removed': True}
+    return rows
 
 
 def _fold_legacy_aliases(tasks: dict[tuple, dict[str, Any]], raw: dict[tuple, dict[str, Any]]) -> None:
