@@ -327,8 +327,7 @@ def test_without_procfs_snapshot_folds_exited_threads(monkeypatch):
         return real_listdir(path)
 
     monkeypatch.setattr(la.os, "listdir", no_procfs)
-    # Hiding /proc alone leaves macOS's proc_pidinfo source live (80c0c4c277e6), so its rows carry CPU.
-    monkeypatch.setattr(la, "_darwin_thread_cpu", list)
+    # Mutation probe: intentionally leave Darwin's native CPU source live.
 
     def worker():
         with la.pass_("short-lived"):
