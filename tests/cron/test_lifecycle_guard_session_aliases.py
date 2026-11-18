@@ -279,6 +279,7 @@ _NESTED_FOREIGN_SHELLS = [
     "doas -a style -s <<< 't ( bash {db} )'",
     # A stdin file fed to a login-shell launcher is that shell's script (review 5903452583 B1).
     "su -l bob < <(cat {script})",
+    "while read l; do su -l bob; done < <(cat {script})",
     "bash -l < <(cat {script})",
     "su -l bob 0< <(cat {script})",
     "sudo -i < <(cat {script})",
@@ -642,8 +643,7 @@ def test_multiline_group_without_a_fed_shell_stays_allowed(tmp_path, live_kanban
 
 
 @pytest.mark.parametrize("shape", [
-    "su -l bob < <(cat {script})",
-    "while read l; do su -l bob; done < <(cat {script})",
+    # cat process substitutions resolve to their file and are covered above.
     "su -l bob < $S",
     "su -l bob < \"$S\"",
     "su -l bob < ${{S}}",
