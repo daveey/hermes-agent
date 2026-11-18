@@ -58,6 +58,40 @@ async def test_claim_pending_read_keeps_the_owner_loop_ticking(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('queued_payload', [None, {'text': 'next'}, {'text': 'next', 'finite': True}])
+@pytest.mark.parametrize('source', ['cli', 'cron'])
+async def test_claim_preserves_lazy_launch_source_freeze(tmp_path, source, queued_payload):
+    import hermes_state_runtime as rt
+    from gateway.session_authority import LiveSession, SessionAuthority
+    from gateway.session_contract import SessionRef
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / 'state.db')
+    db.create_session('s', source=source)
+    authority = SessionAuthority(SimpleNamespace(_draining=False, adapters={}), profile_id='p', instance_id='t',
+                                 db=db, epoch=rt.begin_runtime_epoch(db, instance_id='t'))
+    live = authority.sessions['s'] = LiveSession(SimpleNamespace(platform=None, user_id='u'), 'route')
+    ref = SessionRef('p', 's')
+    rt.admit_session_input(db, epoch=authority.epoch, principal_id='u', session_id='s',
+                          request_id='first', payload={'text': 'first'})
+    if queued_payload is not None:
+        rt.admit_session_input(db, epoch=authority.epoch, principal_id='u', session_id='s',
+                              request_id='next', payload=queued_payload)
+    try:
+        await authority._claim_next(ref, live)
+        eligible = queued_payload == {'text': 'next'}
+        assert authority.launch_sources == ({'s': source} if eligible else {})
+        db._execute_write(lambda conn: conn.execute(
+            'UPDATE sessions SET source=? WHERE id=?', ('cron' if source == 'cli' else 'cli', 's')))
+        authority._publish_pending(ref)
+        if eligible:
+            pending = authority._pending_receipt(authority._pending_rows(ref)[1])
+            assert pending.controls == (['steer', 'replace'] if source == 'cli' else [])
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('cancel_observer', [False, True])
 @pytest.mark.parametrize('frozen_source', [None, 'cron'])
 @pytest.mark.parametrize('invalidation', ['publication', 'settling', 'epoch', 'source', 'transfer'])

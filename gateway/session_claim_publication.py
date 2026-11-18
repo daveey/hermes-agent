@@ -3,7 +3,7 @@ import asyncio
 from dataclasses import asdict
 
 from gateway.session_contract import SessionHandle
-from gateway.session_queued_controls import _INTERACTIVE_SOURCES
+from gateway.session_queued_controls import _INTERACTIVE_SOURCES, queued_controls
 from hermes_state_runtime import STEERING, RuntimeStoreError, get_session_admission
 
 
@@ -34,8 +34,12 @@ def _prepare(authority, ref, token):
             pending[admission_id] = row
     source = token[3] if token[3] is not None else session['source']
     interactive = source in _INTERACTIVE_SOURCES
-    return handle, [asdict(authority._pending_receipt(row, interactive=interactive))
-                    for row in sorted(pending.values(), key=lambda row: row['seq'])]
+    # Match _interactive's lazy cache fill: only a row eligible for controls
+    # consults the source. Return the intent; only the owner may mutate its cache.
+    freeze_source = source if any(queued_controls(authority, row, interactive=True)
+                                  for row in pending.values()) else None
+    return (handle, [asdict(authority._pending_receipt(row, interactive=interactive))
+                     for row in sorted(pending.values(), key=lambda row: row['seq'])]), freeze_source
 
 
 async def stamp_claim(authority, ref, live, row):
@@ -46,12 +50,14 @@ async def stamp_claim(authority, ref, live, row):
         while True:
             with live.event_stream.lock:
                 token = _view_token(authority, ref, live)
-            prepared = await asyncio.to_thread(_prepare, authority, ref, token)
+            prepared, freeze_source = await asyncio.to_thread(_prepare, authority, ref, token)
             with live.event_stream.lock:
                 # A submission/cancel/settlement published while we read: never overwrite
                 # its newer view. Transfers and settling can change before publication too.
                 if token != _view_token(authority, ref, live):
                     continue
+                if freeze_source is not None:
+                    authority.launch_sources.setdefault(ref.session_id, freeze_source)
                 authority._publish_pending(ref, prepared=prepared)
                 break
     return row
