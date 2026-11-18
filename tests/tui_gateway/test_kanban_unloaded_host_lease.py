@@ -490,3 +490,11 @@ def test_notice_fanout_state_a_non_sqlite_error_mid_transaction_leaves_no_open_w
         assert nfs.load_remote() == {"chat": frozenset({("k", "done")})}
     finally:
         nfs.reset_for_tests()
+
+
+def test_host_pass_cadence_is_sixty_seconds_and_grace_unchanged(monkeypatch):
+    """t_01a1dfa94f2251cd: the hub host pass runs every 60 s (halves fixed per-pass CPU); the notice grace stays 30 s."""
+    monkeypatch.delenv("HERMES_KANBAN_UNLOADED_SWEEP_S", raising=False)
+    assert ku.INTERVAL_S == 60.0
+    assert ku.GRACE_S == 30.0
+    assert ku.make_lease().interval == 60.0

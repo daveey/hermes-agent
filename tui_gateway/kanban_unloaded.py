@@ -64,7 +64,7 @@ from hermes_cli import loop_accounting as _la
 logger = logging.getLogger(__name__)
 
 GRACE_S = 30.0
-INTERVAL_S = 30.0
+INTERVAL_S = 60.0  # [daveey] t_01a1dfa94f2251cd: halves fixed per-pass host_pass CPU (David-delegated cadence change)
 FIRST_RUN_DELAY_S = 20.0
 LEASE_NAME = "kanban-unloaded"
 
