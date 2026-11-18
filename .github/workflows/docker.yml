@@ -232,11 +232,12 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:test
           build-args: |
             HERMES_BOT_DESKTOP=${{ matrix.variant == 'desktop' && '1' || '0' }}
-          # Slim owns the scope; desktop adds the gated apt layer, so it reads
-          # and writes nothing — a mode=max scope could exceed the cache cap.
+          # Slim owns the scope; desktop reads it but never exports. Export
+          # only final layers: mode=max's intermediate stages consumed the
+          # repository cache quota, leaving no room for the Nix store.
           # Cache export is optional; backend outages must not discard a tested image.
           cache-from: type=gha,scope=docker-${{ matrix.arch }}
-          cache-to: ${{ (github.event_name != 'pull_request' && matrix.variant == 'slim') && format('type=gha,mode=max,ignore-error=true,scope=docker-{0}', matrix.arch) || '' }}
+          cache-to: ${{ (github.event_name != 'pull_request' && matrix.variant == 'slim') && format('type=gha,mode=min,ignore-error=true,scope=docker-{0}', matrix.arch) || '' }}
 
 
       # Run the docker-integration test suite against the freshly-built image
@@ -414,7 +415,7 @@ jobs:
             org.opencontainers.image.revision=${{ env.CANDIDATE_COMMIT }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=docker-${{ matrix.arch }}
-          cache-to: ${{ matrix.variant == 'slim' && format('type=gha,mode=max,ignore-error=true,scope=docker-{0}', matrix.arch) || '' }}
+          cache-to: ${{ matrix.variant == 'slim' && format('type=gha,mode=min,ignore-error=true,scope=docker-{0}', matrix.arch) || '' }}
 
       - name: Export digest
         run: |

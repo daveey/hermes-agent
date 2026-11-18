@@ -176,13 +176,10 @@ jobs:
           # size of the compressed archive.
           gc-max-store-size-linux: 5G
 
-          # Delete the caches that this key replaces. GitHub removes caches by
-          # least recent use across the whole repository, so a Nix store that
-          # is never purged pushes out the caches of the other workflows.
-          purge: true
-          purge-prefixes: nix-${{ runner.os }}-
-          purge-created: 0
-          purge-primary-key: never
+          # v7 purges before saving, and a purge API 403 aborts the upload
+          # with only a warning. Keep the token read-only (also for PRs and
+          # reusable callers); let GitHub's LRU evict obsolete keys instead.
+          purge: false
 
       - name: Prepare isolated release source
         if: inputs.release == true
@@ -200,7 +197,10 @@ jobs:
         # A path: flake has no git metadata, so the release source names its
         # commit with ?rev=: without it self.rev is null, the install stamp
         # carries no commit, and the packaged CLI reports "unknown".
-        run: nix flake check "${{ inputs.release == true && format('path:{0}/release-source?rev={1}', runner.temp, env.CANDIDATE_COMMIT) || '.' }}" --print-build-logs
+        # Fail before the job deadline: runner deadlines report cancelled,
+        # hiding red main from failure watchers. Reserve time for setup and
+        # cache post steps; GNU timeout exits 124 (or 137 after forced kill).
+        run: timeout --kill-after=30s 40m nix flake check "${{ inputs.release == true && format('path:{0}/release-source?rev={1}', runner.temp, env.CANDIDATE_COMMIT) || '.' }}" --print-build-logs
 
       - name: Verify release package runtime identity
         if: inputs.release == true
