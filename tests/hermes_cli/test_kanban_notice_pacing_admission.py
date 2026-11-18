@@ -363,7 +363,7 @@ def _claimed_by_the_pool(conn, n=3):
             kb._append_event(conn, claimed, "claimed", {"holder": f"worker-{3 + i % 2}", "run_uid": f"r{i}"})
 
 
-@pytest.mark.parametrize("recorded", ["hub_only", "stale_paced_verdict"])
+@pytest.mark.parametrize("recorded", ["hub_only", "stale_paced_verdict", "worker_capacity_full", "per_profile_capped"])
 @pytest.mark.parametrize("path", sorted(NOTICES))
 def test_a_held_pool_beats_same_label_claims_on_other_providers(hub, path, recorded):
     """Defect agent-b460ba9d37 (hub, 2026-11-15 17:17Z): openai-codex went ``held`` (all accounts at 100% of the
@@ -380,6 +380,10 @@ def test_a_held_pool_beats_same_label_claims_on_other_providers(hub, path, recor
         assert skips.record(hub.conn, tid, "llm_paced", detail="anthropic paced",
                             extra={"providers": [{"provider": "anthropic", "state": "paced", "limit": 1,
                                                   "running": 1}]})
+    elif recorded == "worker_capacity_full":  # a capable non-pacing skip from before the hold (review of #3548)
+        assert skips.record(hub.conn, tid, "claim_deferred", detail="worker_capacity_full")
+    elif recorded == "per_profile_capped":
+        assert skips.record(hub.conn, tid, "per_profile_capped")
     _claimed_by_the_pool(hub.conn)
     payload, text = NOTICES[path](hub.conn, tid)
     assert payload["admission"]["status"] == "held", payload

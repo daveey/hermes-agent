@@ -325,14 +325,15 @@ def post_notice(conn, task_id: str, waiting_on: str, *, wait_key: Any, waited_se
         return False  # before the queue place: every tick asks again for each long-ready card [daveey]
     place = _place(conn, waiting_on)
     extra = _host_hold_only_if_local(extra, place)
-    busy = _queued(conn, waiting_on, place)
+    held = _held_over_claims(conn, waiting_on, place)  # the held read IS the admission, as in ready_hint [daveey]
+    busy = held is None and klb.busy(place.get("backlog"))
     from hermes_cli import kanban_notice_verdict
-    verdict = ({} if busy or (extra or {}).get("core_update_hold") else
+    verdict = ({} if busy or held or (extra or {}).get("core_update_hold") else
                kanban_notice_verdict.fields(conn, waiting_on, place, ready_seconds, _read_pacing))
     observed = {"board": place.get("board") or khc.board_of(conn), "observed_at": place.get("observed_at") or int(time.time()),
                 "admission": ({"reason": "core_update_hold", "status": "held"} if (extra or {}).get("core_update_hold")
-                              else {"reason": klb.REASON, "status": "queued"} if busy
-                              else verdict.get("admission") or _pacing_admission(conn, waiting_on, place, extra)
+                              else held or ({"reason": klb.REASON, "status": "queued"} if busy else None)
+                              or verdict.get("admission") or _pacing_admission(conn, waiting_on, place, extra)
                               or {"reason": None, "status": "unknown"})}
     guard = place.get("reason") if place.get("lane") == "respawn_guard" else None
     pool_hint = "" if guard else _pool_sentence(place, observed["observed_at"])  # outside the queue clause (#1821)
