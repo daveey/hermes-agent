@@ -232,3 +232,96 @@ def test_comment_row_is_stamped_inside_the_write_lock(board, monkeypatch):
         ev_at = conn.execute("SELECT created_at FROM task_events WHERE task_id=? AND kind='commented' "
                              "AND json_extract(payload, '$.comment_id')=?", (board, cid)).fetchone()[0]
     assert row_at == ev_at == 1794426074
+
+
+def _uid_ms(ms, salt):
+    h = f"{ms:012x}" + f"7{salt:03x}" + "8" + f"{salt:03x}" + f"{salt:012x}"
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+
+
+def _legacy_own_write(tid, *, drift_s=5, uid_gap_ms=6, mint_offset_ms=57, author=None, length=None,
+                      comment_id=None, event_uid=None, row_uid=None):
+    """t_01a1a1dea9c64d6a shape (live: 5 s / 6 ms and 7 s / 1 ms): an add_comment row stamped before the
+    write lock, its event after, no comment_uid, no run provenance, no transcript."""
+    enable_sync(tid)
+    body = "SOURCE-ONLY next-prefix manifest (subagent; no live DB)"
+    cid = comment(tid, session="20261111_193650_c64738", age=8 * 86400, body=body)
+    with kbc.connect_closing() as conn:
+        row = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
+        ev_at = row["created_at"] + drift_s
+        ev_ms = ev_at * 1000 + mint_offset_ms
+        with kbc.write_txn(conn):
+            conn.execute("UPDATE task_comments SET uid=? WHERE id=?",
+                         (row_uid or _uid_ms(ev_ms - uid_gap_ms, 1), cid))
+            ev = conn.execute("SELECT id FROM task_events WHERE task_id=? AND kind='commented' "
+                              "AND json_extract(payload, '$.comment_id')=?", (tid, cid)).fetchone()
+            payload = {"author": author or "default", "len": len(body) if length is None else length,
+                       "comment_id": cid if comment_id is None else comment_id, "writer_kind": "agent",
+                       "writer_session": "20261111_193650_c64738"}
+            conn.execute("UPDATE task_events SET created_at=?, uid=?, payload=? WHERE id=?",
+                         (ev_at, event_uid or _uid_ms(ev_ms, 2), json.dumps(payload), ev["id"]))
+    return cid
+
+
+@pytest.mark.parametrize("entry", ["promote", "unblock", "tool"])
+@pytest.mark.parametrize("drift_s,uid_gap_ms,mint_offset_ms", [(5, 6, 57), (7, 1, 372)])
+def test_legacy_lock_drift_own_write_is_acknowledged(board, entry, drift_s, uid_gap_ms, mint_offset_ms, capsys):
+    """Replay of both live events: listed by --seen below the row, released at the row."""
+    cid = _legacy_own_write(board, drift_s=drift_s, uid_gap_ms=uid_gap_ms, mint_offset_ms=mint_offset_ms)
+    ok, output = release(board, entry, capsys, cid - 1)
+    assert not ok and "SOURCE-ONLY next-prefix" in output and "data unavailable" not in output, output
+    ok, output = release(board, entry, capsys, cid)
+    assert ok, output
+
+
+@pytest.mark.parametrize("entry", ["promote", "unblock", "tool"])
+@pytest.mark.parametrize("broken", ["author", "length", "other_id", "drift_after", "drift_long", "uid_gap",
+                                    "backfilled_event_uid", "non_v7_event", "non_v7_row"])
+def test_legacy_own_write_needs_every_fact(board, entry, broken, capsys):
+    import uuid
+    kwargs = {"author": {"author": "another"}, "length": {"length": 7}, "drift_after": {"drift_s": -2},
+              "drift_long": {"drift_s": 61}, "uid_gap": {"uid_gap_ms": 1500},
+              "backfilled_event_uid": {"mint_offset_ms": 3 * 86400 * 1000},
+              "non_v7_event": {"event_uid": str(uuid.uuid4())}, "non_v7_row": {"row_uid": str(uuid.uuid4())},
+              "other_id": {}}[broken]
+    cid = _legacy_own_write(board, **kwargs)
+    if broken == "other_id":
+        with kbc.connect_closing() as conn:
+            with kbc.write_txn(conn):
+                ev = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='commented' "
+                                  "AND json_extract(payload, '$.comment_id')=?", (board, cid)).fetchone()
+                payload = json.loads(ev["payload"])
+                payload["comment_id"] = cid + 7
+                conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(payload), ev["id"]))
+    ok, output = release(board, entry, capsys, cid + 1000)
+    assert not ok and "data unavailable" in output, output
+
+
+@pytest.mark.parametrize("entry", ["promote", "unblock", "tool"])
+def test_backfill_race_spare_row_cannot_stand_in(board, entry, capsys):
+    """Adversarial review of #3629: the real sync-enable backfill lands < 2 s after a legacy write, so every
+    uid looks write-time; an eventless same-author row (specify/decompose) must not cover the unsynced comment."""
+    with kbc.connect_closing() as conn:
+        assert "uid" not in [r[1] for r in conn.execute("PRAGMA table_info(task_comments)")]  # never synced
+        now = int(time.time())
+        with kbc.write_txn(conn):
+            kb._insert_comment(conn, board, "default", "Specified -- updated body and promoted to todo.", now - 10)
+        spare_id = conn.execute("SELECT max(id) FROM task_comments").fetchone()[0]
+        cid = kb.add_comment(conn, board, "default", "STOP: do not release, the fix is wrong",
+                             writer_kind="agent", writer_session="peer-session")
+    from hermes_constants import get_hermes_home
+    import uuid
+    from tests.hermes_cli.kanban_sync_support import write_sync_config
+    write_sync_config(get_hermes_home(), True)
+    kb._INITIALIZED_PATHS.clear()
+    with kbc.connect_closing() as conn:
+        sync.install_or_remove(conn, conn.execute("PRAGMA database_list").fetchone()[2])
+        uids = [r[0] for r in conn.execute("SELECT uid FROM task_comments UNION ALL "
+                                           "SELECT uid FROM task_events WHERE kind='commented'")]
+        assert len(uids) == 3 and all(u and uuid.UUID(u).version == 7 for u in uids), uids  # real backfill ran
+        ev = conn.execute("SELECT payload FROM task_events WHERE kind='commented'").fetchone()
+        assert "comment_uid" not in json.loads(ev[0])
+        with kbc.write_txn(conn):
+            conn.execute("DELETE FROM task_comments WHERE id=?", (cid,))  # not synced to this reader yet
+    ok, output = release(board, entry, capsys, spare_id)
+    assert not ok and "Comment data unavailable" in output, output

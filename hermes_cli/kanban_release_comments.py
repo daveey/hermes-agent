@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import time
+import uuid
 from datetime import UTC, datetime
 
 UNREAD_EXIT = 4
@@ -166,8 +167,55 @@ def _resolve(rows, event, payload, *, local_writer=False):
         # the second timestamp. Local run provenance makes its integer usable.
         return [r for r in rows if r["id"] == payload.get("comment_id")
                 and r["author"] == payload["author"].strip()]
-    return [r for r in rows if abs(r["created_at"] - event["created_at"]) <= 1
-            and (not payload.get("author") or r["author"] == payload["author"].strip())]
+    same_second = [r for r in rows if abs(r["created_at"] - event["created_at"]) <= 1
+                   and (not payload.get("author") or r["author"] == payload["author"].strip())]
+    return same_second or _own_write(rows, event, payload)
+
+
+_LOCK_WAIT = 60  # seconds a legacy row stamp may precede its event (add_comment stamped it before the lock)
+
+
+def _uuid7_ms(uid):
+    """Millisecond write time a UUIDv7 carries; None for any other value."""
+    try:
+        value = uuid.UUID(str(uid))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return value.int >> 80 if value.version == 7 else None
+
+
+def _own_write(rows, event, payload):
+    """The row a legacy event names by its own integer, when every recorded fact agrees.
+
+    Before ``add_comment`` stamped rows inside the write lock, a lock wait put
+    the row's ``created_at`` seconds before its event's (5 s and 7 s on
+    t_01a1a1dea9c64d6a), outside the one-second rule above. The row the event
+    names is then bound only when all of these hold: its id is the event's
+    ``comment_id`` and its author and stored length are the event's ``author``
+    and ``len``; both uids are UUIDv7 within a second of each other; the
+    event's uid was minted at its write (within 2 s of its own ``created_at``,
+    which a sync-enable backfill days later is not); and the row stamp precedes
+    the event by at most ``_LOCK_WAIT``.
+
+    Time alone is not trusted: a backfill landing just after a legacy write mints
+    write-like uids for every row, so a spare row must also carry the missing
+    comment's exact integer and length to stand in for it.
+    """
+    source_id, author, length = payload.get("comment_id"), payload.get("author"), payload.get("len")
+    if type(source_id) is not int or type(length) is not int or not isinstance(author, str) or not author.strip():
+        return []
+    event_ms = _uuid7_ms(event["uid"]) if "uid" in event.keys() else None
+    if event_ms is None or not 0 <= event_ms - event["created_at"] * 1000 < 2000:
+        return []
+    for row in rows:
+        if row["id"] != source_id:
+            continue
+        row_ms = _uuid7_ms(row["uid"]) if "uid" in row.keys() else None
+        if (row_ms is not None and abs(row_ms - event_ms) <= 1000
+                and row["author"] == author.strip() and len(row["body"]) == length
+                and 0 <= event["created_at"] - row["created_at"] <= _LOCK_WAIT):
+            return [row]
+    return []
 
 
 def cli_guard(args, tid, verb):
