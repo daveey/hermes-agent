@@ -42,7 +42,12 @@ def bounded_record(fn):
 @contextmanager
 def observation_lock(lock):
     left = remaining()
-    acquired = lock.acquire() if left is None else lock.acquire(timeout=left)
+    if left is None:
+        # Ordinary calls retain the lock's context-manager protocol.
+        with lock:
+            yield
+        return
+    acquired = lock.acquire(timeout=left)
     if not acquired:
         raise TimeoutError('origin_observation_timeout')
     try:
