@@ -579,14 +579,17 @@ def _grouped_pipe_reaches_shell(command: str, sink: re.Pattern[str]) -> bool:
     break: every command in ``| { echo x; bash; }``, ``| ( :; bash -l )`` or ``| while read l;
     do bash; done`` reads the pipe, yet the pipe alternative stops at the first ``;``. Each
     command reading the pipe is matched as if piped into directly (``| bash``). Text the
-    printed-unit walk cannot tokenize fails closed (t_01a1e0990275c62b)."""
-    if "|" not in command or not _SINK_SHELL_WORD_RE.search(command):
+    printed-unit walk cannot tokenize fails closed (t_01a1e0990275c62b). Output
+    process substitutions inherit an implicit pipe across the same compounds."""
+    output_processes = re.search(r">(?:\\\n)*\(", command) is not None
+    if ("|" not in command and not output_processes) or not _SINK_SHELL_WORD_RE.search(command):
         return False
     from cron.lifecycle_guard_nested_shells import pipe_feeds_consumer
 
     try:
         return pipe_feeds_consumer(
-            command, lambda words: sink.search("| " + " ".join(words)) is not None)
+            command, lambda words: sink.search("| " + " ".join(words)) is not None,
+            output_processes=output_processes)
     except ValueError:
         return True
 

@@ -557,16 +557,21 @@ def _reads_nested_stdin(words: list[str]) -> bool:
     return any(_nested_shell_input(view) == ("stdin", None) for view in _command_segment_views(words))
 
 
-def pipe_feeds_consumer(command: str, reads: Callable[[list[str]], bool]) -> bool:
+def pipe_feeds_consumer(
+    command: str, reads: Callable[[list[str]], bool], *, output_processes: bool = False,
+) -> bool:
     """Whether a pipe in *command* feeds a command whose words satisfy *reads*, including a
     command inside a compound command the pipe feeds (``| { echo x; bash; }``, ``| ( :; bash )``,
-    ``| while read l; do bash; done``): every command there reads the compound's stdin."""
-    return "|" in command and any(_unit_feeds_nested_stdin(unit, reads)[0]
-                                  for unit in _printed_pipeline_units(command))
+    ``| while read l; do bash; done``): every command there reads the compound's stdin.
+    With *output_processes*, also count the implicit pipe feeding each ``>(...)``."""
+    return ("|" in command or output_processes) and any(
+        _unit_feeds_nested_stdin(unit, reads, output_processes=output_processes)[0]
+        for unit in _printed_pipeline_units(command))
 
 
 def _unit_feeds_nested_stdin(
     unit: _PrintedUnit, reads: Callable[[list[str]], bool] = _reads_nested_stdin,
+    *, output_processes: bool = False,
 ) -> tuple[bool, bool]:
     """``(printed text, heredoc body output)``: whether a pipe in *unit* feeds a command *reads*
     accepts (by default a startup shell reading stdin), and whether a heredoc-owning producer
@@ -575,6 +580,7 @@ def _unit_feeds_nested_stdin(
     feeds = feeds_body = False
     piped = carried = own_body = False
     frames: list[list[bool]] = []  # [piped, carried, holds a body] at each open group
+    suspended: dict[int, tuple[bool, bool, bool]] = {}
     words: list[str] = []
     for role, word in [*unit.events, ("list", ";")]:
         if role == "data":
@@ -589,6 +595,8 @@ def _unit_feeds_nested_stdin(
         if words and piped and reads(words):
             feeds = True
             feeds_body = feeds_body or carried
+        process = (output_processes and role == "open" and word == "("
+                   and bool(words) and words[-1] == ">" and _syntax_word(words[-1]))
         words = []
         if role == "pipe":
             piped, carried, own_body = True, carried or own_body, False
@@ -596,10 +604,17 @@ def _unit_feeds_nested_stdin(
             piped, carried = (frames[-1][0], frames[-1][1]) if frames else (False, False)
             own_body = False
         elif role == "open":
+            if process:
+                # The substitution receives a new stdin, inherited by its lists
+                # and nested groups. Its enclosing command keeps its own stdin.
+                suspended[len(frames)] = (piped, carried, own_body)
+                piped, carried = True, carried or own_body
             frames.append([piped, carried, False])
             own_body = False
         elif frames:  # close: the group is the pipeline's command now
             piped, carried, own_body = frames.pop()
+            if len(frames) in suspended:
+                piped, carried, own_body = suspended.pop(len(frames))
         else:
             piped = carried = own_body = False
     return feeds, feeds_body
