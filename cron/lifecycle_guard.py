@@ -345,6 +345,7 @@ _TRANSPARENT_COMMAND_PREFIXES = frozenset({
 
 # Wrapper options that consume the NEXT token, so a value is never mistaken for the command.
 _TRANSPARENT_PREFIX_VALUE_OPTIONS = {
+    "exec": {"-a"},
     "sudo": {"-u", "-g", "-U", "-C", "-p", "-r", "-t", "-T", "--user", "--group", "--prompt"},
     "doas": {"-u", "-C"},
     "env": {"-u", "--unset", "-S", "--split-string", "-C", "--chdir"},
