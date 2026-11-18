@@ -1,5 +1,6 @@
 """Quoted interpreter input is not shell code merely because stdout is trimmed."""
 import itertools
+import shlex
 import subprocess
 import sys
 
@@ -98,7 +99,7 @@ def test_generated_data_shapes(data_file, shell, delimiter, suffix):
     assert scan_gateway_lifecycle(command) == (False, None)
     # Run the same generated source with startup files disabled and the test Python.
     executable = command.replace(shell, "bash --noprofile --norc " + shell[5:], 1)
-    executable = executable.replace("python3 -", f"{sys.executable} -", 1)
+    executable = executable.replace("python3 -", f"{shlex.quote(sys.executable)} -", 1)
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-s"], input=executable,
         capture_output=True, encoding="utf-8", timeout=10, check=True,
@@ -113,7 +114,7 @@ def test_real_bash_filter_and_alias_controls(tmp_path, filter_name):
     script.write_text("printf RAN\n#" + "x" * 2_200_000, encoding="utf-8")
     invocation = f"bash {str(script)!r}"
     bodies = [
-        (f"{sys.executable} -", "", f"print({invocation!r})", False),
+        (f"{shlex.quote(sys.executable)} -", "", f"print({invocation!r})", False),
         ("cat", f"{filter_name}() {{ bash; }}\n", invocation, True),
         ("python3 -", "shopt -s expand_aliases\nalias python3=cat\n", invocation, True),
     ]
