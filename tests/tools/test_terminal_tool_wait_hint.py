@@ -359,6 +359,28 @@ class TestRealResultShapes:
 class TestScanCost:
     """The scan runs on the tool thread after the command finished: it must not hold the result."""
 
+    @pytest.mark.parametrize("unit", ["kanban --a ", "kanban\t--a\n", "kanban --a kanban ", "kanban --a=b ", "kanban show "])
+    def test_card_show_is_fast_at_the_size_bound(self, unit):
+        """`kanban --a kanban --a ...`: a flag's value can be the word `kanban`, so an unbounded flag
+        loop ran to the end of the text from every start (about 70 ms here, 0.6 s on a slower host).
+        Best of 5 wall-clock samples against a loose bound: about 2 ms idle, 37 ms worst with every
+        core oversubscribed 2.5x. This only guards against a gross regression; the flag bound itself
+        is pinned exactly by the next test, not by timing."""
+        import time
+
+        text = (unit * (wh.MAX_COMMAND_CHARS // len(unit) + 1))[:wh.MAX_COMMAND_CHARS]
+        best = float("inf")
+        for _ in range(5):
+            started = time.perf_counter()
+            wh._CARD_SHOW_RE.findall(text)
+            best = min(best, time.perf_counter() - started)
+        assert best < 0.25, f"{best:.3f}s at the size bound"
+
+    def test_card_show_still_reads_past_several_flags(self):
+        flags = " ".join(f"--f{i} v{i}" for i in range(wh.MAX_CARD_SHOW_FLAGS))
+        assert wh.awaited_card_id(f"sleep 90; hermes kanban {flags} show {CARD}") == CARD
+        assert wh.awaited_card_id(f"sleep 90; hermes kanban {flags} --one-more x show {CARD}") is None
+
     @pytest.mark.parametrize("command", [
         "sleep 1; " + "while " * 500 + "do " * 500 + "; a" * 500,
         "sleep 1\n" + "cat <<EOF\n" * 600,
@@ -392,10 +414,10 @@ class TestHandlerPath:
         from tools import terminal_tool as tt
         from tools.process_registry import process_registry
 
-        monkeypatch.setattr(tt, "terminal_tool", lambda **kw: OK)  # no command ran: nothing was timed
-        monkeypatch.setattr(wh, "_running_processes", lambda task_id: [_proc()])
-        assert "wait_hint" not in json.loads(tt._handle_terminal({"command": "sleep 60; tail suite.log"}, task_id="task-handler"))
-        monkeypatch.undo()
+        with monkeypatch.context() as scoped:  # scoped, so the suite's own hermetic patches stay in place
+            scoped.setattr(tt, "terminal_tool", lambda **kw: OK)  # no command ran: nothing was timed
+            scoped.setattr(wh, "_running_processes", lambda task_id: [_proc()])
+            assert "wait_hint" not in json.loads(tt._handle_terminal({"command": "sleep 60; tail suite.log"}, task_id="task-handler"))
         monkeypatch.setattr(tt, "terminal_tool", lambda **kw: (wh.note_execute_seconds(600.0), OK)[1])
         session = process_registry.spawn_local("sleep 30", cwd=str(tmp_path), task_id="task-handler")
         session.notify_on_complete = False

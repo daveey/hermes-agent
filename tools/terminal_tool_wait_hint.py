@@ -6,8 +6,10 @@ process the same session had started (``process_manage(action="wait")`` returns 
 28% re-read the status of another card (a Kanban worker can park on that card).
 
 This only ADDS a ``wait_hint`` field to the result of a foreground command that ran to an exit
-status. It never refuses or rewrites a command, and its own work is linear in the command length
-(longer commands are skipped), so a wrong match costs one sentence, not a lost or late result.
+status. It never refuses or rewrites a command, and its own work is bounded: one pass over the
+command for sleeps, card patterns whose work grows in step with the command's length, and commands
+over 8,000 characters are skipped. So a wrong match costs one sentence, not a lost or late
+result.
 
 A hint is only given for a command whose own execution held the call for half a minute or more
 (the successful ``env.execute`` attempt, timed in ``_run_foreground``; not the text, and not the
@@ -30,7 +32,8 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-# Commands longer than this are not examined: the scan below is linear, this bounds it outright.
+# Commands longer than this are not examined. The sleep scan is one pass and the card patterns'
+# work grows in step with the length; this bounds the total outright.
 MAX_COMMAND_CHARS = 8000
 # Shortest single sleep worth a note; anything shorter is a settle delay, not a wait.
 MIN_SLEEP_SECONDS = 60
@@ -60,9 +63,14 @@ _SERVER_COMMAND_RE = re.compile(
     r"|\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|preview)\b|http\.server|--watch\b")
 
 # `kanban [--flag [value]]... show <id>` as a command word in code (not in a quoted string, not a path
-# component). Each flag token matches one way only, so the cost is linear; an earlier pattern that
-# let a flag match two ways backtracked exponentially.
-_CARD_SHOW_RE = re.compile(r"(?<![\w/.-])kanban\s+(?:--[\w-]+(?:=\S+|\s+[^\s-]\S*)?\s+)*show\s+(t_[0-9a-f]{8,})\b")
+# component). Each flag token matches one way only (an earlier pattern that let a flag match two ways
+# backtracked exponentially), and at most MAX_CARD_SHOW_FLAGS flags are read per `kanban` word: an
+# unbounded flag loop ran to the end of the text from every `kanban`, since a flag's value can itself
+# be the word `kanban`, which made `kanban --a kanban --a ...` quadratic (70 ms to 0.6 s at 8,000 characters, by host).
+MAX_CARD_SHOW_FLAGS = 8
+_CARD_SHOW_RE = re.compile(
+    r"(?<![\w/.-])kanban\s+(?:--[\w-]+(?:=\S+|\s+[^\s-]\S*)?\s+){0," + str(MAX_CARD_SHOW_FLAGS)
+    + r"}show\s+(t_[0-9a-f]{8,})\b")
 # sqlite3 on a board database with a statement that STARTS with select and filters on id = <card>.
 _CARD_QUERY_RE = re.compile(
     r"\bsqlite3\b[^;|&\n]{0,200}?(?:kanban\.db|sync-shadow/[\w.-]{1,80}\.db)(?![\w.])\s+[\"']\s*select\b"
