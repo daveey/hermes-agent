@@ -842,18 +842,17 @@ def render_blocker_context(conn: sqlite3.Connection, task_id: str) -> str:
         return ""
     from hermes_cli.kanban_shared_blocker_checks import registered_checks
     checks = registered_checks()
+    unchecked_rule = ("For walls without a registered check: The listing is not evidence. "
+                      "When your next step needs the walled capability, try it, or run the provider's "
+                      "own free read. End with the same `blocker_id` only if that attempt in this run "
+                      "was refused, and quote the refusal in the reason; only one card probes a "
+                      "blocker at a time.")
     lines = ["## Open shared blockers on this board",
-             "External walls other cards already hit. Stop early only when the step this run is about "
-             "to take needs the walled capability; then end "
-             "with kanban_block/kanban_continue passing the same `blocker_id` instead of rediscovering "
-             "it; only one card probes a blocker at a time. A timed wait (kind='time' or a "
-             "SCHEDULED_UNTIL= reason) keeps its wake time and wake_check when it also passes "
-             "blocker_id."]
+             unchecked_rule + " A timed wait (kind='time' or a SCHEDULED_UNTIL= reason) keeps its "
+             "wake time and wake_check when it also passes blocker_id."]
     if any(st.blocker_id in checks for st in states):
         lines[1] = ("For walls with a registered check, never re-assert from this context alone: "
-                    "run the live check when your next step needs the capability. For walls without a "
-                    "registered check, stop at the affected step and end with the same blocker_id; "
-                    "only one card probes those walls at a time.")
+                    "run the live check when your next step needs the capability. " + unchecked_rule)
     model, provider, lane = task_route(conn, task_id)
     lines.append(f"Current route: provider={provider or 'unknown'}, model={model or 'unknown'}, lane={lane}.")
     lines.append("Provider-scoped walls apply only to that provider. Continue unrelated work; if a later "

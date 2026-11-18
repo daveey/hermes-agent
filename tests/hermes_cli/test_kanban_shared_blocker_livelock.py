@@ -106,6 +106,24 @@ def test_non_probe_context_requires_live_check(kanban_home):
         assert 'instead of rediscovering' not in text
 
 
+@pytest.mark.parametrize('with_checked_wall', [False, True])
+@pytest.mark.parametrize('is_probe', [False, True])
+def test_unchecked_wall_requires_this_runs_refusal(kanban_home, with_checked_wall, is_probe):
+    with kbc.connect_closing() as conn:
+        carrier = helpers._blocked_behind(conn, 'old outage', blocker_id='unchecked-provider-wall')
+        if with_checked_wall:
+            helpers._blocked_behind(conn, 'quota', blocker_id='github-quota-reserve')
+        text = blockers.render_blocker_context(conn, carrier if is_probe else 'unrelated-card')
+        assert 'The listing is not evidence' in text
+        assert "try it, or run the provider's own free read" in text
+        assert 'only if that attempt in this run was refused' in text
+        assert 'quote the refusal in the reason' in text
+        assert 'stop at the affected step and end with the same blocker_id' not in text
+        assert 'instead of rediscovering' not in text
+        if with_checked_wall:
+            assert 'Never re-assert without a live check' in text
+
+
 def test_promoted_card_after_reset_checks_before_continuing(kanban_home, monkeypatch):
     from hermes_cli import config, kanban_shared_blocker_checks as checks
 
