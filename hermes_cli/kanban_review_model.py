@@ -63,8 +63,9 @@ def implementer_models(conn, task) -> set[str]:
                 sources.append(creator)
             for source in sources:
                 related = kb.get_task(conn, source)
-                if related is not None:
-                    models.update(collect(related))
+                if related is None:
+                    raise ReviewModelUnavailable(f"Review implementer evidence is unavailable for source {source}")
+                models.update(collect(related))
         return models
 
     return collect(task)
@@ -72,7 +73,7 @@ def implementer_models(conn, task) -> set[str]:
 
 def is_review_run(conn, task, lane) -> bool:
     return (lane == "review" or "sdlc-review" in (getattr(task, "skills", None) or [])
-            or (_downstream(task) and bool(implementer_models(conn, task))))
+            or _downstream(task))
 
 
 def validate_pace_offer(model, excluded):
@@ -286,7 +287,9 @@ def resolve_review_model(conn, task, cfg):
         if why:
             raise ReviewModelUnavailable(f"Review model {override[0]} is unroutable: {why}")
     if not excluded:
-        # Unknown author set: today's behaviour, unchanged (no exclusion evidence to act on).
+        if _downstream(task):
+            raise ReviewModelUnavailable("Downstream review implementer evidence is unavailable")
+        # Legacy same-card reviews may have an explicit handoff but no recorded author.
         if override and refusal is None:
             return override
         if refusal and override:
