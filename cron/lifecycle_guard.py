@@ -524,7 +524,6 @@ class _LifecycleScanBudget:
         "alias_names",
         "aliases_defined",
         "bytes_remaining",
-        "generated",
         "integer_context",
         "lines_remaining",
         "mask_heredocs",
@@ -569,8 +568,6 @@ class _LifecycleScanBudget:
         # False when a session alias may shadow a heredoc consumer, wrapper or shell name
         # (`alias python3=bash`): then no heredoc body is provably inert, so none is masked.
         self.mask_heredocs = not _session_aliases_shadow_consumers(session_aliases)
-        # Each file the walked text writes, with what it writes (lifecycle_guard_generated).
-        self.generated: dict[Path, list[Optional[str]]] = {}
 
     def note_aliases(self, text: str) -> None:
         """Record (sticky) that walked *text* may define or enable an alias."""
@@ -1702,11 +1699,8 @@ def _contains_unsafe_gateway_action(
                     else command)
 
     # A nested startup-file shell's input is walked first, with unknown alias names (nit 1).
-    from cron.lifecycle_guard_generated import note_generated_scripts, preflight_candidate
     from cron.lifecycle_guard_nested_shells import (
         collect_nested_shell_inputs, shell_scope, unvisited_scopes)
-
-    note_generated_scripts(budget, command, cwd)
 
     from cron.lifecycle_guard_output import iter_printed_shell_payloads, quote_scope
 
@@ -1728,15 +1722,14 @@ def _contains_unsafe_gateway_action(
     nested_only = ((path, executed, False) for path in sorted(nested_scripts))
     for script_path, candidate_executed, python_source in itertools.chain(nested_only, _walk_candidates(
             command, walk_command, cwd=cwd, executed=executed, budget=budget)):
-        # A cloud path is refused or skipped unopened; a file this command writes is walked as
-        # written (True: unsafe, False: skip, None: read it from disk below).
-        verdict = preflight_candidate(
-            budget, visited, script_path, executed=candidate_executed, python_source=python_source,
-            recurse=lambda text, directory, label: recurse(
-                text, directory, candidate_executed, label, python_source))
-        if verdict:
-            return True
-        if verdict is False:
+        # Do not touch a FileProvider path even to discover whether the file is hydrated.
+        if _on_cloud_path(script_path):
+            if candidate_executed:
+                return _refuse_unreadable(
+                    budget, script_path,
+                    f"`{script_path}` lives on a cloud-synced path (iCloud Drive / "
+                    "~/Library/CloudStorage) that the guard refuses to open",
+                )
             continue
         resolved = _resolve_lenient(script_path)
         scopes = unvisited_scopes(visited, budget, resolved, python_source=python_source,
@@ -1821,8 +1814,6 @@ def scan_gateway_lifecycle(
             command, cwd=cwd, depth=0, visited=set(), budget=budget,
             read_remote_script=read_remote_script, source=source,
         )
-        if not unsafe and budget.variable_candidates.computed_unknown(budget.alias_names):
-            return True, 'an unresolved computed executable cannot be scanned safely'
         return unsafe, budget.refusal if unsafe else None
     except (SubstitutionNestingLimit, RecursionError):
         # Frame walkers can exhaust Python's stack before the substitution budget.

@@ -21,11 +21,7 @@ def scan_variable_payloads(command, *, cwd, executed, budget, recurse, source, v
         for payload, payload_cwd in budget.variable_candidates.payloads(command, cwd):
             if recurse(payload, payload_cwd, True, source):
                 return True
-    from cron.lifecycle_guard_computed import scan_computed_commands
-
-    return scan_computed_commands(command, cwd=cwd, executed=executed,
-                                  variable_source=variable_source, budget=budget,
-                                  recurse=recurse, source=source)
+    return False
 
 
 def scan_recursive_payloads(command, nested_texts, *, cwd, executed, budget,
@@ -43,24 +39,9 @@ def scan_recursive_payloads(command, nested_texts, *, cwd, executed, budget,
 
 class VariableCandidates:
     def __init__(self):
-        self.unresolved_computed = False
-        self.computed_producer_shadow = False
-        self.computed_producer_used = False
         self.values: dict[str, set[str]] = {}
-        self.unknown_values: set[str] = set()
-        self.computed_variables: set[str] = set()
         self.sinks: set[tuple[str, tuple[str, ...], int, str | None]] = set()
         self.emitted: set[tuple[str, str | None]] = set()
-
-    def computed_unknown(self, aliases):
-        from cron.lifecycle_guard_computed import _PRODUCERS
-
-        if self.unknown_values & self.computed_variables:
-            return True
-        # Later sourced definitions revoke earlier builtin-output assumptions.
-        return self.unresolved_computed or (self.computed_producer_used and (
-            self.computed_producer_shadow or aliases is None
-            or bool(_PRODUCERS & aliases)))
 
     def payloads(self, command, cwd):
         from cron import lifecycle_guard as guard
@@ -79,8 +60,6 @@ class VariableCandidates:
                     # traversed by the ordinary walk, never reinterpreted here.
                     if not any(char in match[2] for char in '$`\x00'):
                         self.values.setdefault(match[1], set()).add(match[2])
-                    else:
-                        self.unknown_values.add(match[1])
                 elif not word.startswith('-'):
                     break
             index = guard._executed_command_index(words)
