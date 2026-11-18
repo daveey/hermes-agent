@@ -14,6 +14,13 @@ from hermes_cli import kanban_worker_node as wn
 NOW = 2_000_000_000
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(subject, "_NEXT_SCAN", {})
+
+
 @pytest.fixture
 def replica():
     conn = sqlite3.connect(":memory:")
@@ -197,3 +204,143 @@ def test_legacy_backstop_and_current_park(replica):
                     "VALUES ('one','scheduled',?,?,'worker-2')",
                     (json.dumps({"wake_at": NOW + 3600}), NOW - 10))
     assert not subject.overdue(replica, {}, now=NOW)
+
+
+@pytest.mark.parametrize("age", [600, -5])
+def test_replica_freshness_includes_exact_boundaries(replica, local, age):
+    card(replica)
+    replica.execute("UPDATE kanban_sync_state SET pulled_at=?", (NOW - age,))
+    [tid] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    task = kb.get_task(local, tid)
+    assert task is not None
+    assert task.created_by == kps.DETECTOR
+
+
+def test_registry_requires_fresh_evidence(replica, local, monkeypatch):
+    card(replica)
+    calls = []
+
+    def registry(*, require_fresh=False):
+        calls.append(require_fresh)
+        # A stale cached registry must not authorize the home-silence alarm.
+        return None if require_fresh else {"machines": {"worker-2": {"hold": True}}}
+
+    monkeypatch.setattr(wn, "registry", registry)
+    assert subject.sweep(local, replica, "hub", now_ms=NOW * 1000) == []
+    assert calls == [True]
+    assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_held_home_heartbeats_do_not_churn_incident_comments(replica, local):
+    card(replica)
+    [tid] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    assert subject.sweep(local, replica, "hub", now_ms=(NOW + 60) * 1000) == [tid]
+    comments = kb.list_comments(local, tid)
+    assert len(comments) == 1
+    replica.execute("INSERT INTO task_events(kind, created_at, origin_gateway) "
+                    "VALUES ('heartbeat', ?, 'worker-2')", (NOW + 61,))
+    assert subject.sweep(local, replica, "hub", now_ms=(NOW + 120) * 1000) == [tid]
+    assert [c.body for c in kb.list_comments(local, tid)] == [c.body for c in comments]
+    replica.execute("DELETE FROM task_events WHERE kind='heartbeat'")
+    assert subject.sweep(local, replica, "hub", now_ms=(NOW + 180) * 1000) == [tid]
+    assert [c.body for c in kb.list_comments(local, tid)] == [c.body for c in comments]
+
+
+@pytest.mark.parametrize("park", ["missing", "spent-woken", "spent-claimed"])
+def test_missing_or_spent_park_does_not_reuse_old_wake(replica, local, monkeypatch, park):
+    from hermes_cli import kanban_continuation as continuation
+
+    monkeypatch.setattr(continuation.time, "time", lambda: NOW)
+    card(replica)
+    if park == "missing":
+        replica.execute("DELETE FROM task_events WHERE task_id='one'")
+    else:
+        kind = continuation.CONTINUATION_WOKEN_EVENT if park == "spent-woken" else "claimed"
+        replica.execute("INSERT INTO task_events(task_id, kind, created_at, origin_gateway) "
+                        "VALUES ('one', ?, ?, 'worker-2')", (kind, NOW - 10))
+    assert subject.sweep(local, replica, "hub", now_ms=NOW * 1000) == []
+    assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+@pytest.fixture
+def observer_replica(replica, local, monkeypatch):
+    from hermes_cli import kanban_db_sync as sync
+
+    card(replica)
+    replica.commit()
+    opened = []
+
+    def open_replica(conn):
+        assert conn is local
+        copy = sqlite3.connect(":memory:")
+        copy.row_factory = sqlite3.Row
+        replica.backup(copy)
+        opened.append(copy)
+        return copy
+
+    monkeypatch.setattr(sync, "board_mode", lambda conn: "primary")
+    monkeypatch.setattr(wn, "_own", lambda conn: "hub")
+    monkeypatch.setattr(wn, "open_replica", open_replica)
+    return opened
+
+
+@pytest.mark.parametrize("pickup,draining", [(None, False), (None, True), ("pinned", True)])
+def test_dispatcher_observes_homes_before_pickup_admission(
+        local, observer_replica, monkeypatch, pickup, draining):
+    from hermes_cli import kanban_gateway_drain as drain
+
+    monkeypatch.setattr(wn, "pickup_mode", lambda: pickup)
+    monkeypatch.setattr(drain, "dispatch_paused", lambda: draining)
+    [tid] = kps.sweep(local, now=NOW)
+    task = kb.get_task(local, tid)
+    assert task is not None
+    assert "Home transitions overdue on worker-2" in task.title
+    assert task.created_by == kps.DETECTOR
+    assert len(observer_replica) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        observer_replica[0].execute("SELECT 1")
+
+
+@pytest.mark.parametrize("failure", ["open", "scan"])
+def test_observer_failure_does_not_suppress_ready_alarm(
+        local, observer_replica, monkeypatch, failure):
+    from hermes_cli import kanban_gateway_drain as drain
+    from hermes_cli import kanban_pickup_stall_held as held
+
+    monkeypatch.setattr(wn, "pickup_mode", lambda: "pinned")
+    monkeypatch.setattr(drain, "dispatch_paused", lambda: False)
+    monkeypatch.setattr(held, "sweep", lambda *a, **kw: [])
+    monkeypatch.setattr(kps, "resolve_sweep", lambda *a, **kw: [])
+    ready = {"id": "ready-card", "title": "ready title", "tenant": None,
+             "since_ms": (NOW - 1200) * 1000,
+             "skip": {"reason": "profile_ineligible", "detail": "missing profile",
+                      "first_at": (NOW - 1200) * 1000, "last_at": NOW * 1000, "passes": 1}}
+    monkeypatch.setattr(kps, "stalled", lambda *a, **kw: [ready])
+
+    def fail(*a, **kw):
+        raise RuntimeError("observer unavailable")
+
+    if failure == "open":
+        original_open = wn.open_replica
+        calls = []
+
+        def fail_first(conn):
+            calls.append(conn)
+            if len(calls) == 1:
+                return fail()
+            return original_open(conn)
+
+        monkeypatch.setattr(wn, "open_replica", fail_first)
+    else:
+        monkeypatch.setattr(subject, "periodic_sweep", fail)
+
+    [tid] = kps.sweep(local, now=NOW)
+    task = kb.get_task(local, tid)
+    assert task is not None
+    assert "ready-card" in task.title
+    assert "profile_ineligible" in (task.body or "")
+    assert task.created_by == kps.DETECTOR
+    assert len(observer_replica) == (1 if failure == "open" else 2)
+    for conn in observer_replica:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")

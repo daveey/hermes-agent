@@ -621,22 +621,24 @@ def sweep(conn, *, now: Optional[float] = None) -> list[str]:
     """The detector pass (see the module doc). Returns the repair card ids now open for stalled cards."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_worker_node as wn
-    if sync.board_mode(conn) != "primary" or wn.pickup_mode() is None:
+    if sync.board_mode(conn) != "primary":
         return []
+    from hermes_cli import kanban_pickup_stall_home as home_stalls
+    stranded = home_stalls.observe(conn, now_ms=_now_ms(now))
+    if wn.pickup_mode() is None:
+        return stranded
     from hermes_cli.kanban_gateway_drain import dispatch_paused
     if dispatch_paused():
-        return []  # a draining gateway runs no pickup, so it writes no fresh evidence to judge a stall by
+        return stranded  # local pickup evidence stops; cross-home observation is independent
     _prune(conn, _now_ms(now))
     own = wn._own(conn)
     from hermes_cli import kanban_pickup_stall_held as held  # own default-placement cards on a held machine
-    stranded = held.sweep(conn, own, now_ms=_now_ms(now))
+    stranded += held.sweep(conn, own, now_ms=_now_ms(now))
     replica = wn.open_replica(conn)
     if replica is None:
         return stranded
     try:
         resolve_sweep(conn, replica, own, now_ms=_now_ms(now))
-        from hermes_cli import kanban_pickup_stall_home as home_stalls
-        stranded += home_stalls.periodic_sweep(conn, replica, own, now_ms=_now_ms(now))
         cards = stalled(conn, replica, own, now=now)
     finally:
         replica.close()

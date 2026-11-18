@@ -72,7 +72,8 @@ def overdue(replica, machines: dict, *, now: float) -> dict[str, list[dict[str, 
         groups.setdefault(home, []).append({
             "id": row["id"], "title": row["title"], "tenant": row["tenant"],
             "status": row["status"], "since": since,
-            "home_evidence": f"held={held}, revoked={revoked}, no Board event within 30 minutes={silent}",
+            "home_evidence": (f"held={held}, revoked={revoked}" if held or revoked
+                              else "no Board event within 30 minutes"),
             "checkpoint": checkpoint_evidence(replica, row["id"]),
         })
     return {home: sorted(cards, key=lambda c: (c["since"], c["id"]))
@@ -93,6 +94,26 @@ HOWTO = (
 
 
 _NEXT_SCAN: dict[tuple, float] = {}
+
+
+def observe(conn, *, now_ms: int) -> list[str]:
+    """Observe independently of local pickup admission and isolate failures."""
+    from hermes_cli import kanban_pickup_stall as kps
+    from hermes_cli import kanban_worker_node as wn
+    try:
+        own = wn._own(conn)
+        if own != kps.OPERATOR_LANE:
+            return []
+        replica = wn.open_replica(conn)
+        if replica is None:
+            return []
+        try:
+            return periodic_sweep(conn, replica, own, now_ms=now_ms)
+        finally:
+            replica.close()
+    except Exception:  # health: allow BLE001 -- observer failure must not suppress ready-card alarms
+        kps._log.warning("kanban dispatcher: home-stall observation failed", exc_info=True)
+        return []
 
 
 def periodic_sweep(conn, replica, own: str, *, now_ms: int) -> list[str]:
