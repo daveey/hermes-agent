@@ -800,7 +800,7 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
         rewrite_compound_background: bool = True,
         bounded_capture: bool = False,
         yield_handler: Callable[[ProcessHandle, str], dict] | None = None,
-        survivable: Any = None) -> dict:
+        survivable: Any = None, origin_cli_launch: Any = None) -> dict:
         """Execute a command, return {"output": str, "returncode": int}. ``survivable`` (local backend
         only): a ``process_registry_survivable.SurvivableForeground`` spawning the command in its own scope. ``bounded_capture=True``
         caps retention at ``tool_output.max_bytes`` WHILE draining; only the foreground terminal
@@ -813,6 +813,8 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
         is drained (head/tail window) instead of holding the full output in memory (#64435).
         See #94285.
         """
+        if origin_cli_launch is not None and (survivable is not None or yield_handler is not None):
+            raise ValueError("CLI custody cannot survive or yield its foreground launch")
         self._before_execute()
 
         exec_command, sudo_stdin = self._prepare_command(command)
@@ -852,6 +854,7 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
             spawned = None
             try:
                 spawned = self._run_bash(wrapped, login=login, timeout=effective_timeout, stdin_data=effective_stdin,
+                                         **({"origin_cli_launch": origin_cli_launch} if origin_cli_launch is not None else {}),
                                          **({"survivable": survivable} if survivable is not None else {}))
             finally:
                 fenced = _leave_foreground_spawn(self, spawned)

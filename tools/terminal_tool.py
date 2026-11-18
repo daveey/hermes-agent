@@ -1467,6 +1467,7 @@ def _run_foreground(
     """Execute in the foreground with retry on transient errors, then finalize. ``metered``
     is False for Hermes' own control-plane commands (``_host_local``)."""
     from hermes_cli.observability.shared_metrics_harness import record_terminal_outcome
+    from tools import origin_cli_terminal
     max_retries = 3
     env_type, eff, effective_timeout = plan.env_type, plan.effective_task_id, plan.effective_timeout
 
@@ -1480,6 +1481,7 @@ def _run_foreground(
         clear_current_thread_interrupt()
 
     for retry_count in range(max_retries + 1):
+        cli_attempt = []
         try:
             command_cwd = _resolve_command_cwd(
                 workdir=workdir, default_cwd=plan.cwd, session_key=cwd_key, env_type=env_type,
@@ -1498,8 +1500,8 @@ def _run_foreground(
             oom_watch = OomWatch(survivable) if env_type == "local" else None  # OOM kills in its scope [daveey]
             try:
                 _execute_started = time.monotonic()
-                result = env.execute(command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
-                                     **exec_kwargs)
+                result = origin_cli_terminal.execute(env, command, env_type=env_type, task_id=task_id,
+                    attempt=cli_attempt, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True, **exec_kwargs)
                 # This attempt's own run time, for the wait hint: not approval, sandbox start or retries.
                 _note_execute_seconds(time.monotonic() - _execute_started)
             finally:
@@ -1509,6 +1511,10 @@ def _run_foreground(
                 result["oom_note"] = oom_watch.note(result.get("returncode"))
             break
         except Exception as e:
+            if isinstance(e, origin_cli_terminal.NoRetry):
+                return _error_json(str(e))
+            if cli_attempt:
+                return _error_json("CLI custody launch outcome unknown; do not retry automatically")
             # A backend exception (e.g. an SSH connect timeout) never reached an exit status, so it
             # is not a terminal outcome; Hermes' own deadline arrives as ``hermes_timed_out``.
             if "timeout" in str(e).lower():

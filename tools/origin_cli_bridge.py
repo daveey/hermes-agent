@@ -17,6 +17,7 @@ from hermes_cli.kanban_origin_admission import strict_local_creation
 from hermes_cli.kanban_origin_cli_gate import LaunchGate
 
 LIMIT = 65536
+MAX_REQUESTS = 64
 ENV_KEY = "HERMES_ORIGIN_CLI_BRIDGE"
 
 
@@ -45,6 +46,7 @@ class Launch:
         self._server, self._child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self._server.settimeout(0.1)
         self._closed = False
+        self._requests = 0
         self._thread = Thread(target=self._serve, name="origin-cli-bridge", daemon=True)
         try:
             self._thread.start()
@@ -108,6 +110,9 @@ class Launch:
                 poller.register(reply, select.POLLHUP | select.POLLERR)
                 if poller.poll(0):
                     return
+                if self._requests >= MAX_REQUESTS:
+                    raise ValueError("CLI launch request limit exceeded")
+                self._requests += 1
                 gate = self._gate.dispatch()
                 result = self._ctx.copy().run(self._invoke, value["args"], gate)
             except Exception:  # health: allow BLE001 -- tool dispatch boundary; preserve gate outcome without leaking tool exceptions

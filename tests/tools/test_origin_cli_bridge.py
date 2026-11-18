@@ -31,6 +31,14 @@ def echo_launch(monkeypatch):
         assert not launch._thread.is_alive()
 
 
+def test_request_count_is_bounded(echo_launch, monkeypatch):
+    from tools import origin_cli_bridge as bridge
+    monkeypatch.setattr(bridge, "MAX_REQUESTS", 1)
+    assert bridge.request(echo_launch.locator, {"title": "first"})["ok"]
+    assert not bridge.request(echo_launch.locator, {"title": "second"})["ok"]
+    assert len(echo_launch.retire()) == 1
+
+
 def test_empty_packet_does_not_poison_launch(echo_launch):
     from tools import origin_cli_bridge as bridge
     packet(echo_launch, b"")

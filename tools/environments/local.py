@@ -1159,7 +1159,8 @@ class LocalEnvironment(BaseEnvironment):
     def _snapshot_excluded_passthrough_names(self) -> tuple[str, ...]:
         """Plus the plugins' session env names: each command gets its own session's values."""
         from hermes_cli.plugins_session_env import session_env_names
-        return tuple(sorted({*super()._snapshot_excluded_passthrough_names(), *session_env_names()}))
+        return tuple(sorted({*super()._snapshot_excluded_passthrough_names(), *session_env_names(),
+                             "HERMES_ORIGIN_CLI_BRIDGE"}))
 
     def __init__(self, cwd: str = "", timeout: int = 60, env: dict | None = None, persistent: bool = True):
         super().__init__(cwd=_resolve_local_initial_cwd(cwd), timeout=timeout, env=env, persist_env=persistent)
@@ -1232,9 +1233,15 @@ class LocalEnvironment(BaseEnvironment):
         self.cwd = safe_cwd
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
-                  stdin_data: str | None = None, survivable=None) -> subprocess.Popen:
+                  stdin_data: str | None = None, survivable=None, origin_cli_launch=None) -> subprocess.Popen:
+        from tools.origin_cli_bridge import ENV_KEY
+        if origin_cli_launch is not None and (survivable is not None or _IS_WINDOWS):
+            raise ValueError("unsupported CLI custody launch")
         bash = _find_bash()
         run_env = _make_run_env(self.env)
+        run_env.pop(ENV_KEY, None)
+        if origin_cli_launch is not None:
+            run_env[ENV_KEY] = origin_cli_launch.locator
         # Login invocations (init_session's env snapshot) source the user's rc /
         # custom init files so nvm/asdf/pyenv land on PATH in the snapshot; then the
         # spawn env's dirs a resetting profile dropped are re-appended (#56634).
@@ -1258,6 +1265,7 @@ class LocalEnvironment(BaseEnvironment):
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             # detached-spawn: ok — owned via own_process_groups right below
             start_new_session=True, cwd=self.cwd,
+            **({"pass_fds": (origin_cli_launch.child_fd,)} if origin_cli_launch is not None else {}),
             **({"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}))
         if not _IS_WINDOWS:
             # The command dies with this process however it dies: a SIGKILLed / OOM-killed host left a
