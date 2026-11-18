@@ -120,14 +120,23 @@ def _bash_runs(tmp_path, command: str) -> bool:
 def test_command_after_a_mid_word_hash_or_quoted_comment_is_refused(tmp_path, command):
     _tree(tmp_path)
     assert _bash_runs(tmp_path, command), "bash must run the restart, or the row proves nothing"
-    assert scan_gateway_lifecycle(command, cwd=str(tmp_path))[0] is True
 
 
 @pytest.mark.parametrize("command", ALLOWED)
 def test_clean_twins_and_real_comments_stay_allowed(tmp_path, command):
     _tree(tmp_path)
     assert not _bash_runs(tmp_path, command)
-    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+
+
+@pytest.mark.parametrize("command,unsafe", [(row, True) for row in RUN] + [(row, False) for row in ALLOWED])
+def test_comment_scanner_contract_without_execution_gate(tmp_path, command, unsafe):
+    # Bash-version gates on execution premises must not skip scanner policy.
+    _tree(tmp_path)
+    result = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    if unsafe:
+        assert result[0] is True
+    else:
+        assert result == (False, None)
 
 
 @pytest.mark.parametrize(("text", "lines"), [

@@ -20,6 +20,7 @@ from tests.ci.test_macos_state_routing import context, detect, workflow
     ('pyproject.toml', True),
     ('.github/workflows/macos-bash32.yml', True),
     ('tests/cron/heredoc_shape_corpus.py', True),
+    ('tests/cron/bash_execution.py', True),
     ('tests/cron/fixtures/lifecycle_guard_heredoc/example.sh', True),
     ('tools/environments/local.py', True),
     ('tools/environments/base_session_env.py', True),

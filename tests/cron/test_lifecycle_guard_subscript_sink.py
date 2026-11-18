@@ -147,5 +147,12 @@ def test_real_bash_runs_recursive_index_payload(tmp_path, shape):
         cwd=tmp_path, env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
     )
     assert (tmp_path / "marker").read_text(encoding="utf-8") == "ran", result.stderr
+
+
+@pytest.mark.parametrize("shape", SHAPES[:3] + SHAPES[12:19] + QUOTE_SCOPE_SHAPES + PRIOR_EXPANSION_SHAPES)
+def test_recursive_index_scan_cap_without_execution_gate(tmp_path, shape):
+    payload = tmp_path / "big.sh"
+    payload.write_text("# padding\n" * 140000 + "printf ran > marker\n", encoding="utf-8")
+    command = shape.replace("{producer}", "$(echo 'b[$(bash ./big.sh)]')")
     unsafe, refusal = scan_gateway_lifecycle(command, cwd=str(tmp_path))
     assert unsafe and refusal and "larger than the scan cap" in refusal

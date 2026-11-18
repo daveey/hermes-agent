@@ -121,14 +121,23 @@ def _bash_runs(tmp_path, command: str) -> bool:
 def test_redirection_before_or_among_command_words_still_refused(tmp_path, command):
     _tree(tmp_path)
     assert _bash_runs(tmp_path, command), "bash must run the restart, or the row proves nothing"
-    assert scan_gateway_lifecycle(command, cwd=str(tmp_path))[0] is True
 
 
 @pytest.mark.parametrize("command", ALLOWED)
 def test_redirection_words_on_clean_commands_stay_allowed(tmp_path, command):
     _tree(tmp_path)
     assert not _bash_runs(tmp_path, command)
-    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+
+
+@pytest.mark.parametrize("command,unsafe", [(row, True) for row in RUN] + [(row, False) for row in ALLOWED])
+def test_redirection_scanner_contract_without_execution_gate(tmp_path, command, unsafe):
+    # Dynamic-fd execution needs modern Bash; scanner policy does not.
+    _tree(tmp_path)
+    result = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    if unsafe:
+        assert result[0] is True
+    else:
+        assert result == (False, None)
 
 
 @pytest.mark.parametrize(("line", "split"), [

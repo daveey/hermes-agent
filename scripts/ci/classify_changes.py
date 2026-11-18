@@ -815,7 +815,8 @@ def classify(files: list[str], run_e2e: bool = False) -> dict[str, bool]:
                           "tools/shell_", "tests/_fixtures/", "scripts/run_tests", "pm/",
                           "tests/cron/fixtures/lifecycle_guard_heredoc/"))
             or f in {"tools/terminal_tool_guards.py", "tests/conftest.py", "tests/cron/conftest.py",
-                     "tests/cron/heredoc_shape_corpus.py", "tools/environments/local.py",
+                     "tests/cron/heredoc_shape_corpus.py", "tests/cron/bash_execution.py",
+                     "tools/environments/local.py",
                      "tools/environments/base_session_env.py", "tools/approval.py",
                      "tools/approval_detection.py", "tools/code_execution_tool.py",
                      "tools/terminal_tool.py", "tools/process_registry.py", "hermes_constants.py",
