@@ -32,6 +32,8 @@ def pinned_anthropic_pool_token(pool: Any, credential_id: str) -> tuple[bool, Op
     if is_credential_disabled(getattr(pool, "provider", "anthropic"), entry):
         # Disabled mid-session: report it gone so the caller re-resolves onto an enabled account.
         return False, None
+    from agent.credential_relay_preflight import before_pinned_request
+    before_pinned_request(getattr(pool, "provider", "anthropic"), entry)
     if entry.auth_type == AUTH_TYPE_OAUTH:
         # Token authority: the shared Claude Code file for the borrowed row, the pool store otherwise.
         if entry.source == "claude_code":
@@ -46,6 +48,9 @@ def pinned_anthropic_pool_token(pool: Any, credential_id: str) -> tuple[bool, Op
                     credential_id)
                 return True, None
             entry = refreshed
+    # A disable can arrive while the relay preflight waits or adopts a replacement.
+    if is_credential_disabled(getattr(pool, "provider", "anthropic"), entry):
+        return False, None
     token = (getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", None) or "").strip()
     return True, token or None
 
