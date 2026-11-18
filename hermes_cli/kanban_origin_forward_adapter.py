@@ -38,6 +38,7 @@ def receive(request):
     outbound = prepare(request, path=home / "kanban/origin-forward.db",
                        native_lookup=lambda origin, creator: native_lookup(origin, creator, gateway=gateway),
                        ledger=home / "kanban/origin-ledger.db", gateway=gateway, profile=profile,
+                       inventory_lookup=lambda: Hub(load_identity()).machines(),
                        lease_lookup=lookup, now_ms=lambda: int(time.time() * 1000),
                        session_exists=lambda sid: bool(_resolve_session(home / "state.db", sid)))
     return {"status": "prepared", "handoff_complete": False, "outbound": outbound}
@@ -57,7 +58,7 @@ def command(args):
         if not re.fullmatch(r"origin_[a-z_]+", code):
             code = "origin_forward_request_invalid"
         # Incomplete snapshots are absence of evidence, not a terminal decision.
-        status = "pending" if code == "origin_forward_lease_unavailable" else "rejected"
+        status = "pending" if code in {"origin_forward_lease_unavailable", "origin_forward_inventory_unavailable"} else "rejected"
         result = {"status": status, "code": code, "handoff_complete": False}
     print(json.dumps(result))
     return 0

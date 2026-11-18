@@ -26,6 +26,8 @@ def forwarding(authority, tmp_path):
         return lease
 
     options = dict(path=tmp_path / "forward.db", ledger=path, gateway="macbook", profile="default",
+                   inventory_lookup=lambda: {"me": "macbook", "machines": [
+                       {"name": "macbook", "state": "active"}, {"name": "hub", "state": "active"}]},
                    lease_lookup=lookup, now_ms=lambda: 1000, session_exists=lambda sid: sid == "chat-1")
     return request, options, calls
 

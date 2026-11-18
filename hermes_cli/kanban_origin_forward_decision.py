@@ -87,7 +87,7 @@ def _existing(db, identity, canonical):
 
 
 def prepare(request: dict, *, path: Path, ledger: Path, gateway: str, profile: str,
-            lease_lookup, now_ms, session_exists, native_lookup=None) -> dict:
+            lease_lookup, inventory_lookup, now_ms, session_exists, native_lookup=None) -> dict:
     canonical = _canonical(_validated(request, gateway, profile))
     # Work only with a detached JSON snapshot, including across network I/O.
     request = json.loads(canonical)
@@ -113,6 +113,10 @@ def prepare(request: dict, *, path: Path, ledger: Path, gateway: str, profile: s
                   profile=profile, sender=request["from"], run_uid=args["run_uid"],
                   lease=lease, now_ms=now_ms(), session_exists=session_exists, native_lookup=native_lookup)
         destination = args["destination"]
+        from hermes_cli.kanban_origin_destination import require_destination
+        # Membership is admission evidence only, never origin authority. A fresh
+        # authenticated read follows authorization; durable replay skips it.
+        require_destination(inventory_lookup(), gateway=gateway, destination=destination["gateway"])
         envelope = {"id": "origin-forward-" + hashlib.sha256(identity.encode()).hexdigest(),
                     "to_gw": destination["gateway"], "coll": "tasks", "action": "create",
                     "key": f"{destination['profile']}/{destination['board']}",

@@ -118,6 +118,8 @@ def network(courier, tmp_path, monkeypatch):
     with host("hub"):
         kb.init_db()
     monkeypatch.setattr(kanban_sync_client, "load_identity", lambda: None)
+    monkeypatch.setattr(kanban_sync_client.Hub, "machines", lambda self: {
+        "me": "macbook", "machines": [{"name": name, "state": "active"} for name in roots]})
     monkeypatch.setattr(kanban_sync_client.Hub, "snapshot_page", lambda *a, **k: {
         "table": "leases", "rows": [{"task_id": "t_parent", "holder": "worker-7", "run_uid": "run-one",
                                     "expires": 9999999999999}], "more": False})

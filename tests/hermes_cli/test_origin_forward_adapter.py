@@ -26,6 +26,9 @@ def envelope(world, monkeypatch, capsys):
     assert helpers.invoke(world, monkeypatch, capsys)["status"] == "accepted"
     binding = world[3]["args"]["binding"]
     monkeypatch.setattr(kanban_sync_client, "load_identity", lambda: None)
+    monkeypatch.setattr(kanban_sync_client.Hub, "machines", lambda self: {
+        "me": "origin", "machines": [{"name": "origin", "state": "active"},
+                                      {"name": "owner", "state": "active"}]})
     monkeypatch.setattr(kanban_sync_client.Hub, "snapshot_page", lambda *a, **k: {
         "table": "leases", "rows": [{"task_id": "t_one", "holder": "worker-7", "run_uid": "run-1",
                                     "expires": 9999999999999}], "more": False})
