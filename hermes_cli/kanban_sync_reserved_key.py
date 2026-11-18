@@ -19,7 +19,9 @@ Contract (``hermes kanban sync reserved-key TASK_ID --new-key KEY [--apply --exp
   being dropped). The replacement key is non-empty, unreserved, unused locally and differs from the old one.
 * **Fresh authenticated Board reads**: ``Hub.row_evidence`` for the card and *every* child identity must be
   ``never_existed`` at floor 0 with no row and no tombstone, and an exhaustive paged ``Hub.snapshot_page('tasks')``
-  must show no live Board card with the replacement key (an incomplete, malformed or failed scan refuses). Reads run
+  must show no live Board card with the replacement key. Moving page heads require contiguous authenticated changes
+  through the final page's head; any matching key in that interval vetoes, even if later removed. Incomplete,
+  malformed or failed reads refuse. This proves absence at that cut, not an atomic reservation. Reads run
   with no write transaction open; the whole interval from the first read to the in-transaction veto, writer-lock wait
   included, is bounded on the monotonic clock (``EVIDENCE_MAX_AGE_S``). The exact local inputs are re-read and
   compared inside the write transaction that applies.
@@ -288,24 +290,29 @@ def _remote_key_refusal(hub: Any, board: str, new_key: str) -> Optional[str]:
     incomplete = "authoritative_snapshot_incomplete"
     after = ""
     snapshot_head = None
+    last_head = -1
     for _ in range(MAX_SNAPSHOT_PAGES):
         try:
             page = hub.snapshot_page(board, "tasks", after)
         except (HubError, SyncUnavailable, OSError, AttributeError, ValueError) as exc:
             return f"authoritative_snapshot_unavailable: {exc}"
-        if (not isinstance(page, dict) or not isinstance(page.get("rows"), list) or not isinstance(page.get("head"), int)
+        if (not isinstance(page, dict) or not isinstance(page.get("rows"), list) or type(page.get("head")) is not int
                 or not isinstance(page.get("more"), bool) or not all(isinstance(r, dict) for r in page["rows"])):
             return incomplete + ": malformed page"
         if page.get("table") != "tasks":
             return incomplete + ": table identity mismatch"
         if snapshot_head is None:
             snapshot_head = page["head"]
-        if page["head"] != snapshot_head:
-            return incomplete + ": snapshot head changed"
+        if page["head"] < max(0, last_head):
+            return incomplete + ": snapshot head regressed"
+        last_head = page["head"]
         if any(r.get("idempotency_key") == new_key for r in page["rows"]):
             return "replacement_key_in_remote_use"
         if not page["more"]:
-            return None
+            if page["head"] == snapshot_head:
+                return None
+            from hermes_cli.kanban_sync_key_evidence import cover_changes
+            return cover_changes(hub, board, new_key, snapshot_head, page["head"])
         nxt = page.get("next")
         if not isinstance(nxt, str) or nxt <= after:
             return incomplete + ": page cursor does not advance"

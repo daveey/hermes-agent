@@ -28,6 +28,8 @@ def test_snapshot_identity_refuses_preview_and_apply(live, svc, monkeypatch, fau
         return page
 
     monkeypatch.setattr(hub, "snapshot_page", snapshot)
+    # A moving scan is insufficient alone: no complete interval proof is available.
+    monkeypatch.setattr(hub, "changes", lambda *a: {})
     report = helpers.plan_with(live, hub, tid)
     assert not report["eligible"], report
     assert report["refusal"].startswith("authoritative_snapshot_incomplete"), report
@@ -47,6 +49,8 @@ def test_stable_tasks_snapshot_allows_recovery(live, svc, monkeypatch, head):
         return {"head": head, "table": "tasks", "rows": [], "more": not after, "next": "a"}
 
     monkeypatch.setattr(hub, "snapshot_page", snapshot)
+    # A moving scan is insufficient alone: no complete interval proof is available.
+    monkeypatch.setattr(hub, "changes", lambda *a: {})
     report = helpers.plan_with(live, hub, tid)
     assert report["eligible"], report
     assert calls == ["", "a"]
