@@ -25,7 +25,8 @@ jobs:
     with:
       commit: ${{ github.sha }}
       python_changed: ''
-      # tests.yml's 30 min job timeout is sized for 8 slices; two slices (~45 min each) were
+      # tests.yml's 30 min job timeout fits 8 slices (its default is 12; scripts/ci/upstream_sync.py
+      # REQUIRED_JOBS names these eight, so keep the list explicit); two slices (~45 min each) were
       # cancelled at the timeout on every candidate.
       python_slices: '[1, 2, 3, 4, 5, 6, 7, 8]'
       e2e: true

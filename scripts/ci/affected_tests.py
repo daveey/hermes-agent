@@ -10,8 +10,11 @@ Prints a JSON plan on stdout: {"mode": "full" | "affected" | "none", "reason", "
 
 Selection, unioned:
   1. changed test files that the full suite would run;
-  2. the transitive import closure: every test file that imports, at any depth through the repo's own
-     modules, a changed module (stdlib `ast`, imports inside functions count, `import a.b` counts a and a.b);
+  2. the import closure (stdlib `ast`, `import a.b` counts a and a.b): every test file that reaches a
+     changed module through the repo's own modules. A file under tests/ counts for every import it holds.
+     A source module passes a change on through its import-time imports only (not function bodies),
+     except that a source module naming the changed module in a function-level import is itself
+     affected (one hop). `if TYPE_CHECKING:` imports never count. See `importers`;
   3. string references to a changed module ("pkg.mod" / "pkg.mod.attr": monkeypatch and mock.patch targets);
   4. tests whose text names a changed file by repo path or by a distinctive basename (scripts run by path,
      workflow YAML, .ts/.mjs read or spawned by Python tests);
@@ -53,8 +56,8 @@ FULL_FRACTION = 0.4
 # Basenames too generic to mean one file when a test mentions them.
 GENERIC = {"__init__.py", "README.md", "index.ts", "index.js", "main.py", "utils.py", "config.py", "cli.py",
            "package.json", "SKILL.md", "types.ts", "constants.py"}
-SLICE_SECONDS = 16 * 300  # one slice: 16 workers x ~5 min of per-file wall time
-MAX_SLICES = 8  # tests.yml's full-suite matrix (one tfgar-tests VM per slice)
+SLICE_SECONDS = 16 * 240  # one affected slice holds about what a full-suite slice does (~12.9 h / MAX_SLICES)
+MAX_SLICES = 12  # tests.yml's full-suite matrix (one 8 vCPU Blacksmith VM per slice)
 DEFAULT_FILE_SECONDS = 3.0
 
 
@@ -85,18 +88,42 @@ def tracked_py(repo: Path) -> list[str]:
     return [f for f in out.splitlines() if f and "node_modules/" not in f]
 
 
-def imports_of(repo: Path, rel: str, modules: set[str]) -> set[str]:
+def _import_nodes(tree: ast.AST, lazy: bool):
+    """Import statements in `tree` that can run. `if TYPE_CHECKING:` bodies never do (the else branch
+    counts). lazy=False also leaves out function bodies: what is left runs when the module is imported."""
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node
+        elif not lazy and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        elif isinstance(node, ast.If) and (
+                (isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING")
+                or (isinstance(node.test, ast.Attribute) and node.test.attr == "TYPE_CHECKING")):
+            stack.extend(node.orelse)  # only the bare test: `not TYPE_CHECKING` / `TYPE_CHECKING or X` can run
+        else:
+            stack.extend(ast.iter_child_nodes(node))
+
+
+def _parse(repo: Path, rel: str) -> ast.AST | None:
     try:
-        tree = ast.parse((repo / rel).read_text(encoding="utf-8-sig", errors="replace"))
+        return ast.parse((repo / rel).read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, SyntaxError, ValueError):
+        return None
+
+
+def imports_of(repo: Path, rel: str, modules: set[str], lazy: bool = True, tree: ast.AST | None = None) -> set[str]:
+    tree = tree or _parse(repo, rel)
+    if tree is None:
         return set()
     me = module_name(rel) or ""
     package = me if rel.endswith("__init__.py") else me.rpartition(".")[0]
     names: set[str] = set()
-    for node in ast.walk(tree):
+    for node in _import_nodes(tree, lazy):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
+        else:
             base = node.module or ""
             if node.level:
                 parts = package.split(".") if package else []
@@ -115,17 +142,41 @@ def imports_of(repo: Path, rel: str, modules: set[str]) -> set[str]:
 
 
 def importers(repo: Path, changed_modules: set[str]) -> set[str]:
-    """Every tracked .py file that imports a changed module, directly or through other repo modules."""
+    """Every tracked .py file a changed module can reach through the import graph.
+
+    A file under tests/ counts for any import it holds, function bodies included. A source module passes a
+    change on only through the imports that run when it is imported, with one exception: a source module
+    that names a changed module in a function-level import is itself affected (one hop), and passes that on
+    through import-time imports like any other. Following function-level imports at every depth ties the
+    source tree into one cycle (2026-11-18: 80% of source modules reached 96% of the suite, so 54 of 60
+    pull requests ran the full suite; with this rule 69 of the last 80 merged pull requests select a
+    median 9% of it). What this gives up: a test that reaches the change only through a function-level
+    import two or more source modules away runs on the main push, not on the pull request.
+    """
     files = tracked_py(repo)
     by_module = {m: f for f in files if (m := module_name(f))}
     modules = set(by_module)
     reverse: dict[str, set[str]] = {}
+    lazy_reverse: dict[str, set[str]] = {}
     for f in files:
-        for dep in imports_of(repo, f, modules):
+        is_test = f.startswith("tests/")
+        tree = _parse(repo, f)  # one parse serves both walks
+        eager = imports_of(repo, f, modules, lazy=is_test, tree=tree)
+        for dep in eager:
             reverse.setdefault(dep, set()).add(f)
+        if not is_test:
+            for dep in imports_of(repo, f, modules, tree=tree) - eager:
+                lazy_reverse.setdefault(dep, set()).add(f)
     seen_files: set[str] = set()
     frontier = [m for m in changed_modules if m in modules]
     seen_modules = set(frontier)
+    first_hop = {f for m in frontier for f in lazy_reverse.get(m, ())}
+    for f in first_hop:
+        seen_files.add(f)
+        m = module_name(f)
+        if m and m not in seen_modules:
+            seen_modules.add(m)
+            frontier.append(m)
     while frontier:
         for f in reverse.get(frontier.pop(), ()):
             if f in seen_files:

@@ -25,12 +25,29 @@ def repo(tmp_path):
         "pkg/__init__.py": "",
         "pkg/core.py": "VALUE = 1\n",
         "pkg/mid.py": "from pkg import core\n",
-        "pkg/top.py": "def f():\n    import pkg.mid\n",  # function-level import still counts
+        "pkg/top.py": "def f():\n    import pkg.mid\n",  # function-level import: one hop from pkg.mid
+        "pkg/typed.py": "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from pkg import core\n"
+                        "else:\n    from pkg import alt\n",
+        "pkg/alt.py": "Y = 1\n",
+        "pkg/klass.py": "class K:\n    from pkg import mid\n",  # class bodies run at import
+        "pkg/coro.py": "async def f():\n    from pkg import mid\n",
+        "pkg/lazy_a.py": "def f():\n    from pkg import alt\n",
+        "pkg/lazy_b.py": "def f():\n    from pkg import lazy_a\n",
+        "pkg/negated.py": "from typing import TYPE_CHECKING\nif not TYPE_CHECKING:\n    from pkg import alt\n",
         "pkg/other.py": "X = 2\n",
         "scripts/tool.sh": "echo hi\n",
         "tests/__init__.py": "",
         "tests/pkg/test_top.py": "from pkg import top\n",
         "tests/pkg/test_other.py": "import pkg.other\n",
+        "tests/pkg/test_typed.py": "import pkg.typed\n",
+        "tests/pkg/test_klass.py": "import pkg.klass\n",
+        "tests/pkg/test_coro.py": "import pkg.coro\n",
+        "tests/pkg/test_lazy_a.py": "import pkg.lazy_a\n",
+        "tests/pkg/test_lazy_b.py": "import pkg.lazy_b\n",
+        "tests/pkg/test_negated.py": "import pkg.negated\n",
+        "tests/pkg/test_lazy.py": "def test():\n    from pkg import mid\n",
+        "tests/pkg/helper.py": "def make():\n    import pkg.core\n",
+        "tests/pkg/test_helper.py": "from tests.pkg import helper\n",
         "tests/pkg/test_patch.py": "def test(monkeypatch):\n    monkeypatch.setattr('pkg.core.VALUE', 2)\n",
         "tests/pkg/test_script.py": "SCRIPT = 'scripts/tool.sh'\n",
         "tests/pkg/test_scan.py": "from pathlib import Path\nFILES = list(Path('.').rglob('*.py'))\n",
@@ -74,10 +91,55 @@ def test_renamed_setup_emits_full_cli_plan(repo, tmp_path, changed):
     assert outputs["mode"] == "full" and "tests/conftest.py" in outputs["reason"]
 
 
-def test_transitive_and_function_level_importers_run(repo):
-    # core <- mid <- top (inside a function) <- test_top
-    assert {"tests/pkg/test_top.py", "tests/pkg/test_patch.py"} <= _files(repo, ["pkg/core.py"])
-    assert "tests/pkg/test_other.py" not in _files(repo, ["pkg/core.py"])
+def test_import_time_closure_and_one_function_level_hop(repo):
+    core = _files(repo, ["pkg/core.py"])
+    # core <- mid (import time) <- test_lazy (a test's own function-level import counts)
+    assert {"tests/pkg/test_lazy.py", "tests/pkg/test_patch.py"} <= core
+    # core <- mid <- klass (class body, two modules away, so only an import-time edge reaches it)
+    assert "tests/pkg/test_klass.py" in core
+    # core <- mid <- coro (inside `async def`): a function body like any other, so it stops.
+    assert "tests/pkg/test_coro.py" not in core
+    # tests/ helpers count for every import too: core <- helper (in a function) <- test_helper
+    assert "tests/pkg/test_helper.py" in core
+    # core <- mid <- top (inside a function): the second source hop is function-level, so it stops.
+    assert "tests/pkg/test_top.py" not in core
+    assert "tests/pkg/test_other.py" not in core
+    # mid <- top (inside a function) <- test_top: one function-level hop from the changed module counts.
+    assert "tests/pkg/test_top.py" in _files(repo, ["pkg/mid.py"])
+
+
+def test_type_checking_imports_do_not_pass_a_change_on(repo):
+    # typed imports core only under TYPE_CHECKING; the else branch (alt) runs at import.
+    assert "tests/pkg/test_typed.py" not in _files(repo, ["pkg/core.py"])
+    alt = _files(repo, ["pkg/alt.py"])
+    assert "tests/pkg/test_typed.py" in alt
+    # `if not TYPE_CHECKING:` runs at import: only the bare test is skipped.
+    assert "tests/pkg/test_negated.py" in alt
+
+
+def test_two_function_level_hops_stop(repo):
+    # alt <- lazy_a (in a function): one hop, selected. lazy_a <- lazy_b (in a function): a second one, not.
+    alt = _files(repo, ["pkg/alt.py"])
+    assert "tests/pkg/test_lazy_a.py" in alt
+    assert "tests/pkg/test_lazy_b.py" not in alt
+
+
+def test_one_hub_with_function_level_imports_does_not_select_the_suite(repo):
+    # A dispatcher that lazily imports every command used to pull every test of every command
+    # into a change to one of them.
+    _write(repo, {"pkg/hub.py": "def run(n):\n    import pkg.cmd_a, pkg.cmd_b\n",
+                  "pkg/cmd_a.py": "from pkg import hub\n", "pkg/cmd_b.py": "from pkg import hub\n",
+                  "pkg/leaf.py": "X = 1\n", "pkg/uses_leaf.py": "from pkg import leaf\n",
+                  "tests/pkg/test_cmd_a.py": "import pkg.cmd_a\n", "tests/pkg/test_cmd_b.py": "import pkg.cmd_b\n",
+                  "tests/pkg/test_hub.py": "import pkg.hub\n", "tests/pkg/test_uses_leaf.py": "import pkg.uses_leaf\n"})
+    _write(repo, {"pkg/cmd_a.py": "from pkg import hub, uses_leaf\n"})
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    leaf = _files(repo, ["pkg/leaf.py"])
+    assert {"tests/pkg/test_uses_leaf.py", "tests/pkg/test_cmd_a.py"} <= leaf
+    # cmd_a <- hub is function-level and two hops from leaf: hub's and cmd_b's tests stay out.
+    assert not {"tests/pkg/test_hub.py", "tests/pkg/test_cmd_b.py"} & leaf
+    # A change to cmd_a itself is one function-level hop from hub: hub's importers run.
+    assert {"tests/pkg/test_hub.py", "tests/pkg/test_cmd_b.py"} <= _files(repo, ["pkg/cmd_a.py"])
 
 
 @pytest.fixture
@@ -204,7 +266,7 @@ def test_explicit_full_and_empty_diff(repo):
 
 
 def test_slices_follow_measured_durations(repo):
-    (repo / "test_durations.json").write_text(json.dumps({"tests/pkg/test_top.py": 3 * at.SLICE_SECONDS}))
+    (repo / "test_durations.json").write_text(json.dumps({"tests/pkg/test_lazy.py": 3 * at.SLICE_SECONDS}))
     assert at.plan(repo, ["pkg/core.py"])["slices"] == min(4, at.MAX_SLICES)
     assert at.plan(repo, ["pkg/other.py"])["slices"] == 1
     assert at.slices_for(100 * at.SLICE_SECONDS) == at.MAX_SLICES

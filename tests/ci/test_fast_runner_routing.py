@@ -345,10 +345,10 @@ def test_python_slices_match_their_matrix():
     job = wf["jobs"]["test"]
     assert job["strategy"]["matrix"]["slice"] == "${{ fromJSON(inputs.python_slices) }}"
     default = wf["on"]["workflow_call"]["inputs"]["python_slices"]["default"]
-    assert default == "[1, 2, 3, 4, 5, 6, 7, 8]"
+    assert default == "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]"
     # The planner's full-suite slice count is the same matrix (scripts/ci/affected_tests.py).
     planner = (ROOT / "scripts" / "ci" / "affected_tests.py").read_text(encoding="utf-8")
-    assert "MAX_SLICES = 8 " in planner
+    assert "MAX_SLICES = 12 " in planner
     run = next(step for step in job["steps"] if step.get("name") == "Run tests")
     assert run["env"]["HERMES_TEST_SLICE"] == "${{ matrix.slice }}/${{ strategy.job-total }}"
     assert "${{ matrix.slice }}/${{ strategy.job-total }}" in job["name"]
