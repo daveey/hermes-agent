@@ -1,4 +1,22 @@
-# Workspace source v2 artifact increment (not activated)
+# Workspace source v2 artifacts
+
+## Current activation contract
+
+Enabled dispatchers advertise source protocol 2 after the v2 consumer integration;
+CLI claims, configured-off hosts and a process that detected an unsupported Board
+do not advertise it. Existing v1 manifest/attachment protocol defaults remain v1.
+This capability advertisement does not enable `kanban.workspace_source` by default.
+
+Live rollout still requires two upgraded installed workers, a compatible deployed
+Board, registered clean clones, task-owned branches and verified Git/GitHub access.
+The first v2 custody row is the rollback boundary: preserve upgraded recovery
+capacity and repair forward; never downgrade/delete custody or strip artifacts.
+Advertisement alone does not prove live two-worker transfer acceptance.
+
+## Historical incremental implementation notes
+
+The remaining notes record intermediate spike stages, not the current integration
+status or a new requirement to repeat the stopped mutation campaign.
 
 `kanban_source_artifacts.stage(conn, task_id, paths, board=..., run_uid=...)`
 records an explicitly selected set, including an intentional empty set. It is an

@@ -211,12 +211,12 @@ def test_grant_carries_source_protocol_only_from_dispatcher(conn, board):
     assert kb.claim_task(conn, tid, ttl_seconds=900, claimer=f"{kb._host_prefix()}:1")
     assert "source_protocol" not in board.calls[-1][1]
     with kbs.protocol_call():
-        assert kbs.grant_protocol() == 1
+        assert kbs.grant_protocol() == 2
     assert kbs.grant_protocol() is None
 
 
 def test_dispatcher_admitted_claim_acquires_with_source_protocol(conn, board, monkeypatch):
-    """The real admitted_claim -> claim gate -> lease acquire path carries ``source_protocol: 1``."""
+    """The real admitted_claim -> claim gate -> lease acquire path carries ``source_protocol: 2``."""
     from hermes_cli import kanban_db_dispatch as d
     from hermes_cli import kanban_db_dispatch_admission as admission
     monkeypatch.setattr("hermes_cli.kanban_capsule_admission.claim_refusal", lambda *a, **kw: None)
@@ -225,8 +225,38 @@ def test_dispatcher_admitted_claim_acquires_with_source_protocol(conn, board, mo
                                        d.DispatchResult())
     assert claimed is not None and claimed.id == tid
     acquires = [b for k, b in board.calls if k == "acquire"]
-    assert acquires and acquires[-1].get("source_protocol") == 1
+    assert acquires and acquires[-1].get("source_protocol") == 2
     assert kbs.grant_protocol() is None  # the protocol never leaks past that one call
+
+
+@pytest.mark.parametrize("disabled", ["config", "old_board"])
+def test_dispatcher_omits_protocol_when_disabled(conn, board, monkeypatch, disabled):
+    if disabled == "config":
+        monkeypatch.setattr(kws, "settings", lambda: SimpleNamespace(enabled=False))
+    else:
+        kbs.mark_board_lacks_source("old Board action list")
+    tid = kb.create_task(conn, title="disabled source", assignee="worker")
+    with kbs.protocol_call():
+        assert kbs.grant_protocol() is None
+        assert kb.claim_task(conn, tid, ttl_seconds=900, claimer=f"{kb._host_prefix()}:1")
+    acquires = [body for action, body in board.calls if action == "acquire"]
+    assert acquires and "source_protocol" not in acquires[-1]
+
+
+def test_protocol_context_restores_nested_and_exceptional_calls(conn, board):
+    assert kbs.grant_protocol() is None
+    with pytest.raises(RuntimeError, match="outer"):
+        with kbs.protocol_call():
+            assert kbs.grant_protocol() == 2
+            with kbs.protocol_call():
+                assert kbs.grant_protocol() == 2
+            assert kbs.grant_protocol() == 2
+            with pytest.raises(ValueError, match="inner"):
+                with kbs.protocol_call():
+                    raise ValueError("inner")
+            assert kbs.grant_protocol() == 2
+            raise RuntimeError("outer")
+    assert kbs.grant_protocol() is None
 
 
 def test_attach_refused_releases_unused_grant_and_never_spawns(conn, board, dispatcher):

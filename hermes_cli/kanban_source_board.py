@@ -1,6 +1,6 @@
-"""workspace_source v1 (core PR-2): the synchronous Board side of a source card's run.
+"""workspace_source: the synchronous Board side of a source card's run.
 
-* ``source_protocol: 1`` rides ONE grant request: the dispatcher's own claim (:func:`protocol_call` around it), never
+* ``source_protocol: 2`` rides ONE grant request: the dispatcher's own claim (:func:`protocol_call` around it), never
   the CLI ``hermes kanban claim`` or any other caller (v4.1 R3-a: per call, not process-global).
 * ``/leases source_attach`` / ``publish_source`` / ``release`` (with a receipt) are synchronous ``/leases`` actions
   (v3 S2), never outbox ops. A ``400`` naming the action list is an old Board (``board_lacks_source``, v4 S2): this
@@ -24,7 +24,7 @@ from hermes_cli import kanban_db_sync as sync
 
 _log = logging.getLogger(__name__)
 
-SOURCE_PROTOCOL = 1
+SOURCE_PROTOCOL = 2
 _PROTOCOL_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar("source_protocol_call", default=False)
 _BOARD_LACKS_SOURCE = {"flag": False}
 
