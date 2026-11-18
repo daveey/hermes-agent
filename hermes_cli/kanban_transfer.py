@@ -68,6 +68,8 @@ def _snapshot_db(source: Path, target: Path) -> None:
 
 
 def _scrub_local_state(conn: sqlite3.Connection) -> None:
+    from hermes_cli.kanban_containment_guard import inert_snapshot
+    inert_snapshot(conn)
     """Strip machine-local runtime state (claims, PIDs, and above all the
     gateway chat ids subscribed to task events). Caller owns the transaction.
     Run on export and again on import (an archive is untrusted input)."""

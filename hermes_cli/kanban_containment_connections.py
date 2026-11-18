@@ -50,3 +50,9 @@ def drop_held(conn: sqlite3.Connection, rows: list) -> list:
 
 def refusal(conn: sqlite3.Connection, task_id: str) -> str | None:
     return "containment_pending: scoped resume-contained required" if held(conn, task_id) else None
+
+
+def released_history_delete(conn: sqlite3.Connection, task_id: str):
+    """Delete custody: only for a task whose containment is verifiably released."""
+    from hermes_cli.kanban_containment_guard import released_history_delete as scoped
+    return scoped(conn, task_id, verify_release=lambda receipt, stop: verifier(conn, receipt, stop))

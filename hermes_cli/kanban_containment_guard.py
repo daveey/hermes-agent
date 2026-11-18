@@ -15,6 +15,7 @@ from typing import Any
 from hermes_cli.kanban_containment_state import reduce_events
 
 _WRITE: contextvars.ContextVar[tuple[int, str] | None] = contextvars.ContextVar("containment_write", default=None)
+_DELETE: contextvars.ContextVar[tuple[int, str] | None] = contextvars.ContextVar("containment_delete", default=None)
 
 
 @contextlib.contextmanager
@@ -31,6 +32,37 @@ def authorized_write(conn: sqlite3.Connection, task_id: str) -> Iterator[None]:
         yield
     finally:
         _WRITE.reset(token)
+
+
+@contextlib.contextmanager
+def released_history_delete(conn: sqlite3.Connection, task_id: str, *, verify_release: Callable | None = None) -> Iterator[None]:
+    """Scoped custody for deleting a task's protected history with the task.
+
+    Refuses (containment_pending) while the task is held for any reason, so
+    active/unverified/unobserved containment keeps its history. Once released
+    and verified, the history goes away only together with its task.
+    """
+    if pending(conn, task_id, verify_release=verify_release):
+        raise sqlite3.IntegrityError("containment_pending")
+    token = _DELETE.set((id(conn), task_id))
+    try:
+        yield
+    finally:
+        _DELETE.reset(token)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='containment_observations'").fetchone():
+        conn.execute("DELETE FROM containment_observations WHERE task_id=?", (task_id,))
+
+
+def inert_snapshot(conn: sqlite3.Connection) -> None:
+    """Private snapshot copies only: stub fence functions so raw scrubs can run.
+
+    Never use on a live board connection; history rows are preserved so the
+    importing board re-derives the hold from the events themselves.
+    """
+    for name, arity in (("kanban_containment_held", 1), ("kanban_containment_write", 1), ("kanban_containment_delete", 1),
+                        ("kanban_containment_sync_task", 1), ("kanban_containment_sync_event", 4),
+                        ("kanban_containment_sync_edge", 2), ("kanban_containment_cache_write", 0)):
+        conn.create_function(name, arity, lambda *a: 0)
 
 
 def pending(conn: sqlite3.Connection, task_id: str, *, verify_release: Callable | None = None) -> bool:
@@ -63,6 +95,8 @@ def register(conn: sqlite3.Connection, *, verify_release: Callable | None = None
     """Register per-connection functions without schema writes or network I/O."""
     conn.create_function("kanban_containment_held", 1,
                          lambda task: int(pending(conn, task, verify_release=verify_release)))
+    conn.create_function("kanban_containment_delete", 1,
+                         lambda task: int(conn.in_transaction and _DELETE.get() == (id(conn), task)))
     conn.create_function("kanban_containment_write", 1,
                          lambda task: int(conn.in_transaction and _WRITE.get() == (id(conn), task)))
     from hermes_cli import kanban_containment_replica as replica
@@ -119,7 +153,7 @@ def _triggers(conn: sqlite3.Connection) -> None:
         "event_insert": ("BEFORE INSERT ON task_events",
                          f"NEW.kind IN {protected} AND NOT {permit}(NEW.task_id) "
                          f"AND NOT kanban_containment_sync_event({new_uid},NEW.task_id,NEW.kind,NEW.payload)"),
-        "event_delete": ("BEFORE DELETE ON task_events", f"OLD.kind IN {protected}"),
+        "event_delete": ("BEFORE DELETE ON task_events", f"OLD.kind IN {protected} AND NOT kanban_containment_delete(OLD.task_id)"),
     }
     same = " AND ".join(f'OLD."{c}" IS NEW."{c}"' for c in columns if c != "uid")
     uid_fill = (f"OLD.uid IS NULL AND NEW.uid IS NOT NULL AND ({same})" if "uid" in columns else "0")

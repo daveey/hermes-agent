@@ -3522,7 +3522,12 @@ def specify_triage_task(
 def _delete_task_relations(conn: sqlite3.Connection, task_id: str) -> None:
     """Delete every row referencing ``task_id`` (schema has no ON DELETE CASCADE)."""
     conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (task_id, task_id))
+    from hermes_cli.kanban_containment_connections import released_history_delete
     for table in ("task_comments", "task_events", "task_runs", "kanban_notify_subs"):
+        if table == "task_events":
+            with released_history_delete(conn, task_id):
+                conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+            continue
         conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (task_id,))
     with contextlib.suppress(sqlite3.OperationalError):  # board predating condition wakes
         conn.execute("DELETE FROM task_wake_checks WHERE task_id = ?", (task_id,))
@@ -3692,7 +3697,8 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM task_events WHERE created_at < ? AND kind NOT IN ('decomposed', 'origin_intent_recorded') "
+            "DELETE FROM task_events WHERE created_at < ? AND kind NOT IN ('decomposed', 'origin_intent_recorded', "
+            "'contained', 'containment_released') "
             "AND task_id IN (SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)
