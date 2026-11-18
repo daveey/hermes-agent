@@ -184,6 +184,8 @@ def test_guidance_does_not_strip_present_or_unrecognised_card_tail():
     assert fold._guidance(text + '\n\nguidance', cards) == 'guidance'
     cards[0]['text'] = 'Remote blocked\nNext action for the user: answer\nOpen task: @task:default@gw/t_one\ncontext'
     assert fold._guidance('unrelated\ncontext\n\nguidance', cards) is None
+    # Even a matching retained tail is not a relabel without this card's header.
+    assert fold._guidance('Remote blocked\ncontext\n\nguidance', cards) is None
 
 
 @pytest.mark.parametrize('error_type', [OSError, sqlite3.OperationalError])
@@ -194,17 +196,24 @@ def test_passive_ledger_open_failure_still_writes_notice(tmp_path, monkeypatch, 
     # Populate observation/memo setup before failing only the delivery ledger open.
     krn._load_swept(ledger)
     with once._chat(tmp_path) as (db, opener):
+        from tui_gateway import kanban_remote_fifo as fifo
         original = krn._ledger
-        opens = []
+        armed = []
+        failures = []
+        def no_gateway(*args):
+            armed.append(True)
         def unavailable(path=None):
-            opens.append(path)
-            if len(opens) == 1:
+            if armed:
+                armed.pop()
+                failures.append(error_type)
                 raise error_type('unavailable ledger')
             return original(path)
+        monkeypatch.setattr(fifo, 'gateway_lease_pid', no_gateway)
         monkeypatch.setattr(krn, '_ledger', unavailable)
         result = krn.sweep_remote_notices(replica_path=hub, gateway='macbook', session_db=opener,
                                         ledger=ledger, now=now, waker=None)
         assert len(result) == 1
+        assert failures == [error_type]
         assert len(db.get_messages(once.CHAT)) == 1
         monkeypatch.setattr(krn, '_ledger', original)
 
