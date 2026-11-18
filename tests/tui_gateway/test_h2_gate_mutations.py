@@ -664,7 +664,6 @@ def test_guarantee_key_ignores_a_talking_chats_last_active(store, clock):
     seed({'state': 'deferred', 'retry_at': 9000.0}, ts=1.0)
     before = gates.probe('guarantee_pass')
     assert not before.pending
-    time.sleep(0.01)
     db._write_rowcount('UPDATE sessions SET last_activity_at = ? WHERE id = ?', (1.9e9, 'chat'))
     after = gates.probe('guarantee_pass')
     assert not after.pending and after.key == before.key
