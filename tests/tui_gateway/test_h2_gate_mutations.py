@@ -418,7 +418,7 @@ def test_remote_each_key_component_moves_the_key_independently(monkeypatch, tmp_
         conn.execute('INSERT INTO notices(delivered) VALUES (1)')
         conn.commit()
     after = gates.probe('remote_notices')
-    assert not after.pending and after.key != base.key
+    assert not after.pending and after.key == base.key  # a settled ledger row is judged each probe, not keyed
     state['ledger'] = tmp_path / 'absent.db'
     missing = gates.probe('remote_notices')
     assert not missing.pending and missing.key != after.key

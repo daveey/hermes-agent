@@ -427,7 +427,9 @@ def test_remote_probe_key_changes_with_the_card_state_and_the_ledger(remote_host
     settle()
     first = gates._remote()
     settle(session='chat-b')
-    assert gates._remote().key != first.key
+    # A settled ledger row changes nothing the sweep does: every probe re-judges the cards against the ledger, so the
+    # ledger's commit counter is not a key component (the sweep's own rows re-armed the pass every run).
+    assert gates._remote().key == first.key
     cards[0] = (*cards[0][:2], {'id': 't_1', 'status': 'blocked', 'blocked_at': 200.0}, cards[0][3])
     stamp[1][0] = (1, 2, 2)  # the owner's write of that state
     stamp[2][:] = [('macbook', 'default/t_1', cards[0][2])]
@@ -512,7 +514,8 @@ def test_remote_probe_open_chat_in_flight_claim_and_woken_stay_hot(remote_host):
     gates, _, _, settle = remote_host
     settle()
     assert not gates._remote().pending
-    assert gates._remote(frozenset({'chat-a'})).pending
+    # A settled notice in a chat this process holds: ``_deliver_link`` only logs, so an open chat is not work.
+    assert not gates._remote(frozenset({'chat-a'})).pending
     settle(session='chat-b', delivered=0, holder=12345)
     assert gates._remote().pending
     settle(session='chat-b', delivered=remote.DELIVERED)
@@ -701,3 +704,50 @@ def test_remote_replica_commit_during_the_cold_read_still_publishes_the_proof(re
     monkeypatch.setattr(remote, '_sweep_snapshot', racing)
     assert not gates._remote().pending
     assert 'inputs' in gates._remote_memo
+
+
+# --- the hub's always-hot shapes (t_01a1dfa94f2251cd, third cut) --------------------------------------------------
+
+def test_remote_probe_ignores_a_rewrite_of_a_terminal_row_whose_notice_inputs_did_not_change(remote_host):
+    """The hub rewrites terminal rows it already holds (owner bookkeeping); only a changed state/chat/withdrawal can
+    change what the sweep does, so a same-print rewrite must not move the token and re-read the 1300-card replica."""
+    gates, _, stamp, settle = remote_host
+    settle()
+    row = ('macbook', 'default/t_1', {'id': 't_1', 'status': 'done', 'completed_at': 100.0, 'lease': 1})
+    gates._remote()  # initialises the watch
+    stamp[1][0] = (1, 2, 2)
+    stamp[2][:] = [row]
+    first = gates._remote()  # first sight of the row's print: judged, moves the token once
+    for n in range(3, 8):
+        stamp[1][0] = (1, n, n)
+        stamp[2][:] = [('macbook', 'default/t_1', {**row[2], 'lease': n})]
+        assert gates._remote() == first
+    stamp[1][0] = (1, 9, 9)
+    stamp[2][:] = [('macbook', 'default/t_1', {'id': 't_1', 'status': 'done', 'completed_at': 250.0})]
+    assert gates._remote().key != first.key  # a new completion time is a new notice state
+
+
+def test_remote_probe_reuses_the_swept_cards_while_the_replica_token_stands(remote_host, monkeypatch):
+    """A ledger commit re-judges the cards against the ledger; it must not re-read the replica."""
+    from tui_gateway import kanban_remote_notices as remote
+    gates, cards, _, settle = remote_host
+    settle()
+    reads = []
+    monkeypatch.setattr(remote, '_sweep_snapshot', lambda path, me: (reads.append(1), (list(cards), {}))[1])
+    gates._remote_memo.clear()
+    gates._remote()
+    settle(session='chat-b')  # a ledger commit: the memo key moves, the replica did not
+    assert not gates._remote().pending
+    assert len(reads) == 1
+
+
+def test_remote_probe_open_chat_with_every_notice_settled_is_quiet(remote_host):
+    """One link in a chat this gateway holds open kept the whole pass hot on the hub: its sweep only logs."""
+    gates, _, _, settle = remote_host
+    settle()
+    assert not gates._remote(frozenset({'chat-a'})).pending
+
+
+def test_remote_probe_open_chat_with_an_unsettled_notice_stays_hot(remote_host):
+    gates, _, _, _ = remote_host
+    assert gates._remote(frozenset({'chat-a'})).pending
