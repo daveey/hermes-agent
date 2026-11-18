@@ -8,7 +8,9 @@ import subprocess
 import pytest
 
 from cron.lifecycle_guard import scan_gateway_lifecycle
-from tests.cron.test_lifecycle_guard_heredoc_nul import LIFECYCLE, _group
+from tests.cron.test_lifecycle_guard_heredoc_nul import (
+    LIFECYCLE, _assert_bash_marker, _bash32, _group,
+)
 from tools.shell_heredoc import _parse_heredoc_operator
 from tools.shell_heredoc_words import _decode_ansi_c
 
@@ -55,10 +57,11 @@ def test_bash_marker_and_harmless_controls(tmp_path, fragment, decoded, suffix):
     marker = tmp_path / "marker.py"
     marker.write_text("print('MARKER_EXECUTED')\n", encoding="utf-8")
     command = _group(word, terminator, marker, "python3")
-    result = subprocess.run(["bash", "--noprofile", "--norc"], input=command,
+    result = subprocess.run([shutil.which("bash") or "bash", "--noprofile", "--norc"], input=command,
                             capture_output=True, text=True, encoding="utf-8", timeout=20,
                             env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}, check=False)
-    assert (result.returncode, result.stdout, result.stderr) == (0, "MARKER_EXECUTED\n", "")
+    # 3.2 retains Unicode escapes and the second control-backslash literally.
+    _assert_bash_marker(result, "MARKER_EXECUTED", bash32_rejects=fragment != r"E\0ignored")
     assert scan_gateway_lifecycle(command) == (False, None)
     marker.write_text(f"import os\nos.system({LIFECYCLE!r})\n", encoding="utf-8")
     # Never execute this file: a non-interpreter sink only prints its source.
@@ -78,11 +81,12 @@ def test_bash_marker_and_harmless_controls(tmp_path, fragment, decoded, suffix):
 def test_bash_byte_boundaries(escape, hex_bytes):
     # Bash supports legacy UTF-8 above Unicode's limit until signed 32-bit overflow.
     # Those non-Unicode bytes cannot be a terminator in a UTF-8 str command.
-    result = subprocess.run(["bash", "--noprofile", "--norc"],
+    result = subprocess.run([shutil.which("bash") or "bash", "--noprofile", "--norc"],
                             input=f"printf %s $'{escape}'\n".encode(), capture_output=True,
                             timeout=20, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"},
                             check=False)
-    assert (result.returncode, result.stdout, result.stderr) == (0, bytes.fromhex(hex_bytes), b"")
+    expected = escape.encode() if _bash32() else bytes.fromhex(hex_bytes)
+    assert (result.returncode, result.stdout, result.stderr) == (0, expected, b"")
     if escape in (r"\U00110000", r"\U7FFFFFFF"):
         assert _decode_ansi_c(escape) == escape
 

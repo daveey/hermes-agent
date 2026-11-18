@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import shlex
 import shutil
 import subprocess
@@ -29,6 +30,26 @@ WORDS = [
     (r"$'E\0ignored\'tail'F", "EF"),
     (r"$'E\x45'", "EE"),
 ]
+
+
+@lru_cache(maxsize=1)
+def _bash32() -> bool:
+    result = subprocess.run(["bash", "--version"], capture_output=True, text=True,
+                            timeout=20, check=True)
+    return "version 3.2." in result.stdout
+
+
+def _assert_bash_marker(result, marker: str, *, bash32_rejects: bool):
+    # These exact modern-terminator fixtures are syntax errors on Bash 3.2,
+    # not successful execution proofs. Assert that boundary rather than skip it.
+    if _bash32() and bash32_rejects:
+        assert result.returncode == 2, result.stderr
+        assert result.stdout == ""
+        assert "syntax error" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert marker in result.stdout.splitlines(), result.stderr
+        assert result.stderr == ""
 
 
 def _group(word, terminator, script, sink):
@@ -61,5 +82,6 @@ def test_nul_fragment_real_bash_and_harmless_control(tmp_path, word, terminator)
     result = subprocess.run(["bash", "--noprofile", "--norc", "-c", command],
                             capture_output=True, text=True, encoding="utf-8", timeout=20,
                             check=False)
-    assert (result.returncode, result.stdout, result.stderr) == (0, "MARKER_EXECUTED\n", "")
+    _assert_bash_marker(result, "MARKER_EXECUTED",
+                        bash32_rejects=word in (r"$'E\u0000junk'", r"$'E\U00000000junk'"))
     assert scan_gateway_lifecycle(command) == (False, None)

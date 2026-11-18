@@ -8,7 +8,8 @@ used to stop such a word at its first ``(`` or space, so the body had no termina
 were walked as commands of the script around it, and a ``}`` there closed the outer group early,
 hiding ``cat f.py`` from the ``} | python3`` it feeds. Now exact words parse whole, and a
 ``$(…)`` word is unparsable: the guard also walks the script once per later line holding ``$(``.
-Every terminator below is the one bash itself uses, checked with a harmless marker.
+Modern Bash terminators are checked with harmless markers; Bash 3.2's differing
+syntax outcomes are asserted explicitly without weakening the static guard cases.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import pytest
 
 from cron import lifecycle_guard_groups
 from cron.lifecycle_guard import scan_gateway_lifecycle
+from tests.cron.test_lifecycle_guard_heredoc_nul import _assert_bash_marker
 from tools.shell_heredoc import _parse_heredoc_operator
 
 # Assembled so this file's own text never carries the literal command.
@@ -83,7 +85,8 @@ def test_bash_ends_the_body_at_the_terminator(delimiter, terminator):
     command = _group(delimiter, terminator, "echo MARKER_FED", "cat")
     result = subprocess.run(["bash", "-c", command], capture_output=True, text=True,
                             timeout=20, check=False)
-    assert "MARKER_FED" in result.stdout.splitlines(), result.stderr
+    _assert_bash_marker(result, "MARKER_FED",
+                        bash32_rejects=(delimiter, terminator) in REPRINTED[1:])
 
 
 @pytest.mark.parametrize(("delimiter", "terminator"), EXACT)
@@ -169,7 +172,7 @@ def test_bash_reads_both_bodies_of_one_opener(words, first, second):
     command = _two_body_group(words, first, second, "echo MARKER_FED", "cat")
     result = subprocess.run(["bash", "-c", command], capture_output=True, text=True,
                             timeout=20, check=False)
-    assert "MARKER_FED" in result.stdout.splitlines(), result.stderr
+    _assert_bash_marker(result, "MARKER_FED", bash32_rejects="echo  E|cat" in words)
 
 
 def test_two_heredocs_on_one_opener_with_harmless_group_stay_allowed():
@@ -194,8 +197,7 @@ def test_reprinted_view_preserves_earlier_heredoc_bodies(tmp_path, prefix, delim
     if shutil.which("bash"):
         result = subprocess.run(["bash", "-c", command("echo MARKER_FED", "cat")],
                                 capture_output=True, text=True, timeout=20, check=False)
-        assert result.returncode == 0, result.stderr
-        assert "MARKER_FED" in result.stdout.splitlines(), result.stderr
+        _assert_bash_marker(result, "MARKER_FED", bash32_rejects="|cat" in delimiter)
 
 
 def _candidate_lines(count: int) -> str:
