@@ -491,6 +491,10 @@ _WORD_START, _WORD_END = r"(?<![\w.-])", r"(?![\w.-])"
 # `eval`, `. <(…)`/`source /dev/stdin`, `bash <(…)`/`<<<`, `sh -c "$(…)"`, `$(…)` as a command.
 _SHELL_SINK_TEMPLATE = (
     rf"(?<!\|)\|&?(?!\|)[^|;&\n]*?{_WORD_START}(?:{_SINK_SHELLS}|eval){_WORD_END}"
+    # An output process substitution reads producer stdout as code, including descriptor
+    # feeds (`exec 3> >(bash); producer >&3`). Like pipes, retain wrapper operands;
+    # stop at its closing parenthesis so a later ordinary shell command is not a sink.
+    rf"|>\([^()|;&\n]*?{_WORD_START}(?:{_SINK_SHELLS}|eval){_WORD_END}"
     rf"|{_WORD_START}eval{_WORD_END}"
     r"|(?:^|[\s;&|({])(?:source|\.)\s+(?:<\s*\(|/dev/(?:stdin|fd/)|/proc/self/fd/)"
     rf"|{_WORD_START}{_SINK_SHELLS}{_WORD_END}[^|;&\n]*?(?:<\(|<<<)"
