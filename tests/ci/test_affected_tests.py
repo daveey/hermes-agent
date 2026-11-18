@@ -291,3 +291,50 @@ def test_cli_without_a_diff_runs_the_full_suite(repo, tmp_path):
     outputs = dict(line.split("=", 1) for line in gh_out.read_text().splitlines())
     assert outputs["mode"] == "full" and "git diff" in outputs["reason"]
     assert json.loads(outputs["slices"]) == list(range(1, at.MAX_SLICES + 1))
+
+
+def _reuse(repo, tmp_path, listing_text):
+    listing, out = tmp_path / "plan" / "affected-tests.txt", tmp_path / "selection.txt"
+    if listing_text is not None:
+        listing.parent.mkdir()
+        listing.write_text(listing_text, encoding="utf-8")
+    assert at.main(["--repo", str(repo), "--changed", "pkg/other.py", "--files-out", str(out),
+                    "--reuse", str(listing)]) == 0
+    return out.read_text(encoding="utf-8").split()
+
+
+def test_reuse_takes_detects_list_without_planning(repo, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(at, "plan", lambda *a, **k: pytest.fail("planned despite a usable list"))
+    # Not what pkg/other.py would select here: the list is detect's answer, taken as given.
+    assert _reuse(repo, tmp_path, "tests/pkg/test_lazy.py\ntests/pkg/test_top.py\n") == [
+        "tests/pkg/test_lazy.py", "tests/pkg/test_top.py"]
+    assert "reused 2 files planned by detect" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("listing", [
+    None,                                              # no cache entry
+    "",                                                # empty file
+    # Each of the next four is sorted and unique, so only the rule it names can reject it.
+    "tests/pkg/test_gone.py\ntests/pkg/test_top.py\n",  # a file this checkout does not have
+    "pkg/core.py\ntests/pkg/test_top.py\n",            # not under tests/
+    "tests/../pkg/core.py\ntests/pkg/test_top.py\n",   # escapes tests/
+    "tests/pkg/data.txt\ntests/pkg/test_top.py\n",     # not a .py file (it exists)
+    "tests/pkg/test_top.py\ntests/pkg/test_lazy.py\n",  # not the planner's sorted output
+    "tests/pkg/test_top.py\ntests/pkg/test_top.py\n",   # duplicate
+    "tests/pkg/test_top.py\n\n",                        # blank line
+    "<html>artifact service error</html>",
+])
+def test_reuse_plans_here_when_the_list_is_unusable(repo, tmp_path, capsys, listing):
+    _write(repo, {"tests/pkg/data.txt": "x\n"})
+    assert set(_reuse(repo, tmp_path, listing)) == {"tests/pkg/test_other.py"} | SMOKE
+    assert "planning here" in capsys.readouterr().err
+
+
+def test_an_unparseable_tracked_file_runs_the_full_suite(repo):
+    # Its imports are unknown, and detect's python3 may not be the slices' interpreter: no narrow list.
+    _write(repo, {"pkg/broken.py": "def f(:\n"})
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    result = at.plan(repo, ["pkg/other.py"])
+    assert result["mode"] == "full" and "cannot parse pkg/broken.py" in result["reason"]
+    (repo / "pkg" / "broken.py").write_text("X = 1\n")
+    assert at.plan(repo, ["pkg/other.py"])["mode"] == "affected"

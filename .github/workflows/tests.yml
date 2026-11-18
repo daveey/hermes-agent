@@ -140,6 +140,19 @@ jobs:
           restore-keys: |
             test-durations-
 
+      - name: Restore the affected test list planned by detect
+        # ci.yaml detect saves the list it planned for this run attempt (exact key, no
+        # restore-keys: another run's list is never taken); reusing it saves the ~35 s each
+        # slice spent planning the same list. Best effort: without it (another caller, a rerun
+        # of failed jobs only, a cache miss) the Run tests step plans it here.
+        if: inputs.python_changed != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/affected-tests.txt
+          key: affected-tests-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Run tests
         # Per-file isolation via scripts/run_tests.sh: each test file runs
         # in its own freshly-spawned `python -m pytest <file>` subprocess
@@ -162,15 +175,17 @@ jobs:
         # the job.
         #
         # Pull requests pass python_changed: the slice runs only the affected files
-        # (scripts/ci/affected_tests.py, the same selection ci.yaml detect sized).
+        # (scripts/ci/affected_tests.py, the same selection ci.yaml detect sized): detect's own
+        # list when the step above restored it (--reuse), else planned here from python_changed.
         run: |
           HERMES_TEST_WORKERS="$(python3 scripts/ci/test_workers.py)"
           export HERMES_TEST_WORKERS
           echo "HERMES_TEST_WORKERS=$HERMES_TEST_WORKERS (nproc=$(nproc))"
           if [ -n "$PYTHON_CHANGED" ]; then
             mapfile -t changed < <(printf '%s\n' "$PYTHON_CHANGED" | grep -v '^$')
-            selection="$RUNNER_TEMP/affected-tests.txt"
-            "$HERMES_PYTHON" scripts/ci/affected_tests.py --changed "${changed[@]}" --files-out "$selection" > /dev/null
+            selection="$RUNNER_TEMP/affected-selection.txt"
+            "$HERMES_PYTHON" scripts/ci/affected_tests.py --changed "${changed[@]}" --files-out "$selection" \
+              --reuse "$RUNNER_TEMP/affected-tests.txt" > /dev/null
             echo "Affected selection: $(wc -l < "$selection") files"
             scripts/run_tests.sh --files-from "$selection"
           else

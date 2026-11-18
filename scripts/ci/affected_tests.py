@@ -2,7 +2,11 @@
 """Pick the Python test files a pull request can affect (tests.yml `plan` job).
 
     affected_tests.py [--repo DIR] [--base REV] [--head REV] [--changed PATH ...] [--full REASON]
-                      [--files-out FILE] [--github-output FILE]
+                      [--files-out FILE] [--github-output FILE] [--reuse FILE]
+
+--reuse FILE (tests.yml slices): FILE is the --files-out list ci.yaml detect made for this run from the
+same commit and changed list. A usable one is copied to --files-out and nothing is planned (the plan
+takes ~35 s a slice); a missing, empty or malformed one is ignored and the selection is planned here.
 
 Prints a JSON plan on stdout: {"mode": "full" | "affected" | "none", "reason", "files", "slices"}.
 "full" runs the whole suite (the runner's own discovery); "affected" runs `files` with --files-from;
@@ -21,8 +25,8 @@ Selection, unioned:
   5. the smoke set: tests/ci plus every test that scans the source tree (rglob/os.walk/git ls-files).
      They break on changes no import graph reaches: docs drift, prompt surface, code health
      (replay of 83 red PR slice jobs, 2026-10-29: 16 failures were tree scans the PR never imported).
-The suite falls back to "full" when a changed file shapes every test (WIDE) or the selection is over
-FULL_FRACTION of the suite. Main pushes, release-check branches, dispatch and release runs never call this:
+The suite falls back to "full" when a changed file shapes every test (WIDE), a tracked .py file does not
+parse (its imports are unknown) or the selection is over FULL_FRACTION of the suite. Main pushes, release-check branches, dispatch and release runs never call this:
 tests.yml runs the full suite for any event that is not a pull request.
 """
 from __future__ import annotations
@@ -109,10 +113,19 @@ def _import_nodes(tree: ast.AST, lazy: bool):
             stack.extend(ast.iter_child_nodes(node))
 
 
+#: Files the last `importers` call could read but not parse: their imports are unknown to this interpreter.
+UNPARSED: list[str] = []
+
+
 def _parse(repo: Path, rel: str) -> ast.AST | None:
     try:
-        return ast.parse((repo / rel).read_text(encoding="utf-8-sig", errors="replace"))
-    except (OSError, SyntaxError, ValueError):
+        text = (repo / rel).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return None
+    try:
+        return ast.parse(text)
+    except (SyntaxError, ValueError):
+        UNPARSED.append(rel)
         return None
 
 
@@ -161,6 +174,7 @@ def importers(repo: Path, changed_modules: set[str]) -> set[str]:
     modules = set(by_module)
     reverse: dict[str, set[str]] = {}
     lazy_reverse: dict[str, set[str]] = {}
+    UNPARSED.clear()
     for f in files:
         is_test = f.startswith("tests/")
         tree = _parse(repo, f)  # one parse serves both walks
@@ -232,6 +246,13 @@ def plan(repo: Path, changed: list[str], full_reason: str | None = None) -> dict
     if any(re.fullmatch(r"scripts/ci/upstream_sync[^/]*\.py", c) for c in changed):
         changed_modules.add("tests.hermes_cli.upstream_gate_fake")
     selected |= importers(repo, changed_modules) & in_suite
+    if UNPARSED:
+        # Its import edges are missing from the graph, so a narrower run has no basis. This also keeps
+        # detect (the runner's system python3) and the slices (the pinned interpreter) from planning
+        # different lists when a file uses syntax only one of them accepts: detect then saves no list.
+        return {"mode": "full", "reason": f"cannot parse {', '.join(sorted(UNPARSED)[:5])} with Python "
+                                          f"{sys.version_info.major}.{sys.version_info.minor}",
+                "files": [], "slices": MAX_SLICES}
     string_refs = [re.compile(rf"[\"']{re.escape(m)}([\"']|\.)") for m in changed_modules]
     path_refs = [re.escape(c) for c in changed if "/" in c and Path(c).name not in GENERIC]
     path_refs += [rf"(?<![\w.-]){re.escape(Path(c).name)}(?![\w-])" for c in changed
@@ -263,6 +284,20 @@ def changed_files(repo: Path, base: str, head: str) -> list[str]:
     return [line for line in out.splitlines() if line]
 
 
+def reusable(repo: Path, listing: Path) -> list[str] | None:
+    """The files in a detect-made --files-out list, or None when it cannot stand in for planning here."""
+    try:
+        files = listing.read_text(encoding="utf-8-sig").split("\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if files and files[-1] == "":
+        files.pop()
+    ok = files and files == sorted(set(files)) and all(
+        f.startswith("tests/") and f.endswith(".py") and ".." not in f.split("/") and (repo / f).is_file()
+        for f in files)
+    return files if ok else None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--repo", default=str(ROOT))
@@ -272,8 +307,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--full", metavar="REASON", help="skip selection: run the full suite for REASON")
     ap.add_argument("--files-out", help="write the selected files here, one per line")
     ap.add_argument("--github-output", help="append mode/reason/slices outputs (GITHUB_OUTPUT)")
+    ap.add_argument("--reuse", metavar="FILE", help="a --files-out list detect made for this run: use it "
+                                                    "instead of planning when it is usable (needs --files-out)")
     args = ap.parse_args(argv)
     repo = Path(args.repo).resolve()
+    if args.reuse and args.files_out:
+        files = reusable(repo, Path(args.reuse))
+        if files is not None:
+            Path(args.files_out).write_text("".join(f"{f}\n" for f in files), encoding="utf-8")
+            print(f"affected-tests: reused {len(files)} files planned by detect", file=sys.stderr)
+            return 0
+        print(f"affected-tests: no usable list at {args.reuse}; planning here", file=sys.stderr)
     if args.full:
         changed = []
     elif args.changed is not None:

@@ -371,3 +371,21 @@ def test_pull_requests_pass_their_affected_plan_to_the_slices():
     run = next(step for step in _workflows()["tests.yml"]["jobs"]["test"]["steps"] if step.get("name") == "Run tests")
     assert run["env"]["PYTHON_CHANGED"] == "${{ inputs.python_changed }}"
     assert "affected_tests.py --changed" in run["run"] and "--files-from" in run["run"]
+    # Detect hands its planned list to the slices through the Actions cache (required jobs never read
+    # artifacts). Both ends are best effort and bounded, use one exact per-attempt key with no
+    # restore-keys, and the slice still passes --changed so a missing list is planned there.
+    steps = ci["detect"]["steps"]
+    save = steps[steps.index(plan) + 1]
+    assert '--files-out "$RUNNER_TEMP/affected-tests.txt"' in script and 'echo "mode=$mode" >> "$GITHUB_OUTPUT"' in script
+    assert save["uses"].startswith("actions/cache/save@")
+    assert save["if"] == "steps.python-plan.outputs.mode == 'affected'"
+    test_steps = _workflows()["tests.yml"]["jobs"]["test"]["steps"]
+    restore = test_steps[test_steps.index(run) - 1]
+    assert restore["uses"].startswith("actions/cache/restore@")
+    assert restore["if"] == "inputs.python_changed != ''"
+    for step in (save, restore):
+        assert step["continue-on-error"] is True and 0 < step["timeout-minutes"] <= 2
+        assert step["with"] == {"path": "${{ runner.temp }}/affected-tests.txt",
+                                "key": "affected-tests-${{ github.run_id }}-${{ github.run_attempt }}"}
+    assert '--reuse "$RUNNER_TEMP/affected-tests.txt"' in run["run"]
+    assert '--files-out "$selection"' in run["run"] and 'selection="$RUNNER_TEMP/affected-selection.txt"' in run["run"]

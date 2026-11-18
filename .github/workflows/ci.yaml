@@ -205,8 +205,9 @@ jobs:
         # Pull requests run the test files their change can reach plus a smoke set
         # (scripts/ci/affected_tests.py); every other event, the label ci:full-tests, a failed
         # compare (empty list) or a list at the compare API's 300-file cap runs the full suite.
-        # Main pushes still run everything, so a miss surfaces there. Each tests.yml slice
-        # recomputes the same file list from `changed` and its own checkout.
+        # Main pushes still run everything, so a miss surfaces there. The affected file list
+        # goes to the tests.yml slices through the Actions cache (next step); a slice that cannot get it
+        # recomputes the same list from `changed` and its own checkout.
         id: python-plan
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -225,19 +226,34 @@ jobs:
           if [ -n "$full" ]; then
             python3 scripts/ci/affected_tests.py --full "$full" --github-output "$plan_out" > /dev/null
           else
-            python3 scripts/ci/affected_tests.py --changed "${changed[@]}" --github-output "$plan_out" > /dev/null
+            python3 scripts/ci/affected_tests.py --changed "${changed[@]}" --github-output "$plan_out" \
+              --files-out "$RUNNER_TEMP/affected-tests.txt" > /dev/null
           fi
           cat "$plan_out"
           mode=$(sed -n 's/^mode=//p' "$plan_out")
           reason=$(sed -n 's/^reason=//p' "$plan_out")
           slices=$(sed -n 's/^slices=//p' "$plan_out")
           echo "slices=$slices" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
           {
             echo "changed<<CHANGED_EOF"
             if [ "$mode" = "affected" ]; then printf '%s\n' "${changed[@]}"; fi
             echo "CHANGED_EOF"
           } >> "$GITHUB_OUTPUT"
           echo "### Python tests: $mode ($reason)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the affected test list for the slices
+        # Planning takes ~35 s; without this every slice repeats it before its first test.
+        # The Actions cache, not an artifact: required jobs never read artifact storage
+        # (tests/ci/test_artifact_quota_advisory.py). Best effort and bounded like the other
+        # cache saves: a slice that finds no entry plans the same list itself.
+        if: steps.python-plan.outputs.mode == 'affected'
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/affected-tests.txt
+          key: affected-tests-${{ github.run_id }}-${{ github.run_attempt }}
 
   # ─────────────────────────────────────────────────────────────────────
   # Lane-gated sub-workflows. Each runs in parallel after detect finishes.
