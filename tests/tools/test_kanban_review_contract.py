@@ -122,7 +122,15 @@ def test_refusal_none_without_contract():
     {"published_pr": PR, "reviewed_head": SHA, "landed_sha": SHA},  # the landing handoff of an implementation card
 ])
 def test_refusal_none_when_not_a_review_result(md):
-    assert krc.refusal(SHIP_BODY, md) is None
+    assert krc.refusal("Investigate the review contract: " + SHIP_BODY, md) is None
+
+
+@pytest.mark.parametrize("md", [None, {}, {"completion_receipt": {}}, {"published_pr": PR}])
+def test_ship_brief_requires_metadata_even_without_review_keys(md):
+    result = krc.completion_refusal(SHIP_BODY, md, worker_run_id=1)
+    assert result and result[1] == "review_contract"
+    assert "metadata.verdict" in result[0]
+    assert "metadata.reviewed_sha" in result[0]
 
 
 @pytest.mark.parametrize("key", ["verdict", "review_verdict", "review_outcome", "reviewed_sha", "reviewed_head",
@@ -173,13 +181,17 @@ def _status(kb, tid):
 
 
 @pytest.mark.parametrize("bad,key", [
+    ({"completion_receipt": {"version": 1, "items": [{"scope": "review", "disposition": "delivered",
+       "evidence": [{"ref": "review evidence", "observed_at": "2026-11-18T00:00:00+00:00",
+                     "verification": "reported"}], "remaining": []}]}}, "metadata.verdict"),
+    ({}, "metadata.verdict"),
     ({"review_verdict": "approve", "reviewed_sha": SHA, "reviewed_pr": PR}, "metadata.verdict"),
     ({"verdict": "approve", "reviewed_pr": PR}, "metadata.reviewed_sha"),
     ({"verdict": "approve", "reviewed_head": SHA, "reviewed_pr": PR}, "metadata.reviewed_sha"),
 ])
 def test_tool_refuses_unreadable_review_then_accepts_fix(board, monkeypatch, bad, key):
     from tools import kanban_tools as kt
-    tid = _claim(board, monkeypatch, MISNAMED_BODY)
+    tid = _claim(board, monkeypatch, SHIP_BODY)
     out = _complete(bad)
     assert out.get("error") and out["rejection"] == "review_contract"
     assert out["rejection"] in kt.COMPLETE_REJECTION_CLASSES
@@ -368,7 +380,7 @@ def test_tool_dispatched_worker_completes_same_card(board, monkeypatch):
 @pytest.mark.parametrize("body,md", [
     ("Fix the sidebar scroll. Done when its tests pass.", NOT_CORE_GOOD),  # not a ship review card
     (PR_KEY_BODY, dict(LANDING_MDS[0])),  # a verdictless landing handoff on a core-pull card
-    (SHIP_BODY, {"changed_files": ["a.py"]}),  # no review key at all
+    ("Investigate the review contract: " + SHIP_BODY, {"changed_files": ["a.py"]}),
 ], ids=["not_ship", "verdictless_landing", "no_review_key"])
 def test_tool_outside_non_review_completions_still_complete(board, body, md):
     from tools import kanban_tools as kt

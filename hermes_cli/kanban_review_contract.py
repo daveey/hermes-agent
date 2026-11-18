@@ -15,8 +15,9 @@ This module catches that gap at completion time, while the reviewer can still fi
   cards record ``reviewed_sha``/``reviewed_pr`` without one (replayed over the real boards) and are not reviews.
 - On such a card, a completion whose metadata looks like a review result (any review key) must carry exactly
   ``verdict`` in {approve, request_changes}, a lowercase 40-hex ``reviewed_sha`` and ``reviewed_pr`` naming the
-  pull. A landing/implementation handoff (``published_pr``) and a completion with no review key at all (a card
-  that only discusses the contract) are not review results and are left alone.
+  pull. A landing/implementation handoff (``published_pr``) and a completion with no review key at all are
+  normally left alone. Ship's explicit "Independent exact-head review of" brief is the exception: its stated
+  metadata contract is required even when every review key is absent, so the reviewer can retry in the same run.
 
 Ship itself is unchanged: it accepts no aliases and infers no sha.
 
@@ -109,7 +110,10 @@ def problems(metadata: Any) -> list[str]:
 
 def refusal(body: Optional[str], metadata: Any) -> Optional[str]:
     """The refusal text for a review result on a core-fork pull card that ship cannot read, else None."""
-    if not is_review_result(metadata):
+    # Ship's generated brief is a review assignment, even when a reviewer forgets every
+    # metadata key. Other cards may merely discuss the contract or hand off a landing.
+    required = states_contract(body) and re.match(r"\s*Independent exact-head review of\b", body or "", re.IGNORECASE)
+    if not required and not is_review_result(metadata):
         return None
     if states_contract(body):
         cause = "this card states the ship review contract"
