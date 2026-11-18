@@ -284,6 +284,27 @@ def test_owner_archive_stays_closed_when_the_owner_goes_quiet(world, board, comp
     assert row.get('closed_uncompleted', False) is not completed
 
 
+@pytest.mark.parametrize('scope_state', [None, 'error'])
+def test_owner_evidenced_archive_settles_without_scope_inventory(world, board, scope_state):
+    """The exact owner terminal record, not a heartbeat, closes an archive without proving delivery."""
+    path, replica = _archive_published(world, board, completed=False)
+    with sqlite3.connect(replica) as db:
+        if scope_state is None:
+            db.execute("DELETE FROM replica WHERE coll='gateway'")
+        else:
+            db.execute("UPDATE replica SET data=? WHERE coll='gateway'", (json.dumps({
+                'gateway': 'owner', 'task_scopes': [
+                    {'profile': 'default', 'board': 'default', 'state': scope_state}]}),))
+    row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)[0]
+    assert row['status'] == 'archived' and row['closed_uncompleted']
+    assert not row['unfinished'] and not row['stale']
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT released FROM origin_obligations').fetchone()[0] == 0
+    # Missing scope evidence cannot make a stale transport authoritative.
+    row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1501)[0]
+    assert row['status'] == 'unknown' and row['unfinished'] and row['stale']
+
+
 def test_archive_not_yet_seen_stays_unknown_then_closes_on_catchup(world, board):
     """Replica lag: until the owner's archive record arrives the card is not known closed; after the catch-up it is."""
     path, replica, binding = world
