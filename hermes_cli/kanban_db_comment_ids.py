@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from typing import Optional
@@ -146,6 +147,11 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
             payload["comment_uid"] = row["uid"]
         if not system:
             payload.update(writer_provenance(conn, task_id))  # writer_run_id + portable writer_run_uid
+        # [daveey] A worker commenting on ANOTHER card: name its own card, so that card's owner can wait on
+        # "a comment from card X" (wait-comment --from-card). The author cannot say: workers share a profile.
+        own = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+        if not system and own and own != task_id and re.fullmatch(r"t_[0-9a-f]{6,}", own):
+            payload["writer_task"] = own
         if writer_kind:
             payload["writer_kind"] = writer_kind
             if writer_session:

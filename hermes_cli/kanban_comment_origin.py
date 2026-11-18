@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sqlite3
 from typing import Any, Optional
@@ -100,9 +101,68 @@ def backfill(conn: sqlite3.Connection) -> int:
 
 # --- wait-comment -----------------------------------------------------------------------------
 
+def _from_card(author: Optional[str], card: str) -> bool:
+    """A relayed card comment is authored ``<gateway>/<task id>`` (``worker-1/t_01a1...``); a bare id also counts."""
+    a, c = (author or "").strip().lower(), card.strip().lower()
+    return bool(c) and (a == c or a.endswith("/" + c))
+
+
+def _writer_tasks(conn: sqlite3.Connection, task_id: str) -> dict:
+    """``{comment key: writing card}`` from the ``commented`` events of ``task_id`` (``writer_task``, set when a
+    worker comments on another card). Keys are the portable ``comment_uid`` and the local ``("id", n)``."""
+    out: dict = {}
+    try:
+        rows = conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented' "
+                            "AND payload LIKE '%writer_task%'", (task_id,)).fetchall()
+    except sqlite3.Error:
+        return out
+    for (raw,) in rows:
+        try:
+            p = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        wt = str(p.get("writer_task") or "").strip().lower()
+        if not wt:
+            continue
+        # The integer id is the WRITER board's: it names a row here only when the event has no portable uid
+        # (an unsynced board). A synced event is matched by uid alone, never by a coinciding local integer.
+        if p.get("comment_uid"):
+            out[str(p["comment_uid"])] = wt
+        elif p.get("comment_id") is not None:
+            try:
+                out[("id", int(p["comment_id"]))] = wt
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
 def find_comment(conn: sqlite3.Connection, task_id: str, *, after_id: int = 0, from_gateway: Optional[str] = None,
-                 contains: Optional[str] = None) -> Optional[dict]:
-    """The first comment on ``task_id`` after ``after_id`` from ``from_gateway`` containing ``contains``."""
+                 contains: Optional[str] = None, from_card: Optional[str] = None) -> Optional[dict]:
+    """The first comment on ``task_id`` after ``after_id`` from ``from_gateway`` / ``from_card`` containing
+    ``contains``. ``from_card``: written by that card's worker (the ``writer_task`` on its ``commented`` event)
+    or authored ``<gateway>/<card>`` by the relay."""
+    if from_card and from_card.strip():
+        card, writers = from_card.strip().lower(), _writer_tasks(conn, task_id)
+        try:
+            rows = conn.execute("SELECT id, author, origin_gateway, body, uid FROM task_comments WHERE task_id = ? "
+                                "AND id > ? ORDER BY id", (task_id, int(after_id or 0))).fetchall()
+        except sqlite3.OperationalError:  # unsynced board: no uid column
+            rows = [(*r, None) for r in conn.execute(
+                "SELECT id, author, origin_gateway, body FROM task_comments WHERE task_id = ? AND id > ? "
+                "ORDER BY id", (task_id, int(after_id or 0))).fetchall()]
+        gw = (from_gateway or "").strip().lower()
+        for row in rows:
+            writer = writers.get(str(row[4])) if row[4] else writers.get(("id", int(row[0])))
+            if writer != card and not _from_card(row[1], card):
+                continue
+            if gw and gw != (row[2] or "").lower() and gw not in (row[1] or "").lower():
+                continue
+            if contains and contains.lower() not in (row[3] or "").lower():
+                continue
+            return {"id": row[0], "author": row[1], "origin_gateway": row[2], "body": row[3]}
+        return None
+    if from_card is not None:
+        return None  # an empty card id matches nothing
     sql = "SELECT id, author, origin_gateway, body FROM task_comments WHERE task_id = ? AND id > ?"
     params: list[Any] = [task_id, int(after_id or 0)]
     if from_gateway:
@@ -128,18 +188,120 @@ def run_wait_comment(args) -> int:
                 print(f"error: no task {args.task_id}")
                 return 2
             hit = find_comment(conn, args.task_id, after_id=args.after_id, from_gateway=args.from_gateway,
-                               contains=args.contains)
+                               contains=args.contains, from_card=getattr(args, "from_card", None))
     except sqlite3.Error as exc:
         print(f"error: {exc}")
         return 2
     if hit is None:
         print(f"not yet: no comment on {args.task_id} after {args.after_id}"
               + (f" from {args.from_gateway}" if args.from_gateway else "")
+              + (f" from card {args.from_card}" if getattr(args, "from_card", None) else "")
               + (f" containing {args.contains!r}" if args.contains else ""))
         return 1
     body = " ".join(str(hit["body"]).split())
     print(f"comment {hit['id']} by {hit['author']} (gateway {hit['origin_gateway'] or '?'}): {body[:300]}")
     return 0
+
+
+# --- comment-wake note ------------------------------------------------------------------------
+
+def _wait_comment_clauses(cmd: str, task_id: str) -> Optional[list[dict]]:
+    """The filters of a wake check that is ONLY ``hermes kanban wait-comment <task_id> ...`` alternatives joined
+    by ``||``; None for anything else (``&&``, ``;``, a pipe, a subshell, ``!``, another command, another card,
+    an unparsable quote): a probe this function cannot fully read is never judged."""
+    import shlex
+    if any(ch in (cmd or "") for ch in "$`#*?~{}\\\n"):
+        return None  # expansion, globbing, a comment or an escape: bash and this parser may read it differently
+    try:
+        lex = shlex.shlex(cmd or "", posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        tokens = list(lex)
+    except ValueError:
+        return None
+    clauses: list[list[str]] = [[]]
+    for tok in tokens:
+        if tok == "||":
+            clauses.append([])
+        elif tok and set(tok) <= set("();<>|&"):
+            return None
+        else:
+            clauses[-1].append(tok)
+    out: list[dict] = []
+    for words in clauses:
+        if words[:3] != ["hermes", "kanban", "wait-comment"]:
+            return None
+        clause: dict = {"contains": None, "from_gateway": None, "from_card": None, "task": None}
+        rest, i = words[3:], 0
+        while i < len(rest):
+            w = rest[i]
+            name, eq, val = w.partition("=")
+            key = {"--contains": "contains", "--from-gateway": "from_gateway", "--from-card": "from_card",
+                   "--after-id": "after_id"}.get(name)
+            if key is None:
+                if w.startswith("-") or clause["task"] is not None:
+                    return None
+                clause["task"] = w
+            elif eq:
+                clause[key] = val
+            elif i + 1 < len(rest):
+                clause[key] = rest[i + 1]
+                i += 1
+            else:
+                return None
+            i += 1
+        if clause["task"] != task_id:
+            return None
+        out.append(clause)
+    return out or None
+
+
+def comment_wake_note(conn: sqlite3.Connection, task_id: str, author: str, body: str,
+                      origin_gateway: Optional[str] = None) -> Optional[str]:
+    """What to tell the sender of a comment on a card parked on ``wait-comment``: nothing when the comment
+    satisfies one alternative, else the filters it missed. [daveey]
+
+    Regression for t_01a194b9de51e620 (2026-11-18): a source card's "bounded SOURCE GO REQUEST" sat five hours
+    because the owner's wake check wanted the phrase ``BOUNDED exact-head SOURCE GO REQUEST``; the sender could
+    not see that its line would not wake the reader. Judged only when the card is ``scheduled`` and its whole
+    probe is wait-comment alternatives on this card (:func:`_wait_comment_clauses`); the after-id is the
+    reader's, and a new comment is always after it. Never raises: the comment is already written."""
+    try:
+        row = conn.execute(
+            "SELECT w.cmd FROM task_wake_checks w JOIN tasks t ON t.id = w.task_id "
+            "WHERE w.task_id = ? AND w.purpose = 'wake' AND t.status = 'scheduled'", (task_id,)).fetchone()
+        if row is None or not row[0]:
+            return None
+        clauses = _wait_comment_clauses(str(row[0]), task_id)
+        if not clauses:
+            return None
+        try:
+            gw = (resolve_origin(author, origin_gateway) or "").lower()   # what add_comment stored
+        except ValueError:
+            gw = ""
+        low, a = (body or "").lower(), (author or "").lower()
+        own = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()            # add_comment's writer_task
+        own = own if re.fullmatch(r"t_[0-9a-f]{6,}", own) else ""
+        missed: list[str] = []
+        for c in clauses:
+            why: list[str] = []
+            if c["contains"] and c["contains"].lower() not in low:
+                why.append(f"the text {c['contains']!r}")
+            if c["from_card"] is not None:
+                card = c["from_card"].strip().lower()
+                if not card or (own != card and not _from_card(author, card)):
+                    why.append(f"a comment from card {c['from_card']}")
+            if c["from_gateway"]:
+                g = c["from_gateway"].strip().lower()
+                if g != gw and g not in a:
+                    why.append(f"a comment from gateway {c['from_gateway']}")
+            if not why:
+                return None
+            missed.append(" and ".join(why))
+    except (sqlite3.Error, TypeError, ValueError, AttributeError):
+        return None
+    return ("This comment will NOT wake the card: it is parked on wait-comment and needs "
+            + "; or ".join(missed) + ". It stays parked until its backstop unless a comment matches.")
 
 
 # --- park guard -------------------------------------------------------------------------------

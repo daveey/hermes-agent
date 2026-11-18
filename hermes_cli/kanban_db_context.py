@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 # build_worker_context() caps, sized for a ~100k-char prompt with headroom.
 _CTX_MAX_PRIOR_ATTEMPTS = 10      # most recent N prior runs shown in full
 _CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
+_CTX_MAX_PARENT_RESULTS = 8       # most recently completed N parent handoffs shown in full [daveey]
 _CTX_MAX_FIELD_BYTES    = 4 * 1024   # per summary/error/metadata/result
 _CTX_MAX_BODY_BYTES     = 8 * 1024   # per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
@@ -179,7 +180,7 @@ def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str
     parent_rows = conn.execute(
         "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id", (task_id,),
     ).fetchall()
-    wrote_header = False
+    done: list[tuple] = []
     for pid in (r["parent_id"] for r in parent_rows):
         pt = _kb.get_task(conn, pid)
         if not pt or pt.status != "done":
@@ -187,6 +188,18 @@ def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str
         runs = [r for r in _kb.list_runs(conn, pid) if r.outcome == "completed"]
         runs.sort(key=lambda r: r.started_at, reverse=True)
         run = runs[0] if runs else None
+        done_ts = run.ended_at if run is not None and run.ended_at else (pt.completed_at or None)
+        done.append((done_ts or 0, pid, pt, run))
+    # [daveey] A long-lived owner card collects finished prerequisites as parents (30 on t_01a1a1dea9c64d6a,
+    # 42 KB of a 99 KB context). Oldest handoffs are the stalest: keep the newest in full, name the rest.
+    older: list[tuple] = []
+    if len(done) > _CTX_MAX_PARENT_RESULTS:
+        by_age = sorted(done, key=lambda d: (d[0], d[1]))
+        older = by_age[:-_CTX_MAX_PARENT_RESULTS]
+        keep = {d[1] for d in by_age[-_CTX_MAX_PARENT_RESULTS:]}
+        done = [d for d in done if d[1] in keep]
+    wrote_header = False
+    for _ts, pid, pt, run in done:
         if not wrote_header:
             lines.append("## Parent task results")
             lines.append(
@@ -209,6 +222,13 @@ def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str
         meta_line = _ctx_metadata_line(run.metadata) if run is not None else None
         if meta_line:
             lines.append(meta_line)
+        lines.append("")
+    if older:
+        lines.append(
+            f"_({len(older)} earlier parent result{'s' if len(older) != 1 else ''} omitted; showing the "
+            f"{_CTX_MAX_PARENT_RESULTS} most recently completed. Read one with `hermes kanban show <id>`: "
+            + ", ".join(d[1] for d in older) + ")_"
+        )
         lines.append("")
 
 

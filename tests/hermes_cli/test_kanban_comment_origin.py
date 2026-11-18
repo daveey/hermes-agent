@@ -361,3 +361,167 @@ def test_pending_hub_request_keeps_the_card_parked(kanban_home, tmp_path, monkey
         kwc.run_due_wake_checks(conn, now=int(time.time()), wait=True)
         assert kb.get_task(conn, tid).status == "scheduled"
         assert not [e for e in kb.list_events(conn, tid) if e.kind == "wake_probe_stale"]
+
+
+# -- (e) a reply from one card, and telling the sender when a comment will not wake the reader -----
+
+@pytest.mark.parametrize("author,want", [
+    ("worker-1/t_01a1a1dea9c64d6a", 0),      # the source card's worker, on any gateway
+    ("t_01a1a1dea9c64d6a", 0),               # a bare id
+    ("worker-1/t_01a1c412aac138e9", 1),      # another card (a burn-down consumer recheck)
+    ("default", 1),
+    ("worker-1/t_01a1a1dea9c64d6a-x", 1),    # not a suffix match on a longer token
+])
+def test_wait_comment_from_card(kanban_home, capsys, author, want) -> None:
+    run = _cli()
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="owner", assignee="worker")
+        kb.add_comment(conn, tid, author, "bounded SOURCE GO REQUEST for PR4151")
+    assert run("wait-comment", tid, "--after-id", "0", "--from-card", "t_01a1a1dea9c64d6a") == want
+    assert run("wait-comment", tid, "--after-id", "0", "--from-card", "t_01a1a1dea9c64d6a",
+               "--contains", "rollback") == 1
+    capsys.readouterr()
+
+
+def _park_on(conn, tid: str, cmd: str) -> None:
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+        conn.execute("INSERT OR REPLACE INTO task_wake_checks(task_id, cmd, every, next_at) VALUES (?,?,900,?)",
+                     (tid, cmd, int(time.time()) + 900))
+
+
+def test_comment_cli_says_when_it_will_not_wake_a_parked_card(kanban_home, capsys) -> None:
+    """t_01a194b9de51e620: the request was worded 'bounded SOURCE GO REQUEST'; the probe wanted another phrase."""
+    run = _cli()
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="owner", assignee="worker")
+        _park_on(conn, tid, f"hermes kanban wait-comment {tid} --after-id 587534 --contains "
+                            f"'BOUNDED exact-head SOURCE GO REQUEST' || hermes kanban wait-comment {tid} "
+                            f"--after-id 587534 --contains 'PR4144'")
+    assert run("comment", tid, "--author", "worker-1/t_01a1a1dea9c64d6a",
+               "Run151 bounded SOURCE GO REQUEST for PR4151") == 0
+    out = capsys.readouterr().out
+    assert "will NOT wake the card" in out
+    assert "BOUNDED exact-head SOURCE GO REQUEST" in out and "PR4144" in out
+    # either clause matching is enough, and then nothing is said
+    assert run("comment", tid, "--author", "worker-1/t_01a1a1dea9c64d6a", "milestone on pr4144 reached") == 0
+    assert "will NOT wake" not in capsys.readouterr().out
+
+
+def test_comment_wake_note_from_card_and_other_probes(kanban_home, capsys) -> None:
+    run = _cli()
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="owner", assignee="worker")
+        other = kb.create_task(conn, title="other", assignee="worker")
+        plain = kb.create_task(conn, title="unparked", assignee="worker")
+        _park_on(conn, tid, f"hermes kanban wait-comment {tid} --after-id 0 --from-card t_01a1a1dea9c64d6a")
+        # a probe that is not wait-comment, or that waits on another card, is never judged
+        _park_on(conn, other, f"test -f /tmp/x || hermes kanban wait-comment {tid} --contains nope")
+    assert run("comment", tid, "--author", "worker-1/t_01a1c412aac138e9", "consumer recheck") == 0
+    assert "from card t_01a1a1dea9c64d6a" in capsys.readouterr().out
+    assert run("comment", tid, "--author", "worker-a2/t_01a1a1dea9c64d6a", "any wording at all") == 0
+    assert "will NOT wake" not in capsys.readouterr().out
+    for card in (other, plain):
+        assert run("comment", card, "--author", "default", "hello") == 0
+        assert "will NOT wake" not in capsys.readouterr().out
+
+
+def test_from_card_matches_a_worker_commenting_from_its_own_run(kanban_home, capsys, monkeypatch) -> None:
+    """Workers share a profile, so the author is 'default': the commented event's writer_task names the card."""
+    run = _cli()
+    with kbc.connect_closing() as conn:
+        owner = kb.create_task(conn, title="owner", assignee="worker")
+        _park_on(conn, owner, f"hermes kanban wait-comment {owner} --after-id 0 --from-card t_01a1a1dea9c64d6a")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_01a1c412aac138e9")      # an unrelated consumer card
+    assert run("comment", owner, "--author", "default", "recheck") == 0
+    assert "from card t_01a1a1dea9c64d6a" in capsys.readouterr().out
+    assert run("wait-comment", owner, "--after-id", "0", "--from-card", "t_01a1a1dea9c64d6a") == 1
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_01a1a1dea9c64d6a")      # the awaited card's worker
+    assert run("comment", owner, "--author", "default", "any wording") == 0
+    assert "will NOT wake" not in capsys.readouterr().out
+    assert run("wait-comment", owner, "--after-id", "0", "--from-card", "t_01a1a1dea9c64d6a") == 0
+    assert run("wait-comment", owner, "--after-id", "0", "--from-card", "t_01a1a1dea9c64d6a",
+               "--contains", "rollback") == 1
+    assert run("wait-comment", owner, "--after-id", "0", "--from-card", "  ") == 1
+    capsys.readouterr()
+
+
+def test_wake_note_agrees_with_the_probe_on_the_local_gateway(kanban_home, capsys, monkeypatch) -> None:
+    """A comment with no explicit origin is stored with this gateway: no false 'will not wake'."""
+    from hermes_cli import kanban_comment_origin as kco
+    monkeypatch.setattr(kco, "_local_gateway", lambda: "mbp")
+    run = _cli()
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="owner", assignee="worker")
+        _park_on(conn, tid, f"hermes kanban wait-comment {tid} --after-id 0 --from-gateway mbp")
+    assert run("comment", tid, "--author", "zed", "hello") == 0
+    assert "will NOT wake" not in capsys.readouterr().out
+    assert run("wait-comment", tid, "--after-id", "0", "--from-gateway", "mbp") == 0
+    with kbc.connect_closing() as conn:
+        _park_on(conn, tid, f"hermes kanban wait-comment {tid} --after-id 0 --from-gateway macbook")
+    assert run("comment", tid, "--author", "zed", "hello again") == 0
+    assert "from gateway macbook" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("probe", [
+    "hermes kanban wait-comment {t} --contains A1 && hermes kanban wait-comment {t} --contains B2",
+    "hermes kanban wait-comment {t} --contains A1 ; true",
+    "test -f /tmp/x || hermes kanban wait-comment {t} --contains A1",
+    "(hermes kanban wait-comment {t} --contains A1)",
+    "! hermes kanban wait-comment {t} --contains A1",
+    "hermes kanban wait-comment {t} --contains A1 | cat",
+    "hermes kanban wait-comment {t} --contains 'unterminated",
+    "hermes kanban wait-comment t_other --contains A1",
+    "hermes kanban wait-comment {t} --unknown-flag --contains A1",
+    "hermes kanban wait-comment {t} --contains PR#42 || hermes kanban wait-comment {t} --contains GO",
+    "hermes kanban wait-comment {t} --contains \"$PHRASE\"",
+    "hermes kanban wait-comment {t} --contains A1 2>/dev/null",
+    "hermes kanban wait-comment {t} --contains A*",
+])
+def test_a_probe_that_is_not_only_wait_comment_alternatives_is_never_judged(kanban_home, capsys, probe) -> None:
+    run = _cli()
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="owner", assignee="worker")
+        _park_on(conn, tid, probe.format(t=tid))
+    assert run("comment", tid, "--author", "default", "matches nothing") == 0
+    assert "will NOT wake" not in capsys.readouterr().out
+
+
+def test_quoted_separators_and_equals_form_are_read_as_values(kanban_home, capsys) -> None:
+    run = _cli()
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="owner", assignee="worker")
+        _park_on(conn, tid, f"hermes kanban wait-comment {tid} --after-id=5 --contains 'GO; proceed || now' "
+                            f"|| hermes kanban wait-comment {tid} --contains=PR4144")
+        ready = kb.create_task(conn, title="not parked", assignee="worker")
+        with kb.write_txn(conn):   # a leftover probe row on a card that is not scheduled says nothing
+            conn.execute("INSERT INTO task_wake_checks(task_id, cmd, every, next_at) VALUES (?,?,900,0)",
+                         (ready, f"hermes kanban wait-comment {ready} --contains nope"))
+    assert run("comment", tid, "--author", "default", "go; proceed || now") == 0
+    assert "will NOT wake" not in capsys.readouterr().out
+    assert run("comment", tid, "--author", "default", "something else") == 0
+    out = capsys.readouterr().out
+    assert "'GO; proceed || now'" in out and "PR4144" in out
+    assert run("comment", ready, "--author", "default", "hello") == 0
+    assert "will NOT wake" not in capsys.readouterr().out
+
+
+def test_no_space_alternatives_and_a_foreign_comment_id_never_matching_a_local_row(kanban_home, capsys) -> None:
+    run = _cli()
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="owner", assignee="worker")
+        _park_on(conn, tid, f"hermes kanban wait-comment {tid} --contains A1||hermes kanban wait-comment {tid} "
+                            f"--contains B2")
+        local = kb.add_comment(conn, tid, "default", "unrelated local note")
+        # A synced event from another board: its comment_id is that board's integer and happens to equal ours.
+        kb._append_event(conn, tid, "commented", {"author": "default", "len": 5, "comment_id": local,
+                                                   "comment_uid": "u-foreign-77",
+                                                   "writer_task": "t_01a1a1dea9c64d6a"})
+        kb._append_event(conn, tid, "commented", {"comment_id": "not-a-number", "writer_task": "t_01a1a1dea9c64d6a"})
+    assert run("wait-comment", tid, "--after-id", "0", "--from-card", "t_01a1a1dea9c64d6a") == 1
+    assert run("comment", tid, "--author", "default", "has b2 in it") == 0
+    assert "will NOT wake" not in capsys.readouterr().out
+    assert run("comment", tid, "--author", "default", "neither") == 0
+    out = capsys.readouterr().out
+    assert "'A1'" in out and "'B2'" in out
+

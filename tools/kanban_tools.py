@@ -1376,6 +1376,10 @@ def _handle_comment(args: dict, **kw) -> str:
             extra["delivery"] = (
                 "the card has a live worker run: it gets this note at its next model call "
                 "(often a few minutes); a comment_delivered event on the card confirms it")
+        if os.environ.get("HERMES_KANBAN_TASK") != str(tid):  # [daveey] a parked reader this comment will not wake
+            from hermes_cli.kanban_comment_origin import comment_wake_note
+            if note := comment_wake_note(conn, str(tid), author, str(body)):
+                extra["wake"] = note
         return _ok(task_id=tid, comment_id=cid, **extra,
                    **({"subscribed": True} if subscribed else {}))
 

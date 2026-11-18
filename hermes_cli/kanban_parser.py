@@ -499,6 +499,10 @@ _SPECS = [
              help="Only comments from this gateway: its origin_gateway, or any author spelling of it "
                   "(hub:gw:<gw>, <gw>, <gw>-chat, <gw>/t_...)"),
         _arg("--contains", default=None, help="Only comments whose body contains this text (case-insensitive)"),
+        _arg("--from-card", default=None,
+             help="Only comments written by this card's worker (it commented from inside its run, or the relay "
+                  "authored it <gateway>/<task id>). Use it to wait for another card's answer instead of a phrase "
+                  "the other card has to reproduce"),
     ], help="Wake-probe primitive for a reply: exit 0 a matching comment exists, 1 not yet, 2 cannot tell. "
             "Use it instead of matching task_comments.author (the park guard refuses that: author_probe)"),
     _cmd("attach", [

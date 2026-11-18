@@ -1080,6 +1080,9 @@ def _cmd_comment(args: argparse.Namespace) -> int:
         except ValueError as exc:
             return _err(f"kanban comment: {exc}", 2)
         live = kb.live_run_id(conn, args.task_id)
+        from hermes_cli.kanban_comment_origin import comment_wake_note  # [daveey] parked reader, unmatched note
+        wake_note = comment_wake_note(conn, args.task_id, author, body,
+                                      origin_gateway=getattr(args, "origin_gateway", None))
         from hermes_cli.kanban_comment_liveness import EXITED_NOTE, worker_exited
         exited = live is not None and worker_exited(conn, args.task_id, live)  # [daveey] no reader left
         from hermes_cli.kanban_board_delivery import cli_lines, remote_runner
@@ -1091,6 +1094,8 @@ def _cmd_comment(args: argparse.Namespace) -> int:
         print(EXITED_NOTE[0].upper() + EXITED_NOTE[1:] + ".")
     elif live is not None and not own_run and not remote:
         print("The card has a live worker run: it gets this note at its next model call.")
+    if wake_note and not own_run:
+        print(wake_note)
     for line in queued:
         print(line)
     return 0

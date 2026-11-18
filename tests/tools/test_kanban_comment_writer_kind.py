@@ -190,3 +190,53 @@ def test_mixed_notes_keep_operator_header_and_stamp_each_line(worker_home, monke
     assert note.startswith("New notes " + OPERATOR_HEADER), note
     assert "- default (agent chat, another session) at " in note
     assert "- default (another session) at " in note  # the human line keeps the old stamp
+
+
+def test_tool_comment_reports_a_parked_reader_it_will_not_wake(worker_home, monkeypatch):
+    """t_01a194b9de51e620: the sender must learn at once that its line misses the reader's wait-comment."""
+    import time
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    tid = _ready_task("owner")
+    conn = kbc.connect()
+    try:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+            conn.execute("INSERT OR REPLACE INTO task_wake_checks(task_id, cmd, every, next_at) VALUES (?,?,900,?)",
+                         (tid, f"hermes kanban wait-comment {tid} --after-id 0 --contains 'SOURCE-GO-REQUEST'",
+                          int(time.time()) + 900))
+    finally:
+        conn.close()
+    miss = json.loads(kt._handle_comment({"task_id": tid, "body": "bounded source go request for PR4151"}))
+    assert "will NOT wake the card" in miss["wake"] and "SOURCE-GO-REQUEST" in miss["wake"]
+    hit = json.loads(kt._handle_comment({"task_id": tid, "body": "SOURCE-GO-REQUEST PR4151@97ce66fd"}))
+    assert "wake" not in hit
+
+
+def test_tool_comment_from_a_worker_satisfies_from_card(worker_home, monkeypatch):
+    """The tool authors every worker as the profile; the awaited card is known from its run's environment."""
+    import time
+    from hermes_cli import kanban_comment_origin as kco
+    tid = _ready_task("owner")
+    conn = kbc.connect()
+    try:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
+            conn.execute("INSERT OR REPLACE INTO task_wake_checks(task_id, cmd, every, next_at) VALUES (?,?,900,?)",
+                         (tid, f"hermes kanban wait-comment {tid} --after-id 0 --from-card t_01a1a1dea9c64d6a",
+                          int(time.time()) + 900))
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_01a1c412aac138e9")
+    miss = json.loads(kt._handle_comment({"task_id": tid, "body": "consumer recheck"}))
+    assert "from card t_01a1a1dea9c64d6a" in miss["wake"]
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_01a1a1dea9c64d6a")
+    hit = json.loads(kt._handle_comment({"task_id": tid, "body": "request, in any wording"}))
+    assert "wake" not in hit
+    assert _payload(tid, hit["comment_id"])["writer_task"] == "t_01a1a1dea9c64d6a"
+    conn = kbc.connect()
+    try:
+        found = kco.find_comment(conn, tid, from_card="t_01a1a1dea9c64d6a")
+    finally:
+        conn.close()
+    assert found is not None and found["id"] == hit["comment_id"]
+
