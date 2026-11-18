@@ -37,7 +37,16 @@ def _payload(event: Mapping[str, Any]) -> dict | None:
         value = json.loads(raw) if isinstance(raw, str) else raw
     except ValueError:
         return None
-    return value if isinstance(value, dict) else None
+    if not isinstance(value, dict):
+        return None
+    # Append-owned transport evidence is not part of the frozen predicate. It
+    # must remain an object; unknown application keys still fail strict parsing.
+    value = dict(value)
+    for key in ("_recovery_history_v1", "_wake_episode_v1"):
+        if key in value:
+            if not isinstance(value.pop(key), dict):
+                return None
+    return value
 
 
 def _stop(event: Mapping[str, Any]) -> dict | None:
@@ -58,7 +67,8 @@ def _stop(event: Mapping[str, Any]) -> dict | None:
     baseline = data["producer_baseline"]
     if baseline is not None and ("producer" not in spec or not isinstance(baseline, dict)
                                 or baseline.keys() != {"event_uid", "run_uid"}
-                                or not all(_uid(v) for v in baseline.values())):
+                                or not _uid(baseline["run_uid"])
+                                or (baseline["event_uid"] is not None and not _uid(baseline["event_uid"]))):
         return None
     return data
 
