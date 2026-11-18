@@ -131,6 +131,15 @@ from tools import kanban_tools
 turn = fixtures.turn
 
 
+def policy_launch(monkeypatch, task_id):
+    import model_tools
+    from tools.origin_cli_bridge import Launch
+    with monkeypatch.context() as scoped:
+        scoped.setattr(model_tools, "_handle_function_call", lambda *a: Launch(task_id))
+        return model_tools.handle_function_call("terminal", {}, task_id=task_id,
+                                               enabled_tools=["kanban_create", "terminal"])
+
+
 @pytest.mark.parametrize("entrypoint", ["client", "cli"])
 @pytest.mark.parametrize("revoke", [False, True])
 def test_real_subprocess_uses_only_parent_custody(turn, monkeypatch, tmp_path, revoke, entrypoint):
@@ -138,13 +147,14 @@ def test_real_subprocess_uses_only_parent_custody(turn, monkeypatch, tmp_path, r
     import sys
     from tools import origin_cli_bridge as bridge
     from tools.environments.local import build_subprocess_env
+    launch = policy_launch(monkeypatch, "terminal-test")
+    monkeypatch.setattr("model_tools._select_tool_names", lambda *a, **k: {"kanban_create"})
     monkeypatch.setattr("model_tools.handle_function_call",
                         lambda name, args, **kw: kanban_tools._handle_create(args))
     script = tmp_path / "cli_client.py"
     script.write_text("import json,sys\nfrom tools.origin_cli_bridge import request\n"
                       "print(json.dumps(request(sys.argv[1], {'title':'subprocess child',"
                       "'assignee':'default','placement':'local','requires':[]})))\n")
-    launch = bridge.Launch("subprocess-test")
     try:
         if revoke:
             turn.release()
@@ -203,11 +213,29 @@ def test_post_admission_exception_reports_unknown(echo_launch, monkeypatch):
     assert result["task_id"] == "committed-maybe"
 
 
+def test_transport_without_dispatch_policy_refuses(turn, monkeypatch):
+    from tools import origin_cli_bridge as bridge
+    called = []
+    monkeypatch.setattr("model_tools.handle_function_call", lambda *a, **k: called.append(a))
+    launch = bridge.Launch("not-authority")
+    try:
+        result = bridge.request(launch.locator, {"title": "denied"})
+        assert not result["ok"]
+        assert result["error"] == "CLI launch has no parent dispatch policy"
+        assert called == []
+        with kbc.connect_closing() as conn:
+            assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
+    finally:
+        launch.close()
+        launch._thread.join(2)
+
+
 def test_transport_creates_with_parent_custody(turn, monkeypatch):
     from tools import origin_cli_bridge as bridge
+    launch = policy_launch(monkeypatch, "terminal-test")
+    monkeypatch.setattr("model_tools._select_tool_names", lambda *a, **k: {"kanban_create"})
     monkeypatch.setattr("model_tools.handle_function_call",
                         lambda name, args, **kw: kanban_tools._handle_create(args))
-    launch = bridge.Launch("terminal-test")
     try:
         result = bridge.request(launch.locator, {"title": "socket child", "assignee": "default",
                                                  "placement": "local", "requires": []})

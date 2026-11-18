@@ -983,7 +983,11 @@ def _tool_function_scope(function):
     return _scoped
 
 
+from tools.origin_cli_policy import capture_dispatch as _capture_cli_dispatch
+
+
 @_tool_function_scope
+@_capture_cli_dispatch
 def handle_function_call(
     function_name: str, function_args: dict[str, Any], task_id: Optional[str] = None,
     tool_call_id: Optional[str] = None, session_id: Optional[str] = None, turn_id: Optional[str] = None,

@@ -38,7 +38,8 @@ class Launch:
         from tools.thread_context import _callback_api
         self._ctx = copy_context()
         self._callbacks = [(pair, pair[0]()) for pair in _callback_api()]
-        self._task_id = task_id
+        from tools.origin_cli_policy import current_policy
+        self._policy = current_policy()  # task_id is correlation, never a grant
         self._gate = LaunchGate()
         self._nonce = secrets.token_hex(24)
         self._server, self._child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -75,13 +76,14 @@ class Launch:
         # Server owns its fd until its loop exits; never close underneath recvmsg.
 
     def _invoke(self, args, gate):
-        from model_tools import handle_function_call
+        if self._policy is None:
+            return {"ok": False, "error": "CLI launch has no parent dispatch policy"}
         previous = [(setter, getter()) for (getter, setter), _ in self._callbacks]
         try:
             for (_, setter), value in self._callbacks:
                 setter(value)
             with strict_local_creation(gate=gate):
-                return json.loads(handle_function_call("kanban_create", args, task_id=self._task_id))
+                return self._policy.create(args)
         finally:
             for setter, value in previous:
                 setter(value)
