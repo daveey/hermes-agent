@@ -25,12 +25,13 @@ class TestWaitTimeoutClarity:
             registry.kill_process(sid)
 
     def test_clamped_wait_keeps_clamp_note_and_running_semantics(self, registry, monkeypatch):
-        monkeypatch.setenv("TERMINAL_TIMEOUT", "1")
+        monkeypatch.setenv("TERMINAL_MAX_WAIT", "1")  # the wait's own limit; TERMINAL_TIMEOUT no longer clamps it
         sid = _spawn_sleeper(registry)
         try:
             r = registry.wait(sid, timeout=600)
             assert r["status"] == "timeout"
             assert r["process_running"] is True
+            assert "clamped to configured limit of 1s" in r["timeout_note"]
         finally:
             registry.kill_process(sid)
 

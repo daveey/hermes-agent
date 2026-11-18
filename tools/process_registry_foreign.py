@@ -142,10 +142,8 @@ def foreign_log(registry, entry: dict[str, Any], offset: Optional[int], limit: i
 
 def foreign_wait(registry, entry: dict[str, Any], timeout: Optional[int]) -> dict[str, Any]:
     from tools.interrupt import consume_yield, is_interrupted
-    try:
-        max_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
-    except (TypeError, ValueError):
-        max_timeout = 180
+    from tools.process_wait_limit import max_wait_seconds
+    max_timeout = max_wait_seconds()  # same window as ProcessRegistry.wait
     if timeout is not None and timeout <= 0:
         return {"status": "error", "error": f"timeout must be positive (got {timeout})"}
     effective = min(timeout or max_timeout, max_timeout)

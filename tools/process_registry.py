@@ -2008,14 +2008,13 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
     def wait(self, session_id: str, timeout: int | None = None) -> dict:
         """Block until the process exits, the timeout elapses, the user interrupts, or a
         mid-turn user message (steer/redirect → ``request_yield``) releases the wait.
-        ``timeout`` defaults to (and is clamped by) TERMINAL_TIMEOUT. Returns a dict
+        ``timeout`` defaults to (and is clamped by) ``process_wait_limit.max_wait_seconds``
+        (TERMINAL_MAX_WAIT, 400 s, under the executor's per-call deadline). Returns a dict
         with status exited|timeout|interrupted|not_found|error and an output snapshot."""
         from tools.interrupt import consume_yield as _consume_yield, is_interrupted as _is_interrupted
+        from tools.process_wait_limit import max_wait_seconds
 
-        try:
-            max_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
-        except (ValueError, TypeError):
-            max_timeout = 180
+        max_timeout = max_wait_seconds()
         # The schema says minimum=1 but not every caller enforces it; timeout=0 is
         # falsy and would silently fall through to the default wait.
         if timeout is not None and timeout <= 0:
@@ -2525,7 +2524,8 @@ PROCESS_SCHEMA = {
         "Completed results remain retrievable by session_id when resuming their owning conversation "
         "(up to 7 days, newest 64 results per profile; rolling output tail). "
         "poll: status + new output. log: full output, paged. wait: block "
-        "until exit or timeout (partial output on timeout). write vs "
+        "until exit or timeout (partial output on timeout); it returns the moment the process exits, "
+        "so use it instead of a terminal sleep followed by a log read. write vs "
         "submit: submit appends Enter — use it to answer prompts; write "
         "sends raw bytes, no newline. close: EOF stdin. kill: terminate. "
         "handoff (subagents only): transfer a running process you started to your parent agent, which then "
@@ -2549,7 +2549,7 @@ PROCESS_SCHEMA = {
             },
             "timeout": {
                 "type": "integer",
-                "description": "Max seconds for 'wait'.",
+                "description": "Max seconds for 'wait'. Default: the longest allowed window (400 unless configured). The call returns as soon as the process exits, so leave it unset unless you need a shorter check.",
                 "minimum": 1
             },
             "offset": {
