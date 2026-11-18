@@ -31,7 +31,7 @@ def test_pnpm_restores_without_saving_and_bounds_validation():
 @pytest.mark.parametrize('fail_call', [0, 1, 2])
 def test_validation_rebuilds_cached_output_and_reports_mismatch(tmp_path, fail_call):
     fake = tmp_path / 'nix'
-    fake.write_text('''#!/bin/bash
+    fake.write_text('''#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$RUNNER_TEMP/calls"
 count=$(wc -l < "$RUNNER_TEMP/calls")
 if [ "$count" = "$FAIL_CALL" ]; then
