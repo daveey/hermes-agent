@@ -1448,6 +1448,16 @@ def _survivable_foreground(command: str, env: Any, plan: _ExecPlan, *, task_id: 
     return SurvivableForeground(command=command, task_id=eff, owner_task_id=task_id or eff, session_key=session_key)
 
 
+def _note_execute_seconds(seconds: float) -> None:
+    """Never raises: it is called inside the retry ``try``, where an exception would re-run a
+    command that already finished."""
+    try:
+        from tools.terminal_tool_wait_hint import note_execute_seconds
+        note_execute_seconds(seconds)
+    except Exception:
+        logger.debug("wait hint: could not record the command's run time", exc_info=True)
+
+
 def _run_foreground(
     command: str, env: Any, plan: _ExecPlan, *,
     task_id: Optional[str], session_id: Optional[str], session_key: str, cwd_key: str,
@@ -1487,8 +1497,11 @@ def _run_foreground(
             result = None
             oom_watch = OomWatch(survivable) if env_type == "local" else None  # OOM kills in its scope [daveey]
             try:
+                _execute_started = time.monotonic()
                 result = env.execute(command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
                                      **exec_kwargs)
+                # This attempt's own run time, for the wait hint: not approval, sandbox start or retries.
+                _note_execute_seconds(time.monotonic() - _execute_started)
             finally:
                 if survivable is not None:
                     survivable.release(result)
@@ -1887,7 +1900,9 @@ def _handle_terminal(args, **kw):
             )
     if heartbeat:
         notify_on_complete = True  # the heartbeat rides the completion delivery path
-    return terminal_tool(
+    from tools.terminal_tool_wait_hint import annotate as _annotate_wait_hint, take_execute_seconds
+    take_execute_seconds()  # drop anything an earlier call on this thread left unread
+    return _annotate_wait_hint(terminal_tool(
         command=args.get("command"),
         background=args.get("background", False),
         timeout=args.get("timeout"),
@@ -1900,7 +1915,8 @@ def _handle_terminal(args, **kw):
         heartbeat=heartbeat,
         persist_on_release=persist_on_release,
         http_readback=args.get("http_readback", False),
-    )
+    ), args.get("command"), background=bool(args.get("background", False)), task_id=kw.get("task_id"),
+        elapsed_seconds=take_execute_seconds())
 
 
 registry.register(
