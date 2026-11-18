@@ -5,7 +5,6 @@ import json
 import os
 import shlex
 import time
-import uuid
 from datetime import UTC, datetime
 
 UNREAD_EXIT = 4
@@ -156,8 +155,7 @@ def _resolve(rows, event, payload, *, local_writer=False):
     Legacy synced events have no portable reference. Require acknowledgement of
     every plausible same-time/author row rather than guess among collisions.
     The timestamp tolerance covers the writer crossing a second between inserts;
-    UUIDv7 write times cover legacy rows stamped before the write lock (``_same_write``).
-    Body length cannot disambiguate because add_comment strips stored text.
+    body length cannot disambiguate because add_comment strips stored text.
     """
     if payload.get("comment_uid"):
         return [r for r in rows if "uid" in r.keys() and r["uid"] == payload["comment_uid"]]
@@ -168,42 +166,8 @@ def _resolve(rows, event, payload, *, local_writer=False):
         # the second timestamp. Local run provenance makes its integer usable.
         return [r for r in rows if r["id"] == payload.get("comment_id")
                 and r["author"] == payload["author"].strip()]
-    return [r for r in rows if (abs(r["created_at"] - event["created_at"]) <= 1 or _same_write(r, event))
+    return [r for r in rows if abs(r["created_at"] - event["created_at"]) <= 1
             and (not payload.get("author") or r["author"] == payload["author"].strip())]
-
-
-def _uuid7_ms(uid):
-    """Millisecond write time a UUIDv7 carries; None for any other value."""
-    try:
-        value = uuid.UUID(str(uid))
-    except (ValueError, TypeError, AttributeError):
-        return None
-    return value.int >> 80 if value.version == 7 else None
-
-
-def _same_write(row, event):
-    """Row and event written in one ``add_comment`` transaction, proven by write clocks.
-
-    Legacy ``add_comment`` stamped the row's ``created_at`` before waiting for the
-    write lock and the event's after it, so the integers drift by seconds (5 s and
-    7 s seen live) while the UUIDv7 uids, minted inside the transaction, sit
-    milliseconds apart. A uid only records the write when it was minted then: the
-    sync-enable backfill gives every old row and event a uid of the enable instant,
-    so the event's uid time must agree with its own ``created_at`` (a floor, so
-    within [0, 2 s)), the row must be stamped at most ``_LOCK_DRIFT`` before the
-    event, and the two uids within a second.
-    """
-    keys = row.keys()
-    row_ms = _uuid7_ms(row["uid"]) if "uid" in keys else None
-    event_ms = _uuid7_ms(event["uid"]) if "uid" in event.keys() else None
-    if row_ms is None or event_ms is None:
-        return False
-    minted_at_write = 0 <= event_ms - event["created_at"] * 1000 < 2000
-    drift = event["created_at"] - row["created_at"]
-    return minted_at_write and 0 <= drift <= _LOCK_DRIFT and abs(row_ms - event_ms) <= 1000
-
-
-_LOCK_DRIFT = 60  # seconds a legacy row stamp may precede its event (write-lock wait)
 
 
 def cli_guard(args, tid, verb):
