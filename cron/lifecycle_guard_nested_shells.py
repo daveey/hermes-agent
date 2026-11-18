@@ -261,7 +261,9 @@ def _hop_data_command(name: Optional[str], arguments: list[str]) -> bool:
     return name in _HOP_DATA_COMMANDS
 
 
-def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
+def _remote_reads_stdin(
+    remote: list[str], hops: int = 1, *, first_host: Optional[bool] = None,
+) -> bool:
     """Whether an ssh remote command (its words, as ssh joins them) hands stdin to a shell:
     none (a login shell), unparsable, any segment running a shell that reads stdin, or a
     further hop whose own input is such a shell (another ``ssh``), or a user switch (``sudo``,
@@ -270,6 +272,8 @@ def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
     (``python3 -``, ``cat``) reads the file as data (self-heal lifecycleguard-6d64a5ee3d48).
     Past the first hop that is an allowlist (``_HOP_DATA_COMMANDS``): any other command, a
     shell's script operand included (``bash /dev/stdin``), counts as a stdin shell."""
+    if first_host is None:
+        first_host = hops == 1
     if not remote:
         return True
     if hops > _MAX_SSH_HOPS:
@@ -288,7 +292,8 @@ def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
                 return True
             # A -c payload inherits the stdin: follow it like a hop (`bash -c bash`,
             # `sh -c "exec sh"`; review 5911756789 B1), under the same depth cap.
-            if kind == "payload" and _remote_reads_stdin([value or ""], hops + 1):
+            if kind == "payload" and _remote_reads_stdin(
+                    [value or ""], hops + 1, first_host=first_host):
                 return True
             if kind == "script" and hops > 1:
                 return True  # `bash /dev/stdin`, `sh -- -`: not modelled past the first hop
@@ -297,6 +302,13 @@ def _remote_reads_stdin(remote: list[str], hops: int = 1) -> bool:
             return True  # an ssh hop feeding a shell, or a user switch's shell (`su -l`, `sudo -i`)
         if name in ("sudo", "su", "runuser", "doas"):
             return True  # a user switch on the remote side: fail closed rather than model it
+        # A first-host -c wrapper must not turn plain `git apply` patch data into
+        # shell code. Keep all unknown payload commands conservative: treating every
+        # payload as a bare first hop would also allow `source /dev/stdin`. Only this
+        # exact argv is proven here; options/aliases/other subcommands stay closed.
+        if (first_host and index is not None and name == "git"
+                and _split_redirections(view[index + 1:])[0] == ["apply"]):
+            continue
         if hops > 1 and index is not None and name != "ssh" and not _hop_data_command(
                 name, _split_redirections(view[index + 1:])[0]):
             return True  # past the first hop only known data consumers read stdin as data

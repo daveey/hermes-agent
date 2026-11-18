@@ -871,7 +871,60 @@ def test_multi_hop_ssh_data_consumer_reads_stdin_as_data(tmp_path, live_kanban_d
             False, None), (shape, names)
 
 
+@pytest.mark.parametrize("payload", [
+    "cd /tmp && git apply", "bash -c 'cd /tmp && git apply'",
+    "bash -lc 'cd /tmp && git apply'", "sh -c 'git apply'",
+    "bash -c \"sh -c 'git apply'\"",
+])
+def test_first_hop_payload_patch_is_data(tmp_path, live_kanban_db, payload):
+    import shlex
+
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(f"t ( bash {live_kanban_db} )\n")
+    command = f"ssh h1 {shlex.quote(payload)} < {patch_file}"
+    for names in (frozenset(), frozenset({"zz"}), None):
+        assert scan_gateway_lifecycle(command, cwd=str(tmp_path), session_aliases=names) == (
+            False, None)
+
+
+@pytest.mark.parametrize("prefix", ["", "env ", "timeout 5 ", "nice ", "command "])
+@pytest.mark.parametrize("flags", ["-c", "-ec", "-o pipefail -c"])
+def test_first_host_patch_wrapper_real_bash(tmp_path, live_kanban_db, prefix, flags):
+    import shlex
+
+    from tools.environments.local import build_subprocess_env
+
+    body = f"t ( bash {live_kanban_db} )\n"
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text("diff --git a/proof.txt b/proof.txt\nnew file mode 100644\n"
+                          "--- /dev/null\n+++ b/proof.txt\n@@ -0,0 +1 @@\n+" + body)
+    payload = f"{prefix}bash {flags} 'git apply'"
+    with patch_file.open() as stream:
+        result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", payload],
+                                stdin=stream, cwd=tmp_path, env=build_subprocess_env(),
+                                capture_output=True, text=True, encoding="utf-8",
+                                timeout=10, check=False)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "proof.txt").read_text() == body
+    command = f"ssh h1 {shlex.quote(payload)} < {patch_file}"
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+
+
+def test_first_host_patch_exception_preserves_budget_and_all_segments():
+    from cron.lifecycle_guard_nested_shells import _MAX_SSH_HOPS, _remote_reads_stdin
+
+    assert _remote_reads_stdin(["git apply; source /dev/stdin"], 2, first_host=True)
+    assert _remote_reads_stdin(["git apply"], _MAX_SSH_HOPS + 1, first_host=True)
+    assert not _remote_reads_stdin(["git apply"], _MAX_SSH_HOPS, first_host=True)
+    assert _remote_reads_stdin(["git apply"], 2)
+
+
 _MULTI_HOP_SHELLS = [
+    "ssh h1 'ssh h2 git apply' < {script}",
+    "ssh h1 \"bash -c 'ssh h2 git apply'\" < {script}",
+    "ssh h1 \"ssh h2 'bash -c git'\" < {script}",
+    "ssh h1 \"bash -c 'git -c alias.apply=!bash apply'\" < {script}",
+    "ssh h1 \"bash -c 'source /dev/stdin; git apply'\" < {script}",
     "ssh h1 'ssh h2' < {script}",  # the last hop has no command: a remote login shell
     "ssh h1 'ssh h2 bash -s' < {script}",
     "ssh h1 \"ssh h2 'bash -l'\" < {script}",
