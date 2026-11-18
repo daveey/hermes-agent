@@ -112,15 +112,22 @@ def test_an_old_core_pool_keeps_the_mandatory_pin_card_home(gws, monkeypatch):
 
 # --- claim -----------------------------------------------------------------------------------------------------
 
-def test_a_worker_that_serves_the_pin_claims_it_and_runs_exactly_that_model(gws, svc, monkeypatch):
+@pytest.mark.parametrize("review_without_evidence", [True, False])
+def test_a_worker_that_serves_the_pin_claims_it_and_runs_exactly_that_model(
+        gws, svc, monkeypatch, review_without_evidence):
     hub, worker = gws
     _attest(monkeypatch)
-    tid = _create(hub, **PIN)["task_id"]
+    title = REVIEW["title"] if review_without_evidence else "Implement the change"
+    tid = _create(hub, title=title, **PIN)["task_id"]
     assert sorted(_runs_on(hub.conn, tid)) == sorted([POOL, mp.LABEL])  # queued for the pool, not a default-placement copy
     hub.round()
     worker.round()
     worker.tick()
     assert svc.board(BOARD)["leases"][tid]["holder"] == WORKER
+    if review_without_evidence:
+        # Pool pickup carries the pin, but cannot turn unknown authorship into independence.
+        assert _route(worker.conn, tid) == []
+        return
     [route] = _route(worker.conn, tid)
     assert (route["model"], route["provider"]) == ("claude-opus-5-5", "anthropic"), route
     assert kb.get_task(worker.conn, tid).model_pin_mandatory == 1
