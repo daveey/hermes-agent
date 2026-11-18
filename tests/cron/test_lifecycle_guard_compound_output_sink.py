@@ -11,7 +11,8 @@ from tools.shell_heredoc import output_reaches_shell
 
 _BODIES = ["cd .; {sink}", ":; {sink}", "( {sink} )", "\n{sink}\n",
            "true && {sink}", "false || {sink}", "{{ :; {sink}; }}",
-           "if true; then {sink}; fi", "case x in x) {sink};; esac"]
+           "if true; then {sink}; fi", "case x in x) {sink};; esac",
+           "case x in (x) {sink};; esac"]
 
 
 @pytest.mark.parametrize("body", _BODIES)
@@ -43,6 +44,18 @@ def _assert_execution(command, tmp_path, marker, shell):
     result = subprocess.run([bash, "--noprofile", "--norc", "-c", command],
                             cwd=tmp_path, capture_output=True, text=True,
                             encoding="utf-8", timeout=15, check=False)
+    if " > >( case x in x) " in command:
+        major = subprocess.check_output(
+            [bash, "--noprofile", "--norc", "-c", 'printf "%s" "${BASH_VERSINFO[0]}"'],
+            text=True, encoding="utf-8", timeout=5,
+        )
+        if int(major) < 4:
+            # Bash 3 mistakes the unbalanced case-pattern ')' for the process
+            # substitution closer. Pin that rejection; scanner assertions in
+            # the caller still run, and the (x) twin executes on every Bash.
+            assert result.returncode != 0 and "syntax error" in result.stderr
+            assert not marker.exists()
+            return
     assert result.returncode == 0, result.stderr
     assert marker.exists() is shell, command
     if shell:

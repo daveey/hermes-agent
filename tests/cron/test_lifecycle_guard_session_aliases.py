@@ -889,7 +889,7 @@ def test_first_hop_payload_patch_is_data(tmp_path, live_kanban_db, payload):
 
 @pytest.mark.parametrize("prefix", ["", "env ", "timeout 5 ", "nice ", "command "])
 @pytest.mark.parametrize("flags", ["-c", "-ec", "-o pipefail -c"])
-def test_first_host_patch_wrapper_real_bash(tmp_path, live_kanban_db, prefix, flags):
+def test_first_host_patch_wrapper_real_bash(tmp_path, live_kanban_db, prefix, flags, monkeypatch):
     import shlex
 
     from tools.environments.local import build_subprocess_env
@@ -899,6 +899,14 @@ def test_first_host_patch_wrapper_real_bash(tmp_path, live_kanban_db, prefix, fl
     patch_file.write_text("diff --git a/proof.txt b/proof.txt\nnew file mode 100644\n"
                           "--- /dev/null\n+++ b/proof.txt\n@@ -0,0 +1 @@\n+" + body)
     payload = f"{prefix}bash {flags} 'git apply'"
+    # The parent enforces a hard timeout; this fixture needs only argv/stdin
+    # forwarding, not GNU coreutils (absent on the room minis).
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    timeout = bindir / "timeout"
+    timeout.write_text('#!/bin/sh\nshift\nexec "$@"\n', encoding="utf-8")
+    timeout.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
     with patch_file.open() as stream:
         result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", payload],
                                 stdin=stream, cwd=tmp_path, env=build_subprocess_env(),

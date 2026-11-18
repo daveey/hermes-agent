@@ -8,6 +8,7 @@ marker first. (A literal lifecycle command cannot run here: tests/conftest.py bl
 """
 
 import base64
+import os
 import shutil
 import subprocess
 
@@ -93,9 +94,21 @@ def test_printed_and_herestring_writes_are_scanned(tmp_path, big, template):
     "cat > G <<'R'\nBODY\nR\ncp -t sub G; bash sub/G\n",
     "cat > G <<'R'\nBODY\nR\nln -s G F; bash F\n",
 ])
-def test_unpredictable_writer_then_execute_fails_closed(tmp_path, big, template):
+def test_unpredictable_writer_then_execute_fails_closed(tmp_path, big, template, monkeypatch):
     command = (template.replace("REVERSED", big[::-1]).replace("BODY", big)
                .replace("B64", base64.b64encode(f"{big}\n".encode()).decode()))
+    if "cp -t sub G" in command:
+        # Model GNU's target-directory argv on BSD too. Keep the scanned text
+        # unchanged, and still perform a real copy and execute its payload.
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        copier = bindir / "cp"
+        copier.write_text(
+            '#!/bin/sh\n[ "$1" = -t ] || exit 64\ndest=$2\nshift 2\nexec /bin/cp "$@" "$dest"\n',
+            encoding="utf-8",
+        )
+        copier.chmod(0o700)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
     assert _differential(tmp_path, command)
 
 
