@@ -134,6 +134,11 @@ def test_fresh_transport_cannot_refresh_an_offline_owner(world, board, terminal)
     with sqlite3.connect(replica) as db:
         db.execute("UPDATE meta SET v='1500' WHERE k='last_ok'")
     row = ledger.project(path, replica=replica, gateway='origin', profile='default', now=1501)[0]
+    if terminal:
+        # [daveey] A verified completion is settled: the owner going quiet does not reopen it (2026-11-16, stopped
+        # workers 2, 5 and 7 turned every card they had finished back to unknown). An open card still goes unknown.
+        assert row['status'] == 'done' and not row['unfinished'] and not row['stale']
+        return
     assert row['status'] == 'unknown'
     assert row['unfinished'] and row['stale']
 
@@ -211,8 +216,10 @@ def test_activity_consumers_share_live_verified_release(world, board, monkeypatc
         with sqlite3.connect(replica) as db:
             db.execute("UPDATE meta SET v='1500' WHERE k='last_ok'")
         cards, stamped = read()
-        assert len(cards) == stamped['kanban_active'] == stamped['kanban_remote_stale'] == 1
-        assert cards[0]['status'] == 'unknown'
+        # [daveey] The verified completion stays released: a quiet owner does not bring a finished card back as
+        # waiting (2026-11-16, 770 links after workers 2, 5 and 7 were stopped). It used to return as ``unknown``.
+        assert cards == []
+        assert not stamped.get('kanban_active') and not stamped.get('kanban_remote_stale')
 
 
 def test_missing_run_end_is_unverified_not_a_collection_error(board):

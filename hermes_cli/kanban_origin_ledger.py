@@ -475,12 +475,18 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                 # Old ledgers set released from status alone. Recheck evidence
                 # even when the replica version has not advanced.
                 released = bool(released and _owner_evidence(task).get('verified') is True)
-                current = False
+                current = settled = False
                 if fresh and source is not None:
                     row = source.execute(
                         "SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
                         (owner['gateway'], binding['task_record_key'])).fetchone()
                     current = bool(row and row[0] == version and json.loads(row[1]) == task)
+                    # [daveey] A verified completion that is still the owner's latest published record is settled:
+                    # the owner going quiet afterwards does not reopen it, only a newer record does. Without this
+                    # every card a stopped worker had finished went back to unknown 450 s after the stop
+                    # (2026-11-16, workers 2, 5 and 7). The replica read keeps such a record released too
+                    # (``kanban_scope_heartbeat.published_before_silence``).
+                    settled = current and released
                     # A successful origin pull does not prove the owner could
                     # read this board. Consume the collector's qualified scope
                     # inventory; missing/ambiguous inventory is not healthy.
@@ -522,7 +528,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     # An unreadable local authority must not fall back to a stale
                     # own replica, even one which previously proved completion.
                     current = local is not None
-                    released = False
+                    released = settled = False
                     if local is not None:
                         task = local
                         released = _owner_evidence(task).get('verified') is True
@@ -534,7 +540,8 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                 # [daveey] A currently observed owner archive without a verified completion produces nothing: the
                 # card is closed, not completed. It neither waits nor counts as done, and never releases as done.
                 closed = bool(current and status == 'archived' and not released and _owner_evidence(task))
-                if not current or not known or (status in ('done', 'archived') and not released and not closed):
+                observed = current or settled
+                if not observed or not known or (status in ('done', 'archived') and not released and not closed):
                     status = 'unknown'
                 from hermes_cli.kanban_completion_receipt_projection import remote_fields
                 result.append({
@@ -546,9 +553,9 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     'origin_profile': origin['profile'], 'origin_gateway': origin['gateway'],
                     'binding_id': binding['binding_id'], 'observation_version': version,
                     'status': status, 'reported_status': task.get('status'),
-                    'unfinished': not (current and (released or closed) and status in ('done', 'archived')),
+                    'unfinished': not (observed and (released or closed) and status in ('done', 'archived')),
                     **({'closed_uncompleted': True} if closed else {}),
-                    'stale': not current, 'synced_at': last_ok,
+                    'stale': not observed, 'synced_at': last_ok,
                     'remote': True, 'via': 'origin',
                     'legacy_aliases': aliases_for_projection(alias_receipts.get(binding_hash(binding), []), binding),
                     # [daveey] Bounded run fields for what the card waits on (kanban_wait_info, display only).

@@ -88,11 +88,31 @@ def test_verified_release_removes_all_proven_legacy_aliases(scenario, aliases):
         assert activity.active_task_counts() == {}
 
 
+def _owner_quiet_for_500s(replica, monkeypatch):
+    monkeypatch.setattr(activity.time, 'time', lambda: 1501)
+    with sqlite3.connect(replica) as db:
+        db.execute("UPDATE meta SET v='1500' WHERE k='last_ok'")
+
+
+def test_alias_merge_keeps_a_verified_release_when_the_owner_goes_quiet(scenario, monkeypatch):
+    """[daveey] Fresh transport, owner heartbeat expired: the verified completion stays released for every alias. It
+    used to come back ``unknown`` (2026-11-16: stopped workers 2, 5 and 7 un-released every card they had finished)."""
+    _, replica, _ = scenario
+    aliases = ['s_old', 's_middle', 's_new']
+    prepare(scenario, aliases)
+    activity._remote_links()
+    _owner_quiet_for_500s(replica, monkeypatch)
+    activity._cache = None
+    assert activity.session_tasks(aliases) == []
+    assert activity.active_task_counts() == {}
+
+
 @pytest.mark.parametrize('fault', ['missing', 'unreadable', 'expired', 'unverified'])
 def test_alias_merge_never_releases_unavailable_or_unverified_evidence(scenario, fault, monkeypatch):
     _, replica, _ = scenario
     aliases = ['s_old', 's_middle', 's_new']
-    prepare(scenario, aliases, verified=fault != 'unverified')
+    # An expired owner heartbeat withholds release only from an unverified completion (see the test above).
+    prepare(scenario, aliases, verified=fault not in ('unverified', 'expired'))
     # Prime the verified ledger before simulating transport loss.
     activity._remote_links()
     if fault == 'missing':
@@ -100,9 +120,7 @@ def test_alias_merge_never_releases_unavailable_or_unverified_evidence(scenario,
     elif fault == 'unreadable':
         replica.write_bytes(b'not sqlite')
     elif fault == 'expired':
-        monkeypatch.setattr(activity.time, 'time', lambda: 1501)
-        with sqlite3.connect(replica) as db:
-            db.execute("UPDATE meta SET v='1500' WHERE k='last_ok'")
+        _owner_quiet_for_500s(replica, monkeypatch)
     activity._cache = None
     cards = activity.session_tasks(aliases)
     assert len(cards) == 1

@@ -160,9 +160,12 @@ def _ledger_links(board: str, gateway: str) -> dict[str, dict[str, Any]]:
         kind = "created" if card.get("via") == "origin" else "shepherd"
         profile = card.get("origin_profile")
         uid = link_uid(card["id"], gateway, profile, card["session"], kind)
+        # [daveey] Two gateways can publish the same card id (a worker's copy of another gateway's card). The link is
+        # one row, so it is released only when every copy is: an open copy keeps it, whatever order they arrive in.
+        # It used to be last-copy-wins, and a stopped gateway's finished copy now stays released for good.
+        released = 1 if card.get("released") and out.get(uid, {}).get("released", 1) else 0
         out[uid] = {"uid": uid, "task_id": card["id"], "chat_gateway": gateway, "chat_profile": profile,
-                    "chat_session": card["session"], "kind": kind,
-                    "released": 1 if card.get("released") else 0, "created_at": now}
+                    "chat_session": card["session"], "kind": kind, "released": released, "created_at": now}
     return out
 
 
