@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { type ChatMessage, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
+import { toRuntimeMessage } from '@/lib/chat-runtime'
 import { withNoReplyNotice } from '@/store/session-no-reply'
 import type { SessionMessage } from '@/types/hermes'
 
@@ -84,5 +85,9 @@ describe('a no-reply notice on a turn with no stored reply', () => {
     const merged = preserveLocalAssistantErrors(stored, local)
 
     expect(errors(merged)).toEqual(['Hermes ended this turn without a reply.'])
+    const notice = merged.find(message => message.error)!
+    expect(toRuntimeMessage(notice).metadata.custom?.errorSurface).toEqual({
+      code: 'no_reply', layer: 'runtime', retryable: true
+    })
   })
 })

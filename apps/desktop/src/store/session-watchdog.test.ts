@@ -205,6 +205,35 @@ describe('live turn event silence', () => {
     $activeSessionId.set(null)
   })
 
+  it.each(['authority', 'tui_gateway'])('keeps a %s turn through a 95-second event gap', async entry => {
+    const runtimeId = entry === 'authority' ? 'stored-quiet' : 'ui-quiet'
+    publishSessionState(runtimeId, partial('', { storedSessionId: 'stored-quiet' }))
+
+    const request = backend(async () => ({
+      sessions: [{ id: runtimeId, session_key: 'stored-quiet', status: 'working' }]
+    }))
+
+    noteSessionEvent(runtimeId)
+    await vi.advanceTimersByTimeAsync(95_000)
+    expect(request).toHaveBeenCalledTimes(2)
+    expect($workingSessionIds.get()).toContain('stored-quiet')
+    expect(card(runtimeId)).toBeUndefined()
+  })
+
+  it('uses the stored-key fallback throughout the silence recovery entry path', async () => {
+    publishSessionState('ui-alias', partial('', { storedSessionId: 'stored-quiet' }))
+
+    const request = backend(async () => ({
+      sessions: [{ id: 'stored-quiet', session_key: 'stored-quiet', status: 'working' }]
+    }))
+
+    noteSessionEvent('ui-alias')
+    await vi.advanceTimersByTimeAsync(95_000)
+    expect(request).toHaveBeenCalledTimes(2)
+    expect($workingSessionIds.get()).toContain('stored-quiet')
+    expect(card('ui-alias')).toBeUndefined()
+  })
+
   it('keeps a silent turn when nothing can answer for it', async () => {
     publishSessionState('rt-alone', partial('long tool call', { storedSessionId: 's-alone' }))
     noteSessionEvent('rt-alone')
@@ -422,7 +451,7 @@ describe('live turn event silence', () => {
     expect(chatMessageText($sessionStates.get()['rt-unread']!.messages[0])).toBe('finished on the backend')
   })
 
-  it('falls back to the local transcript once every store read came back empty-handed', async () => {
+  it('never offers to rerun a prompt whose stored result could not be read', async () => {
     $activeSessionId.set('rt-nostore')
     publishSessionState(
       'rt-nostore',
@@ -445,7 +474,20 @@ describe('live turn event silence', () => {
 
     await vi.advanceTimersByTimeAsync(1)
     expect(refreshTranscript).toHaveBeenCalledTimes(ENDED_TURN_STORE_RETRY_MS.length + 1)
-    expect(card('rt-nostore')?.errorSurface?.code).toBe('no_reply')
+    expect(card('rt-nostore')).toBeUndefined()
+  })
+
+  it('does not stamp stale local state when the pane leaves during a failed store read', async () => {
+    $activeSessionId.set('rt-away')
+    publishSessionState('rt-away', state({ awaitingResponse: true, busy: true, storedSessionId: 's-away', turnLive: true }))
+    const refreshTranscript = vi.fn(async () => false)
+    backend(async () => ({ sessions: [] }), refreshTranscript)
+    noteSessionEvent('rt-away')
+    await vi.advanceTimersByTimeAsync(SILENCE_MS)
+    $activeSessionId.set(null)
+    await vi.advanceTimersByTimeAsync(ENDED_TURN_STORE_RETRY_MS[0])
+    expect(refreshTranscript).toHaveBeenCalledTimes(1)
+    expect(card('rt-away')).toBeUndefined()
   })
 
   it('takes the retry card back when the turn it was stamped on turns out to be running', async () => {

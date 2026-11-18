@@ -34,8 +34,6 @@ import {
 import { resolveRememberedActivePane, workspaceScopeKey } from '@/components/pane-shell/workspace-scope'
 import type { WorkspaceMode } from '@/contrib/types'
 import { dropBrowserProfilePrefs, migrateBrowserProfilePrefs } from '@/lib/browser-profile-prefs'
-import { type ChatMessage, finalizeInterruptedMessages, sealOpenToolParts } from '@/lib/chat-messages'
-import { isNoReplyNotice } from '@/lib/chat-messages/no-reply'
 import { tileFocusStampOnFocusChange } from '@/lib/session-timer-since'
 import { stableArray } from '@/lib/stable-array'
 import { type StopOrigin } from '@/lib/stop-origin'
@@ -90,6 +88,7 @@ import {
 import { secondaryProfileOwnerForEvent } from './session-event-provenance'
 import { $focusedStoredSessionId, TILE_PANE_PREFIX } from './session-focus'
 import { turnHasReply, withNoReplyNotice } from './session-no-reply'
+import { createNoReplyRecovery, logSilentTurnCheck, settleEndedState } from './session-no-reply-recovery'
 import { assertSessionOwnerResolved } from './session-owner-resolution'
 import {
   isSessionOwnerRoute,
@@ -232,16 +231,7 @@ export function liveSessionScopes(): Set<string> {
   return scopes
 }
 
-// The owner hold itself (the map, TTL, hold/release/reset, and the
-// foreground-scope sweep) lives in ./session-owner-holds; re-exported here
-// because session-states.ts is where the rest of the ownership ladder lives
-// and most call sites already import from it.
-export {
-  $sessionOwnerHoldRevision,
-  _resetSessionOwnerHoldsForTests,
-  holdSessionOwnerUntilForeground,
-  releaseSessionOwnerHold
-} from './session-owner-holds'
+export { ENDED_TURN_STORE_RETRY_MS } from './session-no-reply-recovery'
 import { sweepSessionOwnerHolds } from './session-owner-holds'
 
 /**
@@ -484,14 +474,6 @@ async function checkLiveTurn(runtimeId: string): Promise<LiveTurnCheck> {
   }
 }
 
-function logSilentTurnCheck(line: string) {
-  try {
-    console.info(line)
-    window.hermesDesktop?.logLine?.(line)
-  } catch {
-    // logging must never change a verdict
-  }
-}
 
 /** Write through the wiring cache when it holds the runtime, so the cache,
  *  the focused view, and tile mirrors agree (#93059); otherwise the mirror. */
@@ -513,26 +495,7 @@ function writeSessionState(runtimeId: string, updater: (state: ClientSessionStat
 function settleEndedLiveTurn(runtimeId: string) {
   const occurredAt = Date.now() / 1000
 
-  writeSessionState(runtimeId, state => {
-    if (!isLiveTurnAwaitingEvents(state)) {
-      return state
-    }
-
-    const messages = sealOpenToolParts(finalizeInterruptedMessages(state.messages, state.streamId, occurredAt))
-
-    return {
-      ...state,
-      awaitingResponse: false,
-      busy: false,
-      heartbeatSettledStreamId:
-        state.streamId && messages.some(message => message.id === state.streamId) ? state.streamId : null,
-      messages,
-      pendingBranchGroup: null,
-      streamId: null,
-      turnLive: false,
-      turnStartedAt: null
-    }
-  })
+  writeSessionState(runtimeId, state => settleEndedState(state, occurredAt))
 }
 
 /** Stamp the retry card on an ended turn that has no reply, never an intentional
@@ -545,119 +508,26 @@ function markTurnWithoutReply(runtimeId: string) {
   )
 }
 
-// Delays before re-reading the store for an ended turn whose first read did
-// not apply. After the last one the local transcript decides.
-export const ENDED_TURN_STORE_RETRY_MS = [2_000, 8_000, 20_000]
+// The owner hold itself (the map, TTL, hold/release/reset, and the
+// foreground-scope sweep) lives in ./session-owner-holds; re-exported here
+// because session-states.ts is where the rest of the ownership ladder lives
+// and most call sites already import from it.
+export {
+  $sessionOwnerHoldRevision,
+  _resetSessionOwnerHoldsForTests,
+  holdSessionOwnerUntilForeground,
+  releaseSessionOwnerHold
+} from './session-owner-holds'
 
-const endedTurnRecoveries = new Map<string, object>()
+const { recover: recoverEndedLiveTurn, disprove: disproveNoReplyNotice } = createNoReplyRecovery({
+  getState: runtimeId => $sessionStates.get()[runtimeId],
+  getRefresh: () => liveTurnBackend?.refreshTranscript,
+  referenced: runtimeReferenced,
+  mark: markTurnWithoutReply,
+  write: writeSessionState
+})
 
-async function recoverEndedLiveTurn(runtimeId: string) {
-  const recovery = {}
-  endedTurnRecoveries.set(runtimeId, recovery)
-
-  // The turn this recovery is for: a prompt sent during a re-read delay starts
-  // another turn, which this one must not stamp.
-  const tailPrompt = () =>
-    $sessionStates.get()[runtimeId]?.messages.findLast(message => message.role === 'user' && !message.hidden)?.id
-
-  const prompt = tailPrompt()
-
-  try {
-    for (let attempt = 0; ; attempt += 1) {
-      const storedSessionId = $sessionStates.get()[runtimeId]?.storedSessionId ?? null
-      const refreshTranscript = liveTurnBackend?.refreshTranscript
-
-      // Only a session on screen reads its history now; a background session
-      // reads it when the user opens it, like the running=false edge.
-      if (!refreshTranscript || !storedSessionId || !runtimeReferenced(runtimeId, storedSessionId)) {
-        break
-      }
-
-      let applied = false
-
-      try {
-        applied = (await refreshTranscript(runtimeId, storedSessionId)) !== false
-      } catch {
-        // No answer from the store: read again below.
-      }
-
-      if (endedTurnRecoveries.get(runtimeId) !== recovery || tailPrompt() !== prompt) {
-        return
-      }
-
-      // The retry card offers to run the prompt again, so it needs the store's
-      // word that the turn left no reply. A read that did not apply (the
-      // #silent-turn incident of 2026-11-17: the reply was stored, the read
-      // was dropped) is asked again before the local transcript decides.
-      if (applied || attempt >= ENDED_TURN_STORE_RETRY_MS.length) {
-        logSilentTurnCheck(
-          `[silent-turn] runtime=${runtimeId} stored=${storedSessionId} recovery store_read=${applied ? 'applied' : 'none'} attempts=${attempt + 1}`
-        )
-
-        break
-      }
-
-      await new Promise(resolve => setTimeout(resolve, ENDED_TURN_STORE_RETRY_MS[attempt]))
-
-      const state = $sessionStates.get()[runtimeId]
-
-      if (
-        endedTurnRecoveries.get(runtimeId) !== recovery ||
-        !state ||
-        isLiveTurnAwaitingEvents(state) ||
-        tailPrompt() !== prompt
-      ) {
-        return
-      }
-    }
-
-    markTurnWithoutReply(runtimeId)
-  } finally {
-    if (endedTurnRecoveries.get(runtimeId) === recovery) {
-      endedTurnRecoveries.delete(runtimeId)
-    }
-  }
-}
-
-/** The backend, or the turn's own stream, showed a turn still producing after
- *  it was stamped "ended without a reply": the stamp was wrong, so it and its
- *  Retry leave. A pending store re-read for that turn is dropped too. */
-export function disproveNoReplyNotice(runtimeId: string) {
-  endedTurnRecoveries.delete(runtimeId)
-
-  const stamped = (messages: ChatMessage[]) => {
-    const tail = messages.findLastIndex(message => message.role === 'user' && !message.hidden)
-
-    return messages.some((message, index) => index > tail && isNoReplyNotice(message)) ? tail : null
-  }
-
-  if (stamped($sessionStates.get()[runtimeId]?.messages ?? []) === null) {
-    return
-  }
-
-  writeSessionState(runtimeId, state => {
-    const tail = stamped(state.messages)
-
-    if (tail === null) {
-      return state
-    }
-
-    return {
-      ...state,
-      messages: state.messages.flatMap((message, index) => {
-        if (index <= tail || !isNoReplyNotice(message)) {
-          return [message]
-        }
-
-        const { error: _error, errorSurface: _errorSurface, ...rest } = message
-
-        // The notice's own empty bubble carried nothing else.
-        return rest.parts.length ? [rest] : []
-      })
-    }
-  })
-  logSilentTurnCheck(`[silent-turn] runtime=${runtimeId} no_reply_notice=disproved`)
-}
+export { disproveNoReplyNotice }
 
 /** The silence window ran out: ask the backend. Running keeps the turn and
  *  restarts the clock; no answer (gateway down, request failed, owner unknown)

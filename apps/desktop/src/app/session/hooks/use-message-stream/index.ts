@@ -26,6 +26,7 @@ import {
   toolEventOwnerMessageId,
   upsertToolPart
 } from '@/lib/chat-messages'
+import { completionNoticeBase, completionSettlesErrorCard } from '@/lib/chat-messages/no-reply'
 import type { ErrorSurface } from '@/lib/error-surface'
 import {
   dedupeGeneratedImageEchoesInParts,
@@ -894,7 +895,7 @@ export function useMessageStream({
         // reply — clear `interim` so it regains the action footer.
         const completeMessage = (message: ChatMessage): ChatMessage => {
           const settled = {
-            ...message,
+            ...completionNoticeBase(message, finalText, completionError),
             completedAt: occurredAt,
             parts: completeOpenTimelineParts(message.parts, occurredAt),
             pending: false,
@@ -1018,7 +1019,7 @@ export function useMessageStream({
             // A bare `error` event (e.g. the agent build failing) already
             // painted this turn's error card; the turn's terminal error frame
             // is the same failure, so it settles onto that card.
-            const failureRepeatsErrorCard = Boolean(completionError && existing.error && !existingText)
+            const failureRepeatsErrorCard = completionSettlesErrorCard(existing, existingText, finalText, completionError)
 
             // The terminal frame names the stored row it settled; this
             // trailing bubble is a still-unsettled display-only interim that
@@ -1042,6 +1043,7 @@ export function useMessageStream({
 
             if (
               existing.pending ||
+
               failureRepeatsErrorCard ||
               settlesPersistedRow ||
               (!interimBoundaryPending && finalText && existingText === finalText)

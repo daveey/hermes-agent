@@ -881,10 +881,7 @@ export function rehydrateLiveSessionStatuses(
       // builds with no turn at all.
       noteSessionEvent(runtimeSessionId)
 
-      if (working) {
-        // The backend lists the turn as running: a "no reply" stamp on it was wrong.
-        disproveNoReplyNotice(runtimeSessionId)
-      }
+
     }
 
     if (!working) {
@@ -893,6 +890,8 @@ export function rehydrateLiveSessionStatuses(
       continue
     }
 
+    // The backend lists the turn as running: a "no reply" stamp on it was wrong.
+    disproveNoReplyNotice(runtimeSessionId)
     const lastActiveMs = Number(session.last_active) * 1000
 
     const isQuiet =

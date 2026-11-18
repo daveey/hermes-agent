@@ -12,6 +12,25 @@ export function isNoReplyNotice(message: ChatMessage): boolean {
   )
 }
 
+/** Only the synthetic notice is cleared; genuine provider/tool failures survive. */
+export function withoutNoReplyNotice(message: ChatMessage): ChatMessage {
+  if (!isNoReplyNotice(message)) {
+    return message
+  }
+
+  const { error: _error, errorSurface: _surface, ...rest } = message
+
+  return rest
+}
+
+export function completionNoticeBase(message: ChatMessage, text: string, error: string | null): ChatMessage {
+  return text || error ? withoutNoReplyNotice(message) : message
+}
+
+export function completionSettlesErrorCard(message: ChatMessage, existingText: string, text: string, error: string | null): boolean {
+  return Boolean((isNoReplyNotice(message) && (text || error)) || (error && message.error && !existingText))
+}
+
 const visible = (messages: ChatMessage[]) => messages.filter(message => !message.hidden)
 const userText = (message: ChatMessage) => chatMessageText(message).replace(/\s+/g, ' ').trim()
 
@@ -75,8 +94,6 @@ export function withoutDisprovedNoReplyNotice(next: ChatMessage[], current: Chat
       return message
     }
 
-    const { error: _error, errorSurface: _surface, ...rest } = message
-
-    return rest
+    return withoutNoReplyNotice(message)
   })
 }

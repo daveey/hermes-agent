@@ -68,6 +68,12 @@ const TURN_OUTPUT_EVENT_TYPES = new Set([
   'tool.start'
 ])
 
+function disproveNoticeOnOutput(sessionId: string, eventType: string) {
+  if (TURN_OUTPUT_EVENT_TYPES.has(eventType)) {
+    disproveNoReplyNotice(sessionId)
+  }
+}
+
 const COMPACTION_RESUME_EVENT_TYPES = new Set([
   'message.delta',
   'message.interim',
@@ -327,9 +333,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         // state — proves this session is still producing. Silence after the
         // last one force-settles a dead turn, partial payload included.
         if (sessionId) {
-          if (TURN_OUTPUT_EVENT_TYPES.has(event.type)) {
-            disproveNoReplyNotice(sessionId)
-          }
+          disproveNoticeOnOutput(sessionId, event.type)
 
           noteSessionEvent(sessionId)
           retireTurnToolProgress(event.type, sessionId)
