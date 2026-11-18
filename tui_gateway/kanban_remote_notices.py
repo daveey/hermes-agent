@@ -534,15 +534,14 @@ def _reconcile_legacy(conn, session_key: str, cards: list, now: float, transcrip
             moved = moved_claim(conn, session=session_key, ref=row['ref'], state=row['state'],
                                 now=now, notice_key=key, swept_key=None, transcript_has=transcript_has,
                                 retired=retired)
-            if moved is not None:
-                continue
-            cur = conn.execute(
-                "UPDATE notices SET delivered=0, holder_pid=?, holder_start=?, notice_key=?, legacy_seen=1 "
-                "WHERE session=? AND ref=? AND state=? AND delivered=1 AND IFNULL(legacy_seen,0)=0 "
-                "AND notice_key IS NULL",
-                (pid, start, key, session_key, row["ref"], row["state"]))
-            if cur.rowcount == 1:
-                out.append(_notice_item(card, session_key, me, profile, now))
+            if moved is None:
+                cur = conn.execute(
+                    "UPDATE notices SET delivered=0, holder_pid=?, holder_start=?, notice_key=?, legacy_seen=1 "
+                    "WHERE session=? AND ref=? AND state=? AND delivered=1 AND IFNULL(legacy_seen,0)=0 "
+                    "AND notice_key IS NULL",
+                    (pid, start, key, session_key, row["ref"], row["state"]))
+                if cur.rowcount == 1:
+                    out.append(_notice_item(card, session_key, me, profile, now))
         for claim_id in retired:
             _forget_woken(claim_id)
     if stale:

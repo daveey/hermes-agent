@@ -9,6 +9,44 @@ from tests.tui_gateway import test_kanban_remote_notice_once as once
 from tui_gateway import kanban_remote_notices as krn
 
 
+def test_legacy_mixed_alias_skip_retires_ended_receipt(tmp_path, monkeypatch):
+    now = time.time()
+    hub = tmp_path / 'replica.db'
+    hub.touch()
+    ledger = tmp_path / 'ledger.db'
+    task = {'id': 't_dup', 'status': 'done', 'completed_at': now}
+    state = krn._notice_state(task)
+    old, live, legacy = [f'{h}/default/default/t_dup' for h in ('a', 'b', 'c')]
+    sid = once.CHAT
+    cid = (sid, old, state)
+    home = ['c']
+    monkeypatch.setattr(krn, '_chat_index', lambda *_a, **_kw: (
+        'macbook', {sid: [{'gw': home[0], 'key': 'default/default/t_dup', 'task': task}]}, {}))
+    conn = krn._ledger(ledger)
+    pid, start = krn._my_holder()
+    try:
+        with conn:
+            for ref in (old, live):
+                conn.execute(
+                    'INSERT INTO notices(session,ref,state,at,delivered,holder_pid,holder_start,notice_key) '
+                    'VALUES(?,?,?,?,0,?,?,?)', (sid, ref, state, now, pid, start, 'key-' + ref))
+            conn.execute('INSERT INTO notices(session,ref,state,at,delivered,legacy_seen) VALUES(?,?,?,?,1,0)',
+                         (sid, legacy, state, now))
+        krn._track_woken(cid, {'running': False})
+        args = dict(hub_db=hub, ledger=ledger, now=now, transcript_has=lambda *_: False)
+        assert krn.collect(sid, 'default', **args) == []
+        assert conn.execute('SELECT 1 FROM notices WHERE ref=?', (old,)).fetchone() is None
+        assert krn.release({'session': sid, 'ref': live, 'state': state}, ledger=ledger)
+        home[0] = 'a'
+        first = krn.collect(sid, 'default', **args)
+        second = krn.collect(sid, 'default', **args)
+        assert [item['ref'] for item in first] == [old]
+        assert second == [], 'the first new buffer still owns custody'
+    finally:
+        krn._forget_woken(cid)
+        conn.close()
+
+
 def _move(path, gateway):
     with sqlite3.connect(path) as conn:
         conn.execute('UPDATE replica SET gw=?, seq=seq+1', (gateway,))
