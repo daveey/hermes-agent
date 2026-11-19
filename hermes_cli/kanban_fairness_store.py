@@ -147,6 +147,19 @@ def write_manifest(conn: sqlite3.Connection, out: Path, *, board: str, assumptio
 
 
 def load(out: Path) -> dict:
+    from hermes_cli.kanban_fairness_root import collect, files
+
+    try:
+        paths, _ = files(out)
+    except (OSError, ValueError):
+        return {"manifest": {}, "records": [], "owners": None, "gaps": [{"code": "capture_bound"}]}
+    capture = collect(out, _load_one(out), _load_one)
+    if any(path.name.endswith(".tmp") for path in paths):
+        capture["gaps"].append({"code": "capture_orphan"})
+    return capture
+
+
+def _load_one(out: Path) -> dict:
     from hermes_cli.kanban_fairness_tail import validate_tail
 
     capture = segments.load_records(out)

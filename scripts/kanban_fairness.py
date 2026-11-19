@@ -28,7 +28,7 @@ import hashlib
 import json
 import subprocess
 import sys
-import tarfile
+
 from contextlib import closing
 from pathlib import Path
 
@@ -85,13 +85,20 @@ def _arm(args) -> int:
     if (out / PLAN).exists() and not args.replace:
         print(f"{out / PLAN} exists: this directory already holds a capture", file=sys.stderr)
         return EXIT_ERROR
-    out.mkdir(parents=True, exist_ok=True)
+    from hermes_cli.config import load_config
+    from hermes_cli.kanban_fairness_config import DEFAULTS, resolve
+    from hermes_cli import kanban_fairness_budget as budget
+
+    config = load_config()
+    resolve(config)  # Validate the configured ceiling even when runtime capture is off.
+    maximum = config.get("kanban", {}).get("fairness_capture", {}).get("max_bytes", DEFAULTS["max_bytes"])
+    budget.initialize(out, maximum)
     plan = {"capture_id": args.capture_id, "db": db, "board": args.board, "replica": bool(args.replica),
             "assumptions": {"clock_error_s": args.clock_error_s, "apply_lag_s": args.apply_lag_s,
                             "unclaimed_exit": args.unclaimed_exit}}
+    budget.write(out / PLAN, json.dumps(plan, indent=1, sort_keys=True).encode("utf-8"))
     with _connect(db) as conn:
         state = journal.arm(conn, args.capture_id, replace=args.replace)
-        (out / PLAN).write_text(json.dumps(plan, indent=1, sort_keys=True), encoding="utf-8")
         store.drain(conn, out)
     _emit({"armed": state, "plan": plan, "acceptance_ready": False})
     return 0
@@ -161,11 +168,9 @@ def _inventory(args) -> int:
 
 
 def _export(args) -> int:
-    source = Path(args.input)
-    with tarfile.open(args.output, "w:gz") as bundle:
-        for path in sorted(source.iterdir()):
-            if path.is_file() and not path.name.endswith(".tmp"):
-                bundle.add(path, arcname=f"{source.name}/{path.name}")
+    from hermes_cli.kanban_fairness_root import export
+
+    export(Path(args.input), Path(args.output))
     _emit({"output": args.output, "acceptance_ready": False})
     return 0
 

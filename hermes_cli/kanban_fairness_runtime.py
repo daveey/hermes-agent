@@ -184,6 +184,9 @@ class Session:
         from hermes_cli.kanban_fairness_budget import initialize
 
         initialize(settings.directory, settings.max_bytes)
+        from hermes_cli.kanban_fairness_root import register
+
+        register(settings.directory, self.identity)
         self.out.mkdir(parents=True, exist_ok=False)
         from hermes_cli.kanban_fairness_tail import open_epoch
 

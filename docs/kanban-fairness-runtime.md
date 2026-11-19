@@ -24,8 +24,8 @@ is the profile's durable `kanban/evidence/<capture_id>`, never scratch. A byte l
 must be a positive integer no greater than 536870912; booleans are not integers here.
 
 **Integration status:** draft explicit `runtime arm` / `runtime disarm` commands and
-startup bindings now exist. Root export/expected-epoch inventory and full production
-scope verification remain incomplete. Do not activate this draft on a live board.
+startup bindings, root export and expected-epoch inventory now exist. Full production
+scope verification remains incomplete. Do not activate this draft on a live board.
 
 The descriptor pins profile home, board, capture directory/ID, supplied gateway/board
 UIDs, byte limit and nullable clock error. It is not inferred from hostnames or a
@@ -76,7 +76,30 @@ All runtime epochs beneath a capture share a locked byte budget, including exist
 files and temporary replacement peaks. Evidence is never deleted to make room.
 Budget failure can prevent even a gap receipt; an absent clean tail remains a gap.
 The lock is advisory and does not prevent unrelated external writes. Unsupported
-locking platforms reject activation. Assembled-export enforcement is separate work.
+locking platforms reject activation. Explicit DB arm initializes the configured byte
+ceiling and admits its plan file before activating the journal.
+
+Before serving, each runtime registers its identity in `runtime-epochs.json` under
+the root budget lock. Registration is capped at 4096 epochs / 1 MiB of metadata;
+exhaustion refuses another consumer, never recycles old evidence. Use a fresh capture
+after exhaustion. A retained `runtime-required.json` prevents lost inventory from
+being silently recreated. Registration precedes epoch-directory creation and thread
+start, so a crash in between leaves an expected missing epoch. Atomic metadata writes
+fsync both their contents and the containing directory.
+
+Root loading includes runtime records without modifying their frozen envelopes,
+and checks every expected epoch plus discovered orphan epochs. Missing inventories,
+missing epochs, mismatched identities and absent tails remain coverage gaps. Loading
+rejects special files, symlinks and over-bound trees before opening segment contents.
+These are local integrity checks, not independent proof that every fleet process
+participated; external deletion of all authority/evidence cannot be reconstructed.
+
+Export recursively retains temporary and orphan evidence. Disarm first: export
+refuses an armed runtime descriptor, then takes the root lock for a consistent view
+against cooperating writers. Input logical bytes and compressed output bytes are
+each capped at 2 GiB. Output must be new and outside the capture; failures never
+publish a partial archive or replace existing output. Exporting incomplete evidence
+is permitted and does not certify it: validation retains all inventory/tail gaps.
 
 Process shutdown shares one two-second allowance across all active profile/board
 consumers. The writer first drains and seals data, then waits for a positive in-memory

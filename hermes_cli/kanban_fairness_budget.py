@@ -101,6 +101,11 @@ def _write(path, data):
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(tmp, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def write(path, data):
