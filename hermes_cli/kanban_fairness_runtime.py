@@ -6,6 +6,7 @@ An absent final seal (including shutdown timeout or writer failure) is incomplet
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager
 from collections import Counter, deque
 import json
 import os
@@ -54,14 +55,38 @@ def enabled(*, board) -> bool:
 
 
 def invalidate(*, board):
-    """Fail closed after observation failure, without retrying the broken sink or IO.
+    """Fail closed after observation failure, without retrying the broken sink or IO."""
+    session = _SESSIONS.get(_key(board)) if _SESSIONS else None
+    if session is not None:
+        session.abandoned.set()
 
-    Conservatively invalidate matching boards across profile scopes: losing evidence
-    is preferable to certifying a complete epoch after an unrecorded observation.
-    """
-    for session in tuple(_SESSIONS.values()):
-        if session.board == board:
+
+@contextmanager
+def observation(*, board):
+    """Track actual reads across shutdown, without waiting on a busy capture lock."""
+    session = _SESSIONS.get(_key(board)) if _SESSIONS else None
+    admitted = False
+    if session is not None:
+        if session.lock.acquire(blocking=False):
+            try:
+                if not session.stopping.is_set():
+                    session.readers += 1
+                    admitted = True
+            finally:
+                session.lock.release()
+        else:
             session.abandoned.set()
+    try:
+        yield
+    finally:
+        if admitted:
+            if session.lock.acquire(blocking=False):
+                try:
+                    session.readers -= 1
+                finally:
+                    session.lock.release()
+            else:
+                session.abandoned.set()
 
 
 def submit(*, board, kind, payload) -> bool:
@@ -78,40 +103,36 @@ class PayloadLimit(ValueError):
 
 def bounded_payload(payload):
     """Reject huge/deep/nonprimitive inputs before JSON allocates an unbounded copy."""
-    pending = [iter((payload,))]
     budget = MAX_PAYLOAD_BYTES
-    while pending:
-        if len(pending) > 32:
+
+    def copy(value, depth=0):
+        nonlocal budget
+        if depth > 32:
             raise PayloadLimit("payload nesting limit")
-        try:
-            value = next(pending[-1])
-        except StopIteration:
-            pending.pop()
-            continue
         budget -= 1
         if type(value) is str:
             budget -= len(value)
-        elif type(value) in (list, dict):
+        if budget < 0:
+            raise PayloadLimit("payload size limit")
+        if type(value) in (list, dict):
             if len(value) > budget:
                 raise PayloadLimit("payload item limit")
             if type(value) is dict:
-                for key in value:
+                result = {}
+                for key, child in value.items():
                     if type(key) is not str:
                         raise ValueError("payload keys must be strings")
-                    budget -= len(key) + 1
-                    if budget < 0:
-                        raise PayloadLimit("payload key limit")
-                pending.append(iter(value.values()))
-            else:
-                pending.append(iter(value))
-        elif type(value) is int:
-            if value.bit_length() > 128:
-                raise PayloadLimit("payload integer limit")
-        elif value is not None and type(value) not in (bool, float):
+                    result[copy(key, depth + 1)] = copy(child, depth + 1)
+                return result
+            return [copy(child, depth + 1) for child in value]
+        if type(value) is int and value.bit_length() > 128:
+            raise PayloadLimit("payload integer limit")
+        if value is not None and type(value) not in (str, bool, int, float):
             raise ValueError("payload must contain JSON primitives")
-        if budget < 0:
-            raise PayloadLimit("payload size limit")
-    raw = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        return value
+
+    # Serialize only detached primitives, never the concurrently mutable caller data.
+    raw = json.dumps(copy(payload), separators=(",", ":"), allow_nan=False).encode("utf-8")
     if len(raw) > MAX_PAYLOAD_BYTES:
         raise PayloadLimit("encoded payload limit")
     return raw
@@ -135,9 +156,18 @@ class Session:
         self.failed = False
         self.sealed = False
         self.seq = 0
+        self.readers = 0
+        self.deadline_ns = None
+        self.loss_lock = threading.Lock()
         # Validate supplied identities before starting any thread or making directories.
         self.record("loss", self.loss_payload("clock_gap", 1), 1)
+        from hermes_cli.kanban_fairness_budget import initialize
+
+        initialize(settings.directory, settings.max_bytes)
         self.out.mkdir(parents=True, exist_ok=False)
+        from hermes_cli.kanban_fairness_tail import open_epoch
+
+        open_epoch(self.out, self.identity)
         from agent.memory_provider import spawn_context_thread
 
         self.thread = spawn_context_thread(self.run, name="fairness-evidence", daemon=True)
@@ -153,31 +183,39 @@ class Session:
                            wall_ns=time.time_ns() if wall is None else wall,
                            mono_ns=time.monotonic_ns() if mono is None else mono)
 
+    def note_loss(self, reason):
+        # Contention never waits on the scheduler. Uncounted loss invalidates the tail.
+        if not self.loss_lock.acquire(blocking=False):
+            self.abandoned.set()
+            return
+        try:
+            self.loss[reason] += 1
+        finally:
+            self.loss_lock.release()
+
     def enqueue(self, kind, payload):
         if self.stopping.is_set() or self.failed:
             return False
-        try:
-            # Snapshot caller-owned data; at most one bounded record is handed to writer.
-            raw = bounded_payload(payload)
-            payload = json.loads(raw)
-            self.record(kind, payload, 1)
-        except PayloadLimit:
-            self.loss["oversize"] += 1
-            return False
-        except (TypeError, ValueError, OverflowError, RecursionError, RuntimeError):
-            self.loss["unsupported"] += 1
-            return False
         if not self.lock.acquire(blocking=False):
-            self.loss["dropped"] += 1
+            self.note_loss("dropped")
             return False
         try:
             if self.stopping.is_set():
                 return False
+            # The writer's final empty-queue check shares this admission lock.
+            raw = bounded_payload(payload)
+            self.record(kind, json.loads(raw), 1)
             if len(self.queue) >= MAX_RECORDS or self.bytes + len(raw) > MAX_QUEUE_BYTES:
-                self.loss["dropped"] += 1
+                self.note_loss("dropped")
                 return False
             self.queue.append((kind, raw, len(raw), time.time_ns(), time.monotonic_ns()))
             self.bytes += len(raw)
+        except PayloadLimit:
+            self.note_loss("oversize")
+            return False
+        except (TypeError, ValueError, OverflowError, RecursionError, RuntimeError):
+            self.note_loss("unsupported")
+            return False
         finally:
             self.lock.release()
         self.wake.set()
@@ -196,29 +234,48 @@ class Session:
                 while True:
                     with self.lock:
                         item = self.queue.popleft() if self.queue else None
+                        done = item is None and self.stopping.is_set()
                         if item is not None:
                             self.bytes -= item[2]
                     if item is None:
                         break
                     kind, payload, _, wall, mono = item
                     self.write(kind, json.loads(payload), wall, mono)
-                if self.stopping.is_set():
+                if done:
                     break
-            for reason, count in self.loss.items():
+            with self.loss_lock:
+                losses = dict(self.loss)
+            for reason, count in losses.items():
                 self.write("loss", self.loss_payload(reason, count))
             if self.seq and not self.abandoned.is_set():
-                seal_records(self.out, expected_sources=[dict(source_gateway=self.identity["source_gateway"],
-                             source_epoch=self.epoch, last_seq=self.seq)])
-                self.sealed = True
+                manifest = seal_records(self.out, expected_sources=[dict(source_gateway=self.identity["source_gateway"],
+                                        source_epoch=self.epoch, last_seq=self.seq)])
+                from hermes_cli.kanban_fairness_tail import close_epoch
+
+                completed = time.monotonic_ns()
+                if not self.abandoned.is_set() and self.deadline_ns is not None and completed <= self.deadline_ns:
+                    close_epoch(self.out, self.identity, manifest, self.deadline_ns, completed)
+                    self.sealed = True
         except (OSError, ValueError, TypeError, RuntimeError):
             # Evidence failure cannot change scheduler behavior; unsealed epoch is a gap.
             self.failed = True
-            self.loss["writer_error"] += 1
+            self.note_loss("writer_error")
 
     def close(self, timeout=2.0):
+        timeout = min(2.0, max(0.0, timeout))
+        if self.deadline_ns is None:
+            self.deadline_ns = time.monotonic_ns() + int(timeout * 1_000_000_000)
         self.stopping.set()
+        if self.lock.acquire(blocking=False):
+            try:
+                if self.readers:
+                    self.abandoned.set()
+            finally:
+                self.lock.release()
+        else:
+            self.abandoned.set()
         self.wake.set()
-        self.thread.join(min(2.0, max(0.0, timeout)))
+        self.thread.join(timeout)
         if self.thread.is_alive():
             self.abandoned.set()
         for key, session in tuple(_SESSIONS.items()):

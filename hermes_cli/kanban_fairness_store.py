@@ -68,6 +68,9 @@ def drain(conn: sqlite3.Connection, out: Path) -> dict:
             _gap(receipts, "journal_missing", "database no longer carries the armed journal")
             _write(out / RECEIPTS, segments.encoded(receipts))
         return receipts
+    from hermes_cli.kanban_fairness_budget import initialize
+
+    initialize(out)
     if receipts["capture_id"] is None:
         _bind(conn, receipts, state)
         _write(out / RECEIPTS, segments.encoded(receipts))
@@ -144,8 +147,11 @@ def write_manifest(conn: sqlite3.Connection, out: Path, *, board: str, assumptio
 
 
 def load(out: Path) -> dict:
+    from hermes_cli.kanban_fairness_tail import validate_tail
+
     capture = segments.load_records(out)
     manifest, records, gaps = capture["manifest"], capture["records"], capture["gaps"]
+    gaps.extend(validate_tail(out, manifest))
     expected = 1
     for record in records:
         if record["kind"] not in ("opening", "row_change"):

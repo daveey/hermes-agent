@@ -135,6 +135,130 @@ def test_ten_thousand_submissions_do_not_wait_for_writer(tmp_path, monkeypatch):
         session.close()
 
 
+def test_timeout_during_seal_cannot_certify_epoch(tmp_path, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    actual = runtime.seal_records
+
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return actual(*args, **kwargs)
+
+    monkeypatch.setattr(runtime, "seal_records", held)
+    session = activate(tmp_path, monkeypatch)
+    assert runtime.submit(board="default", kind="loss", payload=session.loss_payload("redaction", 1))
+    closer = threading.Thread(target=lambda: session.close(timeout=0.1))
+    closer.start()
+    try:
+        assert entered.wait(2)
+        closer.join(2)
+        assert not closer.is_alive()
+    finally:
+        release.set()
+        session.thread.join(3)
+    assert not session.sealed
+    assert "runtime_tail" in {g["code"] for g in load(session.out)["gaps"]}
+
+
+def test_snapshot_detaches_before_serialization(monkeypatch):
+    payload = {"values": ["small"]}
+    actual = runtime.json.dumps
+
+    def mutate(snapshot, **kwargs):
+        payload["values"].append("x" * (runtime.MAX_PAYLOAD_BYTES + 1))
+        return actual(snapshot, **kwargs)
+
+    monkeypatch.setattr(runtime.json, "dumps", mutate)
+    assert json.loads(runtime.bounded_payload(payload)) == {"values": ["small"]}
+
+
+def test_inflight_submission_cannot_be_silently_sealed(tmp_path, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    session = activate(tmp_path, monkeypatch)
+    assert runtime.submit(board="default", kind="loss", payload=session.loss_payload("redaction", 1))
+    actual = runtime.bounded_payload
+
+    def held(payload):
+        entered.set()
+        assert release.wait(5)
+        return actual(payload)
+
+    monkeypatch.setattr(runtime, "bounded_payload", held)
+    producer = threading.Thread(target=lambda: session.enqueue("loss", session.loss_payload("redaction", 1)))
+    producer.start()
+    try:
+        assert entered.wait(2)
+        assert not session.close(timeout=0)
+    finally:
+        release.set()
+        producer.join(3)
+        session.thread.join(3)
+    assert not session.sealed
+
+
+@pytest.mark.parametrize("mutation", ["missing", "late", "identity", "seal", "malformed"])
+def test_runtime_tail_is_required_and_bound(tmp_path, monkeypatch, mutation):
+    session = activate(tmp_path, monkeypatch)
+    assert session is not None
+    assert runtime.submit(board="default", kind="loss", payload=session.loss_payload("redaction", 1))
+    assert session.close()
+    closing = session.out / "runtime-close.json"
+    data = json.loads(closing.read_bytes())
+    assert "runtime_tail" not in {g["code"] for g in load(session.out)["gaps"]}
+    if mutation == "missing":
+        closing.unlink()
+    elif mutation == "malformed":
+        closing.write_text("[]")
+    else:
+        if mutation == "late":
+            data["completed_ns"] = data["deadline_ns"] + 1
+        elif mutation == "identity":
+            data["source_epoch"] = "other"
+        else:
+            data["final_seal"] = "0" * 64
+        closing.write_text(json.dumps(data))
+    assert "runtime_tail" in {g["code"] for g in load(session.out)["gaps"]}
+
+
+def test_actual_read_inflight_at_close_is_incomplete(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    session = activate(tmp_path, monkeypatch)
+    assert session is not None
+    assert runtime.submit(board="default", kind="loss", payload=session.loss_payload("redaction", 1))
+    entered, release = threading.Event(), threading.Event()
+    path = tmp_path / "missing-owner-document"
+    actual = Path.open
+
+    def held(self, *args, **kwargs):
+        if self == path:
+            entered.set()
+            assert release.wait(5)
+        return actual(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", held)
+    results = []
+    reader = threading.Thread(target=lambda: results.append(read_owners(board="default", now_s=150, path=path)))
+    reader.start()
+    try:
+        assert entered.wait(2)
+        assert not session.close()
+    finally:
+        release.set()
+        reader.join(3)
+    assert results == [set()]
+    assert "runtime_tail" in {g["code"] for g in load(session.out)["gaps"]}
+
+
+def test_loss_lock_contention_fails_closed(tmp_path, monkeypatch):
+    session = activate(tmp_path, monkeypatch)
+    assert session is not None
+    with session.loss_lock:
+        session.note_loss("dropped")
+    assert session.abandoned.is_set()
+    assert not session.close()
+
+
 def test_overflow_and_tail_are_bounded(tmp_path, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     actual = runtime.append_records

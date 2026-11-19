@@ -23,7 +23,13 @@ def read_owners(*, board: str, now_s: float, path=None) -> set[str]:
     """Return cached owner IDs, or no urgency when observation is invalid."""
     from hermes_cli import kanban_fairness_runtime as runtime
 
-    capture = runtime.enabled(board=board) if isinstance(board, str) else False
+    if not isinstance(board, str) or not runtime.enabled(board=board):
+        return _read_owners(board=board, now_s=now_s, path=path, capture=False)
+    with runtime.observation(board=board):
+        return _read_owners(board=board, now_s=now_s, path=path, capture=True)
+
+
+def _read_owners(*, board, now_s, path, capture):
     raw = None
 
     def result(owners=None, outcome="invalid"):

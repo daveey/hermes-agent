@@ -18,12 +18,9 @@ def encoded(value) -> bytes:
 
 
 def write(path: Path, data: bytes) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(tmp, path)
+    from hermes_cli.kanban_fairness_budget import write as bounded_write
+
+    bounded_write(path, data)
 
 
 MAX_METADATA_BYTES = 8 * 1024 * 1024
