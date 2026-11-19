@@ -438,14 +438,16 @@ def _relaunch_shaped(orig, template):
 
 def _detect_relaunch_route(core_root, template, own_file, orig, argv):
     """Route ``managed-stub-relaunch``: ``orig_argv == [exe, "-I" (one or more, nothing else),
-    "-c", src]`` with ``src == relaunch_prefix(core_root, sys.argv) + "exec(" + repr(script) + ")"``
+    "-c", src, *sys.argv[1:]]`` with ``src == relaunch_prefix(core_root, sys.argv) + "exec(" + repr(script) + ")"``
     byte for byte, and ``script`` passing the unchanged managed-stub checks. Flags and env are
     never evidence; ``_hermes_relaunched`` is set by these very bytes."""
     index = orig.index("-c", 1)
     options = orig[1:index]
     if not options or any(option != "-I" for option in options):
         raise _Refuse("unsupported-route:relaunch-options")
-    if len(orig) != index + 2 or argv[:1] != ["-c"]:
+    # Anything after the source is exactly sys.argv's tail (venv_sync keeps a ``-c`` program's trailing argv for
+    # its command line); the prefix proven below assigns that same sys.argv, so the tokens are never evidence.
+    if orig[index + 2:] != argv[1:] or argv[:1] != ["-c"]:
         raise _Refuse("unsupported-route:relaunch-argv")
     source = orig[index + 1]
     if len(source) > MAX_SOURCE:

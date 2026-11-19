@@ -946,15 +946,19 @@ def relaunch_command(
         # Python is still locating the module (a package's __init__ imported the bootstrap):
         # argv[0] is "-m" and __main__ has no spec yet, so the module name is on the command line.
         module = original[index + 1]
+    trailing: list[str] = []
     if argv[0] == "-c":
         body = f"exec({original[index + 1]!r})"
+        # The prefix assigns sys.argv itself, so these change nothing for the program; they keep the re-entered
+        # process's command line naming what it runs (ps, /proc, `hermes doctor` holder lists).
+        trailing = original[index + 2:]
     elif module and module != "__main__":
         body = f"runpy.run_module({module!r}, run_name='__main__', alter_sys=True)"
     else:
         # distlib .exe launchers are executable zip files with __main__, not
         # importable modules named '__main__'. run_path handles both shapes.
         body = f"runpy.run_path({str(Path(argv[0]).absolute())!r}, run_name='__main__')"
-    return [str(python), *options, "-I", "-c", prefix + body]
+    return [str(python), *options, "-I", "-c", prefix + body, *trailing]
 
 
 def main(argv: list | None = None) -> int:
