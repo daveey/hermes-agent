@@ -37,6 +37,8 @@ from agent.turn_failure_copy import (
 )
 from agent.route_verdicts import route_visit
 from agent.turn_retry_state import TurnRetryState
+from agent import update_pause_cancel
+from agent.turn_api_call import yield_to_update_pause
 from agent.turn_recovery_codex import _codex_soft_failure_error, _is_codex_token_expired, _recover_stale_codex_reasoning
 from hermes_constants import display_hermes_home
 from utils import base_url_host_matches
@@ -1407,6 +1409,11 @@ def interruptible_backoff_sleep(
     _touch_counter = 0
     while time.time() < sleep_end:
         if agent._interrupt_requested:
+            # Preserve the update-owned cancel for begin_iteration's boundary pause;
+            # generic interrupt handling would clear it and append a terminal Stop row.
+            if _retry is not None and update_pause_cancel.model_yield_requested(agent):
+                yield_to_update_pause(_retry)
+                return None
             if _retry is not None and agent.clear_interrupt(preserve_redirect=True):
                 _retry.restart_with_redirected_messages = True
                 return None

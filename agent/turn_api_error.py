@@ -485,13 +485,16 @@ def settle_unrecovered_error(
     )
     # Same preserve-redirect rule as the invalid-response wait: a steering correction
     # must survive backoff, not die as "Operation interrupted".
-    _interrupted = interruptible_backoff_sleep(
-        agent, wait_time, _retry, messages=messages, conversation_history=conversation_history,
-        api_call_count=api_call_count,
-        abort_message="Interrupt detected during retry wait, aborting.",
-        interrupt_text=f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",
-        activity_label=f"error retry backoff ({retry_count}/{max_retries})",
-    )
+    # The failed request's context has exited, but its retry wait is still at the same
+    # boundary. Keep it visible to the update watcher without broadening eligibility.
+    with update_pause_cancel.model_request_in_flight(agent, messages, api_call_count=api_call_count):
+        _interrupted = interruptible_backoff_sleep(
+            agent, wait_time, _retry, messages=messages, conversation_history=conversation_history,
+            api_call_count=api_call_count,
+            abort_message="Interrupt detected during retry wait, aborting.",
+            interrupt_text=f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",
+            activity_label=f"error retry backoff ({retry_count}/{max_retries})",
+        )
     if _interrupted is not None:
         return _verdict("return", _interrupted)
     if _retry.restart_with_redirected_messages:
