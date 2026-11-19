@@ -167,3 +167,73 @@ def test_certified_release_rederives_episode_and_payload(fault):
         proof["containment_v1"]["episode" if fault == "episode" else "containment_sha256"] = sync.uuid7()
     with pytest.raises(ContainmentRefused, match="not bound to this exact containment episode"):
         canonical.certified_release(original, proof, **args)
+
+
+
+@pytest.mark.parametrize("fault", ["missing-producer", "baseline-type", "event", "run"])
+def test_resume_producer_requires_nomination_and_portable_completion(board, monkeypatch, fault):
+    op, frozen, episode = wire.operation()
+    frozen["policy"]["producer"] = {**frozen["target"], "task_id": wire.AUTH}
+    hub = wire.Hub(op, frozen, episode)
+    hub.close = lambda: None
+    data = context_data()
+    data["target"]["task_id"] = wire.AUTH
+    data["producer_baseline"] = {"event_uid": sync.uuid7(), "run_uid": sync.uuid7()}
+    hub.containment_context = lambda *a: data
+    monkeypatch.setattr(remote, "enrolled", lambda c: (hub, "fixture"))
+    monkeypatch.setattr(remote, "_recover_stop", lambda *a: None)
+    class ReachedStage(RuntimeError):
+        pass
+    def stage(*args):
+        assert args[-1]["evidence"]["event_uid"] == data["producer_baseline"]["event_uid"]
+        raise ReachedStage
+    monkeypatch.setattr(remote, "_stage", stage)
+    args = dict(actor=Actor(wire.AUTH, sync.uuid7()), task=wire.TASK, episode=episode, kind="producer")
+    with pytest.raises(ReachedStage):
+        remote.resume(board, **args)
+    if fault == "missing-producer":
+        del frozen["policy"]["producer"]
+        hub.events[episode] = wire.evidence(op, frozen, episode)
+    elif fault == "baseline-type":
+        data["producer_baseline"] = []
+    else:
+        data["producer_baseline"]["event_uid" if fault == "event" else "run_uid"] = "invalid"
+    message = "has no producer predicate" if fault == "missing-producer" else "has no portable completion evidence"
+    with pytest.raises(ContainmentRefused, match=message):
+        remote.resume(board, **args)
+
+
+def test_settle_local_does_not_pick_up_absent_target(board):
+    def forbidden(*args):
+        pytest.fail("absent retained target must not fetch or apply a projection")
+    hub = SimpleNamespace(row_evidence=forbidden)
+    assert remote.settle_local(board, hub, "fixture", {"task_id": wire.TASK}, Actor(wire.AUTH, sync.uuid7())) is False
+
+
+@pytest.mark.parametrize("fault", ["board", "table", "uid", "state", "row-type", "task-id", "run-task-id"])
+def test_settle_local_rechecks_each_canonical_projection_coordinate(board, monkeypatch, fault):
+    from gateway.session_context import scoped_current_session_id
+    from hermes_cli import kanban_containment_service as service
+    from tests.hermes_cli import test_kanban_containment_remote as fixtures
+    target, authority, session, hub = fixtures.setup(board, monkeypatch)
+    run_uid = board.execute("SELECT uid FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1", (target,)).fetchone()[0]
+    actor = Actor(target, run_uid)
+    with scoped_current_session_id(session):
+        result = service.contain(board, authority=authority, summary="Fixture")
+    assert remote.settle_local(board, hub, "fixture", result, actor) is True
+    original = hub.row_evidence
+    def altered(slug, table, uid):
+        proof = original(slug, table, uid)
+        selected = "task_runs" if fault == "run-task-id" else "tasks"
+        if table != selected:
+            return proof
+        if fault == "row-type":
+            proof["row"] = []
+        elif fault in ("task-id", "run-task-id"):
+            proof["row"]["id" if table == "tasks" else "task_id"] = wire.TASK
+        else:
+            proof[fault] = "other"
+        return proof
+    monkeypatch.setattr(hub, "row_evidence", altered)
+    with pytest.raises(ContainmentRefused, match="canonical lifecycle projection changed identity"):
+        remote.settle_local(board, hub, "fixture", result, actor)
