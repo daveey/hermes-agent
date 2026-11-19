@@ -158,11 +158,12 @@ def _apply_turn_floor(conn, tasks, *, now_s=None) -> frozenset:
     return frozenset(applied)
 
 
+ALARM_KEY_PREFIXES = ("worker-claim-watch:", "pickup-stall:", "mods-suite-red:")
+
+
 def _alarm_key(key) -> bool:
     """Explicit detector keys, not titles or priority bands, identify alarms."""
-    return isinstance(key, str) and key.startswith((
-        "worker-claim-watch:", "pickup-stall:", "mods-suite-red:",
-    ))
+    return isinstance(key, str) and key.startswith(ALARM_KEY_PREFIXES)
 
 
 def _source_snapshot(conn, candidate_ids):
