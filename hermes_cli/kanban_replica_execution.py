@@ -72,7 +72,8 @@ def raw(row: dict) -> dict | None:
     run = row.get("_replica_run")
     if not isinstance(run, dict) or row.get("status") != "running":
         return None
-    gateway, profile = row.get("gateway"), row.get("owner_profile")
+    scope = run.get("scope", row)
+    gateway, profile = scope.get("gateway"), scope.get("owner_profile")
     identity = {"gateway": gateway, "profile": profile, "board": row.get("board"), "kind": "card",
                 "work_id": row.get("id"), "run_id": run["run_id"]}
     owner = {"gateway": gateway, "profile": profile}

@@ -102,6 +102,31 @@ def test_incomplete_primary_evidence_remains_unknown(primary, sql):
         assert value['state'] == 'unknown'
 
 
+def test_primary_preserves_local_row_routing_shape(primary):
+    primary_row = activity.session_tasks(['session'])[0]
+    with sqlite3.connect(primary) as conn:
+        conn.execute("UPDATE kanban_sync_state SET mode='off'")
+    local_row = activity.session_tasks(['session'])[0]
+    assert set(primary_row) == set(local_row)
+    assert 'gateway' not in primary_row
+    assert 'owner_profile' not in primary_row
+    assert primary_row.get('remote') == local_row.get('remote')
+
+
+def test_primary_uses_latest_beat_of_current_run_only(primary):
+    with sqlite3.connect(primary) as conn:
+        conn.executemany(
+            'INSERT INTO task_events (task_id,run_id,kind,created_at,uid) VALUES (?,?,?,?,?)',
+            [('card', 7, 'heartbeat', 985, 'older-current'),
+             ('card', 7, 'heartbeat', 995, 'newest-current'),
+             ('card', 6, 'heartbeat', 999, 'earlier-run')],
+        )
+    for value in read_all(primary):
+        assert value['observed_at'] == 995
+        assert value['source_revision'] == 'event:newest-current'
+        assert value['identity']['run_id'] == 'portable-run'
+
+
 def test_primary_clock_expires_without_rejuvenation(primary, monkeypatch):
     monkeypatch.setattr(activity.time, 'time', lambda: 1200)
     for value in read_all(primary):

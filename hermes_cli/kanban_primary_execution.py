@@ -36,10 +36,12 @@ def attach(conn, rows, *, gateway, profile, board):
             if evidence is None:
                 continue
             row = rows[tid]
-            row.update(gateway=gateway, owner_profile=profile, board=board, status='running', assignee=assignee)
+            row.update(board=board, status='running', assignee=assignee)
             from hermes_cli.kanban_execution_observations import _request
             row['human_request'] = _request(row.get('human_request'))
             # Display enrichment runs only on lists; it must not change the shared evidence record.
-            row['_replica_run'] = {**evidence, 'activity_at': None, 'activity_kind': None}
+            # Evidence ownership is private adapter data, not remote-card UI routing.
+            row['_replica_run'] = {**evidence, 'activity_at': None, 'activity_kind': None,
+                                   'scope': {'gateway': gateway, 'owner_profile': profile}}
             values[tid] = raw(row)
     return values
