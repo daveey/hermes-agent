@@ -99,7 +99,7 @@ def validate(value) -> dict:
     """
     problems: list[dict] = []
     result = {"version": 1, "complete": False, "problems": problems, "sources": []}
-    if not isinstance(value, dict) or value.get("version") != 1:
+    if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
         _problem(problems, "invalid_roster", "expected a version 1 roster object")
         return result
     result["unknown_sources"] = {

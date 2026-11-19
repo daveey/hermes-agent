@@ -223,7 +223,7 @@ def main(argv=None) -> int:
         parser.error("inventory roster needs --manifest")
     try:
         return args.run(args)
-    except (journal.JournalError, FileNotFoundError, ValueError, KeyError) as exc:
+    except (journal.JournalError, OSError, ValueError, KeyError) as exc:
         print(f"kanban_fairness: {type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_ERROR
 

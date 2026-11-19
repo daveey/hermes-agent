@@ -114,6 +114,58 @@ def test_unknown_discovery_is_retained_even_when_complete_was_claimed():
     assert result["unknown_sources"]["opening"] == [unknown]
 
 
+@pytest.mark.parametrize("version", [True, 1.0, "1"])
+def test_version_is_strict_integer(version):
+    value = evidence()
+    value["version"] = version
+    assert "invalid_roster" in codes(value)
+    assert not roster.validate(value)["complete"]
+
+
+@pytest.mark.parametrize("mutation,code", [
+    (lambda v: v["window"].update(end_ms=100), "invalid_window"),
+    (lambda v: v["closing"].update(observed_ms=201), "discovery_cut_mismatch"),
+    (lambda v: v["closing"]["sources"][0].update(process_epoch=None), "missing_source_pin"),
+    (lambda v: v["membership"].update(start_ms=101), "membership_incomplete"),
+    (lambda v: v["opening"].update(provenance=None), "missing_provenance"),
+    (lambda v: v["membership"].update(provenance=None), "missing_provenance"),
+    (lambda v: v["membership"].update(events=None), "membership_incomplete"),
+    (lambda v: v["coverage"][0].update(end_ms=199), "coverage_gap"),
+    (lambda v: v["closing"].update(complete=False), "discovery_incomplete"),
+])
+def test_each_guard_reports_its_specific_problem(mutation, code):
+    value = evidence()
+    mutation(value)
+    assert code in codes(value)
+    assert not roster.validate(value)["complete"]
+
+
+def test_empty_roster_is_not_complete():
+    value = evidence()
+    value["expected_sources"] = []
+    value["coverage"] = []
+    for section in ("opening", "closing"):
+        value[section]["sources"] = []
+    assert "empty_roster" in codes(value)
+    assert not roster.validate(value)["complete"]
+
+
+@pytest.mark.parametrize("failure", ["directory", "permission"])
+def test_cli_unreadable_manifest_is_clean_tool_error(tmp_path, capsys, monkeypatch, failure):
+    from pathlib import Path
+    from scripts.kanban_fairness import main
+
+    if failure == "permission":
+        def denied(*args, **kwargs):
+            raise PermissionError("fixture denied")
+        monkeypatch.setattr(Path, "read_text", denied)
+    assert main(["inventory", "roster", "--manifest", str(tmp_path),
+                 "--output", str(tmp_path / "result.json")]) == 3
+    error = capsys.readouterr().err
+    assert "kanban_fairness:" in error
+    assert "Traceback" not in error
+
+
 def test_cli_roster_reads_manifest_without_arming_capture(tmp_path, capsys):
     import json
     from scripts.kanban_fairness import main
