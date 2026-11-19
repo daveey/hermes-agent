@@ -591,8 +591,12 @@ class SessionMaintenanceMixin:
         amplified one (#105670). Same guard ``_execute_write`` applies to every write."""
         self._raise_if_db_corrupt()
         optimized = 0
+        from hermes_state_fts_online import FtsFreeRefused
+
         try:
             optimized = self.optimize_fts()  # manages its own lock
+        except FtsFreeRefused:
+            raise  # the gate saw damage it will not let a page-freeing rewrite touch: no VACUUM either
         except Exception as exc:
             logger.warning("FTS optimize before VACUUM failed: %s", exc)
         with self._lock:

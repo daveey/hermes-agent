@@ -812,7 +812,7 @@ class SessionSearchMixin:
         # Heal bookkeeping BEFORE deciding whether to demote again.
         self._repair_optimize_bookkeeping()
         if self._fts_stale or self._fts_reseed_needs_reset():
-            return {"ok": False, "reason": "fts_index_damaged"}  # the gate kept a damaged index (logged)
+            return {"ok": False, "reason": "fts_index_kept"}  # the gate kept the index (detached or unplanned; logged)
         with self._lock:
             needs_storage_upgrade = self._db_needs_fts_storage_upgrade(self._conn)
         pending = self.get_meta("fts_rebuild_high_water") is not None
@@ -1376,18 +1376,24 @@ class SessionSearchMixin:
         maintenance: changes neither results nor ``snippet()`` output, only layout and
         speed; VACUUM then returns the freed pages. Returns the number optimized. A quarantined
         handle never issues ``'optimize'``: it rewrites index segments in place and would compound
-        structural damage (or a split WAL generation) instead of leaving it diagnosable."""
+        structural damage (or a split WAL generation) instead of leaving it diagnosable. A detached
+        (stale) index has nothing worth merging: 0. Raises ``FtsFreeRefused`` when the whole-file gate
+        keeps the index (``'optimize'`` frees every old segment page; hermes_state_fts_online)."""
         self._raise_if_db_corrupt()
         optimized = 0
-        # 'optimize' frees every old segment page: the whole-file plan runs here, before the lock
-        # (hermes_state_fts_online).
-        with self._fts_runtime_plan(), self._lock:
+        # The whole-file plan runs here, before the lock.
+        with self._fts_runtime_plan(needed=not self._fts_stale), self._lock:
             self._raise_if_db_replaced()
             if self._conn is None:
                 self._reopen_after_close_locked(context="write")
+            if self._fts_stale:
+                return 0
             tables = self._present_fts_tables()
             if tables and not self._fts_wholesale_free_allowed(tables, context="FTS segment merge ('optimize')"):
-                return 0
+                from hermes_state_fts_online import FtsFreeRefused
+
+                raise FtsFreeRefused("the integrity gate kept the search index from being merged (see the log); "
+                                     "`hermes sessions repair-search` or `hermes sessions recover` first")
             for tbl in tables:
                 try:
                     self._conn.execute(f"INSERT INTO {tbl}({tbl}) VALUES('optimize')")
@@ -1418,7 +1424,7 @@ class SessionSearchMixin:
         self._raise_if_db_corrupt()
         rebuilt = 0
         # 'rebuild' frees every index page: the whole-file plan runs here, before the lock (hermes_state_fts_online).
-        with self._fts_runtime_plan(), fts_rebuild_admission(self.db_path) as admitted:
+        with self._fts_runtime_plan(needed=not self._fts_stale), fts_rebuild_admission(self.db_path) as admitted:
             if not admitted:
                 logger.warning(
                     "Deferred in-place FTS rebuild: another process holds the rebuild authority for this state.db.")

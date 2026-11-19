@@ -436,6 +436,10 @@ class SessionSchemaMixin:
             # Absent: the normal ensure path creates/backfills it. None: this runtime cannot
             # safely inspect an existing one, so leave the version behind for retry.
             return trigram_exists is False
+        if self._fts_stale:
+            # Detached: the stale recovery (one-shot or online) recreates the index and its view from the current
+            # DDL, which already carries the exclusion. Rebuilding the old index here would only free its pages.
+            return True
         if not self._fts_wholesale_free_allowed(("messages_fts_trigram",),
                                                 context="Trigram source-exclusion rebuild ('rebuild')"):
             return False  # schema_version stays behind; a later open retries on a recovered index
@@ -1560,11 +1564,49 @@ class SessionSchemaMixin:
     def _detach_fts_stale(self, cursor) -> None:
         """The fail-open state on *cursor*'s connection: the ``fts_stale`` breadcrumb and no FTS triggers (canonical
         writes continue, search uses LIKE, the stale-index recovery rebuilds). Caller holds ``self._lock`` or runs
-        schema init."""
-        cursor.execute(_STALE_KEY_UPSERT_SQL, (FTS_STALE_KEY,))
-        self._drop_all_fts_triggers(cursor)
+        schema init. The in-memory flags flip first, so even when the write fails this handle stops using the index
+        and its retry tick treats the store as stale. Breadcrumb and trigger drops commit together: inside the
+        caller's transaction (a savepoint), else one ``BEGIN IMMEDIATE`` retried for a few seconds of lock
+        contention."""
         self._fts_stale = True
         self._fts_enabled = self._trigram_available = False
+
+        def detach() -> None:
+            cursor.execute(_STALE_KEY_UPSERT_SQL, (FTS_STALE_KEY,))
+            self._drop_all_fts_triggers(cursor)
+
+        conn = getattr(cursor, "connection", cursor)  # a cursor, or a connection (both have execute)
+        if conn.in_transaction:
+            cursor.execute("SAVEPOINT fts_detach")
+            try:
+                detach()
+                cursor.execute("RELEASE SAVEPOINT fts_detach")
+            except BaseException:
+                cursor.execute("ROLLBACK TO SAVEPOINT fts_detach")
+                cursor.execute("RELEASE SAVEPOINT fts_detach")
+                raise
+            return
+        deadline = time.monotonic() + 10.0
+        while True:
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) and "busy" not in str(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    logger.error("Could not record the detached FTS state (write lock busy); this handle runs on "
+                                 "LIKE and its retry tick recovers the index.")
+                    return
+                time.sleep(0.2)
+                continue
+            try:
+                detach()
+                cursor.execute("COMMIT")
+            except BaseException:
+                with contextlib.suppress(sqlite3.Error):
+                    cursor.execute("ROLLBACK")
+                raise
+            return
 
     def _backfill_gateway_metadata_from_sessions_json(self, cursor: sqlite3.Cursor) -> None:
         """One-time v18 backfill of gateway metadata from sessions.json. Only fills NULL
