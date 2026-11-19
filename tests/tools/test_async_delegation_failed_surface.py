@@ -105,10 +105,49 @@ def test_a_split_unit_that_stalls_after_one_task_finished_lists_only_the_stalled
         assert res["status"] == "dispatched"
         failed = wait_until(lambda: ad.failed_delegations_for_session("ui-1"), timeout=5)
         assert [(r["task_index"], r["goal"], r["status"]) for r in failed] == [(2, "C goal", "stalled")]
+        # Persistence precedes publication: an empty queue is not completion.
+        event = process_registry.completion_queue.get(timeout=10)
+        assert event["delegation_id"] == "deleg_call-2"
+        assert [(r["task_index"], r["status"]) for r in event["results"]] == [
+            (1, "completed"), (2, "stalled")]
     finally:
         gate.set()
-        while not process_registry.completion_queue.empty():
-            process_registry.completion_queue.get_nowait()
+        if ad._executor is not None:
+            ad._executor.shutdown(wait=True)
+
+
+def test_stall_fixture_consumes_completion_published_after_the_durable_row(monkeypatch):
+    """A durable failure is visible before the monitor publishes its queue event."""
+    from tools.process_registry import process_registry
+
+    queue = process_registry.completion_queue
+    original_put, original_get = queue.put, queue.get
+    publish = threading.Event()
+    reached = threading.Event()
+
+    def held_put(event, *args, **kwargs):
+        reached.set()
+        assert publish.wait(5), "completion consumer never released publication"
+        return original_put(event, *args, **kwargs)
+
+    def consuming_get(*args, **kwargs):
+        publish.set()
+        return original_get(*args, **kwargs)
+
+    monkeypatch.setattr(queue, "put", held_put)
+    monkeypatch.setattr(queue, "get", consuming_get)
+    try:
+        test_a_split_unit_that_stalls_after_one_task_finished_lists_only_the_stalled_task(monkeypatch)
+    finally:
+        publish.set()
+        if ad._executor is not None:
+            ad._executor.shutdown(wait=True)
+        ad._reset_for_tests()  # joins the monitor before inspecting its final publication
+    assert reached.is_set(), "did not exercise the publication gap"
+    leftover = []
+    while not queue.empty():
+        leftover.append(original_get(timeout=1))
+    assert leftover == [], "stall fixture left a completion for the next test"
 
 
 @pytest.mark.parametrize("task_indexes, unfinished", [([1, 2], [2]), (None, [0, 2])], ids=["split-unit", "whole-batch"])
