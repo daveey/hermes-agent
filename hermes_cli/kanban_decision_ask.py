@@ -121,10 +121,23 @@ def escalate_if_overdue(conn, task_id: str, *, now: int | None = None) -> bool:
     record, _reason, cmd, at = _latest_chat_park(conn, task_id)
     if record is None or at is None:
         return False
-    if not str(cmd or "").startswith("hermes kanban wait-comment "):
-        return False  # it waits on another producer it named (CI, a probe): the answer may be in; not a stuck ask
+    # Every chat wait has the deadline. The card's own comment probe (however spelled: nice, VAR=, a path) just said
+    # "not yet", so it is trusted; a probe naming another producer counts an answer since the park as "answered,
+    # now waiting on that producer" (adversarial review of #3647).
+    trust = is_comment_probe(cmd)
     now = int(time.time()) if now is None else int(now)
     if now - at < ASK_OVERDUE_S:
         return False
-    return escalate(conn, task_id, f"its wake check has seen no answer for {ASK_OVERDUE_S // 3600} h",
-                    trust_probe=True)
+    return escalate(conn, task_id, f"it has had no answer for {ASK_OVERDUE_S // 3600} h", trust_probe=trust)
+
+
+def is_comment_probe(cmd) -> bool:
+    """``hermes kanban wait-comment ...`` anywhere in the command's words (after env, VAR=, nice, a full path)."""
+    import os
+    import shlex
+    try:
+        words = shlex.split(str(cmd or ""))
+    except ValueError:
+        return False
+    return any(os.path.basename(words[i]) == "hermes" and words[i + 1] == "kanban" and words[i + 2] == "wait-comment"
+               for i in range(len(words) - 2))

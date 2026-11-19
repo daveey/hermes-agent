@@ -635,8 +635,11 @@ def test_unanswered_chat_wait_goes_to_david_after_two_hours(kanban_home, monkeyp
         assert kb.get_task(conn, tid).status == "blocked"
 
 
-def test_a_chat_wait_on_its_own_named_probe_has_no_deadline(kanban_home, monkeypatch) -> None:
-    """Review of #3647: a chat wait that brought a CI probe may already be answered and waiting on CI."""
+@pytest.mark.parametrize("answered", [False, True])
+def test_a_chat_wait_on_its_own_named_probe_has_the_deadline_until_answered(kanban_home, monkeypatch,
+                                                                             answered) -> None:
+    """Every chat wait has the deadline (adversarial review of #3647); one that named a CI probe and has its answer
+    is waiting on CI, not on the orchestrator (review of #3647)."""
     from hermes_cli import kanban_decision_ask as kda
     with kbc.connect_closing() as conn:
         tid = _running(conn)
@@ -645,8 +648,25 @@ def test_a_chat_wait_on_its_own_named_probe_has_no_deadline(kanban_home, monkeyp
         out = _tool("schedule", {"reason": LIVE_REASON, "awaiting": LIVE_AWAITING,
                                  "wake_check": "gh run view 40443505012 --json status | grep -q completed"})
         assert out.get("status") == "scheduled", out
-        assert not kda.escalate_if_overdue(conn, tid, now=int(time.time()) + kda.ASK_OVERDUE_S + 60)
-        assert kb.get_task(conn, tid).status == "scheduled"
+        if answered:
+            _orchestrator_comment(monkeypatch, conn, tid, "Go with premise A; then wait for the CI run.")
+        result = kda.escalate_if_overdue(conn, tid, now=int(time.time()) + kda.ASK_OVERDUE_S + 60)
+        assert result is (not answered)
+        assert kb.get_task(conn, tid).status == ("scheduled" if answered else "blocked")
+
+
+@pytest.mark.parametrize("cmd,expected", [
+    ("hermes kanban wait-comment t_1 --after-id 3 --skip-system", True),
+    ("nice hermes kanban wait-comment t_1 --after-id 3", True),
+    ("HERMES_HOME=/root/.hermes hermes kanban wait-comment t_1", True),
+    ("/usr/local/bin/hermes kanban wait-comment t_1 --contains APPROVED", True),
+    ("hermes kanban wait-check task t_1", False),
+    ("gh run view 404 --json status | grep -q completed", False),
+    ("", False),
+])
+def test_comment_probe_is_recognised_however_spelled(cmd, expected) -> None:
+    from hermes_cli.kanban_decision_ask import is_comment_probe
+    assert is_comment_probe(cmd) is expected
 
 
 def test_answered_since_uses_times_not_local_ids(kanban_home, monkeypatch) -> None:
