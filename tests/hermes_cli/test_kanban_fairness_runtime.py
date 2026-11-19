@@ -16,8 +16,11 @@ def activate(tmp_path, monkeypatch):
                             clock_error_ns=0)
 
 
+# Keep PYTEST_CURRENT_TEST below execve's per-environment-entry limit: the
+# default string ID embeds the oversized payload and breaks guard subprocesses.
 @pytest.mark.parametrize("value", ["x" * (runtime.MAX_PAYLOAD_BYTES + 1),
-                                   [None] * (runtime.MAX_PAYLOAD_BYTES + 1), 10**400])
+                                   [None] * (runtime.MAX_PAYLOAD_BYTES + 1), 10**400],
+                         ids=["oversize-string", "oversize-list", "oversize-integer"])
 def test_oversize_is_rejected_before_serializing(monkeypatch, value):
     monkeypatch.setattr(runtime.json, "dumps", lambda *a, **kw: pytest.fail("unbounded serialization"))
     with pytest.raises(runtime.PayloadLimit):
