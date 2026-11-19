@@ -1,4 +1,7 @@
-"""Paced headroom must not trap idle dispatchers at zero concurrency. [daveey]"""
+"""A far quota wall reroutes before pacing, and the destination pool decides the claim. [daveey]
+
+(Until 2026-11-19 this file also pinned the paced one-run floor of the per-host start limit; that limit is gone:
+only a pool at reserve holds a start, ``test_kanban_llm_pacing.py::test_v2_at_reserve_is_exactly_the_legacy_held_verdict``.)"""
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -8,23 +11,11 @@ from hermes_cli import kanban_llm_pacing as lp
 from hermes_cli import kanban_llm_pacing_dispatch as pd
 from hermes_cli import kanban_model_tier as tier
 from hermes_cli import kanban_provider_walls as walls
+from tests.hermes_cli import kanban_pacing_state as pacing_state
 from tests.hermes_cli import test_kanban_quota_episode as helpers
 from tests.hermes_cli.test_kanban_quota_episode_walls import LIVE_CFG, _clock
 
 board = helpers.board
-
-
-@pytest.mark.parametrize('average', [0, 0.5, 1, 6])
-@pytest.mark.parametrize('deferrable', [False, True])
-def test_paced_headroom_has_a_one_run_floor(average, deferrable):
-    pace = lp.PoolPace('openai-codex', lp.PACED, 0.15)
-    assert lp.admit_limit(pace, average, deferrable=deferrable, cfg=lp.PacingConfig(pace_starts=True)) == 1
-
-
-@pytest.mark.parametrize('deferrable', [False, True])
-def test_no_headroom_still_holds(deferrable):
-    pace = lp.PoolPace('openai-codex', lp.HELD, 0.0)
-    assert lp.admit_limit(pace, 0, deferrable=deferrable, cfg=lp.PacingConfig()) == 0
 
 
 @pytest.mark.parametrize('destination', [lp.PACED, lp.HELD])
@@ -38,13 +29,14 @@ def test_far_wall_reroutes_before_pacing_and_destination_limits_claims(
     monkeypatch.setattr(tier, 'load_tier_config', lambda: LIVE_CFG)
     monkeypatch.setattr(walls, 'active_walls', lambda **kw: {'openai-codex': float(clock[0] + 6 * 86400)})
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *a, **kw: None)
-    monkeypatch.setattr(pd, 'load_config', lambda: lp.PacingConfig(pace_starts=True))
-    monkeypatch.setattr(pd, 'avg_running', lambda *a: 0)
+    monkeypatch.setattr(pd, 'load_config', lambda: lp.PacingConfig())
     consulted = []
 
     def pace_for(conn, provider, cfg, now):
         consulted.append(provider)
-        return lp.PoolPace(provider, destination if provider == 'anthropic' else lp.HELD, 0.15)
+        state = destination if provider == 'anthropic' else lp.HELD
+        pacing_state.store((provider, state, now + 86400), now=now)
+        return lp.PoolPace(provider, state, 0.15)
 
     monkeypatch.setattr(pd, 'pace_for', pace_for)
     # Observe claim routing, not the independent all-provider maintenance read.
@@ -58,12 +50,9 @@ def test_far_wall_reroutes_before_pacing_and_destination_limits_claims(
         if destination == lp.HELD:
             assert seen == []
             assert len(result.llm_paced) == 2
-        else:
-            assert len(seen) == 1
-            assert seen[0][0] in ids
-            assert seen[0][1:] == ('claude-opus-5-5', 'anthropic')
-            assert len(result.llm_paced) == 1
-            assert result.llm_paced[0][3]['providers'] == [
-                {'provider': 'anthropic', 'state': lp.PACED, 'limit': 1, 'running': 1}]
+        else:  # a paced destination holds no start: both cards run there
+            assert sorted(t for t, *_ in seen) == sorted(ids)
+            assert {tuple(route) for _, *route in seen} == {('claude-opus-5-5', 'anthropic')}
+            assert result.llm_paced == []
             receipts = [e.payload for e in kb.list_events(conn, seen[0][0]) if e.kind == 'run_route']
             assert receipts[-1]['tier_reason'] == 'default+wall:openai-codex'

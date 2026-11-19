@@ -10,6 +10,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_llm_pacing as lp
 from hermes_cli import kanban_llm_pacing_dispatch as pd
 from hermes_cli import kanban_worker_node as wn
+from tests.hermes_cli import kanban_pacing_state as pacing_state
 from tests.hermes_cli import test_kanban_worker_node as support
 
 svc = support.svc
@@ -19,15 +20,13 @@ WINDOW = 9
 
 @pytest.fixture
 def pools(monkeypatch):
-    """Per-provider pace: codex follows ``state['codex']`` (HELD = limit 0, OPEN = no limit); anthropic is open."""
+    """Per-provider state: codex follows ``state['codex']`` (HELD = at reserve in v2), anthropic is open; each
+    refresh stores both as this machine's dispatcher would."""
     state = {"codex": lp.HELD}
 
     def pace_for(conn, provider, cfg, now):
-        if provider == "openai-codex":
-            return lp.PoolPace(provider, state["codex"], 0.0 if state["codex"] == lp.HELD else 1.0)
-        # At the ramp factor an open pool has no limit (``lp.admit_limit``); below it an idle host may start one
-        # card, and a pass counts its own picks against that (t_01a1e14333fada79).
-        return lp.PoolPace(provider, lp.OPEN, lp.OPEN_RAMP_FACTOR)
+        pacing_state.store(("openai-codex", state["codex"], now + 86400), ("anthropic", lp.OPEN), now=now)
+        return lp.PoolPace(provider, state["codex"] if provider == "openai-codex" else lp.OPEN)
     monkeypatch.setattr(pd, "pace_for", pace_for)
     return state
 

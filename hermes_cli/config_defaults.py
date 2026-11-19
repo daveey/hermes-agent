@@ -1989,7 +1989,7 @@ DEFAULT_CONFIG = {
         # silently followed every change of the profile's default model.
         "strong_model": "", "strong_provider": "",
         "pin_quota_reroute_min_hours": 6,  # a card pin walled this long runs on a same-class peer (kanban_pin_reroute)
-        "llm_pacing": dict(_PACING_DEFAULTS, providers=list(_PACING_DEFAULTS["providers"])),  # claim-time quota pacing
+        "llm_pacing": dict(_PACING_DEFAULTS, providers=list(_PACING_DEFAULTS["providers"]), tokens_per_percent={}),  # claim-time quota pacing
         # Each tick, requeue 'running' cards with broken claim bookkeeping (claim_lock or
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.

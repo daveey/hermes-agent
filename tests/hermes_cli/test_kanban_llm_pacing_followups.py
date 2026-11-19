@@ -7,7 +7,8 @@
    account had no five_hour reading and added 0 sustainable rate: one other account's 5h burn drove the factor
    to 0 (PACED, limit 0) while the idle account was free. A missing window (or one with no reset) now counts as a
    fresh full window.
-3. Dispatch-level coverage for class selectors, a non-zero paced limit and the deferrable share.
+3. Dispatch-level coverage for class selectors. (A paced limit and the deferrable share were covered here until
+   2026-11-19, when the per-host start limit was removed: only a pool at reserve holds a start now.)
 """
 from __future__ import annotations
 
@@ -51,7 +52,6 @@ def test_idle_account_without_a_five_hour_reading_adds_a_full_window_of_headroom
     five_hour = (95 / lp.WINDOW_SECONDS[lp.FIVE_HOUR]) / (8 / HOUR)  # softmax.admin's fresh window vs 8%/h
     assert pace.factor == pytest.approx(five_hour, abs=1e-4)
     assert pace.state == lp.OPEN  # was PACED at factor 0, limit 0
-    assert lp.admit_limit(pace, 4, deferrable=False, cfg=CFG) is None
 
 
 def test_a_window_with_no_reset_counts_as_a_full_window():
@@ -83,8 +83,9 @@ def test_registered_config_defaults_match_the_governor_defaults():
     assert lp.config_from(DEFAULT_CONFIG["kanban"]["llm_pacing"]) == lp.PacingConfig()
     assert set(DEFAULTS) == {"enabled", "target_percent", "reserve_five_hour_percent", "reserve_seven_day_percent",
                              "providers", "read_interval_seconds", "rate_window_seconds", "min_rate_span_seconds",
-                             "deferrable_share", "pace_starts"}
-    assert DEFAULTS["pace_starts"] is False  # slots, not the burn rate, decide how many cards run
+                             "margin_seconds", "history_days", "tpp_min_delta_percent", "tpp_window_seconds",
+                             "tpp_half_life_seconds", "tokens_per_percent", "budget_publish"}
+    assert "pace_starts" not in DEFAULTS  # slots, not the burn rate, decide how many cards run
 
 
 # --- dispatch fixtures --------------------------------------------------------------------------------------
@@ -101,18 +102,15 @@ def _config(home, **extra):
     home.joinpath("config.yaml").write_text(json.dumps({"kanban": {}, **extra}), encoding="utf-8")
 
 
-def _paced_reads(monkeypatch):
-    """Every pool reads 20% used one day into the week: factor 0.625 (paced) with no history."""
+def _held_reads(monkeypatch):
+    """Every pool reads 90% used (past the weekly reserve) with six days to its reset: held, at reserve."""
+    reset = [0.0]
+
     def read(provider, now):
-        return [lp.Reading(now, f"{provider}-1", lp.SEVEN_DAY, 20, now + 6 * DAY)]
+        reset[0] = now + 6 * DAY
+        return [lp.Reading(now, f"{provider}-1", lp.SEVEN_DAY, 90, reset[0])]
     monkeypatch.setattr(pd, "read_pool", read)
-
-
-def _seed_concurrency(running: float):
-    """This host ran ``running`` cards on anthropic over the last rate window (the paced limit's base)."""
-    now = time.time()
-    pd.state_path().write_text(json.dumps({"anthropic": {"running": [[now - 60 * i, running] for i in range(1, 30)]}}),
-                               encoding="utf-8")
+    return reset
 
 
 def _tick(conn):
@@ -134,19 +132,18 @@ def _skips(conn, tid):
 # --- 1. paced holds are recorded skips ----------------------------------------------------------------------
 
 def test_paced_hold_records_a_skip_the_notices_and_diagnostics_name(paced_board, monkeypatch):
-    _config(paced_board, kanban={"llm_pacing": {"pace_starts": True}})
-    _paced_reads(monkeypatch)
+    _config(paced_board)
+    reset = _held_reads(monkeypatch)
     monkeypatch.setattr(qp, "_running_and_limit", lambda *_a: (1, 7))  # free slots: the unrecorded case
-    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
     start = time.time()
     with kbc.connect() as conn:
         tid = _opus(conn, "paced", session_id="chat")
         seen, result = _tick(conn)
         assert seen == [] and kb.get_task(conn, tid).status == "ready"
-        assert result.llm_paced and result.llm_paced[0][:3] == (tid, "anthropic paced", None)
+        assert result.llm_paced and result.llm_paced[0][:3] == (tid, "anthropic held", int(reset[0]))
         [skip] = _skips(conn, tid)
-        assert (skip["reason"], skip["detail"]) == (skips.LLM_PACED, "anthropic paced")
-        assert skip["providers"] == [{"provider": "anthropic", "state": lp.PACED, "limit": 1, "running": 1}]
+        assert (skip["reason"], skip["detail"]) == (skips.LLM_PACED, "anthropic held")
+        assert skip["providers"] == [{"provider": "anthropic", "state": lp.HELD, "limit": 0}]
         _tick(conn)
         assert len(_skips(conn, tid)) == 1  # one row per episode, not one per tick
 
@@ -154,7 +151,7 @@ def test_paced_hold_records_a_skip_the_notices_and_diagnostics_name(paced_board,
         place = qp.position(conn, task)
         assert place["skip"]["reason"] == skips.LLM_PACED
         line = qp.describe(place)
-        assert "held: LLM quota pacing (anthropic paced pool)" in line
+        assert "held: LLM quota pacing (anthropic held pool)" in line
         assert not any(w in line for w in PRIORITY_WORDS), line
 
         later = start + 31 * 60
@@ -163,17 +160,18 @@ def test_paced_hold_records_a_skip_the_notices_and_diagnostics_name(paced_board,
         assert cw.sweep(conn, now=later) == 1
         payload = kb._json_dict(conn.execute("SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
                                              (tid, cw.NOTICE_KIND)).fetchone()[0])
-        assert payload["dispatch_skip"] == {"reason": skips.LLM_PACED, "detail": "anthropic paced"}
+        assert payload["dispatch_skip"]["reason"] == skips.LLM_PACED
+        assert payload["dispatch_skip"]["detail"] == "anthropic held"
         assert "skip_unrecorded" not in payload
         for text in (cw.notice_text(payload), pu.notice_text(payload), pu.ready_hint(conn, task, now=later)):
-            assert "held: LLM quota pacing (anthropic paced pool)" in text, text
+            assert "held: LLM quota pacing (anthropic held pool)" in text, text
             assert skips.UNRECORDED not in text
             assert not any(w in text for w in PRIORITY_WORDS), text
 
         diags = compute_task_diagnostics(task, kb.list_events(conn, tid), kb.list_runs(conn, tid), now=later)
     assert [(d.kind, d.severity) for d in diags] == [("held_in_ready", "warning")]
     assert diags[0].data["hold_reason"] == "llm_paced"
-    assert "llm_paced: anthropic paced" in diags[0].title
+    assert "llm_paced: anthropic held" in diags[0].title
 
 
 def test_held_pool_skip_carries_the_reset(paced_board, monkeypatch):
@@ -199,9 +197,8 @@ def test_held_pool_skip_carries_the_reset(paced_board, monkeypatch):
 
 
 def test_dry_run_records_the_hold_on_the_result_only(paced_board, monkeypatch):
-    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
-    _config(paced_board, kanban={"llm_pacing": {"pace_starts": True}})
-    _paced_reads(monkeypatch)
+    _config(paced_board)
+    _held_reads(monkeypatch)
     with kbc.connect() as conn:
         tid = _opus(conn, "paced")
         result = kbd.dispatch_once(conn, dry_run=True, spawn_fn=lambda *_a: None)
@@ -209,51 +206,20 @@ def test_dry_run_records_the_hold_on_the_result_only(paced_board, monkeypatch):
         assert _skips(conn, tid) == []
 
 
-# --- 3. dispatch-level limits -------------------------------------------------------------------------------
-
-def test_paced_limit_is_a_share_of_recent_concurrency_counted_against_running_cards(paced_board, monkeypatch):
-    """avg 4 running x factor 0.625 -> limit 2: two cards start, the third waits for a running one to end."""
-    _config(paced_board, kanban={"llm_pacing": {"pace_starts": True}})
-    _paced_reads(monkeypatch)
-    _seed_concurrency(4)
-    with kbc.connect() as conn:
-        ids = [_opus(conn, f"c{i}") for i in range(3)]
-        seen, result = _tick(conn)
-        held = [row[0] for row in result.llm_paced]
-    assert len(seen) == 2 and held == [t for t in ids if t not in seen]
-    assert result.llm_paced[0][3]["providers"][0] == {"provider": "anthropic", "state": lp.PACED, "limit": 2,
-                                                       "running": 2}
-
-
-def test_deferrable_card_gets_only_its_share_of_the_paced_limit(paced_board, monkeypatch):
-    """Limit 2, deferrable share 0.5 -> 1: the normal card starts, the negative-priority card then waits."""
-    _config(paced_board, kanban={"llm_pacing": {"pace_starts": True}})
-    _paced_reads(monkeypatch)
-    _seed_concurrency(4)
-    with kbc.connect() as conn:
-        normal = _opus(conn, "normal")
-        low = _opus(conn, "low", priority=-1)
-        seen, result = _tick(conn)
-    assert seen == [normal]
-    [(tid, _detail, _until, extra)] = result.llm_paced
-    assert tid == low
-    assert extra["providers"][0]["limit"] == 1 and extra["providers"][0]["running"] == 1
-
+# --- 3. class selectors ----------------------------------------------------------------------------------------
 
 ROUTE = {"billing": "subscription", "weight": 1, "eligible": True, "funding_verified": True,
          "capabilities": {"tools": True, "streaming": True, "context_tokens": 1000000}}
 
 
-def _class_config(home, *providers, pace_starts=False):
+def _class_config(home, *providers):
     routes = [dict(ROUTE, provider=p, model=f"{p}-deep") for p in providers]
-    _config(home, model_routing={"enabled": True, "routes": {"deep": routes}},
-            kanban={"llm_pacing": {"pace_starts": pace_starts}})
+    _config(home, model_routing={"enabled": True, "routes": {"deep": routes}}, kanban={})
 
 
 def test_class_selector_is_paced_on_its_class_providers(paced_board, monkeypatch):
-    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
-    _class_config(paced_board, "anthropic", pace_starts=True)
-    _paced_reads(monkeypatch)
+    _class_config(paced_board, "anthropic")
+    _held_reads(monkeypatch)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="deep", assignee="default", model_override="class:deep",
                              provider_override="auto")
@@ -263,8 +229,10 @@ def test_class_selector_is_paced_on_its_class_providers(paced_board, monkeypatch
 
 def test_class_selector_with_an_ungoverned_route_always_starts(paced_board, monkeypatch):
     """Any ungoverned candidate admits the card: it may run there whatever the governed pools say."""
-    _class_config(paced_board, "anthropic", "zai", pace_starts=True)
-    _paced_reads(monkeypatch)  # every pool, zai included, reads paced
+    _class_config(paced_board, "anthropic", "zai")
+    # Every pool reads paced (20% one day into the week): a paced pool holds no start.
+    monkeypatch.setattr(pd, "read_pool", lambda provider, now: [
+        lp.Reading(now, f"{provider}-1", lp.SEVEN_DAY, 20, now + 6 * DAY)])
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="deep", assignee="default", model_override="class:deep",
                              provider_override="auto")

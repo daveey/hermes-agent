@@ -4,7 +4,7 @@ Defect agent-6f3c6009b5 (hub, 2026-11-15): a chat ran ``kanban edit <id> --prior
 dispatcher was holding for ``llm_pacing``, although the stall notice it had just read said "priority changes do not
 lift a pacing hold" and a coach hint said not to bump. Nothing at the edit refused it, so the prose was the only
 guard. The CLI now refuses a raise (``--priority`` above the stored value, or ``--priority-bump``) while every
-candidate pool of the card is paced or held (``kanban_llm_pacing_dispatch.paced_pools``, the read the stall notice
+candidate pool of the card is held at reserve (``kanban_llm_pacing_dispatch.paced_pools``, the read the stall notice
 uses), unless ``--reason`` is given; the reason lands on the ``reprioritized`` event. A card the governor does not
 hold, an unreadable governor and lowering/same-value edits behave as before. [daveey]
 """
@@ -21,8 +21,7 @@ from hermes_cli import kanban_llm_pacing as lp
 from hermes_cli import kanban_llm_pacing_dispatch as pd
 from hermes_cli.kanban_parser import build_parser
 from tests.hermes_cli import test_kanban_model_tier as model_tier
-from tests.hermes_cli.test_kanban_notice_pacing_admission import (  # _pace_starts_mode: the autouse opt-in
-    OPUS, _pace_starts_mode, _store)
+from tests.hermes_cli.test_kanban_notice_pacing_admission import OPUS, _store
 
 board = model_tier.board  # one unsynced gateway: every card is its own to lease
 
@@ -38,7 +37,7 @@ def paced_card(board):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="paced", assignee="default", priority=900, model_override=OPUS,
                              provider_override="anthropic")
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))  # every candidate pool at reserve: the only state that holds a start
     with kbc.connect_closing() as conn:
         assert pd.paced_pools(conn, tid), "precondition: the governor holds the card"
     return tid

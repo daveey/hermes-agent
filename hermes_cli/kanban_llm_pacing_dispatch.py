@@ -7,13 +7,17 @@ before any claim (:func:`hold`). Pool math and the incident are in ``kanban_llm_
   selector (``class:deep``) may run on any of its subscription routes, so it is held only when every candidate
   provider holds it. An unknown route, an ungoverned provider or a mandatory pin always starts.
 * Each governed provider's OAuth pool is read (``/api/oauth/usage``, read-only) at most every
-  ``read_interval`` seconds per Hermes home; samples and this host's running count on the provider are kept in
-  ``<kanban home>/llm_pacing.json`` for burn rates and average concurrency.
+  ``read_interval`` seconds per Hermes home; two hours of samples are kept in ``<kanban home>/llm_pacing.json``
+  under the provider's key (the legacy ``pace`` verdict, read by hermes-mods ``throughput/runway.py``), and the
+  capacity model's document under ``version: 2`` / ``v2`` (``kanban_llm_pacing.assemble_v2``), with its eight-day
+  history in ``llm_pacing_history.sqlite`` (``kanban_llm_pacing_history``).
+* A start waits only while its pool is **at reserve**: ``v2.pools[p].at_reserve`` stored fresh by a dispatcher on
+  this home. No ``v2`` (an old file, a fault) or a stale one holds nothing (fail open). There is no per-host
+  start limit any more (``pace_starts``/``deferrable_share`` are gone): the token rate is a throttle's business.
 * Dispatcher maintenance refreshes configured pools even with zero admissions; the claim path shares its interval.
 * The read-only notice reader :func:`paced_pools` reads usage never, writes nothing and holds nothing.
 * Any read or resolve fault starts the card (fail open, warned once per interval).
 * ``kanban.llm_pacing.enabled: false`` restores the ungoverned behaviour.
-* ``kanban.llm_pacing.pace_starts`` (default false): only a ``held`` pool stops a start; true also limits on ``paced``.
 """
 from __future__ import annotations
 
@@ -39,6 +43,10 @@ EVENT_REPEAT_SECONDS = 3600
 STALE_READ_INTERVALS = 3
 _STATE_FILE = "llm_pacing.json"
 _CACHE: dict[str, tuple[float, lp.PoolPace]] = {}
+_MODEL_SCOPED: dict[str, list[lp.Reading]] = {}  # read_pool's model-scoped windows, taken by the next refresh
+# state path -> provider -> the v2 pool this process last planned: a failed save of the shared file must not drop a
+# hold this process judged (the in-process read budget keeps serving it, as the legacy pace cache did).
+_V2_MEMO: dict[str, dict[str, dict]] = {}
 _CLASS_CACHE: dict[str, tuple[float, list[str]]] = {}
 _WARNED: dict[str, float] = {}
 
@@ -51,6 +59,11 @@ def load_config() -> lp.PacingConfig:
 def state_path() -> Path:
     from hermes_cli import kanban_db as kb
     return kb.kanban_home() / _STATE_FILE
+
+
+def history_path() -> Path:
+    from hermes_cli.kanban_llm_pacing_history import FILE_NAME
+    return state_path().with_name(FILE_NAME)
 
 
 def _load_state(path: Path) -> dict:
@@ -107,7 +120,7 @@ def read_pool(provider: str, now: float) -> list[lp.Reading]:
     ``five_hour`` and ``seven_day`` as ``null``, so the snapshot is not even ``available``) reads as two fresh
     windows, 0% with no reset: :func:`kanban_llm_pacing._sustainable` counts each as a full window of headroom
     (PR #3058 review). A failed read (None) or an unavailable one stays unknown."""
-    readings = []
+    readings, scoped = [], []
     for label, snapshot in _snapshots(provider):
         if snapshot is None or snapshot.unavailable_reason:
             continue
@@ -117,7 +130,18 @@ def read_pool(provider: str, now: float) -> list[lp.Reading]:
         for window in account:
             reset = window.reset_at.timestamp() if window.reset_at is not None else None
             readings.append(lp.Reading(now, label, lp.window_kind(window.label), float(window.used_percent), reset))
+        for window in snapshot.windows:  # model-scoped (Anthropic Opus/Sonnet weekly): history only, never capacity
+            if window.scope == "model" and window.used_percent is not None:
+                reset = window.reset_at.timestamp() if window.reset_at is not None else None
+                scoped.append(lp.Reading(now, label, model_kind(window.label), float(window.used_percent), reset))
+    _MODEL_SCOPED[provider] = scoped
     return readings
+
+
+def model_kind(label: Any) -> str:
+    """``Opus week`` -> ``seven_day_opus``; ``Sonnet week`` -> ``seven_day_sonnet``; else ``model:<label>``."""
+    text = str(label or "").strip().lower()
+    return next((kind for kind in lp.MODEL_KINDS if kind.rsplit("_", 1)[-1] in text), f"model:{text[:32]}")
 
 
 def class_providers(model: str) -> list[str]:
@@ -165,22 +189,6 @@ def candidate_providers(conn: sqlite3.Connection, task: Any, lane: str) -> list[
     return candidate_route(conn, task, lane)[1]
 
 
-def local_running(conn: sqlite3.Connection, provider: str) -> int:
-    """This host's running cards whose run routed to ``provider`` (a class run counts for each candidate)."""
-    from hermes_cli import kanban_db as kb
-    prefix = kb._host_prefix()
-    rows = conn.execute(
-        "SELECT e.payload FROM tasks t JOIN task_events e ON e.task_id = t.id AND e.run_id = t.current_run_id "
-        "AND e.kind = 'run_route' WHERE t.status = 'running' AND substr(t.claim_lock, 1, ?) = ?",
-        (len(prefix), prefix)).fetchall()
-    count = 0
-    for (payload,) in rows:
-        route = kb._json_dict(payload)
-        if provider in _route_providers(route.get("model"), route.get("provider")):
-            count += 1
-    return count
-
-
 def _history(entry: dict, now: float, cfg: lp.PacingConfig) -> list[lp.Reading]:
     rows = (lp.Reading.from_row(row) for row in entry.get("samples") or [])
     return [r for r in rows if r is not None and now - 2 * cfg.rate_window <= r.ts < now]
@@ -192,8 +200,9 @@ def _refresh(conn: sqlite3.Connection, provider: str, cfg: lp.PacingConfig, now:
     found = state.get(provider)
     entry: dict = found if isinstance(found, dict) else {}
     shared = lp.PoolPace.from_dict(entry.get("pace"))
-    if shared is not None and now - float(entry.get("read_at") or 0) < cfg.read_interval:
-        return shared  # another dispatcher on this home read it already
+    if (shared is not None and now - float(entry.get("read_at") or 0) < cfg.read_interval
+            and _v2_pool(state, provider) is not None):
+        return shared  # another dispatcher on this home read it already (an old file without v2 is re-read)
     try:
         current = read_pool(provider, now)
     except Exception as exc:  # health: allow BLE001 -- a usage read fault never stops dispatch (fail open)
@@ -202,13 +211,15 @@ def _refresh(conn: sqlite3.Connection, provider: str, cfg: lp.PacingConfig, now:
         current = []
     history = _history(entry, now, cfg)
     pace = lp.pool_pace(provider, current, history, cfg)
-    running = [row for row in entry.get("running") or [] if now - cfg.rate_window <= float(row[0]) < now]
-    state[provider] = {"read_at": now, "pace": pace.as_dict(), "running": running + [[now, local_running(conn, provider)]],
-                       "samples": [r.as_row() for r in history + current]}
+    state[provider] = {"read_at": now, "pace": pace.as_dict(), "samples": [r.as_row() for r in history + current]}
+    _update_v2(state, provider, current, _MODEL_SCOPED.pop(provider, []), now, cfg)
+    pool = _v2_pool(state, provider)
+    if pool is not None:
+        _V2_MEMO.setdefault(str(path), {})[provider] = pool
     _save_state(path, state)
-    if pace.state != (shared.state if shared else None):
-        logger.info("kanban pacing: %s pool %s (factor %s, until %s): %s", provider, pace.state, pace.factor,
-                    pace.until, pace.detail)
+    if pace.state != (shared.state if shared else None):  # no detail: it names accounts by label (e-mail)
+        logger.info("kanban pacing: %s pool %s (factor %s, until %s, %d account(s) read)", provider, pace.state,
+                    pace.factor, pace.until, len({r.account for r in current}))
     return pace
 
 
@@ -237,50 +248,70 @@ def refresh_pools(conn: sqlite3.Connection) -> None:
         _warn("refresh", "kanban pacing: periodic refresh failed (%s); continuing dispatch", exc)
 
 
-def avg_running(provider: str, now: float, cfg: lp.PacingConfig) -> float:
-    """This host's average concurrency on ``provider`` over ``rate_window`` (the samples the burn was measured on)."""
-    entry = _load_state(state_path()).get(provider) or {}
-    counts = [float(n) for ts, n in entry.get("running") or [] if now - cfg.rate_window <= float(ts) <= now]
-    return sum(counts) / len(counts) if counts else 0.0
+def _update_v2(state: dict, provider: str, current: list[lp.Reading], scoped: list[lp.Reading], now: float,
+               cfg: lp.PacingConfig) -> None:
+    from hermes_cli import kanban_llm_pacing_history as hist
+    faults = hist.update_v2(state, provider, current, scoped, now, cfg, history_path())
+    if faults:
+        _warn(f"history:{provider}", "kanban pacing: %s capacity history unavailable (%s); planned from the last "
+              "exchange rates", provider, "; ".join(faults))
 
 
-def is_deferrable(conn: sqlite3.Connection, task: Any, lane: str) -> bool:
-    """Review-lane work, negative priority and scheduled wakes yield first when the pool is paced."""
-    if lane == "review" or int(getattr(task, "priority", 0) or 0) < 0:
-        return True
-    from hermes_cli.kanban_continuation import CONTINUATION_WOKEN_EVENT
-    row = conn.execute("SELECT kind FROM task_events WHERE task_id = ? AND kind IN (?, 'claimed', 'spawned') "
-                       "ORDER BY id DESC LIMIT 1", (task.id, CONTINUATION_WOKEN_EVENT)).fetchone()
-    return row is not None and row[0] == CONTINUATION_WOKEN_EVENT
+def _v2_pool(state: Any, provider: str) -> Optional[dict]:
+    v2 = state.get("v2") if isinstance(state, dict) else None
+    pool = (v2.get("pools") or {}).get(provider) if isinstance(v2, dict) and isinstance(v2.get("pools"), dict) else None
+    return pool if isinstance(pool, dict) else None
 
 
-def _verdicts(conn, task, providers, lane, cfg, host=None, picked=None, admitted=None) -> Optional[list[dict]]:
-    """One verdict per governed candidate pool at its pace limit; None when none is (the card starts as routed).
-    ``host``: the connection whose running cards count (default ``conn``): pickup judges a replica card against
-    this machine's own board. ``picked`` counts this pass's reservations. ``admitted`` receives all limited
-    candidates with room: without a reroute the class allocator can choose any of them, so pickup conservatively
-    reserves each. When rerouting, pickup instead reserves only the chosen target.
+def _hold_state() -> dict:
+    """The stored state, with any newer pool this process planned itself (:data:`_V2_MEMO`) laid over it."""
+    path = state_path()
+    state = _load_state(path)
+    mine = _V2_MEMO.get(str(path)) or {}
+    if not mine:
+        return state
+    v2 = dict(state.get("v2")) if isinstance(state.get("v2"), dict) else {}
+    pools = dict(v2.get("pools")) if isinstance(v2.get("pools"), dict) else {}
+    for provider, pool in mine.items():
+        stored = pools.get(provider)
+        if not isinstance(stored, dict) or float(stored.get("read_at") or 0) < float(pool.get("read_at") or 0):
+            pools[provider] = pool
+    return {**state, "v2": {**v2, "pools": pools}}
 
-    A class route (several candidate pools) is judged pool by pool: ONE pool at its limit is enough, because the class
-    allocator is weighted round-robin, not pace-aware, and would hand the card to that pool on its turn. The caller
-    then moves the card to a pool of its class with room (:func:`_pace_alternate`, the limited pools as walls) or
-    holds it. Since xai-oauth is governed too (b6f19b5dbc), a Grok pool with room no longer exempts a class card whose
-    Claude/Codex pools are paced: it is the move's target instead. [daveey] (t_01a1deaf95f5b885)"""
+
+def reserve_hold(state: Any, provider: str, now: float, cfg: lp.PacingConfig) -> Optional[dict]:
+    """The verdict for ``provider`` when this home's dispatchers stored its pool **at reserve** and fresh (read
+    within :data:`STALE_READ_INTERVALS` read intervals): ``{provider, state: held, until, limit: 0, detail}``.
+    None (no hold) when ``v2`` or the pool is missing, malformed, stale or stamped in the future: fail open."""
+    pool = _v2_pool(state, provider)
+    read_at = pool.get("read_at") if pool else None
+    if (pool is None or pool.get("at_reserve") is not True or not isinstance(read_at, (int, float))
+            or not 0 <= now - read_at < STALE_READ_INTERVALS * cfg.read_interval):
+        return None
+    until = pool.get("until")
+    until = float(until) if isinstance(until, (int, float)) and not isinstance(until, bool) else None
+    accounts = len({a.get("id") for a in pool.get("accounts") or [] if isinstance(a, dict)})
+    return {"provider": provider, "state": lp.HELD, "until": until, "limit": 0,
+            "detail": f"{accounts} account(s) all at reserve"}
+
+
+def _verdicts(conn, task, providers, lane, cfg, host=None) -> Optional[list[dict]]:
+    """One verdict per governed candidate pool at reserve (:func:`reserve_hold`, after refreshing it); None when
+    none is (the card starts as routed). ``host``: the board whose dispatcher reads the pools (pickup judges a
+    replica card for this machine).
+
+    A class route (several candidate pools) is judged pool by pool: ONE pool at reserve is enough, because the class
+    allocator is weighted round-robin, not reserve-aware, and would hand the card to that pool on its turn. The caller
+    then moves the card to a pool of its class with room (:func:`_pace_alternate`, the held pools as walls) or
+    holds it. [daveey] (t_01a1deaf95f5b885)"""
     host = conn if host is None else host
     now = time.time()
-    deferrable = is_deferrable(conn, task, lane)
     verdicts = []
     for provider in providers:
-        pace = pace_for(host, provider, cfg, now)
-        limit = lp.admit_limit(pace, avg_running(provider, now, cfg), deferrable=deferrable, cfg=cfg)
-        running = local_running(host, provider)
-        taken = int((picked or {}).get(provider, 0))
-        if limit is None or running + taken < limit:
-            if limit is not None and admitted is not None:
-                admitted.append(provider)
-            continue
-        verdicts.append({**pace.as_dict(), "limit": limit, "running": running, "deferrable": deferrable,
-                         **({"picked": taken} if taken else {})})
+        pace_for(host, provider, cfg, now)
+        verdict = reserve_hold(_hold_state(), provider, now, cfg)
+        if verdict is not None:
+            verdicts.append(verdict)
     return verdicts or None
 
 
@@ -294,7 +325,7 @@ def _record(conn: sqlite3.Connection, task_id: str, verdicts: list[dict], result
     # The tick's skip record (``kanban_dispatch_skip``): notices and diagnostics name the hold, not "unrecorded".
     detail = ", ".join(f"{v['provider']} {v['state']}" for v in verdicts)
     result.llm_paced.append((task_id, detail, int(until) if until else None, {"providers": [
-        {k: v.get(k) for k in ("provider", "state", "limit", "running")} for v in verdicts]}))
+        {k: v.get(k) for k in ("provider", "state", "limit")} for v in verdicts]}))
     if dry_run:
         return
     last = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = ? "
@@ -327,9 +358,9 @@ def _governed(conn: sqlite3.Connection, task_id: str, lane: str, cfg: lp.PacingC
 
 
 def _pace_alternate(conn: sqlite3.Connection, task: Any, lane: str, cfg: lp.PacingConfig,
-                    host: sqlite3.Connection, verdicts: list[dict], *, picked=None) -> Optional[tuple[str, str, str, tuple]]:
-    """``(model, provider, paced, judged)``: a route of the card's own class on a pool that is NOT ahead of pace, for a
-    card a candidate pool holds (``verdicts``: the pools at their limit); ``judged`` is the ``(model, provider)`` route
+                    host: sqlite3.Connection, verdicts: list[dict]) -> Optional[tuple[str, str, str, tuple]]:
+    """``(model, provider, paced, judged)``: a route of the card's own class on a pool that is NOT at reserve, for a
+    card a candidate pool holds (``verdicts``: the pools at reserve); ``judged`` is the ``(model, provider)`` route
     it moves from. None keeps the hold. [daveey]
 
     The move uses the quota-episode probe (``alternate_route``: unpinned default or strong-class routes only, the
@@ -345,13 +376,13 @@ def _pace_alternate(conn: sqlite3.Connection, task: Any, lane: str, cfg: lp.Paci
         route = candidate_route(conn, task, lane)[0]
         if route is None:
             return None  # a pin/profile fallback route is launched as is: holding is the only safe answer
-        return _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts, picked=picked)
+        return _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts)
     except Exception as exc:  # health: allow BLE001 -- a failed probe keeps today's hold, never starts a paced card
         _warn("alternate", "kanban pacing: pace alternate probe failed (%s: %s); holding", type(exc).__name__, exc)
         return None
 
 
-def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts, *, picked=None):
+def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts):
     from hermes_cli import kanban_provider_walls as pw
     from hermes_cli.kanban_quota_episode import alternate_route
     if pw.requires_model(task):
@@ -363,7 +394,6 @@ def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts, *, picke
     # A default route already moved off a wall or by its episode is still the unpinned default card.
     reason = str(reason or "")
     base = (model, provider, reason.split("+", 1)[0] if reason.startswith("default+") else reason)
-    deferrable = is_deferrable(conn, task, lane)
     from hermes_cli.kanban_review_model import implementer_models, is_review_run, mandatory_reviewer_pin
     reviewing = is_review_run(conn, task, lane)
     if reviewing and mandatory_reviewer_pin(task):
@@ -389,68 +419,55 @@ def _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts, *, picke
             unusable[target] = now
             continue
         if target in cfg.providers:
-            pace = pace_for(host, target, cfg, now)
-            limit = lp.admit_limit(pace, avg_running(target, now, cfg), deferrable=deferrable, cfg=cfg)
-            if limit is not None and local_running(host, target) + int((picked or {}).get(target, 0)) >= limit:
-                paced[target] = float(pace.until or now + cfg.read_interval)
+            pace_for(host, target, cfg, now)
+            held = reserve_hold(_hold_state(), target, now, cfg)
+            if held is not None:
+                paced[target] = float(held["until"] or now + cfg.read_interval)
                 continue
         return moved[0], target, ",".join(sorted(paced)), (model, provider)
     return None
 
 
-def _stored_pace(entry: Any, now: float, cfg: lp.PacingConfig) -> Optional[lp.PoolPace]:
-    """The pace a dispatcher on this home stored for one provider; None when it is absent, malformed, stamped in the
-    future or older than :data:`STALE_READ_INTERVALS` read intervals."""
-    read_at = entry.get("read_at") if isinstance(entry, dict) else None
-    if not isinstance(read_at, (int, float)):
-        return None
-    return lp.PoolPace.from_dict(entry.get("pace")) if 0 <= now - read_at < STALE_READ_INTERVALS * cfg.read_interval else None
-
-
 def paced_pools(conn: sqlite3.Connection, task_id: str) -> Optional[list[lp.PoolPace]]:
-    """The pools holding ready card ``task_id``, for a stall notice: one :class:`~kanban_llm_pacing.PoolPace` per
-    candidate provider when EVERY candidate is stored in a state that holds starts (``held``; also ``paced`` with
-    ``pace_starts``); else None (no positive read).
+    """The pools holding ready card ``task_id``, for a stall notice: one ``held``
+    :class:`~kanban_llm_pacing.PoolPace` per candidate provider when EVERY candidate is stored at reserve and fresh
+    (:func:`reserve_hold`); else None (no positive read, no ``v2``).
 
-    A notice describes the hold, it never makes one: this reads the pace the dispatchers of this home stored
-    (``llm_pacing.json``; pool workers draw the same accounts from the hub's relay), makes no usage read and writes
-    nothing. It judges the card as :func:`hold` does (:func:`_governed`) and, like :func:`_verdicts`, finds no hold as
-    soon as one candidate is open, unknown or unread: the card may start there. The pool's state, not this host's slot
-    math: the hosts that would run the card keep their own concurrency, so a held pool admits nothing anywhere and,
-    with ``pace_starts``, a paced pool limits every host. Without it (the default) a paced pool holds nothing, so
-    it is no hold to describe. Faults propagate; the caller fails open."""
+    A notice describes the hold, it never makes one: this reads what the dispatchers of this home stored
+    (``llm_pacing.json`` ``v2``; pool workers draw the same accounts from the hub's relay), makes no usage read and
+    writes nothing. It judges the card as :func:`hold` does (:func:`_governed`) and, like :func:`_verdicts`, finds no
+    hold as soon as one candidate is under reserve, unknown or unread: the card may start there. Faults propagate;
+    the caller fails open."""
     cfg = load_config()
     judged = _governed(conn, task_id, "ready", cfg) if cfg.enabled else None
     if judged is None:
         return None
     stored, now = _load_state(state_path()), time.time()
-    holding = (lp.PACED, lp.HELD) if cfg.pace_starts else (lp.HELD,)  # what admit_limit can limit on
     paces: list[lp.PoolPace] = []
     for provider in judged[1]:
-        pace = _stored_pace(stored.get(provider), now, cfg)
-        if pace is None or pace.state not in holding:
+        held = reserve_hold(stored, provider, now, cfg)
+        if held is None:
             return None
-        paces.append(pace)
+        paces.append(lp.PoolPace(provider, lp.HELD, 0.0, held["until"], held["detail"]))
     return paces
 
 
 def held_pools(section: Any, now: float) -> dict[str, float]:
-    """``provider -> until`` (``inf`` when no reset is known) for every governed pool this home's dispatchers stored as
-    ``held`` and fresh (:func:`_stored_pace`), under the ``kanban.llm_pacing`` ``section``; pacing off = none.
+    """``provider -> until`` (``inf`` when no reset is known) for every governed pool this home's dispatchers stored
+    at reserve and fresh (:func:`reserve_hold`, ``v2``), under the ``kanban.llm_pacing`` ``section``; pacing off or
+    no ``v2`` = none.
 
     The route resolver's read-only view (``kanban_paced_reroute``: a far hold moves a route to an unheld peer). Like
-    :func:`paced_pools` it reads the stored pace only: no usage read, no write, no hold."""
+    :func:`paced_pools` it reads the stored state only: no usage read, no write, no hold."""
     cfg = lp.config_from(section)
     if not cfg.enabled:
         return {}
+    stored = _load_state(state_path())
     now_held: dict[str, float] = {}
-    for provider, entry in _load_state(state_path()).items():
-        name = str(provider).strip().lower()
-        pace = _stored_pace(entry, now, cfg) if name in cfg.providers else None
-        if pace is None or pace.state != lp.HELD:
-            continue
-        until = pace.until
-        now_held[name] = float(until) if isinstance(until, (int, float)) and not isinstance(until, bool) else math.inf
+    for provider in cfg.providers:
+        held = reserve_hold(stored, provider, now, cfg)
+        if held is not None:
+            now_held[provider] = held["until"] if held["until"] is not None else math.inf
     return now_held
 
 
@@ -477,7 +494,7 @@ def admission_skip(stored: Any) -> Optional[dict[str, Any]]:
 
 
 def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run: bool = False) -> bool:
-    """True when the card must wait for its provider's pool to come back to pace (recorded on ``result``)."""
+    """True when the card must wait for its provider's pool to come back under reserve (recorded on ``result``)."""
     try:
         if not dry_run:
             # A fresh judgment: an offer from an earlier tick whose claim never happened must not steer this one.
@@ -497,7 +514,7 @@ def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run:
             from hermes_cli.kanban_pace_reroute import offer
             if not dry_run:
                 offer(task.id, moved[3], moved[:3])
-            logger.info("kanban pacing: %s pools %s ahead of pace; starting on %s/%s", task.id, moved[2], moved[1],
+            logger.info("kanban pacing: %s pools %s at reserve; starting on %s/%s", task.id, moved[2], moved[1],
                         moved[0])
             return False
         _record(conn, task.id, verdicts, result, dry_run=dry_run, cfg=cfg)
@@ -508,35 +525,22 @@ def hold(conn: sqlite3.Connection, row: Any, lane: str, result: Any, *, dry_run:
         return False
 
 
-def pickup_hold(local: sqlite3.Connection, replica: sqlite3.Connection, card: Any, *,
-                picked: Optional[dict[str, int]] = None, admitted: Optional[list[str]] = None) -> Optional[str]:
-    """Pickup's read-only twin of :func:`hold`: ``"<provider> <state>, ..."`` when this machine's dispatcher would
-    pace-hold the foreign ``card`` right now, else None. The card is judged on the replica's copy, the running
-    count on ``local`` (this machine's board), so a copy that only pacing would hold is never taken into the pickup
-    window (worker-6 2026-11-15: 9 paced codex cards hid a runnable anthropic card at rank 16). Records nothing;
-    any fault returns None (fail open: the local dispatcher still decides after the copy).
-
-    ``picked``/``admitted``: the pass's own spend (:func:`_verdicts`). The cards a pass already took count against
-    the limit, so a pass copies no more cards of a provider than it can start (worker-3 2026-11-15: limit 1, running
-    0, a batch of 10 anthropic copies, 9 pace-held and evicted each tick, t_01a1e14333fada79)."""
+def pickup_hold(local: sqlite3.Connection, replica: sqlite3.Connection, card: Any) -> Optional[str]:
+    """Pickup's read-only twin of :func:`hold`: ``"<provider> held, ..."`` when this machine's dispatcher would hold
+    the foreign ``card`` right now (a candidate pool at reserve, no alternate), else None. The card is judged on the
+    replica's copy, the pools as this machine's dispatcher reads them (``local``), so a copy that only pacing would
+    hold is never taken into the pickup window (worker-6 2026-11-15: 9 paced codex cards hid a runnable anthropic
+    card at rank 16). Records nothing; any fault returns None (fail open: the local dispatcher still decides after
+    the copy)."""
     try:
         cfg = load_config()
         judged = _governed(replica, card["id"], card["status"], cfg) if cfg.enabled else None
         if judged is None:
             return None
-        pools: list[str] = []
-        verdicts = _verdicts(replica, judged[0], judged[1], card["status"], cfg, host=local, picked=picked,
-                             admitted=pools)
-        if verdicts is not None:
-            moved = _pace_alternate(replica, judged[0], card["status"], cfg, local, verdicts, picked=picked)
-            if moved is not None:
-                pools = [moved[1]]
-                verdicts = None
-        if verdicts is None and admitted is not None:
-            admitted.extend(pools)
-        return None if verdicts is None else ", ".join(
-            f"{v['provider']} {v['state']}" + (f" (limit {v['limit']}, running {v['running']}, {v['picked']} picked "
-                                               "this pass)" if v.get("picked") else "") for v in verdicts)
+        verdicts = _verdicts(replica, judged[0], judged[1], card["status"], cfg, host=local)
+        if verdicts is not None and _pace_alternate(replica, judged[0], card["status"], cfg, local, verdicts):
+            verdicts = None
+        return None if verdicts is None else ", ".join(f"{v['provider']} {v['state']}" for v in verdicts)
     except Exception as exc:  # health: allow BLE001 -- a hold prediction must never stop a pickup
         _warn("pickup", "kanban pacing: pickup hold check failed (%s: %s); copying ungoverned", type(exc).__name__, exc)
         return None

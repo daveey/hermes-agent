@@ -7,14 +7,15 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_ops
 
 
-def paced(*, until=None, limit=1, running=1):
+def paced(*, until=2000, limit=0, running=None):
+    """A pool at reserve (``held``) until ``until``; ``until=None`` is a hold nothing frees (stays unexplained)."""
     result = kbd.DispatchResult(lane_candidates=2)
     result.skipped_ineligible.append(("t_elsewhere", "labels_mismatch"))
     result.respawn_guarded.append(("t_wait", "llm_pacing"))
     result.clock_held["t_wait"] = ("llm_pacing", until or 2000)
     result.llm_paced.append(("t_wait", "openai-codex paced", until, {"providers": [
-        {"provider": "openai-codex", "state": "held" if until else "paced",
-         "limit": limit, "running": running}]}))
+        {"provider": "openai-codex", "state": "held", "limit": limit,
+         **({} if running is None else {"running": running})}]}))
     return result
 
 
@@ -37,7 +38,8 @@ def daemon(monkeypatch, capsys, result):
     return capsys.readouterr().err
 
 
-@pytest.mark.parametrize("kind", ["full", "timed", "pressure"])
+# "full" (a paced pool at this host's start limit) is gone with the start limit: only a held pool holds a start.
+@pytest.mark.parametrize("kind", ["timed", "pressure"])
 def test_daemon_expected_hold_not_stuck(monkeypatch, capsys, kind):
     monkeypatch.setattr(kanban_ops.time, "time", lambda: 1000)
     result = paced(until=1600 if kind == "timed" else None)
@@ -53,12 +55,13 @@ def test_long_deferral_warns_despite_unrelated_spawns():
     from hermes_cli.kanban_dispatch_expected_holds import ExpectedHoldMonitor
     monitor = ExpectedHoldMonitor()
     messages = []
-    result = paced()
+    result = paced(until=1100)  # held until a reset at 1100: reported 15 min after it
     emit = lambda level, text: messages.append((level, text))
     assert monitor.observe([("a", result)], 1000, emit)
     result.spawned.append(("t_other", "default", ""))
-    monitor.observe([("a", result)], 1900, emit)
-    assert any(level == 30 and "t_wait" in text and "900s" in text for level, text in messages)
+    result.llm_paced[0] = (*result.llm_paced[0][:2], 1e9, result.llm_paced[0][3])  # a rolling refresh
+    monitor.observe([("a", result)], 2000, emit)
+    assert any(level == 30 and "t_wait" in text and "1000s" in text for level, text in messages)
     assert all("dispatcher stuck" not in text for _, text in messages)
 
 
@@ -92,7 +95,7 @@ def test_unknown_claim_reason_is_not_hidden(monkeypatch, capsys):
     assert "kanban dispatcher stuck" in daemon(monkeypatch, capsys, result)
 
 
-@pytest.mark.parametrize("kind", ["full", "timed", "pressure"])
+@pytest.mark.parametrize("kind", ["timed", "pressure"])
 def test_gateway_expected_hold_not_stuck(monkeypatch, caplog, tmp_path, kind):
     import logging
     from gateway import kanban_watchers as watchers
@@ -139,19 +142,6 @@ def test_malformed_pacing_is_unexplained_not_exception(value):
     assert not expected_holds([("a", result)], 1000)[1]
 
 
-def test_full_to_timed_hold_respects_first_real_reset():
-    from hermes_cli.kanban_dispatch_expected_holds import ExpectedHoldMonitor
-    monitor = ExpectedHoldMonitor()
-    messages = []
-    emit = lambda level, text: messages.append((level, text))
-    monitor.observe([("a", paced())], 1000, emit)
-    monitor.observe([("a", paced(until=4000, limit=0, running=0))], 1500, emit)
-    monitor.observe([("a", paced(until=4000, limit=0, running=0))], 1900, emit)
-    assert not any(level == 30 for level, _ in messages)
-    monitor.observe([("a", paced(until=8000, limit=0, running=0))], 4900, emit)
-    assert any(level == 30 for level, _ in messages)
-
-
 def test_pressure_warning_is_bounded_and_resets_after_card_leaves():
     from hermes_cli.kanban_dispatch_expected_holds import ExpectedHoldMonitor
     monitor = ExpectedHoldMonitor()
@@ -185,9 +175,9 @@ def test_real_pacing_record_is_classified_without_writing(monkeypatch):
     from hermes_cli.kanban_dispatch_expected_holds import expected_holds
     monkeypatch.setattr(dispatch.time, "time", lambda: 1000)
     result = kbd.DispatchResult(lane_candidates=2, skipped_ineligible=[("t_elsewhere", "labels_mismatch")])
-    dispatch._record(None, "t_wait", [{"provider": "openai-codex", "state": "paced", "until": None,
-                     "limit": 1, "running": 1}], result, dry_run=True, cfg=lp.PacingConfig())
+    dispatch._record(None, "t_wait", [{"provider": "openai-codex", "state": "held", "until": 4000.0, "limit": 0,
+                     "detail": "2 account(s) all at reserve"}], result, dry_run=True, cfg=lp.PacingConfig())
     holds, covered = expected_holds([("a", result)], 1000)
     assert covered
-    assert "release when pool has room" in holds[("a", "t_wait")][0]
-    assert holds[("a", "t_wait")][1] is None
+    assert "openai-codex held" in holds[("a", "t_wait")][0] and "next reset" in holds[("a", "t_wait")][0]
+    assert holds[("a", "t_wait")][1] == 4000

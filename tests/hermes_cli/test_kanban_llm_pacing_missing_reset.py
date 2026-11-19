@@ -8,7 +8,6 @@ recomputed with the production formula.
 """
 from __future__ import annotations
 
-import dataclasses
 import pytest
 
 from hermes_cli import kanban_llm_pacing as lp
@@ -52,13 +51,12 @@ def test_no_reset_seven_day_window_subtracts_its_usage():
     assert pace.state == lp.PACED
 
 
-def test_no_reset_usage_decides_paced_versus_open_and_the_admission_limit():
+def test_no_reset_usage_decides_paced_versus_open():
     """burner 60% (was 15% an hour ago, 1 h to reset): burn 45 %/h, sustainable 35 %/h. The no-reset account at
     75% adds 20/5h = 4 %/h -> 39/45 = 0.8667: PACED. Treated as a fresh window (19 %/h) it would read 54/45 = 1.2 OPEN."""
     pace = _pool(lp.FIVE_HOUR, 60, 15, HOUR, 75)
     assert pace.state == lp.PACED
     assert pace.factor == pytest.approx(0.8667, abs=1e-4)
-    assert lp.admit_limit(pace, 10, deferrable=False, cfg=dataclasses.replace(CFG, pace_starts=True)) == 8  # floor(10 * 0.8667); the mutant allows 12
 
 
 def test_no_reset_account_over_target_does_not_cancel_other_headroom():
