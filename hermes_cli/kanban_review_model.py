@@ -15,15 +15,22 @@ _DECLARED = re.compile(r"^<!-- implementer-models: ([^>\n]*) -->$", re.MULTILINE
 _MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._-]{1,79}")
 
 
-def declared_implementers(body) -> set[str]:
-    """Models a review card's body declares as the change's implementers (``_DECLARED``). A malformed entry or a
-    class selector makes the whole declaration void: it then proves nothing, as if absent."""
+def declared_implementers(body, assignee=None) -> set[str]:
+    """Models a review card's body declares as the change's implementers (``_DECLARED``). [daveey]
+
+    Void (an empty set, as if absent) when any entry on any marker line is malformed (``_MODEL_ID``: no class
+    selector, no space or slash) or is not a model this host's routing registry knows for the card's assignee
+    (``registry_refusal``): a name that excludes no real route must not lift the fail-closed refusal while the
+    review could still run on the model that wrote the change (review 5971146857)."""
     found: set[str] = set()
     for match in _DECLARED.finditer(body or ""):
         names = [name.strip() for name in match.group(1).split(",")]
-        if not names or any(not _MODEL_ID.fullmatch(name) or is_class_selector(name) for name in names):
+        if any(not _MODEL_ID.fullmatch(name) for name in names):
             return set()
         found.update(names)
+    from hermes_cli.kanban_model_tier import infer_provider
+    if any(registry_refusal(name, infer_provider(name), assignee) is not None for name in found):
+        return set()
     return found
 
 
@@ -72,7 +79,7 @@ def implementer_models(conn, task) -> set[str]:
                     models.add(model)
         if downstream:
             # Declared provenance counts as evidence of its own: the change came from outside the board.
-            models.update(declared_implementers(getattr(stored, "body", None)))
+            models.update(declared_implementers(getattr(stored, "body", None), getattr(stored, "assignee", None)))
             created = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created' "
                                    "ORDER BY id LIMIT 1", (card.id,)).fetchone()
             creator = _payload(created[0] if created else None).get("creator_task_id")

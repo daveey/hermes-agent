@@ -33,9 +33,21 @@ TITLE = 'Independent exact-head review PR #1 @abc (core-wt ship review required)
     ('<!-- implementer-models: class:deep -->', set()),                    # a class is no implementer
     ('<!-- implementer-models: claude-opus-5-5, Bad Name -->', set()),     # one bad entry voids the declaration
     ('<!-- implementer-models:  -->', set()),
+    ('<!-- implementer-models: a-model -->\n<!-- implementer-models: Bad Name -->', set()),  # a later bad line too
+    ('<!-- implementer-models: claude-opus x -->', set()),                                  # the whole entry must match
 ])
-def test_declared_implementers(body, expected):
+def test_declared_implementers(body, expected, monkeypatch):
+    monkeypatch.setattr(review, 'registry_refusal', lambda *a: None)  # every well-formed name is registered here
     assert review.declared_implementers(body) == expected
+
+
+def test_a_name_the_routing_registry_does_not_know_voids_the_declaration(monkeypatch):
+    """Review 5971146857: ``claude-code`` excludes no real route, so it must not count as implementer evidence."""
+    known = {'claude-opus-5-5', 'claude-fable-5-2'}
+    monkeypatch.setattr(review, 'registry_refusal', lambda model, provider, assignee: None if model in known else 'no')
+    assert review.declared_implementers('<!-- implementer-models: claude-opus-5-5 -->') == {'claude-opus-5-5'}
+    assert review.declared_implementers('<!-- implementer-models: claude-code -->') == set()
+    assert review.declared_implementers('<!-- implementer-models: claude-opus-5-5, claude-code -->') == set()
 
 
 def _review(conn, body):
@@ -73,3 +85,16 @@ def test_a_declaration_on_a_card_that_is_not_a_review_is_ignored(board):
                              body=f'<!-- implementer-models: {OPUS} -->')
         conn.commit()
         assert review.implementer_models(conn, kb.get_task(conn, tid)) == set()
+
+
+def test_the_reviewer_is_never_a_declared_implementer(board):
+    """Through ``resolve_review_model`` with a real routing config (deep routes opus and fable, strong opus): the
+    declared implementer opus is excluded, so fable reviews."""
+    from tests.hermes_cli import test_kanban_review_model as routing
+    cfg = routing.config(board)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title=TITLE, assignee='default', body=f'<!-- implementer-models: {routing.OPUS} -->')
+        conn.commit()
+        task = kb.get_task(conn, tid)
+        assert review.implementer_models(conn, task) == {routing.OPUS}
+        assert review.resolve_review_model(conn, task, cfg)[0] == routing.FABLE
