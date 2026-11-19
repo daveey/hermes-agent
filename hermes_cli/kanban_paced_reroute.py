@@ -153,7 +153,8 @@ def paced_route(conn: sqlite3.Connection, task: Any, base: tuple, *, lane: str,
     the caller's: a review run reaches here as ``review_unpinned``, never as ``pinned``.
 
     Non-allocating and read-only, so preview, the governor and admission decide alike. A fault keeps the route
-    (warned); a SQLite error propagates as the other tier reads do."""
+    (warned); an untranslated SQLite error propagates. Review evidence reads translate storage errors to
+    ReviewModelUnavailable, so a failed peer probe keeps the already-resolved independent base route."""
     try:
         moved = _probe(conn, task, base, cfg, time.time())
     except sqlite3.Error:
