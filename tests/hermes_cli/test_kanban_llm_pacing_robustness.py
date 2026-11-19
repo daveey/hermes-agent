@@ -165,14 +165,14 @@ def test_the_dispatch_hold_is_the_legacy_held_verdict(home, monkeypatch, case, m
     legacy = lp.pool_pace("anthropic", lp.valid_readings(readings), [], CFG).state == lp.HELD
     expected = {"nan beside one past reserve": True, "sole account inf": True, "nan beside one under": False}
     assert legacy is expected.get(case, legacy)
-    if mode == "memo":
-        monkeypatch.setattr(pd, "_save_state", lambda *a: None)
-    elif mode == "junk-file":
-        pd.state_path().write_text('{"anthropic": 3, "v2": [1], "version": "x"}', encoding="utf-8")
-    elif mode == "plan-raises":
-        _break_v2_plan(monkeypatch)
-    elif mode == "update-raises":
-        _break_v2_update(monkeypatch)
+    setup = {
+        "memo": lambda: monkeypatch.setattr(pd, "_save_state", lambda *a: None),
+        "junk-file": lambda: pd.state_path().write_text('{"anthropic": 3, "v2": [1], "version": "x"}',
+                                                        encoding="utf-8"),
+        "plan-raises": lambda: _break_v2_plan(monkeypatch),
+        "update-raises": lambda: _break_v2_update(monkeypatch),
+    }
+    setup.get(mode, lambda: None)()
     lock = None
     if mode == "history-locked":
         lock = hist.connect(pd.history_path())
