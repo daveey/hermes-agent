@@ -30,7 +30,13 @@ def _drive(tmp_path, *, request, eligible=True, stop=False):
     """Run a real agent turn through the runner; the request lands while its first tool runs."""
     events: list = []
     tool_started = threading.Event()
-    agent = _make_agent(events, tool_seconds=0.3, on_tool_start=tool_started.set)
+    release_tool = threading.Event()
+
+    def tool_start():
+        tool_started.set()
+        assert release_tool.wait(10), 'pause/stop publication did not release the tool'
+
+    agent = _make_agent(events, on_tool_start=tool_start)
     agent.client.chat.completions.create.side_effect = [_tool_response(1), _final_response()]
     turn = _local_turn()
     from hermes_state import SessionDB
@@ -53,12 +59,15 @@ def _drive(tmp_path, *, request, eligible=True, stop=False):
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             running = executor.submit(go)
-            assert tool_started.wait(10)
-            if stop:
-                agent.interrupt()
-            if request:
-                admission_fence.set_hold(tmp_path)
-                admission_fence.request_pause(tmp_path, expires_at=time.time() + 60)
+            try:
+                assert tool_started.wait(10)
+                if stop:
+                    agent.interrupt()
+                if request:
+                    admission_fence.set_hold(tmp_path)
+                    admission_fence.request_pause(tmp_path, expires_at=time.time() + 60)
+            finally:
+                release_tool.set()
             return agent, running.result(timeout=20), events
     finally:
         admission_fence.clear_hold(tmp_path)
