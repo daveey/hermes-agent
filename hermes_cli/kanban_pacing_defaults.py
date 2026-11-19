@@ -16,6 +16,9 @@ reads. The pool's burn against ``target_percent`` (open/paced) is still judged a
   delta within this lookback (and at least 2 h), smoothed with this half-life. ``tokens_per_percent``: seeds,
   ``{provider: {seven_day|five_hour: tokens}}``, used until a rate is measured. ``budget_publish``: this host
   publishes the budget to the token throttle (read by the hermes-mods throughput plugin; the hub only).
+- Ratio routing (``kanban_ratio_routing``): ``ratio_routing`` starts each unpinned default-tier card on the governed
+  pool of ``kanban.default_model``'s routing class furthest below its ``v2`` budget share (``ratio``);
+  ``ratio_route_models``: ``{pool: model}``, the route each pool runs (default: its first route in the registry).
 - The per-host start limit (``pace_starts``, ``deferrable_share``) is removed: 2026-11-17 with both pools ``paced``
   every host was cut to one run per provider, 3 of 18 slots busy and 130 cards waiting, while the pools still had
   over two account-weeks left. How many cards run is the worker slots' business, how many tokens they burn a token
@@ -38,4 +41,6 @@ DEFAULTS = {
     "tpp_half_life_seconds": 43200,
     "tokens_per_percent": {},
     "budget_publish": False,
+    "ratio_routing": True,
+    "ratio_route_models": {},
 }

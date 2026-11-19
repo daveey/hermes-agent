@@ -281,15 +281,20 @@ def record_run_route(conn: sqlite3.Connection, task: Any, *, lane: str, reason: 
         logger.debug("kanban model tier: route resolve failed for %s (%s)", getattr(task, "id", "?"), exc,
                      exc_info=True)
         model, provider, source = None, None, "unknown"
+    from hermes_cli import kanban_ratio_routing as ratio
+    payload = {"model": model, "provider": provider, "lane": lane, "source": source, "tier_reason": reason}
+    picked = ratio.receipt(conn, task.id, reason)
+    if picked:
+        payload["ratio"] = picked
     try:
         from hermes_cli import kanban_db as _kb
         with _kb.write_txn(conn):
-            _kb._append_event(conn, task.id, RUN_ROUTE_EVENT, {
-                "model": model, "provider": provider, "lane": lane, "source": source, "tier_reason": reason,
-            }, run_id=run_id)
+            _kb._append_event(conn, task.id, RUN_ROUTE_EVENT, payload, run_id=run_id)
     except Exception as exc:
         logger.debug("kanban model tier: route receipt failed for %s (%s)", getattr(task, "id", "?"), exc,
                      exc_info=True)
+        return
+    ratio.note_start(conn, provider, reason)  # the next card in this tick sees this start in its pool's share
 
 
 def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
@@ -303,11 +308,23 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
 
 def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
     """One read-only route decision for preview and actual admission."""
-    from hermes_cli.kanban_quota_episode import active, decision
     base = resolve_model_tier(conn, task, lane=lane, cfg=cfg)
-    from hermes_cli.kanban_review_model import implementer_models, is_review_run, mandatory_reviewer_pin
+    from hermes_cli.kanban_review_model import is_review_run, mandatory_reviewer_pin
     if is_review_run(conn, task, lane) and mandatory_reviewer_pin(task):
         return base  # a mandatory reviewer pin never moves: not off a wall, an episode or a hold
+    # An unpinned default card starts on the pool furthest below its budget share (``kanban_ratio_routing``). Every
+    # later rule (episode, walls, pace) judges that route as the unpinned ``default`` it is; the reason is tagged last.
+    from hermes_cli import kanban_ratio_routing as ratio
+    picked = ratio.pick(conn, task, base, lane=lane, cfg=load_tier_config() if cfg is None else cfg)
+    if picked is None:
+        return _route_from_base(conn, task, base, lane=lane, cfg=cfg)
+    return ratio.tag(_route_from_base(conn, task, (*picked, base[2]), lane=lane, cfg=cfg), picked[1])
+
+
+def _route_from_base(conn, task, base, *, lane, cfg):
+    """:func:`resolve_dispatch_tier` after the tier and ratio choice: the episode, wall and pace moves of *base*."""
+    from hermes_cli.kanban_quota_episode import active, decision
+    from hermes_cli.kanban_review_model import implementer_models, is_review_run
     _, route = decision(conn, task, lane=lane, cfg=cfg, base=base)
     if route and is_review_run(conn, task, lane) and route[0] in implementer_models(conn, task):
         route = None
@@ -479,6 +496,9 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
             payload = {"reason": reason, "model": model or _str(getattr(task, "model_override", None)) or None,
                        "provider": provider or _str(getattr(task, "provider_override", None)) or None,
                        "lane": lane}
+            from hermes_cli.kanban_ratio_routing import receipt as _ratio_receipt
+            if picked := _ratio_receipt(conn, task.id, reason):
+                payload["ratio"] = picked
             if is_review:
                 payload["implementer_model"] = implementer_model
                 payload["implementer_models"] = sorted(excluded)

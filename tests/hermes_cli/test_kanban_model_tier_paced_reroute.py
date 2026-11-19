@@ -1,8 +1,13 @@
-"""A pacing-held default provider moves a card's route to an unheld peer of its class (``kanban_paced_reroute``).
+"""A pacing-held provider moves a card's route to an unheld peer of its class (``kanban_paced_reroute``).
 
 2026-11-15 (hub core 992c0cb5e3b): openai-codex was pacing-``held`` (limit 0) until 11-20 22:40Z but not walled, so
 every default-routed card waited ~5 days while anthropic, the other deep-class provider, was ``paced`` with free
 slots. ``resolve_dispatch_tier`` moved a route only off a wall; a pacing hold never records one.
+
+2026-11-19: ``paced_route`` no longer moves an unpinned default route (ratio routing places those,
+``test_kanban_ratio_routing``); a default card that still resolves onto a held pool is moved by the governor at claim
+time (``kanban_pace_reroute``). The threshold rules are exercised on non-mandatory pins, which ``paced_route`` still
+moves.
 """
 import json
 import sqlite3
@@ -60,13 +65,14 @@ def _route(conn, tid, lane='ready'):
 
 
 def test_held_far_default_route_moves_to_the_unheld_class_peer(board, clock, monkeypatch, all_assignees_spawnable):
+    """The resolver keeps a default route on the held pool (no ratio pick: no pool has a known rate here); the
+    governor moves it at claim time to the class peer with room, under the same ``default+paced`` reason."""
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', HELD_FAR), anthropic=('paced', None))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='default card', assignee='a')
-        assert _route(conn, tid) == (*PEER, 'default+paced:openai-codex')
-        # The governor judges the moved route on its own provider: anthropic paced with a free slot claims it.
-        assert lpd.candidate_providers(conn, kb.get_task(conn, tid), 'ready') == ['anthropic']
+        assert _route(conn, tid) == (*PIN, 'default')
+        assert lpd.candidate_providers(conn, kb.get_task(conn, tid), 'ready') == ['openai-codex']
         assert pin_tests._tick(conn) == [PEER]
         receipt = pin_tests._events(conn, tid, 'run_route')[-1]
         assert (receipt['model'], receipt['provider'], receipt['tier_reason']) == (*PEER, 'default+paced:openai-codex')
@@ -80,14 +86,24 @@ def test_held_pool_with_unknown_or_far_reset_moves_the_route(board, clock, monke
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', until))
     with kbc.connect() as conn:
-        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*PEER, 'default+paced:openai-codex')
+        assert _route(conn, pin_tests._pinned_card(conn)) == (*PEER, 'pinned+paced:openai-codex')
 
 
-def test_held_near_reset_keeps_the_default_route(board, clock, monkeypatch):
+def test_held_near_reset_keeps_the_pinned_route(board, clock, monkeypatch):
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', 1800))
     with kbc.connect() as conn:
-        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*PIN, 'default')
+        assert _route(conn, pin_tests._pinned_card(conn)) == (None, None, 'pinned')
+
+
+def test_paced_route_never_moves_an_unpinned_default_route(board, clock, monkeypatch):
+    """Retired 2026-11-19: ratio routing places default cards, the governor moves one left on a held pool."""
+    _deep(monkeypatch)
+    _pools(clock, openai_codex=('held', HELD_FAR))
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, kb.create_task(conn, title='d', assignee='a'))
+        assert paced.paced_route(conn, task, (*PIN, 'default'), lane='ready', cfg=tier.load_tier_config()) is None
+        assert _route(conn, task.id) == (*PIN, 'default')
 
 
 @pytest.mark.parametrize('after, until, moved', [
@@ -99,8 +115,8 @@ def test_reroute_after_s_sets_the_threshold(board, clock, monkeypatch, after, un
     _deep(monkeypatch, {} if after is None else {'llm_pacing': {'reroute_after_s': after}})
     _pools(clock, openai_codex=('held', until))
     with kbc.connect() as conn:
-        route = _route(conn, kb.create_task(conn, title='d', assignee='a'))
-    assert route == ((*PEER, 'default+paced:openai-codex') if moved else (*PIN, 'default'))
+        route = _route(conn, pin_tests._pinned_card(conn))
+    assert route == ((*PEER, 'pinned+paced:openai-codex') if moved else (None, None, 'pinned'))
 
 
 @pytest.mark.parametrize('state', ['paced', 'open', 'unknown'])
@@ -136,14 +152,17 @@ def test_mandatory_pin_keeps_its_held_provider(board, clock, monkeypatch, why):
         assert _route(conn, tid) == (None, None, 'pinned')  # the pin runs as pinned
 
 
-def test_require_model_default_card_keeps_its_held_route(board, clock, monkeypatch):
+def test_require_model_default_card_keeps_its_held_route(board, clock, monkeypatch, all_assignees_spawnable):
+    """The marker line keeps the card on its held route (the governor holds it); prose naming it still moves."""
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='needs astra', body=f'astra only\n{walls.REQUIRE_MODEL_MARKER}', assignee='a')
         assert _route(conn, tid) == (*PIN, 'default')
         prose = kb.create_task(conn, title='prose', body='a card may say `require_model` in prose', assignee='a')
-        assert _route(conn, prose) == (*PEER, 'default+paced:openai-codex')
+        assert pin_tests._tick(conn) == [PEER]
+        assert pin_tests._events(conn, prose, 'run_route')[-1]['tier_reason'] == 'default+paced:openai-codex'
+        assert pin_tests._events(conn, tid, 'run_route') == [] and kb.get_task(conn, tid).status == 'ready'
 
 
 @pytest.mark.parametrize('peer', ['held', 'walled', 'live_wall'])
@@ -160,20 +179,16 @@ def test_no_unheld_unwalled_peer_keeps_the_base_route(board, clock, monkeypatch,
         assert _route(conn, pin_tests._pinned_card(conn)) == (None, None, 'pinned')
 
 
-@pytest.mark.parametrize('route', ['default', 'pinned'])
-def test_a_peer_with_no_live_pool_on_this_host_is_skipped(board, clock, monkeypatch, route):
+def test_a_peer_with_no_live_pool_on_this_host_is_skipped(board, clock, monkeypatch):
     """t_01a1deaf95f5b885: a registry peer this host holds no credential for (xai-oauth before the hub relay mints it
     to a worker) would launch a run that cannot authenticate. The move skips it to the next serving peer, else keeps
-    the route for the governor to hold."""
+    the route for the governor to hold. (The default-route row moved with the default move itself: the governor's
+    walk, ``test_kanban_pace_reroute::test_no_grok_credential_on_this_host_keeps_the_hold``.)"""
     _deep(monkeypatch, {'llm_pacing': {'providers': ['anthropic', 'openai-codex', 'xai-oauth']}}, grok=True)
     _pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
-        if route == 'pinned':
-            tid, lane, reason = pin_tests._pinned_card(conn), 'ready', 'pinned'
-            base = (None, None)
-        else:
-            tid, lane, reason = kb.create_task(conn, title='d', assignee='a'), 'ready', 'default'
-            base = PIN
+        tid, lane, reason = pin_tests._pinned_card(conn), 'ready', 'pinned'
+        base = (None, None)
         first = _route(conn, tid, lane)
         assert first[2] == f'{reason}+paced:openai-codex' and first[1] in ('anthropic', 'xai-oauth')
         UNSERVED.add(first[1])
@@ -243,11 +258,11 @@ def test_no_trusted_hold_on_a_concrete_route_keeps_it(board, clock, monkeypatch,
 def test_queue_note_and_stall_notice_name_the_reroute(board, clock, monkeypatch):
     _deep(monkeypatch)
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title='d', assignee='a')
+        tid = pin_tests._pinned_card(conn)
         assert 'reroute' not in (kqp.position(conn, kb.get_task(conn, tid)) or {})  # nothing held: no note
         _pools(clock, openai_codex=('held', HELD_FAR))
         place = kqp.position(conn, kb.get_task(conn, tid))
-    words = 'default+paced:openai-codex -> anthropic/claude-opus-5-5'
+    words = 'pinned+paced:openai-codex -> anthropic/claude-opus-5-5'
     assert place['reroute'] == words
     assert kqp.describe(place).startswith(f'next run rerouted: {words}; ')
     assert kpu._queue_words(place).startswith(f'next run rerouted: {words}; ')
@@ -261,9 +276,9 @@ def test_a_failed_probe_keeps_the_route(board, clock, monkeypatch):
 
     def boom(*_a, **_k):
         raise RuntimeError('policy unreadable')
-    monkeypatch.setattr('hermes_cli.kanban_quota_episode.alternate_route', boom)
+    monkeypatch.setattr('hermes_cli.kanban_pin_reroute.peer_route', boom)
     with kbc.connect() as conn:
-        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*PIN, 'default')
+        assert _route(conn, pin_tests._pinned_card(conn)) == (None, None, 'pinned')
 
 
 def test_a_sqlite_fault_in_the_probe_propagates(board, clock, monkeypatch):
@@ -273,9 +288,9 @@ def test_a_sqlite_fault_in_the_probe_propagates(board, clock, monkeypatch):
 
     def locked(*_a, **_k):
         raise sqlite3.OperationalError('database is locked')
-    monkeypatch.setattr('hermes_cli.kanban_quota_episode.alternate_route', locked)
+    monkeypatch.setattr('hermes_cli.kanban_pin_reroute.peer_route', locked)
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title='d', assignee='a')
+        tid = pin_tests._pinned_card(conn)
         with pytest.raises(sqlite3.OperationalError):
             _route(conn, tid)
 

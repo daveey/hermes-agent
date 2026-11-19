@@ -184,7 +184,8 @@ def position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Opt
 
 
 def _paced_reroute(conn: sqlite3.Connection, task) -> Optional[str]:
-    """The next run's move off a pacing-held pool (``kanban_paced_reroute.route_words``), else None. Advisory."""
+    """The next run's move off a pacing-held pool, or its ratio pick (``kanban_paced_reroute.route_words``), else
+    None. Advisory."""
     try:
         from hermes_cli.kanban_paced_reroute import route_words
         return route_words(conn, task)
@@ -194,10 +195,14 @@ def _paced_reroute(conn: sqlite3.Connection, task) -> Optional[str]:
 
 
 def reroute_prefix(place: Optional[dict[str, Any]]) -> str:
-    """``"next run rerouted: default+paced:openai-codex -> anthropic/<model>; "`` for a place whose card runs off a
-    pacing-held pool, else ``""``: queue notes and stall notices name the move, not only the held pool."""
+    """``"next run rerouted: pinned+paced:openai-codex -> anthropic/<model>; "`` for a place whose card runs off a
+    pacing-held pool, ``"next run on anthropic (budget share): anthropic/<model>; "`` for a ratio pick, else ``""``:
+    queue notes and stall notices name the route, not only the held pool."""
+    from hermes_cli.kanban_ratio_routing import NOTE_PREFIX
     rerouted = (place or {}).get("reroute")
-    return f"next run rerouted: {rerouted}; " if rerouted else ""
+    if not rerouted:
+        return ""
+    return f"{rerouted}; " if str(rerouted).startswith(NOTE_PREFIX) else f"next run rerouted: {rerouted}; "
 
 
 def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:

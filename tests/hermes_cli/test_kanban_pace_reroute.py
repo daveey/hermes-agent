@@ -401,8 +401,9 @@ def resolver_first(pool, monkeypatch):
 
 
 def test_resolver_first_far_held_default_card_starts_on_grok(pool, resolver_first, monkeypatch):
-    """Both pools held 9 h: the resolver moves the default route off the held Codex pool to the first serving class
-    peer (Grok: Claude is held too); the governor then judges Grok, which it does not govern, and starts the card."""
+    """Both pools held 9 h: the default route stays on Codex in the resolver (2026-11-19: ``paced_route`` no longer
+    moves default routes; ratio routing has no pool with a budget here), and the governor moves it at claim time to
+    the first serving class peer (Grok: Claude is held too), naming both held pools."""
     _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="routine work", assignee="a")
@@ -410,7 +411,7 @@ def test_resolver_first_far_held_default_card_starts_on_grok(pool, resolver_firs
         receipt = _route_receipt(conn, tid)
     assert seen == [(tid, *GROK)] and tid not in result.clock_held
     assert receipt is not None and (receipt["model"], receipt["provider"]) == GROK
-    assert receipt["tier_reason"] == "default+paced:openai-codex"
+    assert receipt["tier_reason"] == "default+paced:anthropic,openai-codex"
 
 
 def test_resolver_first_no_grok_credential_keeps_the_hold(pool, resolver_first, monkeypatch):

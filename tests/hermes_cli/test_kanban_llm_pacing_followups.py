@@ -84,7 +84,8 @@ def test_registered_config_defaults_match_the_governor_defaults():
     assert set(DEFAULTS) == {"enabled", "target_percent", "reserve_five_hour_percent", "reserve_seven_day_percent",
                              "providers", "read_interval_seconds", "rate_window_seconds", "min_rate_span_seconds",
                              "margin_seconds", "history_days", "tpp_min_delta_percent", "tpp_window_seconds",
-                             "tpp_half_life_seconds", "tokens_per_percent", "budget_publish"}
+                             "tpp_half_life_seconds", "tokens_per_percent", "budget_publish", "ratio_routing",
+                             "ratio_route_models"}
     assert "pace_starts" not in DEFAULTS  # slots, not the burn rate, decide how many cards run
 
 

@@ -11,18 +11,22 @@ Rule (:func:`paced_route`); anything else keeps the route, as before:
    ``kanban_llm_pacing_dispatch.held_pools``, no usage read here) and its ``until`` is more than
    ``kanban.llm_pacing.reroute_after_s`` (default 3600) away, or unknown. A ``paced`` pool (limit >= 1) never moves a
    route;
-2. the route is an unpinned ``default`` route, a ``review_unpinned`` reviewer, an explicit handoff ``review_model``
+2. the route is a ``review_unpinned`` reviewer, an explicit handoff ``review_model``
    (``review_override``/``review_override_refused``), or a non-mandatory concrete pin (the far-wall rule of
-   ``kanban_pin_reroute``). Mandatory pins, class selectors and ``require_model: true`` cards keep their route;
-3. the peer comes from the same eligibility the wall reroutes use (``alternate_route``, the review resolver's
-   independent routes, the pin's class peers) and its provider is neither held nor walled, and serves on this
+   ``kanban_pin_reroute``). Mandatory pins, class selectors and ``require_model: true`` cards keep their route.
+   An unpinned ``default`` route is no longer moved here (2026-11-19): ratio routing (``kanban_ratio_routing``)
+   starts it on a pool under its budget share and never on one at reserve, and the governor's claim-time pace move
+   (``kanban_pace_reroute``) still moves one that resolves onto a held pool (ratio routing off or failing open);
+3. the peer comes from the same eligibility the wall reroutes use (the review resolver's independent routes, the
+   pin's class peers) and its provider is neither held nor walled, and serves on this
    host's live pool (``live_pool_serving``: never a provider this host holds no credential for). A review peer is
    never the implementer's model, and an override's peer must also pass this host's routing registry. With none,
    the route stays and the governor holds it as before; a moved route is judged by the governor on its new provider.
 
 The move lives on the in-memory claimed task only (as every tier decision does); ``run_route.tier_reason`` names it
 ``<reason>+paced:<held provider>``, and a review run's ``model_tier`` receipt adds ``paced`` (:func:`receipt`): the
-held provider, its ``until`` and the route it replaced.
+held provider, its ``until`` and the route it replaced. :func:`route_words` names such a move, or a ratio pick, for
+queue notes and stall notices.
 
 2026-11-16 (t_01a1e15ae11c8d41): pool-worker registries list no Fable deep route, so a Claude-implemented review
 there has gpt-6-astra as its only independent reviewer and keeps waiting on a codex hold (rule 3: never the
@@ -66,16 +70,6 @@ def _held(cfg: Optional[dict], now: float) -> dict[str, float]:
     return held_pools(_section(cfg), now)
 
 
-def _default_peer(conn, task, base, held, now):
-    """The quota-episode probe (unpinned default routes only) with every held pool as a wall; never live-walled."""
-    from hermes_cli import kanban_provider_walls as pw
-    from hermes_cli.kanban_quota_episode import alternate_route
-    route = alternate_route(conn, task, dict(held), base, now)
-    if not route or pw.live_quota_wall(route[1], route[0]):
-        return None
-    return route[0], route[1]
-
-
 def _review_peer(conn, task, cfg, held, now, *, registered=False):
     """The first independent reviewer (``_review_off_wall``'s candidates) on a provider neither held nor walled.
     ``registered`` (override fallbacks) also requires this host's routing registry to accept it, as the
@@ -116,7 +110,7 @@ def _probe(conn, task, base, cfg, now):
         if pinned is None:
             return None
         model, provider = pinned
-    elif reason in ("default", *REVIEW_REASONS):
+    elif reason in REVIEW_REASONS:
         model, provider = base[0], pw._norm(base[1])
         if not model or not provider or pw.requires_model(task):
             return None
@@ -132,8 +126,6 @@ def _probe(conn, task, base, cfg, now):
     for _ in range(_MAX_PEER_PROBES):
         if reason == "pinned":
             moved = _pinned_peer(task, model, excluded, now)
-        elif reason == "default":
-            moved = _default_peer(conn, task, base, excluded, now)
         else:
             moved = _review_peer(conn, task, cfg or {}, excluded, now, registered=reason != "review_unpinned")
         if not moved:
@@ -188,13 +180,23 @@ def receipt(conn: sqlite3.Connection, task: Any, reason: str, *, lane: str,
 
 
 def route_words(conn: sqlite3.Connection, task: Any) -> Optional[str]:
-    """``"<tier_reason> -> <provider>/<model>"`` when a ready ``task``'s next run is moved off a held pool (queue
-    notes and stall notices name it), else None. Resolves no route while nothing is held (one state-file read)."""
+    """Advisory words for a ready ``task``'s next run (queue notes and stall notices), else None:
+
+    * ``"<tier_reason> -> <provider>/<model>"`` when it is moved off a held pool (``...+paced:<provider>``);
+    * ``"next run on <pool> (budget share): <provider>/<model>"`` for a ratio pick (``default+ratio:<pool>``) that
+      nothing moved further (:func:`kanban_queue_position.reroute_prefix` words it as is).
+
+    Resolves no route while no pool is held and ratio routing cannot apply (one state-file read)."""
+    from hermes_cli import kanban_ratio_routing as ratio
     from hermes_cli.kanban_model_tier import load_tier_config, resolve_dispatch_tier
     cfg = load_tier_config()
-    if not _held(cfg, time.time()):
+    now = time.time()
+    if not _held(cfg, now) and not (ratio.enabled(cfg) and ratio.fresh_v2(now) is not None):
         return None
     model, provider, reason = resolve_dispatch_tier(conn, task, lane="ready", cfg=cfg)
-    if f"+{REASON}:" not in str(reason or ""):
-        return None
-    return f"{reason} -> {provider}/{model}"
+    reason = str(reason or "")
+    if f"+{REASON}:" in reason:
+        return f"{reason} -> {provider}/{model}"
+    if reason == f"default+{ratio.REASON}:{provider}":
+        return f"{ratio.NOTE_PREFIX}{provider} (budget share): {provider}/{model}"
+    return None
