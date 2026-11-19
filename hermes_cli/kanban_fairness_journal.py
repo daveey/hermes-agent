@@ -104,11 +104,20 @@ def status(conn: sqlite3.Connection) -> Optional[dict]:
         return None
     names = ("capture_id", "armed_ms", "sealed_ms", "max_records", "max_bytes", "stored", "bytes", "dropped",
              "first_drop_ms", "last_drop_ms")
-    installed = {r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'kanban_fairness_*'")}
+    installed = dict(conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'kanban_fairness_*'"))
+    complete = installed == _triggers(conn)
+    # A seal intentionally removes triggers. Its pre-removal receipt, not current absence,
+    # proves integrity. Older sealed journals without that receipt are unknown, never clean.
+    seal_complete = None
+    columns = {r[1] for r in conn.execute(f"PRAGMA table_info({SESSION})")}
+    if "seal_triggers_complete" in columns:
+        seal_complete = conn.execute(f"SELECT seal_triggers_complete FROM {SESSION} WHERE id = 1").fetchone()[0]
     last = conn.execute(f"SELECT MAX(seq) FROM {JOURNAL}").fetchone()[0]
     return {**dict(zip(names, row)), "last_seq": last or 0, "db": identity(conn),
-            "triggers": sorted(installed), "triggers_complete": installed == set(_triggers(conn))}
+            "triggers": sorted(installed), "triggers_complete": complete,
+            "trigger_integrity": complete if row[2] is None else (
+                seal_complete == 1 if seal_complete in (0, 1) else None)}
 
 
 def arm(conn: sqlite3.Connection, capture_id: str, *, max_records: int = MAX_RECORDS,
@@ -165,7 +174,13 @@ def seal(conn: sqlite3.Connection) -> dict:
     from hermes_cli.kanban_db_connect import write_txn
 
     with write_txn(conn):
-        _open_status(conn)
+        state = _open_status(conn)
+        columns = {r[1] for r in conn.execute(f"PRAGMA table_info({SESSION})")}
+        if "seal_triggers_complete" not in columns:
+            conn.execute(f"ALTER TABLE {SESSION} ADD COLUMN seal_triggers_complete INTEGER")
+        if state["sealed_ms"] is None:
+            conn.execute(f"UPDATE {SESSION} SET seal_triggers_complete = ? WHERE id = 1",
+                         (int(state["triggers_complete"]),))
         conn.execute(f"UPDATE {SESSION} SET sealed_ms = COALESCE(sealed_ms, {_NOW_MS}) WHERE id = 1")
         _drop_triggers(conn)
     return _open_status(conn)

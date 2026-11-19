@@ -109,10 +109,29 @@ def test_seal_stops_capture_and_survives_a_reopen(conn, tmp_path):
         assert journal.status(again)["triggers"] == []
         assert journal.status(again)["stored"] == manifest["journal"]["stored"]
     capture = store.load(out)
-    expected_gaps = {"source_identity_unknown", "clock_unknown", "source_uid_unknown", "trigger_integrity_unknown"}
+    expected_gaps = {"source_identity_unknown", "clock_unknown", "source_uid_unknown"}
     assert {g["code"] for g in capture["gaps"]} == expected_gaps
     assert len(manifest["segments"]) == 2
     assert [r["seq"] for r in capture["records"]] == list(range(1, len(capture["records"]) + 1))
+
+
+@pytest.mark.parametrize("integrity,expected", [
+    (True, set()), (False, {"trigger_loss"}),
+    (None, {"trigger_integrity_unknown"}), (1, {"trigger_integrity_unknown"}),
+])
+def test_drain_preserves_three_way_trigger_evidence(conn, tmp_path, monkeypatch, integrity, expected):
+    journal.arm(conn, "c1")
+    state = journal.status(conn)
+    state["trigger_integrity"] = integrity
+    monkeypatch.setattr(journal, "status", lambda _conn: state)
+    out = tmp_path / "evidence"
+    for _ in range(2):  # no rows: new gaps must still be persisted and deduplicated
+        receipts = store.drain(conn, out)
+        codes = [g["code"] for g in receipts["gaps"] if g["code"].startswith("trigger_")]
+        assert set(codes) == expected
+        assert len(codes) == len(expected)
+        stored = json.loads((out / store.RECEIPTS).read_text())
+        assert {g["code"] for g in stored["gaps"] if g["code"].startswith("trigger_")} == expected
 
 
 def test_arm_refuses_a_second_capture(conn):
@@ -142,6 +161,73 @@ def test_changed_segment_and_lost_journal_are_gaps(conn, tmp_path):
     journal.clear(conn)  # ... or none at all, as after a replica rebuild
     assert "journal_missing" in [g["code"] for g in store.drain(conn, other)["gaps"]]
     assert "unsealed" in _codes(other)
+
+
+@pytest.mark.parametrize("first_drain", [False, True])
+@pytest.mark.parametrize("trigger", [
+    "kanban_fairness_tasks_ins", "kanban_fairness_tasks_upd",
+    "kanban_fairness_tasks_del", "kanban_fairness_events_ins",
+])
+def test_missing_trigger_survives_seal_and_reopen(conn, tmp_path, trigger, first_drain):
+    out = tmp_path / "evidence"
+    journal.arm(conn, "c1")
+    with kb.write_txn(conn):
+        conn.execute(f"DROP TRIGGER {trigger}")
+    if first_drain:
+        assert "trigger_loss" in [g["code"] for g in store.drain(conn, out)["gaps"]]
+        assert "trigger_loss" in _codes(out)  # persist even without journal rows
+    journal.seal(conn)  # direct seal must not erase loss before the store sees it
+    with kbc.connect_closing() as again:
+        store.write_manifest(again, out, board="default", assumptions={}, policy={})
+    assert "trigger_loss" in _codes(out)
+
+
+def test_observed_trigger_loss_is_sticky_after_repair(conn, tmp_path):
+    out = tmp_path / "evidence"
+    journal.arm(conn, "c1")
+    name = "kanban_fairness_tasks_upd"
+    ddl = conn.execute("SELECT sql FROM sqlite_master WHERE name = ?", (name,)).fetchone()[0]
+    with kb.write_txn(conn):
+        conn.execute(f"DROP TRIGGER {name}")
+    store.drain(conn, out)
+    with kb.write_txn(conn):
+        conn.execute(ddl)
+    store.write_manifest(conn, out, board="default", assumptions={}, policy={})
+    assert "trigger_loss" in _codes(out)
+
+
+def test_same_name_noop_trigger_is_a_gap(conn, tmp_path):
+    out = tmp_path / "evidence"
+    journal.arm(conn, "c1")
+    with kb.write_txn(conn):
+        conn.execute("DROP TRIGGER kanban_fairness_tasks_upd")
+        conn.execute("CREATE TRIGGER kanban_fairness_tasks_upd AFTER UPDATE ON tasks BEGIN SELECT 1; END")
+    store.write_manifest(conn, out, board="default", assumptions={}, policy={})
+    assert "trigger_loss" in _codes(out)
+
+
+@pytest.mark.parametrize("sealed", [False, True])
+def test_legacy_journal_seal_receipt_is_not_invented(conn, tmp_path, sealed):
+    out = tmp_path / "evidence"
+    journal.arm(conn, "legacy")  # the original schema has no seal receipt column
+    if sealed:
+        with kb.write_txn(conn):
+            conn.execute(f"UPDATE {journal.SESSION} SET sealed_ms = armed_ms WHERE id = 1")
+            for name in journal.status(conn)["triggers"]:
+                conn.execute(f"DROP TRIGGER {name}")
+    manifest = store.write_manifest(conn, out, board="default", assumptions={}, policy={})
+    gap_code = "trigger_integrity_unknown" if sealed else None
+    assert (journal.status(conn)["trigger_integrity"] is None) is sealed
+    assert ("trigger_integrity_unknown" in _codes(out)) is sealed
+    assert "trigger_loss" not in _codes(out)
+    # Repeated journal seal preserves its receipt; the newer store refuses resealing.
+    again = journal.seal(conn)
+    assert again["sealed_ms"] == manifest["window"]["sealed_ms"]
+    assert (again["trigger_integrity"] is None) is sealed
+    with pytest.raises(ValueError, match="already sealed"):
+        store.write_manifest(conn, out, board="default", assumptions={}, policy={})
+    if gap_code:
+        assert gap_code in _codes(out)
 
 
 def test_bad_record_line_is_a_gap_not_a_skip(conn, tmp_path):

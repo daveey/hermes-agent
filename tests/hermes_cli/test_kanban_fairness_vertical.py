@@ -91,7 +91,7 @@ def test_dispatch_to_report(kanban_home, all_assignees_spawnable, tmp_path, caps
     capsys.readouterr()
 
     capture = store.load(out)
-    expected_gaps = {"source_identity_unknown", "clock_unknown", "source_uid_unknown", "trigger_integrity_unknown"}
+    expected_gaps = {"source_identity_unknown", "clock_unknown", "source_uid_unknown"}
     assert {g["code"] for g in capture["gaps"]} == expected_gaps
     eps = metrics.episodes(capture["records"], armed_s=capture["manifest"]["window"]["armed_ms"] / 1000,
                            err=0)

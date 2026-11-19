@@ -30,6 +30,12 @@ stored.
 - `capture drain` copies new rows into `segment-NNNNNN.jsonl` files (hashed in `receipts.json`).
   `capture seal` removes the triggers, drains the tail and writes `manifest.json`. `capture clear` drops the
   tables.
+- Drains compare the installed trigger SQL with the expected definitions and persist observed loss even
+  when there are no new rows. Seal checks inside its write transaction before removing triggers and stores
+  that result in the session, so a later drain or repeated seal cannot hide loss. Missing or changed
+  triggers, and legacy seals without an integrity receipt, produce `trigger_loss` coverage gaps.
+  This detects loss observed by drain or seal, not a trigger removed and identically restored entirely
+  between checks; do not repair triggers during a capture or treat such a window as certified.
 
 Which database to arm: a board's own `kanban.db` holds only what that gateway knows. To see every gateway's
 cards from one host, arm the board's replica (`--board default --replica`, the `sync-shadow` copy) and state
