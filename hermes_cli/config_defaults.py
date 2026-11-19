@@ -1881,6 +1881,8 @@ DEFAULT_CONFIG = {
         "failure_repeat_alert_hours": 6,
     },
     "kanban": {
+        # Evidence only; never changes urgency or starts capture without explicit activation.
+        "fairness_capture": {"enabled": False, "capture_id": None, "directory": None, "max_bytes": 536870912},
         "self_work": {"sample_rate": 0.2},  # Reversible spot checks; risky/unknown diffs always selected. [daveey]
         "wake_check_stale_hours": 48,  # Reconsider a never-passing probe; same-probe re-parks retain age.
         "passive_intake": {},  # Exact task ID -> exact wake_check for standing external listeners.
