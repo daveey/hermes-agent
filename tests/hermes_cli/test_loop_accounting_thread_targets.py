@@ -199,6 +199,70 @@ def test_user_system_split_matches_cpu_and_family_sum_still_reconciles():
     assert total == pytest.approx(res["unaccounted_cpu_s"], abs=1e-3)
 
 
+def test_reused_native_id_does_not_inherit_exited_accounting(monkeypatch):
+    la.instrument_thread_targets()
+    monkeypatch.setattr(la, "_native_id", lambda: 123456789)
+    monkeypatch.setattr(la, "_thread_time", lambda: 0.2)
+    # The previous lifetime has ended but no snapshot/new scope has folded it.
+    la._thread_accounted[123456789] = 0.2
+    la._exited_tids.append(123456789)
+
+    def replacement():
+        pass
+
+    th = threading.Thread(target=replacement)
+    th.start()
+    th.join()
+    row = la._target_exited[la._target_key(replacement)]
+    assert row["accounted_cpu_s"] == 0.0
+    assert row["unaccounted_cpu_s"] == pytest.approx(0.2)
+
+
+def test_reused_native_id_nested_scopes_do_not_double_count(monkeypatch):
+    la.instrument_thread_targets()
+    monkeypatch.setattr(la, "_native_id", lambda: 123456789)
+    la._thread_accounted[123456789] = 0.2
+    la._exited_tids.append(123456789)
+    ticks = iter((0.0, 0.0, 0.1, 0.2, 0.2))
+    monkeypatch.setattr(la, "_thread_time", lambda: next(ticks))
+
+    def replacement():
+        with la.scope("replacement.outer"):
+            with la.scope("replacement.inner"):
+                pass
+
+    th = threading.Thread(target=replacement)
+    th.start()
+    th.join()
+    assert la.counters()["replacement.inner"]["cpu_s"] == pytest.approx(0.1)
+    assert la.counters()["replacement.outer"]["cpu_s"] == pytest.approx(0.1)
+    assert la._target_exited[la._target_key(replacement)]["accounted_cpu_s"] == pytest.approx(0.2)
+
+
+def test_context_thread_names_original_target():
+    from contextvars import Context
+
+    la.instrument_thread_targets()
+
+    def original(value):
+        assert value == 42
+
+    th = threading.Thread(target=Context().run, args=(original, 42))
+    th.start()
+    th.join()
+    assert la._target_key(original) in la._target_exited
+    assert not any("Context.run" in key for key in la._target_exited)
+
+
+@pytest.mark.parametrize("clear", [la.reset, la._after_fork_child])
+def test_lifetime_reset_clears_both_target_maps(clear):
+    la._thread_targets[123] = "old.target"
+    la._target_exited["old.target"] = {"threads": 1, "cpu_s": 0.2}
+    clear()
+    assert la._thread_targets == {}
+    assert la._target_exited == {}
+
+
 def test_thread_start_overhead_is_small():
     """One wrapped thread lifecycle adds two lock rounds: pin the added cost under 50 µs per thread."""
     def noop():

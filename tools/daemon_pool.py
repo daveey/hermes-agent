@@ -16,6 +16,7 @@ import weakref
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.thread import _worker
 from contextvars import copy_context
+from functools import partial
 
 __all__ = ["DaemonThreadPoolExecutor"]
 
@@ -29,11 +30,7 @@ class DaemonThreadPoolExecutor(ThreadPoolExecutor):
         Thread-start context cannot track later submissions from other profiles
         (#54937). The stdlib worker context manages initialization, not contextvars.
         """
-        ctx = copy_context()
-
-        def _run_with_context(*call_args, **call_kwargs):
-            return ctx.run(fn, *call_args, **call_kwargs)
-        return super().submit(_run_with_context, *args, **kwargs)
+        return super().submit(partial(copy_context().run, fn), *args, **kwargs)
 
     def _adjust_thread_count(self) -> None:
         # Mirrors CPython's implementation with two changes:
