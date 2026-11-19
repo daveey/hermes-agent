@@ -162,3 +162,52 @@ def test_orchestrator_wait_matcher() -> None:
     assert kaw.orchestrator_wait("Parked pending the orchestrator's go-ahead on phase B.")
     assert not kaw.orchestrator_wait("Per the orchestrator's decision, waiting for CI run 40443505012.")
     assert not kaw.orchestrator_wait("Orchestrator decision recorded; waiting for the release build.")
+
+
+WHY_DAVID = "David's approval of the $400 GPU spend is pending"
+WHY_WALL = "needs the IAM permission grant on s3://prod-bucket"
+DAVID_REASON = "SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting for David's approval of the $400 GPU spend"
+
+
+@pytest.mark.parametrize("reason,awaiting,code", [
+    (DAVID_REASON, {"kind": "chat", "ref": "owning orchestrator", "why": WHY_DAVID}, kaw.HUMAN_WAIT),
+    (DAVID_REASON, {"kind": "external", "ref": "Owning orchestrator", "why": WHY_DAVID}, kaw.HUMAN_WAIT),
+    (DAVID_REASON + "; awaiting the owning orchestrator's go-ahead",
+     {"kind": "external", "ref": "AWS case 17722033541", "why": WHY_DAVID}, kaw.HUMAN_WAIT),
+    ("SCHEDULED_UNTIL=2099-01-01T00:00:00Z " + WHY_WALL, {"kind": "chat", "why": WHY_WALL}, kaw.AGENT_ACTION_WAIT),
+    ("SCHEDULED_UNTIL=2099-01-01T00:00:00Z " + WHY_WALL,
+     {"kind": "external", "ref": "Owning orchestrator", "why": WHY_WALL}, kaw.AGENT_ACTION_WAIT),
+])
+def test_chat_wait_never_launders_a_david_ask_or_an_agent_wall(kanban_home, monkeypatch, reason, awaiting,
+                                                                 code) -> None:
+    """Adversarial review of #3647: each row parked as a chat wait before the wall check in _check_chat."""
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": reason, "clock_only": True, "awaiting": awaiting})
+        assert out.get("code") == code or code in out.get("error", ""), out
+        assert kb.get_task(conn, tid).status == "running" and not _asks(conn, tid)
+
+
+@pytest.mark.parametrize("platform,mode,parks", [
+    ("tui", None, True),
+    ("telegram", "notify+wake", True),
+    ("telegram", None, False),  # a passive ping, maybe to a person: no orchestrator is woken
+    ("hub", None, False),       # the hub relay carries only cards that turned terminal
+])
+def test_only_a_subscription_the_notice_can_wake_counts(kanban_home, monkeypatch, platform, mode, parks) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        kbn.add_notify_sub(conn, task_id=tid, platform=platform,
+                           chat_id="macbook/default/20261026_235722_bef6c6" if platform == "hub" else "chat-1",
+                           notifier_profile="default", delivery_mode=mode,
+                           delivery_metadata={"reason": "shepherd"})
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING})
+        if parks:
+            assert out.get("ok") is not False and "error" not in out, out
+            assert len(_asks(conn, tid)) == 1
+        else:
+            assert kaw.NO_CHAT_SUBSCRIBER in (out.get("code") or "") + out.get("error", ""), out
+            assert kb.get_task(conn, tid).status == "running"

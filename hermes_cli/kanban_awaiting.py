@@ -491,9 +491,16 @@ def orchestrator_wait(text: Optional[str], ref: Optional[str] = None) -> bool:
 
 
 def has_chat_subscriber(conn: sqlite3.Connection, task_id: str) -> bool:
-    """A chat that would receive the card's notices: any notify subscription on the card."""
+    """A subscribed chat that ``decision_requested`` can wake.
+
+    A ``tui`` row: the live poller queues it and the unloaded sweeper starts a turn in a dormant chat. A
+    ``notify+wake`` / ``wake`` row: the gateway notifier wakes the agent. Not a plain ``notify`` messaging row
+    (a passive ping, possibly to a person rather than the orchestrator) and not a ``hub`` relay row, which
+    carries only cards that turned terminal, never a parked card's events."""
     try:
-        return conn.execute("SELECT 1 FROM kanban_notify_subs WHERE task_id = ? LIMIT 1", (task_id,)).fetchone() is not None
+        return conn.execute(
+            "SELECT 1 FROM kanban_notify_subs WHERE task_id = ? AND (platform = 'tui' "
+            "OR delivery_mode IN ('notify+wake', 'wake')) LIMIT 1", (task_id,)).fetchone() is not None
     except sqlite3.OperationalError:
         return False
 
@@ -501,9 +508,16 @@ def has_chat_subscriber(conn: sqlite3.Connection, task_id: str) -> bool:
 def _check_chat(conn, task_id, awaiting, text) -> None:
     if not awaiting.get("why"):
         raise AwaitingError(INVALID_AWAITING, "awaiting kind='chat' needs why=<the question the orchestrator must answer>")
+    # Relabelling a park as a chat wait never excuses a wait on David or an agent wall: those stay refused
+    # (human_wait / agent_action_wait), as for a clock wait. Review of #3647: a David ask phrased as
+    # "awaiting the owning orchestrator's go-ahead" otherwise parked as a chat notice.
+    wall = text_wall(text)
+    if wall:
+        raise wall_error(task_id, wall, text)
     if not has_chat_subscriber(conn, task_id):
         raise AwaitingError(NO_CHAT_SUBSCRIBER, (
-            f"{task_id} has no chat subscribed to it, so no orchestrator would be told about this wait. "
+            f"{task_id} has no chat subscription that a decision_requested notice can wake (a tui row, or a "
+            "notify+wake row), so no orchestrator would be told about this wait. "
             "A decision only David can make is kanban_block kind='needs_input' with human_request; agent work is "
             "an owner card you create and park on (awaiting kind='card')."))
 
