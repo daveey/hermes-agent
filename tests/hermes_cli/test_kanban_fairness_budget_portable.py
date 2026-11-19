@@ -76,21 +76,28 @@ def _windows_lock(monkeypatch, locking):
 
 
 @pytest.mark.parametrize("error_name", ["EACCES", "EAGAIN", "EDEADLK"])
-def test_windows_budget_waits_past_crt_retry_window(tmp_path, monkeypatch, error_name):
+@pytest.mark.parametrize("operation", ["initialize", "write"])
+def test_windows_budget_waits_past_crt_retry_window(tmp_path, monkeypatch, error_name, operation):
     import errno
 
+    if operation == "write":
+        budget.initialize(tmp_path, 4096)
     calls = []
 
     def locking(fd, mode, count):
         calls.append(mode)
         assert count == 1
-        if mode == 1 and len(calls) <= 2:
+        if mode == 1 and len(calls) <= 12:
             raise OSError(getattr(errno, error_name), "CRT ten-attempt window exhausted")
 
     _windows_lock(monkeypatch, locking)
-    budget.initialize(tmp_path, 4096)
+    if operation == "initialize":
+        budget.initialize(tmp_path, 4096)
+    else:
+        budget.write(tmp_path / "plan.json", b"previous plan")
+        assert (tmp_path / "plan.json").read_bytes() == b"previous plan"
     assert budget._limit(tmp_path) == 4096
-    assert calls == [1, 1, 1, 2]
+    assert calls == [1] * 13 + [2]
 
 
 @pytest.mark.parametrize("mode,error_name", [(1, "EBADF"), (2, "EBADF"), (2, "EACCES")])
@@ -127,3 +134,39 @@ def test_windows_budget_locks_byte_zero_with_existing_sentinel(tmp_path, monkeyp
     with budget._locked(tmp_path):
         pass
     assert calls == [1, 2]
+
+
+def test_windows_arm_rollback_waits_for_budget_lock(tmp_path, monkeypatch):
+    import errno
+    from hermes_cli import kanban_fairness_journal as journal
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    db = str(kb.kanban_db_path())
+    out = tmp_path / "capture"
+    args = ["capture", "arm", "--db", db, "--out", str(out), "--capture-id", "portable"]
+    assert main(args) == 0
+    previous = (out / "plan.json").read_bytes()
+    rollback = False
+    attempts = 0
+
+    def fail_triggers(conn):
+        nonlocal rollback
+        rollback = True
+        raise OSError("journal failed before commit")
+
+    def locking(fd, mode, count):
+        nonlocal attempts
+        if rollback and mode == 1:
+            attempts += 1
+            if attempts <= 12:
+                raise OSError(errno.EACCES, "CRT ten-attempt window exhausted")
+
+    _windows_lock(monkeypatch, locking)
+    monkeypatch.setattr(journal, "_triggers", fail_triggers)
+    assert main([*args, "--replace", "--clock-error-s", "7"]) == 3
+    assert attempts == 13
+    assert (out / "plan.json").read_bytes() == previous
