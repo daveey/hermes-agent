@@ -255,7 +255,9 @@ def test_all_gates_passing_is_the_only_overall_pass():
 def test_decode_refuses_unknown_shapes(patch):
     good = {"version": 1, "seq": 1, "kind": "task", "wall_ms": 1, "task_id": "t", "op": "insert",
             "fields": {"status": "ready", "priority": 0}}
-    assert decode_record(good)["task_id"] == "t"
+    # Legacy flat rows, even internally well-formed ones, are not versioned envelopes.
+    with pytest.raises(BadRecord):
+        decode_record(good)
     with pytest.raises(BadRecord):
         decode_record({**good, **patch})
 

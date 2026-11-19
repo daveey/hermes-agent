@@ -109,7 +109,9 @@ def test_seal_stops_capture_and_survives_a_reopen(conn, tmp_path):
         assert journal.status(again)["triggers"] == []
         assert journal.status(again)["stored"] == manifest["journal"]["stored"]
     capture = store.load(out)
-    assert capture["gaps"] == [] and len(manifest["segments"]) == 2
+    assert {g["code"] for g in capture["gaps"]} == {
+        "source_identity_unknown", "clock_unknown", "source_uid_unknown"}
+    assert len(manifest["segments"]) == 2
     assert [r["seq"] for r in capture["records"]] == list(range(1, len(capture["records"]) + 1))
 
 
@@ -136,7 +138,7 @@ def test_changed_segment_and_lost_journal_are_gaps(conn, tmp_path):
     journal.arm(conn, "c3", replace=True)
     store.drain(conn, other)
     journal.arm(conn, "c4", replace=True)  # the database now carries someone else's journal
-    assert [g["code"] for g in store.drain(conn, other)["gaps"]] == ["journal_replaced"]
+    assert "journal_replaced" in [g["code"] for g in store.drain(conn, other)["gaps"]]
     journal.clear(conn)  # ... or none at all, as after a replica rebuild
     assert "journal_missing" in [g["code"] for g in store.drain(conn, other)["gaps"]]
     assert "unsealed" in _codes(other)
@@ -154,6 +156,7 @@ def test_bad_record_line_is_a_gap_not_a_skip(conn, tmp_path):
     segment.write_bytes(data)
     import hashlib
     manifest["segments"][0]["sha256"] = hashlib.sha256(data).hexdigest()
+    manifest["segments"][0]["bytes"] = len(data)
     (out / "manifest.json").write_text(json.dumps(manifest))
     codes = _codes(out)
     assert "bad_record" in codes and "record_count" in codes

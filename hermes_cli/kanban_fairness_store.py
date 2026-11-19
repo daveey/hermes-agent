@@ -1,81 +1,43 @@
-"""Durable files of one queue-fairness capture: hashed JSONL segments and a sealed manifest. [daveey]
+"""Durable Phase A capture envelopes and fail-closed database export. [daveey]
 
-``drain`` copies journal rows the directory does not hold yet into ``segment-<n>.jsonl`` (written whole,
-fsynced, renamed) and records each segment's hash in ``receipts.json``. ``write_manifest`` closes the capture
-with the journal's own counters. ``load`` reads a directory back for the reader and reports, rather than
-repairs, anything that makes the capture incomplete: no seal, a changed or missing segment, a hole in the
-sequence, dropped changes, or a journal that moved to another database file (a replica rebuild).
+Runtime consumers use append_records/seal_records in an exclusively owned directory. DB export preserves
+its transactionally monotonic journal_seq separately from each exporter process epoch's envelope seq.
+The current DB journal does not observe monotonic clocks, clock error, or event source UIDs: those remain
+unknown. Export never retroactively invents them from a present-day row or an assumed clock bound.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Optional
 
 from hermes_cli import kanban_fairness_journal as journal
-from hermes_cli.kanban_fairness_schema import SEGMENT_BYTES, VERSION, BadRecord, decode_owner, decode_record
+from hermes_cli import kanban_fairness_segments as segments
+from hermes_cli.kanban_fairness_schema import VERSION, BadRecord, decode_owner, make_record
+from hermes_cli.kanban_fairness_segments import append_records, seal_records
 
-RECEIPTS, MANIFEST, OWNERS = "receipts.json", "manifest.json", "owner_authority.jsonl"
+__all__ = ["append_records", "drain", "load", "seal_records", "write_manifest"]
 
-
-def _write(path: Path, data: bytes) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(tmp, path)
+RECEIPTS, MANIFEST, OWNERS = segments.RECEIPTS, segments.MANIFEST, "owner_authority.jsonl"
+_PROCESS_EPOCH = (os.getpid(), str(uuid.uuid4()))
 
 
-def _receipts(out: Path) -> dict:
-    path = out / RECEIPTS
-    if not path.exists():
-        return {"version": VERSION, "capture_id": None, "db": None, "armed_ms": None, "segments": [], "gaps": []}
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+def _epoch():
+    global _PROCESS_EPOCH
+    if _PROCESS_EPOCH[0] != os.getpid():
+        _PROCESS_EPOCH = (os.getpid(), str(uuid.uuid4()))
+    return _PROCESS_EPOCH[1]
 
 
-def drain(conn: sqlite3.Connection, out: Path) -> dict:
-    """Append the journal's new rows to ``out``; returns the receipts (with any gap this call found)."""
-    out.mkdir(parents=True, exist_ok=True)
-    receipts = _receipts(out)
-    state = journal.status(conn)
-    if state is None:
-        if receipts["capture_id"] is not None:
-            _gap(receipts, "journal_missing", "the database no longer carries the armed journal")
-            _write(out / RECEIPTS, json.dumps(receipts, indent=1).encode())
-        return receipts
-    if receipts["capture_id"] is None:
-        receipts.update(capture_id=state["capture_id"], db=state["db"], armed_ms=state["armed_ms"])
-    elif (receipts["capture_id"], receipts["armed_ms"], receipts["db"]) != (
-            state["capture_id"], state["armed_ms"], state["db"]):
-        _gap(receipts, "journal_replaced", "the journal on this database is not the one this directory drains")
-        _write(out / RECEIPTS, json.dumps(receipts, indent=1).encode())
-        return receipts
-    last = receipts["segments"][-1]["last_seq"] if receipts["segments"] else 0
-    while True:
-        lines, size, first = [], 0, None
-        for seq, kind, wall_ms, task_id, op, fields in journal.rows(conn, last):
-            line = json.dumps({"version": VERSION, "seq": seq, "kind": kind, "wall_ms": wall_ms,
-                               "task_id": task_id, "op": op, "fields": json.loads(fields)},
-                              separators=(",", ":"), sort_keys=True)
-            lines.append(line)
-            size += len(line) + 1
-            first = seq if first is None else first
-            last = seq
-            if size >= SEGMENT_BYTES:
-                break
-        if not lines:
-            break
-        data = ("\n".join(lines) + "\n").encode()
-        name = f"segment-{len(receipts['segments']) + 1:06d}.jsonl"
-        _write(out / name, data)
-        receipts["segments"].append({"name": name, "first_seq": first, "last_seq": last, "records": len(lines),
-                                     "sha256": hashlib.sha256(data).hexdigest()})
-        _write(out / RECEIPTS, json.dumps(receipts, indent=1).encode())
-    return receipts
+def _write(path, data):
+    segments.write(path, data)
+
+
+def _receipts(out):
+    return segments.receipts(out)
 
 
 def _gap(receipts: dict, code: str, detail: str) -> None:
@@ -83,64 +45,109 @@ def _gap(receipts: dict, code: str, detail: str) -> None:
         receipts["gaps"].append({"code": code, "detail": detail})
 
 
+def _bind(conn, receipts, state):
+    from hermes_cli.kanban_db_sync import sync_state
+
+    identity = sync_state(conn) or {}
+    database_uid = "evidence-local:" + str(uuid.uuid4())
+    receipts.update(capture_id=state["capture_id"], db=state["db"], armed_ms=state["armed_ms"],
+                    database_uid=database_uid, journal_seq=0,
+                    source_gateway=identity.get("gateway_id") or database_uid,
+                    board_uid=identity.get("board_id") or database_uid)
+    if not identity.get("gateway_id") or not identity.get("board_id"):
+        _gap(receipts, "source_identity_unknown", "evidence-local database identity is not cross-host authority")
+
+
+def drain(conn: sqlite3.Connection, out: Path) -> dict:
+    """Export journal batches outside scheduler locks. Unknown provenance stays an explicit gap."""
+    out.mkdir(parents=True, exist_ok=True)
+    receipts = _receipts(out)
+    state = journal.status(conn)
+    if state is None:
+        if receipts["capture_id"] is not None:
+            _gap(receipts, "journal_missing", "database no longer carries the armed journal")
+            _write(out / RECEIPTS, segments.encoded(receipts))
+        return receipts
+    if receipts["capture_id"] is None:
+        _bind(conn, receipts, state)
+        _write(out / RECEIPTS, segments.encoded(receipts))
+    elif (receipts["capture_id"], receipts.get("armed_ms"), receipts.get("db")) != (
+            state["capture_id"], state["armed_ms"], state["db"]):
+        _gap(receipts, "journal_replaced", "directory belongs to another database journal")
+        _write(out / RECEIPTS, segments.encoded(receipts))
+        return receipts
+    if (out / MANIFEST).exists():
+        return receipts
+    while True:
+        rows = list(journal.rows(conn, receipts["journal_seq"], limit=128))
+        if not rows:
+            return receipts
+        cuts = segments.source_map(receipts["sources"])
+        epoch = _epoch()
+        seq = cuts.get((receipts["source_gateway"], epoch), 0)
+        records = []
+        try:
+            for db_seq, kind, wall_ms, task_id, op, fields in rows:
+                seq += 1
+                records.append(make_record(
+                    capture_id=state["capture_id"], source_gateway=receipts["source_gateway"],
+                    board_uid=receipts["board_uid"], source_epoch=epoch, seq=seq,
+                    kind="opening" if kind == "opening" else "row_change", wall_ns=wall_ms * 1_000_000,
+                    payload={"task_id": task_id, "op": op, "fields": json.loads(fields),
+                             "journal_seq": db_seq, "journal_kind": kind,
+                             "database_uid": receipts["database_uid"], "source_uid": None}))
+            receipts = append_records(out, records)
+        except (ValueError, OSError) as exc:
+            _gap(receipts, "export_failed", type(exc).__name__)
+            _write(out / RECEIPTS, segments.encoded(receipts))
+            return receipts
+        receipts["journal_seq"] = rows[-1][0]
+        _write(out / RECEIPTS, segments.encoded(receipts))
+
+
 def write_manifest(conn: sqlite3.Connection, out: Path, *, board: str, assumptions: dict,
                    policy: dict, roster: Optional[list] = None) -> dict:
-    """Seal the journal, drain its tail and write ``manifest.json``. An unsealed directory is incomplete."""
     state = journal.seal(conn)
     receipts = drain(conn, out)
     manifest = {
-        "version": VERSION, "capture_id": state["capture_id"], "board": board, "db": state["db"],
+        **receipts, "version": VERSION, "capture_id": state["capture_id"], "board": board, "db": state["db"],
         "window": {"armed_ms": state["armed_ms"], "sealed_ms": state["sealed_ms"]},
         "journal": {k: state[k] for k in ("stored", "bytes", "dropped", "first_drop_ms", "last_drop_ms",
                                          "max_records", "max_bytes", "last_seq")},
-        "segments": receipts["segments"], "gaps": receipts["gaps"], "assumptions": assumptions,
-        "policy": policy, "roster": roster or [], "sealed": True,
+        "assumptions": assumptions, "policy": policy, "roster": roster or [], "sealed": True,
     }
-    _write(out / MANIFEST, json.dumps(manifest, indent=1, sort_keys=True).encode())
+    # Empty captures cannot attest an epoch's final drain, and over-limit journal payload is a gap.
+    if not receipts["sources"]:
+        _gap(manifest, "source_tail", "no exporter epoch was captured")
+    actual_bytes = conn.execute(f"SELECT COALESCE(SUM(length(CAST(fields AS BLOB))), 0) FROM {journal.JOURNAL}").fetchone()[0]
+    if actual_bytes > state["max_bytes"] or state["stored"] > state["max_records"]:
+        _gap(manifest, "journal_bound", "stored journal exceeded its declared bound")
+    manifest["final_seal"] = segments.final_seal(manifest)
+    _write(out / MANIFEST, segments.encoded(manifest))
     return manifest
 
 
 def load(out: Path) -> dict:
-    """``{"manifest", "records", "owners", "gaps"}`` for the reader. ``gaps`` is every reason the capture cannot
-    certify a pass; ``records`` holds what could be decoded, in sequence order."""
-    gaps: list[dict] = []
-    path = out / MANIFEST
-    if not path.exists():
-        receipts = _receipts(out)
-        gaps.append({"code": "unsealed", "detail": "no manifest.json: the capture was never sealed"})
-        manifest = {"version": VERSION, "capture_id": receipts["capture_id"], "window": {
-            "armed_ms": receipts["armed_ms"], "sealed_ms": None}, "journal": None,
-            "segments": receipts["segments"], "gaps": receipts["gaps"], "assumptions": {}, "policy": {},
-            "sealed": False}
-    else:
-        manifest = json.loads(path.read_text(encoding="utf-8-sig"))
-    gaps.extend(manifest.get("gaps") or [])
-    records, expected = [], 1
-    for seg in manifest.get("segments") or []:
-        file = out / seg["name"]
-        data = file.read_bytes() if file.exists() else None
-        if data is None or hashlib.sha256(data).hexdigest() != seg["sha256"]:
-            gaps.append({"code": "segment_mismatch", "detail": f"{seg['name']} is missing or changed"})
+    capture = segments.load_records(out)
+    manifest, records, gaps = capture["manifest"], capture["records"], capture["gaps"]
+    expected = 1
+    for record in records:
+        if record["kind"] not in ("opening", "row_change"):
             continue
-        for number, line in enumerate(data.decode().splitlines(), 1):
-            try:
-                record = decode_record(json.loads(line))
-            except (ValueError, BadRecord) as exc:
-                gaps.append({"code": "bad_record", "detail": f"{seg['name']}:{number}: {exc}"})
-                continue
-            if record["seq"] != expected:
-                gaps.append({"code": "sequence_gap", "detail": f"expected seq {expected}, read {record['seq']}"})
-            expected = record["seq"] + 1
-            records.append(record)
+        payload = record["payload"]
+        if payload["journal_seq"] != expected:
+            gaps.append({"code": "journal_sequence_gap"})
+        expected = payload["journal_seq"] + 1
+        if payload["source_uid"] is None:
+            gaps.append({"code": "source_uid_unknown"})
     counters = manifest.get("journal")
     if counters:
         if counters["dropped"]:
-            gaps.append({"code": "journal_dropped", "detail": f"{counters['dropped']} change(s) past the "
-                         f"journal bound, first at {counters['first_drop_ms']} ms"})
+            gaps.append({"code": "journal_dropped", "detail": "journal bound dropped changes"})
         if counters["stored"] != len(records) or counters["last_seq"] != expected - 1:
-            gaps.append({"code": "record_count", "detail": f"journal stored {counters['stored']} (last seq "
-                         f"{counters['last_seq']}), directory holds {len(records)}"})
-    return {"manifest": manifest, "records": records, "owners": _owners(out, gaps), "gaps": gaps}
+            gaps.append({"code": "record_count"})
+    capture["owners"] = _owners(out, gaps)
+    return capture
 
 
 def _owners(out: Path, gaps: list[dict]) -> Optional[list[dict]]:

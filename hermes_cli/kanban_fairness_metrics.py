@@ -82,6 +82,12 @@ def episodes(records: Iterable[dict], *, armed_s: float, err: float, lag: float 
     done: list[Episode] = []
     claims: dict[str, list[int]] = {}
     for rec in records:
+        if "payload" in rec:
+            if rec["kind"] not in ("opening", "row_change"):
+                continue
+            p = rec["payload"]
+            rec = {"task_id": p["task_id"], "wall_ms": rec["wall_ns"] / 1_000_000,
+                   "kind": p["journal_kind"], "op": p["op"], "fields": p["fields"]}
         tid, wall, fields = rec["task_id"], rec["wall_ms"] / 1000, rec["fields"]
         if rec["kind"] == "event":
             if fields["kind"] == "claimed":
@@ -255,7 +261,14 @@ def verdict(capture: dict, *, alarm_prefixes: tuple, min_window_s: float = 0) ->
     manifest = capture["manifest"]
     gaps = list(capture["gaps"])
     window = manifest.get("window") or {}
-    records = capture["records"]
+    # The metric kernel uses a local row view; persisted input remains the strict envelope.
+    records = [
+        {"seq": rec["payload"]["journal_seq"], "kind": rec["payload"]["journal_kind"],
+         "wall_ms": rec["wall_ns"] / 1_000_000, "task_id": rec["payload"]["task_id"],
+         "op": rec["payload"]["op"], "fields": rec["payload"]["fields"]}
+        if "payload" in rec else rec
+        for rec in capture["records"] if "payload" not in rec or rec["kind"] in ("opening", "row_change")
+    ]
     armed_ms = window.get("armed_ms") or (records[0]["wall_ms"] if records else 0)
     close_ms = window.get("sealed_ms") or (records[-1]["wall_ms"] if records else armed_ms)
     armed_s, close_s = armed_ms / 1000, close_ms / 1000

@@ -87,11 +87,12 @@ def test_dispatch_to_report(kanban_home, all_assignees_spawnable, tmp_path, caps
         kb.archive_task(conn, ids["foreign"])
     assert cli.main(["capture", "drain", "--out", str(out)]) == 0
     assert cli.main(["capture", "seal", "--out", str(out)]) == 0
-    assert cli.main(["validate", "--input", str(out)]) == 0
+    assert cli.main(["validate", "--input", str(out)]) == 2
     capsys.readouterr()
 
     capture = store.load(out)
-    assert capture["gaps"] == []
+    assert {g["code"] for g in capture["gaps"]} == {
+        "source_identity_unknown", "clock_unknown", "source_uid_unknown"}
     eps = metrics.episodes(capture["records"], armed_s=capture["manifest"]["window"]["armed_ms"] / 1000,
                            err=0)
     by_task = {}
@@ -111,11 +112,11 @@ def test_dispatch_to_report(kanban_home, all_assignees_spawnable, tmp_path, caps
     report = tmp_path / "live.json"
     code = cli.main(["report", "--mode", "live", "--input", str(out), "--output", str(report)])
     verdict = json.loads(report.read_text())
-    assert verdict["coverage"]["complete"] is True
+    assert verdict["coverage"]["complete"] is False
     assert verdict["cohorts"]["all"]["opening_backlog"] == 1
     gates = verdict["gates"]
-    assert gates["alarm_wait"]["status"] == "PASS" and gates["alarm_wait"]["episodes"] == 1
-    assert gates["max_wait_while_claims"]["status"] == "PASS"
+    assert gates["alarm_wait"]["status"] == "INDETERMINATE" and gates["alarm_wait"]["episodes"] == 1
+    assert gates["max_wait_while_claims"]["status"] == "INDETERMINATE"
     # No owner journal was supplied: that gate cannot pass, so neither can the capture.
     assert gates["owner_wait"]["status"] == "INDETERMINATE"
     assert (verdict["overall"], code) == ("INDETERMINATE", 2)
