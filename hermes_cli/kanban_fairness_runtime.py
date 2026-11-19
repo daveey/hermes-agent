@@ -80,7 +80,9 @@ class Session:
         # Validate supplied identities before starting any thread or making directories.
         self.record("loss", self.loss_payload("clock_gap", 1), 1)
         self.out.mkdir(parents=True, exist_ok=False)
-        self.thread = threading.Thread(target=self.run, name="fairness-evidence", daemon=True)
+        from agent.memory_provider import spawn_context_thread
+
+        self.thread = spawn_context_thread(self.run, name="fairness-evidence", daemon=True)
         self.thread.start()
 
     @staticmethod
@@ -150,7 +152,7 @@ class Session:
                 seal_records(self.out, expected_sources=[dict(source_gateway=self.identity["source_gateway"],
                              source_epoch=self.epoch, last_seq=self.seq)])
                 self.sealed = True
-        except Exception:
+        except (OSError, ValueError, TypeError, RuntimeError):
             # Evidence failure cannot change scheduler behavior; unsealed epoch is a gap.
             self.failed = True
             self.loss["writer_error"] += 1

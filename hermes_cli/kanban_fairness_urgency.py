@@ -39,7 +39,7 @@ def emit(**observation):
     try:
         payload = receipt(**observation)
         runtime.submit(board=observation["board"], kind="owner_generation", payload=payload)
-    except Exception:
+    except (ValueError, TypeError, OverflowError, RecursionError):
         # Observation must never change an existing read result.
         runtime.submit(board=observation["board"], kind="loss", payload=dict(
             reason="unsupported", count=1, first_seq=None, last_seq=None,

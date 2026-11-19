@@ -1888,10 +1888,8 @@ DEFAULT_CONFIG = {
         "passive_intake": {},  # Exact task ID -> exact wake_check for standing external listeners.
         "sync": {"enabled": False},  # New boards get sync tables + outbox triggers when enabled. [daveey]
         "create_overlap_check": True,  # kanban_create refuses work open cards already own (kanban_overlap) [daveey]
-        # A board whose TABLE b-trees fail integrity_check (REINDEX can't fix it) pauses dispatch; true = the
-        # gateway dispatcher also starts `hermes kanban recover` for it (salvage in a child process, fill from
-        # the newest healthy backup, write back in place, loss report + follow-up card + sync reconcile). On
-        # here: fail-closed alone left a board down until an agent noticed by chance. [daveey]
+        # Failed TABLE integrity pauses dispatch; true also starts `hermes kanban recover` (child salvage,
+        # healthy backup, in-place restore, loss report + follow-up + sync reconcile). [daveey]
         "auto_recover_corruption": True,
         "recovery_card_assignee": "default",  # assignee of the card an automatic recovery files [daveey]
         # Opt-in per-profile broker argv before gh (empty = ordinary login); never include tokens.
