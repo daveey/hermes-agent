@@ -465,31 +465,27 @@ def _removed_owner(elsewhere: _Publications, listed: frozenset, owner: dict, tas
 class _Publications:
     """Which gateways publish a card, for ``_removed_owner``. [daveey]
 
-    Exact primary-key reads only: each gateway's ``gateway/info`` row lists the (profile, board) scopes it collects,
-    so another gateway's record of a card is at one of a few known keys ``profile/board/id``. The scope list is read
-    once per projection and only when a removed owner's row asks. A per-obligation ``key GLOB`` scanned the whole
-    replica (about 20 ms on 20,000 rows) on every projection, and a scan of all task keys costs 37 ms on the MacBook's
-    23,000 (review 5965756952). A gateway that publishes no info row is not consulted: the binding is then kept,
-    which only errs towards showing the card as unknown."""
+    Built at most once per projection, and only when a removed owner's row asks: for every gateway the replica
+    lists, one read of its task keys through the ``(gw, coll, key)`` primary key, which covers the read (no row
+    data; 13 ms for 23,000 keys on the MacBook), then one keyed read per candidate record. A per-obligation
+    ``key GLOB`` scanned the whole table each time (review 5965756952). Discovery does not depend on a gateway's
+    announced scopes: a replacement whose owner announces no scope for the board is still found, so a re-homed
+    running card is never settled from its removed owner's old completion (review 5970563622)."""
 
-    def __init__(self, source: sqlite3.Connection | None):
+    def __init__(self, source: sqlite3.Connection | None, listed: frozenset):
         self.source = source
-        self.scopes: dict[str, list[tuple[str, str]]] | None = None  # board -> [(gateway, profile)]
+        self.listed = listed
+        self.keys: dict[tuple[str, str], list[tuple[str, str]]] | None = None
 
-    def _scopes(self) -> dict[str, list[tuple[str, str]]]:
-        if self.scopes is None:
-            self.scopes = {}
-            for gw, raw in self.source.execute("SELECT gw, data FROM replica WHERE coll='gateway' AND key='info'"):
-                try:
-                    info = json.loads(raw)
-                    scopes = info.get('task_scopes') if isinstance(info, dict) else None
-                except (TypeError, ValueError):
-                    continue
-                for scope in scopes if isinstance(scopes, list) else ():
-                    if isinstance(scope, dict) and isinstance(scope.get('profile'), str) \
-                            and isinstance(scope.get('board'), str):
-                        self.scopes.setdefault(scope['board'], []).append((str(gw), scope['profile']))
-        return self.scopes
+    def _index(self) -> dict[tuple[str, str], list[tuple[str, str]]]:
+        if self.keys is None:
+            self.keys = {}
+            for gw in sorted(self.listed):
+                for (key,) in self.source.execute("SELECT key FROM replica WHERE gw=? AND coll='tasks'", (gw,)):
+                    parts = str(key).split('/')
+                    if len(parts) == 3:
+                        self.keys.setdefault((parts[1], parts[2]), []).append((gw, str(key)))
+        return self.keys
 
     def has_other(self, owner: dict, task: dict) -> bool:
         """Another gateway's replica record of this card: same board and id, same non-null ``created_at`` (a re-home
@@ -498,11 +494,11 @@ class _Publications:
         if self.source is None or created is None or isinstance(created, bool) \
                 or not isinstance(created, (int, float, str)):
             return False
-        for gw, profile in self._scopes().get(owner['board'], ()):
+        for gw, key in self._index().get((owner['board'], owner['task_id']), ()):
             if gw == owner['gateway']:
                 continue
             row = self.source.execute("SELECT data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
-                                      (gw, f"{profile}/{owner['board']}/{owner['task_id']}")).fetchone()
+                                      (gw, key)).fetchone()
             try:
                 other = json.loads(row[0]) if row else None
             except (TypeError, ValueError):
@@ -566,7 +562,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
         # its info row; a machine removed from the Board has neither (``_removed_owner``). Read once per projection,
         # inside the try so a failed read still closes the replica connection (review 5965756952).
         listed = _listed_gateways(source if fresh else None)
-        elsewhere = _Publications(source)
+        elsewhere = _Publications(source, listed)
         with closing(_ro(path)) as conn:
             from hermes_cli.kanban_origin_legacy import aliases_for_projection
             alias_receipts = {}

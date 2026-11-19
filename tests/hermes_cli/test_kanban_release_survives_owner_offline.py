@@ -276,23 +276,55 @@ def test_a_failed_listed_gateways_read_still_closes_the_replica(world, board, mo
             conn.execute('SELECT 1')
 
 
-def test_a_rehome_is_found_only_through_a_scope_the_new_owner_announces(world, board):
-    """The lookup reads exact keys from the scopes in each gateway's info row: a gateway that does not collect the
-    card's board is not consulted, so the binding is kept (unknown), never wrongly dropped."""
-    path, replica = _bound_done(world, verified_completion=False)
+def _rehash(task):
+    """Recompute an owner record's observation hash after a field edit, so its completion evidence stays valid."""
+    import hashlib
+    from hermes_cli.kanban_origin_ledger import _json
+    payload = {k: v for k, v in task.items() if k != 'origin_observation'}
+    task['origin_observation'] = {**task['origin_observation'],
+                                  'task_hash': hashlib.sha256(_json(payload).encode()).hexdigest()}
+    return task
+
+
+@pytest.mark.parametrize('inventory', ['no-info-row', 'info-for-another-board', 'info-for-this-board'])
+def test_a_running_replacement_is_never_settled_from_the_removed_owners_completion(world, board, inventory):
+    """Review 5970563622: the removed owner's VERIFIED completion must not settle the row while another gateway
+    publishes the same card running, whatever that gateway's info row announces."""
+    path, replica = _bound_done(world)
     _, _, binding = world
     with sqlite3.connect(replica) as db:
         task = json.loads(db.execute("SELECT data FROM replica WHERE coll='tasks' AND gw='owner'").fetchone()[0])
         task['created_at'] = 1234
+        task = _rehash(task)
         db.execute("UPDATE replica SET data=?, version=6 WHERE coll='tasks' AND gw='owner'", (json.dumps(task),))
+    assert _project(path, replica, 1001)['unfinished'] is False, 'the edited record still carries valid evidence'
     _remove_owner(replica, 5000, path)
     moved = {k: v for k, v in task.items() if k != 'origin_observation'} | {'gateway': 'third', 'status': 'running'}
     key = '/'.join((binding['owner']['profile'], binding['owner']['board'], binding['owner']['task_id']))
     with sqlite3.connect(replica) as db:
         db.execute("INSERT INTO replica VALUES ('third','tasks',?,1,?)", (key, json.dumps(moved)))
-        db.execute("INSERT INTO replica VALUES ('third','gateway','info',1,?)",
-                   (json.dumps({'gateway': 'third', 'task_scopes': [
-                       {'profile': 'default', 'board': 'elsewhere', 'state': 'ok', 'observed_at': 5000}]}),))
+        if inventory != 'no-info-row':
+            scope_board = 'elsewhere' if inventory == 'info-for-another-board' else binding['owner']['board']
+            db.execute("INSERT INTO replica VALUES ('third','gateway','info',1,?)",
+                       (json.dumps({'gateway': 'third', 'task_scopes': [
+                           {'profile': 'default', 'board': scope_board, 'state': 'ok', 'observed_at': 5000}]}),))
     from hermes_cli import kanban_origin_ledger as ledger
     rows = ledger.project(path, replica=replica, gateway='origin', profile='default', now=5001)
-    assert len(rows) == 1 and rows[0]['status'] == 'unknown'
+    assert not [r for r in rows if r['unfinished'] is False], 'no finished row while the replacement runs'
+    assert rows == [], 'the replacement speaks for the card: the binding to the removed owner is dropped'
+
+
+def test_the_verified_completion_settles_when_no_replacement_exists(world, board):
+    """Control for the test above: the same verified completion, with an unrelated third gateway, is settled."""
+    path, replica = _bound_done(world)
+    with sqlite3.connect(replica) as db:
+        task = json.loads(db.execute("SELECT data FROM replica WHERE coll='tasks' AND gw='owner'").fetchone()[0])
+        task['created_at'] = 1234
+        db.execute("UPDATE replica SET data=?, version=6 WHERE coll='tasks' AND gw='owner'",
+                   (json.dumps(_rehash(task)),))
+    _remove_owner(replica, 5000, path)
+    with sqlite3.connect(replica) as db:
+        db.execute("INSERT INTO replica VALUES ('third','tasks','default/default/t_unrelated',1,?)",
+                   (json.dumps({'id': 't_unrelated', 'created_at': 1234, 'status': 'running'}),))
+    row = _project(path, replica, 5001)
+    assert (row['status'], row['unfinished']) == ('done', False)
