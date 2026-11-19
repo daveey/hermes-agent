@@ -530,8 +530,8 @@ class SessionSchemaMixin:
         holders and the remedy that works from inside a gateway session (stop only the other
         holder; this process's own retry tick admits the rebuild). The window restarts only
         when the last deferral saw no holder, or when the gap since it is negative or longer
-        than twice the retry backoff cap (a new episode). This process also keeps its own copy
-        of the window and the longer one counts, so a writer that resets the shared record (an
+        than twice the retry backoff cap (a new episode). This handle also keeps its own copy of
+        the window and the longer one counts, so a writer that resets the shared record (an
         older release still on the store) cannot starve this process's futility decision."""
         now = time.time()
         try:
@@ -552,8 +552,11 @@ class SessionSchemaMixin:
         if first_seen > now or first_seen < 0:
             first_seen = now
         holder_pids = sorted({pid for pid, _path in foreign_holders if pid > 0})
-        # No record at all is a new episode (recovery deletes it); this process's copy starts over with it.
+        # No record at all, or one whose episode began after this process last saw a holder, is a new episode
+        # (recovery deletes the record; a peer may write the next episode's first one): this copy starts over.
         own = getattr(self, "_fts_holder_presence", None) if row else None
+        if own is not None and own[2] < first_seen:
+            own = None
         holders_since, holders_attempts = _continue_holder_presence(shared, now)
         own_since, own_attempts = _continue_holder_presence(own, now)
         holders_since, holders_attempts = min(holders_since, own_since), max(holders_attempts, own_attempts)

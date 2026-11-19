@@ -174,3 +174,42 @@ def test_an_older_writer_resetting_the_shared_record_cannot_starve_futility(
     assert record.get("futile") is True and record["holders_attempts"] == attempts, (
         record
     )
+
+
+def test_a_new_episode_started_by_a_peer_does_not_inherit_this_handles_window(
+    stale_store,
+):
+    """A peer recovers (deleting the record), the index goes stale again and the peer writes the new episode's
+    first deferral: this handle's window from the old episode must not make the new one futile at once."""
+    db, db_path, clock = stale_store
+    attempts = hermes_state_schema._FTS_HOLDER_FUTILE_ATTEMPTS
+    step = hermes_state_schema._FTS_HOLDER_FUTILE_SECONDS / (attempts - 1)
+    record = {}
+    for _ in range(attempts):
+        record = _defer(db, clock, step)
+        if record.get("futile"):
+            break
+    assert record.get("futile") is True, record
+    clock[0] += step
+    fresh = {
+        "first_seen": clock[0],
+        "last_seen": clock[0],
+        "attempts": 1,
+        "holder_pids": [4242],
+        "holders_since": clock[0],
+        "holders_attempts": 1,
+        "futile": False,
+    }
+    raw = sqlite3.connect(str(db_path))
+    raw.execute(
+        "UPDATE state_meta SET value = ? WHERE key = ?",
+        (json.dumps(fresh), FTS_REBUILD_DEFERRAL_KEY),
+    )
+    raw.commit()
+    raw.close()
+    record = _defer(db, clock, step)
+    assert (
+        record["holders_attempts"] == 2
+        and record["holders_since"] >= fresh["first_seen"]
+    ), record
+    assert not record.get("futile"), record

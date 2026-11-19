@@ -97,7 +97,40 @@ def test_holder_description_skips_inline_bootstrap_code(tmp_path):
     try:
         assert proc.stdout.readline().strip() == "ready"
         desc = describe_holder_pid(proc.pid)
-        assert desc.endswith("-c … gateway run)"), desc
+        assert desc.endswith("-c <inline code> gateway run)"), desc
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=30)
+
+
+def test_other_holders_without_a_gateway_get_coherent_advice():
+    text = _deferral_row(
+        {"futile": False, "holder_pids": [200], "attempts": 4}, [WATCHER]
+    )
+    assert (
+        "stop PID 200 (python3 hermes_hub.py watch); the next Hermes process to open state.db"
+        in text
+    )
+    assert "gateway's its" not in text and "stop ONLY" not in text
+
+
+def test_two_gateways_are_told_they_block_each_other():
+    other_gateway = (101, "PID 101 (hermes gateway run)", True)
+    text = _deferral_row(
+        {"futile": True, "holder_pids": [101], "holders_attempts": 12},
+        [GATEWAY, other_gateway],
+    )
+    assert "several gateways hold it" in text and "keep one and stop the rest" in text
+    assert "its next retry rebuilds" not in text
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_holder_description_keeps_a_non_python_dash_c():
+    from hermes_state_holders import describe_holder_pid
+
+    proc = subprocess.Popen(["sh", "-c", "read x", "sh"], stdin=subprocess.PIPE)
+    try:
+        assert "read x" in describe_holder_pid(proc.pid)
     finally:
         proc.stdin.close()
         proc.wait(timeout=30)

@@ -51,19 +51,30 @@ def host_gateway_note() -> str:
     return f" ({topology.describe()})" if topology is not None else ""
 
 
+def _fts_holder_advice(others: list, gateways: list) -> str:
+    """What to stop so the blocked rebuild can run, from the live holders split into gateways and the rest."""
+    if len(gateways) > 1:
+        return (f"several gateways hold it ({', '.join(gateways)}) and each blocks the other: keep one and stop the "
+                f"rest{' and ' + ', '.join(others) if others else ''}")
+    if others and gateways:
+        return (f"stop ONLY {', '.join(others)}; keep the host gateway {gateways[0]} running: its own retry rebuilds "
+                "within a minute of them leaving")
+    if others:
+        return (f"stop {', '.join(others)}; the next Hermes process to open state.db (or the host gateway's next "
+                "retry) then rebuilds")
+    if gateways:
+        return f"only the host gateway {gateways[0]} holds it now; its next retry rebuilds"
+    return "nothing holds it now; the next Hermes process to open state.db rebuilds"
+
+
 def _fts_deferral_row(deferral: dict, live_holders) -> tuple:
     """The warn row for a stored FTS-rebuild deferral. The record's ``holder_pids`` is its last writer's view, which
     leaves that writer out (often the gateway), so the advice names the processes holding the DB now
     (*live_holders*: ``(pid, description, is_gateway)``), never telling the user to stop the gateway, whose own
     retry does the rebuild. Without a live view it falls back to the record."""
     if live_holders is not None:
-        others = ", ".join(desc for _pid, desc, is_gateway in live_holders if not is_gateway)
-        gateways = ", ".join(desc for _pid, desc, is_gateway in live_holders if is_gateway)
         held_by = ", ".join(desc for _pid, desc, _is_gateway in live_holders) or "no other process"
-        keep = f"keep the host gateway {gateways} running: " if gateways else "the host gateway's "
-        stop = (f"stop ONLY {others}; {keep}its own retry rebuilds within a minute of them leaving" if others else
-                f"only the host gateway {gateways} holds it now; its next retry rebuilds" if gateways else
-                "nothing holds it now; the host gateway's next retry rebuilds")
+        stop = _fts_holder_advice([d for _p, d, gw in live_holders if not gw], [d for _p, d, gw in live_holders if gw])
     else:
         held_by = f"PID(s) {deferral.get('holder_pids') or 'unknown'}"
         stop = ("stop ONLY the holder(s) other than the host gateway; the gateway's own retry rebuilds within a "
