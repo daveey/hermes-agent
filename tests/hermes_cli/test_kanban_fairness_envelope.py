@@ -77,16 +77,42 @@ def test_make_record_rejects_phase_b_kinds():
             _rec(kind=kind, payload={})
 
 
-@pytest.mark.parametrize("kind", ["membership", "loss"])
-def test_other_kinds_take_bounded_json_mapping(kind):
-    raw = _rec(kind=kind, payload={"a": [1, {"b": None}], "c": "x"})
-    assert decode_record(raw)["payload"] == {"a": [1, {"b": None}], "c": "x"}
+def _loss(**over):
+    payload = {"reason": "dropped", "count": 1, "first_seq": None, "last_seq": None,
+               "start_wall_ns": None, "end_wall_ns": None}
+    payload.update(over)
+    return payload
+
+
+def test_membership_records_are_unsupported():
+    with pytest.raises(BadRecord, match="unsupported"):
+        _rec(kind="membership", payload={})
+    with pytest.raises(BadRecord, match="unsupported"):
+        decode_record({**_rec(), "kind": "membership", "payload": {"a": [1, {"b": None}], "c": "x"}})
+
+
+def test_loss_payload_is_exact():
+    raw = _rec(kind="loss", payload=_loss())
+    assert decode_record(raw)["payload"] == _loss()
     with pytest.raises(BadRecord):
-        decode_record({**raw, "payload": {"a": object()}})
+        decode_record({**raw, "payload": {**_loss(), "extra": 1}})
     with pytest.raises(BadRecord):
-        decode_record({**raw, "payload": {"a": float("nan")}})
+        decode_record({**raw, "payload": {**_loss(), "membership": []}})
+
+
+@pytest.mark.parametrize("kind,payload", [
+    ("membership", {}),
+    ("loss", {"reason": "dropped", "count": 1, "first_seq": None, "last_seq": None,
+              "start_wall_ns": None, "end_wall_ns": None}),
+])
+def test_membership_and_loss_still_reject_non_json_and_oversize(kind, payload):
+    raw = {**_rec(), "kind": kind, "payload": payload}
     with pytest.raises(BadRecord):
-        decode_record({**raw, "payload": {"a": "x" * (300 * 1024)}})
+        decode_record({**raw, "payload": {**payload, "a": object()}})
+    with pytest.raises(BadRecord):
+        decode_record({**raw, "payload": {**payload, "a": float("nan")}})
+    with pytest.raises(BadRecord):
+        decode_record({**raw, "payload": {**payload, "a": "x" * (300 * 1024)}})
     with pytest.raises(BadRecord):
         decode_record({**raw, "payload": {1: 2}})
 

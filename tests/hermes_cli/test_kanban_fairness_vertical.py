@@ -91,8 +91,13 @@ def test_dispatch_to_report(kanban_home, all_assignees_spawnable, tmp_path, caps
     capsys.readouterr()
 
     capture = store.load(out)
-    assert {g["code"] for g in capture["gaps"]} == {
-        "source_identity_unknown", "clock_unknown", "source_uid_unknown"}
+    expected_gaps = {"source_identity_unknown", "clock_unknown", "source_uid_unknown"}
+    with kbc.connect_closing() as again:
+        state = journal.status(again)
+        assert state is not None
+        if state.get("trigger_integrity") is not True:
+            expected_gaps.add("trigger_loss")
+    assert {g["code"] for g in capture["gaps"]} == expected_gaps
     eps = metrics.episodes(capture["records"], armed_s=capture["manifest"]["window"]["armed_ms"] / 1000,
                            err=0)
     by_task = {}

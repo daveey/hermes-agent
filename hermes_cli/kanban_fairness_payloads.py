@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import math
 import re
 from typing import Mapping, NoReturn
@@ -36,11 +37,23 @@ def _string(value, name, *, optional=False, bounded=False):
         _bad(f"{name} exceeds the string limit")
 
 
-def _integer(value, name, *, optional=False, nonnegative=False):
+def _integer(value, name, *, optional=False, nonnegative=False, positive=False):
     if value is None and optional:
         return
-    if type(value) is not int or (nonnegative and value < 0):
-        _bad(f"{name} must be {'a nonnegative' if nonnegative else 'an'} integer")
+    if type(value) is not int or (positive and value < 1) or (nonnegative and value < 0):
+        kind = "a positive" if positive else "a nonnegative" if nonnegative else "an"
+        _bad(f"{name} must be {kind} integer")
+
+
+def _pair(lo, hi, lo_name, hi_name, *, positive=False):
+    if (lo is None) is not (hi is None):
+        _bad(f"{lo_name} and {hi_name} must both be null or both known")
+    if lo is None:
+        return
+    _integer(lo, lo_name, positive=positive, nonnegative=not positive)
+    _integer(hi, hi_name, positive=positive, nonnegative=not positive)
+    if hi < lo:
+        _bad(f"{lo_name} and {hi_name} must be ordered")
 
 
 def creation_payload(payload):
@@ -48,8 +61,11 @@ def creation_payload(payload):
     _string(payload["task_uid"], "task_uid")
     for name in ("creator_task_uid", "creator_episode_uid"):
         _string(payload[name], name, optional=True)
-    if payload["priority_intent"] not in ("explicit", "omitted", "unknown"):
+    intent = payload["priority_intent"]
+    if intent not in ("explicit", "omitted", "unknown"):
         _bad("priority_intent must be explicit, omitted or unknown")
+    if intent == "omitted" and payload["priority_argument"] is not None:
+        _bad("omitted priority_argument must be null")
     if isinstance(payload["priority_argument"], (Mapping, list, tuple)):
         _bad("priority_argument must be a JSON scalar or null")
     for name in ("effective_parent_priority", "inheritance_cap"):
@@ -68,7 +84,10 @@ def creation_payload(payload):
     if (not isinstance(unknown, list) or any(not isinstance(name, str) for name in unknown)
             or len(unknown) != len(set(unknown)) or not set(unknown) <= CREATION_KEYS):
         _bad("unknown_fields must be a unique list of known creation field names")
-    if any(value is None and name != "priority_argument" and name not in unknown
+    if intent == "unknown" and "priority_intent" not in unknown:
+        _bad("unknown priority_intent must appear in unknown_fields")
+    known_null = intent in ("explicit", "omitted")
+    if any(value is None and not (name == "priority_argument" and known_null) and name not in unknown
            for name, value in payload.items()):
         _bad("null creation provenance must appear in unknown_fields")
     return dict(payload)
@@ -94,6 +113,63 @@ def _finite(value, name):
         _bad(f"{name} must be a finite number or null")
 
 
+SOURCE_KEYS = frozenset(("version", "board", "source_revision", "observed_at", "valid_until", "owners"))
+SOURCE_OWNER_KEYS = frozenset(("task_id", "source", "ref", "head", "expires_at"))
+SOURCE_OWNER_SOURCES = ("core-lane", "state-turn")
+MAX_SOURCE_BYTES = 128 * 1024
+MAX_SOURCE_OWNERS = 4096
+
+
+def _source_pairs(pairs):
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def _source_constant(_name):
+    raise ValueError("nonfinite number")
+
+
+def _source_identity(value):
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= MAX_METADATA_STRING
+
+
+def _source_time(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
+
+
+def _validate_source_document(raw):
+    """Schema-only allowlist of the kanban_turn_urgency source document; nothing else is storable."""
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_source_pairs,
+                           parse_constant=_source_constant)
+    except (ValueError, UnicodeError, RecursionError):
+        _bad("raw_b64 must be a strict owner source JSON document")
+    if not isinstance(value, dict) or set(value) != SOURCE_KEYS:
+        _bad("raw_b64 source document keys must be exactly the owner source keys")
+    if type(value["version"]) is not int or value["version"] != 1:
+        _bad("raw_b64 source document version must be 1")
+    if not _source_identity(value["board"]) or not _source_identity(value["source_revision"]):
+        _bad("raw_b64 source document board/source_revision must be bounded nonempty strings")
+    if not _source_time(value["observed_at"]) or not _source_time(value["valid_until"]):
+        _bad("raw_b64 source document times must be finite numbers")
+    owners = value["owners"]
+    if not isinstance(owners, list) or len(owners) > MAX_SOURCE_OWNERS:
+        _bad("raw_b64 source document owners must be a bounded list")
+    for owner in owners:
+        if not isinstance(owner, dict) or set(owner) != SOURCE_OWNER_KEYS:
+            _bad("raw_b64 source owner keys must be exactly the owner source keys")
+        if not all(_source_identity(owner[key]) for key in ("task_id", "ref", "head")):
+            _bad("raw_b64 source owner identities must be bounded nonempty strings")
+        if not isinstance(owner["source"], str) or owner["source"] not in SOURCE_OWNER_SOURCES:
+            _bad("raw_b64 source owner source is not allowed")
+        if not _source_time(owner["expires_at"]):
+            _bad("raw_b64 source owner expires_at must be finite")
+
+
 def _raw_receipt(payload):
     encoded, digest, size = (payload[name] for name in ("raw_b64", "raw_sha256", "raw_size"))
     _integer(size, "raw_size", optional=True, nonnegative=True)
@@ -105,6 +181,8 @@ def _raw_receipt(payload):
         return
     if not isinstance(encoded, str):
         _bad("raw_b64 must be base64 or null")
+    if len(encoded) > 4 * ((MAX_SOURCE_BYTES + 2) // 3):
+        _bad("raw_b64 exceeds the source document size bound")
     try:
         raw = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error):
@@ -113,6 +191,9 @@ def _raw_receipt(payload):
         _bad("raw_sha256 does not match raw_b64")
     if len(raw) != size:
         _bad("raw_size does not match raw_b64")
+    if len(raw) > MAX_SOURCE_BYTES:
+        _bad("raw_b64 exceeds the source document size bound")
+    _validate_source_document(raw)
 
 
 def urgency_payload(payload):
@@ -145,4 +226,19 @@ def urgency_payload(payload):
         _bad("unavailable urgency receipt cannot be raw_complete")
     if payload["outcome"] == "invalid" and not payload["redacted"]:
         _bad("invalid urgency bytes must be redacted")
+    return dict(payload)
+
+
+LOSS_KEYS = frozenset(("reason", "count", "first_seq", "last_seq", "start_wall_ns", "end_wall_ns"))
+LOSS_REASONS = ("dropped", "oversize", "writer_error", "unsupported", "redaction", "truncation",
+                "clock_gap", "membership_gap")
+
+
+def loss_payload(payload):
+    _keys(payload, LOSS_KEYS, "loss")
+    if payload["reason"] not in LOSS_REASONS:
+        _bad("unknown loss reason")
+    _integer(payload["count"], "count", positive=True)
+    _pair(payload["first_seq"], payload["last_seq"], "first_seq", "last_seq", positive=True)
+    _pair(payload["start_wall_ns"], payload["end_wall_ns"], "start_wall_ns", "end_wall_ns")
     return dict(payload)

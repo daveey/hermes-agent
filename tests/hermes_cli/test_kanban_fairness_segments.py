@@ -10,7 +10,9 @@ from hermes_cli.kanban_fairness_schema import BadRecord, make_record
 def record(seq=1, epoch="e1", **kw):
     return make_record(capture_id="capture", board_uid="board", source_gateway="gw",
                        source_epoch=epoch, seq=seq, kind="loss", wall_ns=100,
-                       mono_ns=10, clock_error_ns=0, payload={"count": 0}, **kw)
+                       mono_ns=10, clock_error_ns=0,
+                       payload={"reason": "dropped", "count": 1, "first_seq": None, "last_seq": None,
+                                "start_wall_ns": None, "end_wall_ns": None}, **kw)
 
 
 def seal(out, *sources):

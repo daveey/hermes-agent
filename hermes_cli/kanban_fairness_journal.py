@@ -42,13 +42,14 @@ def _fields_sql(columns: list[str], ref: str) -> str:
 
 def _append(kind: str, task_id: str, op: Optional[str], fields: str) -> str:
     """Count the change, then store it only while the session is open and under both bounds."""
-    full = "(stored >= max_records OR bytes >= max_bytes)"
+    # The bound is on the UTF-8 bytes the row would add (not SQLite's character length), checked before admission.
+    full = f"(stored >= max_records OR bytes + length(CAST({fields} AS BLOB)) > max_bytes)"
     op_sql = "NULL" if op is None else f"'{op}'"
     return (
         f"UPDATE {SESSION} SET admit = NOT {full}, dropped = dropped + {full}, "
         f"first_drop_ms = CASE WHEN {full} THEN COALESCE(first_drop_ms, {_NOW_MS}) ELSE first_drop_ms END, "
         f"last_drop_ms = CASE WHEN {full} THEN {_NOW_MS} ELSE last_drop_ms END, "
-        f"bytes = bytes + CASE WHEN {full} THEN 0 ELSE length({fields}) END, stored = stored + NOT {full} "
+        f"bytes = bytes + CASE WHEN {full} THEN 0 ELSE length(CAST({fields} AS BLOB)) END, stored = stored + NOT {full} "
         "WHERE id = 1 AND sealed_ms IS NULL; "
         f"INSERT INTO {JOURNAL} (kind, wall_ms, task_id, op, fields) "
         f"SELECT '{kind}', {_NOW_MS}, {task_id}, {op_sql}, {fields} FROM {SESSION} "
@@ -132,15 +133,21 @@ def arm(conn: sqlite3.Connection, capture_id: str, *, max_records: int = MAX_REC
         present = [r[1] for r in conn.execute("PRAGMA table_info(tasks)")]
         fields = _fields_sql([c for c in TASK_FIELDS if c in present], "s")
         # The opening snapshot is not optional evidence: an armed session that could not hold it is a gap.
+        # Rows over the byte bound on their own are gaps; the rest are admitted in id order while the running
+        # UTF-8 byte total and the record count stay within bounds.
         conn.execute(
-            f"INSERT INTO {JOURNAL} (kind, wall_ms, task_id, op, fields) SELECT 'opening', {_NOW_MS}, s.id, NULL, "
-            f"{fields} FROM tasks AS s WHERE s.status NOT IN ('done', 'archived') ORDER BY s.id LIMIT ?",
-            (max_records,))
+            f"INSERT INTO {JOURNAL} (kind, wall_ms, task_id, op, fields) SELECT 'opening', {_NOW_MS}, id, NULL, f "
+            f"FROM (SELECT id, f, SUM(n) OVER (ORDER BY id) AS run, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM ("
+            f"SELECT s.id AS id, {fields} AS f, length(CAST({fields} AS BLOB)) AS n FROM tasks AS s "
+            "WHERE s.status NOT IN ('done', 'archived')) WHERE n <= ?) WHERE run <= ? AND rn <= ? ORDER BY id",
+            (max_bytes, max_bytes, max_records))
         conn.execute(
             f"UPDATE {SESSION} SET stored = (SELECT COUNT(*) FROM {JOURNAL}), "
-            f"bytes = (SELECT COALESCE(SUM(length(fields)), 0) FROM {JOURNAL}), "
+            f"bytes = (SELECT COALESCE(SUM(length(CAST(fields AS BLOB))), 0) FROM {JOURNAL}), "
             "dropped = MAX(0, (SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done', 'archived')) - "
             f"(SELECT COUNT(*) FROM {JOURNAL})) WHERE id = 1")
+        conn.execute(f"UPDATE {SESSION} SET first_drop_ms = armed_ms, last_drop_ms = armed_ms "
+                     "WHERE id = 1 AND dropped > 0")
         for ddl in _triggers(conn).values():
             conn.execute(ddl)
     return _open_status(conn)

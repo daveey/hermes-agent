@@ -26,10 +26,87 @@ def write(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
+MAX_METADATA_BYTES = 8 * 1024 * 1024
+
+
+def read_bounded(path, limit):
+    """Bound the allocation even if the file grows after stat."""
+    with path.open("rb") as stream:
+        if os.fstat(stream.fileno()).st_size > limit:
+            raise BadRecord("file exceeds storage bound")
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise BadRecord("file exceeds storage bound")
+    return data
+
+
+def dedupe_gaps(gaps):
+    return list({encoded(g): g for g in gaps}.values())
+
+
+def checked_gaps(gaps):
+    if not isinstance(gaps, list) or any(
+            not isinstance(g, dict) or not isinstance(g.get("code"), str) or not g["code"]
+            or ("detail" in g and not isinstance(g["detail"], str)) for g in gaps):
+        raise BadRecord("invalid coverage gaps")
+    return dedupe_gaps(gaps)
+
+
+def validate_state(state, *, check_totals=True):
+    required = {"version", "capture_id", "board_uid", "segments", "sources", "gaps", "bytes"}
+    if not isinstance(state, dict) or not required <= state.keys():
+        raise BadRecord("invalid capture metadata")
+    if type(state["version"]) is not int or state["version"] != VERSION:
+        raise BadRecord("invalid capture version")
+    for key in ("capture_id", "board_uid"):
+        if state[key] is not None and (not isinstance(state[key], str) or not state[key]):
+            raise BadRecord("invalid capture identity")
+    if (state["capture_id"] is None) != (state["board_uid"] is None):
+        raise BadRecord("partial capture identity")
+    if type(state["bytes"]) is not int or not 0 <= state["bytes"] <= MAX_CAPTURE_BYTES:
+        raise BadRecord("invalid capture byte count")
+    if not isinstance(state["segments"], list):
+        raise BadRecord("invalid segment list")
+    total = 0
+    for item in state["segments"]:
+        if (not isinstance(item, dict) or set(item) != {"name", "bytes", "records", "sha256"}
+                or not isinstance(item["name"], str)
+                or not re.fullmatch(r"segment-\d{6}\.jsonl", item["name"])
+                or type(item["bytes"]) is not int or not 0 < item["bytes"] <= SEGMENT_BYTES
+                or type(item["records"]) is not int or not 0 < item["records"] <= item["bytes"]
+                or not isinstance(item["sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])):
+            raise BadRecord("invalid segment receipt")
+        total += item["bytes"]
+    cuts = source_map(state["sources"])
+    if total > MAX_CAPTURE_BYTES or (check_totals and total != state["bytes"]) or bool(cuts) != bool(total):
+        raise BadRecord("inconsistent capture totals or empty source cuts")
+    if total and state["capture_id"] is None:
+        raise BadRecord("missing capture identity")
+    checked_gaps(state["gaps"])
+    if "journal_seq" in state and (type(state["journal_seq"]) is not int or state["journal_seq"] < 0):
+        raise BadRecord("invalid journal cursor")
+    if "journal_seq" in state:
+        for name in ("source_gateway", "database_uid"):
+            if not isinstance(state.get(name), str) or not state[name]:
+                raise BadRecord("invalid database export identity")
+        db = state.get("db")
+        if (not isinstance(db, dict) or set(db) != {"path", "dev", "ino"}
+                or not isinstance(db["path"], str) or not db["path"]
+                or any(type(db[k]) is not int or db[k] < 0 for k in ("dev", "ino"))):
+            raise BadRecord("invalid database file identity")
+        if type(state.get("armed_ms")) is not int or state["armed_ms"] < 0:
+            raise BadRecord("invalid database export opening cut")
+    return state
+
+
 def receipts(out: Path) -> dict:
     path = out / RECEIPTS
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        try:
+            return validate_state(json.loads(read_bounded(path, MAX_METADATA_BYTES).decode("utf-8-sig")))
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise BadRecord("invalid receipts") from exc
     return {"version": VERSION, "capture_id": None, "board_uid": None, "segments": [],
             "sources": [], "gaps": [], "bytes": 0}
 
@@ -40,14 +117,16 @@ def source_key(record):
 
 def source_map(sources):
     result = {}
+    if not isinstance(sources, list):
+        raise BadRecord("source cuts must be a list")
     for item in sources:
-        if set(item) != {"source_gateway", "source_epoch", "last_seq"}:
+        if not isinstance(item, dict) or set(item) != {"source_gateway", "source_epoch", "last_seq"}:
             raise BadRecord("invalid source closing cut")
         key = source_key(item)
         if any(not isinstance(x, str) or not x for x in key) or key in result:
             raise BadRecord("invalid or duplicate source identity")
         seq = item["last_seq"]
-        if type(seq) is not int or seq < 0:
+        if type(seq) is not int or seq <= 0:
             raise BadRecord("invalid source closing sequence")
         result[key] = seq
     return result
@@ -57,7 +136,7 @@ def source_rows(cuts):
     return [{"source_gateway": g, "source_epoch": e, "last_seq": n} for (g, e), n in sorted(cuts.items())]
 
 
-def append_records(out: Path, records, *, max_bytes: int = MAX_CAPTURE_BYTES) -> dict:
+def append_records(out: Path, records, *, max_bytes: int = MAX_CAPTURE_BYTES, _metadata=None) -> dict:
     """Append one bounded batch. Caller counts rejection as loss; one consumer owns the directory."""
     if type(max_bytes) is not int or not 0 < max_bytes <= MAX_CAPTURE_BYTES:
         raise ValueError("max_bytes outside capture bound")
@@ -65,6 +144,15 @@ def append_records(out: Path, records, *, max_bytes: int = MAX_CAPTURE_BYTES) ->
         raise ValueError("capture is already sealed")
     state = receipts(out)
     cuts = source_map(state["sources"])
+    if _metadata is not None:
+        if not isinstance(_metadata, dict) or set(_metadata) != {"journal_seq"}:
+            raise BadRecord("internal metadata may only advance journal_seq")
+        cursor = _metadata["journal_seq"]
+        if type(cursor) is not int or cursor < state.get("journal_seq", 0):
+            raise BadRecord("invalid journal cursor advance")
+    for index, item in enumerate(state["segments"], 1):
+        if item["name"] != f"segment-{index:06d}.jsonl":
+            raise BadRecord("invalid segment order")
     batches, lines, size, total = [], [], 0, state["bytes"]
     for raw in records:
         rec = decode_record(raw)
@@ -91,13 +179,23 @@ def append_records(out: Path, records, *, max_bytes: int = MAX_CAPTURE_BYTES) ->
     if any((out / name).exists() for name in names):
         raise ValueError("unacknowledged segment exists; capture incomplete")
     out.mkdir(parents=True, exist_ok=True)
+    data_batches = []
     for name, batch in zip(names, batches):
         data = b"".join(batch)
-        write(out / name, data)
+        data_batches.append(data)
         state["segments"].append({"name": name, "records": len(batch), "bytes": len(data),
                                   "sha256": hashlib.sha256(data).hexdigest()})
     state.update(sources=source_rows(cuts), bytes=total)
-    write(out / RECEIPTS, encoded(state))
+    if _metadata is not None:
+        state.update(_metadata)
+    state["gaps"] = checked_gaps(state["gaps"])
+    validate_state(state)
+    receipt_data = encoded(state)
+    if len(receipt_data) > MAX_METADATA_BYTES:
+        raise BadRecord("receipt metadata bound exceeded")
+    for name, data in zip(names, data_batches):
+        write(out / name, data)
+    write(out / RECEIPTS, receipt_data)
     return state
 
 
@@ -113,7 +211,7 @@ def seal_records(out: Path, *, expected_sources: list[dict], gaps=None) -> dict:
         raise BadRecord("source closing cuts do not cover exactly the recorded epochs")
     if (out / MANIFEST).exists():
         raise ValueError("capture already sealed")
-    manifest = {**state, "sealed": True, "gaps": state["gaps"] + (gaps or [])}
+    manifest = {**state, "sealed": True, "gaps": checked_gaps(state["gaps"] + checked_gaps([] if gaps is None else gaps))}
     manifest["final_seal"] = final_seal(manifest)
     write(out / MANIFEST, encoded(manifest))
     return manifest
@@ -125,7 +223,7 @@ def _read_segment(out, seg, gaps):
         gaps.append({"code": "bad_segment_name"})
         return []
     try:
-        data = (out / name).read_bytes()
+        data = read_bounded(out / name, SEGMENT_BYTES)
         if (len(data) > SEGMENT_BYTES or len(data) != seg.get("bytes")
                 or hashlib.sha256(data).hexdigest() != seg.get("sha256")):
             raise ValueError("segment size/hash mismatch")
@@ -142,14 +240,20 @@ def load_records(out: Path) -> dict:
     gaps = []
     try:
         path = out / MANIFEST
-        manifest = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else receipts(out)
-    except (OSError, ValueError, TypeError):
+        manifest = validate_state(json.loads(read_bounded(path, MAX_METADATA_BYTES).decode("utf-8-sig")), check_totals=False) if path.exists() else receipts(out)
+    except (OSError, ValueError, TypeError, RecursionError):
         return {"manifest": {}, "records": [], "gaps": [{"code": "bad_manifest"}]}
     if manifest.get("sealed") is not True or not manifest.get("final_seal"):
         gaps.append({"code": "unsealed"})
-    elif manifest["final_seal"] != final_seal(manifest):
-        gaps.append({"code": "seal_mismatch"})
+    else:
+        try:
+            if manifest["final_seal"] != final_seal(manifest):
+                gaps.append({"code": "seal_mismatch"})
+        except (ValueError, TypeError, RecursionError):
+            return {"manifest": {}, "records": [], "gaps": [{"code": "bad_manifest"}]}
     gaps.extend(manifest.get("gaps") or [])
+    if sum(s["bytes"] for s in manifest["segments"]) != manifest["bytes"]:
+        gaps.append({"code": "capture_bytes"})
     records, cuts, names = [], {}, []
     for index, seg in enumerate(manifest.get("segments") or [], 1):
         names.append(seg.get("name"))
@@ -167,7 +271,7 @@ def load_records(out: Path) -> dict:
             if rec["seq"] != cuts.get(key, 0) + 1:
                 gaps.append({"code": "sequence_gap"})
             cuts[key] = rec["seq"]
-            if rec["clock_error_ns"] is None:
+            if rec["clock_error_ns"] is None or rec["mono_ns"] is None:
                 gaps.append({"code": "clock_unknown"})
             payload = rec["payload"]
             if rec["kind"] == "loss" or payload.get("unknown_fields") or payload.get("redacted"):
@@ -180,4 +284,6 @@ def load_records(out: Path) -> dict:
             gaps.append({"code": "source_tail"})
     except (ValueError, TypeError, KeyError):
         gaps.append({"code": "bad_source_cuts"})
-    return {"manifest": manifest, "records": records, "gaps": gaps}
+    if not cuts:
+        gaps.append({"code": "source_tail"})
+    return {"manifest": manifest, "records": records, "gaps": dedupe_gaps(gaps)}

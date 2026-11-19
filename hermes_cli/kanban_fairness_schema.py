@@ -186,6 +186,12 @@ def decode_record(raw: Any) -> dict:
         from hermes_cli.kanban_fairness_payloads import urgency_payload
 
         payload = urgency_payload(payload)
+    elif kind == "membership":
+        raise BadRecord("membership records are unsupported")
+    elif kind == "loss":
+        from hermes_cli.kanban_fairness_payloads import loss_payload
+
+        payload = loss_payload(payload)
     out["payload"] = payload
     return out
 

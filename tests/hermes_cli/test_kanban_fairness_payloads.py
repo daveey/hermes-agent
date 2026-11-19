@@ -1,6 +1,7 @@
 """Strict, privacy-bounded Phase A payload contracts."""
 import base64
 import hashlib
+import json
 
 import pytest
 
@@ -12,9 +13,9 @@ def creation():
                 priority_intent="unknown", priority_argument=None, effective_parent_priority=None,
                 parent_snapshot_cut=None, inheritance_cap=None, stored_child_priority=2,
                 producer_source_hash=None,
-                unknown_fields=["creator_task_uid", "creator_episode_uid", "priority_argument",
-                                "effective_parent_priority", "parent_snapshot_cut", "inheritance_cap",
-                                "producer_source_hash"])
+                unknown_fields=["creator_task_uid", "creator_episode_uid", "priority_intent",
+                                "priority_argument", "effective_parent_priority", "parent_snapshot_cut",
+                                "inheritance_cap", "producer_source_hash"])
 
 
 def record(kind, payload, **kwargs):
@@ -51,13 +52,76 @@ def test_creation_requires_all_exact_keys():
             record("creation", payload)
 
 
-def test_creation_accepts_known_cut_and_scalar_priority():
-    payload = creation()
-    payload.update(creator_task_uid="parent", creator_episode_uid="run", priority_intent="explicit",
-                   priority_argument="3", effective_parent_priority=0, inheritance_cap=2,
+def known_creation(**over):
+    payload = dict(task_uid="child", creator_task_uid="parent", creator_episode_uid="run",
+                   priority_intent="omitted", priority_argument=None, effective_parent_priority=0,
                    parent_snapshot_cut=dict(source_gateway="gw", source_epoch="ep", seq=1),
-                   producer_source_hash="revision", unknown_fields=[])
+                   inheritance_cap=2, stored_child_priority=2, producer_source_hash="revision",
+                   unknown_fields=[])
+    payload.update(over)
+    return payload
+
+
+def test_creation_accepts_known_cut_and_scalar_priority():
+    payload = known_creation(priority_intent="explicit", priority_argument="3")
     assert record("creation", payload)["payload"] == payload
+
+
+def test_creation_known_omitted_and_explicit_null():
+    omitted = known_creation()
+    assert record("creation", omitted)["payload"] == omitted
+    explicit_null = known_creation(priority_intent="explicit", priority_argument=None)
+    assert record("creation", explicit_null)["payload"] == explicit_null
+
+
+def test_creation_unknown_intent_requires_marker():
+    missing = known_creation(priority_intent="unknown", priority_argument=3)
+    with pytest.raises(schema.BadRecord):
+        record("creation", missing)
+    marked = known_creation(priority_intent="unknown", priority_argument=3,
+                            unknown_fields=["priority_intent"])
+    assert record("creation", marked)["payload"] == marked
+
+
+def test_creation_rejects_omitted_scalar():
+    with pytest.raises(schema.BadRecord):
+        record("creation", known_creation(priority_argument=3))
+
+
+def loss(**over):
+    payload = dict(reason="dropped", count=1, first_seq=None, last_seq=None,
+                   start_wall_ns=None, end_wall_ns=None)
+    payload.update(over)
+    return payload
+
+
+def test_loss_roundtrip_and_known_ranges():
+    assert record("loss", loss())["payload"] == loss()
+    payload = loss(first_seq=2, last_seq=4, start_wall_ns=0, end_wall_ns=5, reason="oversize", count=3)
+    assert record("loss", payload)["payload"] == payload
+
+
+@pytest.mark.parametrize("change", [
+    {"extra": 1}, {"reason": "other"}, {"count": 0}, {"count": True}, {"count": -1},
+    {"first_seq": 1}, {"last_seq": 1}, {"first_seq": 0, "last_seq": 1},
+    {"first_seq": 3, "last_seq": 2}, {"first_seq": True, "last_seq": 1},
+    {"start_wall_ns": 1}, {"end_wall_ns": 1}, {"start_wall_ns": -1, "end_wall_ns": 0},
+    {"start_wall_ns": 5, "end_wall_ns": 4}, {"reason": None}, {"membership": []},
+])
+def test_loss_rejects_malformed_and_banned_keys(change):
+    payload = loss()
+    payload.update(change)
+    with pytest.raises(schema.BadRecord):
+        record("loss", payload)
+
+
+def test_membership_records_are_unsupported():
+    with pytest.raises(schema.BadRecord, match="unsupported"):
+        record("membership", {})
+    with pytest.raises(schema.BadRecord, match="unsupported"):
+        record("membership", {"roster": [], "extra": 1})
+    with pytest.raises(schema.BadRecord, match="unsupported"):
+        record("membership", loss())
 
 
 def test_make_record_stage_index_is_explicit_but_phase_a_rejects_nonnull():
@@ -66,13 +130,23 @@ def test_make_record_stage_index_is_explicit_but_phase_a_rejects_nonnull():
         record("creation", creation(), stage_index=0)
 
 
-def urgency():
-    raw = b'{"version":1,"board":"board","owners":[]}'
-    return dict(receipt_type="urgency_read", board="board", read_at_s=10, outcome="valid",
-                raw_b64=base64.b64encode(raw).decode("ascii"),
-                raw_sha256=hashlib.sha256(raw).hexdigest(), raw_complete=True,
-                observed_at=9, valid_until=20, source_revision="rev", owner_ids=[], reason=None,
-                raw_size=len(raw), redacted=False)
+def source_doc(**changes):
+    doc = dict(version=1, board="board", source_revision="rev", observed_at=9, valid_until=20,
+               owners=[dict(task_id="t1", source="core-lane", ref="r", head="h", expires_at=30)])
+    doc.update(changes)
+    return doc
+
+
+def urgency(raw=None, **changes):
+    if raw is None:
+        raw = json.dumps(source_doc()).encode()
+    payload = dict(receipt_type="urgency_read", board="board", read_at_s=10, outcome="valid",
+                   raw_b64=base64.b64encode(raw).decode("ascii"),
+                   raw_sha256=hashlib.sha256(raw).hexdigest(), raw_complete=True,
+                   observed_at=9, valid_until=20, source_revision="rev", owner_ids=["t1"], reason=None,
+                   raw_size=len(raw), redacted=False)
+    payload.update(changes)
+    return payload
 
 
 def test_owner_generation_valid_roundtrip():
@@ -156,3 +230,55 @@ def test_lifecycle_field_values_cannot_hide_nested_content(value):
     payload["fields"]["assignee"] = value
     with pytest.raises(schema.BadRecord):
         record("row_change", payload)
+
+
+def _owner(**changes):
+    owner = dict(task_id="t1", source="core-lane", ref="r", head="h", expires_at=30)
+    owner.update(changes)
+    return owner
+
+
+def _j(**changes):
+    return json.dumps(source_doc(**changes)).encode()
+
+
+BAD_RAW = [
+    b"secret-token-abc123", b"[]", b"", b"\xff\xfe", b"null",
+    json.dumps(dict(source_doc(), extra=1)).encode(),
+    json.dumps({k: v for k, v in source_doc().items() if k != "board"}).encode(),
+    _j(version=2), _j(version=True), _j(version=1.0),
+    _j(board=""), _j(board=" "), _j(board=1), _j(board="b" * 1025), _j(source_revision=None),
+    _j(observed_at="9"), _j(valid_until=True), _j(owners={}), _j(owners=["x"]),
+    _j(owners=[_owner(extra="secret")]),
+    _j(owners=[{k: v for k, v in _owner().items() if k != "ref"}]),
+    _j(owners=[_owner(source="other")]), _j(owners=[_owner(source=["core-lane"])]),
+    _j(owners=[_owner(task_id="")]), _j(owners=[_owner(head=3)]), _j(owners=[_owner(expires_at=None)]),
+    _j(owners=[_owner()] * 4097),
+    b'{"version":1,"version":1,"board":"b","source_revision":"r","observed_at":1,"valid_until":2,"owners":[]}',
+    b'{"version":1,"board":"b","source_revision":"r","observed_at":NaN,"valid_until":2,"owners":[]}',
+    b'{"version":1,"board":"b","source_revision":"r","observed_at":1,"valid_until":1e999,"owners":[]}',
+    b'{"version":1,"board":"b","source_revision":"r","observed_at":1,"valid_until":2,"owners":[],"x":Infinity}',
+    b'{"version":1,"board":"b","source_revision":"r","observed_at":1,"valid_until":2,"owners":['
+    b'{"task_id":"a","task_id":"b","source":"core-lane","ref":"r","head":"h","expires_at":3}]}',
+    b" " * (128 * 1024 + 1),
+]
+
+
+@pytest.mark.parametrize("raw", BAD_RAW, ids=[f"bad{i}" for i in range(len(BAD_RAW))])
+def test_owner_generation_rejects_non_source_raw_bytes(raw):
+    with pytest.raises(schema.BadRecord):
+        record("owner_generation", urgency(raw))
+
+
+def test_owner_generation_accepts_empty_and_many_owners():
+    for owners in ([], [_owner(task_id=f"t{i}") for i in range(1000)]):
+        raw = json.dumps(source_doc(owners=owners), separators=(",", ":")).encode()
+        payload = urgency(raw, owner_ids=sorted(o["task_id"] for o in owners))
+        assert record("owner_generation", payload)["payload"] == payload
+
+
+def test_owner_generation_redacted_receipt_keeps_digest_without_bytes():
+    raw = b"secret-token-abc123"
+    payload = urgency(raw, outcome="invalid", raw_b64=None, raw_complete=False, redacted=True,
+                      owner_ids=[], reason="invalid_source")
+    assert record("owner_generation", payload)["payload"] == payload

@@ -16,7 +16,7 @@ from typing import Optional
 
 from hermes_cli import kanban_fairness_journal as journal
 from hermes_cli import kanban_fairness_segments as segments
-from hermes_cli.kanban_fairness_schema import VERSION, BadRecord, decode_owner, make_record
+from hermes_cli.kanban_fairness_schema import VERSION, decode_owner, make_record
 from hermes_cli.kanban_fairness_segments import append_records, seal_records
 
 __all__ = ["append_records", "drain", "load", "seal_records", "write_manifest"]
@@ -78,6 +78,10 @@ def drain(conn: sqlite3.Connection, out: Path) -> dict:
         return receipts
     if (out / MANIFEST).exists():
         return receipts
+    if state.get("trigger_integrity") is not True and not any(g["code"] == "trigger_loss" for g in receipts["gaps"]):
+        _gap(receipts, "trigger_loss", "capture triggers are missing or changed, or seal integrity is unknown")
+        # Preserve newly observed gaps even when no new rows arrive.
+        _write(out / RECEIPTS, segments.encoded(receipts))
     while True:
         rows = list(journal.rows(conn, receipts["journal_seq"], limit=128))
         if not rows:
@@ -96,17 +100,18 @@ def drain(conn: sqlite3.Connection, out: Path) -> dict:
                     payload={"task_id": task_id, "op": op, "fields": json.loads(fields),
                              "journal_seq": db_seq, "journal_kind": kind,
                              "database_uid": receipts["database_uid"], "source_uid": None}))
-            receipts = append_records(out, records)
+            receipts = append_records(out, records, _metadata={"journal_seq": rows[-1][0]})
         except (ValueError, OSError) as exc:
             _gap(receipts, "export_failed", type(exc).__name__)
             _write(out / RECEIPTS, segments.encoded(receipts))
             return receipts
-        receipts["journal_seq"] = rows[-1][0]
-        _write(out / RECEIPTS, segments.encoded(receipts))
+
 
 
 def write_manifest(conn: sqlite3.Connection, out: Path, *, board: str, assumptions: dict,
                    policy: dict, roster: Optional[list] = None) -> dict:
+    if (out / MANIFEST).exists():
+        raise ValueError("capture already sealed")
     state = journal.seal(conn)
     receipts = drain(conn, out)
     manifest = {
@@ -141,13 +146,29 @@ def load(out: Path) -> dict:
         if payload["source_uid"] is None:
             gaps.append({"code": "source_uid_unknown"})
     counters = manifest.get("journal")
-    if counters:
+    if "journal" in manifest and not _valid_counters(counters):
+        gaps.append({"code": "bad_journal_counters"})
+    elif counters is not None:
         if counters["dropped"]:
             gaps.append({"code": "journal_dropped", "detail": "journal bound dropped changes"})
         if counters["stored"] != len(records) or counters["last_seq"] != expected - 1:
             gaps.append({"code": "record_count"})
     capture["owners"] = _owners(out, gaps)
+    capture["gaps"] = segments.dedupe_gaps(gaps)
     return capture
+
+
+def _valid_counters(counters):
+    required = {"stored", "bytes", "dropped", "first_drop_ms", "last_drop_ms", "max_records", "max_bytes", "last_seq"}
+    if not isinstance(counters, dict) or set(counters) != required:
+        return False
+    for name, value in counters.items():
+        if value is None and name in ("first_drop_ms", "last_drop_ms"):
+            continue
+        if type(value) is not int or value < 0:
+            return False
+    return (counters["stored"] <= counters["max_records"] and counters["bytes"] <= counters["max_bytes"]
+            and counters["max_records"] > 0 and counters["max_bytes"] > 0)
 
 
 def _owners(out: Path, gaps: list[dict]) -> Optional[list[dict]]:
@@ -155,11 +176,17 @@ def _owners(out: Path, gaps: list[dict]) -> Optional[list[dict]]:
     if not path.exists():
         return None
     owners = []
-    for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+    try:
+        data = segments.read_bounded(path, min(segments.MAX_CAPTURE_BYTES, segments.MAX_METADATA_BYTES))
+        lines = data.decode("utf-8-sig").splitlines()
+    except (OSError, ValueError):
+        gaps.append({"code": "bad_owner_record", "detail": "owner file unreadable or over bound"})
+        return owners
+    for number, line in enumerate(lines, 1):
         if not line.strip():
             continue
         try:
             owners.append(decode_owner(json.loads(line)))
-        except (ValueError, BadRecord) as exc:
+        except (ValueError, TypeError, RecursionError) as exc:
             gaps.append({"code": "bad_owner_record", "detail": f"{OWNERS}:{number}: {exc}"})
     return owners
