@@ -1390,6 +1390,8 @@ class SessionSearchMixin:
                 return 0
             tables = self._present_fts_tables()
             if tables and not self._fts_wholesale_free_allowed(tables, context="FTS segment merge ('optimize')"):
+                if self._fts_gate_outcome not in ("refused", "named"):
+                    return 0  # a race (schema moved, no plan): nothing wrong with the store; a later call merges
                 from hermes_state_fts_online import FtsFreeRefused
 
                 raise FtsFreeRefused("the integrity gate kept the search index from being merged (see the log); "
