@@ -118,7 +118,9 @@ def test_cli_roster_reads_manifest_without_arming_capture(tmp_path, capsys):
     import json
     from scripts.kanban_fairness import main
 
-    manifest, output = tmp_path / "manifest.json", tmp_path / "validation.json"
+    out_dir = tmp_path / "evidence"
+    out_dir.mkdir()
+    manifest, output = out_dir / "manifest.json", out_dir / "validation.json"
     manifest.write_text(json.dumps({"roster": evidence()}))
     args = ["inventory", "roster", "--manifest", str(manifest), "--output", str(output)]
     assert main(args) == 0
@@ -128,5 +130,5 @@ def test_cli_roster_reads_manifest_without_arming_capture(tmp_path, capsys):
     manifest.write_text(json.dumps({"roster": value}))
     assert main(args) == 2
     assert not json.loads(output.read_text())["complete"]
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["manifest.json", "validation.json"]
+    assert sorted(p.name for p in out_dir.iterdir()) == ["manifest.json", "validation.json"]
 
