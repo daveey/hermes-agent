@@ -9,7 +9,9 @@ sessions run detached until a client attaches; opening one later reuses the live
 
 All the existing auto-continue guards still apply inside ``session.resume`` (freshness window, ``max_attempts``
 crash-loop breaker, live-writer ownership, hosted-room exclusion); this module only pre-filters to avoid resuming
-sessions that would not continue anyway.
+sessions that would not continue anyway. After boot a passive observer keeps checking update-paused turns:
+blue/green predecessors can publish a new pause long after the initial marker scan becomes empty. Ordinary
+crash markers remain boot-only; recovery still enters the normal session.resume admission path.
 """
 
 from __future__ import annotations
@@ -174,7 +176,7 @@ def _paused_markers_remain(home: Path, cfg: dict | None) -> bool:
                if (entry := read_turn_marker(h, key)) is not None)
 
 
-def start_startup_resume_sweep() -> threading.Thread | None:
+def start_startup_resume_sweep(*, stop: threading.Event | None = None) -> threading.Thread | None:
     """Backend boot hook: run the sweep on a daemon thread after a short settle delay (no-op unless enabled)."""
     from hermes_cli.proof_home import recovery_home_allowed
     from hermes_constants import get_hermes_home
@@ -204,18 +206,19 @@ def start_startup_resume_sweep() -> threading.Thread | None:
             done = resume_interrupted_sessions(handler, home, cfg)
             if done:
                 logger.info("startup resume: %d interrupted session(s) processed", len(done))
-            # Backend boot can precede hold release or the last old SSH writer's exit.
-            # Retry PAUSES only: ordinary crash recovery keeps its one-shot semantics.
-            deadline = time.monotonic() + 600.0
-            while time.monotonic() < deadline and _paused_markers_remain(home, cfg):
-                time.sleep(5.0)
+            # A warm successor may boot before the old writer continues and pauses again.
+            # An empty scan (or a fixed boot deadline) is not a completed handoff.
+            # Keep observing PAUSES only; ordinary crash recovery remains boot-only.
+            stopped = stop or threading.Event()
+            while not stopped.is_set():
+                time.sleep(5.0 if _paused_markers_remain(home, cfg) else 30.0)
+                if stopped.is_set():
+                    break
                 resume_interrupted_sessions(handler, home, cfg, paused_only=True)
-            if _paused_markers_remain(home, cfg):
-                logger.warning("startup resume: paused turns still pending after the update recovery window")
         except Exception:
             logger.exception("startup resume sweep failed")
 
     from agent.memory_provider import spawn_context_thread
-    t = spawn_context_thread(_run, name="startup-resume-sweep")
+    t = spawn_context_thread(_run, name="startup-resume-sweep", passive=True)
     t.start()
     return t

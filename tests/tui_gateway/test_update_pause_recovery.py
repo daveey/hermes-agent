@@ -113,7 +113,7 @@ def test_replaced_backend_notice_requeues_before_real_continuation(recovery, mon
             self.target()
     monkeypatch.setattr(memory_provider, "spawn_context_thread", lambda target, **kw: Inline(target))
     # Drive the real startup worker + resume handler, not an explicit scheduling call.
-    sr.start_startup_resume_sweep()
+    sr.start_startup_resume_sweep(stop=recovery.done)
     assert_continued(recovery)
     assert attempts == submitted == [5.0]
     assert submitted[0] <= 120
@@ -387,7 +387,7 @@ def test_boot_worker_retries_without_another_client_message(recovery, monkeypatc
     def thread_factory(*args, **kwargs):
         return spawn(kwargs["target"]) if kwargs.get("name") == "startup-resume-sweep" else real_thread(*args, **kwargs)
     monkeypatch.setattr(sr.threading, "Thread", thread_factory)
-    sr.start_startup_resume_sweep()
+    sr.start_startup_resume_sweep(stop=recovery.done)
     assert_continued(recovery)
 
 

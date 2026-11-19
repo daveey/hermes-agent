@@ -35,11 +35,16 @@ def test_boot_continues_a_fresh_unopened_chat_and_not_a_stale_one(monkeypatch):
     # Default config apart from the settle delay: resume_on_startup is not set anywhere.
     monkeypatch.setattr(config, "load_config", lambda: {"desktop": {"auto_continue": {
         "resume_on_startup_delay_seconds": 0}}})
+    import threading
+    stop = threading.Event()
     resumed = []
-    monkeypatch.setitem(server._methods, "session.resume",
-                        lambda rid, params: resumed.append(params["session_id"]) or {"result": {"auto_continue": {}}})
+    def resume(rid, params):
+        resumed.append(params["session_id"])
+        stop.set()
+        return {"result": {"auto_continue": {}}}
+    monkeypatch.setitem(server._methods, "session.resume", resume)
 
-    thread = sr.start_startup_resume_sweep()
+    thread = sr.start_startup_resume_sweep(stop=stop)
 
     assert thread is not None, "the boot sweep must run without resume_on_startup in config"
     thread.join(10)
