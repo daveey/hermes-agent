@@ -51,11 +51,51 @@ def host_gateway_note() -> str:
     return f" ({topology.describe()})" if topology is not None else ""
 
 
-def _render_state_db_stats(stats: dict, holders=None, host_note: str = "") -> list:
+def _fts_deferral_row(deferral: dict, live_holders) -> tuple:
+    """The warn row for a stored FTS-rebuild deferral. The record's ``holder_pids`` is its last writer's view, which
+    leaves that writer out (often the gateway), so the advice names the processes holding the DB now
+    (*live_holders*: ``(pid, description, is_gateway)``), never telling the user to stop the gateway, whose own
+    retry does the rebuild. Without a live view it falls back to the record."""
+    if live_holders is not None:
+        others = ", ".join(desc for _pid, desc, is_gateway in live_holders if not is_gateway)
+        gateways = ", ".join(desc for _pid, desc, is_gateway in live_holders if is_gateway)
+        held_by = ", ".join(desc for _pid, desc, _is_gateway in live_holders) or "no other process"
+        keep = f"keep the host gateway {gateways} running: " if gateways else "the host gateway's "
+        stop = (f"stop ONLY {others}; {keep}its own retry rebuilds within a minute of them leaving" if others else
+                f"only the host gateway {gateways} holds it now; its next retry rebuilds" if gateways else
+                "nothing holds it now; the host gateway's next retry rebuilds")
+    else:
+        held_by = f"PID(s) {deferral.get('holder_pids') or 'unknown'}"
+        stop = ("stop ONLY the holder(s) other than the host gateway; the gateway's own retry rebuilds within a "
+                "minute of them leaving")
+    if deferral.get("futile"):
+        return ("warn", f"state.db FTS repair has been blocked by other processes for "
+                f"{deferral.get('holders_attempts') or '?'} consecutive deferral(s), now held by {held_by}; "
+                "waiting is futile",
+                f"(the host gateway's next retry rebuilds online with every holder running, or run 'hermes sessions "
+                f"repair-search' now; alternatively {stop})")
+    return ("warn", f"state.db FTS repair is blocked after {deferral.get('attempts') or '?'} deferral(s), now held "
+            f"by {held_by}",
+            f"({stop}; or run 'hermes sessions optimize-storage' with every holder stopped)")
+
+
+def _live_state_db_holders(state_db_path: Path):
+    """``[(pid, description, is_gateway)]`` for the processes holding state.db now (this one excluded), or None."""
+    from gateway.status import _looks_like_gateway_process
+    from hermes_state_dbfile import db_holder_pids
+    from hermes_state_holders import describe_holder_pid
+    pids = db_holder_pids(state_db_path)
+    if pids is None:
+        return None
+    return [(pid, describe_holder_pid(pid), _looks_like_gateway_process(pid)) for pid in pids if pid != os.getpid()]
+
+
+def _render_state_db_stats(stats: dict, holders=None, host_note: str = "", live_holders=None) -> list:
     """Turn a collect_state_db_stats() dict into ``(kind, text, detail)`` rows, kind 'info' / 'warn'.
 
     Pure formatting — no I/O — so it is unit-testable without the doctor CLI. Tolerates None in every field.
-    ``host_note`` names the shared host gateway among the holders (see :func:`host_gateway_note`).
+    ``host_note`` names the shared host gateway among the holders (see :func:`host_gateway_note`);
+    ``live_holders`` is :func:`_live_state_db_holders` (the FTS deferral advice names them).
     """
     lines: list = []
     stats = stats or {}
@@ -82,19 +122,7 @@ def _render_state_db_stats(stats: dict, holders=None, host_note: str = "") -> li
         lines.append(("info", "FTS tables: " + (", ".join(present) if present else "none"), ""))
     deferral = stats.get("fts_rebuild_deferral")
     if isinstance(deferral, dict):
-        pids = deferral.get("holder_pids") or "unknown"
-        if deferral.get("futile"):
-            lines.append(("warn", f"state.db FTS repair has been blocked by foreign holder(s) (now PID(s) "
-                          f"{pids}) for {deferral.get('holders_attempts') or '?'} consecutive deferral(s); "
-                          "waiting is futile",
-                          "(the host gateway's next retry rebuilds online with every holder running, or run "
-                          "'hermes sessions repair-search' now; alternatively stop ONLY the listed process(es) and "
-                          "the gateway's own retry rebuilds within a minute of the holder leaving)"))
-        else:
-            lines.append(("warn", f"state.db FTS repair is blocked after {deferral.get('attempts') or '?'} deferral(s) "
-                          f"by PID(s) {pids}",
-                          "(stop the listed processes; the host gateway's own retry then rebuilds, or run "
-                          "'hermes sessions optimize-storage' with every holder stopped)"))
+        lines.append(_fts_deferral_row(deferral, live_holders))
     # Oversized DB: suggest auto_prune, plus the offline optimize-storage pass when the FTS rebuild is
     # pending, an earlier run stopped before tearing down the old index, or the stored FTS layout is an
     # older release's (not just a lagging marker).
@@ -413,9 +441,11 @@ def _state_db_stats(issues: list, state_db_path: Path) -> None:
     """Health/stats snapshot: strictly read-only (mode=ro) so it is safe against a live DB held by
     the gateway; any failure degrades to one info line rather than failing doctor."""
     with warn_on_error("state.db stats unavailable ({e})", "", report=lambda t, _d: check_info(t)):
-        from hermes_state_dbfile import collect_state_db_stats, count_db_holders
-        rows = _render_state_db_stats(collect_state_db_stats(state_db_path), holders=count_db_holders(state_db_path),
-                                      host_note=host_gateway_note())
+        from hermes_state_dbfile import collect_state_db_stats
+        stats = collect_state_db_stats(state_db_path)
+        live = _live_state_db_holders(state_db_path)
+        rows = _render_state_db_stats(stats, holders=None if live is None else len(live),
+                                      host_note=host_gateway_note(), live_holders=live)
         for _kind, _text, _detail in rows:
             if _kind != "warn":
                 check_info(_text + (f" {_detail}" if _detail else ""))

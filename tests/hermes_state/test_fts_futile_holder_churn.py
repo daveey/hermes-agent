@@ -139,15 +139,38 @@ def test_a_broken_presence_record_starts_a_new_window(stale_store, break_continu
     for _ in range(attempts - 2):
         record = _defer(db, clock, step)
     assert record["holders_attempts"] == attempts - 1, record
+    cursor = db._conn.cursor()
     if break_continuity == "clock_went_back":
         clock[0] -= 2 * step
-        record = _defer(db, clock, 0.0)
     else:
-        # What the orphan reap writes when it cleared every holder.
-        db._conn.execute(
-            "UPDATE state_meta SET value = json_set(value, '$.holder_pids', json('[]')) WHERE key = ?",
-            (FTS_REBUILD_DEFERRAL_KEY,),
-        )
-        db._conn.commit()
-        record = _defer(db, clock, step)
+        # The orphan reap's outcome when it cleared every holder: a deferral that saw none.
+        clock[0] += step
+        assert db._defer_stale_fts_for_holders(cursor, []) is False
+    record = _defer(db, clock, 0.0 if break_continuity == "clock_went_back" else step)
     assert record["holders_attempts"] == 1 and not record.get("futile"), record
+
+
+def test_an_older_writer_resetting_the_shared_record_cannot_starve_futility(
+    stale_store,
+):
+    """A process still on the old release rewrites the record with a fresh window whenever its own holder view
+    differs from the stored one. This process's own copy of the window keeps counting."""
+    db, db_path, clock = stale_store
+    attempts = hermes_state_schema._FTS_HOLDER_FUTILE_ATTEMPTS
+    step = hermes_state_schema._FTS_HOLDER_FUTILE_SECONDS / (attempts - 1)
+    record = {}
+    for _ in range(attempts):
+        raw = sqlite3.connect(str(db_path))
+        raw.execute(
+            "UPDATE state_meta SET value = json_set(value, '$.holders_since', ?, '$.holders_attempts', 1, "
+            "'$.holder_pids', json('[7777]')) WHERE key = ?",
+            (clock[0], FTS_REBUILD_DEFERRAL_KEY),
+        )
+        raw.commit()
+        raw.close()
+        record = _defer(db, clock, step)
+        if record.get("futile"):
+            break
+    assert record.get("futile") is True and record["holders_attempts"] == attempts, (
+        record
+    )

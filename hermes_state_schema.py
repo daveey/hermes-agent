@@ -59,6 +59,18 @@ _MESSAGE_UID_BACKFILL_CHUNK = 2000
 _MESSAGE_UID_BACKFILL_BUDGET_S = 1.0
 
 
+def _continue_holder_presence(window, now: float) -> tuple[float, int]:
+    """``(since, attempts)`` of a foreign-holder presence window after one more blocked deferral. *window* is the
+    previous ``(since, attempts, last_seen, saw_holders)`` or None. It restarts when the previous deferral saw no
+    holder, or when the gap since it is negative or longer than twice the retry backoff cap (a new episode)."""
+    if window is None:
+        return now, 1
+    since, attempts, last_seen, saw_holders = window
+    if not saw_holders or not 0 <= now - last_seen <= _FTS_STALE_RETRY_MAX_SECONDS * 2 or since > now:
+        return now, 1
+    return since, attempts + 1
+
+
 def _holder_cmdline(pid: int) -> str:
     argv = _read_proc_argv(pid)
     return " ".join(argv)[:120] if argv else "<cmdline unavailable>"
@@ -518,7 +530,9 @@ class SessionSchemaMixin:
         holders and the remedy that works from inside a gateway session (stop only the other
         holder; this process's own retry tick admits the rebuild). The window restarts only
         when the last deferral saw no holder, or when the gap since it is negative or longer
-        than twice the retry backoff cap (a new episode)."""
+        than twice the retry backoff cap (a new episode). This process also keeps its own copy
+        of the window and the longer one counts, so a writer that resets the shared record (an
+        older release still on the store) cannot starve this process's futility decision."""
         now = time.time()
         try:
             row = cursor.execute(
@@ -531,16 +545,18 @@ class SessionSchemaMixin:
         try:
             first_seen = float(record.get("first_seen", now))
             attempts = int(record.get("attempts", 0)) + 1
-            holders_since = float(record.get("holders_since", now))
-            holders_attempts = int(record.get("holders_attempts", 0)) + 1
-            last_seen = float(record.get("last_seen", now))
+            shared = (float(record.get("holders_since", now)), int(record.get("holders_attempts", 0)),
+                      float(record.get("last_seen", now)), bool(record.get("holder_pids")))
         except (TypeError, ValueError):
-            first_seen, attempts, holders_since, holders_attempts, last_seen = now, 1, now, 1, now
+            first_seen, attempts, shared = now, 1, None
         if first_seen > now or first_seen < 0:
             first_seen = now
         holder_pids = sorted({pid for pid, _path in foreign_holders if pid > 0})
-        if not record.get("holder_pids") or not 0 <= now - last_seen <= _FTS_STALE_RETRY_MAX_SECONDS * 2:
-            holders_since, holders_attempts = now, 1
+        # No record at all is a new episode (recovery deletes it); this process's copy starts over with it.
+        own = getattr(self, "_fts_holder_presence", None) if row else None
+        holders_since, holders_attempts = _continue_holder_presence(shared, now)
+        own_since, own_attempts = _continue_holder_presence(own, now)
+        holders_since, holders_attempts = min(holders_since, own_since), max(holders_attempts, own_attempts)
         if attempts >= _FTS_HOLDER_ESCALATE_ATTEMPTS and now - first_seen >= _FTS_HOLDER_ESCALATE_SECONDS:
             reaped = self._reap_inactive_orphan_desktop_holders(
                 foreign_holders, min_age_seconds=_FTS_HOLDER_ESCALATE_SECONDS,
@@ -555,6 +571,7 @@ class SessionSchemaMixin:
         futile = bool(holder_pids) and (
             holders_attempts >= _FTS_HOLDER_FUTILE_ATTEMPTS and now - holders_since >= _FTS_HOLDER_FUTILE_SECONDS
         )
+        self._fts_holder_presence = (holders_since, holders_attempts, now, bool(holder_pids))
         diagnostic = {
             "first_seen": first_seen, "last_seen": now, "attempts": attempts, "holder_pids": holder_pids,
             "holders_since": holders_since, "holders_attempts": holders_attempts, "futile": futile,

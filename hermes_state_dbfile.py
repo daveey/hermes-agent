@@ -1250,10 +1250,10 @@ def collect_state_db_stats(db_path: Path) -> dict[str, Any]:
     return stats
 
 
-def count_db_holders(db_path: Path) -> Optional[int]:
-    """Best-effort count of distinct PIDs holding ``db_path`` open (``/proc/*/fd`` on Linux, libproc
-    on macOS); ``None`` on any error or other host, never raises.  Uninspectable processes (other
-    users' without root) are skipped, so this is a lower bound."""
+def db_holder_pids(db_path: Path) -> Optional[list[int]]:
+    """Best-effort sorted distinct PIDs holding ``db_path`` open (``/proc/*/fd`` on Linux, libproc on
+    macOS); ``None`` on any error or other host, never raises.  Uninspectable processes (other users'
+    without root) are skipped, so this is a lower bound."""
     try:
         target = os.path.realpath(str(db_path))
         if sys.platform == "darwin":
@@ -1261,12 +1261,19 @@ def count_db_holders(db_path: Path) -> Optional[int]:
             # (case, symlinked prefix), which is exactly what the sidecar leg had to case-fold around.
             st = os.stat(target)
             identity = (st.st_dev, st.st_ino)
-            return len({pid for pid, _fd, _path, ident in _iter_darwin_fd_targets() if ident == identity})
+            return sorted({pid for pid, _fd, _path, ident in _iter_darwin_fd_targets() if ident == identity})
         if not sys.platform.startswith("linux"):
             return None
-        return len({pid for pid, link, _fd_path in _iter_proc_fd_targets() if link == target})
+        return sorted({pid for pid, link, _fd_path in _iter_proc_fd_targets() if link == target})
     except Exception:
+        logger.debug("state.db holder scan failed for %s", db_path, exc_info=True)
         return None
+
+
+def count_db_holders(db_path: Path) -> Optional[int]:
+    """``len(db_holder_pids(db_path))``, or ``None`` when that is unknown."""
+    pids = db_holder_pids(db_path)
+    return None if pids is None else len(pids)
 
 
 def _is_inactive_orphan_desktop_holder(*, ppid: int, age_seconds: float, min_age_seconds: float,

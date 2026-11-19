@@ -65,6 +65,10 @@ def describe_holder_pid(pid: int) -> str:
             argv = psutil.Process(pid).cmdline() or None
         except Exception:
             argv = None
+    if argv and "-c" in argv[1:-1]:
+        # Inline bootstrap code (launcher wrappers) would fill the 80 characters; the arguments after it say who.
+        at = argv.index("-c", 1)
+        argv = [*argv[:at + 1], "…", *argv[at + 2:]]
     who = " ".join(" ".join([os.path.basename(argv[0]), *argv[1:]]).split())[:80] if argv else "command line unavailable"
     return f"PID {pid} ({who})"
 
