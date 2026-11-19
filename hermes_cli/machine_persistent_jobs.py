@@ -1,6 +1,7 @@
 """Conservative persistent-work observations, independent of CPU admission.
 
-A populated worker scope is positive evidence of occupied work (a lower bound).
+A populated worker scope is positive evidence of occupied work (a lower bound),
+including ordinary active cards as well as detached or parked jobs.
 An empty pool is NOT a complete census: unscoped jobs, app.slice descendants and
 in-process baseline work are not accounted for. Until that census is available,
 this producer deliberately never emits zero. Missing means UNKNOWN, not idle.
