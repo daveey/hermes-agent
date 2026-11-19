@@ -914,8 +914,18 @@ def _callable_name(fn: Any, args: tuple = ()) -> str:
 
 
 def _run_scoped(name: str, fn: Callable, *args: Any, **kwargs: Any) -> Any:
-    with Scope(name):
+    try:
+        observed = Scope(name)
+        observed.__enter__()
+    except Exception:  # health: allow BLE001 -- diagnostics cannot prevent the operation
         return fn(*args, **kwargs)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        try:
+            observed.__exit__(*sys.exc_info())
+        except Exception:  # health: allow BLE001 -- never replace results/errors or retry the operation
+            logger.debug("loop accounting: scope booking failed", exc_info=True)
 
 
 def scoped_call(prefix: str, fn: Callable, args: tuple = ()) -> Callable:
@@ -973,6 +983,27 @@ def instrument_executors() -> bool:
         return False
     _instrumented["executors"] = True
     from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures.thread import _WorkItem
+    item_orig = _WorkItem.run
+
+    def run_item(self, *args, **kwargs):
+        if not scopes_enabled():
+            return item_orig(self, *args, **kwargs)
+        # 3.14 stores the invocation as a task triple; older CPython uses fn/args.
+        try:
+            if hasattr(self, "task"):
+                func, call_args, _ = self.task
+            else:
+                func, call_args = self.fn, self.args
+            name = "executor_item/" + _callable_name(func, call_args)
+        except Exception:  # health: allow BLE001 -- diagnostics must not break future completion
+            return item_orig(self, *args, **kwargs)
+        # The submitted scope has ended when Future invokes completion callbacks.
+        # Scope subtracts inner accounting, leaving only item/custody/completion CPU.
+        return _run_scoped(name, item_orig, self, *args, **kwargs)
+
+    run_item._la_orig = item_orig  # type: ignore[attr-defined]
+    _WorkItem.run = run_item  # type: ignore[method-assign]
     pool_orig = ThreadPoolExecutor.submit
 
     def submit(self, func, /, *args, **kwargs):
@@ -1044,11 +1075,11 @@ def instrument_callbacks() -> bool:
     return True
 
 
-MAX_TARGET_KEYS = 64  # distinct thread targets; later ones fold into TARGET_OTHER
+MAX_TARGET_KEYS = 256  # distinct thread targets; later ones fold into TARGET_OTHER
 TARGET_OTHER = "other"
 
 
-def _target_key(target: Any, args: tuple | list = ()) -> str:
+def _target_key(target: Any, args: Any = ()) -> str:
     """Name of a ``Thread`` target (``module.qualname``; a lambda also gets its line number)."""
     # Inspection must not consume one-shot iterables before Thread.run uses them.
     inspect_args = tuple(args) if isinstance(args, (tuple, list)) else ()
@@ -1122,7 +1153,9 @@ def uninstrument() -> None:
         threading.Thread.run = threading.Thread.run._la_orig  # type: ignore[attr-defined,method-assign]
     if _instrumented.pop("executors", None):
         from concurrent.futures import ThreadPoolExecutor
-        ThreadPoolExecutor.submit = ThreadPoolExecutor.submit._la_orig  # type: ignore[attr-defined,method-assign]
+        from concurrent.futures.thread import _WorkItem
+        _WorkItem.run = _WorkItem.run._la_orig  # type: ignore[attr-defined,method-assign]
+        ThreadPoolExecutor.submit = ThreadPoolExecutor.submit._la_orig  # type: ignore[method-assign]
         import asyncio.base_events as be
         be.BaseEventLoop.run_in_executor = be.BaseEventLoop.run_in_executor._la_orig  # type: ignore[attr-defined]
         try:

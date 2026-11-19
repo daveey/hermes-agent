@@ -290,9 +290,13 @@ def test_thread_attribution_does_not_consume_iterator_args(carrier):
     th.join()
     assert seen == [expected]
     assert list(args) == []  # Only the actual invocation consumes the iterator.
+    assert sum(row["threads"] for row in la._target_exited.values()) == 1
+    if carrier != "context":
+        assert la._target_key(original) in la._target_exited
 
 
-def test_context_thread_names_original_target():
+@pytest.mark.parametrize("args_type", [tuple, list])
+def test_context_thread_names_original_target(args_type):
     from contextvars import Context
 
     la.instrument_thread_targets()
@@ -300,7 +304,7 @@ def test_context_thread_names_original_target():
     def original(value):
         assert value == 42
 
-    th = threading.Thread(target=Context().run, args=(original, 42))
+    th = threading.Thread(target=Context().run, args=args_type((original, 42)))
     th.start()
     th.join()
     assert la._target_key(original) in la._target_exited

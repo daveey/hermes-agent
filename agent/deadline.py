@@ -349,10 +349,15 @@ def run_bounded_sync(
     box: dict[str, Any] = {}
     done = threading.Event()
     ctx = contextvars.copy_context()
+    try:
+        from hermes_cli.loop_accounting import scoped_call, scopes_enabled
+        scoped_fn = scoped_call("thread", fn) if scopes_enabled() else fn
+    except Exception:  # health: allow BLE001 -- naming must not prevent the bounded operation
+        scoped_fn = fn
 
     def _worker() -> None:
         try:
-            box["value"] = ctx.run(fn)
+            box["value"] = ctx.run(scoped_fn)
         except BaseException as exc:  # re-raised in caller; must not vanish
             box["exc"] = exc
         finally:

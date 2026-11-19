@@ -191,7 +191,7 @@ def test_gateway_direct_pool_submission_is_named(monkeypatch, tmp_path, enabled)
         assert await threads.run_in_pool(None, copy_context(), direct_job) == 42
 
     asyncio.run(main())
-    names = {k: v for k, v in la.counters().items() if k.endswith("direct_job")}
+    names = {k: v for k, v in la.counters().items() if k.startswith("thread/") and k.endswith("direct_job")}
     if enabled:
         assert len(names) == 1, la.counters()
         st = next(iter(names.values()))
