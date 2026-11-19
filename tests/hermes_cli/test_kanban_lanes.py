@@ -21,6 +21,14 @@ LANES = {
     "other": {"share": 10},
 }
 
+ASK = {
+    "action": "Tap Approve on the iPhone sign-in prompt",
+    "why_human": "Only the owner can confirm the prompt on their phone",
+    "interaction": "physical",
+    "scope": "Pending account sign-in on the owner's iPhone",
+    "evidence": "Sign-in reports a pending device confirmation",
+}
+
 
 @pytest.fixture(autouse=True)
 def person(monkeypatch):
@@ -253,6 +261,29 @@ def test_usage_reports_target_actual_and_backlog(conn, configured):
     assert out["hermes"]["run_seconds"] == 3600 and out["hermes"]["actual"] == 1.0
     assert out["hermes"]["held"] == 1 and out["babybear"]["ready"] == 1
     assert round(out["babybear"]["target"], 3) == round(35 / 65, 3)
+
+
+def test_usage_counts_per_lane_blocked_on_you(conn, configured):
+    """Human-request parks count as blocked_on_you; dependency, gate-held, and ask-less needs_input do not."""
+    kb.create_task(conn, title="bb ask", assignee="default", tenant="babybear", created_by="user",
+                   initial_status="blocked", human_request=ASK)
+    kb.create_task(conn, title="hermes ask", assignee="default", tenant="hermes", created_by="user",
+                   workspace_path="/src/hermes-agent", initial_status="blocked", human_request=ASK)
+    cap = kb.create_task(conn, title="bb capability", assignee="default", tenant="babybear", created_by="user")
+    kb.block_task(conn, cap, reason="needs a grant only David can give", kind="capability", human_request=ASK)
+    dep = kb.create_task(conn, title="bb dep", assignee="default", tenant="babybear", created_by="user")
+    parent = _hermes_parent(conn)
+    kb.create_task(conn, title="infra", assignee="default", creator_task_id=parent,
+                   workspace_path="/src/hermes-agent")
+    ghost = kb.create_task(conn, title="ask-less needs_input", assignee="default", tenant="other", created_by="user")
+    conn.execute("UPDATE tasks SET status='blocked', block_kind='dependency' WHERE id=?", (dep,))
+    conn.execute("UPDATE tasks SET status='blocked', block_kind='needs_input' WHERE id=?", (ghost,))
+    conn.commit()
+    out = lanes.usage(conn, lanes.policy(), window_s=3600)
+    assert out["babybear"]["blocked_on_you"] == 2
+    assert out["hermes"]["blocked_on_you"] == 1
+    assert out["other"]["blocked_on_you"] == 0
+    assert out["hermes"]["held"] == 1
 
 
 def test_shadow_classifies_and_reports_but_holds_caps_and_reorders_nothing(conn, configured):

@@ -2,7 +2,7 @@ import { fireEvent, screen } from '@testing-library/react'
 import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter } from 'react-router'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
 import { $tabStripDefault, setTabStripDefault } from '@/store/tabstrip-prefs'
@@ -46,6 +46,9 @@ const toggle = (label: string) =>
   globalThis.document.querySelector<HTMLButtonElement>(
     `[data-tree-group="terminal-zone"] button[aria-label="${label}"]`
   )!
+
+// Tab-strip chrome under test; Single (the default) hides main-only strips.
+beforeEach(() => setTabStripDefault('auto'))
 
 afterEach(() => {
   if (root) {

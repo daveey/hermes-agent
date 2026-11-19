@@ -1027,7 +1027,8 @@ export const frOverrides = {
       sessionDensityDetailed: 'Détaillée',
       tabStripTitle: "Barre d'onglets",
       tabStripDesc:
-        "Affiche les onglets au-dessus d'une zone. Le mode automatique les masque lorsqu'une zone ne contient qu'un seul panneau.",
+        'Unique conserve un onglet principal sans fermer les sessions en arrière-plan. Automatique, Toujours et Jamais règlent la barre. Les onglets latéraux restent inchangés.',
+      tabStripSingle: 'Unique',
       tabStripAuto: 'Automatique',
       tabStripAlways: 'Toujours',
       tabStripNever: 'Jamais',

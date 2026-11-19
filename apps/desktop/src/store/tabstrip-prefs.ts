@@ -3,24 +3,21 @@ import { type Codec, persistentAtom } from '@/lib/persisted'
 
 const TAB_STRIP_DEFAULT_STORAGE_KEY = 'hermes.desktop.tabStripDefault'
 
-/** What a zone does when it has made no choice of its own. */
-export type TabStripDefault = 'auto' | TabStripMode
+/** Single limits main-area tabs; the other choices control strip chrome. */
+export type TabStripDefault = 'single' | 'auto' | TabStripMode
 
 const codec: Codec<TabStripDefault> = {
-  decode: raw => (raw === 'always' || raw === 'never' ? raw : 'auto'),
-  encode: value => (value === 'auto' ? null : value)
+  decode: raw => (raw === 'auto' || raw === 'always' || raw === 'never' ? raw : 'single'),
+  encode: value => (value === 'single' ? null : value)
 }
 
 /**
- * The app-wide answer for zones on auto, VS Code's `workbench.editor.showTabs`
- * and Zed's `tab_bar.show`. `auto` keeps the contextual rule (a lone pane is
- * not a tab); the other two are for people who want one answer everywhere
- * rather than a per-zone choice they have to repeat.
- *
- * A zone that states its own preference still wins — this is the fallback, not
- * an override — and neither value can strand a pane (see resolveTabStripVisible).
+ * Single keeps one main-area tab per zone without closing its background
+ * sessions/guests. Side-panel tabs retain Auto behavior. Explicit strip choices
+ * continue to win for Auto/Always/Never; Single's main-slot policy is separate
+ * from those chrome preferences.
  */
-export const $tabStripDefault = persistentAtom<TabStripDefault>(TAB_STRIP_DEFAULT_STORAGE_KEY, 'auto', codec)
+export const $tabStripDefault = persistentAtom<TabStripDefault>(TAB_STRIP_DEFAULT_STORAGE_KEY, 'single', codec)
 
 export function setTabStripDefault(value: TabStripDefault) {
   $tabStripDefault.set(value)
@@ -34,5 +31,5 @@ export function effectiveTabStripMode(zoneMode: TabStripMode | undefined): TabSt
 
   const fallback = $tabStripDefault.get()
 
-  return fallback === 'auto' ? undefined : fallback
+  return fallback === 'auto' || fallback === 'single' ? undefined : fallback
 }

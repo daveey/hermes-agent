@@ -16,8 +16,10 @@ import { writeKey } from '@/lib/storage'
 import { type InterfaceMode, modeLayout } from '@/store/interface-mode'
 import { notify } from '@/store/notifications'
 import { clearAllPaneSizeOverrides } from '@/store/panes'
+import { $tabStripDefault } from '@/store/tabstrip-prefs'
 import { isBrowserWindow, isSecondaryWindow } from '@/store/windows'
 
+import { shownGroupPanes } from './main-tab-policy'
 import {
   allPaneIds,
   anchorsFirst,
@@ -48,6 +50,7 @@ import {
 import { isTreePaneParked } from './parked-panes'
 import { FLOATING_PLACEMENT } from './renderer/floating-rect'
 import { tabStripVisibleForZone } from './renderer/strip-visibility'
+import { singleTabs } from './single-tab-state'
 
 // v2: v1 trees were saved against placeholder panes with index-order zone
 // assignment (chat could land in a corner cell). Retire them wholesale.
@@ -817,34 +820,14 @@ export const $newSessionTabAction = atom<(() => void) | null>(null)
  * the raw array made ⌘2 land on what the strip called tab 1 after a hidden
  * pane sat earlier in the list (classic after-⌘W-shift offset).
  */
-export function shownPanesInGroup(group: { panes: readonly string[] }): string[] {
-  const hidden = $hiddenTreePanes.get()
-  const registered = registry.getArea('panes')
-  const paneFor = (id: string) => registered.find(c => c.id === id)
-
-  return group.panes.filter(id => {
-    const pane = paneFor(id)
-
-    if (!pane) {
-      return false
-    }
-
-    if (hidden.has(id)) {
-      return false
-    }
-
-    // Match TreeGroup's paneShown for the narrow breakpoint — collapsible
-    // panes drop out of the strip when the viewport collapses them.
-    if (
-      typeof window !== 'undefined' &&
-      window.matchMedia?.(SIDEBAR_COLLAPSE_MEDIA_QUERY).matches &&
-      Boolean((pane.data as { collapsible?: boolean } | undefined)?.collapsible)
-    ) {
-      return false
-    }
-
-    return true
-  })
+export function shownPanesInGroup(group: { active?: string; panes: readonly string[] }): string[] {
+  return shownGroupPanes(
+    group,
+    registry.getArea('panes'),
+    $hiddenTreePanes.get(),
+    typeof window !== 'undefined' && Boolean(window.matchMedia?.(SIDEBAR_COLLAPSE_MEDIA_QUERY).matches),
+    $tabStripDefault.get() === 'single'
+  )
 }
 
 /** Is this zone showing a tab strip right now? The store's adapter over the
@@ -931,7 +914,7 @@ export function removeTreePane(paneId: string) {
 
   if (tree) {
     rememberPaneShare(tree, paneId)
-    commit(removePane(tree, paneId))
+    commit(singleTabs.remove(tree, paneId))
   }
 }
 
@@ -1008,7 +991,7 @@ export function dismissTreePane(paneId: string) {
   if (tree) {
     setDismissed(paneId, true)
     rememberPaneShare(tree, paneId)
-    commit(removePane(tree, paneId))
+    commit(singleTabs.remove(tree, paneId))
   }
 }
 
@@ -1230,10 +1213,12 @@ export function revealTreePane(paneId: string) {
 
   // A layout replacement can omit a still-registered pane without dismissing
   // it. Reconcile that saved contribution before claiming to reveal it.
+  // In Single, a pane displaced from its zone is parked: an explicit reveal
+  // takes the slot back (and displaces the then-current tab).
   const currentTree = $layoutTree.get()
 
-  if (currentTree && !findGroupOfPane(currentTree, paneId)) {
-    adoptContributedPanes()
+  if (currentTree) {
+    singleTabs.reveal(currentTree, paneId, commit, adoptContributedPanes)
   }
 
   // Reveal beats a hide too: clear the persisted hide-only record, or the
@@ -1545,7 +1530,7 @@ export function adoptContributedPanes(): void {
 
   // Enforced dock invariants run FIRST: they re-home panes that are ALREADY
   // in the tree, so the missing-pane adoption below never sees them.
-  const healed = enforceDockedPanes(tree, dataOf)
+  const healed = singleTabs.enforce(enforceDockedPanes(tree, dataOf))
 
   // `placement: 'floating'` opts OUT of the tree entirely — those panes render
   // as fixed cards above it (renderer/floating-panes.tsx). Adopting one would
@@ -1646,9 +1631,17 @@ function commit(next: LayoutNode | null) {
     return
   }
 
+  next = singleTabs.enforce(next)
   $layoutTree.set(next)
   persist(next)
 }
+
+singleTabs.bind(
+  () => $layoutTree.get(),
+  commit,
+  adoptContributedPanes,
+  () => $dismissedPanes.get()
+)
 
 // ---------------------------------------------------------------------------
 // USER-PLACED panes — "their spot wins". A pane the user has explicitly

@@ -406,6 +406,20 @@ function GlassRow({ children, label }: GlassRowProps) {
   )
 }
 
+function tabStripChoices(a: {
+  tabStripSingle: string
+  tabStripAuto: string
+  tabStripAlways: string
+  tabStripNever: string
+}) {
+  return [
+    { id: 'single', label: a.tabStripSingle },
+    { id: 'auto', label: a.tabStripAuto },
+    { id: 'always', label: a.tabStripAlways },
+    { id: 'never', label: a.tabStripNever }
+  ] as const satisfies readonly { id: TabStripDefault; label: string }[]
+}
+
 interface AppearanceSettingsProps {
   subpage?: string
 }
@@ -522,11 +536,7 @@ export function AppearanceSettings({ subpage }: AppearanceSettingsProps = {}) {
   const withModeNote = (description: string, shadowed: boolean) =>
     shadowed ? `${description} ${t.interfaceMode.sessionNote}` : description
 
-  const tabStripOptions = [
-    { id: 'auto', label: a.tabStripAuto },
-    { id: 'always', label: a.tabStripAlways },
-    { id: 'never', label: a.tabStripNever }
-  ] as const satisfies readonly { id: TabStripDefault; label: string }[]
+  const tabStripOptions = tabStripChoices(a)
 
   const appActionsOptions = [
     { id: 'right', label: a.appActionsRight },

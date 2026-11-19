@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
+
+
 vi.mock('./right-rail/preview', () => ({
   PreviewTilePane: () => null
 }))
@@ -156,6 +158,7 @@ describe('preview tiles stack, not split (#93610)', () => {
 describe('preview tiles mirror the visible session tabs', () => {
   beforeEach(() => {
     window.localStorage.clear()
+    window.localStorage.setItem('hermes.desktop.tabStripDefault', 'auto') // multi-tab fixtures predate Single
     vi.resetModules()
   })
 

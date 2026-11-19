@@ -1,15 +1,19 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
 import { isMacPlatform } from '@/lib/platform'
 import { $bindings, $capture } from '@/store/keybinds'
+import { setTabStripDefault } from '@/store/tabstrip-prefs'
 
 import { group, split } from './model'
 import { $activeTreeGroup, $hoveredTreeGroup, $layoutTree } from './store'
 import { $heldTabModifier, useTabKeyHints } from './tab-key-hint-state'
 import { TabKeyHint } from './tab-key-hints'
+
+// Multi-tab behavior under test: Single (the default) would park sibling tabs.
+beforeEach(() => setTabStripDefault('auto'))
 
 const disposers: Array<() => void> = []
 const container = globalThis.document.createElement('div')

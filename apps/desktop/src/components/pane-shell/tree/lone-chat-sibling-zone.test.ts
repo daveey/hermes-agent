@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { registry } from '@/contrib/registry'
+import { setTabStripDefault } from '@/store/tabstrip-prefs'
 
 import { findGroupOfPane, group } from './model'
 import {
@@ -11,6 +12,9 @@ import {
   removeTreePane,
   tabStripVisibleForGroup
 } from './store'
+
+// Multi-tab behavior under test: Single (the default) would park sibling tabs.
+beforeEach(() => setTabStripDefault('auto'))
 
 // The report: two session tabs in main, drag the second one to the right edge,
 // and "the tabs disappear". Main was left a lone uncloseable workspace, which

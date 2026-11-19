@@ -800,6 +800,7 @@ export interface Translations extends NoticeTranslations {
       sessionDensityDetailed: string
       tabStripTitle: string
       tabStripDesc: string
+      tabStripSingle: string
       tabStripAuto: string
       tabStripAlways: string
       tabStripNever: string

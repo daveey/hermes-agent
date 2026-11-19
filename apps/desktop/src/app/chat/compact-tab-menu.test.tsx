@@ -9,10 +9,14 @@ import { $layoutTree, $narrowViewport } from '@/components/pane-shell/tree/store
 import { registry } from '@/contrib/registry'
 import { $selectedStoredSessionId, $sessions } from '@/store/session'
 import { $sessionTiles, type SessionTileDelegate, setSessionTileDelegate } from '@/store/session-states'
+import { setTabStripDefault } from '@/store/tabstrip-prefs'
 import { stubMenuDomApis, stubResizeObserver } from '@/test/jsdom'
 import type { SessionInfo } from '@/types/hermes'
 
 import { watchSessionTiles, workspaceTabActions } from './session-tile'
+
+// Multi-tab behavior under test: Single (the default) would park sibling tabs.
+beforeEach(() => setTabStripDefault('auto'))
 
 // The transport: the REST rename the dialog falls back to with no live runtime.
 const renameSession = vi.hoisted(() => vi.fn())

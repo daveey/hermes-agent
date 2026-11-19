@@ -2,11 +2,15 @@ import { cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
+import { setTabStripDefault } from '@/store/tabstrip-prefs'
 
 import { allPaneIds, group, split } from '../model'
 import { $layoutTree } from '../store'
 
 import { TreeGroup } from './tree-group'
+
+// Multi-tab behavior under test: Single (the default) would park sibling tabs.
+beforeEach(() => setTabStripDefault('auto'))
 
 // The hover ✕ and middle-click are ONE affordance in two shapes: whichever tabs
 // the pointer gesture can close must advertise it. A tab that closes on

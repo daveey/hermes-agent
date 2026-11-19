@@ -61,6 +61,7 @@ import {
 } from '@/store/session-states'
 import { orderTilesByTree } from '@/store/session-tile-order'
 
+
 const tile = (storedSessionId: string): SessionTile => ({ storedSessionId })
 const tilePane = (id: string) => `session-tile:${id}`
 
@@ -777,6 +778,7 @@ describe('dropTilesForProfile', () => {
   let activeGatewayProfile: { set: (name: string) => void }
   beforeEach(async () => {
     window.localStorage.clear()
+    window.localStorage.setItem('hermes.desktop.tabStripDefault', 'auto') // multi-tab fixtures predate Single
     vi.resetModules()
     // Re-import the module graph so the private tile buckets start empty; the
     // profile atom session-states subscribes to is the freshly loaded one too.
@@ -788,6 +790,7 @@ describe('dropTilesForProfile', () => {
   })
   afterEach(() => {
     window.localStorage.clear()
+    window.localStorage.setItem('hermes.desktop.tabStripDefault', 'auto') // multi-tab fixtures predate Single
     $activeGatewayProfile.set('default')
     $layoutTree.set(null)
     $selectedStoredSessionId.set(null)
@@ -1445,6 +1448,7 @@ describe('blankDraftTile', () => {
 describe('reopenLastClosedTile focuses the restored tab', () => {
   beforeEach(() => {
     window.localStorage.clear()
+    window.localStorage.setItem('hermes.desktop.tabStripDefault', 'auto') // multi-tab fixtures predate Single
     vi.resetModules()
   })
 

@@ -1021,7 +1021,8 @@ export const deOverrides = {
       sessionDensityDetailed: 'Detailreich',
       tabStripTitle: 'Tab-Leiste',
       tabStripDesc:
-        'Zeigt Tabs über einer Zone. Blendet sie automatisch aus, wenn eine Zone nur einen einzelnen Bereich enthält.',
+        'Einzeln zeigt einen Haupt-Tab, ohne Hintergrundsitzungen zu schließen. Automatisch, Immer und Nie steuern die Tab-Leiste. Seitenleisten-Tabs bleiben unverändert.',
+      tabStripSingle: 'Einzeln',
       tabStripAuto: 'Automatisch',
       tabStripAlways: 'Immer',
       tabStripNever: 'Nie',

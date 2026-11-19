@@ -990,7 +990,8 @@ export const en: Translations = {
       sessionDensityDetailed: 'Detailed',
       tabStripTitle: 'Tab Strip',
       tabStripDesc:
-        'Show tabs above a zone. Auto hides them for a single pane unless another chat or tile zone is open.',
+        'Single keeps one main tab without closing background sessions. Auto, Always and Never control tab-strip visibility. Side-panel tabs are unchanged.',
+      tabStripSingle: 'Single',
       tabStripAuto: 'Auto',
       tabStripAlways: 'Always',
       tabStripNever: 'Never',

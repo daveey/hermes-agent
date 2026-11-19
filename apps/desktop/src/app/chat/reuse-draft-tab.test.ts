@@ -8,11 +8,15 @@ import { registry } from '@/contrib/registry'
 import { clearSessionDraft, freshDraftScope, onComposerDraftSyncRequest, stashSessionDraft } from '@/store/composer'
 import * as session from '@/store/session'
 import * as states from '@/store/session-states'
+import { setTabStripDefault } from '@/store/tabstrip-prefs'
 import type { SessionInfo } from '@/types/hermes'
 
 import { $workspaceIsPage } from '../routes'
 
 import { frontUntouchedDraftTab } from './reuse-draft-tab'
+
+// Multi-tab behavior under test: Single (the default) would park sibling tabs.
+beforeEach(() => setTabStripDefault('auto'))
 
 beforeAll(() => {
   const disposeWorkspace = registry.register({

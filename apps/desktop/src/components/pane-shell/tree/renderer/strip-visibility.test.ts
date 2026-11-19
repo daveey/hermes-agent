@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { Contribution } from '@/contrib/types'
 import { setTabStripDefault } from '@/store/tabstrip-prefs'
@@ -105,6 +105,8 @@ describe('a lone workspace', () => {
 // chrome flags and fold in the app-wide default on both paths, so the strip on
 // screen and the toggle command can never disagree.
 describe('tabStripVisibleForZone', () => {
+  beforeEach(() => setTabStripDefault('auto'))
+
   const contributions: Record<string, Contribution> = {
     terminal: { area: 'panes', data: { placement: 'bottom' }, id: 'terminal', render: () => null, title: 'terminal' },
     'tile:a': { area: 'panes', data: { placement: 'main' }, id: 'tile:a', render: () => null, title: 'tile' },
@@ -127,6 +129,16 @@ describe('tabStripVisibleForZone', () => {
     })
 
   afterEach(() => setTabStripDefault('auto'))
+
+  it('hides Single main-slot chrome without hiding side-panel tabs', () => {
+    setTabStripDefault('single')
+    expect(visible(['workspace'])).toBe(false)
+    expect(visible(['workspace'], 'always')).toBe(false)
+    expect(visible(['terminal'])).toBe(true)
+    expect(visible(['workspace', 'terminal'])).toBe(true)
+    expect(visible(['workspace', 'terminal'], 'never')).toBe(false)
+    expect(visible([])).toBe(false)
+  })
 
   it('reads placement, uncloseable and collapse off the contributions', () => {
     expect(visible(['workspace'])).toBe(true)

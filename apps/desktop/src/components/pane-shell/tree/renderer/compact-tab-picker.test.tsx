@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
+import { setTabStripDefault } from '@/store/tabstrip-prefs'
 import { stubMenuDomApis, stubResizeObserver } from '@/test/jsdom'
 
 import { $layoutEditMode } from '../../edit-mode'
@@ -11,6 +12,9 @@ import { group } from '../model'
 import { $layoutTree, $narrowViewport, $newSessionTabAction } from '../store'
 
 import { TreeGroup } from './tree-group'
+
+// Multi-tab behavior under test: Single (the default) would park sibling tabs.
+beforeEach(() => setTabStripDefault('auto'))
 
 const ids = ['workspace', 'session-tile:second', 'session-tile:third']
 const disposers: (() => void)[] = []

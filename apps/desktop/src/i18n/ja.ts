@@ -523,7 +523,8 @@ export const jaOverrides = {
       sessionDensityDetailed: '詳細',
       tabStripTitle: 'タブバー',
       tabStripDesc:
-        'ゾーンの上にタブを表示します。自動では、他にチャットやタイルのゾーンがない限り、ペインが1つのときに隠します。',
+        '単一ではバックグラウンドのセッションを閉じずにメインタブを1つにします。自動・常に表示・表示しないはタブバーの表示を制御します。サイドパネルのタブは変わりません。',
+      tabStripSingle: '単一',
       tabStripAuto: '自動',
       tabStripAlways: '常に表示',
       tabStripNever: '表示しない',

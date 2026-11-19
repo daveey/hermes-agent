@@ -10,7 +10,7 @@
  */
 
 import type { Contribution } from '@/contrib/types'
-import { effectiveTabStripMode } from '@/store/tabstrip-prefs'
+import { $tabStripDefault, effectiveTabStripMode } from '@/store/tabstrip-prefs'
 
 import type { TabStripMode } from '../model'
 
@@ -110,6 +110,16 @@ export function tabStripVisibleForZone(zone: {
   /** Panes currently rendered as chips. */
   shown: readonly string[]
 }): boolean {
+  // Single's main slot has no tab-strip chrome. Side/tool-panel strips still
+  // resolve through the existing Auto/Always/Never ladder below.
+  if (
+    $tabStripDefault.get() === 'single' &&
+    zone.shown.length > 0 &&
+    zone.shown.every(id => paneChrome(zone.paneFor(id)).placement === 'main')
+  ) {
+    return false
+  }
+
   return resolveTabStripVisible({
     headerVeto: paneChrome(zone.paneFor(zone.active)).headerVeto,
     mode: effectiveTabStripMode(zone.mode),

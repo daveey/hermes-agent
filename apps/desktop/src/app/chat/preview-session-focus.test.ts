@@ -1,4 +1,9 @@
-import { afterEach, beforeAll, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest'
+
+import { setTabStripDefault } from '@/store/tabstrip-prefs'
+
+// Multi-tab behavior under test: Single (the default) would park sibling tabs.
+beforeEach(() => setTabStripDefault('auto'))
 
 vi.mock('./right-rail/preview', () => ({ PreviewTilePane: () => null }))
 vi.mock('./right-rail/preview-console-store', () => ({ forgetPreviewConsole: () => undefined }))

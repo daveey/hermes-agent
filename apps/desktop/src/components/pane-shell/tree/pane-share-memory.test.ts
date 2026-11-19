@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { LayoutNode } from '@/components/pane-shell/tree/model'
 
+
 // Closing and re-opening a docked tile (the in-app browser) must respect the
 // size the user left it at. Adoption's edge insert used to split the anchor
 // zone [1, 1] every time, so each agent-triggered browser open re-took half
@@ -11,6 +12,7 @@ import type { LayoutNode } from '@/components/pane-shell/tree/model'
 describe('tile split-share memory across close/reopen', () => {
   beforeEach(() => {
     window.localStorage.clear()
+    window.localStorage.setItem('hermes.desktop.tabStripDefault', 'auto') // multi-tab fixtures predate Single
     vi.resetModules()
   })
 

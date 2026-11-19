@@ -324,6 +324,7 @@ export const arSettings = {
       }
     },
     appearance: {
+      tabStripSingle: 'تبويب واحد',
       chatTextScaleTitle: 'حجم نص المحادثة',
       chatTextScaleDesc:
         'يضبط حجم نص المحادثة ومحرر الرسائل نسبةً إلى مقياس الواجهة. يبقى حجم الأشرطة الجانبية وعناصر التحكم كما هو.',

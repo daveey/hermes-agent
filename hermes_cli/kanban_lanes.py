@@ -22,7 +22,7 @@ Three things read it. Creation (:func:`initial_state`) assigns the lane (given, 
 parent's or creating card's lane, then the default) and holds a gated lane's agent-filed cards in ``triage`` with
 ``block_kind='lane_gate'``. Ordering (:func:`order`) gives each free slot to the lane running the fewest cards
 relative to its share; a lane with nothing ready lends its share, so shares are targets and never ceilings.
-:func:`usage` reports target against actual.
+:func:`usage` reports target against actual, including ``blocked_on_you`` (human-request parks).
 
 ``lane_shadow: true`` is the rollout step before enforcement: cards are classified and reported, and each
 ``lane_assigned`` event says whether the card would have been held (``would_gate``), but nothing is held, capped,
@@ -576,13 +576,18 @@ def drop_paused(conn, rows: list) -> list:
 # ── report ──────────────────────────────────────────────────────────────────
 
 def usage(conn, pol: Policy, *, window_s: int, now: Optional[float] = None) -> dict[str, dict]:
-    """Per lane on one connection: target and actual share of run-seconds in the window, and what is waiting."""
+    """Per lane on one connection: target and actual share of run-seconds in the window, and what is waiting.
+
+    ``blocked_on_you`` is the count of ``blocked``/``triage`` cards whose stored ask ``needs_human`` (the same
+    predicate as the sidebar red count): a valid ``human_request``, typically ``needs_input`` or ``capability``.
+    Gate-held cards, dependency/time parks, and ask-less ``needs_input`` are not counted.
+    """
     now = int(time.time() if now is None else now)
     cutoff = now - window_s
     out = {name: {"share": lane.share, "paused": lane.paused, "gated": lane.gated,
                   "admit_per_day": lane.admit_per_day, "run_seconds": 0, "runs": 0, "running": 0, "ready": 0,
-                  "held": 0, "open": 0, "oldest_ready_s": None, "admitted_today": 0, "done": 0, "cost_usd": 0.0,
-                  "tokens": 0, "usage_runs": 0}
+                  "held": 0, "blocked_on_you": 0, "open": 0, "oldest_ready_s": None, "admitted_today": 0,
+                  "done": 0, "cost_usd": 0.0, "tokens": 0, "usage_runs": 0}
            for name, lane in pol.lanes.items()}
     for tenant, seconds, runs in conn.execute(
             "SELECT t.tenant, SUM(MIN(COALESCE(r.ended_at, ?), ?) - MAX(r.started_at, ?)), COUNT(*) "
@@ -622,6 +627,11 @@ def usage(conn, pol: Policy, *, window_s: int, now: Optional[float] = None) -> d
         row["usage_runs"] += runs
     for tenant, count in conn.execute(f"SELECT tenant, COUNT(*) FROM tasks WHERE {HELD} GROUP BY tenant"):
         out[pol.lane_of(tenant)]["held"] += count
+    from hermes_cli.kanban_session_wait_rows import _stored_needs_human
+    for tenant, request, kind in conn.execute(
+            "SELECT tenant, human_request, block_kind FROM tasks WHERE status IN ('blocked', 'triage')"):
+        if _stored_needs_human(request, kind):
+            out[pol.lane_of(tenant)]["blocked_on_you"] += 1
     total_share = sum(lane.share for lane in pol.lanes.values() if not lane.paused) or 1
     total_run = sum(row["run_seconds"] for row in out.values()) or 1
     for name, row in out.items():

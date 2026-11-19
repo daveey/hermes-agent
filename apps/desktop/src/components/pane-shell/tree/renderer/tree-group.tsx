@@ -104,6 +104,7 @@ import { usePanelTitlebar } from './panel-titlebar'
 import { tabStripVisibleForZone } from './strip-visibility'
 import { useActiveTabVisible } from './tab-strip-scroll'
 import { paneChrome } from './track-model'
+import { useMainTabPolicy } from './use-main-tab-policy'
 import { useZoneHeaderLayout } from './zone-header-layout'
 
 /** Right-click zone menu: the tab verbs (close this / others / to the right /
@@ -448,10 +449,7 @@ export function TreeGroup({
   // shown one (render-side — the tree keeps `active`).
   // Edit mode (in Advanced) forces toggle-hidden panes visible so they can be
   // rearranged (mirrors tree-split's paneGone) — restores itself on exit.
-  const paneShown = (id: string) =>
-    Boolean(paneFor(id)) && (revealsHidden || !hiddenPanes.has(id)) && !(narrow && paneChrome(paneFor(id)).collapsible)
-
-  const shown = node.panes.filter(paneShown)
+  const { available, shown } = useMainTabPolicy(node, panes, hiddenPanes, narrow, revealsHidden)
   const memoryKey = workspaceScopeKey(workspaceMode, workspaceOwnerKey)
 
   const activeId = shown.includes(node.active)
@@ -511,18 +509,18 @@ export function TreeGroup({
     lifecycleRef.current = reconcilePaneLifecycle(lifecycleRef.current, {
       activeId,
       keepAlive: id => Boolean(paneChrome(paneFor(id)).lifecycleKeepAlive),
-      paneIds: shown
+      paneIds: available
     })
   }
 
   const paneLifecycle = lifecycleRef.current.entries
-  const keptPanes = shown.filter(id => paneLifecycle[id] && paneLifecycle[id].lifecycle !== 'parked')
+  const keptPanes = available.filter(id => paneLifecycle[id] && paneLifecycle[id].lifecycle !== 'parked')
 
   // A parked session pane releases its transcript from the warm cache
   // (#77311): publish which tiles are parked so use-session-state-cache stops
   // treating them as referenced. Cleared on unmount so a zone that goes away
   // never leaves a tile marked parked.
-  const parkedSessionKey = shown
+  const parkedSessionKey = available
     .filter(id => id.startsWith('session-tile:') && paneLifecycle[id]?.lifecycle === 'parked')
     .map(id => id.slice('session-tile:'.length))
     .join('\n')

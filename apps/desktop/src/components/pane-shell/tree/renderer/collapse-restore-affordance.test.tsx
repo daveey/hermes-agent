@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
+import { setTabStripDefault } from '@/store/tabstrip-prefs'
 
 import { group, type GroupNode, split } from '../model'
 import {
@@ -18,6 +19,9 @@ import {
 } from '../store'
 
 import { TreeGroup } from './tree-group'
+
+// Multi-tab behavior under test: Single (the default) would park sibling tabs.
+beforeEach(() => setTabStripDefault('auto'))
 
 /**
  * A collapsed pane must leave a visible way back. Two live repros, one

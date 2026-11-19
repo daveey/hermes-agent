@@ -1024,7 +1024,8 @@ export const esOverrides = {
       sessionDensityDetailed: 'Detallada',
       tabStripTitle: 'Barra de pestañas',
       tabStripDesc:
-        'Muestra pestañas encima de una zona. Auto las oculta si hay un solo panel, salvo que haya otra zona de chat o de mosaico abierta.',
+        'Única mantiene una pestaña principal sin cerrar las sesiones en segundo plano. Auto, Siempre y Nunca controlan la barra de pestañas. Las pestañas laterales no cambian.',
+      tabStripSingle: 'Única',
       tabStripAuto: 'Auto',
       tabStripAlways: 'Siempre',
       tabStripNever: 'Nunca',
