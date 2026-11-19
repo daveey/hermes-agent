@@ -58,13 +58,78 @@ CLEAN = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _private_home_and_complete_walk(tmp_path, monkeypatch, caplog):
+    """Resolve `~` and PATH inside the test tree, and reject a verdict that
+    comes from the walker's failure fallback instead of from the scan."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('PATH', f"{tmp_path / 'bin'}:/usr/bin:/bin")
+    yield
+    assert 'walk failed' not in caplog.text
+
+
 def _siblings(tmp_path):
     fixtures._tree(tmp_path)
     (tmp_path / 'r.sh').chmod(0o755)
     (tmp_path / 'lib.sh').write_text('FOO=1\n')
+    home_bin = tmp_path / '.hermes' / 'bin'
+    home_bin.mkdir(parents=True)
+    (home_bin / 'hermes-core-wt').write_text('#!/bin/sh\necho "export CORE_WT=1"\n')
+    (home_bin / 'hermes-core-wt').chmod(0o755)
     (tmp_path / 'sub').mkdir()
     (tmp_path / 'sub' / 'lib2.sh').write_text('BAR=2\n')
     (tmp_path / 'sub' / 'calls.sh').write_text(f'bash {tmp_path}/r.sh\n')
+    # Stand-ins for the fleet tool: the honest one prints an export line.
+    for directory, body in (('bin', 'echo "export CORE_WT=1"'), ('evil', f'cat {tmp_path}/r.sh')):
+        (tmp_path / directory).mkdir(exist_ok=True)
+        tool = tmp_path / directory / 'hermes-core-wt'
+        tool.write_text(f'#!/bin/sh\n{body}\n')
+        tool.chmod(0o755)
+
+
+@pytest.mark.parametrize('command', [
+    'eval "$(hermes-core-wt env)"',
+    'cd . && eval "$(hermes-core-wt env)" >/dev/null 2>&1; echo ok | tail -1',
+    'export A="b c" D=e; eval "$(hermes-core-wt env)"; echo ok && echo ok',
+])
+def test_core_worktree_path_export_is_allowed(tmp_path, command):
+    _siblings(tmp_path)
+    assert not fixtures._bash_runs(tmp_path, command)
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+    home = command.replace('hermes-core-wt env', '~/.hermes/bin/hermes-core-wt env')
+    assert scan_gateway_lifecycle(home, cwd=str(tmp_path)) == (False, None)
+
+
+@pytest.mark.parametrize('command', [
+    'hermes-core-wt() { cat ./r.sh; }; eval "$(hermes-core-wt env)"',
+    'function hermes-core-wt { cat ./r.sh; }; eval "$(hermes-core-wt env)"',
+    'PATH="$PWD/evil:$PATH"; eval "$(hermes-core-wt env)"',
+    'export PATH="$PWD/evil:$PATH"; eval "$(hermes-core-wt env)"',
+    'eval "$(hermes-core-wt env; cat ./r.sh)"',
+    'eval "$(evil/hermes-core-wt env)"',
+    'eval "$(./evil/hermes-core-wt env)"',
+    'eval "$(cat ./r.sh)"',
+])
+def test_path_export_trust_does_not_cover_other_eval_input(tmp_path, command):
+    _siblings(tmp_path)
+    assert fixtures._bash_runs(tmp_path, command), 'bash must run the restart, or the row proves nothing'
+    assert scan_gateway_lifecycle(command, cwd=str(tmp_path))[0]
+
+
+@pytest.mark.parametrize('command', [
+    'eval "$(hermes-core-wt env --json)"',
+    'eval "$(hermes-core-wt env)" "$(cat ./r.sh)"',
+    'eval "$(hermes-core-wt env)" > /dev/null "$(cat ./r.sh)"',
+    'eval $(hermes-core-wt env)',
+    'eval "$(hermes-core-wt  env)"',
+    'HOME=/tmp/x; eval "$(~/.hermes/bin/hermes-core-wt env)"',
+    'eval "$(/tmp/.hermes/bin/hermes-core-wt env)"',
+    'noteval "$(hermes-core-wt env)"; bash -c "$(hermes-core-wt env)"',
+])
+def test_path_export_trust_is_exact(tmp_path, command):
+    _siblings(tmp_path)
+    unsafe, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+    assert unsafe and reason and REASON in reason, (unsafe, reason)
 
 
 @pytest.mark.parametrize('command', RUN)

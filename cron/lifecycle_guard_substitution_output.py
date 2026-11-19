@@ -12,6 +12,17 @@ from cron.lifecycle_guard_substitutions import separate_substitutions
 from cron.lifecycle_guard_variables import _ASSIGNMENT, _DECLARATIONS
 
 _OUTPUT = '\x00command-output'
+# `eval "$(hermes-core-wt env)"` is the fleet's way to put a core worktree's
+# tools on PATH; the tool prints one `export PATH=...` line. The name is trusted
+# like the word `python3`: bare or under ~/.hermes/bin, sole argument `env`,
+# the whole quoted eval operand. A command that defines the name or assigns
+# HOME/PATH keeps the refusal.
+_PATH_EXPORT = re.compile(
+    r'(?<![\w$\\.-])eval[ \t]+"\$\((?:(?:~|\$HOME|\$\{HOME\}|/home/[\w.-]+|/Users/[\w.-]+)'
+    r'/\.hermes/bin/)?hermes-core-wt env\)"(?=[ \t]*(?:[;&|\n>)]|[0-9]?>|$))')
+_PATH_EXPORT_DENY = re.compile(
+    r'hermes-core-wt\s*\(|function\s+hermes-core-wt|alias\b[^;\n]*hermes-core-wt='
+    r'|(?<![\w])(?:HOME|PATH)\+?=')
 _VARIABLE_REFERENCE = re.compile(r'\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})')
 
 
@@ -491,6 +502,10 @@ def computed_shell_input(command: str, alias_names: frozenset[str], *,
     from cron.lifecycle_guard_lines import strip_shell_comments
     from cron.lifecycle_guard_substitutions import normalize_ansi_c_quotes
 
+    if not _PATH_EXPORT_DENY.search(command):
+        # Same text the empty-output reading produces; the body is still walked
+        # as an executed command by the substitution scan.
+        command = _PATH_EXPORT.sub('eval ""', command)
     outer, _ = separate_substitutions(command, output_placeholder=_OUTPUT)
     if _OUTPUT not in outer:
         return False, None
