@@ -2,6 +2,7 @@ import { configure } from '@testing-library/react'
 import { afterAll, afterEach } from 'vitest'
 
 import { resetSubmissionIdSupportForTests } from './src/app/session/hooks/use-prompt-actions/submission-identity-support'
+import { resetSingleTabsForTests } from './src/components/pane-shell/tree/single-tab-memory'
 import { clearPlaybackSourceCache } from './src/lib/playback-source-cache'
 import { resetParkRowsForTests } from './src/store/session-park-rows'
 import { InertResizeObserver } from './src/test/jsdom'
@@ -97,3 +98,5 @@ afterEach(() => resetParkRowsForTests())
 // Module-global per-backend memo: a test whose backend refuses submission_id must not make the next
 // test's send skip identity.
 afterEach(() => resetSubmissionIdSupportForTests())
+// Single-tab bookkeeping must not restore a prior test's displaced panes.
+afterEach(() => resetSingleTabsForTests())

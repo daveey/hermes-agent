@@ -3,15 +3,7 @@ import { $tabStripDefault } from '@/store/tabstrip-prefs'
 
 import { allPaneIds, findGroup, findGroupOfPane, type LayoutNode, removePane } from './model'
 import { setTreePaneParked } from './parked-panes'
-
-interface ParkedTab {
-  groupId: string
-  id: string
-  index: number
-}
-
-let parked: ParkedTab[] = []
-let preferred: string | null = null
+import { singleTabMemory as memory, type ParkedTab } from './single-tab-memory'
 const on = () => $tabStripDefault.get() === 'single'
 
 const isMain = (id: string) =>
@@ -37,28 +29,35 @@ function enforce(tree: LayoutNode): LayoutNode {
     }
 
     const keep =
-      preferred && mains.includes(preferred) ? preferred : mains.includes(node.active) ? node.active : mains[0]
+      memory.preferred && mains.includes(memory.preferred)
+        ? memory.preferred
+        : mains.includes(node.active)
+          ? node.active
+          : mains[0]
 
     const displaced = mains.filter(id => id !== keep)
 
     for (const id of displaced) {
-      parked = [...parked.filter(e => e.id !== id), { groupId: node.id, id, index: node.panes.indexOf(id) }]
+      memory.parked = [
+        ...memory.parked.filter(e => e.id !== id),
+        { groupId: node.id, id, index: node.panes.indexOf(id) }
+      ]
       setTreePaneParked(id, true)
     }
 
     const panes = node.panes.filter(id => !displaced.includes(id))
 
-    return { ...node, panes, active: preferred === keep || !panes.includes(node.active) ? keep : node.active }
+    return { ...node, panes, active: memory.preferred === keep || !panes.includes(node.active) ? keep : node.active }
   }
 
   return walk(tree)
 }
 
 function unpark(id: string): ParkedTab | undefined {
-  const entry = parked.find(e => e.id === id)
+  const entry = memory.parked.find(e => e.id === id)
 
   if (entry) {
-    parked = parked.filter(e => e.id !== id)
+    memory.parked = memory.parked.filter(e => e.id !== id)
     setTreePaneParked(id, false)
   }
 
@@ -92,7 +91,7 @@ function remove(tree: LayoutNode, id: string): LayoutNode | null {
   if (on() && zone && (isMain(id) || !registered.has(id)) && !zone.panes.some(p => p !== id && isMain(p))) {
     const inTree = new Set(allPaneIds(tree))
 
-    const candidate = [...parked]
+    const candidate = [...memory.parked]
       .reverse()
       .find(e => e.groupId === zone.id && registered.has(e.id) && !inTree.has(e.id))
 
@@ -118,8 +117,8 @@ function remove(tree: LayoutNode, id: string): LayoutNode | null {
 }
 
 function release(tree: LayoutNode | null, dismissed: ReadonlySet<string>): LayoutNode | null {
-  const entries = [...parked].sort((a, b) => a.index - b.index)
-  parked = []
+  const entries = [...memory.parked].sort((a, b) => a.index - b.index)
+  memory.parked = []
   entries.forEach(e => setTreePaneParked(e.id, false))
 
   if (!tree) {
@@ -167,7 +166,7 @@ function bind(
       if (tree) {
         commit(tree)
       }
-    } else if (parked.length) {
+    } else if (memory.parked.length) {
       const released = release(tree, dismissed())
 
       if (released) {
@@ -184,7 +183,7 @@ function reveal(tree: LayoutNode, id: string, commit: (tree: LayoutNode) => void
   if (findGroupOfPane(tree, id)) {
     return
   }
-  preferred = id
+  memory.preferred = id
 
   try {
     const restored = restore(tree, id, displaced)
@@ -195,7 +194,7 @@ function reveal(tree: LayoutNode, id: string, commit: (tree: LayoutNode) => void
       adopt()
     }
   } finally {
-    preferred = null
+    memory.preferred = null
   }
 }
 
