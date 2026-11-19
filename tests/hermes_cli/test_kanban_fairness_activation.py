@@ -130,6 +130,52 @@ def test_disarm_does_not_require_enabled_config(tmp_path):
     assert not (tmp_path / "capture" / activation.NAME).exists()
 
 
+@pytest.mark.parametrize("change", ["missing", "modified", "false_disarm"])
+def test_authority_loss_cannot_publish_clean_tail(tmp_path, monkeypatch, change):
+    from hermes_cli import kanban_fairness_activation as activation
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    cfg = config(tmp_path)
+    activation.arm(cfg, home=tmp_path, board="default", source_gateway="gw", board_uid="board")
+    session = activation.start(cfg, home=tmp_path)
+    try:
+        read_owners(board="default", now_s=150, path=tmp_path / "missing")
+        descriptor = tmp_path / "capture" / activation.NAME
+        if change == "modified":
+            descriptor.write_bytes(b"{}")
+        else:
+            descriptor.unlink()
+            if change == "false_disarm":
+                (descriptor.parent / activation.DISARMED).write_bytes(b"{}")
+        session.activation_monitor.join(4)
+        session.thread.join(2)
+        assert not session.activation_monitor.is_alive()
+        assert session.abandoned.is_set()
+        assert not (session.out / "runtime-close.json").exists()
+        assert load(session.out)["gaps"]
+    finally:
+        session.close()
+
+
+def test_revocation_during_startup_never_returns_active_epoch(tmp_path, monkeypatch):
+    from hermes_cli import kanban_fairness_activation as activation
+    cfg = config(tmp_path)
+    activation.arm(cfg, home=tmp_path, board="default", source_gateway="gw", board_uid="board")
+    original = runtime.activate
+    sessions = []
+    def revoked(*args, **kwargs):
+        activation.disarm(cfg, home=tmp_path)
+        result = original(*args, **kwargs)
+        sessions.append(result)
+        return result
+    monkeypatch.setattr(runtime, "activate", revoked)
+    try:
+        assert activation.start(cfg, home=tmp_path) is None
+        assert sessions[0].stopping.is_set()
+    finally:
+        for session in sessions:
+            session.close()
+
+
 def test_real_cli_disarm_after_reset(tmp_path, monkeypatch):
     import os
     from pathlib import Path

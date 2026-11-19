@@ -298,7 +298,7 @@ class Session:
 
                 self.ready.set()
                 self.decision.wait()
-                if self.approved:
+                if self.approved and getattr(self, "authority_valid", lambda: True)():
                     close_epoch(self.out, self.identity, manifest, self.deadline_ns, self.completed_ns)
                     self.sealed = True
         except (OSError, ValueError, TypeError, RuntimeError):

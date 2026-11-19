@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import stat
 import threading
 
 from hermes_cli.kanban_fairness_config import resolve
@@ -43,9 +44,11 @@ def _validate(value, settings, home):
 
 
 def _read(path):
-    if path.is_symlink():
-        raise ValueError("runtime descriptor must not be a symlink")
-    with path.open("rb") as stream:
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_DESCRIPTOR:
+            raise ValueError("runtime descriptor must be a bounded regular file")
         raw = stream.read(MAX_DESCRIPTOR + 1)
     if len(raw) > MAX_DESCRIPTOR:
         raise ValueError("runtime descriptor exceeds bound")
@@ -103,13 +106,25 @@ def disarm(config, *, home, directory=None):
             os.replace(path, root / DISARMED)
 
 
+def _authority(path, expected):
+    """Only an exact retained descriptor proves intentional operator revocation."""
+    try:
+        return "armed" if _read(path) == expected else "lost"
+    except FileNotFoundError:
+        try:
+            return "disarmed" if _read(path.parent / DISARMED) == expected else "lost"
+        except (OSError, ValueError):
+            return "lost"
+    except (OSError, ValueError):
+        return "lost"
+
+
 def _monitor(session, path, expected):
     while not session.stopping.wait(0.5):
-        try:
-            unchanged = _read(path) == expected
-        except (OSError, ValueError):
-            unchanged = False
-        if not unchanged:
+        state = _authority(path, expected)
+        if state != "armed":
+            if state == "lost":
+                session.abandoned.set()
             session.close()
             return
 
@@ -135,6 +150,14 @@ def start(config, *, home):
         session = runtime.activate(config, home=home, board=value["board"],
                                    source_gateway=value["source_gateway"], board_uid=value["board_uid"],
                                    clock_error_ns=value["clock_error_ns"])
+        path = settings.directory / NAME
+        session.authority_valid = lambda: _authority(path, raw) != "lost"
+        state = _authority(path, raw)
+        if state != "armed":
+            if state == "lost":
+                session.abandoned.set()
+            session.close()
+            return None
         from agent.memory_provider import spawn_context_thread
 
         session.activation_monitor = spawn_context_thread(
