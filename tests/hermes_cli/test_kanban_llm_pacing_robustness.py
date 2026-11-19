@@ -54,14 +54,21 @@ def test_a_hostile_reset_plans_fast_and_bounded(reset):
     json.dumps(curve, allow_nan=False)
 
 
-def test_a_non_finite_used_is_dropped_before_it_reaches_json():
+def test_a_non_finite_used_reads_as_exhausted_and_never_reaches_json():
     readings = [lp.Reading(NOW, "a", lp.SEVEN_DAY, math.nan, NOW + DAY),
                 lp.Reading(NOW, "b", lp.SEVEN_DAY, math.inf, NOW + DAY),
                 lp.Reading(NOW, "c", lp.SEVEN_DAY, 90.0, NOW + DAY)]
-    assert [r.account for r in lp.valid_readings(readings)] == ["c"]
+    assert [(r.account, r.used) for r in lp.valid_readings(readings)] == [("a", 100.0), ("b", 100.0), ("c", 90.0)]
     pool, _ = lp.plan_pool("anthropic", readings, TPP, TPP, NOW, CFG)
-    assert [a["id"] for a in pool["accounts"]] == ["c"] and pool["at_reserve"] is True
+    assert pool["at_reserve"] is True and pool["remaining_tokens"] == 0.0
     json.dumps(pool, allow_nan=False)
+
+
+@pytest.mark.parametrize("pools", [True, [1], "x", 5, None, {"anthropic": 7}, {"anthropic": {"ratio": math.nan}}],
+                         ids=repr)
+def test_route_ratios_reads_a_malformed_document_as_no_ratios(pools):
+    assert lp.route_ratios({"pools": pools}) == {}
+    assert lp.route_ratios(pools) == {}
 
 
 # --- 2. a malformed stored file: held stays held, one usage read per interval ---------------------------------------
@@ -126,6 +133,9 @@ def test_malformed_fields_of_a_fresh_stored_pool_still_hold(home, monkeypatch, j
 # --- 3. dispatch-level equivalence: the hold is exactly the legacy ``held`` verdict ---------------------------------
 
 CASES = {
+    "nan beside one past reserve": [("a", lp.SEVEN_DAY, math.nan, 2), ("b", lp.SEVEN_DAY, 90.0, 2)],
+    "sole account inf": [("a", lp.SEVEN_DAY, math.inf, 2)],
+    "nan beside one under": [("a", lp.SEVEN_DAY, math.nan, 2), ("b", lp.SEVEN_DAY, 40.0, 2)],
     "one past reserve": [("a", lp.SEVEN_DAY, 90.0, 2)],
     "one under": [("a", lp.SEVEN_DAY, 40.0, 2)],
     "mixed": [("a", lp.SEVEN_DAY, 100.0, 1), ("b", lp.SEVEN_DAY, 50.0, 3)],
@@ -151,7 +161,10 @@ def test_the_dispatch_hold_is_the_legacy_held_verdict(home, monkeypatch, case, m
     windows = CASES[case]
     readings = [lp.Reading(NOW, f"{a}@example.test", kind, used, NOW + days * DAY) for a, kind, used, days in windows]
     monkeypatch.setattr(pd, "read_pool", lambda provider, now: list(readings))
-    legacy = lp.pool_pace("anthropic", readings, [], CFG).state == lp.HELD
+    # The legacy verdict on the same readings, a non-finite ``used`` read as exhausted (``valid_readings``).
+    legacy = lp.pool_pace("anthropic", lp.valid_readings(readings), [], CFG).state == lp.HELD
+    expected = {"nan beside one past reserve": True, "sole account inf": True, "nan beside one under": False}
+    assert legacy is expected.get(case, legacy)
     if mode == "memo":
         monkeypatch.setattr(pd, "_save_state", lambda *a: None)
     elif mode == "junk-file":

@@ -216,7 +216,7 @@ def _refresh(conn: sqlite3.Connection, provider: str, cfg: lp.PacingConfig, now:
         _warn(f"read:{provider}", "kanban pacing: cannot read the %s usage windows (%s); dispatch is ungoverned "
               "until it reads again", provider, exc)
         current = []
-    current = lp.valid_readings(current)  # NaN/inf ``used`` is no reading (and would not serialize)
+    current = lp.valid_readings(current)  # NaN/inf ``used`` reads as exhausted (and never serializes as NaN)
     history = _history(entry, now, cfg)
     pace = lp.pool_pace(provider, current, history, cfg)
     state[provider] = {"read_at": now, "pace": pace.as_dict(), "samples": [r.as_row() for r in history + current]}

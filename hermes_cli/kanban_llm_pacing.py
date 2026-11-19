@@ -268,14 +268,14 @@ MAX_CURVE_POINTS = 64
 
 
 def valid_readings(readings: Iterable[Reading]) -> list[Reading]:
-    """Readings fit to store and plan: a non-finite ``used`` (NaN/inf would not even serialize as JSON) drops the
-    reading as invalid; a non-finite ``reset_at`` reads as no reset."""
+    """Readings fit to store and plan: a non-finite ``used`` reads as exhausted (100%: reserved for the ``held``
+    verdict, no capacity for the plan), never as headroom, and never reaches JSON as NaN/inf; a non-finite
+    ``reset_at`` reads as no reset."""
     out = []
     for r in readings:
-        if not math.isfinite(r.used):
-            continue
+        used = r.used if math.isfinite(r.used) else 100.0
         reset = r.reset_at if r.reset_at is not None and math.isfinite(r.reset_at) else None
-        out.append(r if reset == r.reset_at else Reading(r.ts, r.account, r.kind, r.used, reset))
+        out.append(r if (used, reset) == (r.used, r.reset_at) else Reading(r.ts, r.account, r.kind, used, reset))
     return out
 
 
@@ -580,6 +580,7 @@ def assemble_v2(previous: Any, provider: str, pool: dict, curve: list, events: l
 
 def route_ratios(v2: Any) -> dict[str, float]:
     """Phase 2's routing input: each governed pool's share of the global rate (0 at reserve), known pools only."""
-    pools = (v2 or {}).get("pools") if isinstance(v2, dict) else None
-    return {p: float(v["ratio"]) for p, v in (pools or {}).items()
-            if isinstance(v, dict) and isinstance(v.get("ratio"), (int, float)) and not isinstance(v["ratio"], bool)}
+    pools = _dict(_dict(v2).get("pools"))
+    return {p: float(v["ratio"]) for p, v in pools.items()
+            if isinstance(v, dict) and isinstance(v.get("ratio"), (int, float)) and not isinstance(v["ratio"], bool)
+            and math.isfinite(v["ratio"])}
