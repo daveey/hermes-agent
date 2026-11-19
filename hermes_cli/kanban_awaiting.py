@@ -559,7 +559,9 @@ def tui_chat_reachable(chat_id: str) -> bool:
         _HEADLESS_SESSION, _INTERACTIVE_SOURCES, MACHINE_SESSION_SOURCES, session_creation_source)
     for path in _session_stores():
         try:
-            with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            from hermes_cli.sqlite_safe_read import connect_tracked  # state.db is byte-probed: tracked fd
+            with contextlib.closing(connect_tracked(path.as_uri() + "?mode=ro", tracking_path=path, uri=True,
+                                                    timeout=1)) as db:
                 db.row_factory = sqlite3.Row
                 row = db.execute("SELECT * FROM sessions WHERE id = ?", (chat_id,)).fetchone()
         except (sqlite3.Error, OSError, ValueError):
