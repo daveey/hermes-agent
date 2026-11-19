@@ -753,7 +753,9 @@ def _orchestrator_comment(monkeypatch, conn, tid, body) -> None:
     """The orchestrator answers from its own chat, not from inside this card's run."""
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
-    kb.add_comment(conn, tid, "default", body)
+    cid = kb.add_comment(conn, tid, "default", body)
+    with kb.write_txn(conn):  # an answer comes after the ask was delivered, never in the park's own second
+        conn.execute("UPDATE task_comments SET created_at = ? WHERE id = ?", (int(time.time()) + 5, cid))
 
 
 def test_a_filtered_probe_that_misses_the_answer_still_escalates(kanban_home, monkeypatch) -> None:
