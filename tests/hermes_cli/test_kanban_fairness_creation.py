@@ -226,6 +226,42 @@ def test_named_board_uses_connection_not_default(capture, tmp_path):
         named.close()
 
 
+def test_sqlite_auto_rollback_does_not_commit_orphan_changes(capture, monkeypatch):
+    import sqlite3
+    from hermes_cli import kanban_fairness_creation as receipts
+
+    conn, session = capture
+    before = [tuple(row) for row in conn.execute("SELECT * FROM kanban_task_change ORDER BY task_id")]
+
+    calls = []
+
+    def auto_rollback(conn, *args):
+        calls.append(conn.in_transaction)
+        conn.execute("ROLLBACK")
+        raise sqlite3.OperationalError("simulated SQLite auto-rollback")
+
+    monkeypatch.setattr(receipts, "_append", auto_rollback)
+    with pytest.raises(sqlite3.OperationalError, match="simulated SQLite auto-rollback"):
+        kb.create_task(conn, title="auto-rollback child", assignee="a")
+    assert calls == [True]
+    assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    assert [tuple(row) for row in conn.execute("SELECT * FROM kanban_task_change ORDER BY task_id")] == before
+    assert session.abandoned.is_set()
+
+
+@pytest.mark.parametrize("mismatch", ["creator_task_uid", "capture_id"])
+def test_receipt_custody_mismatch_abandons_without_record(capture, mismatch):
+    conn, session = capture
+    evidence = {}
+    creation.inherit_tool_priority(conn, {"priority": 5}, None, receipt=evidence)
+    evidence[mismatch] = "different-custodian"
+    child = kb.create_task(conn, title="mismatched receipt", assignee="a", priority=5,
+                           creation_receipt=evidence)
+    assert kb.get_task(conn, child).priority == 5
+    assert session.abandoned.is_set()
+    assert not [row for row in journal.rows(conn) if row[1] == "creation"]
+
+
 def test_origin_retry_excludes_internal_observation(capture):
     from tests.hermes_cli.test_kanban_origin_creation import intent
 

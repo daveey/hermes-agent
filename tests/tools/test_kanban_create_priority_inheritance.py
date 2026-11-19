@@ -12,13 +12,16 @@ home = helpers.home
 
 
 @pytest.mark.parametrize('argument,intent,expected', [
-    ("omitted", "omitted", 37), (0, "explicit", 0), (None, "explicit", 37), (60000, "explicit", 1000)])
-def test_capture_keeps_original_tool_intent(home, monkeypatch, argument, intent, expected):
+    ("omitted", "omitted", 37), (0, "explicit", 0), (5, "explicit", 5),
+    (None, "explicit", 37), (60000, "explicit", 1000)])
+@pytest.mark.parametrize('creator_present', [True, False])
+def test_capture_keeps_original_tool_intent(home, monkeypatch, argument, intent, expected, creator_present):
     from hermes_cli import kanban_fairness_journal as journal
     from hermes_cli import kanban_fairness_runtime as runtime
 
     with kbc.connect_closing() as conn:
-        creator = kb.create_task(conn, title='creator', priority=37, session_id=helpers.CHAT)
+        creator = (kb.create_task(conn, title='creator', priority=37, session_id=helpers.CHAT)
+                   if creator_present else 't_absent_on_target_board')
         journal.arm(conn, 'tool-intent')
     config = {'kanban': {'fairness_capture': {'enabled': True, 'capture_id': 'tool-intent',
                                            'directory': str(home / 'capture')}}}
@@ -33,7 +36,13 @@ def test_capture_keeps_original_tool_intent(home, monkeypatch, argument, intent,
         assert result.get('ok'), result
         with kbc.connect_closing() as conn:
             records = [json.loads(row[5]) for row in journal.rows(conn) if row[1] == 'creation']
+        assert not session.abandoned.is_set()
         assert len(records) == 1
+        assert records[0]['creator_task_uid'] == (creator if creator_present else None)
+        if not creator_present:
+            assert 'creator_task_uid' in records[0]['unknown_fields']
+            if argument in ('omitted', None):
+                expected = 0
         assert records[0]['priority_intent'] == intent
         assert records[0]['priority_argument'] == (None if argument == 'omitted' else argument)
         assert records[0]['stored_child_priority'] == expected
@@ -97,10 +106,37 @@ def test_inheritance_crosses_placement_and_courier_without_owner_reinference(hom
     intent = {'request_id': 'priority-transport-fixture',
               'owner': {'gateway': 'owner', 'profile': 'default', 'board': 'default'},
               'origin': {'gateway': 'sender', 'profile': 'default', 'session': helpers.CHAT}}
-    result = json.loads(tools._handle_create(sent[0], origin_intent=intent))
-    # No remote session exists in this fixture; persisted creation is distinct
-    # from the intentionally pending origin-binding acknowledgement.
-    assert result.get('created') and result.get('code') == 'origin_bind_pending', result
+    from hermes_cli import kanban_fairness_journal as journal
+    from hermes_cli import kanban_fairness_runtime as runtime
+
     with kbc.connect_closing() as conn:
-        child = kb.get_task(conn, result['task_id'])
-        assert child is not None and child.priority == 37
+        journal.arm(conn, 'courier-intent')
+    config = {'kanban': {'fairness_capture': {'enabled': True, 'capture_id': 'courier-intent',
+                                           'directory': str(home / 'courier-capture')}}}
+    session = runtime.activate(config, home=home, board='default', source_gateway='test', board_uid='board')
+    assert session is not None
+    observed_receipts = []
+    inherit = tools.inherit_tool_priority
+
+    def observe_courier(*args, **kwargs):
+        observed_receipts.append(kwargs.get('receipt'))
+        return inherit(*args, **kwargs)
+
+    monkeypatch.setattr(tools, 'inherit_tool_priority', observe_courier)
+    try:
+        result = json.loads(tools._handle_create(sent[0], origin_intent=intent))
+        assert observed_receipts == [None]  # do not collect normalized courier intent, even before DB filtering
+        # Persisted creation is distinct from the pending origin-binding acknowledgement.
+        assert result.get('created') and result.get('code') == 'origin_bind_pending', result
+        with kbc.connect_closing() as conn:
+            child = kb.get_task(conn, result['task_id'])
+            assert child is not None and child.priority == 37
+            records = [json.loads(row[5]) for row in journal.rows(conn) if row[1] == 'creation']
+        assert not session.abandoned.is_set()
+        assert len(records) == 1
+        assert records[0]['priority_intent'] == 'unknown'
+        assert records[0]['priority_argument'] is None
+        assert {'priority_intent', 'priority_argument', 'creator_task_uid'} <= set(records[0]['unknown_fields'])
+        assert records[0]['stored_child_priority'] == 37
+    finally:
+        session.close()

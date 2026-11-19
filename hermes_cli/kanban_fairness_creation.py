@@ -86,3 +86,7 @@ def stage(conn, task_id, *, creator_task_id, board, receipt):
     except (sqlite3.Error, ValueError, TypeError):
         # Observation failure makes the capture incomplete, never changes scheduling policy.
         runtime.invalidate(board=board)
+        if not conn.in_transaction:
+            # SQLite FULL/IOERR/NOMEM can roll back the whole creator transaction.
+            # Stop here rather than let later creation writes commit in autocommit.
+            raise
