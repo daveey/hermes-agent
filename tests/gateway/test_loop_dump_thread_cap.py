@@ -37,8 +37,11 @@ def _wedge_loop_behind_fillers(tmp_path, monkeypatch, secret=None):
     def drive_loop() -> None:
         loop = asyncio.new_event_loop()
         state["loop"] = loop
-        loop.call_soon(lambda: start_loop_liveness_watchdog(
-            loop, probe_interval=0.05, probe_timeout=0.05, max_strikes=1))
+        def start_watchdog():
+            state["watchdog"] = start_loop_liveness_watchdog(
+                loop, probe_interval=0.05, probe_timeout=0.05, max_strikes=1)
+
+        loop.call_soon(start_watchdog)
         loop.call_soon(wedged_loop_callback_marker)
         loop.run_forever()
         loop.close()
@@ -54,22 +57,80 @@ def _wedge_loop_behind_fillers(tmp_path, monkeypatch, secret=None):
                   side_effect=lambda file=None, all_threads=True: (file or stderr).write(
                       "Thread 0x1 (most recent call first):\n...\n")):
         loop_thread.start()
-        assert frozen.wait(timeout=5.0), "loop thread never reached its wedged callback"
-        for t in fillers:
-            t.start()  # started AFTER the loop: newest-first truncation drops the loop thread
-        fillers_up.set()
+        started_fillers = []
         try:
+            assert frozen.wait(timeout=5.0), "loop thread never reached its wedged callback"
+            for t in fillers:
+                t.start()  # started AFTER the loop: newest-first truncation drops the loop thread
+                started_fillers.append(t)
+            fillers_up.set()
             assert fired.wait(timeout=10.0), "watchdog never fired"
         finally:
+            # A mocked hard exit returns. Stop its producer while every patch is still
+            # installed, before closing the loop can strand a later probe.
+            watchdog = state.get("watchdog")
+            if watchdog is not None:
+                watchdog.stop()
             release.set()
-            state["loop"].call_soon_threadsafe(state["loop"].stop)
+            fillers_up.set()
+            if (loop := state.get("loop")) is not None:
+                loop.call_soon_threadsafe(loop.stop)
             loop_thread.join(timeout=5.0)
             stop_fillers.set()
-            for t in fillers:
+            for t in started_fillers:
                 t.join(timeout=5.0)
+            if watchdog is not None:
+                watchdog.join(timeout=5.0)
+                assert not watchdog.is_alive(), "watchdog escaped the hard-exit patch"
+            assert not loop_thread.is_alive()
+            assert all(not t.is_alive() for t in started_fillers)
     assert threading.active_count() < _FILLER_THREADS
     dump = get_shutdown_watchdog_dump_path(tmp_path).read_text(encoding="utf-8-sig")
     return dump, stderr.getvalue()
+
+
+def test_fixture_joins_watchdog_before_restoring_hard_exit(tmp_path, monkeypatch):
+    """Hold the mocked exit after it publishes ``fired``: publication is not thread exit."""
+    import gateway.shutdown_watchdog as watchdog
+
+    real_start = start_loop_liveness_watchdog
+    handles = []
+    release_exit = threading.Event()
+    stop_inside_patch = []
+
+    def start_with_held_exit(loop, **kwargs):
+        mocked_exit = watchdog._hard_exit
+        publish_fired = mocked_exit.side_effect
+
+        def held_exit(code):
+            publish_fired(code)
+            assert release_exit.wait(timeout=10.0), "fixture never stopped its watchdog"
+
+        mocked_exit.side_effect = held_exit
+        handle = real_start(loop, **kwargs)
+        assert handle is not None
+        original_stop = handle.stop
+
+        def stop():
+            stop_inside_patch.append(watchdog._hard_exit is mocked_exit)
+            original_stop()
+            release_exit.set()
+
+        handle.stop = stop
+        handles.append(handle)
+        return handle
+
+    with patch(f"{__name__}.start_loop_liveness_watchdog", side_effect=start_with_held_exit):
+        try:
+            _wedge_loop_behind_fillers(tmp_path, monkeypatch)
+            assert handles and not handles[0].is_alive(), "watchdog escaped the hard-exit patch"
+            assert stop_inside_patch == [True]
+        finally:
+            release_exit.set()
+            for handle in handles:
+                handle.stop()
+                handle.join(timeout=5.0)
+                assert not handle.is_alive()
 
 
 def test_file_dump_leads_with_the_wedged_loop_thread_past_100_threads(tmp_path, monkeypatch):
