@@ -49,7 +49,7 @@ def schedule_task(
         except kaw.RepeatedPark as rp:
             return noted.keep(kaw.escalate(conn, task_id, record=rp.record, reason=reason,
                                            expected_run_id=expected_run_id) is not None)
-        wake_check = wake_check or kaw.card_probe(record)
+        wake_check, clock_only = kaw.park_probe(conn, task_id, record, wake_check, clock_only)
         why = kaw.park_cycle_error(conn, task_id, record, wake_check)
         if why:
             raise kaw.AwaitingError(kaw.INVALID_AWAITING, why)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 
 import pytest
 
@@ -32,9 +33,35 @@ LIVE_AWAITING = {"kind": "external", "ref": "Owning orchestrator of comments 216
 LIVE_PROBE = "hermes kanban wait-comment {tid} --after-id 3414 --from-gateway hub"
 
 
-def _subscribe(conn, tid) -> None:
-    kbn.add_notify_sub(conn, task_id=tid, platform="tui", chat_id="local-orchestrator", notifier_profile="default",
-                       delivery_metadata={"reason": "shepherd"})
+ORCHESTRATOR = "20261114_223808_7fed0a"
+
+
+def _session(chat_id: str = ORCHESTRATOR, *, source: str = "desktop", archived: bool = False,
+             end_reason: str | None = None) -> str:
+    """A real session row in the launch store, as the sweeper finds the chat."""
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+    db = SessionDB(get_hermes_home() / "state.db")
+    try:
+        if db.get_session(chat_id) is None:
+            db.create_session(chat_id, source=source)
+        db._conn.execute("UPDATE sessions SET archived = ?, end_reason = ? WHERE id = ?",
+                         (1 if archived else 0, end_reason, chat_id))
+        db._conn.commit()
+    finally:
+        db.close()
+    return chat_id
+
+
+def _subscribe(conn, tid, chat_id: str | None = None) -> None:
+    chat_id = chat_id or _session()
+    # Written directly: add_notify_sub refuses headless-looking ids, and the worker-transcript case must be
+    # refused by the chat-wait check, not by a missing row.
+    with kb.write_txn(conn):
+        conn.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, thread_id, notifier_profile, "
+                     "delivery_mode, delivery_metadata, created_at, last_event_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                     (tid, "tui", chat_id, "", "default", "notify", json.dumps({"reason": "shepherd"}),
+                      int(time.time()), 0))
 
 
 def _asks(conn, tid) -> list:
@@ -156,12 +183,23 @@ def test_decision_requested_reaches_live_and_dormant_chats() -> None:
     assert "premise A/B/C?" in render(None, {"why": "premise A/B/C?"}, "t")
 
 
-def test_orchestrator_wait_matcher() -> None:
-    assert kaw.orchestrator_wait(LIVE_REASON)
-    assert kaw.orchestrator_wait("", "Owning orchestrator of comments 216055 and 3389 (hub)")
-    assert kaw.orchestrator_wait("Parked pending the orchestrator's go-ahead on phase B.")
-    assert not kaw.orchestrator_wait("Per the orchestrator's decision, waiting for CI run 40443505012.")
-    assert not kaw.orchestrator_wait("Orchestrator decision recorded; waiting for the release build.")
+@pytest.mark.parametrize("text,ref,expected", [
+    (LIVE_REASON, None, True),
+    ("", "Owning orchestrator of comments 216055 and 3389 (hub)", True),
+    ("Parked pending the orchestrator's go-ahead on phase B.", None, True),
+    ("Waiting on the orchestrator to decide between A and B.", None, True),
+    ("Need the creator chat's answer on the scope.", None, True),
+    ("Awaiting the origin session's call on the window.", None, True),
+    # citations, negations and product names are not waits on the card's orchestrator (review of #3647)
+    ("Per the orchestrator's decision, waiting for CI run 40443505012.", None, False),
+    ("Orchestrator decision recorded; waiting for the release build.", None, False),
+    ("Waiting for vendor ticket 4411 per the orchestrator's decision in comment 3392.", None, False),
+    ("This card needs no orchestrator decision; waiting for CI run 40443505012.", None, False),
+    ("Waiting for the Airflow orchestrator release 2.9 from the vendor.", None, False),
+    ("Blocked on the k8s orchestrator call timing out; vendor ticket 4411.", None, False),
+])
+def test_orchestrator_wait_matcher(text, ref, expected) -> None:
+    assert kaw.orchestrator_wait(text, ref) is expected
 
 
 WHY_DAVID = "David's approval of the $400 GPU spend is pending"
@@ -195,12 +233,14 @@ def test_chat_wait_never_launders_a_david_ask_or_an_agent_wall(kanban_home, monk
     ("telegram", "notify+wake", True),
     ("telegram", None, False),  # a passive ping, maybe to a person: no orchestrator is woken
     ("hub", None, False),       # the hub relay carries only cards that turned terminal
+    ("hub", "notify+wake", False),  # legacy hub rows were backfilled to notify+wake: still only terminal cards
 ])
 def test_only_a_subscription_the_notice_can_wake_counts(kanban_home, monkeypatch, platform, mode, parks) -> None:
     with kbc.connect_closing() as conn:
         tid = _running(conn)
+        chat = _session() if platform == "tui" else "chat-1"
         kbn.add_notify_sub(conn, task_id=tid, platform=platform,
-                           chat_id="macbook/default/20261026_235722_bef6c6" if platform == "hub" else "chat-1",
+                           chat_id="macbook/default/20261026_235722_bef6c6" if platform == "hub" else chat,
                            notifier_profile="default", delivery_mode=mode,
                            delivery_metadata={"reason": "shepherd"})
         _as_worker(monkeypatch, conn, tid)
@@ -211,3 +251,100 @@ def test_only_a_subscription_the_notice_can_wake_counts(kanban_home, monkeypatch
         else:
             assert kaw.NO_CHAT_SUBSCRIBER in (out.get("code") or "") + out.get("error", ""), out
             assert kb.get_task(conn, tid).status == "running"
+
+
+def test_continue_on_the_orchestrator_asks_too(kanban_home, monkeypatch) -> None:
+    """Review of #3647: kanban_continue recorded the chat wait but posted no decision_requested."""
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("continue", {"checkpoint": LIVE_REASON, "resume_after_seconds": 86400,
+                                 "wake_check": LIVE_PROBE.format(tid=tid), "awaiting": LIVE_AWAITING})
+        assert out.get("ok") is not False and "error" not in out, out
+        assert _park_payload(conn, tid)["awaiting"]["kind"] == "chat"
+        assert len(_asks(conn, tid)) == 1
+        assert "wait-comment" in (kwc.get_state(conn, tid) or {}).get("cmd", "")
+
+
+def test_cli_block_time_records_the_chat_wait(kanban_home, capsys) -> None:
+    from hermes_cli import kanban as kcli
+
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    kcli.build_parser(parser.add_subparsers(dest="command"))
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+    rc = kcli.kanban_command(parser.parse_args([
+        "kanban", "block", tid, LIVE_REASON, "--kind", "time", "--wake-check", LIVE_PROBE.format(tid=tid),
+        "--awaiting", json.dumps(LIVE_AWAITING)]))
+    assert rc == 0, capsys.readouterr().err
+    with kbc.connect_closing() as conn:
+        _assert_chat_park(conn, tid)
+
+
+@pytest.mark.parametrize("op", ["schedule", "block"])
+def test_clock_only_chat_wait_wakes_on_the_answering_comment(kanban_home, monkeypatch, capsys, op) -> None:
+    """Review of #3647: a chat wait with no probe slept to its clock. Its auto probe ignores the park's own
+    comment and fires on the next one."""
+    from hermes_cli import kanban as kcli
+
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        _as_worker(monkeypatch, conn, tid)
+        args = {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING}
+        if op == "block":
+            args["kind"] = "time"
+        out = _tool(op, args)
+        assert out.get("ok") is not False and "error" not in out, out
+        cmd = (kwc.get_state(conn, tid) or {}).get("cmd", "")
+        assert cmd.startswith(f"hermes kanban wait-comment {tid} --after-id "), cmd
+        after = int(cmd.rsplit(" ", 1)[1])
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    kcli.build_parser(parser.add_subparsers(dest="command"))
+
+    def probe() -> int:
+        return kcli.kanban_command(parser.parse_args(["kanban", "wait-comment", tid, "--after-id", str(after)]))
+
+    assert probe() != 0  # the park's own comment and notice do not count as the answer
+    with kbc.connect_closing() as conn:
+        kb.add_comment(conn, tid, "default", "Decisions: B, authorize, Phase A alone.")
+    assert probe() == 0
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("shape", ["archived", "moved", "worker_transcript", "kanban_source", "missing"])
+def test_unreachable_tui_chat_does_not_count(kanban_home, monkeypatch, shape) -> None:
+    """Adversarial review of #3647: the sweeper drops a notice to an archived/moved chat, a worker transcript or
+    a chat no store holds, so such a tui row cannot carry the ask."""
+    chat = {"archived": lambda: _session("20261101_010101_aaaaaa", archived=True),
+            "moved": lambda: _session("20261101_010101_bbbbbb", end_reason="moved_to_gateway:hub"),
+            "worker_transcript": lambda: _session("local-" + "ab" * 32, source="local"),
+            "kanban_source": lambda: _session("20261101_010101_cccccc", source="kanban"),
+            "missing": lambda: "20261101_010101_dddddd"}[shape]()
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid, chat)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING})
+        assert kaw.NO_CHAT_SUBSCRIBER in (out.get("code") or "") + out.get("error", ""), out
+        assert kb.get_task(conn, tid).status == "running" and not _asks(conn, tid)
+
+
+def test_orphan_reaped_desktop_chat_still_counts(kanban_home, monkeypatch) -> None:
+    """The live incident's orchestrator: a Desktop chat ended by ws_orphan_reap, which the sweeper resumes."""
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        chat = _session("20261114_010101_eeeeee", source="local", end_reason="ws_orphan_reap")
+        from hermes_constants import get_hermes_home
+        import sqlite3
+        with sqlite3.connect(get_hermes_home() / "state.db") as sdb:
+            sdb.execute("UPDATE sessions SET created_source = 'cli' WHERE id = ?", (chat,))
+        _subscribe(conn, tid, chat)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING})
+        assert out.get("ok") is not False and "error" not in out, out
+        assert len(_asks(conn, tid)) == 1

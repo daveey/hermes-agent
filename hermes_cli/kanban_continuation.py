@@ -170,7 +170,7 @@ def continue_task(
             checkpoint = noted or checkpoint
             noted, check_every = kaw.resource_apply(record, checkpoint, check_every)
             checkpoint = noted or checkpoint
-            wake_check = wake_check or kaw.card_probe(record)
+            wake_check, clock_only = kaw.park_probe(conn, task_id, record, wake_check, clock_only)
             why = kaw.park_cycle_error(conn, task_id, record, wake_check)
             if why:
                 return {"ok": False, "error": why, "reason_code": kaw.INVALID_AWAITING}
@@ -223,6 +223,8 @@ def continue_task(
             payload.update(kwc.park_fields(wake_check, check_every, clock_only, conn=conn, probe_host=host))
             payload["awaiting"] = record
         kb._append_event(conn, task_id, CONTINUED_OUTCOME, payload, run_id=run_id)
+        from hermes_cli import kanban_decision_ask  # record is None for a continue that does not park
+        kanban_decision_ask.post_notice(conn, task_id, reason=checkpoint, awaiting=record, run_id=run_id)
         kwc.set_check(conn, task_id, wake_check if wake_at is not None else None, check_every, now=now,
                       register_here=kwc.probe_here(conn, host))
         if in_txn is not None:

@@ -55,6 +55,7 @@ on the same opaque probe counts as the same premise however its reason is worded
 from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
+import contextlib
 import hashlib
 import json
 import os
@@ -82,16 +83,23 @@ SOAK_WAIT = "soak_wait"
 NO_CHAT_SUBSCRIBER = "no_chat_subscriber"
 CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT, PRODUCER_DONE, CI_RUN_UNSTARTABLE,
          SOAK_WAIT, NO_CHAT_SUBSCRIBER)
-# A wait on the card's own orchestrator chat: a waiting verb within a clause of "owning/origin/creating
-# orchestrator" (or "orchestrator's decision/answer"), or a ref that starts by naming it. Past citations of a
-# decision already given ("per the orchestrator's decision") carry no waiting verb and are not matched.
+# A wait on the card's own orchestrator chat: a waiting verb, then within the clause either a qualified
+# orchestrator/chat ("owning orchestrator", "origin chat", "creator chat") or the orchestrator's decision words
+# ("orchestrator's three decisions", "orchestrator to decide"). Product names ("Airflow orchestrator release",
+# "k8s orchestrator call") carry neither. A citation or negation just before the noun ("per the orchestrator's
+# decision", "no orchestrator decision") is skipped by :func:`orchestrator_wait`.
 ORCHESTRATOR_WAIT = re.compile(
-    r"\b(?:await(?:s|ing)?|wait(?:s|ing)?\s+(?:on|for)|pending|until|needs?|blocked\s+on)\b[^.;\n]{0,80}?"
-    r"\b(?:(?:owning|origin(?:ating)?|creating|parent|managing)\s+(?:orchestrator|chat)|"
-    r"orchestrator['\u2019]?s?\s+(?:\w+\s+){0,3}?(?:decisions?|answers?|reply|release|go-?ahead|disposition|call))\b",
+    r"\b(?:await(?:s|ing)?|wait(?:s|ing)?\s+(?:on|for)|pending|until|needs?|blocked\s+on|parked\s+(?:on|for))\b"
+    r"(?P<gap>[^.;\n]{0,80}?)"
+    r"\b(?P<noun>(?:owning|origin(?:ating)?|creating|creator|parent|managing|shepherd(?:ing)?)\s+"
+    r"(?:orchestrator|chat|session)|"
+    r"orchestrator['\u2019]s\s+(?:\w+\s+){0,3}?(?:decisions?|answers?|reply|go-?ahead|disposition|approval)|"
+    r"orchestrator\s+to\s+(?:decide|answer|reply|approve|confirm))\b",
     re.IGNORECASE)
-_ORCHESTRATOR_REF = re.compile(r"^\s*(?:the\s+)?(?:owning|origin(?:ating)?|creating|parent|managing)\s+"
-                               r"(?:orchestrator|chat)\b", re.IGNORECASE)
+_ORCHESTRATOR_REF = re.compile(r"^\s*(?:the\s+)?(?:owning|origin(?:ating)?|creating|creator|parent|managing|"
+                               r"shepherd(?:ing)?)\s+(?:orchestrator|chat|session)\b", re.IGNORECASE)
+_CITED_OR_NEGATED = re.compile(r"\b(?:per|following|given|after|no|not|never|without)\s+(?:the\s+|an?\s+|its\s+)?$",
+                               re.IGNORECASE)
 # Parks in a row on one premise before the next one escalates instead (the 3rd park = 2nd re-park).
 REPARK_LIMIT = 2
 # Fires of one opaque probe, each followed by a re-park on it, before the next park escalates: a probe
@@ -487,22 +495,89 @@ def _check_external(conn, task_id, awaiting, text) -> None:
 
 def orchestrator_wait(text: Optional[str], ref: Optional[str] = None) -> bool:
     """True when a park's text waits on the card's own orchestrator chat (see :data:`ORCHESTRATOR_WAIT`)."""
-    return bool(ORCHESTRATOR_WAIT.search(text or "") or _ORCHESTRATOR_REF.search(ref or ""))
+    if _ORCHESTRATOR_REF.search(ref or ""):
+        return True
+    for m in ORCHESTRATOR_WAIT.finditer(text or ""):
+        if not _CITED_OR_NEGATED.search(m.group("gap")):
+            return True
+    return False
+
+
+def park_probe(conn: sqlite3.Connection, task_id: str, record: Optional[dict], wake_check: Optional[str],
+               clock_only: bool) -> tuple[Optional[str], bool]:
+    """``(wake_check, clock_only)`` for a park: the caller's probe, else :func:`wake_probe`'s. A chat wait that
+    now has its comment probe is not a pure clock wait."""
+    wake_check = wake_check or wake_probe(conn, task_id, record)
+    return wake_check, bool(clock_only and not (record and record.get("kind") == CHAT and wake_check))
+
+
+def wake_probe(conn: sqlite3.Connection, task_id: str, record: Optional[dict]) -> Optional[str]:
+    """The probe a park adds when it brought none: a card wait waits on that card (:func:`card_probe`); a chat
+    wait wakes on the next comment, the answer its ``decision_requested`` notice asks for. ``--after-id`` is
+    the newest comment now, so the worker's own park comment (written earlier in the txn) never fires it."""
+    if not record or record.get("kind") != CHAT:
+        return card_probe(record)
+    row = conn.execute("SELECT MAX(id) FROM task_comments WHERE task_id = ?", (task_id,)).fetchone()
+    return shlex.join(["hermes", "kanban", "wait-comment", task_id, "--after-id", str(int(row[0] or 0))])
+
+
+_MOVED_PREFIX = "moved_to_gateway:"  # tui_gateway.notice_fanout.MOVED_PREFIX
+
+
+def _session_stores() -> list[Path]:
+    """The launch store, then each named profile's: where the unloaded sweeper looks for a chat."""
+    from hermes_constants import get_hermes_home
+    home = get_hermes_home()
+    return [p for p in (home / "state.db", *sorted((home / "profiles").glob("*/state.db"))) if p.is_file()]
+
+
+def tui_chat_reachable(chat_id: str) -> bool:
+    """A ``tui`` chat the unloaded sweeper would wake: present in a session store, not archived, not moved away,
+    and not a worker transcript (``tui_gateway.notice_fanout``'s rules, read-only here). A chat whose
+    ``end_reason`` is an orphan reap is still reachable: the sweeper resumes it. Unreadable = unreachable."""
+    from hermes_cli.kanban_session_provenance import (
+        _HEADLESS_SESSION, _INTERACTIVE_SOURCES, MACHINE_SESSION_SOURCES, session_creation_source)
+    for path in _session_stores():
+        try:
+            with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                db.row_factory = sqlite3.Row
+                row = db.execute("SELECT * FROM sessions WHERE id = ?", (chat_id,)).fetchone()
+        except (sqlite3.Error, OSError, ValueError):
+            continue
+        if row is None:
+            continue
+        info = dict(row)
+        if info.get("archived") or str(info.get("end_reason") or "").startswith(_MOVED_PREFIX):
+            return False
+        source = session_creation_source(info)
+        return not (source in MACHINE_SESSION_SOURCES
+                    or (_HEADLESS_SESSION.fullmatch(chat_id) and source not in _INTERACTIVE_SOURCES))
+    return False
 
 
 def has_chat_subscriber(conn: sqlite3.Connection, task_id: str) -> bool:
     """A subscribed chat that ``decision_requested`` can wake.
 
-    A ``tui`` row: the live poller queues it and the unloaded sweeper starts a turn in a dormant chat. A
-    ``notify+wake`` / ``wake`` row: the gateway notifier wakes the agent. Not a plain ``notify`` messaging row
-    (a passive ping, possibly to a person rather than the orchestrator) and not a ``hub`` relay row, which
-    carries only cards that turned terminal, never a parked card's events."""
+    A ``tui`` row whose chat is reachable (:func:`tui_chat_reachable`): the live poller queues the notice and
+    the unloaded sweeper starts a turn in a dormant chat. A messaging row in ``notify+wake`` / ``wake`` mode:
+    the gateway notifier wakes the agent. Never a ``hub`` relay row, whatever its mode (legacy rows were
+    backfilled to ``notify+wake``): it carries only cards that turned terminal. Not a plain ``notify``
+    messaging row either: a passive ping, possibly to a person rather than the orchestrator."""
     try:
-        return conn.execute(
-            "SELECT 1 FROM kanban_notify_subs WHERE task_id = ? AND (platform = 'tui' "
-            "OR delivery_mode IN ('notify+wake', 'wake')) LIMIT 1", (task_id,)).fetchone() is not None
+        rows = conn.execute("SELECT platform, chat_id, delivery_mode FROM kanban_notify_subs WHERE task_id = ?",
+                            (task_id,)).fetchall()
     except sqlite3.OperationalError:
         return False
+    for platform, chat_id, mode in rows:
+        platform = (platform or "").lower()
+        if platform == "hub":
+            continue
+        if platform == "tui":
+            if chat_id and tui_chat_reachable(chat_id):
+                return True
+        elif mode in ("notify+wake", "wake"):
+            return True
+    return False
 
 
 def _check_chat(conn, task_id, awaiting, text) -> None:
