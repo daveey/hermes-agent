@@ -56,7 +56,9 @@ def _inputs(conn, rejected):
     parent = _local(conn, "tasks", task) if task else None
     parent_ops = [tuple(r) for r in conn.execute(
         "SELECT * FROM kanban_sync_outbox WHERE table_name='tasks' AND row_uid=?", (task,))] if task else []
+    from hermes_cli.kanban_sync_rejected_event import snapshot
     return {"row": dict(row) if row else None, "fields": fields, "task": task,
+            "fenced_event": snapshot(conn, rejected, task),
             "parent": dict(parent) if parent else None, "parent_ops": parent_ops,
             "pending": pending, "tombstones": tombs, "run": dict(run_row) if run_row else None,
             "receipt": reserved_key.receipt_for_op(conn, rejected["op_id"])}
@@ -90,6 +92,9 @@ def _moot_release(op, before, evidence, run_evidence):
 
 def _classify(op, before, evidence, parent_evidence, run_evidence=None):
     from hermes_cli import kanban_sync_client as client
+    from hermes_cli.kanban_sync_rejected_event import moot_event
+    if moot_event(op, before, evidence):
+        return "moot", "live-claim fenced phantom event remains tombstoned with its rejection audit; never stored by Board"
     if before["pending"] or before["tombstones"]:
         return "unresolved", "pending local work or local tombstone"
     gate = reserved_key.receipt_resolution(op, before, evidence, parent_evidence)
