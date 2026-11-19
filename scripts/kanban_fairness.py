@@ -180,7 +180,7 @@ def _runtime(args) -> int:
         activation.arm(config, home=home, board=args.board, source_gateway=args.source_gateway,
                        board_uid=args.board_uid, clock_error_ns=args.clock_error_ns)
     else:
-        activation.disarm(config, home=home)
+        activation.disarm(config, home=home, directory=args.directory)
     _emit({"runtime": args.action, "acceptance_ready": False})
     return 0
 
@@ -193,6 +193,7 @@ def _parser() -> argparse.ArgumentParser:
     runtime.add_argument("--board", default="default")
     runtime.add_argument("--source-gateway")
     runtime.add_argument("--board-uid")
+    runtime.add_argument("--directory", help="existing capture directory for disarm after config reset")
     runtime.add_argument("--clock-error-ns", type=int, default=None)
     runtime.set_defaults(run=_runtime)
     capture = sub.add_parser("capture")

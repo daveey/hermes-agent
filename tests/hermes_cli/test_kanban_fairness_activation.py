@@ -101,10 +101,49 @@ def test_real_daemon_binds_before_dispatch_and_closes(tmp_path, monkeypatch, ena
         assert not (tmp_path / "capture").exists()
 
 
+def test_disarm_after_config_reset_uses_existing_directory(tmp_path):
+    from hermes_cli import kanban_fairness_activation as activation
+    cfg = config(tmp_path)
+    activation.arm(cfg, home=tmp_path, board="default", source_gateway="gw", board_uid="board")
+    root = tmp_path / "capture"
+    original = (root / activation.NAME).read_bytes()
+    activation.disarm({}, home=tmp_path, directory=root)
+    assert not (root / activation.NAME).exists()
+    assert (root / activation.DISARMED).read_bytes() == original
+    activation.disarm({}, home=tmp_path, directory=root)
+
+
+def test_explicit_disarm_refuses_other_profile(tmp_path):
+    from hermes_cli import kanban_fairness_activation as activation
+    activation.arm(config(tmp_path), home=tmp_path, board="default", source_gateway="gw", board_uid="board")
+    with pytest.raises(ValueError):
+        activation.disarm({}, home=tmp_path / "other", directory=tmp_path / "capture")
+    assert (tmp_path / "capture" / activation.NAME).exists()
+
+
 def test_disarm_does_not_require_enabled_config(tmp_path):
     from hermes_cli import kanban_fairness_activation as activation
     cfg = config(tmp_path)
     activation.arm(cfg, home=tmp_path, board="default", source_gateway="gw", board_uid="board")
     cfg["kanban"]["fairness_capture"]["enabled"] = False
     activation.disarm(cfg, home=tmp_path)
+    assert not (tmp_path / "capture" / activation.NAME).exists()
+
+
+def test_real_cli_disarm_after_reset(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+    from hermes_cli import kanban_fairness_activation as activation
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    activation.arm(config(tmp_path), home=tmp_path, board="default", source_gateway="gw", board_uid="board")
+    repo = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, str(repo / "scripts" / "kanban_fairness.py"), "runtime", "disarm",
+         "--directory", str(tmp_path / "capture")],
+        cwd=repo, env=dict(os.environ), capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["runtime"] == "disarm"
+    assert (tmp_path / "capture" / activation.DISARMED).is_file()
     assert not (tmp_path / "capture" / activation.NAME).exists()

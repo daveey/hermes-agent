@@ -35,12 +35,15 @@ small descriptor and retains it and all evidence. A passive monitor outside sche
 locks notices the change on a 0.5-second poll and closes its consumer; filesystem
 stalls may delay noticing it, so no synchronous remote-stop guarantee is made.
 Turning config off prevents new consumers but does not replace explicit disarm for
-already-running consumers. The draft disarm command still needs the original capture
-ID/directory settings even when enabled is false.
+already-running consumers. After a config reset, `runtime disarm --directory /absolute/capture`
+reads and validates the existing descriptor for the exact current profile home; it
+never reconstructs or rearms capture. Repeated disarm retains the original bytes.
 
 Bindings currently enter before standalone dispatch, before the daemon loop, during
-gateway dispatcher lease tenure, and around a managed tool-worker turn using live
-profile config (not the frozen session policy). No lazy IO is added to readers,
+gateway dispatcher lease tenure, and around a managed tool-worker turn. Ordinary
+worker admission refreshes only capture observation settings from live profile config
+before freezing the child snapshot; scheduler settings stay frozen. Safe/config-bypass
+workers never read the live profile. No lazy IO is added to readers,
 submission, enabled checks or config loading. Profile-specific descriptors must be
 armed for their exact home; a root descriptor is not authority for another profile.
 Managed-worker/profile and multiplexed gateway scope still need end-to-end proof.

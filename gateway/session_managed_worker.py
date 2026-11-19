@@ -111,7 +111,8 @@ def _worker_config(authority, policy, *, config=None):
     config.pop('command_allowlist', None)
     if live.get('command_allowlist') is not None:
         config['command_allowlist'] = live['command_allowlist']
-    return config
+    from hermes_cli.kanban_fairness_activation import hydrate_worker_config
+    return hydrate_worker_config(config, live)
 
 
 def _session_yolo(authority, route, policy):

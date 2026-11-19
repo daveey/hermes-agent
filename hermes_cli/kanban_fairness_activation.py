@@ -76,15 +76,31 @@ def arm(config, *, home, board, source_gateway, board_uid, clock_error_ns=None):
     return value
 
 
-def disarm(config, *, home):
-    """Retain the descriptor/evidence; revoke new boots and monitored consumers."""
-    raw = dict(config.get("kanban", {}).get("fairness_capture", {}))
-    raw["enabled"] = True  # permit rollback after the config was disabled
-    settings = resolve({"kanban": {"fairness_capture": raw}}, home=Path(home))
-    root = settings.directory
+def disarm(config, *, home, directory=None):
+    """Revoke an existing descriptor, even after config reset; never create one."""
+    home = Path(home)
+    if directory is None:
+        raw = dict(config.get("kanban", {}).get("fairness_capture", {}))
+        raw["enabled"] = True  # permit rollback after the config was disabled
+        settings = resolve({"kanban": {"fairness_capture": raw}}, home=home)
+        root = settings.directory
+    else:
+        root = Path(directory)
+        if not root.is_absolute():
+            raise ValueError("disarm directory must be absolute")
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError("disarm requires an existing capture directory")
     with budget._locked(root):
-        if (root / NAME).exists():
-            os.replace(root / NAME, root / DISARMED)
+        path = root / NAME if (root / NAME).exists() else root / DISARMED
+        value = json.loads(_read(path))
+        if type(value) is not dict:
+            raise ValueError("invalid runtime arm descriptor")
+        options = {"enabled": True, "capture_id": value.get("capture_id"),
+                   "directory": str(root), "max_bytes": value.get("max_bytes")}
+        settings = resolve({"kanban": {"fairness_capture": options}}, home=home)
+        _validate(value, settings, home)
+        if path.name == NAME:
+            os.replace(path, root / DISARMED)
 
 
 def _monitor(session, path, expected):
@@ -126,6 +142,23 @@ def start(config, *, home):
             name="fairness-arm-monitor", daemon=True, passive=True)
         session.activation_monitor.start()
         return session
+
+
+def hydrate_worker_config(config, live):
+    """Owner admission refreshes observations only, never frozen scheduler policy."""
+    from copy import deepcopy
+
+    block = live.get("kanban", {})
+    prior = config.get("kanban", {})
+    if (isinstance(prior, dict) and "fairness_capture" not in prior
+            and (not isinstance(block, dict) or "fairness_capture" not in block)):
+        return config
+    result = deepcopy(config)
+    capture = block.get("fairness_capture", {}) if isinstance(block, dict) else {}
+    if not isinstance(result.get("kanban"), dict):
+        result["kanban"] = {}
+    result["kanban"]["fairness_capture"] = deepcopy(capture)
+    return result
 
 
 def boot(config=None, *, home=None):
