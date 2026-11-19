@@ -31,6 +31,33 @@ def admitted(tmp_path, monkeypatch):
         yield conn, peer, tid, run, home
 
 
+def _end_run(conn, run):
+    from hermes_cli.kanban_continuation import continue_task
+    tid = conn.execute('SELECT task_id FROM task_runs WHERE id=?', (run,)).fetchone()[0]
+    assert continue_task(conn, tid, checkpoint='finished fixture run', expected_run_id=run)
+
+
+@pytest.mark.parametrize('partial_end', ['none', 'clock_only', 'event_only'])
+def test_attestation_waits_for_run_end_and_captures_late_children(admitted, partial_end):
+    from hermes_cli.kanban_run_models_cli import attest
+    conn, peer, tid, run, home = admitted
+    with kb.write_txn(conn):
+        if partial_end == 'clock_only':
+            conn.execute('UPDATE task_runs SET ended_at=? WHERE id=?', (int(time.time()), run))
+        elif partial_end == 'event_only':
+            kb._append_event(conn, tid, 'continued', {}, run_id=run)
+    assert attest(conn, tid)[0]['status'] == 'run_active'
+    assert not conn.execute("SELECT 1 FROM task_events WHERE kind='run_models_attested'").fetchone()
+    with sqlite3.connect(home / 'state.db') as db:
+        db.execute('INSERT INTO sessions VALUES (?, ?, ?, ?)', ('late-child', 'late-model', 0, 'session'))
+    _end_run(conn, run)
+    assert attest(conn, tid)[0]['session_models'] == ['late-model', 'model-a', 'model-b']
+    assert attest(conn, tid)[0]['status'] == 'unchanged'
+    replay(conn, peer)
+    row = peer.execute("SELECT payload FROM task_events WHERE kind='run_models_attested'").fetchone()
+    assert json.loads(row[0])['session_models'] == ['late-model', 'model-a', 'model-b']
+
+
 def test_descendant_models_include_recursive_sessions_and_usage(admitted):
     from hermes_cli import kanban_run_models as models
     from hermes_cli.kanban_run_models_cli import attest
@@ -48,6 +75,7 @@ def test_descendant_models_include_recursive_sessions_and_usage(admitted):
     assert receipt['session_ids'] == ['child', 'grandchild', 'session']
     expected = ['child-model', 'child-usage', 'grandchild-model', 'grandchild-usage', 'model-a', 'model-b']
     assert receipt['session_models'] == expected
+    _end_run(conn, run)
     assert attest(conn, tid)[0]['session_models'] == expected
     with kb.write_txn(conn):
         kb._append_event(conn, tid, 'continued', {}, run_id=run)
@@ -69,6 +97,7 @@ def test_descendant_uncertainty_omits_all_evidence(admitted, defect):
         elif defect == 'missing_admitted_root':
             db.execute("DELETE FROM sessions WHERE id='session'")
     assert models.evidence(conn, tid, run) is None
+    _end_run(conn, run)
     assert attest(conn, tid)[0]['status'] == 'unknown_or_foreign'
     with kb.write_txn(conn):
         kb._append_event(conn, tid, 'continued', {'session_models': ['untrusted']}, run_id=run)
@@ -132,7 +161,8 @@ def test_real_lifecycle_transition_carries_models(admitted, action, kind):
 def test_historical_attestation_does_not_reset_wake_episode(admitted, status):
     from hermes_cli.kanban_run_models_cli import attest
     from hermes_cli import kanban_db_sync as sync
-    conn, _, tid, _, _ = admitted
+    conn, _, tid, run, _ = admitted
+    _end_run(conn, run)
     with kb.write_txn(conn):
         conn.execute('UPDATE tasks SET status=? WHERE id=?', (status, tid))
         conn.execute('INSERT INTO task_wake_episodes(task_id, cmd, first_at, checks) VALUES (?, ?, ?, ?)',
@@ -150,6 +180,7 @@ def test_attestation_is_local_readonly_and_idempotent(admitted):
     from hermes_cli.kanban_run_models_cli import attest
     conn, peer, tid, run, home = admitted
     before = (home / 'state.db').read_bytes()
+    _end_run(conn, run)
     first = attest(conn, tid)
     second = attest(conn, tid)
     assert first[0]['status'] == 'attested'
@@ -166,7 +197,8 @@ def test_evicted_copy_is_hydrated_without_republishing_history(admitted, monkeyp
     from hermes_cli import kanban_worker_node as node
     from hermes_cli.kanban_run_models_cli import attest
     from hermes_cli import kanban_db_sync as sync
-    conn, replica, tid, _, _ = admitted
+    conn, replica, tid, run, _ = admitted
+    _end_run(conn, run)
     gateway = conn.execute('SELECT gateway_id FROM kanban_sync_state').fetchone()[0]
     replay(conn, replica, origin=gateway)
     # Keep the durable replica open while exercising the real import path.
@@ -197,6 +229,7 @@ def test_cli_parser_and_command_attest_admitted_models(admitted, monkeypatch, ca
     from hermes_cli.kanban_parser import build_parser
     from hermes_cli.kanban_run_models_cli import command
     conn, peer, tid, run, _ = admitted
+    _end_run(conn, run)
     parser = argparse.ArgumentParser()
     build_parser(parser.add_subparsers())
     args = parser.parse_args(['kanban', 'attest-run-models', tid, '--json'])

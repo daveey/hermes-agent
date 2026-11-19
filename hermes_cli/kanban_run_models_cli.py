@@ -5,7 +5,7 @@ import json
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
-from hermes_cli.kanban_run_models import evidence, local_gateway
+from hermes_cli.kanban_run_models import TERMINAL_KINDS, evidence, local_gateway
 
 
 def attest(conn, task_id):
@@ -21,8 +21,13 @@ def attest(conn, task_id):
     results = []
     with kb.write_txn(conn):
         gateway = local_gateway(conn)
-        runs = conn.execute('SELECT id, uid FROM task_runs WHERE task_id=?', (task_id,)).fetchall()
-        for run_id, uid in runs:
+        runs = conn.execute('SELECT id, uid, ended_at FROM task_runs WHERE task_id=?', (task_id,)).fetchall()
+        for run_id, uid, ended_at in runs:
+            kinds = {row[0] for row in conn.execute(
+                'SELECT kind FROM task_events WHERE task_id=? AND run_id=?', (task_id, run_id))}
+            if ended_at is None or not kinds.intersection(TERMINAL_KINDS):
+                results.append({'task_id': task_id, 'run_uid': uid, 'status': 'run_active'})
+                continue  # A live session may still acquire more descendant models.
             receipt = evidence(conn, task_id, run_id)
             status = 'unknown_or_foreign'
             if receipt:
