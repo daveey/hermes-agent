@@ -16,6 +16,30 @@ All settings are stored in the `~/.hermes/` directory for easy access.
 Run `hermes setup --portal` — one OAuth gets you a model provider and all four Tool Gateway tools without hand-editing YAML. Portal subscribers also get 10% off token-billed providers. See [Nous Portal](../integrations/nous-portal.md).
 :::
 
+## Kanban fairness evidence capture
+
+Fairness evidence capture is opt-in and does not change scheduling or scoring.
+`kanban.fairness_capture.enabled` defaults to `false`; enabling it alone does not
+arm capture. An operator must separately arm a capture with explicit board and
+source identities before supported process startup can bind a recorder.
+
+- `kanban.fairness_capture.capture_id` defaults to `null`. When enabled, supply
+  1–128 characters: an initial ASCII letter or digit, followed by ASCII letters,
+  digits, `_`, `.`, or `-`.
+- `kanban.fairness_capture.directory` defaults to `null`, resolving to
+  `<profile home>/kanban/evidence/<capture_id>`. An explicit value must be an
+  absolute path.
+- `kanban.fairness_capture.max_bytes` defaults to `536870912` (512 MiB). It must
+  be an integer from `1` through `536870912`, even when capture is disabled.
+  This bounds capture-root storage, including runtime epochs and metadata;
+  reaching a bound refuses further writes rather than deleting evidence.
+
+Disabled capture starts no recorder or monitor. Captures can remain incomplete:
+queue loss, invalid authority, missing tails, unknown clocks, and privacy-redacted
+source documents are not successful completeness evidence. Arbitrary malformed
+source bytes are not persisted. Do not use capture configuration as a fairness
+certification or enable it fleet-wide without a separate approved capture plan.
+
 ## Standing Kanban intake listeners
 
 `kanban.passive_intake` defaults to `{}`. It maps exact task IDs to exact stored
