@@ -15,6 +15,7 @@ usage: scripts/hermes-python scripts/kanban_fairness.py <command> ...
                     cohorts and the four gates (p0 median, max wait while claims, alarms, owners)
   inventory scan --tree NAME=PATH ... --output FILE
   inventory check --scan FILE --classification FILE --output FILE
+  inventory roster --manifest FILE --output FILE  validate fleet identity/coverage evidence
   export --input DIR --output FILE.tar.gz
 
 Exit: 0 pass / completed IO, 1 a proven measured failure, 2 indeterminate or unsupported input, 3 tool error.
@@ -137,6 +138,14 @@ def _report(args) -> int:
 
 
 def _inventory(args) -> int:
+    if args.action == "roster":
+        from hermes_cli.kanban_fairness_roster import validate
+
+        manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8-sig"))
+        result = validate(manifest.get("roster") if isinstance(manifest, dict) else None)
+        Path(args.output).write_text(json.dumps(result, indent=1, sort_keys=True), encoding="utf-8")
+        _emit(result)
+        return EXIT[PASS] if result["complete"] else EXIT[INDETERMINATE]
     if args.action == "scan":
         trees = dict(item.split("=", 1) for item in args.tree)
         result = inventory.scan({name: Path(path) for name, path in trees.items()})
@@ -186,7 +195,8 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--min-window-s", type=float, default=0)
     report.set_defaults(run=_report)
     inv = sub.add_parser("inventory")
-    inv.add_argument("action", choices=("scan", "check"))
+    inv.add_argument("action", choices=("scan", "check", "roster"))
+    inv.add_argument("--manifest")
     inv.add_argument("--tree", action="append", default=[])
     inv.add_argument("--scan")
     inv.add_argument("--classification")
@@ -209,6 +219,8 @@ def main(argv=None) -> int:
             if args.replica:
                 parser.error("capture arm --replica needs --apply-lag-s (the replica's worst pull lag)")
             args.apply_lag_s = 0.0
+    if args.command == "inventory" and args.action == "roster" and not args.manifest:
+        parser.error("inventory roster needs --manifest")
     try:
         return args.run(args)
     except (journal.JournalError, FileNotFoundError, ValueError, KeyError) as exc:
