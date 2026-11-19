@@ -1379,11 +1379,16 @@ class SessionSearchMixin:
         structural damage (or a split WAL generation) instead of leaving it diagnosable."""
         self._raise_if_db_corrupt()
         optimized = 0
-        with self._lock:
+        # 'optimize' frees every old segment page: the whole-file plan runs here, before the lock
+        # (hermes_state_fts_online).
+        with self._fts_runtime_plan(), self._lock:
             self._raise_if_db_replaced()
             if self._conn is None:
                 self._reopen_after_close_locked(context="write")
-            for tbl in self._present_fts_tables():
+            tables = self._present_fts_tables()
+            if tables and not self._fts_wholesale_free_allowed(tables, context="FTS segment merge ('optimize')"):
+                return 0
+            for tbl in tables:
                 try:
                     self._conn.execute(f"INSERT INTO {tbl}({tbl}) VALUES('optimize')")
                     optimized += 1

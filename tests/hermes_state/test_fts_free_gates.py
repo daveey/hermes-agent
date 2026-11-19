@@ -460,3 +460,43 @@ def test_verified_list_merges_with_trash_already_recorded(tmp_path):
         recorded = hermes_state_fts_online.verified_trash(conn)
     assert "fts_v22_trash_older" in recorded and len(recorded) > 1
 
+
+
+# ── 8. optimize_fts() ('optimize' segment merge, reached through vacuum()) ──
+
+def test_optimize_keeps_a_damaged_index_and_plans_outside_the_lock(store, plans):
+    path, before = store
+    _break(path, "messages_fts_trigram_data")
+    root = _root(path, "messages_fts_trigram_data")
+    db = SessionDB(db_path=path)
+    plans[0]["db"] = db
+    assert db.optimize_fts() == 0
+    assert plans[1] == [False]
+    assert db._fts_tick_plan is None
+    _assert_gate_fired(db, path, "messages_fts_trigram_data", root)
+    _recover(db, path, before)
+
+
+def test_optimize_on_a_healthy_store_runs_as_before(store, plans):
+    path, _before = store
+    db = SessionDB(db_path=path)
+    plans[0]["db"] = db
+    try:
+        assert db.optimize_fts() == 2
+        assert db.vacuum() == 2  # vacuum() merges first, through the same gate
+        assert plans[1] == [False, False]
+        assert db._fts_stale is False
+        assert db.search_messages("bravoword")
+    finally:
+        db.close()
+    assert _integrity_lines(path)[0] == ["ok"]
+
+
+def test_merge_is_not_gated(store, plans):
+    path, _before = store
+    db = SessionDB(db_path=path)
+    try:
+        db._merge_fts_incrementally(max_pages=8, max_commands=2)
+        assert plans[1] == []
+    finally:
+        db.close()
