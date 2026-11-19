@@ -527,3 +527,49 @@ def test_spent_wake_budget_still_wakes_the_orchestrator_for_an_ask(kanban_home, 
                   spawn=lambda job: job())
     assert len(wakes) == 1 and "parked until you decide" in wakes[0] and not rows, (wakes, rows)
     ku._reset_wake_budget_for_tests()
+
+
+def test_reworded_chat_reask_still_escalates(kanban_home, monkeypatch) -> None:
+    """Adversarial review of #3647: the premise hashed the question, so a reworded re-ask never escalated."""
+    monkeypatch.setattr(kaw, "_supervisor_profile", lambda task: None)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        for n in range(2):
+            _as_worker(monkeypatch, conn, tid)
+            out = _tool("schedule", {"reason": f"waiting for the owning orchestrator decision, round {n}",
+                                     "clock_only": True, "awaiting": {"kind": "chat", "ref": "owning orchestrator",
+                                                                      "why": f"premise A or B? (asked {n} times)"}})
+            assert out.get("status") == "scheduled", out
+            assert kb.unblock_task(conn, tid)
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+            assert kb.claim_task(conn, tid, claimer="worker") is not None
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": "still need the orchestrator's answer", "clock_only": True,
+                                 "awaiting": {"kind": "chat", "ref": "owning orchestrator",
+                                              "why": "which premise, A or B, please?"}})
+        assert out.get("code") == "repark_escalated" and out.get("status") == "todo", out
+
+
+def test_declared_chat_wait_needs_no_probe_or_clock_flag(kanban_home, monkeypatch) -> None:
+    """Adversarial review of #3647: the long-park guard refused a chat wait before its comment probe existed."""
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting for the release go",
+                                 "awaiting": {"kind": "chat", "ref": "owning orchestrator", "why": "premise A or B?"}})
+        assert out.get("status") == "scheduled", out
+        assert "wait-comment" in kwc.get_state(conn, tid)["cmd"]
+
+
+def test_budget_exemption_is_once_per_card_per_hour() -> None:
+    from tui_gateway import kanban_unloaded as ku
+    ku._reset_wake_budget_for_tests()
+    ident = {"task_id": "t_0000aaaa"}
+    assert ku._ask_exempt_ok("chat-1", ident, 1000.0)
+    assert not ku._ask_exempt_ok("chat-1", ident, 1000.0 + 600)
+    assert ku._ask_exempt_ok("chat-1", {"task_id": "t_0000bbbb"}, 1000.0 + 600)  # another card's question
+    assert ku._ask_exempt_ok("chat-1", ident, 1000.0 + ku.ASK_EXEMPT_S)
+    ku._reset_wake_budget_for_tests()

@@ -76,6 +76,8 @@ _sweeper_started = False
 _sweeper_lock = threading.Lock()
 _wake_lock = threading.Lock()
 _wake_times: dict[str, list[float]] = {}  # chat -> recent started wakes (this process)
+_ask_exempt: dict[tuple[str, str], float] = {}  # (chat, card) -> last budget-exempt ask wake (this process)
+ASK_EXEMPT_S = 3600.0
 _wake_slots = wake_slots.WakeSlots(MAX_PARALLEL_WAKES)
 _slot_waits: dict[tuple, float] = {}  # remote notice -> when slots first refused it (this process)
 
@@ -91,6 +93,7 @@ _overdue_warned: set[tuple[str, str, str]] = set()
 def _reset_wake_budget_for_tests() -> None:
     with _wake_lock:
         _wake_times.clear()
+        _ask_exempt.clear()
 
 
 def _reset_overdue_for_tests() -> None:
@@ -465,7 +468,7 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
     # [daveey] A worker's question to its orchestrator is not budgeted: a passive row nobody reads leaves the card
     # parked until its deadline (adversarial review of #3647). It cannot chain: each ask is a new park, and an
     # identical re-park escalates at kanban_awaiting.REPARK_LIMIT.
-    asks = any(getattr(e, "kind", "") == "decision_requested" for e in claimed)
+    asks = any(getattr(e, "kind", "") == "decision_requested" for e in claimed) and _ask_exempt_ok(tip, ident, now)
     held_by, verdict = _route_notice(holders, ident, tip, slug, task, texts, now, grace_s, exempt_budget=asks)
     if verdict == "skipped:slots" and _slots_may_wait(claimed, now):
         # Every wake slot is busy: hand the range back so the next pass wakes the chat, instead of a passive row
@@ -534,6 +537,18 @@ def _undelivered(db, tip, slug, claimed: list) -> list:
                        exc_info=True)
         return claimed
     return [e for e in claimed if f"{slug}:{int(e.id)}" not in done]
+
+
+def _ask_exempt_ok(tip: str, ident: dict, now: float) -> bool:
+    """One budget-exempt ask wake per chat and card per ``ASK_EXEMPT_S``: an orchestrator answering "not yet" and a
+    re-park must not wake it without bound (the re-park also escalates at REPARK_LIMIT). Charged here."""
+    key = (tip, str(ident.get("task_id") or ""))
+    with _wake_lock:
+        last = _ask_exempt.get(key)
+        if last is not None and now - last < ASK_EXEMPT_S:
+            return False
+        _ask_exempt[key] = now
+        return True
 
 
 def _route_notice(holders, ident, tip, slug, task, texts, now, grace_s,

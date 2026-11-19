@@ -226,7 +226,12 @@ def premise_hash(awaiting: dict, reason: Optional[str], wake_check: Optional[str
     pushed as a new head and a park on that head is new evidence, not the same premise. A PR-URL ref with
     no per-head ``why`` folded every head into one premise and escalated the third fix round (PR #1806,
     t_01a1d19e0179a093). The same head re-parked still counts, so a stuck head escalates. [daveey]"""
-    if awaiting.get("inferred"):
+    if awaiting.get("kind") == CHAT:
+        # The orchestrator waited on, not the question's wording: a worker that rewords its question each park
+        # must still escalate at REPARK_LIMIT (adversarial review of #3647: an orchestrator answering "not yet"
+        # and a reworded re-ask woke it 8 times in 16 min with no escalation).
+        basis = "|".join(awaiting.get(k, "") for k in ("kind", "gateway"))
+    elif awaiting.get("inferred"):
         basis = " ".join((reason or "").lower().split())[:400]
     elif awaiting.get("kind") == RESOURCE:
         # The gate, not its reading: "pool at 87%" and "pool at 88%" are one premise with no new evidence.
@@ -501,6 +506,17 @@ def orchestrator_wait(text: Optional[str], ref: Optional[str] = None) -> bool:
         if not _CITED_OR_NEGATED.search(m.group("gap")):
             return True
     return False
+
+
+def declared_chat_wait(awaiting: Optional[dict]) -> bool:
+    """A declared ``chat`` wait, or an ``external`` one the gate will record as ``chat``. Before the gate it has no
+    probe yet (:func:`wake_probe` adds it in the park txn), so the long-park guard treats it as timed."""
+    if not awaiting:
+        return False
+    if awaiting.get("kind") == CHAT:
+        return True
+    text = " ".join(str(awaiting.get(k) or "") for k in ("why", "ref"))
+    return awaiting.get("kind") == "external" and orchestrator_wait(text, awaiting.get("ref"))
 
 
 def park_probe(conn: sqlite3.Connection, task_id: str, record: Optional[dict], wake_check: Optional[str],
