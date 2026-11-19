@@ -8,6 +8,53 @@ from typing import Any
 from agent.model_routing import ModelRoutingError, eligible_routes, is_class_selector, validate_policy
 
 _DOWNSTREAM_REVIEW = re.compile(r"\A\W*independent\b[^\n]*\breview\b", re.IGNORECASE)
+# [daveey] A downstream review card's own declaration of who implemented the change, for work no Kanban card wrote
+# (a Claude Code session landing through ``hermes-core-wt ship``): one line ``<!-- implementer-models: a, b -->``
+# in the card body, written by the filing tool from the commits' Co-Authored-By trailers. Concrete model ids only.
+_DECLARED = re.compile(r"^<!-- implementer-models: ([^>\n]*) -->\r?$", re.MULTILINE)
+_MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._-]{1,79}")
+
+
+def declared_implementers(body, assignee=None) -> set[str]:
+    """Models a review card's body declares as the change's implementers (``_DECLARED``). [daveey]
+
+    Void (an empty set, as if absent) when any entry on any marker line is malformed (``_MODEL_ID``: no class
+    selector, no space or slash), is not a route model of the assignee's enabled routing policy
+    (``_routable_models``: positive membership, so a host with no policy accepts no declaration), or is refused by
+    the managed registry (``registry_refusal``). A name that excludes no real route must not lift the fail-closed
+    refusal while the review could still run on the model that wrote the change (reviews 5971146857 and the Claude
+    Code review of 3525a48bb8: ``registry_refusal`` alone refuses nothing on an unmanaged host)."""
+    found: set[str] = set()
+    for match in _DECLARED.finditer(body or ""):
+        names = [name.strip() for name in match.group(1).split(",")]
+        if any(not _MODEL_ID.fullmatch(name) for name in names):
+            return set()
+        found.update(names)
+    if not found:
+        return found
+    known = _routable_models(assignee)
+    if any(name not in known for name in found):
+        return set()
+    from hermes_cli.kanban_model_tier import infer_provider
+    if any(registry_refusal(name, infer_provider(name), assignee) is not None for name in found):
+        return set()
+    return found
+
+
+def _routable_models(assignee) -> set[str]:
+    """Every route model of the enabled routing policy a worker for *assignee* on this host reads (any level); empty
+    when there is none or it cannot be read, which voids any declaration (``declared_implementers``). [daveey]"""
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    try:
+        config = _assignee_config(assignee) or {}
+        policy = config.get("model_routing") or {}
+        validate_policy(policy)
+    except Exception:  # health: allow BLE001 -- [daveey] an unreadable routing config names no model: the declaration is void, the review fails closed
+        return set()
+    if not policy.get("enabled", False):
+        return set()
+    return {str(route.get("model") or "") for routes in (policy.get("routes") or {}).values()
+            for route in (routes or []) if isinstance(route, dict)} - {""}
 
 
 def _downstream(task):
@@ -55,6 +102,8 @@ def implementer_models(conn, task) -> set[str]:
                 if model:
                     models.add(model)
         if downstream:
+            # Declared provenance counts as evidence of its own: the change came from outside the board.
+            models.update(declared_implementers(getattr(stored, "body", None), getattr(stored, "assignee", None)))
             created = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created' "
                                    "ORDER BY id LIMIT 1", (card.id,)).fetchone()
             creator = _payload(created[0] if created else None).get("creator_task_id")
