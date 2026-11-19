@@ -26,13 +26,19 @@ def scan_variable_payloads(command, *, cwd, executed, budget, recurse, source, v
 
 def scan_recursive_payloads(command, nested_texts, *, cwd, executed, budget,
                             covered_scope, recurse, source):
-    from cron.lifecycle_guard_output import iter_recursive_payloads
+    from cron.lifecycle_guard_output import iter_recursive_payloads, quote_aware_shell_sink
 
-    for payload, nested, covered, variable_source in iter_recursive_payloads(
+    # A raw quote or a decoded printer line is speculative when this text does
+    # not feed output to a shell outside single quotes. Only that visit drops
+    # placeholder-only basename splices. Nested shell programs, variable
+    # expansions, and arithmetic words keep the full splice check.
+    certified = quote_aware_shell_sink(command)
+    for payload, nested, covered, variable_source, printed_line in iter_recursive_payloads(
             command, nested_texts, cwd=cwd, executed=executed,
             budget=budget, covered_scope=covered_scope):
+        speculative_quote = (covered is not None or printed_line) and not certified
         if recurse(payload, cwd, executed, source, nested=nested, covered_quotes=covered,
-                   variable_source=variable_source):
+                   variable_source=variable_source, anchored_splice_only=speculative_quote):
             return True
     return False
 

@@ -80,11 +80,11 @@ def test_printed_variable_is_not_original_shell_syntax():
         'echo "$log" | bash', [], cwd=None, executed=True,
         budget=_LifecycleScanBudget(), covered_scope=None))
     assert payloads
-    assert all(not item[-1] for item in payloads)
+    assert all(not item[3] for item in payloads)
     shell = list(iter_recursive_payloads(
         "bash -c 'f() { $P; }; f'", [], cwd=None, executed=True,
         budget=_LifecycleScanBudget(), covered_scope=None))
-    assert any(item[0] == 'f() { $P; }; f' and item[-1] for item in shell)
+    assert any(item[0] == 'f() { $P; }; f' and item[3] for item in shell)
 
 
 def test_variable_discovery_skips_plain_text_without_tokenizing(monkeypatch):

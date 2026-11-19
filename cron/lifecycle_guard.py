@@ -889,10 +889,13 @@ def _runs_under_uv(segment: list[str], index: int) -> bool:
                for position, token in enumerate(segment[:index]))
 
 
-def _split_redirections(arguments: list[str]) -> tuple[list[str], list[str]]:
-    """Strip redirections and follow opened inputs through ordered fd copies/moves to stdin."""
+def _split_redirections(
+    arguments: list[str], *, opened: Optional[dict[str, str]] = None,
+) -> tuple[list[str], list[str]]:
+    """Follow ordered fd bindings; an optional caller-owned map carries inherited fds."""
     kept: list[str] = []
-    opened: dict[str, str] = {}
+    if opened is None:
+        opened = {}
     index = 0
     while index < len(arguments):
         match = redirection_parts(arguments[index], _REDIRECTION)
@@ -1314,8 +1317,8 @@ def _iter_option_values(segment: list[str], start: int, option: str) -> Iterator
 
 def _references_at(
     segment: list[str], index: int, cwd: Optional[str], piped: Optional[list[str]] = None,
-) -> Iterator[Path]:
-    """Yield the scripts the token at *index* executes, if any; *piped* are files a pipe feeds to
+) -> Iterator[tuple[Path, bool]]:
+    """Yield ``(path, direct_invocation)``; *piped* are files a pipe feeds to
     its stdin, run by a shell given no script operand (or ``-s``)."""
     if index >= len(segment):
         return
@@ -1324,7 +1327,7 @@ def _references_at(
 
     if executable_name in {".", "source"}:
         if len(segment) > index + 1:
-            yield from _resolved_or_nothing(segment[index + 1], cwd)
+            yield from ((path, False) for path in _resolved_or_nothing(segment[index + 1], cwd))
         return
 
     if executable_name in _SHELL_EXECUTABLES:
@@ -1335,29 +1338,29 @@ def _references_at(
         # the options (`bash clean.sh --rcfile x`) it is only the script's argument.
         for arg_index in range(min(operand_index, len(arguments)) - 1):
             if arguments[arg_index] in _SHELL_LONG_OPTIONS_WITH_VALUES:
-                yield from _resolved_or_nothing(arguments[arg_index + 1], cwd)
+                yield from ((path, False) for path in _resolved_or_nothing(arguments[arg_index + 1], cwd))
         if command_string:
             return
         if operand_index < len(arguments):
-            yield from _resolved_or_nothing(arguments[operand_index], cwd)
+            yield from ((path, False) for path in _resolved_or_nothing(arguments[operand_index], cwd))
         else:
             reads_stdin = True
         if reads_stdin:
             for source in stdin or piped or []:
-                yield from _resolved_or_nothing(source, cwd)
+                yield from ((path, False) for path in _resolved_or_nothing(source, cwd))
         return
 
     # A bare "/" is pathlib's division operator in Python sources, not an executable; resolving it
     # hits the filesystem root and fails the regular-file check, hard-blocking innocent .py scripts.
     if executable.strip("/") and ("/" in executable or executable.endswith((".sh", ".bash", ".zsh"))):
-        yield from _resolved_or_nothing(executable, cwd)
+        yield from ((path, True) for path in _resolved_or_nothing(executable, cwd))
 
 
-def _iter_referenced_shell_scripts(
+def _iter_referenced_script_invocations(
     command: str, *, cwd: Optional[str] = None, call_arguments: bool = False,
     alias_names: frozenset[str] = frozenset(),
-) -> Iterator[Path]:
-    """Yield scripts executed directly or through a POSIX shell. Each segment is read at the
+) -> Iterator[tuple[Path, bool]]:
+    """Yield scripts with direct-versus-forced-shell provenance. Each segment is read at the
     original token AND at the peeled wrapper target, both with and without leading reserved words
     (`time`, `!`, `then`, `{`, …) — additive on purpose: peeling must never REMOVE
     a reference (a local ``./timeout`` is a script, not the coreutils wrapper). With
@@ -1379,6 +1382,12 @@ def _iter_referenced_shell_scripts(
                         target < len(view) and view[target].endswith(_PYTHON_SOURCE_SUFFIXES)
                         and _runs_under_uv(view, target)):
                     yield from _references_at(view, target, cwd, piped)
+
+
+def _iter_referenced_shell_scripts(command: str, **kwargs) -> Iterator[Path]:
+    """Path-only discovery view for callers that do not need invocation provenance."""
+    for path, _direct in _iter_referenced_script_invocations(command, **kwargs):
+        yield path
 
 
 # CPython short options that take a value (glued `-Wignore` or the next token), and the ones after
@@ -1619,8 +1628,8 @@ def _read_script_for_scanning(script_path: str) -> tuple[str, Optional[str]]:
 def _walk_candidates(
     command: str, walk_command: str, *, cwd: Optional[str], executed: bool,
     budget: _LifecycleScanBudget,
-) -> Iterator[tuple[Path, bool, bool]]:
-    """``(path, executed, python_source)`` for every path *command* references, executed
+) -> Iterator[tuple[Path, bool, bool, bool]]:
+    """``(path, executed, python_source, direct_invocation)`` for every reference, executed
     candidates first.
 
     Paths named only inside a masked body are still READ: an interpreter body that hands
@@ -1641,34 +1650,35 @@ def _walk_candidates(
     """
     names = budget.alias_names or frozenset()
     entries = [
-        (path, executed, False)
-        for path in _iter_referenced_shell_scripts(walk_command, cwd=cwd, alias_names=names)
+        (path, executed, False, direct)
+        for path, direct in _iter_referenced_script_invocations(walk_command, cwd=cwd, alias_names=names)
     ]
     entries += [
-        (path, executed, True)
-        for path in _iter_referenced_shell_scripts(
+        (path, executed, True, direct)
+        for path, direct in _iter_referenced_script_invocations(
             walk_command, cwd=cwd, call_arguments=True, alias_names=names)
     ]
     if walk_command != command:
         entries += [
-            (path, False, False)
+            (path, False, False, direct)
             for call_arguments in (False, True)
-            for path in _iter_referenced_shell_scripts(
+            for path, direct in _iter_referenced_script_invocations(
                 command, cwd=cwd, call_arguments=call_arguments, alias_names=names)
         ]
-    for path, candidate_executed, call_argument in entries:
-        yield path, candidate_executed and (budget.alias_names is None or not call_argument), False
+    for path, candidate_executed, call_argument, direct in entries:
+        yield path, candidate_executed and (budget.alias_names is None or not call_argument), False, direct
     # Python candidates are never executed (fail-closed) entries, so the unmasked text, a superset
     # of the masked view, finds them all.
     for path in _iter_python_interpreter_scripts(command, cwd=cwd):
-        yield path, False, True
+        yield path, False, True, False
 
 
 def _contains_unsafe_gateway_action(
     command: str, *, cwd: Optional[str], depth: int, visited: set[object], budget: _LifecycleScanBudget,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None, executed: bool = True,
     source: Optional[str] = None, covered_quote_scope: Optional[tuple] = None,
-    variable_source: bool = True, preserve_cwd: bool = False,
+    variable_source: bool = True, preserve_cwd: bool = False, computed_input: bool = True,
+    anchored_splice_only: bool = False,
 ) -> bool:
     """``executed=False`` means *command* is the content of a file that is only MENTIONED in inert
     (masked) text: it is still scanned for a literal lifecycle command, but "could not scan" (budget,
@@ -1687,7 +1697,12 @@ def _contains_unsafe_gateway_action(
         text: str, cwd: Optional[str], executed: bool, source: Optional[str], python_source: bool = False,
         nested: bool = False, covered_quotes: Optional[tuple] = None, variable_source: bool = True,
         preserve_source_cwd: bool = preserve_cwd,
+        file_computed_input: Optional[bool] = None, anchored_splice_only: bool = False,
     ) -> bool:
+        # Text derived from the current text inherits its computed-input mode; a file visit
+        # decides its own (``file_computed_input``), so a nested script is never covered.
+        # Speculative-quote splice narrowing does not inherit: a referenced file and a
+        # nested shell program keep the full splice check unless they qualify themselves.
         if python_source:
             return _python_source_is_unsafe(text, budget)
         with shell_scope(budget, nested):
@@ -1696,6 +1711,9 @@ def _contains_unsafe_gateway_action(
                 read_remote_script=read_remote_script, executed=executed, source=source,
                 covered_quote_scope=covered_quotes, variable_source=variable_source,
                 preserve_cwd=preserve_source_cwd,
+                computed_input=(computed_input if file_computed_input is None
+                                else file_computed_input),
+                anchored_splice_only=anchored_splice_only,
             )
 
     # The walks below must see the same masked view `_direct_lifecycle_scan` sees (#110422): a
@@ -1727,8 +1745,8 @@ def _contains_unsafe_gateway_action(
     # A nested shell's script may be a path the ordinary candidates never name: a stdin file
     # redirected into `su -l bob`, `doas -s`, `sudo -i` or `ssh host` (review 5903452583 B1). It
     # comes from the executed view, so it is executed, and is walked first in both scopes.
-    nested_only = ((path, executed, False) for path in sorted(nested_scripts))
-    for script_path, candidate_executed, python_source in itertools.chain(nested_only, _walk_candidates(
+    nested_only = ((path, executed, False, False) for path in sorted(nested_scripts))
+    for script_path, candidate_executed, python_source, direct in itertools.chain(nested_only, _walk_candidates(
             command, walk_command, cwd=cwd, executed=executed, budget=budget)):
         # Do not touch a FileProvider path even to discover whether the file is hydrated.
         if _on_cloud_path(script_path):
@@ -1742,7 +1760,8 @@ def _contains_unsafe_gateway_action(
         resolved = _resolve_lenient(script_path)
         scopes = unvisited_scopes(visited, budget, resolved, python_source=python_source,
                                   nested=resolved in nested_scripts, executed=candidate_executed,
-                                  working_directory=str(cwd or Path.cwd()) if preserve_cwd else None)
+                                  working_directory=str(cwd or Path.cwd()) if preserve_cwd else None,
+                                  direct_invocation=direct)
         if not scopes:
             continue
         if not budget.charge_path():
@@ -1777,13 +1796,26 @@ def _contains_unsafe_gateway_action(
                 continue
         if not script_text:
             continue
+        # A directly invoked Python-shebang file is still walked as shell text, exactly as
+        # before the computed-input check existed (never promoted to Python source: the
+        # interpreter name is not proof). Only that new uncertainty check is withheld from
+        # its text, so prose/backticks in Python source cannot newly refuse. Forced
+        # shell/source/stdin visits keep their own keys and the full check.
+        from cron.lifecycle_guard_shebang import checks_computed_input
+
+        file_computed_input = checks_computed_input(direct, script_text)
         # Startup sources retain the invoking shell's cwd; legacy script walks use the script directory.
         if any(recurse(
             script_text, script_working_directory(resolved, cwd, preserve_cwd), candidate_executed,
             f"`{script_path}`", python_source, nested=nested,
+            file_computed_input=file_computed_input,
         ) for nested, _key in scopes):
             return True
-    return False
+    from cron.lifecycle_guard_substitution_output import scan_computed_shell_input
+
+    return scan_computed_shell_input(
+        walk_command, executed=executed, budget=budget, recurse=recurse, cwd=cwd, source=source,
+        enabled=computed_input, anchored_only=anchored_splice_only)
 
 
 def scan_gateway_lifecycle(

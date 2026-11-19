@@ -54,7 +54,10 @@ def test_empty_expansions_mixed_with_present_quoted_arguments(tmp_path, command)
     runs = _bash_runs(tmp_path, command)
     if '"" -s' in command:
         assert not runs
-        assert scan_gateway_lifecycle(command, cwd=str(tmp_path)) == (False, None)
+        # The output is not evaluated by preflight: a function named true can
+        # supply a script operand even though the literal builtin emits nothing.
+        unsafe, reason = scan_gateway_lifecycle(command, cwd=str(tmp_path))
+        assert unsafe and reason and 'substitution output' in reason
         return
     assert runs
     assert scan_gateway_lifecycle(command, cwd=str(tmp_path))[0]

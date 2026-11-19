@@ -350,7 +350,8 @@ def _paren_end(text: str, start: int, nesting: int = 0) -> int:
 
 
 def separate_substitutions(text: str, *, _nesting: int = 0,
-                           empty_unquoted: bool = False) -> tuple[str, list[str]]:
+                           empty_unquoted: bool = False,
+                           output_placeholder: str = SUBSTITUTION) -> tuple[str, list[str]]:
     """Return the outer text and executed bodies, before redirection/line splitting.
 
     Single quotes and comments are inert. Double quotes still execute expansions.
@@ -394,7 +395,7 @@ def separate_substitutions(text: str, *, _nesting: int = 0,
             else:
                 bodies.append(body)
             out.append(_EMPTY_SUBSTITUTION if empty_unquoted and not quote and not arithmetic
-                       else SUBSTITUTION)
+                       else SUBSTITUTION if arithmetic else output_placeholder)
             index = end
             continue
         if quote:
