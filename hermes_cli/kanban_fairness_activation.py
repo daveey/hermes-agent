@@ -5,6 +5,7 @@ monitor observes disarm outside scheduling locks; existing processes close withi
 one poll plus the shared runtime shutdown allowance. No journal is auto-armed.
 """
 from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import logging
 import os
@@ -23,6 +24,8 @@ DISARMED = "runtime-disarmed.json"
 MAX_DESCRIPTOR = 8192
 _LOCK = threading.Lock()
 _LOG = logging.getLogger(__name__)
+# Scoped acquisition mode keeps boot's public/mocked call signature unchanged.
+_OWNED_ONLY = ContextVar("fairness_activation_owned_only", default=False)
 
 
 def _validate(value, settings, home):
@@ -135,6 +138,17 @@ def start(config, *, home):
     settings = resolve(config, home=home)
     if settings is None:
         return None
+    # Validate the complete runtime IO contract before reading an arm or creating
+    # an epoch. In particular O_DIRECTORY is first used by the background writer.
+    required = ("O_NONBLOCK", "O_NOFOLLOW", "O_DIRECTORY")
+    if any(not hasattr(os, name) for name in required):
+        raise ValueError("runtime capture requires nonblocking, nofollow and directory IO")
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise ValueError("runtime capture requires advisory file locking") from exc
+    if any(not hasattr(fcntl, name) for name in ("flock", "LOCK_EX", "LOCK_UN")):
+        raise ValueError("runtime capture requires advisory file locking")
     with _LOCK:
         try:
             raw = _read(settings.directory / NAME)
@@ -146,7 +160,7 @@ def start(config, *, home):
             raise ValueError("runtime arm budget mismatch")
         key = runtime._key(value["board"], home)
         if key in runtime._SESSIONS:
-            return runtime._SESSIONS[key]
+            return None if _OWNED_ONLY.get() else runtime._SESSIONS[key]
         session = runtime.activate(config, home=home, board=value["board"],
                                    source_gateway=value["source_gateway"], board_uid=value["board_uid"],
                                    clock_error_ns=value["clock_error_ns"])
@@ -201,9 +215,18 @@ def boot(config=None, *, home=None):
         return None
 
 
+def boot_owned(config=None, *, home=None):
+    """Return only an epoch this caller created and therefore may close."""
+    token = _OWNED_ONLY.set(True)
+    try:
+        return boot(config, home=home)
+    finally:
+        _OWNED_ONLY.reset(token)
+
+
 @contextmanager
 def serving(config=None, *, home=None):
-    session = boot(config, home=home)
+    session = boot_owned(config, home=home)
     try:
         yield session
     finally:

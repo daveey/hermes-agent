@@ -41,6 +41,28 @@ _GC_INTERVAL_SECONDS = 3600.0
 _HEALTH_WINDOW = 6
 
 
+async def _await_process_service(func, /, *args, into=None):
+    """Offload process-service work; cancellation still observes the worker.
+
+    ``asyncio.to_thread`` does not stop the thread. A cancelled waiter waits for
+    it so a late return value can be closed. Nested cancels are absorbed until
+    the worker finishes. Process-service context is unchanged.
+    """
+    worker = asyncio.ensure_future(_to_thread_process_service(func, *args))
+    try:
+        result = await asyncio.shield(worker)
+        if into is not None:
+            into.append(result)
+        return result
+    except asyncio.CancelledError:
+        while not worker.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({worker})
+        if into is not None and not worker.cancelled() and worker.exception() is None:
+            into.append(worker.result())
+        raise
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
@@ -366,9 +388,10 @@ class GatewayKanbanWatchersMixin:
         from gateway.kanban_dispatcher_health import DispatcherHealth
         health = DispatcherHealth(getattr(self, "_kanban_dispatcher_lock_handle", None), interval=interval)
         self._kanban_dispatcher_health = health
-        from hermes_cli.kanban_fairness_activation import boot
-        capture = await _to_thread_process_service(boot)
+        from hermes_cli.kanban_fairness_activation import boot_owned as boot
+        held: list = []
         try:
+            await _await_process_service(boot, into=held)
             # Initial delay so adapters are wired before workers spawn (matches the notifier).
             await asyncio.sleep(5)
 
@@ -472,9 +495,12 @@ class GatewayKanbanWatchersMixin:
                 await self._sleep_until_tick_or_sync_wake(interval)
 
         finally:
-            if capture is not None:
-                await _to_thread_process_service(capture.close)
-            self._release_kanban_dispatcher_lock()
+            capture = held[-1] if held else None
+            try:
+                if capture is not None:
+                    await _await_process_service(capture.close)
+            finally:
+                self._release_kanban_dispatcher_lock()
 
     async def _kanban_sync_watcher(self) -> None:
         """Central Kanban sync (``kanban.sync.enabled``): pull the Board service's feed and push the outbox every

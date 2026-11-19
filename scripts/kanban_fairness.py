@@ -93,13 +93,26 @@ def _arm(args) -> int:
     resolve(config)  # Validate the configured ceiling even when runtime capture is off.
     maximum = config.get("kanban", {}).get("fairness_capture", {}).get("max_bytes", DEFAULTS["max_bytes"])
     budget.initialize(out, maximum)
+    plan_path = out / PLAN
+    previous = plan_path.read_bytes() if plan_path.exists() else None
     plan = {"capture_id": args.capture_id, "db": db, "board": args.board, "replica": bool(args.replica),
             "assumptions": {"clock_error_s": args.clock_error_s, "apply_lag_s": args.apply_lag_s,
                             "unclaimed_exit": args.unclaimed_exit}}
-    budget.write(out / PLAN, json.dumps(plan, indent=1, sort_keys=True).encode("utf-8"))
-    with _connect(db) as conn:
-        state = journal.arm(conn, args.capture_id, replace=args.replace)
-        store.drain(conn, out)
+    budget.write(plan_path, json.dumps(plan, indent=1, sort_keys=True).encode("utf-8"))
+    armed = False
+    try:
+        with _connect(db) as conn:
+            state = journal.arm(conn, args.capture_id, replace=args.replace)
+            armed = True
+            store.drain(conn, out)
+    except BaseException:
+        # Budget admission comes first; only roll back before the journal is armed.
+        if not armed:
+            if previous is None:
+                plan_path.unlink(missing_ok=True)
+            else:
+                budget.write(plan_path, previous)
+        raise
     _emit({"armed": state, "plan": plan, "acceptance_ready": False})
     return 0
 
