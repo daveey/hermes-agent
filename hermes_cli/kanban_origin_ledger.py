@@ -338,8 +338,9 @@ def _stuck_unreleased(task_raw: str, released: int) -> bool:
 
 def _advanced_observation(binding_raw: str, observed: int, source: sqlite3.Connection) -> tuple | None:
     """``(task, version, released)`` when the replica holds a newer, exactly bound record for this obligation."""
-    binding = json.loads(binding_raw)
-    validate_binding(binding)
+    from hermes_cli.kanban_origin_structure import binding as read_binding
+
+    binding = read_binding(binding_raw)
     row = source.execute(
         "SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
         (binding['owner']['gateway'], binding['task_record_key'])).fetchone()
@@ -572,8 +573,9 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     alias_receipts.setdefault(ack['binding_hash'], []).append(ack)
             for raw, resolved, payload, version, released in conn.execute(
                     "SELECT binding_json,resolved_session,task_json,observation_version,released FROM origin_obligations"):
-                binding = json.loads(raw)
-                validate_binding(binding)
+                from hermes_cli import kanban_origin_structure as structure
+
+                binding = structure.binding(raw)
                 origin, owner = binding['origin'], binding['owner']
                 if (origin['gateway'], origin['profile']) != (gateway, profile):
                     continue
@@ -651,7 +653,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     **({'closed_uncompleted': True} if closed else {}),
                     'stale': not observed, 'synced_at': last_ok,
                     'remote': True, 'via': 'origin',
-                    'legacy_aliases': aliases_for_projection(alias_receipts.get(binding_hash(binding), []), binding),
+                    'legacy_aliases': aliases_for_projection(alias_receipts.get(structure.digest(raw, binding), []), binding),
                     # [daveey] Bounded run fields for what the card waits on (kanban_wait_info, display only).
                     'park': _park_of(task),
                     **{k: task[k] for k in ('awaiting', 'wake_check', 'human_request') if task.get(k)},

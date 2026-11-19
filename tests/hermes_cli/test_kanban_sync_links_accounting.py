@@ -20,6 +20,19 @@ def test_links_substeps_account_work_and_unchanged_pass(live, ledger, kanban_hom
     assert spies == {"reconcile": 0, "backfill": 0}
 
 
+def test_link_only_board_creation_is_accounted(live, ledger, kanban_home, scope):
+    ledger.append(helpers._ledger_row("t_remote", "s_chat", board="only-links"))
+    before = la.snapshot()["loops"]
+    helpers._pass(kanban_home)
+    after = la.snapshot()["loops"]
+    name = "sync.links.ensure_boards"
+    assert after.get(name, {}).get("runs", 0) == before.get(name, {}).get("runs", 0) + 1
+    paths = dict(helpers.ksc.board_paths())
+    assert "only-links" in paths
+    with helpers.kbc.connect(paths["only-links"]) as conn:
+        assert ("t_remote", "s_chat", "shepherd", 0) in helpers._links(conn)
+
+
 def test_links_reconcile_substeps_are_accounted(live, ledger, kanban_home, scope):
     before = la.snapshot()["loops"]
     helpers._seed(live, ledger)
