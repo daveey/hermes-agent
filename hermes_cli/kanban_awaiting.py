@@ -915,9 +915,25 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
             continue  # a continuation with no wait, or a legacy park
         if got["premise"] != premise and not (probe and got.get("probe") == probe):
             break
+        if got.get("kind") == CHAT and _answered_since(conn, task_id, data.get("wake_check")):
+            break  # that ask was answered: a later question is new work, not the same stuck wait
         if not is_healthy(got):
             count += 1
     return count
+
+
+_AFTER_ID = re.compile(r"--after-id\s+(\d+)")
+
+
+def _answered_since(conn: sqlite3.Connection, task_id: str, wake_check: Optional[str]) -> bool:
+    """A chat park's own comment probe (``wait-comment --after-id N``) and an answer after it: any comment above N
+    not written by a kernel writer. Review of #3647: three separately answered questions escalated."""
+    m = _AFTER_ID.search(wake_check or "")
+    if not m:
+        return False
+    from hermes_cli.kanban_comment_origin import is_system_author
+    return any(not is_system_author(author) for (author,) in conn.execute(
+        "SELECT author FROM task_comments WHERE task_id = ? AND id > ?", (task_id, int(m.group(1)))))
 
 
 def probe_fire_reparks(conn: sqlite3.Connection, task_id: str, premise: str, probe: Optional[str]) -> int:

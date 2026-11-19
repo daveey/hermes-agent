@@ -76,8 +76,11 @@ _sweeper_started = False
 _sweeper_lock = threading.Lock()
 _wake_lock = threading.Lock()
 _wake_times: dict[str, list[float]] = {}  # chat -> recent started wakes (this process)
-_ask_exempt: dict[tuple[str, str], float] = {}  # (chat, card) -> last budget-exempt ask wake (this process)
-ASK_EXEMPT_S = 3600.0
+# [daveey] A worker's question to its orchestrator (``decision_requested``) is never written as a passive row: one
+# that cannot wake its chat now (budget spent, slots busy) is handed back and retried, the budget still pacing
+# wakes; one still undelivered after ASK_OVERDUE_S goes to David as a visible needs_input block
+# (kanban_decision_ask.escalate). Adversarial review of #3647.
+ASK_OVERDUE_S = 2 * 3600.0
 _wake_slots = wake_slots.WakeSlots(MAX_PARALLEL_WAKES)
 _slot_waits: dict[tuple, float] = {}  # remote notice -> when slots first refused it (this process)
 
@@ -93,7 +96,6 @@ _overdue_warned: set[tuple[str, str, str]] = set()
 def _reset_wake_budget_for_tests() -> None:
     with _wake_lock:
         _wake_times.clear()
-        _ask_exempt.clear()
 
 
 def _reset_overdue_for_tests() -> None:
@@ -465,11 +467,20 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 "task_id": ident["task_id"], "event_ids": [int(e.id) for e in claimed],
                 # event-id identity shared with the live poller: a notice it already wrote is not written twice
                 "kanban_event_keys": [f"{slug}:{int(e.id)}" for e in claimed if fmt(sub, task, e, slug)]}
-    # [daveey] A worker's question to its orchestrator is not budgeted: a passive row nobody reads leaves the card
-    # parked until its deadline (adversarial review of #3647). It cannot chain: each ask is a new park, and an
-    # identical re-park escalates at kanban_awaiting.REPARK_LIMIT.
-    asks = any(getattr(e, "kind", "") == "decision_requested" for e in claimed) and _ask_exempt_ok(tip, ident, now)
-    held_by, verdict = _route_notice(holders, ident, tip, slug, task, texts, now, grace_s, exempt_budget=asks)
+    held_by, verdict = _route_notice(holders, ident, tip, slug, task, texts, now, grace_s)
+    asks = [e for e in claimed if getattr(e, "kind", "") == "decision_requested"]
+    if asks and verdict in ("skipped:budget", "skipped:slots"):
+        if _ask_waits(asks, now):
+            with contextlib.suppress(Exception):
+                _kbn.rewind_notify_cursor(conn, claimed_cursor=new, old_cursor=old, **ident)
+            if _note_stall(_stall_key(slug, ident), f"orchestrator ask waiting for a wake ({verdict})"):
+                logger.info("kanban ask for %s/%s to chat %s deferred (%s); retrying next pass",
+                            slug, ident["task_id"], tip, verdict)
+            return None
+        from hermes_cli import kanban_decision_ask
+        with contextlib.suppress(Exception):
+            kanban_decision_ask.escalate(conn, ident["task_id"], f"its orchestrator chat {tip} could not be woken "
+                                         f"for {ASK_OVERDUE_S / 3600:.0f} h ({verdict})")
     if verdict == "skipped:slots" and _slots_may_wait(claimed, now):
         # Every wake slot is busy: hand the range back so the next pass wakes the chat, instead of a passive row
         # that no turn reads (design t_01a1d45d75851804 R4). An OVERDUE_S-old notice gets its row as before.
@@ -501,6 +512,15 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 tip, slug, ident["task_id"], len(texts), verdict)
     return {"board": slug, "task_id": ident["task_id"], "chat_id": ident["chat_id"], "session_id": tip,
             "texts": texts, "woken": verdict == "started", "wake_result": verdict, "held_by": held_by}
+
+
+def _ask_waits(asks: list, now: float) -> bool:
+    """An undelivered orchestrator ask waits for a wake until its oldest event is ``ASK_OVERDUE_S`` old."""
+    try:
+        oldest = min(float(getattr(e, "created_at", 0) or 0) for e in asks)
+    except ValueError:
+        return False
+    return now - oldest < ASK_OVERDUE_S
 
 
 def _slots_may_wait(events: list, now: float) -> bool:
@@ -539,20 +559,7 @@ def _undelivered(db, tip, slug, claimed: list) -> list:
     return [e for e in claimed if f"{slug}:{int(e.id)}" not in done]
 
 
-def _ask_exempt_ok(tip: str, ident: dict, now: float) -> bool:
-    """One budget-exempt ask wake per chat and card per ``ASK_EXEMPT_S``: an orchestrator answering "not yet" and a
-    re-park must not wake it without bound (the re-park also escalates at REPARK_LIMIT). Charged here."""
-    key = (tip, str(ident.get("task_id") or ""))
-    with _wake_lock:
-        last = _ask_exempt.get(key)
-        if last is not None and now - last < ASK_EXEMPT_S:
-            return False
-        _ask_exempt[key] = now
-        return True
-
-
-def _route_notice(holders, ident, tip, slug, task, texts, now, grace_s,
-                  exempt_budget: bool = False) -> tuple[Optional[str], Optional[str]]:
+def _route_notice(holders, ident, tip, slug, task, texts, now, grace_s) -> tuple[Optional[str], Optional[str]]:
     """``(held_by, verdict)``: verdict None means a wake slot was taken and the caller must spawn the wake; any other
     verdict says why the row is written now. Never raises: the events are already claimed."""
     held_by = None
@@ -561,8 +568,7 @@ def _route_notice(holders, ident, tip, slug, task, texts, now, grace_s,
         if held_by:
             logger.warning("kanban poller miss: chat %s is held by %s but its poller did not claim %s/%s within "
                            "%.0fs; the sweeper is delivering it", tip, held_by, slug, ident["task_id"], grace_s)
-        skip = _wake_skip_reason(task, texts) or (
-            None if exempt_budget or _has_wake_budget(tip, now) else "skipped:budget")
+        skip = _wake_skip_reason(task, texts) or (None if _has_wake_budget(tip, now) else "skipped:budget")
     except Exception:
         logger.warning("kanban sweep routing for %s failed; writing the notice row", tip, exc_info=True)
         return held_by, "error"

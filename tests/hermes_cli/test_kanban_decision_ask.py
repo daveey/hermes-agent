@@ -491,29 +491,14 @@ class _ChatStore:
         return lambda *a, **k: None
 
 
-def test_spent_wake_budget_still_wakes_the_orchestrator_for_an_ask(kanban_home, monkeypatch) -> None:
-    """Adversarial review of #3647: with the chat's hourly wake budget spent by other cards, the sweeper wrote the
-    ask as a passive row and acked it, so no turn ever read it and the card stayed parked."""
+def _sweep(chat, now, *, busy_slots=False):
     from tui_gateway import kanban_unloaded as ku
-    chat = _session()
-    with kbc.connect_closing() as conn:
-        tid = _running(conn)
-        _subscribe(conn, tid, chat)
-        _as_worker(monkeypatch, conn, tid)
-        out = _tool("schedule", {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING})
-        assert kb.get_task(conn, tid).status == "scheduled", out
-    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
-    now = time.time() + 10
-    ku._reset_wake_budget_for_tests()
-    for i in range(ku.WAKES_PER_HOUR):  # the orchestrator's other cards woke it this hour
-        ku._charge_wake(chat, now - 60 * (i + 1))
-    assert not ku._has_wake_budget(chat, now)
     wakes, rows = [], []
 
     class Store(_ChatStore):
         def append_kanban_notice(self, tip, text, metadata):
             rows.append(text)
+            return True
 
     @contextlib.contextmanager
     def session_db(chat_id):
@@ -523,9 +508,66 @@ def test_spent_wake_budget_still_wakes_the_orchestrator_for_an_ask(kanban_home, 
         wakes.append(text)
         return "started"
 
-    ku.sweep_once(set(), grace_s=0, now=now, session_db=session_db, wake=wake, holders=list,
-                  spawn=lambda job: job())
+    if busy_slots:
+        taken = 0
+        while ku._wake_slots.acquire(blocking=False):
+            taken += 1
+    try:
+        ku.sweep_once(set(), grace_s=0, now=now, session_db=session_db, wake=wake, holders=list,
+                      spawn=lambda job: job())
+    finally:
+        if busy_slots:
+            for _ in range(taken):
+                ku._wake_slots.release()
+    return wakes, rows
+
+
+def _parked_ask(monkeypatch):
+    chat = _session()
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid, chat)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING})
+        assert kb.get_task(conn, tid).status == "scheduled", out
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    return chat, tid
+
+
+@pytest.mark.parametrize("busy_slots", [False, True])
+def test_an_ask_that_cannot_wake_now_is_retried_never_written_passively(kanban_home, monkeypatch,
+                                                                       busy_slots) -> None:
+    """Adversarial review of #3647: with the chat's hourly wake budget spent (or every wake slot busy), the sweeper
+    wrote the ask as a passive row and acked it; no turn read it and the card stayed parked."""
+    from tui_gateway import kanban_unloaded as ku
+    chat, _tid = _parked_ask(monkeypatch)
+    now = time.time() + 10
+    ku._reset_wake_budget_for_tests()
+    if not busy_slots:
+        for i in range(ku.WAKES_PER_HOUR):  # the orchestrator's other cards woke it this hour
+            ku._charge_wake(chat, now - 60 * (i + 1))
+    wakes, rows = _sweep(chat, now, busy_slots=busy_slots)
+    assert not wakes and not rows  # handed back, not written passively
+    later = now + (60 if busy_slots else 3600)  # a slot frees / the budget's hour slides
+    wakes, rows = _sweep(chat, later)
     assert len(wakes) == 1 and "parked until you decide" in wakes[0] and not rows, (wakes, rows)
+    ku._reset_wake_budget_for_tests()
+
+
+def test_an_ask_undelivered_for_two_hours_goes_to_david(kanban_home, monkeypatch) -> None:
+    from tui_gateway import kanban_unloaded as ku
+    chat, tid = _parked_ask(monkeypatch)
+    now = time.time() + ku.ASK_OVERDUE_S + 60
+    ku._reset_wake_budget_for_tests()
+    for i in range(ku.WAKES_PER_HOUR):
+        ku._charge_wake(chat, now - 60 * (i + 1))
+    _sweep(chat, now)
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked", task.status
+        request = json.loads(task.human_request) if isinstance(task.human_request, str) else task.human_request
+        assert "premise A/B/C" in request["action"] or "Owning orchestrator" in request["action"], request
     ku._reset_wake_budget_for_tests()
 
 
@@ -564,12 +606,19 @@ def test_declared_chat_wait_needs_no_probe_or_clock_flag(kanban_home, monkeypatc
         assert "wait-comment" in kwc.get_state(conn, tid)["cmd"]
 
 
-def test_budget_exemption_is_once_per_card_per_hour() -> None:
-    from tui_gateway import kanban_unloaded as ku
-    ku._reset_wake_budget_for_tests()
-    ident = {"task_id": "t_0000aaaa"}
-    assert ku._ask_exempt_ok("chat-1", ident, 1000.0)
-    assert not ku._ask_exempt_ok("chat-1", ident, 1000.0 + 600)
-    assert ku._ask_exempt_ok("chat-1", {"task_id": "t_0000bbbb"}, 1000.0 + 600)  # another card's question
-    assert ku._ask_exempt_ok("chat-1", ident, 1000.0 + ku.ASK_EXEMPT_S)
-    ku._reset_wake_budget_for_tests()
+def test_separately_answered_questions_do_not_escalate(kanban_home, monkeypatch) -> None:
+    """Review of #3647: with one premise per orchestrator, three questions each answered escalated on the third."""
+    monkeypatch.setattr(kaw, "_supervisor_profile", lambda task: None)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        for n in range(3):
+            _as_worker(monkeypatch, conn, tid)
+            out = _tool("schedule", {"reason": f"waiting for the owning orchestrator decision {n}", "clock_only": True,
+                                     "awaiting": {"kind": "chat", "ref": "owning orchestrator", "why": f"question {n}?"}})
+            assert out.get("status") == "scheduled", (n, out)
+            kb.add_comment(conn, tid, "default", f"Answer {n}: go with A.")
+            assert kb.unblock_task(conn, tid)
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+            assert kb.claim_task(conn, tid, claimer="worker") is not None

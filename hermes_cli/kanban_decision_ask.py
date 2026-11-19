@@ -49,34 +49,42 @@ def post_notice(conn, task_id: str, *, reason: str | None, awaiting: Any, run_id
 
 def owner_fallback(conn, task_id: str) -> bool:
     """On the owning gateway, after an imported ``decision_requested``: no wakeable subscriber means nobody gets
-    the ask, so block the still-parked card ``needs_input`` with the question. True when it blocked."""
+    the ask, so it becomes David's (:func:`escalate`). True when it blocked."""
     from hermes_cli import kanban_awaiting as kaw
+    from hermes_cli import kanban_wake_check as kwc
+    if kaw.has_chat_subscriber(conn, task_id):
+        return False
+    own = kwc.own_gateway(conn)
+    return escalate(conn, task_id, f"no chat subscribed to it on {own or 'its owning gateway'} can be woken")
+
+
+def escalate(conn, task_id: str, why_unanswered: str) -> bool:
+    """A still-parked card whose orchestrator ask cannot reach anyone: leave the park (``scheduled`` -> ``triage``,
+    probe cleared, ``decision_unanswerable``) and block it ``needs_input`` with the question, as the spend-budget hold
+    leaves a park. If the block is refused it stays visibly in triage. True when it blocked."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_wake_check as kwc
     task = kb.get_task(conn, task_id)
-    if task is None or task.status != "scheduled" or kaw.has_chat_subscriber(conn, task_id):
+    if task is None or task.status != "scheduled":
         return False
     ask = [e for e in kb.list_events(conn, task_id) if e.kind == NOTICE_KIND]
-    question = str((ask[-1].payload or {}).get("why") or (ask[-1].payload or {}).get("reason") or "") if ask else ""
-    question = question.strip()[:1500] or "the decision named in the card's latest comment"
-    from hermes_cli import kanban_wake_check as kwc
-    own = kwc.own_gateway(conn)
-    # A parked card cannot be blocked directly (block_task takes running/ready/triage): leave the park first, as the
-    # spend-budget hold does. If the block below is refused, the card still sits visibly in triage.
+    payload = (ask[-1].payload or {}) if ask else {}
+    question = str(payload.get("why") or payload.get("reason") or "").strip()[:1500]
+    question = question or "the decision named in the card's latest comment"
     with kb.write_txn(conn):
         if conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ? AND status = 'scheduled'",
                         (task_id,)).rowcount != 1:
             return False
         kwc.set_check(conn, task_id, None, None)
-        kb._append_event(conn, task_id, UNANSWERED_KIND, {"why": question, "gateway": own})
+        kb._append_event(conn, task_id, UNANSWERED_KIND, {"why": question, "because": why_unanswered})
     return bool(kb.block_task(
         conn, task_id, kind="needs_input",
-        reason=("This card's worker parked waiting on its orchestrator's decision, but no chat subscribed to the "
-                "card can be woken here. 1) Answer the question below with a comment on the card. 2) Then unblock "
-                "it.\n" + question),
+        reason=(f"This card's worker parked waiting on its orchestrator's decision, but {why_unanswered}. "
+                "1) Answer the question below with a comment on the card. 2) Then unblock it.\n" + question),
         human_request={
             "action": "Answer the card's question: " + question[:400],
-            "why_human": "its worker asked its orchestrator, and no subscribed chat on the owning gateway can take it",
+            "why_human": f"its worker asked its orchestrator, and {why_unanswered}",
             "interaction": "reply",
             "scope": f"card {task_id}: {str(task.title or '')[:120]}",
-            "evidence": f"decision_requested on {task_id}; no wakeable notify subscription on {own or 'this gateway'}",
+            "evidence": f"decision_requested on {task_id}; {why_unanswered}",
         }))
