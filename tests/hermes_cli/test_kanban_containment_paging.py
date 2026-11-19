@@ -78,6 +78,8 @@ def test_failed_trigger_upgrade_retains_prior_fence(board, monkeypatch):
         conn.execute("DROP TRIGGER containment_task_update")
         raise sqlite3.OperationalError("fixture interrupted migration")
 
+    # A settled install is read-only. Change a real input to request an upgrade.
+    board.execute("ALTER TABLE task_events ADD COLUMN fixture_upgrade TEXT")
     monkeypatch.setattr(guard, "_triggers", interrupted)
     with pytest.raises(sqlite3.OperationalError, match="interrupted migration"):
         guard.install(board)

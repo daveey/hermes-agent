@@ -121,9 +121,33 @@ def install(conn: sqlite3.Connection, *, verify_release: Callable[
     DB. A connection without them fails closed at SQLite, not open on restart.
     """
     register(conn, verify_release=verify_release)
+    if _schema_current(conn):
+        return
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn, allow_nested=True):
-        _install_schema(conn)
+        # Recheck after acquiring the writer: another connection may have repaired
+        # the schema, or changed the columns from which the fence is generated.
+        if not _schema_current(conn):
+            _install_schema(conn)
+
+
+def _stored_triggers(conn: sqlite3.Connection) -> dict[str, str]:
+    return dict(conn.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name GLOB 'containment_*'"))
+
+
+def _schema_current(conn: sqlite3.Connection) -> bool:
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='containment_observations'").fetchone():
+        return False
+    wanted = _trigger_statements(conn)
+    stored = _stored_triggers(conn)
+    if not all(stored.get(name) == sql for name, sql in wanted.items()):
+        return False
+    # Preserve recovery of a missing observation before a later feed page can
+    # clear its task marker. Intact triggers alone do not certify backfill.
+    return conn.execute(
+        "SELECT 1 FROM tasks t WHERE containment_episode IS NOT NULL AND NOT EXISTS "
+        "(SELECT 1 FROM containment_observations o WHERE o.task_id=t.id AND o.episode=t.containment_episode) LIMIT 1"
+    ).fetchone() is None
 
 
 def _install_schema(conn: sqlite3.Connection) -> None:
@@ -132,15 +156,24 @@ def _install_schema(conn: sqlite3.Connection) -> None:
                  "PRIMARY KEY(task_id,episode))")
     conn.execute("INSERT OR IGNORE INTO containment_observations SELECT id,containment_episode FROM tasks "
                  "WHERE containment_episode IS NOT NULL")
-    for operation in ("INSERT", "UPDATE OF containment_episode"):
-        name = operation.split()[0].lower()
-        conn.execute(f"CREATE TRIGGER IF NOT EXISTS containment_observe_{name} AFTER {operation} ON tasks "
-                     "WHEN NEW.containment_episode IS NOT NULL BEGIN INSERT OR IGNORE INTO containment_observations "
-                     "VALUES (NEW.id,NEW.containment_episode); END")
     _triggers(conn)
 
 
 def _triggers(conn: sqlite3.Connection) -> None:
+    stored = _stored_triggers(conn)
+    for name, sql in _trigger_statements(conn).items():
+        if stored.get(name) != sql:
+            conn.execute(f'DROP TRIGGER IF EXISTS "{name}"')
+            conn.execute(sql)
+
+
+def _trigger_statements(conn: sqlite3.Connection) -> dict[str, str]:
+    wanted = {}
+    for operation in ("INSERT", "UPDATE OF containment_episode"):
+        name = "containment_observe_" + operation.split()[0].lower()
+        wanted[name] = (f"CREATE TRIGGER {name} AFTER {operation} ON tasks "
+                        "WHEN NEW.containment_episode IS NOT NULL BEGIN INSERT OR IGNORE INTO containment_observations "
+                        "VALUES (NEW.id,NEW.containment_episode); END")
     held = "kanban_containment_held"
     permit = "kanban_containment_write"
     fail = "SELECT RAISE(ABORT,'containment_pending');"
@@ -173,6 +206,7 @@ def _triggers(conn: sqlite3.Connection) -> None:
         if op == "insert":
             condition = f"({condition}) AND NOT kanban_containment_sync_edge(NEW.parent_id,NEW.child_id)"
         statements[f"edge_{op}"] = (f"BEFORE {op.upper()} ON task_links", condition)
-    for name, (operation, condition) in statements.items():
-        conn.execute(f"DROP TRIGGER IF EXISTS containment_{name}")
-        conn.execute(f"CREATE TRIGGER containment_{name} {operation} WHEN {condition} BEGIN {fail} END")
+    for suffix, (operation, condition) in statements.items():
+        name = f"containment_{suffix}"
+        wanted[name] = f"CREATE TRIGGER {name} {operation} WHEN {condition} BEGIN {fail} END"
+    return wanted
