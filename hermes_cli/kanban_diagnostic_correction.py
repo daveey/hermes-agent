@@ -16,7 +16,11 @@ def correct_diagnostics(
     """Operator-only local CAS; sync convergence must be verified separately.
 
     Caller-provided prose is an audit reason, never an authorization grant.
-    The existing process/DB fence remains the mutation authority boundary.
+    This uses the existing trusted-operator model: absence of worker markers
+    does not authenticate a human or author chat. The actual authorized operator
+    must initiate the call; process_context is observation, not identity proof.
+    Retain the existing process/DB fences and verify invocation custody outside
+    this function before claiming independent-author delivery.
     """
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_sync as sync
@@ -24,8 +28,15 @@ def correct_diagnostics(
 
     if worker_identity():
         raise PermissionError("diagnostic correction requires an independent non-worker operator")
-    if not reason.strip() or not request_id.strip():
-        raise ValueError("reason and request_id must be nonempty")
+    fields = {
+        "task_id": (task_id, 64), "comment_uid": (comment_uid, 201),
+        "expected_body": (expected_body, 100000), "expected_comment": (expected_comment, 50000),
+        "body_diagnostic": (body_diagnostic, 2000), "comment_diagnostic": (comment_diagnostic, 2000),
+        "reason": (reason, 2000), "request_id": (request_id, 128),
+    }
+    for name, (value, limit) in fields.items():
+        if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > limit:
+            raise ValueError(f"invalid correction field: {name}")
     after = {
         "body": quote_diagnostic(expected_body, body_diagnostic),
         "comment": quote_diagnostic(expected_comment, comment_diagnostic),
@@ -41,13 +52,28 @@ def correct_diagnostics(
             raise PermissionError("diagnostic correction requires the owning primary gateway")
         if task["status"] not in ("todo", "ready", "blocked", "scheduled", "triage") or task["current_run_id"]:
             raise ValueError("diagnostic correction requires an inactive open task")
+        request = {
+            "request_id": request_id, "comment_uid": comment_uid, "reason": reason,
+            "before": {"body": expected_body, "comment": expected_comment}, "after": after,
+        }
+        for event in kb.list_events(conn, task_id):
+            if event.kind != "diagnostic_corrected" or event.payload.get("request_id") != request_id:
+                continue
+            if any(event.payload.get(key) != value for key, value in request.items()):
+                raise ValueError("request_id conflict; no correction applied")
+            if task["body"] != after["body"] or comment["body"] != after["comment"]:
+                raise ValueError("correction state drifted; no replay applied")
+            return event.payload
         if task["body"] != expected_body or comment["body"] != expected_comment:
             raise ValueError("stale body or comment; no correction applied")
         payload = {
             "request_id": request_id, "comment_uid": comment_uid, "reason": reason,
             "before": {"body": expected_body, "comment": expected_comment}, "after": after,
-            "operator": {"kind": "non-worker", "session": os.environ.get("HERMES_SESSION_ID"),
-                         "gateway": state["gateway_id"] if state else None},
+            "process_context": {
+                "authority_model": "trusted-operator", "worker_markers_present": False,
+                "session_hint": os.environ.get("HERMES_SESSION_ID"),
+                "gateway": state["gateway_id"] if state else None,
+            },
         }
         conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (after["body"], task_id))
         conn.execute("UPDATE task_comments SET body = ? WHERE uid = ?", (after["comment"], comment_uid))
