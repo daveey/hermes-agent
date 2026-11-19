@@ -176,7 +176,7 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
                         "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed",
                         "chat_wait_unclaimed", "spend_budget_decision_ready", "request_withdrawn", "failure_finalized", "resolved_check_broken",
-                        "resolved_check_lost", "park_progress_notice")
+                        "resolved_check_lost", "park_progress_notice", "decision_requested")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
@@ -617,6 +617,11 @@ def _kb_spend_budget(task, payload, title):
     return ": " + notice(payload)
 
 
+def _kb_decision_requested(payload):
+    from hermes_cli.kanban_decision_ask import notice_text
+    return ": " + notice_text(payload)
+
+
 def _kb_park_progress(payload):
     from hermes_cli.kanban_done_tail import notice_text
     return ": " + notice_text(payload)
@@ -624,6 +629,7 @@ def _kb_park_progress(payload):
 
 _KANBAN_EVENT_FORMATTERS = {
     "park_progress_notice": ("ℹ", lambda t, p, title: _kb_park_progress(p)),
+    "decision_requested": ("❓", lambda t, p, title: _kb_decision_requested(p)),
     "spend_budget_decision_ready": ("⏸", _kb_spend_budget),
     "request_withdrawn": ("ℹ", lambda t, p, title: " request withdrawn: the card was archived. "
                          "No answer is needed for this request; this is not approval and not proof of completion."),

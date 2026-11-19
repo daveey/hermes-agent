@@ -61,6 +61,9 @@ _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "revie
 TERMINAL_KINDS = (*TERMINAL_KINDS, "failure_finalized", "spend_budget_decision_ready", "park_progress_notice")
 _WAKE_KINDS = (*_WAKE_KINDS, "park_progress_notice")
 _WAKE_KINDS = (*_WAKE_KINDS, "spend_budget_decision_ready")
+# ``decision_requested`` (hermes_cli.kanban_decision_ask): a card parked on its orchestrator's answer.
+TERMINAL_KINDS = (*TERMINAL_KINDS, "decision_requested")
+_WAKE_KINDS = (*_WAKE_KINDS, "decision_requested")
 
 
 def diagnostic_event(ev) -> bool:
@@ -634,6 +637,12 @@ def _fmt_park_progress(ev, n) -> tuple:
     return f"ℹ {n.head}: {body}", body, None
 
 
+def _fmt_decision_requested(ev, n) -> tuple:
+    from hermes_cli.kanban_decision_ask import notice_text
+    body = notice_text(ev.payload)
+    return f"\u2753 {n.head}: {body}", body, None
+
+
 def _fmt_chat_wait(ev, n) -> tuple:
     from hermes_cli.kanban_chat_wait import notice_text
     return f"⏳ {n.head}: {notice_text(ev.payload)}", None, None
@@ -675,6 +684,7 @@ def _fmt_request_withdrawn(ev, n):
 # never wake the creator.
 _EVENT_FORMATTERS: dict[str, Callable[[Any, _KanbanNotification], tuple]] = {
     "park_progress_notice": _fmt_park_progress,
+    "decision_requested": _fmt_decision_requested,
     "request_withdrawn": _fmt_request_withdrawn,
     "resolved_check_broken": _fmt_resolved_check_drop,
     "resolved_check_lost": _fmt_resolved_check_drop,

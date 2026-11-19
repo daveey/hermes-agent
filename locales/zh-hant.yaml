@@ -242,6 +242,7 @@ gateway:
       dependency_parent_unclaimed: "has a parent card waiting with no worker"
       chat_wait_unclaimed: "is ready with no worker claiming it"
       park_progress_notice: "在等待期間回報了進度；尚未完成"
+      decision_requested: "is parked until its orchestrator decides"
       spend_budget_decision_ready: "已達到支出預算，等待重新啟動或封存的決定"
       status_default: "status changed"
       status_joiner: ", "

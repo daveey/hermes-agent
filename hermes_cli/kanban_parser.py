@@ -116,7 +116,8 @@ def _WAKE_CHECK_ARGS():
              help="A pure time wait with nothing to probe (soak window, calendar date)"),
         _arg("--awaiting", dest="awaiting", default=None, metavar="KIND:REF|JSON",
              help="Who produces the condition: card:<task id> (JSON adds gateway/board), ci:<run id>, "
-                  "deploy:<id>, external:<vendor/ticket>, clock:<window>, resource:<gate> (an internal "
+                  "deploy:<id>, external:<vendor/ticket>, clock:<window>, chat:<owning orchestrator> (with --awaiting-why "
+                  "<the question>; wakes the card's subscribed chat), resource:<gate> (an internal "
                   "governor/pool hold; needs --wake-check, never escalates, backs off). A wait needs a producer; "
                   "agent-action conditions (grant, permission, install, fix) are work, not waits."),
         _arg("--awaiting-why", dest="awaiting_why", default=None, help="Evidence for --awaiting"),

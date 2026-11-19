@@ -38,6 +38,7 @@ _FOLD_HEADER = ('[IMPORTANT: {count} Kanban task updates arrived while this sess
 # (completed, ...) and is never relabelled. Review handoffs remain pending while a reviewer runs.
 _PREMISE_HOLDS = {
     'park_progress_notice': frozenset({'scheduled'}),
+    'decision_requested': frozenset({'scheduled'}),
     'review_requested': frozenset({'review'}),
     'spend_budget_decision_ready': frozenset({'triage'}),
     'chat_wait_unclaimed': frozenset({'triage', 'todo', 'ready'}),

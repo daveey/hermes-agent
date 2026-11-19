@@ -29,6 +29,12 @@ Each park now carries ``awaiting = {kind, ref, why}`` on its parking event:
   admission and re-parks it (a counted repeat) if the hold stands.
 * ``human``: refused. A wait on David is a visible ``blocked`` card with ``human_request``;
   an ask he already answered (ask-gate ledger) is never re-asked.
+* ``chat``: the card's own orchestrator (a chat subscribed to it: its creator or shepherd) must answer.
+  ``why`` is the question. The park posts ``decision_requested`` (:mod:`kanban_decision_ask`), which wakes
+  that chat even when it is dormant; refused (``no_chat_subscriber``) when no chat subscribes to the card,
+  since nobody would be told. An ``external`` or inferred wait whose text waits on the owning/origin
+  orchestrator is recorded as ``chat`` (``reclassified_from``): labelled ``external`` it woke nobody
+  (t_01a1d774f7486668, 2026-11-18).
 
 A park with no explicit ``awaiting`` is classified from its text: a pending step for a human is
 refused (``human_wait``), and a wall only an agent action clears (grant, permission, access) is
@@ -59,7 +65,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-KINDS = ("card", "ci", "deploy", "external", "clock", "human", "resource")
+KINDS = ("card", "ci", "deploy", "external", "clock", "human", "resource", "chat")
+CHAT = "chat"
 RESOURCE = "resource"
 # A repeat resource park doubles its probe cadence per park in a row on the same gate, up to this.
 RESOURCE_BACKOFF_MAX_SECONDS = 3600
@@ -72,8 +79,19 @@ PRODUCER_DONE = "producer_done"
 # The CI run the park names has a job queued past the limit with no runner (``kanban_ci_progress``).
 CI_RUN_UNSTARTABLE = "ci_run_unstartable"
 SOAK_WAIT = "soak_wait"
+NO_CHAT_SUBSCRIBER = "no_chat_subscriber"
 CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT, PRODUCER_DONE, CI_RUN_UNSTARTABLE,
-         SOAK_WAIT)
+         SOAK_WAIT, NO_CHAT_SUBSCRIBER)
+# A wait on the card's own orchestrator chat: a waiting verb within a clause of "owning/origin/creating
+# orchestrator" (or "orchestrator's decision/answer"), or a ref that starts by naming it. Past citations of a
+# decision already given ("per the orchestrator's decision") carry no waiting verb and are not matched.
+ORCHESTRATOR_WAIT = re.compile(
+    r"\b(?:await(?:s|ing)?|wait(?:s|ing)?\s+(?:on|for)|pending|until|needs?|blocked\s+on)\b[^.;\n]{0,80}?"
+    r"\b(?:(?:owning|origin(?:ating)?|creating|parent|managing)\s+(?:orchestrator|chat)|"
+    r"orchestrator['\u2019]?s?\s+(?:\w+\s+){0,3}?(?:decisions?|answers?|reply|release|go-?ahead|disposition|call))\b",
+    re.IGNORECASE)
+_ORCHESTRATOR_REF = re.compile(r"^\s*(?:the\s+)?(?:owning|origin(?:ating)?|creating|parent|managing)\s+"
+                               r"(?:orchestrator|chat)\b", re.IGNORECASE)
 # Parks in a row on one premise before the next one escalates instead (the 3rd park = 2nd re-park).
 REPARK_LIMIT = 2
 # Fires of one opaque probe, each followed by a re-park on it, before the next park escalates: a probe
@@ -467,6 +485,29 @@ def _check_external(conn, task_id, awaiting, text) -> None:
         raise wall_error(task_id, wall, text)
 
 
+def orchestrator_wait(text: Optional[str], ref: Optional[str] = None) -> bool:
+    """True when a park's text waits on the card's own orchestrator chat (see :data:`ORCHESTRATOR_WAIT`)."""
+    return bool(ORCHESTRATOR_WAIT.search(text or "") or _ORCHESTRATOR_REF.search(ref or ""))
+
+
+def has_chat_subscriber(conn: sqlite3.Connection, task_id: str) -> bool:
+    """A chat that would receive the card's notices: any notify subscription on the card."""
+    try:
+        return conn.execute("SELECT 1 FROM kanban_notify_subs WHERE task_id = ? LIMIT 1", (task_id,)).fetchone() is not None
+    except sqlite3.OperationalError:
+        return False
+
+
+def _check_chat(conn, task_id, awaiting, text) -> None:
+    if not awaiting.get("why"):
+        raise AwaitingError(INVALID_AWAITING, "awaiting kind='chat' needs why=<the question the orchestrator must answer>")
+    if not has_chat_subscriber(conn, task_id):
+        raise AwaitingError(NO_CHAT_SUBSCRIBER, (
+            f"{task_id} has no chat subscribed to it, so no orchestrator would be told about this wait. "
+            "A decision only David can make is kanban_block kind='needs_input' with human_request; agent work is "
+            "an owner card you create and park on (awaiting kind='card')."))
+
+
 def _check_clock(conn, task_id, awaiting, text) -> None:
     wall = text_wall(text)
     if wall:
@@ -493,7 +534,7 @@ def _check_resource(conn, task_id, awaiting, text) -> None:
 
 
 _CHECKS: dict[str, Callable[[sqlite3.Connection, str, dict, str], None]] = {
-    "card": _check_card, "ci": _check_run, "deploy": _check_run, "external": _check_external,
+    "card": _check_card, "ci": _check_run, "deploy": _check_run, "external": _check_external, "chat": _check_chat,
     "clock": _check_clock, "human": _check_human, "resource": _check_resource,
 }
 
@@ -575,6 +616,9 @@ def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Op
         return inferred
     kanban_soak_wait.check(conn, task_id, declared, reason, short_continue=_short_continue(op, wake_in))
     text = " ".join(x for x in (reason, declared.get("why"), declared.get("ref")) if x)
+    if declared["kind"] == "external" and orchestrator_wait(text, declared.get("ref")):
+        declared = {**declared, "kind": CHAT, "reclassified_from": "external",
+                    "why": declared.get("why") or (reason or "")[:600]}
     if declared["kind"] == RESOURCE and not (wake_check and str(wake_check).strip()):
         raise AwaitingError(INVALID_AWAITING, (
             "awaiting kind='resource' needs a wake_check that passes once the resource drops below its threshold: "
@@ -642,6 +686,10 @@ def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in) -> dic
             raise wall_error(task_id, wall, text, named=producer)
     if producer:
         return {"kind": "card", "ref": producer, "inferred": True}
+    if not short and orchestrator_wait(text):
+        record = {"kind": CHAT, "ref": "owning orchestrator", "why": text[:600], "inferred": True}
+        _check_chat(conn, task_id, record, text)
+        return record
     if wake_check and not clock_only:
         probe = None if short or not parked_by_own_worker(task_id) else opaque_probe(wake_check)
         if probe:
