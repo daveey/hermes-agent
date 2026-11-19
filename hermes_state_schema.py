@@ -373,6 +373,10 @@ class SessionSchemaMixin:
         if not stale_view and not self._fts_index_is_misaligned_source(cursor):
             return
         has_messages = cursor.execute("SELECT 1 FROM messages LIMIT 1").fetchone() is not None
+        freed = ("messages_fts", "messages_fts_trigram") if has_messages and _meta_row(
+            cursor, "fts_rebuild_high_water") is not None else ("messages_fts",)
+        if not self._fts_wholesale_free_allowed(freed, context="FTS source realign (DROP + 'rebuild')"):
+            return
 
         def do_align() -> None:
             for name in _FTS_BASE_TRIGGERS:
@@ -432,6 +436,9 @@ class SessionSchemaMixin:
             # Absent: the normal ensure path creates/backfills it. None: this runtime cannot
             # safely inspect an existing one, so leave the version behind for retry.
             return trigram_exists is False
+        if not self._fts_wholesale_free_allowed(("messages_fts_trigram",),
+                                                context="Trigram source-exclusion rebuild ('rebuild')"):
+            return False  # schema_version stays behind; a later open retries on a recovered index
         for name in _FTS_TRIGRAM_TRIGGERS:
             cursor.execute(f"DROP TRIGGER IF EXISTS {name}")
         cursor.execute("DROP VIEW IF EXISTS messages_fts_trigram_src")
@@ -1103,7 +1110,14 @@ class SessionSchemaMixin:
         if memo.try_restore(self):
             return
         before = memo.snapshot(self)
-        healed = self._init_schema_full()
+        # Open-time FTS paths that free index trees may run the whole-file plan inline (nothing else uses this
+        # handle yet), once per open (_fts_wholesale_free_allowed).
+        self._fts_startup_init = True
+        try:
+            healed = self._init_schema_full()
+        finally:
+            self._fts_startup_init = False
+            self._fts_tick_plan = None
         memo.record(self, before, healed=healed)
 
     def _init_schema_full(self) -> bool:
@@ -1445,9 +1459,24 @@ class SessionSchemaMixin:
         # A `.recover`-restored image keeps the shadow tables but not the vtable rows; the DDL
         # below would fail on the first shadow. Drop only orphaned families, then rebuild the
         # recreated (empty) index like a missing-trigger repair (#103840).
+        kept: list[str] = []
+
+        def may_drop(family: str) -> bool:
+            allowed = self._fts_wholesale_free_allowed((family,), context=f"Orphan {family} shadow-table DROP")
+            if not allowed:
+                kept.append(family)
+            return allowed
+
         orphan_repaired = _drop_orphan_fts_shadow_tables(
-            cursor, ("messages_fts", "messages_fts_trigram"),
+            cursor, ("messages_fts", "messages_fts_trigram"), may_drop=may_drop,
         )
+        if kept and not self._fts_stale:
+            # Refused: the CREATE below would fail on the kept shadows; this handle runs without FTS.
+            self._fts_enabled = self._trigram_available = False
+            return
+        # Index trees present before any DDL here: a 'rebuild' below frees their pages (gated); a table created
+        # by this open has none to free, so a fresh store never plans.
+        preexisting = tuple(t for t in self._FTS_TABLES if self._sqlite_table_exists(cursor, t))
         if not self._fts_stale:
             self._migrate_misaligned_fts_source(cursor, legacy=legacy_fts)
         if self._fts_stale:
@@ -1464,7 +1493,17 @@ class SessionSchemaMixin:
                 self._fts_triggers_missing(cursor, _FTS_TRIGRAM_TRIGGERS) or "messages_fts_trigram" in orphan_repaired
             )
 
+            def rebuild_allowed() -> bool:
+                """The 'rebuild' frees the trees of every index that existed before this open (gate); refused, this
+                handle runs without FTS and the store is left as it was."""
+                if not preexisting or self._fts_wholesale_free_allowed(preexisting, context="Open-time FTS 'rebuild'"):
+                    return True
+                self._fts_enabled = self._trigram_available = False
+                return False
+
             def ensure_and_rebuild() -> None:
+                if not rebuild_allowed():
+                    return
                 self._fts_enabled = self._ensure_fts_schema(cursor, "messages_fts", base_sql)
                 if not self._fts_enabled:
                     return
@@ -1478,6 +1517,8 @@ class SessionSchemaMixin:
                 # ``executescript`` commits DDL statement-by-statement, so acquiring after ensure exposed a
                 # partially initialized FTS family while another opener held the rebuild lock.
                 self._run_admitted_startup_rebuild(cursor, ensure_and_rebuild)
+            elif trigram_triggers_missing and self._trigram_tokenizer_available(cursor) and not rebuild_allowed():
+                pass  # gated before the ensure below publishes triggers over an index it would not rebuild
             else:
                 self._fts_enabled = self._ensure_fts_schema(cursor, "messages_fts", base_sql)
                 if self._fts_enabled:
@@ -1514,6 +1555,12 @@ class SessionSchemaMixin:
             "Deferred startup FTS rebuild: another process holds the "
             "rebuild authority for this state.db; detaching FTS sync until the stale-index recovery path rebuilds it."
         )
+        self._detach_fts_stale(cursor)
+
+    def _detach_fts_stale(self, cursor) -> None:
+        """The fail-open state on *cursor*'s connection: the ``fts_stale`` breadcrumb and no FTS triggers (canonical
+        writes continue, search uses LIKE, the stale-index recovery rebuilds). Caller holds ``self._lock`` or runs
+        schema init."""
         cursor.execute(_STALE_KEY_UPSERT_SQL, (FTS_STALE_KEY,))
         self._drop_all_fts_triggers(cursor)
         self._fts_stale = True

@@ -39,6 +39,7 @@ Never on a read-only or quarantined handle, nor on the legacy inline (pre-v23) l
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import re
 import sqlite3
@@ -56,6 +57,28 @@ FTS_BACKFILL_TICK_BUDGET_S = 5.0
 ONLINE_REFUSAL_MEMO_S = 6 * 3600.0
 FAMILIES = ("messages_fts", "messages_fts_trigram")
 TRASH_PREFIX = "fts_v22_trash_"  # the optimize-storage teardown drains every table with this prefix
+# state_meta: JSON list of trash tables a whole-file plan proved unshared (the online recovery's own trash, or
+# trash a clean plan vouched for before its first teardown chunk). Only these are drained.
+TRASH_VERIFIED_KEY = "fts_trash_verified"
+
+
+def verified_trash(conn) -> set:
+    """The trash table names recorded under ``TRASH_VERIFIED_KEY`` (empty for a missing or unreadable value)."""
+    row = conn.execute("SELECT value FROM state_meta WHERE key = ?", (TRASH_VERIFIED_KEY,)).fetchone()
+    try:
+        names = json.loads(row[0]) if row else []
+    except (TypeError, ValueError):
+        return set()
+    return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
+
+
+def write_verified_trash(conn, names) -> None:
+    """Replace the recorded list; caller holds the write transaction."""
+    if names:
+        conn.execute("INSERT INTO state_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                     "value = excluded.value", (TRASH_VERIFIED_KEY, json.dumps(sorted(names))))
+    else:
+        conn.execute("DELETE FROM state_meta WHERE key = ?", (TRASH_VERIFIED_KEY,))
 
 
 _FAMILY_OBJECT_RE = re.compile(r"(messages_fts(?:_trigram)?)(?:_data|_idx|_content|_docsize|_config)?")
@@ -154,6 +177,14 @@ def online_recovery_script(*, unlink_tables, trash, trash_tables, trigram: bool,
                      "AND sql LIKE 'CREATE VIRTUAL TABLE%';")
     parts.append("PRAGMA writable_schema=RESET;")
     parts += [f"ALTER TABLE {name} RENAME TO {TRASH_PREFIX}{name}_{stamp};" for name in trash_tables]
+    if trash_tables:
+        # The plan proved these unshared: their teardown needs no new plan (merged into the recorded list here, in
+        # the same transaction as the rename).
+        names = json.dumps(sorted(f"{TRASH_PREFIX}{name}_{stamp}" for name in trash_tables)).replace("'", "''")
+        parts.append(f"INSERT INTO state_meta (key, value) VALUES ('{TRASH_VERIFIED_KEY}', '{names}') "
+                     "ON CONFLICT(key) DO UPDATE SET value = (SELECT json_group_array(value) FROM ("
+                     "SELECT value FROM json_each(CASE WHEN json_valid(state_meta.value) THEN state_meta.value "
+                     "ELSE '[]' END) UNION SELECT value FROM json_each(excluded.value)));")
     # The claim lands before the triggers exist, so no row is ever both trigger-indexed and backfilled.
     parts += ["INSERT INTO state_meta (key, value) SELECT 'fts_rebuild_high_water', CAST(COALESCE(MAX(id), 0) AS TEXT) "
               "FROM messages WHERE true ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
@@ -197,6 +228,72 @@ class SessionFtsOnlineRecoveryMixin:
             self._fts_online_refused_until = now + ONLINE_REFUSAL_MEMO_S
             self._fts_online_refused_reason = str(exc)
             raise
+
+    # ── Gate for every other path that frees an FTS tree wholesale ──
+    # DROP, FTS5 'rebuild' / 'delete-all' and a trash teardown free every page of a tree. On the hub's damage shape
+    # (a page referenced twice) that frees the shared page twice, and SQLite later hands it to canonical data. So
+    # each such path asks this gate first, with the same whole-file plan the online recovery uses.
+
+    @contextlib.contextmanager
+    def _fts_runtime_plan(self, needed: bool = True):
+        """Make the plan now, before the caller takes ``self._lock``, for this call only (like the retry tick's
+        ``_fts_tick_plan``). An enclosing attempt's plan stands; *needed* False makes none."""
+        if not needed or getattr(self, "_fts_tick_plan", None) is not None:
+            yield
+            return
+        self._fts_tick_plan = self._fts_plan_outcome()
+        try:
+            yield
+        finally:
+            self._fts_tick_plan = None
+
+    def _fts_wholesale_free_allowed(self, families, *, context: str, cursor=None) -> bool:
+        """True when freeing the trees of *families* (FTS index families; empty for trash teardown) is provably safe.
+
+        False when the plan refuses (damage it cannot attribute: logged, nothing changes) or names one of
+        *families* (the store goes to the fail-open state with ``_fts_oneshot_failed`` set, so the retry tick's
+        online path unlinks the family unread). Uses the attempt's plan (``_fts_tick_plan``); without one it
+        plans inline only when ``self._lock`` is free (open-time schema init, or a caller outside the lock) and
+        otherwise skips: a whole-file check takes minutes and every write of this process waits on that lock.
+        *cursor*: where the fail-open state is written (default: the writer connection; caller holds the lock)."""
+        startup = getattr(self, "_fts_startup_init", False)
+        if getattr(self, "_fts_tick_plan", None) is None and not startup and self._lock.locked():
+            logger.warning("%s skipped: no integrity plan was made for this attempt before the session lock; a later "
+                           "attempt plans first.", context)
+            return False
+        try:
+            plan = self._fts_plan()
+        except OnlineRecoveryRefused as exc:
+            logger.error("%s skipped: %s. `hermes sessions recover` rebuilds the store offline.", context, exc)
+            return False
+        if startup:
+            self._fts_tick_plan = ("ok", plan)  # one whole-file check per open (cleared when schema init ends)
+        named = [f for f in families if f in plan["unlink"]]
+        if not named:
+            return True
+        self._fts_oneshot_failed = True
+        self._detach_fts_stale(cursor if cursor is not None else self._conn.cursor())
+        logger.error("%s skipped: integrity_check names damaged index tree(s) %s, which freeing could release twice. "
+                     "Search is detached (LIKE fallback); the retry recovers online (unlinks them unread).",
+                     context, ", ".join(named))
+        return False
+
+    def _fts_verify_trash(self, names) -> set:
+        """Record *names* (trash tables no plan has vouched for) as verified when a fresh plan, made here outside
+        ``self._lock``, is clean; returns the names recorded. A plan names a trash table only by refusing (it is
+        no index family), so a damaged trash table is never drained."""
+        with self._fts_runtime_plan():
+            if not self._fts_wholesale_free_allowed((), context=f"Teardown of FTS trash {', '.join(sorted(names))}"):
+                return set()
+
+        def _record(conn):
+            present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE ? "
+                                                  "ESCAPE '\\'", (TRASH_PREFIX.replace("_", "\\_") + "%",))}
+            keep = (verified_trash(conn) | set(names)) & present
+            write_verified_trash(conn, keep)
+            return keep & set(names)
+
+        return self._execute_write(_record)
 
     def recover_stale_fts_online(self, *, reason: str, force: bool = False) -> bool:
         """Steps 1-2. True when done (or already done by a peer). Never raises; False leaves everything as it was.
@@ -315,8 +412,9 @@ class SessionFtsOnlineRecoveryMixin:
                 t0 = time.monotonic()
                 if self.get_meta("fts_rebuild_high_water") is not None:
                     self.fts_rebuild_step()
-                else:
-                    self._fts_teardown_trash_step()
+                elif not self._fts_teardown_trash_step():
+                    more = self.fts_online_work_pending()  # left: trash no clean plan vouches for (logged)
+                    break
                 self._fts_chunk_rows = self._next_chunk_rows(
                     self._fts_chunk_rows, time.monotonic() - t0, self._FTS_REBUILD_CHUNK_TARGET_S)
                 more = self.fts_online_work_pending()

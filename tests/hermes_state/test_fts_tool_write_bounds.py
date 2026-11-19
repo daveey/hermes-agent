@@ -141,7 +141,7 @@ def test_full_rebuild_keeps_every_tool_row_bounded(db):
     # The deferred chunked backfill + boundary sweep must feed the index through the
     # same truncated tool projection; an untruncated write path leaves the
     # external-content index disagreeing with the triggers and fails the strict probe.
-    with db._lock:
+    with db._fts_runtime_plan(), db._lock:  # truncation needs a plan made before the lock
         db._reset_fts_index_to_empty(db._conn)
         db._seed_fts_rebuild_markers(db._conn, force=True)
         db._conn.commit()
