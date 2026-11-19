@@ -393,6 +393,8 @@ def test_park_progress_note_does_not_fire_the_chat_probe(kanban_home, monkeypatc
     assert kcli.kanban_command(parser.parse_args(argv)) != 0
     with kbc.connect_closing() as conn:
         kb.add_comment(conn, tid, "kanban-dispatcher", "Woken: probe stale", system=True)
+        kb.add_comment(conn, tid, "dispatcher", "Host rebooted; card requeued", system=True)
+        kb.add_comment(conn, tid, "placement", "Placed on worker-1", system=True)
     assert kcli.kanban_command(parser.parse_args(argv)) != 0
     with kbc.connect_closing() as conn:
         kb.add_comment(conn, tid, "default", "Decisions: B, authorize, Phase A alone.")
@@ -426,3 +428,47 @@ def test_owned_card_still_needs_a_subscriber(kanban_home, monkeypatch) -> None:
         _as_worker(monkeypatch, conn, tid)
         out = _tool("schedule", {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING})
         assert kaw.NO_CHAT_SUBSCRIBER in (out.get("code") or "") + out.get("error", ""), out
+
+
+def _imported_ask(tid) -> None:
+    """A pool worker's park reaching the owner by sync: its decision_requested event."""
+    from hermes_cli import kanban_db_sync as sync
+    payload = {"why": "premise A, B or C for the replay?", "reason": LIVE_REASON}
+    change = sync.RemoteChange(1, "task_events", "remote-ask-1", "upsert",
+                               {"task_id": tid, "kind": "decision_requested", "created_at": int(time.time()),
+                                "payload": json.dumps(payload)}, 1, "", "worker-a1")
+    with kbc.connect_closing() as conn:
+        assert sync.apply_remote_changes(conn, [change], new_cursor=1, observers=True).applied == 1
+
+
+def _owned_parked(subscribed: bool) -> str:
+    from tests.hermes_cli.test_kanban_release_imported_comments import enable_sync
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        if subscribed:
+            _subscribe(conn, tid)
+    enable_sync(tid)  # this gateway ("owner") owns the card
+    with kbc.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'scheduled' WHERE id = ?", (tid,))
+    return tid
+
+
+def test_owner_with_no_wakeable_chat_turns_an_imported_ask_into_a_visible_one(kanban_home) -> None:
+    """Adversarial review of #3647: a foreign-card park skips the subscriber check, so the owner must act."""
+    tid = _owned_parked(subscribed=False)
+    _imported_ask(tid)
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked", task.status
+        assert kwc.get_state(conn, tid) is None
+        assert [e.kind for e in kb.list_events(conn, tid) if e.kind == "decision_unanswerable"]
+        request = json.loads(task.human_request) if isinstance(task.human_request, str) else task.human_request
+        assert request["interaction"] == "reply" and "premise A, B or C" in request["action"]
+
+
+def test_owner_with_a_wakeable_chat_leaves_the_card_parked(kanban_home) -> None:
+    tid = _owned_parked(subscribed=True)
+    _imported_ask(tid)
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "scheduled"

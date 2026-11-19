@@ -505,8 +505,8 @@ _SPECS = [
                   "authored it <gateway>/<task id>). Use it to wait for another card's answer instead of a phrase "
                   "the other card has to reproduce"),
         _arg("--skip-system", action="store_true", default=False,
-             help="Ignore comments by kernel writers (authors 'kanban-*': the park's own progress note, dispatcher, "
-                  "supervisor and spend-budget notes), so only an answer from an agent or a person fires"),
+             help="Ignore comments by kernel writers (authors 'kanban-*' and the older dispatcher, placement, sweep "
+                  "and detector notes), so only an answer from an agent or a person fires"),
     ], help="Wake-probe primitive for a reply: exit 0 a matching comment exists, 1 not yet, 2 cannot tell. "
             "Use it instead of matching task_comments.author (the park guard refuses that: author_probe)"),
     _cmd("attach", [

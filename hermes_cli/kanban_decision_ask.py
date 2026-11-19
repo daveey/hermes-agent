@@ -11,12 +11,17 @@ its orchestrator never saw (2026-11-18).
 the card. After the park, :func:`post_notice` appends ``decision_requested`` in the same transaction.
 That kind is a gateway wake kind and a ``tui`` notify kind, so a live chat gets it in its queue, a
 Mac ``notify+wake`` row starts a turn, and the unloaded sweeper wakes a dormant ``tui`` chat.
+
+The subscriber check runs only where the card is owned (subscriptions are machine-local). When a pool
+worker's ask reaches the owner by sync and the owner has no chat that can take it, :func:`owner_fallback`
+turns it into a visible ask for David (``needs_input`` with ``human_request``) instead of a silent park.
 """
 from __future__ import annotations
 
 from typing import Any
 
 NOTICE_KIND = "decision_requested"
+UNANSWERED_KIND = "decision_unanswerable"  # the owner had no chat to take the ask; it became David's
 
 
 def is_chat_wait(awaiting: Any) -> bool:
@@ -40,3 +45,38 @@ def post_notice(conn, task_id: str, *, reason: str | None, awaiting: Any, run_id
     from hermes_cli import kanban_db as kb
     payload = {"reason": reason, "why": awaiting.get("why"), "ref": awaiting.get("ref")}
     kb._append_event(conn, task_id, NOTICE_KIND, {k: v for k, v in payload.items() if v}, run_id=run_id)
+
+
+def owner_fallback(conn, task_id: str) -> bool:
+    """On the owning gateway, after an imported ``decision_requested``: no wakeable subscriber means nobody gets
+    the ask, so block the still-parked card ``needs_input`` with the question. True when it blocked."""
+    from hermes_cli import kanban_awaiting as kaw
+    from hermes_cli import kanban_db as kb
+    task = kb.get_task(conn, task_id)
+    if task is None or task.status != "scheduled" or kaw.has_chat_subscriber(conn, task_id):
+        return False
+    ask = [e for e in kb.list_events(conn, task_id) if e.kind == NOTICE_KIND]
+    question = str((ask[-1].payload or {}).get("why") or (ask[-1].payload or {}).get("reason") or "") if ask else ""
+    question = question.strip()[:1500] or "the decision named in the card's latest comment"
+    from hermes_cli import kanban_wake_check as kwc
+    own = kwc.own_gateway(conn)
+    # A parked card cannot be blocked directly (block_task takes running/ready/triage): leave the park first, as the
+    # spend-budget hold does. If the block below is refused, the card still sits visibly in triage.
+    with kb.write_txn(conn):
+        if conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ? AND status = 'scheduled'",
+                        (task_id,)).rowcount != 1:
+            return False
+        kwc.set_check(conn, task_id, None, None)
+        kb._append_event(conn, task_id, UNANSWERED_KIND, {"why": question, "gateway": own})
+    return bool(kb.block_task(
+        conn, task_id, kind="needs_input",
+        reason=("This card's worker parked waiting on its orchestrator's decision, but no chat subscribed to the "
+                "card can be woken here. 1) Answer the question below with a comment on the card. 2) Then unblock "
+                "it.\n" + question),
+        human_request={
+            "action": "Answer the card's question: " + question[:400],
+            "why_human": "its worker asked its orchestrator, and no subscribed chat on the owning gateway can take it",
+            "interaction": "reply",
+            "scope": f"card {task_id}: {str(task.title or '')[:120]}",
+            "evidence": f"decision_requested on {task_id}; no wakeable notify subscription on {own or 'this gateway'}",
+        }))

@@ -1258,6 +1258,8 @@ class ApplyResult:
     changed_fields: dict[str, set[str]] = field(default_factory=dict)
     wake_dispatcher: bool = False
     blobs_to_fetch: list[str] = field(default_factory=list)
+    # [daveey] Cards this gateway owns that received a worker's ``decision_requested`` (kanban_decision_ask).
+    decision_asks: set[str] = field(default_factory=set)
     # [daveey] A feed pull or snapshot: task fields with an unanswered local edit keep the local value
     # (``_without_unacked_fields``), checked inside the apply transaction.
     local_pending_wins: bool = False
@@ -1528,6 +1530,10 @@ def _upsert_row(conn: sqlite3.Connection, ch: RemoteChange, own: str, result: Ap
         from hermes_cli.kanban_terminal_guard import is_reopen
         if is_reopen({"kind": cols.get("kind"), "payload": cols.get("payload")}):
             result.reopened.add(str(task_id))
+    if table == "task_events" and task_id and cols.get("kind") == "decision_requested":
+        row = conn.execute("SELECT created_on FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is not None and (not row[0] or row[0] == own):
+            result.decision_asks.add(str(task_id))  # the owner checks it can deliver, after the commit
     if table == "task_events" and ch.fields.get("kind") in ("archive_requested", "capability_owner_archive_requested"):
         result.wake_dispatcher = True  # a stop request (kanban_remote_stop) or forwarded owner archive to apply
     if table == "task_chat_links":
@@ -1617,6 +1623,13 @@ def _after_commit(conn: sqlite3.Connection, result: ApplyResult, board: Optional
             _kb._fire_kanban_lifecycle_hook(
                 "on_kanban_task_updated", task_id, board=board, changed_fields=sorted(fields), remote=True,
             )
+    if result.decision_asks:
+        from hermes_cli import kanban_decision_ask
+        for task_id in sorted(result.decision_asks):
+            try:
+                kanban_decision_ask.owner_fallback(conn, task_id)
+            except (sqlite3.Error, ValueError) as exc:  # one card's fallback never stops the rest of the apply
+                _log.warning("kanban sync: decision ask fallback for %s failed: %s", task_id, exc, exc_info=True)
     if result.wake_dispatcher:
         wake_dispatcher()
 
