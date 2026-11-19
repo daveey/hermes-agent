@@ -5,7 +5,7 @@ import logging
 import re
 import sqlite3
 import time
-from typing import Sequence
+from typing import Callable, Optional, Sequence
 
 from hermes_state_common import FTS_SQL, FTS_STALE_KEY, FTS_TRIGRAM_SQL, _FTS_TRIGGERS
 from hermes_state_errors import is_fts_scoped_corruption_error, is_sqlite_lock_error
@@ -144,8 +144,13 @@ def _orphan_fts_shadows(cursor: sqlite3.Cursor, family: str) -> list[str]:
     ).fetchall()]
 
 
-def _drop_orphan_fts_shadow_tables(cursor: sqlite3.Cursor, families: Sequence[str]) -> list[str]:
+def _drop_orphan_fts_shadow_tables(
+    cursor: sqlite3.Cursor, families: Sequence[str], *, may_drop: Optional[Callable[[str], bool]] = None,
+) -> list[str]:
     """Drop, per family, shadow tables whose virtual table row is absent from sqlite_master.
+
+    *may_drop(family)* is asked once a family has orphans, before any write: DROP frees every page of those
+    trees, so SessionDB passes its whole-file gate (hermes_state_fts_online); False keeps the family.
 
     Matches exact shadow names only (never a prefix LIKE, so the base family cannot reach
     ``messages_fts_trigram_*``) and leaves a family alone whenever its vtable is live. The
@@ -159,7 +164,7 @@ def _drop_orphan_fts_shadow_tables(cursor: sqlite3.Cursor, families: Sequence[st
     """
     repaired: list[str] = []
     for family in families:
-        if not _orphan_fts_shadows(cursor, family):
+        if not _orphan_fts_shadows(cursor, family) or (may_drop is not None and not may_drop(family)):
             continue
         owns_transaction = not cursor.connection.in_transaction
         if owns_transaction:

@@ -105,7 +105,7 @@ def test_deferred_rebuild_does_not_reintroduce_cron(db: SessionDB):
     cli_id = db.append_message("cli", role="assistant", content="交互会话内容")
     db.append_message("cron", role="assistant", content="定时会话内容")
 
-    with db._lock:
+    with db._fts_runtime_plan(), db._lock:  # truncation needs a plan made before the lock
         db._reset_fts_index_to_empty(db._conn)
         db._seed_fts_rebuild_markers(db._conn, force=True)
         db._conn.commit()

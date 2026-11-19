@@ -12,6 +12,18 @@ from hermes_cli.local_work_threads import (
 )
 
 
+@pytest.fixture(autouse=True, params=[False, True])
+def executor_accounting(request):
+    from hermes_cli import loop_accounting
+
+    if request.param:
+        loop_accounting.instrument_executors()
+    yield
+    if request.param:
+        loop_accounting.uninstrument()
+        loop_accounting.reset()
+
+
 def setup_owner(tmp_path):
     home = str(tmp_path)
     return Registry(homes=[home]), home

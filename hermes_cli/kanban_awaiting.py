@@ -29,6 +29,12 @@ Each park now carries ``awaiting = {kind, ref, why}`` on its parking event:
   admission and re-parks it (a counted repeat) if the hold stands.
 * ``human``: refused. A wait on David is a visible ``blocked`` card with ``human_request``;
   an ask he already answered (ask-gate ledger) is never re-asked.
+* ``chat``: the card's own orchestrator (a chat subscribed to it: its creator or shepherd) must answer.
+  ``why`` is the question. The park posts ``decision_requested`` (:mod:`kanban_decision_ask`), which wakes
+  that chat even when it is dormant; refused (``no_chat_subscriber``) when no chat subscribes to the card,
+  since nobody would be told. An ``external`` or inferred wait whose text waits on the owning/origin
+  orchestrator is recorded as ``chat`` (``reclassified_from``): labelled ``external`` it woke nobody
+  (t_01a1d774f7486668, 2026-11-18).
 
 A park with no explicit ``awaiting`` is classified from its text: a pending step for a human is
 refused (``human_wait``), and a wall only an agent action clears (grant, permission, access) is
@@ -49,6 +55,7 @@ on the same opaque probe counts as the same premise however its reason is worded
 from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
+import contextlib
 import hashlib
 import json
 import os
@@ -59,7 +66,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-KINDS = ("card", "ci", "deploy", "external", "clock", "human", "resource")
+KINDS = ("card", "ci", "deploy", "external", "clock", "human", "resource", "chat")
+CHAT = "chat"
 RESOURCE = "resource"
 # A repeat resource park doubles its probe cadence per park in a row on the same gate, up to this.
 RESOURCE_BACKOFF_MAX_SECONDS = 3600
@@ -72,8 +80,26 @@ PRODUCER_DONE = "producer_done"
 # The CI run the park names has a job queued past the limit with no runner (``kanban_ci_progress``).
 CI_RUN_UNSTARTABLE = "ci_run_unstartable"
 SOAK_WAIT = "soak_wait"
+NO_CHAT_SUBSCRIBER = "no_chat_subscriber"
 CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT, PRODUCER_DONE, CI_RUN_UNSTARTABLE,
-         SOAK_WAIT)
+         SOAK_WAIT, NO_CHAT_SUBSCRIBER)
+# A wait on the card's own orchestrator chat: a waiting verb, then within the clause either a qualified
+# orchestrator/chat ("owning orchestrator", "origin chat", "creator chat") or the orchestrator's decision words
+# ("orchestrator's three decisions", "orchestrator to decide"). Product names ("Airflow orchestrator release",
+# "k8s orchestrator call") carry neither. A citation or negation just before the noun ("per the orchestrator's
+# decision", "no orchestrator decision") is skipped by :func:`orchestrator_wait`.
+ORCHESTRATOR_WAIT = re.compile(
+    r"\b(?:await(?:s|ing)?|wait(?:s|ing)?\s+(?:on|for)|pending|until|needs?|blocked\s+on|parked\s+(?:on|for))\b"
+    r"(?P<gap>[^.;\n]{0,80}?)"
+    r"\b(?P<noun>(?:owning|origin(?:ating)?|creating|creator|parent|managing|shepherd(?:ing)?)\s+"
+    r"(?:orchestrator|chat|session)|"
+    r"orchestrator['\u2019]s\s+(?:\w+\s+){0,3}?(?:decisions?|answers?|reply|go-?ahead|disposition|approval)|"
+    r"orchestrator\s+to\s+(?:decide|answer|reply|approve|confirm))\b",
+    re.IGNORECASE)
+_ORCHESTRATOR_REF = re.compile(r"^\s*(?:the\s+)?(?:owning|origin(?:ating)?|creating|creator|parent|managing|"
+                               r"shepherd(?:ing)?)\s+(?:orchestrator|chat|session)\b", re.IGNORECASE)
+_CITED_OR_NEGATED = re.compile(r"\b(?:per|following|given|after|no|not|never|without)\s+(?:the\s+|an?\s+|its\s+)?$",
+                               re.IGNORECASE)
 # Parks in a row on one premise before the next one escalates instead (the 3rd park = 2nd re-park).
 REPARK_LIMIT = 2
 # Fires of one opaque probe, each followed by a re-park on it, before the next park escalates: a probe
@@ -200,7 +226,12 @@ def premise_hash(awaiting: dict, reason: Optional[str], wake_check: Optional[str
     pushed as a new head and a park on that head is new evidence, not the same premise. A PR-URL ref with
     no per-head ``why`` folded every head into one premise and escalated the third fix round (PR #1806,
     t_01a1d19e0179a093). The same head re-parked still counts, so a stuck head escalates. [daveey]"""
-    if awaiting.get("inferred"):
+    if awaiting.get("kind") == CHAT:
+        # The orchestrator waited on, not the question's wording: a worker that rewords its question each park
+        # must still escalate at REPARK_LIMIT (adversarial review of #3647: an orchestrator answering "not yet"
+        # and a reworded re-ask woke it 8 times in 16 min with no escalation).
+        basis = "|".join(awaiting.get(k, "") for k in ("kind", "gateway"))
+    elif awaiting.get("inferred"):
         basis = " ".join((reason or "").lower().split())[:400]
     elif awaiting.get("kind") == RESOURCE:
         # The gate, not its reading: "pool at 87%" and "pool at 88%" are one premise with no new evidence.
@@ -467,6 +498,141 @@ def _check_external(conn, task_id, awaiting, text) -> None:
         raise wall_error(task_id, wall, text)
 
 
+def orchestrator_wait(text: Optional[str], ref: Optional[str] = None) -> bool:
+    """True when a park's text waits on the card's own orchestrator chat (see :data:`ORCHESTRATOR_WAIT`)."""
+    if _ORCHESTRATOR_REF.search(ref or ""):
+        return True
+    for m in ORCHESTRATOR_WAIT.finditer(text or ""):
+        if not _CITED_OR_NEGATED.search(m.group("gap")):
+            return True
+    return False
+
+
+def declared_chat_wait(awaiting: Optional[dict]) -> bool:
+    """A declared ``chat`` wait, or an ``external`` one the gate will record as ``chat``. Before the gate it has no
+    probe yet (:func:`wake_probe` adds it in the park txn), so the long-park guard treats it as timed."""
+    if not awaiting:
+        return False
+    if awaiting.get("kind") == CHAT:
+        return True
+    text = " ".join(str(awaiting.get(k) or "") for k in ("why", "ref"))
+    return awaiting.get("kind") == "external" and orchestrator_wait(text, awaiting.get("ref"))
+
+
+def park_probe(conn: sqlite3.Connection, task_id: str, record: Optional[dict], wake_check: Optional[str],
+               clock_only: bool) -> tuple[Optional[str], bool]:
+    """``(wake_check, clock_only)`` for a park: the caller's probe, else :func:`wake_probe`'s. A chat wait that
+    now has its comment probe is not a pure clock wait."""
+    wake_check = wake_check or wake_probe(conn, task_id, record)
+    return wake_check, bool(clock_only and not (record and record.get("kind") == CHAT and wake_check))
+
+
+def wake_probe(conn: sqlite3.Connection, task_id: str, record: Optional[dict]) -> Optional[str]:
+    """The probe a park adds when it brought none: a card wait waits on that card (:func:`card_probe`); a chat
+    wait wakes on the next comment, the answer its ``decision_requested`` notice asks for. ``--after-id`` is
+    the newest comment now, so the worker's own park comment (written earlier in the txn) never fires it."""
+    if not record or record.get("kind") != CHAT:
+        return card_probe(record)
+    row = conn.execute("SELECT MAX(id) FROM task_comments WHERE task_id = ?", (task_id,)).fetchone()
+    return shlex.join(["hermes", "kanban", "wait-comment", task_id, "--after-id", str(int(row[0] or 0)),
+                       "--skip-system"])
+
+
+_MOVED_PREFIX = "moved_to_gateway:"  # tui_gateway.notice_fanout.MOVED_PREFIX
+
+
+def _session_stores() -> list[Path]:
+    """The launch store, then each named profile's, under the ROOT home: where the unloaded sweeper looks for a
+    chat. A worker of a named profile runs with ``HERMES_HOME=<root>/profiles/<name>`` (the dispatcher), and its
+    orchestrator chat usually lives in the root store (adversarial review of #3647)."""
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+    root = get_default_hermes_root()
+    stores = (root / "state.db", *sorted((root / "profiles").glob("*/state.db")), get_hermes_home() / "state.db")
+    return [p for p in dict.fromkeys(stores) if p.is_file()]
+
+
+def tui_chat_reachable(chat_id: str) -> bool:
+    """A ``tui`` chat the unloaded sweeper would wake: present in a session store, not archived, not moved away,
+    and not a worker transcript (``tui_gateway.notice_fanout``'s rules, read-only here). A chat whose
+    ``end_reason`` is an orphan reap is still reachable: the sweeper resumes it. Unreadable = unreachable."""
+    from hermes_cli.kanban_session_provenance import (
+        _HEADLESS_SESSION, _INTERACTIVE_SOURCES, MACHINE_SESSION_SOURCES, session_creation_source)
+    for path in _session_stores():
+        try:
+            from hermes_cli.sqlite_safe_read import connect_tracked  # state.db is byte-probed: tracked fd
+            with contextlib.closing(connect_tracked(path.as_uri() + "?mode=ro", tracking_path=path, uri=True,
+                                                    timeout=1)) as db:
+                db.row_factory = sqlite3.Row
+                row = db.execute("SELECT * FROM sessions WHERE id = ?", (chat_id,)).fetchone()
+        except (sqlite3.Error, OSError, ValueError):
+            continue
+        if row is None:
+            continue
+        info = dict(row)
+        if info.get("archived") or str(info.get("end_reason") or "").startswith(_MOVED_PREFIX):
+            return False
+        source = session_creation_source(info)
+        return not (source in MACHINE_SESSION_SOURCES
+                    or (_HEADLESS_SESSION.fullmatch(chat_id) and source not in _INTERACTIVE_SOURCES))
+    return False
+
+
+def _owns_card(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when this gateway owns the card (or the board does not sync). A pool worker parking a hub card has
+    neither the hub's notify subscriptions (machine-local) nor its session stores, so the subscriber check
+    belongs to the owner; the park's ``decision_requested`` reaches it by sync (review of #3647)."""
+    from hermes_cli.kanban_wake_check import own_gateway
+    own = own_gateway(conn)
+    if not own:
+        return True
+    row = conn.execute("SELECT created_on FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return not row or not row[0] or row[0] == own
+
+
+def has_chat_subscriber(conn: sqlite3.Connection, task_id: str) -> bool:
+    """A subscribed chat that ``decision_requested`` can wake.
+
+    A ``tui`` row whose chat is reachable (:func:`tui_chat_reachable`): the live poller queues the notice and
+    the unloaded sweeper starts a turn in a dormant chat. A messaging row in ``notify+wake`` / ``wake`` mode:
+    the gateway notifier wakes the agent. Never a ``hub`` relay row, whatever its mode (legacy rows were
+    backfilled to ``notify+wake``): it carries only cards that turned terminal. Not a plain ``notify``
+    messaging row either: a passive ping, possibly to a person rather than the orchestrator."""
+    try:
+        rows = conn.execute("SELECT platform, chat_id, delivery_mode FROM kanban_notify_subs WHERE task_id = ?",
+                            (task_id,)).fetchall()
+    except sqlite3.OperationalError:
+        return False
+    for platform, chat_id, mode in rows:
+        platform = (platform or "").lower()
+        if platform == "hub":
+            continue
+        if platform == "tui":
+            if chat_id and tui_chat_reachable(chat_id):
+                return True
+        elif mode in ("notify+wake", "wake"):
+            return True
+    return False
+
+
+def _check_chat(conn, task_id, awaiting, text) -> None:
+    if not awaiting.get("why"):
+        raise AwaitingError(INVALID_AWAITING, "awaiting kind='chat' needs why=<the question the orchestrator must answer>")
+    # Relabelling a park as a chat wait never excuses a wait on David or an agent wall: those stay refused
+    # (human_wait / agent_action_wait), as for a clock wait. Review of #3647: a David ask phrased as
+    # "awaiting the owning orchestrator's go-ahead" otherwise parked as a chat notice.
+    wall = text_wall(text)
+    if wall:
+        raise wall_error(task_id, wall, text)
+    if not _owns_card(conn, task_id):
+        return  # subscriptions are machine-local: the owning gateway receives the synced ask and delivers it
+    if not has_chat_subscriber(conn, task_id):
+        raise AwaitingError(NO_CHAT_SUBSCRIBER, (
+            f"{task_id} has no chat subscription that a decision_requested notice can wake (a tui row, or a "
+            "notify+wake row), so no orchestrator would be told about this wait. "
+            "A decision only David can make is kanban_block kind='needs_input' with human_request; agent work is "
+            "an owner card you create and park on (awaiting kind='card')."))
+
+
 def _check_clock(conn, task_id, awaiting, text) -> None:
     wall = text_wall(text)
     if wall:
@@ -493,7 +659,7 @@ def _check_resource(conn, task_id, awaiting, text) -> None:
 
 
 _CHECKS: dict[str, Callable[[sqlite3.Connection, str, dict, str], None]] = {
-    "card": _check_card, "ci": _check_run, "deploy": _check_run, "external": _check_external,
+    "card": _check_card, "ci": _check_run, "deploy": _check_run, "external": _check_external, "chat": _check_chat,
     "clock": _check_clock, "human": _check_human, "resource": _check_resource,
 }
 
@@ -575,6 +741,9 @@ def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Op
         return inferred
     kanban_soak_wait.check(conn, task_id, declared, reason, short_continue=_short_continue(op, wake_in))
     text = " ".join(x for x in (reason, declared.get("why"), declared.get("ref")) if x)
+    if declared["kind"] == "external" and orchestrator_wait(text, declared.get("ref")):
+        declared = {**declared, "kind": CHAT, "reclassified_from": "external",
+                    "why": declared.get("why") or (reason or "")[:600]}
     if declared["kind"] == RESOURCE and not (wake_check and str(wake_check).strip()):
         raise AwaitingError(INVALID_AWAITING, (
             "awaiting kind='resource' needs a wake_check that passes once the resource drops below its threshold: "
@@ -642,6 +811,10 @@ def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in) -> dic
             raise wall_error(task_id, wall, text, named=producer)
     if producer:
         return {"kind": "card", "ref": producer, "inferred": True}
+    if not short and orchestrator_wait(text):
+        record = {"kind": CHAT, "ref": "owning orchestrator", "why": text[:600], "inferred": True}
+        _check_chat(conn, task_id, record, text)
+        return record
     if wake_check and not clock_only:
         probe = None if short or not parked_by_own_worker(task_id) else opaque_probe(wake_check)
         if probe:
@@ -720,9 +893,10 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
     from hermes_cli.kanban_wake_check import CONDITION_MET_EVENT
     from hermes_cli.kanban_shared_blockers import CLEARED_EVENT
     count = 0
-    for kind, payload in conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued',?,?,?) "
-            "ORDER BY id DESC LIMIT 20", (task_id, ESCALATED_EVENT, CONDITION_MET_EVENT, CLEARED_EVENT)):
+    for kind, payload, park_at in conn.execute(
+            "SELECT kind, payload, created_at FROM task_events WHERE task_id = ? AND kind IN "
+            "('scheduled','continued',?,?,?) ORDER BY id DESC LIMIT 20",
+            (task_id, ESCALATED_EVENT, CONDITION_MET_EVENT, CLEARED_EVENT)):
         if kind == ESCALATED_EVENT:
             break
         try:
@@ -744,9 +918,63 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
             continue  # a continuation with no wait, or a legacy park
         if got["premise"] != premise and not (probe and got.get("probe") == probe):
             break
+        if got.get("kind") == CHAT and _answered_since(conn, task_id, park_at):
+            break  # that ask was answered: a later question is new work, not the same stuck wait
         if not is_healthy(got):
             count += 1
     return count
+
+
+CHAT_PARK_CAP = 6  # chat parks per card per 24 h before the next one escalates, however each was answered
+
+
+def chat_parks_today(conn: sqlite3.Connection, task_id: str) -> int:
+    """Chat-wait parks of this card in the last 24 h, since its last escalation."""
+    since = int(time.time()) - 86400
+    count = 0
+    for kind, payload in conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? AND created_at >= ? AND kind IN "
+            "('scheduled', 'continued', ?) ORDER BY id DESC", (task_id, since, ESCALATED_EVENT)):
+        if kind == ESCALATED_EVENT:
+            break
+        try:
+            got = (json.loads(payload or "{}") or {}).get("awaiting") or {}
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(got, dict) and got.get("kind") == CHAT:
+            count += 1
+    return count
+
+
+def _answered_since(conn: sqlite3.Connection, task_id: str, park_at: Optional[int]) -> bool:
+    """A comment after a chat park (``park_at``: the park event's ``created_at``; an answer cannot share the ask's
+    second) not by a kernel writer and
+    not by this card's own worker. Times and portable uids only: comment and run integers are local to each board
+    file, and a pool worker's park is read on the owner too (review of #3647)."""
+    if park_at is None:
+        return False
+    from hermes_cli.kanban_comment_origin import is_system_author
+    run_cols = {r[1] for r in conn.execute("PRAGMA table_info(task_runs)")}
+    own_uids = {r[0] for r in conn.execute("SELECT uid FROM task_runs WHERE task_id = ? AND uid IS NOT NULL",
+                                           (task_id,))} if "uid" in run_cols else set()
+    own_ids = {int(r[0]) for r in conn.execute("SELECT id FROM task_runs WHERE task_id = ?", (task_id,))}
+    has_uid = "uid" in {r[1] for r in conn.execute("PRAGMA table_info(task_comments)")}
+    rows = conn.execute(
+        f"SELECT id, author, {'uid' if has_uid else 'NULL'} FROM task_comments WHERE task_id = ? AND created_at > ?",
+        (task_id, int(park_at))).fetchall()
+    for cid, author, cuid in rows:
+        if is_system_author(author):
+            continue
+        key, value = ("$.comment_uid", cuid) if cuid else ("$.comment_id", cid)
+        writer = conn.execute(
+            "SELECT json_extract(payload, '$.writer_run_uid'), json_extract(payload, '$.writer_run_id') "
+            f"FROM task_events WHERE task_id = ? AND kind = 'commented' AND json_extract(payload, '{key}') = ? LIMIT 1",
+            (task_id, value)).fetchone()
+        if writer is not None and (writer[0] in own_uids if writer[0] else
+                                   (cuid is None and isinstance(writer[1], int) and writer[1] in own_ids)):
+            continue  # the card's own worker leaving a note before it re-asks is not an answer
+        return True
+    return False
 
 
 def probe_fire_reparks(conn: sqlite3.Connection, task_id: str, premise: str, probe: Optional[str]) -> int:
@@ -835,6 +1063,10 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     from hermes_cli import kanban_passive_intake as passive
     if (not passive.eligible(task_id, wake_check, record, blocker_id)
             and prior_same_premise(conn, task_id, record["premise"], probe=probe) >= REPARK_LIMIT):
+        raise RepeatedPark(record)
+    if record["kind"] == CHAT and chat_parks_today(conn, task_id) >= CHAT_PARK_CAP:
+        # Answered "not yet" each time, the streak above never builds: a card asking its orchestrator this often in
+        # a day is stuck behind something the orchestrator cannot give (adversarial review of #3647).
         raise RepeatedPark(record)
     fired = probe_fire_reparks(conn, task_id, record["premise"], probe)
     if fired >= PROBE_FIRE_REPARK_LIMIT:

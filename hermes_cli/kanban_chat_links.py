@@ -385,12 +385,14 @@ def ledger_boards(gateway: str) -> set[str]:
 
 def _plan(conn: sqlite3.Connection, board: str, gateway: str, ledger: bool) -> tuple[dict, list]:
     """``(want, rows)``: the links this gateway wants in ``conn`` and the rows it has (read-only)."""
-    want = _local_links(conn, gateway)
+    from hermes_cli import loop_accounting as la
+    want = la.timed("sync.links.local", _local_links, conn, gateway)
     if ledger:
-        want.update(_ledger_links(board, gateway))
-    want.update(_owner_written_releases(board, gateway, want))
-    rows = conn.execute("SELECT uid, released, chat_session, kind, task_id, chat_profile FROM task_chat_links "
-                        "WHERE chat_gateway = ?", (gateway,)).fetchall()
+        want.update(la.timed("sync.links.ledger", _ledger_links, board, gateway))
+    want.update(la.timed("sync.links.owner_releases", _owner_written_releases, board, gateway, want))
+    with la.pass_("sync.links.existing"):
+        rows = conn.execute("SELECT uid, released, chat_session, kind, task_id, chat_profile FROM task_chat_links "
+                            "WHERE chat_gateway = ?", (gateway,)).fetchall()
     return want, rows
 
 
@@ -438,9 +440,10 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     the same captured writes; each pass that releases any writes a receipt (``_write_release_receipt``). [daveey]"""
     from hermes_cli.kanban_db_connect import write_txn
     from hermes_cli.kanban_creator_chats import backfill
-    backfill(conn)
-    want, rows = _plan(conn, board, gateway, ledger)
-    machine = _machine_releases(want, rows, gateway)
+    from hermes_cli import loop_accounting as la
+    la.timed("sync.links.backfill", backfill, conn)
+    want, rows = la.timed("sync.links.plan", _plan, conn, board, gateway, ledger)
+    machine = la.timed("sync.links.machine_releases", _machine_releases, want, rows, gateway)
     from hermes_cli.kanban_placement import is_placeholder_session
     have = {r[0]: r[1] for r in rows}
     # A placement attribution id is not a chat: its link is deleted (captured, so the Board drops it too), never
@@ -448,15 +451,17 @@ def reconcile(conn: sqlite3.Connection, board: str, gateway: str, *, ledger: boo
     # shepherd link is no chat either (its wakes are refused). [daveey]
     # A released ``created`` row to a worker hash is the release record of an owner-written link
     # (``_owner_written_releases``): deleting it would hand the owner's unreleased copy back. [daveey]
-    shepherd_rows: dict[tuple, tuple[Any, list[Any]]] = {}  # exact chat profile -> (profile, sessions)
-    for r in rows:
-        shepherd_rows.setdefault((type(r[5]), r[5]), (r[5], []))[1].append(r[2])
-    headless = {key: _worker_shepherds(sessions, gateway, profile) for key, (profile, sessions) in shepherd_rows.items()}
-    placeholders = {r[0] for r in rows if is_placeholder_session(r[2]) or (
-        str(r[2] or "") in headless[(type(r[5]), r[5])] and not (r[1] and r[3] == "created"))}
+    with la.pass_("sync.links.classify"):
+        shepherd_rows: dict[tuple, tuple[Any, list[Any]]] = {}  # exact chat profile -> (profile, sessions)
+        for r in rows:
+            shepherd_rows.setdefault((type(r[5]), r[5]), (r[5], []))[1].append(r[2])
+        headless = {key: _worker_shepherds(sessions, gateway, profile)
+                    for key, (profile, sessions) in shepherd_rows.items()}
+        placeholders = {r[0] for r in rows if is_placeholder_session(r[2]) or (
+            str(r[2] or "") in headless[(type(r[5]), r[5])] and not (r[1] and r[3] == "created"))}
     added = changed = released = retired = 0
-    owner_links = _owner_hub_links(conn, board, gateway)  # read before the write lock, like ``_plan``
-    with write_txn(conn):
+    owner_links = la.timed("sync.links.owner_links", _owner_hub_links, conn, board, gateway)
+    with la.pass_("sync.links.write"), write_txn(conn):
         for link in owner_links:
             # Insert-only, and only while no row for this card and chat exists (a concurrent write, or a pull that
             # brought the chat gateway's own row in, wins). See ``_owner_hub_links``.

@@ -21,7 +21,6 @@ board = _board_fixture
 OPUS = "claude-opus-5-5"
 HOUR, DAY = 3600.0, 86400.0
 CFG = lp.PacingConfig()
-PACING = lp.PacingConfig(pace_starts=True)  # the opt-in mode: a paced pool limits this host's starts
 
 
 def _r(account, kind, used, reset_in, ts):
@@ -77,7 +76,23 @@ def test_every_account_past_reserve_holds_until_earliest_reset():
     pace = lp.pool_pace("anthropic", current, [], CFG)
     assert pace.state == lp.HELD
     assert pace.until == now + 9 * HOUR  # b frees once both its reserved windows reset
-    assert lp.admit_limit(pace, 5, deferrable=False, cfg=CFG) == 0
+    pool = lp.plan_pool("anthropic", lp.hashed(current), lp.Tpp(None), lp.Tpp(None), now, CFG)[0]
+    assert pool["at_reserve"] is True and pool["until"] == pace.until  # the v2 view the start hold reads
+
+
+@pytest.mark.parametrize("used", [(100, 40), (86, 84), (84, 86), (90, 95), (0, 85), (85, 85)])
+@pytest.mark.parametrize("five_hour", [None, 50, 81])
+def test_v2_at_reserve_is_exactly_the_legacy_held_verdict(used, five_hour):
+    """Removing the start limit must not move a held pool: v2 ``at_reserve`` holds exactly when ``pool_pace`` said
+    ``held``, with the same until."""
+    now = 1_800_000_000.0
+    current = [_r("a", lp.SEVEN_DAY, used[0], 2 * DAY, now), _r("b", lp.SEVEN_DAY, used[1], 3 * DAY, now)]
+    if five_hour is not None:
+        current.append(_r("b", lp.FIVE_HOUR, five_hour, 2 * HOUR, now))
+    pace = lp.pool_pace("anthropic", current, [], CFG)
+    pool = lp.plan_pool("anthropic", lp.hashed(current), lp.Tpp(1.0), lp.Tpp(1.0), now, CFG)[0]
+    assert pool["at_reserve"] is (pace.state == lp.HELD)
+    assert pool["until"] == (pace.until if pace.state == lp.HELD else None)
 
 
 def test_one_account_under_reserve_is_not_held():
@@ -89,20 +104,8 @@ def test_one_account_under_reserve_is_not_held():
 def test_no_readable_account_fails_open():
     pace = lp.pool_pace("anthropic", [], [], CFG)
     assert pace.state == lp.UNKNOWN
-    assert lp.admit_limit(pace, 5, deferrable=False, cfg=CFG) is None
-
-
-def test_paced_limit_scales_recent_concurrency_and_defers_low_tier_first():
-    pace = lp.PoolPace("anthropic", lp.PACED, 0.5)
-    assert lp.admit_limit(pace, 6, deferrable=False, cfg=PACING) == 3
-    assert lp.admit_limit(pace, 6, deferrable=True, cfg=PACING) == 1
-    assert lp.admit_limit(lp.PoolPace("anthropic", lp.OPEN, 2.0), 6, deferrable=True, cfg=PACING) is None
-
-
-def test_just_behind_pace_ramps_from_recent_concurrency():
-    pace = lp.PoolPace("anthropic", lp.OPEN, 1.5)
-    assert lp.admit_limit(pace, 4, deferrable=False, cfg=PACING) == 6
-    assert lp.admit_limit(pace, 0, deferrable=False, cfg=PACING) == 1  # off a hold: one run, then grow
+    pool = lp.plan_pool("anthropic", [], lp.Tpp(1.0), lp.Tpp(1.0), 1_800_000_000.0, CFG)[0]
+    assert pool["at_reserve"] is False and pool["rate_tokens_per_s"] is None
 
 
 def test_capped_window_burns_nothing_and_a_fresh_burst_counts_at_once():
@@ -155,7 +158,6 @@ def test_pool_ahead_of_pace_starts_cards_by_default(paced_board, monkeypatch):
     """The default: a burn rate never holds a start. Slots decide concurrency; a token throttle the token rate."""
     _write_cfg(paced_board)
     _usage(monkeypatch, 70, 6 * DAY)  # 70% in the week's first day: paced
-    monkeypatch.setattr(pd, "local_running", lambda *_a: 5)  # already well past the paced mode's limit
     with kbc.connect() as conn:
         a, b = _opus_card(conn, "a"), _opus_card(conn, "b")
         seen, result = _dispatch(conn)
@@ -172,34 +174,6 @@ def test_held_pool_still_stops_starts_by_default(paced_board, monkeypatch):
         tid = _opus_card(conn)
         seen, result = _dispatch(conn)
     assert seen == [] and (tid, lp.GUARD_REASON) in result.respawn_guarded
-
-
-def test_admit_limit_without_pace_starts_limits_only_a_held_pool():
-    off = lp.PacingConfig()
-    assert off.pace_starts is False and lp.config_from({}).pace_starts is False
-    assert lp.config_from({"pace_starts": True}).pace_starts is True
-    assert lp.config_from({"pace_starts": "yes"}).pace_starts is False  # only a real true opts in
-    for average in (0, 1, 6):
-        for deferrable in (False, True):
-            assert lp.admit_limit(lp.PoolPace("anthropic", lp.PACED, 0.04), average, deferrable=deferrable, cfg=off) is None
-            assert lp.admit_limit(lp.PoolPace("anthropic", lp.OPEN, 1.5), average, deferrable=deferrable, cfg=off) is None
-            assert lp.admit_limit(lp.PoolPace("anthropic", lp.HELD, 0.0), average, deferrable=deferrable, cfg=off) == 0
-            assert lp.admit_limit(lp.PoolPace("anthropic", lp.UNKNOWN), average, deferrable=deferrable, cfg=off) is None
-
-
-def test_pool_ahead_of_pace_defers_spawns(paced_board, monkeypatch):
-    _write_cfg(paced_board, llm_pacing={"pace_starts": True})
-    _usage(monkeypatch, 70, 6 * DAY)  # 70% in the week's first day: ~490% projected at reset
-    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
-    with kbc.connect() as conn:
-        tid = _opus_card(conn)
-        seen, result = _dispatch(conn)
-        events = [e.payload for e in kb.list_events(conn, tid) if e.kind == pd.EVENT_KIND]
-        status = kb.get_task(conn, tid).status
-    assert seen == [] and status == "ready"
-    assert (tid, lp.GUARD_REASON) in result.respawn_guarded
-    assert result.clock_held[tid][0] == lp.GUARD_REASON
-    assert events and events[-1]["providers"][0]["state"] == lp.PACED
 
 
 def test_pool_behind_pace_does_not_defer(paced_board, monkeypatch):
@@ -315,6 +289,7 @@ def test_only_kanban_dispatch_consults_the_governor():
     assert users == ["hermes_cli/kanban_db_edit.py",
                      "hermes_cli/kanban_dispatch_maintenance.py",
                      "hermes_cli/kanban_llm_pacing.py", "hermes_cli/kanban_llm_pacing_dispatch.py",
+                     "hermes_cli/kanban_llm_pacing_history.py",
                      "hermes_cli/kanban_paced_reroute.py",
                      "hermes_cli/kanban_parent_unclaimed.py", "hermes_cli/kanban_review_model.py",
                      "hermes_cli/kanban_start_gate.py",

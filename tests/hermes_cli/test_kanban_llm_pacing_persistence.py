@@ -12,31 +12,22 @@ import pytest
 
 _SAMPLE = """
 import json
-import sqlite3
 import sys
-from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_llm_pacing as lp
 from hermes_cli import kanban_llm_pacing_dispatch as pd
+from hermes_cli import kanban_llm_pacing_history as hist
 
-now, used, running = map(int, sys.argv[1:])
-# Only the external usage endpoint is replaced; persistence, reload, rate math,
-# local concurrency SQL and the in-process cache all use production code.
+now, used = map(int, sys.argv[1:])
+# Only the external usage endpoint and the Board's token registry are replaced; persistence, reload, rate math,
+# the capacity history and the in-process cache all use production code.
 pd.read_pool = lambda provider, ts: [lp.Reading(ts, 'a', lp.SEVEN_DAY, used, 1800036000)]
+hist.fleet_tokens = lambda provider: {'hub': float(used) * 1000}
 assert not pd._CACHE
-with sqlite3.connect(':memory:') as conn:
-    conn.executescript('''
-        CREATE TABLE tasks (id TEXT, current_run_id INTEGER, status TEXT, claim_lock TEXT);
-        CREATE TABLE task_events (task_id TEXT, run_id INTEGER, kind TEXT, payload TEXT);
-    ''')
-    for i in range(running):
-        conn.execute('INSERT INTO tasks VALUES (?, ?, ?, ?)', (str(i), i, 'running', kb._host_prefix() + 'fixture'))
-        conn.execute('INSERT INTO task_events VALUES (?, ?, ?, ?)',
-                     (str(i), i, 'run_route', json.dumps({'model': 'claude-opus-5-5', 'provider': 'anthropic'})))
-    cfg = lp.PacingConfig(pace_starts=True)
-    pace = pd.pace_for(conn, 'anthropic', cfg, now)
-    average = pd.avg_running('anthropic', now, cfg)
-    print(json.dumps({'pace': pace.as_dict(), 'average': average,
-                      'limit': lp.admit_limit(pace, average, deferrable=False, cfg=cfg)}))
+cfg = lp.PacingConfig()
+pace = pd.pace_for(None, 'anthropic', cfg, now)
+with hist.History.open(pd.history_path(), 'anthropic') as store:
+    reads = len(store.recent_reads(now + 1, 9))
+print(json.dumps({'pace': pace.as_dict(), 'reads': reads}))
 """
 
 
@@ -48,27 +39,28 @@ def test_dispatch_rate_history_survives_process_restart(tmp_path):
            'HERMES_KANBAN_HOME': str(state)}
     root = Path(__file__).resolve().parents[2]
 
-    def sample(now, used, running):
+    def sample(now, used):
         result = subprocess.run(
-            [sys.executable, '-c', _SAMPLE, str(now), str(used), str(running)],
+            [sys.executable, '-c', _SAMPLE, str(now), str(used)],
             cwd=root, env=env, capture_output=True, text=True, timeout=30, check=True,
         )
         return json.loads(result.stdout)
 
     # The week-average fallback is open. Only the saved 54 -> 60%/hour
     # measurement can make the next fresh interpreter pace this pool.
-    first = sample(1799996400, 54, 6)
-    assert first['pace']['state'] == 'open'
-    restarted = sample(1800000000, 60, 2)
+    first = sample(1799996400, 54)
+    assert first['pace']['state'] == 'open' and first['reads'] == 1
+    restarted = sample(1800000000, 60)
     assert restarted['pace']['state'] == 'paced'
     assert restarted['pace']['factor'] == pytest.approx(0.5833)
-    assert restarted['average'] == 4
-    assert restarted['limit'] == 2
-    saved = json.loads((state / 'llm_pacing.json').read_text(encoding='utf-8-sig'))['anthropic']
+    assert restarted['reads'] == 2  # the capacity history survives the restart too
+    data = json.loads((state / 'llm_pacing.json').read_text(encoding='utf-8-sig'))
+    assert data['version'] == 2 and data['v2']['pools']['anthropic']['read_at'] == 1800000000
+    saved = data['anthropic']
     assert saved['samples'] == [
         [1799996400, 'a', 'seven_day', 54, 1800036000],
         [1800000000, 'a', 'seven_day', 60, 1800036000],
     ]
-    assert saved['running'] == [[1799996400, 6], [1800000000, 2]]
+    assert 'running' not in saved  # the per-host start limit's concurrency samples are gone
     assert saved['read_at'] == 1800000000
     assert saved['pace'] == restarted['pace']

@@ -882,10 +882,16 @@ def scope(name: str) -> Scope:
     return Scope(name)
 
 
-def _callable_name(fn: Any, args: tuple = ()) -> str:
-    """``module.qualname`` of what a thread pool will run (``partial`` / ``Context.run`` unwrapped)."""
-    for _ in range(6):
+def _callable_target(fn: Any, args: tuple = ()) -> Any:
+    """Inspect carriers without changing the invocation's context or custody."""
+    for _ in range(12):
         if isinstance(fn, functools.partial):
+            if getattr(fn, "_la_thread_scope", False) is True:
+                break
+            target = getattr(fn, "_la_target", None)
+            if target is not None:
+                fn, args = target
+                continue
             args = fn.args + args
             fn = fn.func
             continue
@@ -894,6 +900,14 @@ def _callable_name(fn: Any, args: tuple = ()) -> str:
             fn, args = args[0], args[1:]
             continue
         break
+    return fn
+
+
+def _callable_name(fn: Any, args: tuple = ()) -> str:
+    """Logical function behind partial, context and physical-custody carriers."""
+    fn = _callable_target(fn, args)
+    if getattr(fn, "_la_thread_scope", False) is True:
+        return fn._la_target_name
     qual = getattr(fn, "__qualname__", None) or type(fn).__name__
     mod = getattr(fn, "__module__", None) or ""
     return f"{mod}.{qual}" if mod else str(qual)
@@ -907,7 +921,13 @@ def _run_scoped(name: str, fn: Callable, *args: Any, **kwargs: Any) -> Any:
 def scoped_call(prefix: str, fn: Callable, args: tuple = ()) -> Callable:
     """``fn`` wrapped so each call is one :class:`Scope` named ``<prefix>/<fn qualname>`` (``args`` are only
     read, to name a ``Context.run(func, ...)`` submission by ``func``)."""
-    return functools.partial(_run_scoped, f"{prefix}/{_callable_name(fn, args)}", fn)
+    if prefix == "thread" and getattr(_callable_target(fn, args), "_la_thread_scope", False) is True:
+        return fn
+    name = _callable_name(fn, args)
+    wrapped: Any = functools.partial(_run_scoped, f"{prefix}/{name}", fn)
+    wrapped._la_thread_scope = prefix == "thread"
+    wrapped._la_target_name = name
+    return wrapped
 
 
 _cb_stats: dict[str, _Stat] = {}  # callback name -> counters (at most MAX_CALLBACK_KEYS + the other bucket)
@@ -948,11 +968,20 @@ _instrumented: dict[str, Any] = {}
 
 
 def instrument_executors() -> bool:
-    """Name the submitted function of every ``loop.run_in_executor`` (so ``asyncio.to_thread``) and
-    ``anyio.to_thread.run_sync`` call as a residual scope ``thread/<qualname>``. Idempotent."""
+    """Name direct pool, asyncio and AnyIO submissions; nested hooks share one residual scope."""
     if _instrumented.get("executors"):
         return False
     _instrumented["executors"] = True
+    from concurrent.futures import ThreadPoolExecutor
+    pool_orig = ThreadPoolExecutor.submit
+
+    def submit(self, func, /, *args, **kwargs):
+        if scopes_enabled():
+            func = scoped_call("thread", func, args)
+        return pool_orig(self, func, *args, **kwargs)
+
+    submit._la_orig = pool_orig  # type: ignore[attr-defined]
+    ThreadPoolExecutor.submit = submit  # type: ignore[method-assign]
     import asyncio.base_events as be
     orig = be.BaseEventLoop.run_in_executor
 
@@ -1019,8 +1048,9 @@ MAX_TARGET_KEYS = 64  # distinct thread targets; later ones fold into TARGET_OTH
 TARGET_OTHER = "other"
 
 
-def _target_key(target: Any) -> str:
+def _target_key(target: Any, args: tuple = ()) -> str:
     """Name of a ``Thread`` target (``module.qualname``; a lambda also gets its line number)."""
+    target = _callable_target(target, args)
     name = _callable_name(target)
     code = getattr(getattr(target, "__func__", target), "__code__", None)
     if name.endswith("<lambda>") and code is not None:
@@ -1047,8 +1077,10 @@ def instrument_thread_targets() -> bool:
         tid = _native_id()
         key: Optional[str]
         try:
-            key = _target_key(target)
+            key = _target_key(target, getattr(self, "_args", ()))
             with _lock:
+                if _exited_tids:
+                    _fold_exited()
                 if key not in _target_exited and key not in _thread_targets.values():
                     if len({*_thread_targets.values(), *_target_exited}) >= MAX_TARGET_KEYS:
                         key = TARGET_OTHER
@@ -1063,6 +1095,8 @@ def instrument_thread_targets() -> bool:
                 try:
                     cpu = _thread_time()
                     with _lock:
+                        if _exited_tids:
+                            _fold_exited()
                         acc = _thread_accounted.get(tid, 0.0)
                         if _thread_targets.get(tid) == key:
                             del _thread_targets[tid]
@@ -1085,6 +1119,8 @@ def uninstrument() -> None:
     if _instrumented.pop("threads", None):
         threading.Thread.run = threading.Thread.run._la_orig  # type: ignore[attr-defined,method-assign]
     if _instrumented.pop("executors", None):
+        from concurrent.futures import ThreadPoolExecutor
+        ThreadPoolExecutor.submit = ThreadPoolExecutor.submit._la_orig  # type: ignore[attr-defined,method-assign]
         import asyncio.base_events as be
         be.BaseEventLoop.run_in_executor = be.BaseEventLoop.run_in_executor._la_orig  # type: ignore[attr-defined]
         try:

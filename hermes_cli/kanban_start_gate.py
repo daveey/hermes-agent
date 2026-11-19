@@ -68,7 +68,7 @@ def pre_claim_hold(conn: Any, row: Any, lane: str, result: Any, *, assignee: Opt
     records its own event) and then the plugin start gate, recorded as a guard hold on ``result``."""
     from hermes_cli.kanban_llm_pacing_dispatch import hold as pacing_hold
 
-    if pacing_hold(conn, row, lane, result, dry_run=dry_run):  # pool held (or, with pace_starts, ahead of pace)
+    if pacing_hold(conn, row, lane, result, dry_run=dry_run):  # every account of the pool at reserve
         return True
     reason = hold(task_id=row["id"], lane=lane, assignee=assignee, board=board)
     if reason is None:

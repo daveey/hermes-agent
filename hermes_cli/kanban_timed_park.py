@@ -178,7 +178,7 @@ def park(
         from hermes_cli import kanban_deploy_window as kdw
         wake_at, reason = kdw.apply(record, wake_at, reason, now=now)
         reason, check_every = kaw.resource_apply(record, reason, check_every)
-    wake_check = wake_check or kaw.card_probe(record)
+    wake_check, clock_only = kaw.park_probe(conn, task_id, record, wake_check, clock_only)
     wake_check, check_every = kwc.validate_park(
         wake_at=wake_at, wake_check=wake_check, check_every=check_every, clock_only=clock_only)
     from hermes_cli.kanban_wake_check_hub_relay import relay_host
@@ -212,4 +212,6 @@ def park(
                   register_here=kwc.probe_here(conn, probe_host))
     from hermes_cli.kanban_done_tail import post_notice
     post_notice(conn, task_id, reason=reason, awaiting=record, run_id=run_id)
+    from hermes_cli import kanban_decision_ask
+    kanban_decision_ask.post_notice(conn, task_id, reason=reason, awaiting=record, run_id=run_id)
     return True

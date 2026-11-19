@@ -12,6 +12,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_llm_pacing_dispatch as lpd
+from tests.hermes_cli import kanban_pacing_state as pacing_state
 from hermes_cli import kanban_model_tier as tier
 from hermes_cli import kanban_paced_reroute as paced
 from hermes_cli import kanban_parent_unclaimed as kpu
@@ -40,14 +41,10 @@ UNSERVED: set = set()  # providers this host holds no live pool (credential) for
 
 
 def _pools(clock, **states):
-    """Store ``provider=(state, until_offset or None)`` paces in this home's ``llm_pacing.json``, read just now."""
-    data = {}
-    for name, (state, offset) in states.items():
-        provider = name.replace('_', '-')
-        data[provider] = {'read_at': clock[0], 'running': [], 'samples': [], 'pace': {
-            'provider': provider, 'state': state, 'factor': 0.0 if state == 'held' else 0.07,
-            'until': None if offset is None else float(clock[0] + offset), 'detail': ''}}
-    lpd.state_path().write_text(json.dumps(data), encoding='utf-8')
+    """Store ``provider=(state, until_offset or None)`` paces in this home's ``llm_pacing.json``, read just now (a
+    ``held`` pool at reserve in ``v2``)."""
+    pacing_state.store(*((name.replace('_', '-'), state, None if offset is None else float(clock[0] + offset))
+                         for name, (state, offset) in states.items()), now=clock[0])
 
 
 def _deep(monkeypatch, cfg=None, grok=False):
@@ -108,7 +105,7 @@ def test_reroute_after_s_sets_the_threshold(board, clock, monkeypatch, after, un
 
 @pytest.mark.parametrize('state', ['paced', 'open', 'unknown'])
 def test_a_pool_that_is_not_held_never_moves_the_route(board, clock, monkeypatch, state):
-    """A ``paced`` pool keeps limit >= 1 (``admit_limit``): the card waits its turn there, it is not rerouted."""
+    """Only a pool at reserve holds a start: a ``paced`` (or open/unknown) pool starts the card where it is."""
     _deep(monkeypatch)
     _pools(clock, openai_codex=(state, HELD_FAR))
     with kbc.connect() as conn:

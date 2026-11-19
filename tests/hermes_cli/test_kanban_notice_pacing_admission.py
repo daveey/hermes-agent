@@ -7,13 +7,13 @@ priority order and this one ranked 62 of 66, so no dispatcher able to lease it e
 on it was the hub's own ``skipped_ineligible: labels_mismatch`` ("this machine cannot lease it"). The hub's own
 governor file (``llm_pacing.json``) covers the same accounts, because pool workers draw theirs from the hub's relay.
 
-Only a positive read of that file (every candidate provider paced or held) changes the notice. An absent, stale,
-unreadable, failing or OPEN read leaves today's payload and words, "admission reason unknown" included.
+Only a positive read of that file (every candidate provider held: at reserve in ``v2``) changes the notice. An
+absent, stale, unreadable, failing, OPEN or PACED read leaves today's payload and words, "admission reason unknown"
+included. (Until 2026-11-19 a paced pool held starts under ``pace_starts: true``; that start limit is gone.)
 """
 from __future__ import annotations
 
 import copy
-import dataclasses
 import json
 import time
 
@@ -25,6 +25,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_dispatch_skip as skips
 from hermes_cli import kanban_llm_pacing as lp
 from hermes_cli import kanban_llm_pacing_dispatch as pd
+from tests.hermes_cli import kanban_pacing_state as pacing_state
 from hermes_cli import kanban_parent_unclaimed as pu
 from hermes_cli import kanban_queue_position as kqp
 from hermes_cli import kanban_worker_node as wn
@@ -36,13 +37,6 @@ hub = pool_wait.hub  # a hub that cannot lease ``pool:worker`` cards: the Board 
 board = model_tier.board  # one unsynced gateway: every card is its own to lease
 
 
-@pytest.fixture(autouse=True)
-def _pace_starts_mode(monkeypatch):
-    """This file describes the opt-in mode (``kanban.llm_pacing.pace_starts: true``), where a paced pool holds
-    starts. The default, where it holds nothing and is no hold to describe, is in
-    ``test_kanban_pacing_default_reads.py``."""
-    real = lp.config_from
-    monkeypatch.setattr(lp, "config_from", lambda section: dataclasses.replace(real(section), pace_starts=True))
 LABELS = pool_wait.LABELS
 OPUS = "claude-opus-5-5"
 DAY = 86400
@@ -58,14 +52,9 @@ CANNOT_LEASE = [(reason, detail) for reason in ("skipped_ineligible", "claim_def
 
 
 def _store(*pools, age=0.0):
-    """This gateway's own governor file as its dispatcher leaves it: ``(provider, state[, until])`` per pool."""
-    now = time.time()
-    data = {}
-    for provider, state, *until in pools:
-        pace = lp.PoolPace(provider, state, 0.0299 if state == lp.PACED else 0.0, until[0] if until else None,
-                           "6 of 7 accounts at 100% on the 7-day window")
-        data[provider] = {"read_at": now - age, "pace": pace.as_dict(), "running": [], "samples": []}
-    pd.state_path().write_text(json.dumps(data), encoding="utf-8")
+    """This gateway's own governor file as its dispatcher leaves it: ``(provider, state[, until])`` per pool; a
+    ``held`` pool is stored at reserve in ``v2`` (``kanban_pacing_state``)."""
+    pacing_state.store(*pools, age=age)
 
 
 def _pool_card(conn, *, age=40 * 60, labels=None, title="waits on the pool", **kw):
@@ -138,16 +127,16 @@ def _assert_queue_words_as_before(payload, text, render):
     assert "this machine cannot lease it" in text, text
 
 
-# --- card cases 1 and 2: a paced pool is named, by both notices -----------------------------------------------------
+# --- card cases 1 and 2: a held pool is named, by both notices  -----------------------------------------------------
 
 
 def test_chat_wait_notice_for_a_never_imported_pool_card_names_the_paced_pool(hub):
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     tid = _hub_card(hub.conn)
     payload, text = _chat_wait(hub.conn, tid)
     assert payload["admission"] == {"reason": "llm_pacing", "status": "held",
-                                    "providers": [{"provider": "anthropic", "state": "paced"}]}, payload
-    assert "admission reason llm_pacing: held: LLM quota pacing (anthropic paced pool)" in text, text
+                                    "providers": [{"provider": "anthropic", "state": "held"}]}, payload
+    assert "admission reason llm_pacing: held: LLM quota pacing (anthropic held pool)" in text, text
     assert "it starts on its own once its provider pool is back on pace" in text, text
     _assert_names_no_re_placement(text)
     _assert_queue_words_as_before(payload, text, cw.notice_text)
@@ -157,12 +146,12 @@ def test_chat_wait_notice_for_a_never_imported_pool_card_names_the_paced_pool(hu
 
 
 def test_parent_unclaimed_notice_for_a_never_imported_pool_card_names_the_paced_pool(hub):
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     parent = _hub_card(hub.conn)
     payload, text = _parent_unclaimed(hub.conn, parent)
     assert payload["admission"] == {"reason": "llm_pacing", "status": "held",
-                                    "providers": [{"provider": "anthropic", "state": "paced"}]}, payload
-    assert "admission reason llm_pacing: held: LLM quota pacing (anthropic paced pool)" in text, text
+                                    "providers": [{"provider": "anthropic", "state": "held"}]}, payload
+    assert "admission reason llm_pacing: held: LLM quota pacing (anthropic held pool)" in text, text
     assert "it starts on its own once its provider pool is back on pace" in text, text
     _assert_names_no_re_placement(text)
     _assert_queue_words_as_before(payload, text, pu.notice_text)
@@ -185,7 +174,7 @@ def test_held_pool_notice_carries_the_until_time(hub, path):
     _assert_names_no_re_placement(text)
 
 
-@pytest.mark.parametrize("state", [lp.PACED, lp.HELD])
+@pytest.mark.parametrize("state", [lp.HELD])  # a paced pool holds no start any more: no notice to match
 @pytest.mark.parametrize("path", sorted(NOTICES))
 def test_ready_hint_matches_the_notice_pacing_admission(hub, state, path):
     until = int(time.time()) + 3600
@@ -212,8 +201,8 @@ def test_without_a_positive_governor_read_the_notice_is_as_before(hub, monkeypat
      "unknown": lambda: _store(("anthropic", lp.UNKNOWN)),
      "absent": lambda: None,
      "unreadable": lambda: pd.state_path().write_text("{not json", encoding="utf-8"),
-     "stale": lambda: _store(("anthropic", lp.PACED), age=10 * READ_INTERVAL),
-     "failing": lambda: _store(("anthropic", lp.PACED))}[read]()
+     "stale": lambda: _store(("anthropic", lp.HELD), age=10 * READ_INTERVAL),
+     "failing": lambda: _store(("anthropic", lp.HELD))}[read]()
     asked, real = [], getattr(pd, "paced_pools", None)
 
     def governor(conn, task_id, *args, **kw):
@@ -243,7 +232,7 @@ def test_without_a_positive_governor_read_the_notice_is_as_before(hub, monkeypat
 
 
 def test_a_card_this_gateway_can_lease_keeps_its_own_dispatchers_words(board):
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="local", assignee="default", model_override=OPUS, provider_override="anthropic",
                              session_id="owner-chat")
@@ -255,7 +244,7 @@ def test_a_card_this_gateway_can_lease_keeps_its_own_dispatchers_words(board):
 
 
 def test_an_unplaceable_card_keeps_the_re_place_advice(hub):
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     tid = _pool_card(hub.conn)
     with kb.write_txn(hub.conn):  # create_task refuses labels no machine carries; an old card can still hold them
         hub.conn.execute("UPDATE tasks SET runs_on = ? WHERE id = ?",
@@ -280,7 +269,7 @@ def _set_registry(states):
 @pytest.mark.parametrize("states", [("held", "held"), ("draining", "draining"), ("held", "draining")])
 def test_a_pool_whose_every_matching_machine_is_held_or_draining_keeps_that_explanation(hub, states):
     """It starts when an operator releases the hold or the drain ends, not "once its provider pool is back on pace"."""
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     _set_registry(dict(zip(("worker-3", "worker-4"), states)))
     tid = _hub_card(hub.conn)
     place = kqp.placement(hub.conn, tid)  # the registry says what it should, or this test proves nothing
@@ -292,7 +281,7 @@ def test_a_pool_whose_every_matching_machine_is_held_or_draining_keeps_that_expl
 
 @pytest.mark.parametrize("kind", ["held", "draining"])
 def test_one_machine_able_to_lease_it_is_enough_for_the_pacing_notice(hub, kind):
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     _set_registry({"worker-3": kind})  # worker-4 is neither: the live case had 1 of 8 workers draining
     tid = _hub_card(hub.conn)
     place = kqp.placement(hub.conn, tid)
@@ -303,7 +292,7 @@ def test_one_machine_able_to_lease_it_is_enough_for_the_pacing_notice(hub, kind)
 
 @pytest.mark.parametrize("verdict", CAPABLE_VERDICTS)
 def test_a_verdict_recorded_by_a_dispatcher_able_to_lease_the_card_keeps_todays_notice(hub, verdict):
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     tid = _hub_card(hub.conn)
     assert skips.record(hub.conn, tid, verdict[0], detail=verdict[1])
     payload, text = _chat_wait(hub.conn, tid)
@@ -315,22 +304,22 @@ def test_a_verdict_recorded_by_a_dispatcher_able_to_lease_the_card_keeps_todays_
 
 @pytest.mark.parametrize("cannot_lease", CANNOT_LEASE)
 def test_a_skip_that_only_says_the_recording_gateway_cannot_lease_the_card_is_no_verdict(hub, cannot_lease):
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     tid = _pool_card(hub.conn)
     assert skips.record(hub.conn, tid, cannot_lease[0], detail=cannot_lease[1])
     payload, text = _chat_wait(hub.conn, tid)
     assert payload["admission"]["reason"] == "llm_pacing", payload
-    assert "held: LLM quota pacing (anthropic paced pool)" in text, text
+    assert "held: LLM quota pacing (anthropic held pool)" in text, text
 
 
 def test_a_card_without_any_skip_is_named_too(hub):
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     payload, text = _chat_wait(hub.conn, _pool_card(hub.conn))
     assert payload["admission"]["reason"] == "llm_pacing" and "LLM quota pacing" in text, (payload, text)
 
 
 def test_a_busy_pool_and_a_core_update_hold_still_come_first(hub):
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.PACED))  # a paced pool holds nothing (a held one beats same-label claims, below)
     busy = _pool_card(hub.conn, title="behind three claims")
     now = int(time.time())
     for i in range(3):  # three same-label cards claimed by the pool within 30 min
@@ -409,7 +398,7 @@ def test_a_paced_pool_with_same_label_claims_stays_a_queue_wait(hub):
 def test_this_hosts_update_hold_does_not_hide_a_pool_cards_pacing_wait(hub):
     """The incident shape (t_01a1e01b9645d70c): a pool card paced by the governor while the hub swaps its own
     core gets the pacing notice, not the hub's hold sentence."""
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     payload = _post(hub.conn, _pool_card(hub.conn), core_update_hold=True, core_update_started="x")
     assert payload["admission"]["reason"] == "llm_pacing", payload
     assert not any(k.startswith("core_update_") for k in payload), payload
@@ -419,13 +408,13 @@ def test_this_hosts_update_hold_does_not_hide_a_pool_cards_pacing_wait(hub):
 
 def test_a_card_missing_from_the_shared_board_is_not_a_pacing_wait(hub):
     """No worker can import a card the Board does not hold: the sync repair is the advice, not the pool's pace."""
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     tid = _hub_card(hub.conn)
     assert _post(hub.conn, tid, missing_shared_board=True, sync_reject_reason="rejected")["admission"] == UNKNOWN
 
 
 def test_an_ungoverned_provider_and_a_mandatory_pin_always_start_so_they_are_not_named(hub):
-    _store(("anthropic", lp.PACED), ("zai", lp.PACED))
+    _store(("anthropic", lp.HELD), ("zai", lp.HELD))
     for kw in ({"model_override": "glm-5", "provider_override": "zai"}, {"pin_mandatory": True}):
         assert _post(hub.conn, _pool_card(hub.conn, **kw))["admission"] == UNKNOWN, kw
 
@@ -444,9 +433,9 @@ def test_the_read_returns_every_candidate_pool_when_all_are_paced_or_held(card, 
     conn, tid = card
     until = time.time() + DAY
     monkeypatch.setattr(pd, "candidate_providers", lambda *_a: ["anthropic", "openai-codex"])
-    _store(("anthropic", lp.PACED), ("openai-codex", lp.HELD, until))
+    _store(("anthropic", lp.HELD), ("openai-codex", lp.HELD, until))
     paces = pd.paced_pools(conn, tid)
-    assert [(p.provider, p.state, p.until) for p in paces] == [("anthropic", lp.PACED, None),
+    assert [(p.provider, p.state, p.until) for p in paces] == [("anthropic", lp.HELD, None),
                                                               ("openai-codex", lp.HELD, until)]
 
 
@@ -455,13 +444,13 @@ def test_one_candidate_pool_that_is_not_paced_or_held_means_no_positive_read(car
     """The card may run there, so the governor does not hold it: ``_verdicts`` returns None at the first admitting pool."""
     conn, tid = card
     monkeypatch.setattr(pd, "candidate_providers", lambda *_a: ["anthropic", "openai-codex"])
-    _store(("anthropic", lp.PACED), *([other] if other else []))
+    _store(("anthropic", lp.HELD), *([other] if other else []))
     assert pd.paced_pools(conn, tid) is None
 
 
 def test_no_candidate_provider_means_no_positive_read(card, monkeypatch):
     conn, tid = card
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     monkeypatch.setattr(pd, "candidate_providers", lambda *_a: [])
     assert pd.paced_pools(conn, tid) is None
 
@@ -470,36 +459,36 @@ def test_no_candidate_provider_means_no_positive_read(card, monkeypatch):
                          ids=["disabled", "provider-not-governed"])
 def test_the_read_follows_the_governors_own_start_rules(card, monkeypatch, cfg):
     conn, tid = card
-    _store(("anthropic", lp.PACED))
-    assert [p.state for p in pd.paced_pools(conn, tid)] == [lp.PACED]  # the control: the card is judged
+    _store(("anthropic", lp.HELD))
+    assert [p.state for p in pd.paced_pools(conn, tid)] == [lp.HELD]  # the control: the card is judged
     monkeypatch.setattr(pd, "load_config", lambda: cfg)  # enabled: false restores ungoverned claims; others always start
     assert pd.paced_pools(conn, tid) is None
 
 
 def test_a_card_that_is_not_on_the_board_is_no_positive_read(card):
     conn, _tid = card
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     assert pd.paced_pools(conn, "t_missing") is None
 
 
 def test_the_read_ages_out_a_stored_pace_after_a_few_read_intervals(card):
     conn, tid = card
     bound = pd.STALE_READ_INTERVALS * READ_INTERVAL
-    _store(("anthropic", lp.PACED), age=bound - 30)
-    assert [p.state for p in pd.paced_pools(conn, tid)] == [lp.PACED]
-    _store(("anthropic", lp.PACED), age=bound + 30)
+    _store(("anthropic", lp.HELD), age=bound - 30)
+    assert [p.state for p in pd.paced_pools(conn, tid)] == [lp.HELD]
+    _store(("anthropic", lp.HELD), age=bound + 30)
     assert pd.paced_pools(conn, tid) is None
-    _store(("anthropic", lp.PACED), age=-3600)  # stamped in the future: not a read this gateway can age
+    _store(("anthropic", lp.HELD), age=-3600)  # stamped in the future: not a read this gateway can age
     assert pd.paced_pools(conn, tid) is None
     data = json.loads(pd.state_path().read_text(encoding="utf-8"))
-    data["anthropic"]["read_at"] = "yesterday"
+    data["v2"]["pools"]["anthropic"]["read_at"] = "yesterday"
     pd.state_path().write_text(json.dumps(data), encoding="utf-8")
     assert pd.paced_pools(conn, tid) is None
 
 
 def test_the_read_makes_no_usage_read_and_writes_no_state(card, monkeypatch):
     conn, tid = card
-    _store(("anthropic", lp.PACED))
+    _store(("anthropic", lp.HELD))
     before = pd.state_path().read_bytes()
 
     def refused(*_a, **_kw):
@@ -507,7 +496,7 @@ def test_the_read_makes_no_usage_read_and_writes_no_state(card, monkeypatch):
 
     monkeypatch.setattr(pd, "read_pool", refused)
     monkeypatch.setattr(pd, "_snapshots", refused)
-    assert [p.state for p in pd.paced_pools(conn, tid)] == [lp.PACED]
+    assert [p.state for p in pd.paced_pools(conn, tid)] == [lp.HELD]
     assert pd.state_path().read_bytes() == before
 
 
@@ -539,7 +528,7 @@ def test_a_stored_pacing_admission_renders_with_the_earliest_until():
     {"reason": "llm_pacing", "providers": [None, 3, {"provider": "anthropic"}]},
     {"reason": "llm_pacing", "providers": [{"state": "held"}, {"provider": "", "state": "paced"}]},  # no pool named
     {"reason": "llm_pacing", "providers": 5},  # not a list, and not iterable
-    {"reason": "other_reason", "providers": [{"provider": "anthropic", "state": "paced"}]}, "llm_pacing", None,
+    {"reason": "other_reason", "providers": [{"provider": "anthropic", "state": "held"}]}, "llm_pacing", None,
     UNKNOWN])
 def test_a_malformed_or_foreign_admission_does_not_render_pacing_words(admission):
     for render in (cw.notice_text, pu.notice_text):

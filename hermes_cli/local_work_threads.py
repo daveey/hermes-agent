@@ -6,6 +6,7 @@ not finish a running target. No helper here claims complete runtime coverage.
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
+from functools import partial
 import os
 import threading
 from typing import TYPE_CHECKING
@@ -165,14 +166,16 @@ def _refused_before_enqueue(executor):
 
 def _submit_owned(executor, function, args, kwargs, owner, kind):
     reservation = _Reservation(owner, kind, copy_context())
+    call = partial(reservation.run, function, args, kwargs)
+    # Attribution may inspect the logical target, but must execute custody intact.
+    call._la_target = (function, args)  # type: ignore[attr-defined]
     try:
         # Bypass ScopeAwareExecutor.submit to avoid wrapping the same boundary
         # twice. Nested physical work inside the target is still scope-aware.
         if isinstance(executor, ScopeAwareExecutor):
-            future = ThreadPoolExecutor.submit(executor, reservation.run,
-                                               function, args, kwargs)
+            future = ThreadPoolExecutor.submit(executor, call)
         else:
-            future = executor.submit(reservation.run, function, args, kwargs)
+            future = executor.submit(call)
     except BaseException:
         if _refused_before_enqueue(executor):
             # A stdlib pool refuses a shut-down/broken submit under its lock BEFORE enqueuing.

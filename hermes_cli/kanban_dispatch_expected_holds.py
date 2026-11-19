@@ -21,18 +21,14 @@ def _pacing_hold(row, now):
     providers = extra.get("providers")
     if not isinstance(providers, list) or not providers or not all(isinstance(v, dict) for v in providers):
         return None
-    full = all(v.get("state") == "paced" and type(v.get("limit")) is int and v["limit"] > 0 and
-               type(v.get("running")) is int and v["running"] >= v["limit"] for v in providers)
-    timed = (all(v.get("state") in ("held", "paced") for v in providers) and
+    # Only a pool at reserve holds a start (the governor's ``reserve_hold``): its wait is expected
+    # while it names a real future reset. A hold with no reset stays stuck accounting (nothing frees it).
+    timed = (all(v.get("state") == "held" for v in providers) and
              type(until) in (int, float) and now < until < 253402300799)
-    if not (full or timed):
+    if not timed:
         return None
-    pools = ", ".join(f"{v.get('provider')} {v.get('state')} running={v.get('running')} "
-                      f"limit={v.get('limit')}" for v in providers)
-    deadline = until if timed else None
-    detail = (f"next reset {datetime.fromtimestamp(deadline, UTC).isoformat()}" if deadline else
-              "release when pool has room; recheck next tick")
-    return tid, (f"llm_pacing ({pools}); {detail}", deadline)
+    pools = ", ".join(f"{v.get('provider')} {v.get('state')}" for v in providers)
+    return tid, (f"llm_pacing ({pools}); next reset {datetime.fromtimestamp(until, UTC).isoformat()}", until)
 
 
 def expected_holds(results, now):

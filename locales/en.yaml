@@ -245,6 +245,7 @@ gateway:
       dependency_parent_unclaimed: "has a parent card waiting with no worker"
       chat_wait_unclaimed: "is ready with no worker claiming it"
       park_progress_notice: "reported progress while parked; not completed"
+      decision_requested: "is parked until its orchestrator decides"
       spend_budget_decision_ready: "reached its spend budget; awaiting a promote or archive decision"
       status_default: "status changed"
       status_joiner: ", "

@@ -12,6 +12,12 @@ Sources, per ``state.db`` (the installation root's and every ``profiles/*/state.
   normalized to 64-character names and bounded to 32 keys (overflow becomes ``other``).
   Legacy schemas contribute their token totals under ``unknown``.
 
+:func:`provider_counters` (not part of :func:`counters`) groups the same token columns by
+``session_model_usage.billing_provider`` for the LLM pacing capacity model; a row with no billing provider (or a
+schema without the column) is attributed by :func:`provider_for_model`. It is a full grouped read, so it is cached
+for :data:`PROVIDER_TTL_S` and kept off the 10 s metrics path, whose incremental reads are history-bounded. It is not
+sent to the Board (a Board that predates a field rejects the whole sample).
+
 Totals only grow while rows are kept; deleting sessions (prune) lowers them, which a consumer treats as a reset.
 Read-only URI connections with a 1 s busy timeout. The result (success or failure) is cached for :data:`CACHE_TTL_S`
 because ``collect()`` runs every 10 s. Any unreadable database omits all throughput fields: a partial sum would read as
@@ -38,6 +44,37 @@ _USAGE_SQL = ("SELECT coalesce(sum(input_tokens + output_tokens), 0), "
 _SESSIONS_SQL = "SELECT count(*), count(ended_at) FROM sessions"
 
 _cache: Optional[tuple[str, float, dict]] = None  # (root key, taken at, value)
+
+
+_PREFIXES = (("claude", "anthropic"), ("gpt-", "openai-codex"), ("codex", "openai-codex"), ("o1", "openai-codex"),
+             ("o3", "openai-codex"), ("o4", "openai-codex"), ("grok", "xai-oauth"))
+_PROVIDER_SQL = ("SELECT billing_provider, model, coalesce(sum(input_tokens + output_tokens), 0), "
+                 "coalesce(sum(cache_read_tokens + cache_write_tokens), 0) FROM session_model_usage "
+                 "GROUP BY billing_provider, model")
+
+
+def provider_for_model(model: object) -> str:
+    """The subscription pool a model name belongs to by prefix (``claude-`` Anthropic, ``gpt-`` Codex, ``grok-``
+    xAI), else ``unknown``. Ambiguous for a model served through OpenRouter: the billing provider wins when known."""
+    name = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    return next((provider for prefix, provider in _PREFIXES if name.startswith(prefix)), "unknown")
+
+
+def _provider_rows(path: Path, providers: dict[str, list[int]]) -> None:
+    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+    try:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(session_model_usage)")}
+        if not columns:
+            return
+        sql = _PROVIDER_SQL if "billing_provider" in columns else _PROVIDER_SQL.replace(
+            "billing_provider, model", "'', model")
+        for provider, model, io, cache in db.execute(sql):
+            name = str(provider or "").strip().lower()[:64] or provider_for_model(model)
+            target = providers.setdefault(name, [0, 0])
+            target[0] += max(0, int(io or 0))
+            target[1] += max(0, int(cache or 0))
+    finally:
+        db.close()
 
 
 def state_db_paths(root: Optional[Path] = None) -> list[Path]:
@@ -148,6 +185,34 @@ def _counters_locked(root):
     return {**dict(zip(FIELDS, totals)), "tokens_by_model": bounded}
 
 
+PROVIDER_TTL_S = 240.0
+_provider_cache: Optional[tuple[str, float, dict]] = None
+
+
+def provider_counters(root: Optional[Path] = None, *, clock: Callable[[], float] = time.monotonic) -> dict:
+    """``{"tokens_by_provider": {provider: [io, cache]}}`` over every ``state.db`` of this host, cached
+    :data:`PROVIDER_TTL_S`; ``{}`` when any database is unreadable (a partial sum would read as a drop)."""
+    global _provider_cache
+    with _lock:
+        now, key = clock(), str(root)
+        if _provider_cache is not None and _provider_cache[0] == key and 0 <= now - _provider_cache[1] < PROVIDER_TTL_S:
+            return deepcopy(_provider_cache[2])
+        providers: dict[str, list[int]] = {}
+        seen = set()
+        try:
+            for path in state_db_paths(root):
+                stat = path.stat()
+                if (stat.st_dev, stat.st_ino) in seen:
+                    continue
+                seen.add((stat.st_dev, stat.st_ino))
+                _provider_rows(path, providers)
+            value = {"tokens_by_provider": providers} if seen else {}
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            value = {}
+        _provider_cache = (key, now, value)
+        return deepcopy(value)
+
+
 def cached_counters(root: Optional[Path] = None, *, clock: Callable[[], float] = time.monotonic) -> dict:
     with _lock:
         return _cached_locked(root, clock)
@@ -164,7 +229,7 @@ def _cached_locked(root, clock):
 
 
 def reset_cache() -> None:
-    global _cache
+    global _cache, _provider_cache
     with _lock:
-        _cache = None
+        _cache = _provider_cache = None
         incremental.reset()

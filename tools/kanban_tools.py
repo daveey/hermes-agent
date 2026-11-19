@@ -986,6 +986,8 @@ def _awaiting_arg(args: dict, wake: tuple) -> tuple[Optional[dict], tuple]:
     if probe:
         from hermes_cli import kanban_wake_check as kwc
         wake = (probe, kwc.normalize_every(None), wake[2])
+    elif not wake[0] and kaw.declared_chat_wait(awaiting):
+        wake = (wake[0], wake[1], True)  # its comment probe is added in the park txn (kanban_awaiting.park_probe)
     try:
         kaw.confirm_remote(awaiting, hint=" ".join(str(x) for x in (wake[0], args.get("reason"), args.get("checkpoint")) if x))
     except kaw.AwaitingError as exc:

@@ -447,15 +447,24 @@ class SessionSearchMixin:
         the start of the table every chunk (O(n²) total on large trash tables, #79324). Compound-key tables
         keep the chunked ``LIMIT`` delete — they are small by construction.
         """
+        from hermes_state_fts_online import verified_trash, write_verified_trash
+
         limit = self._fts_chunk_rows
         with self._read_ctx() as conn:
             trash = [r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE ? ESCAPE '\\'",
                 (self._FTS_TRASH_PREFIX.replace("_", "\\_") + "%",),
             ).fetchall()]
-            if trash and progress is not None and progress.table != trash[0]:
+            verified = verified_trash(conn)
+        # Only trash a whole-file plan proved unshared is drained (hermes_state_fts_online); the rest is verified
+        # first, outside self._lock, and stays put when the plan refuses.
+        if any(t not in verified for t in trash):
+            verified |= self._fts_verify_trash([t for t in trash if t not in verified])
+            trash = [t for t in trash if t in verified]
+        if trash and progress is not None and progress.table != trash[0]:
+            with self._read_ctx() as conn:
                 self._fts_teardown_start_table(conn, trash, progress)
-                return True
+            return True
         if not trash:
             return False
         tbl = trash[0]
@@ -491,6 +500,7 @@ class SessionSearchMixin:
         def _drop(conn, marker_key: Optional[str] = None) -> bool:
             """Drained — the DROP is cheap now. True: re-check for more trash."""
             conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+            write_verified_trash(conn, verified_trash(conn) - {tbl})
             if marker_key is not None:
                 _delete_meta(conn, marker_key)
             logger.info("Old FTS shadow table %s torn down.", tbl)
@@ -537,9 +547,16 @@ class SessionSearchMixin:
         without an anti-join, so it needs a known-empty index. A missing docsize table counts
         as empty."""
         if _meta_row(conn, "fts_rebuild_progress") is None:
-            if not self._fts_index_known_empty(conn):
-                self._reset_fts_index_to_empty(conn)
+            if not self._fts_index_known_empty(conn) and not self._reset_fts_index_to_empty(conn):
+                return  # the gate kept the index: no claim over rows it still holds (optimize reports it)
             self.set_meta("fts_rebuild_progress", "0", cursor=conn)
+
+    def _fts_reseed_needs_reset(self) -> bool:
+        """``_reseed_missing_progress`` would truncate the index ('delete-all'): a backfill claim without progress
+        over a non-empty index. Read-only; lets optimize-storage plan before it takes the lock."""
+        with self._read_ctx() as conn:
+            return (_meta_row(conn, "fts_rebuild_high_water") is not None
+                    and _meta_row(conn, "fts_rebuild_progress") is None and not self._fts_index_known_empty(conn))
 
     @staticmethod
     def _fts_index_known_empty(conn) -> bool:
@@ -549,13 +566,18 @@ class SessionSearchMixin:
         except sqlite3.OperationalError:
             return True
 
-    @staticmethod
-    def _reset_fts_index_to_empty(conn) -> None:
+    def _reset_fts_index_to_empty(self, conn) -> bool:
         """Truncate the v23 external-content tables via FTS5 ``'delete-all'`` (O(1); a plain DELETE is
-        O(rows) and corrupts the index when indexed rows diverged from ``messages``)."""
+        O(rows) and corrupts the index when indexed rows diverged from ``messages``). 'delete-all' frees every
+        index page, so it first passes the whole-file gate (hermes_state_fts_online); False when the gate kept
+        the index (nothing truncated)."""
+        if not self._fts_wholesale_free_allowed(self._FTS_TABLES, context="FTS index truncation ('delete-all')",
+                                                cursor=conn):
+            return False
         for tbl in ("messages_fts", "messages_fts_trigram"):
             with contextlib.suppress(sqlite3.OperationalError):  # table absent — already an empty surface
                 conn.execute(f"INSERT INTO {tbl}({tbl}) VALUES('delete-all')")
+        return True
 
     def _seed_fts_rebuild_markers(self, conn, *, force: bool = False) -> int:
         """Write ``fts_rebuild_high_water`` / ``fts_rebuild_progress`` for a full backfill; returns
@@ -587,7 +609,9 @@ class SessionSearchMixin:
             if self._fts_external_index_empty_with_messages(conn):
                 _delete_meta(conn, "fts_storage_version")
                 self._seed_fts_rebuild_markers(conn, force=True)
-        self._execute_write(_do)
+        # A reseed truncates the index ('delete-all'): its whole-file plan runs here, before the write lock.
+        with self._fts_runtime_plan(needed=self._fts_reseed_needs_reset()):
+            self._execute_write(_do)
 
     def fts_optimize_available(self) -> bool:
         """True when `optimize_fts_storage()` has work: legacy inline FTS or a v23 trigram still
@@ -787,6 +811,8 @@ class SessionSearchMixin:
 
         # Heal bookkeeping BEFORE deciding whether to demote again.
         self._repair_optimize_bookkeeping()
+        if self._fts_stale or self._fts_reseed_needs_reset():
+            return {"ok": False, "reason": "fts_index_kept"}  # the gate kept the index (detached or unplanned; logged)
         with self._lock:
             needs_storage_upgrade = self._db_needs_fts_storage_upgrade(self._conn)
         pending = self.get_meta("fts_rebuild_high_water") is not None
@@ -1350,14 +1376,27 @@ class SessionSearchMixin:
         maintenance: changes neither results nor ``snippet()`` output, only layout and
         speed; VACUUM then returns the freed pages. Returns the number optimized. A quarantined
         handle never issues ``'optimize'``: it rewrites index segments in place and would compound
-        structural damage (or a split WAL generation) instead of leaving it diagnosable."""
+        structural damage (or a split WAL generation) instead of leaving it diagnosable. A detached
+        (stale) index has nothing worth merging: 0. Raises ``FtsFreeRefused`` when the whole-file gate
+        keeps the index (``'optimize'`` frees every old segment page; hermes_state_fts_online)."""
         self._raise_if_db_corrupt()
         optimized = 0
-        with self._lock:
+        # The whole-file plan runs here, before the lock.
+        with self._fts_runtime_plan(needed=not self._fts_stale), self._lock:
             self._raise_if_db_replaced()
             if self._conn is None:
                 self._reopen_after_close_locked(context="write")
-            for tbl in self._present_fts_tables():
+            if self._fts_stale:
+                return 0
+            tables = self._present_fts_tables()
+            if tables and not self._fts_wholesale_free_allowed(tables, context="FTS segment merge ('optimize')"):
+                if self._fts_gate_outcome not in ("refused", "named"):
+                    return 0  # a race (schema moved, no plan): nothing wrong with the store; a later call merges
+                from hermes_state_fts_online import FtsFreeRefused
+
+                raise FtsFreeRefused("the integrity gate kept the search index from being merged (see the log); "
+                                     "`hermes sessions repair-search` or `hermes sessions recover` first")
+            for tbl in tables:
                 try:
                     self._conn.execute(f"INSERT INTO {tbl}({tbl}) VALUES('optimize')")
                     optimized += 1
@@ -1386,7 +1425,8 @@ class SessionSearchMixin:
         """
         self._raise_if_db_corrupt()
         rebuilt = 0
-        with fts_rebuild_admission(self.db_path) as admitted:
+        # 'rebuild' frees every index page: the whole-file plan runs here, before the lock (hermes_state_fts_online).
+        with self._fts_runtime_plan(needed=not self._fts_stale), fts_rebuild_admission(self.db_path) as admitted:
             if not admitted:
                 logger.warning(
                     "Deferred in-place FTS rebuild: another process holds the rebuild authority for this state.db.")
@@ -1395,7 +1435,10 @@ class SessionSearchMixin:
                 self._raise_if_db_replaced()
                 if self._conn is None:
                     self._reopen_after_close_locked(context="write")
-                for tbl in self._present_fts_tables():
+                tables = self._present_fts_tables()
+                if tables and not self._fts_wholesale_free_allowed(tables, context="In-place FTS rebuild"):
+                    return 0
+                for tbl in tables:
                     try:
                         self._conn.execute(f"INSERT INTO {tbl}({tbl}) VALUES('rebuild')")
                         self._conn.commit()

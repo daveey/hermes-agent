@@ -1,6 +1,6 @@
 """LLM pacing follow-ups from the PR #3058 review (t_01a1db2e63e89126). [daveey]
 
-1. paced -> held(until T) -> paced: ``kanban_dispatch_skip.record`` dedupes against every skip of the episode, so the
+1. (historical) paced -> held(until T) -> paced: ``kanban_dispatch_skip.record`` dedupes against every skip of the episode, so the
    second ``paced`` appended nothing. Past T the newest row was the expired ``held`` one, ``_llm_paced_hold`` returned
    None and ``kanban diagnostics`` called the still-paced card ``stranded_in_ready`` (error). A skip that replaces a
    time-bounded newest row (one carrying ``until``) is now appended again.
@@ -20,67 +20,16 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_dispatch_skip as skips
 from hermes_cli import kanban_llm_pacing as lp
 from hermes_cli import kanban_llm_pacing_dispatch as pd
-from hermes_cli.kanban_diagnostics import compute_task_diagnostics
-from tests.hermes_cli.test_kanban_llm_pacing_followups import (CFG, DAY, HOUR, _config, _opus, _skips, _tick,
-                                                               paced_board)
+from tests.hermes_cli.test_kanban_llm_pacing_followups import CFG, DAY, HOUR, _skips, paced_board
 from tests.hermes_cli.test_kanban_model_tier import board as _board_fixture
 
 board = _board_fixture
 __all__ = ["paced_board"]
 
 
-# --- 1. paced -> held -> paced keeps the hold visible to diagnostics -----------------------------------------
-
-def test_paced_after_an_expired_held_row_is_recorded_again(paced_board, monkeypatch):
-    """Reviewer repro: pool reads paced -> held (reset now+60) -> paced; diagnostics an hour past the reset."""
-    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
-    _config(paced_board, kanban={"llm_pacing": {"read_interval_seconds": 0, "pace_starts": True}})
-    phase, reset = ["paced"], [0.0]
-
-    def read(provider, now):
-        if phase[0] == "held":
-            reset[0] = now + 60
-            return [lp.Reading(now, f"{provider}-1", lp.SEVEN_DAY, 90, reset[0])]
-        return [lp.Reading(now, f"{provider}-1", lp.SEVEN_DAY, 20, now + 6 * DAY)]  # factor 0.625: paced
-    monkeypatch.setattr(pd, "read_pool", read)
-    with kbc.connect() as conn:
-        tid = _opus(conn, "flip")
-        for step in ("paced", "held", "paced"):
-            phase[0] = step
-            pd._CACHE.clear()
-            seen, _ = _tick(conn)
-            assert seen == []
-        rows = [(s["reason"], s["detail"], s.get("until")) for s in _skips(conn, tid)]
-        assert rows == [(skips.LLM_PACED, "anthropic paced", None), (skips.LLM_PACED, "anthropic held", int(reset[0])),
-                        (skips.LLM_PACED, "anthropic paced", None)]
-        assert skips.latest(conn, tid)["detail"] == "anthropic paced"
-        _tick(conn)  # paced again: already the newest row, nothing more
-        assert len(_skips(conn, tid)) == 3
-        diags = compute_task_diagnostics(kb.get_task(conn, tid), kb.list_events(conn, tid), kb.list_runs(conn, tid),
-                                         now=reset[0] + 3600)
-    assert [d.kind for d in diags] == ["held_in_ready"]
-    assert diags[0].data["hold_reason"] == "llm_paced"
-
-
-def test_a_flapping_hold_appends_at_most_one_row_per_expiry(paced_board, monkeypatch):
-    """held <-> paced flaps do not refill the episode: once ``paced`` is newest, a later ``held`` (a key the episode
-    holds) appends nothing, so the newest row stays the untimed ``paced`` one."""
-    monkeypatch.setattr(pd, "local_running", lambda *_a: 1)  # recovery floor occupied
-    _config(paced_board, kanban={"llm_pacing": {"read_interval_seconds": 0, "pace_starts": True}})
-    phase = ["paced"]
-
-    def read(provider, now):
-        if phase[0] == "held":
-            return [lp.Reading(now, f"{provider}-1", lp.SEVEN_DAY, 90, now + 60)]
-        return [lp.Reading(now, f"{provider}-1", lp.SEVEN_DAY, 20, now + 6 * DAY)]
-    monkeypatch.setattr(pd, "read_pool", read)
-    with kbc.connect() as conn:
-        tid = _opus(conn, "flap")
-        for step in ("paced", "held", "paced", "held", "paced", "held", "paced"):
-            phase[0] = step
-            pd._CACHE.clear()
-            _tick(conn)
-        assert [s["detail"] for s in _skips(conn, tid)] == ["anthropic paced", "anthropic held", "anthropic paced"]
+# --- 1. a skip superseding a time-bounded newest row ----------------------------------------------------------
+# (The dispatch-level paced -> held -> paced flips were removed with the start limit on 2026-11-19: a paced pool
+# records no skip any more. The skip record's dedup is exercised directly below.)
 
 
 def test_a_replica_catching_up_does_not_duplicate_the_current_skip(paced_board):
@@ -163,4 +112,4 @@ def test_a_fully_idle_pool_is_open():
     now = 1_800_000_000.0
     current = [lp.Reading(now, "idle", kind, 0.0, None) for kind in (lp.FIVE_HOUR, lp.SEVEN_DAY)]
     pace = lp.pool_pace("anthropic", current, [], CFG)
-    assert pace.state == lp.OPEN and lp.admit_limit(pace, 3, deferrable=False, cfg=CFG) is None
+    assert pace.state == lp.OPEN

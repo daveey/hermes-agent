@@ -323,7 +323,10 @@ _WAKE_CHECK_PROPS = {
             "not one. kind: 'card' (ref=<task id>, gateway=<name> when it lives on another "
             "gateway; it must be live, and a wake probe is added for you), 'ci' / 'deploy' "
             "(ref=<run, job or release id/URL>), 'external' (ref=<vendor or ticket>, why=<evidence>), "
-            "'clock' (a real window: soak, cooldown, release slot). 'human' is always refused: a "
+            "'clock' (a real window: soak, cooldown, release slot), 'chat' (why=<the question> "
+            "your owning orchestrator, the chat that created or shepherds this card, must answer: the "
+            "park wakes that chat with your question; refused when no chat subscribes to the card). "
+            "'human' is always refused: a "
             "wait on David is kanban_block kind='needs_input' with human_request. A condition only "
             "an agent action changes (a grant, a permission, an install, a fix) is work, not a "
             "wait: it is refused (agent_action_wait) unless ref names the owner card doing it. "
@@ -331,7 +334,7 @@ _WAKE_CHECK_PROPS = {
             "goes to the supervisor as an owner card instead of parking again."
         ),
         "properties": {
-            "kind": {"type": "string", "enum": ["card", "ci", "deploy", "external", "clock", "human"]},
+            "kind": {"type": "string", "enum": ["card", "ci", "deploy", "external", "clock", "human", "chat"]},
             "ref": {"type": "string"},
             "why": {"type": "string"},
             "gateway": {"type": "string"},

@@ -844,6 +844,9 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
             apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation, diagnostics=diag,
                          answered=answered, producer=producer, dead_ancestry=dead_ancestry,
                          stale_interval=stale_interval, passive_policy=passive_policy)
+            if rc == 1 and not output_error(out):
+                from hermes_cli import kanban_decision_ask  # [daveey] a chat wait unanswered for 2 h goes to David
+                kanban_decision_ask.escalate_if_overdue(conn, task_id, now=now)
         finally:
             conn.close()
         return rc

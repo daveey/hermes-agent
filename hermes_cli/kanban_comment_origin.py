@@ -136,11 +136,23 @@ def _writer_tasks(conn: sqlite3.Connection, task_id: str) -> dict:
     return out
 
 
+SYSTEM_AUTHOR_PREFIX = "kanban-"  # kernel writers: kanban-park, kanban-dispatcher, kanban-supervisor, ...
+# Kernel writers that predate the prefix (kanban_host_reboot, placement, sweeps, detectors).
+SYSTEM_AUTHORS = frozenset({"dispatcher", "placement", "worker-placement", "triage-sweep", "respawn-guard",
+                            "quota-detector", "oom-detector", "dup-detector", "gateway"})
+
+
+def is_system_author(author: Optional[str]) -> bool:
+    name = (author or "").strip().lower()
+    return name.startswith(SYSTEM_AUTHOR_PREFIX) or name in SYSTEM_AUTHORS
+
+
 def find_comment(conn: sqlite3.Connection, task_id: str, *, after_id: int = 0, from_gateway: Optional[str] = None,
-                 contains: Optional[str] = None, from_card: Optional[str] = None) -> Optional[dict]:
+                 contains: Optional[str] = None, from_card: Optional[str] = None,
+                 skip_system: bool = False) -> Optional[dict]:
     """The first comment on ``task_id`` after ``after_id`` from ``from_gateway`` / ``from_card`` containing
     ``contains``. ``from_card``: written by that card's worker (the ``writer_task`` on its ``commented`` event)
-    or authored ``<gateway>/<card>`` by the relay."""
+    or authored ``<gateway>/<card>`` by the relay. ``skip_system``: ignore kernel writers (``kanban-*``)."""
     if from_card and from_card.strip():
         card, writers = from_card.strip().lower(), _writer_tasks(conn, task_id)
         try:
@@ -155,6 +167,8 @@ def find_comment(conn: sqlite3.Connection, task_id: str, *, after_id: int = 0, f
             writer = writers.get(str(row[4])) if row[4] else writers.get(("id", int(row[0])))
             if writer != card and not _from_card(row[1], card):
                 continue
+            if skip_system and is_system_author(row[1]):
+                continue
             if gw and gw != (row[2] or "").lower() and gw not in (row[1] or "").lower():
                 continue
             if contains and contains.lower() not in (row[3] or "").lower():
@@ -165,6 +179,10 @@ def find_comment(conn: sqlite3.Connection, task_id: str, *, after_id: int = 0, f
         return None  # an empty card id matches nothing
     sql = "SELECT id, author, origin_gateway, body FROM task_comments WHERE task_id = ? AND id > ?"
     params: list[Any] = [task_id, int(after_id or 0)]
+    if skip_system:
+        sql += (" AND substr(lower(trim(author)), 1, ?) != ? AND lower(trim(author)) NOT IN ("
+                + ",".join("?" * len(SYSTEM_AUTHORS)) + ")")
+        params += [len(SYSTEM_AUTHOR_PREFIX), SYSTEM_AUTHOR_PREFIX, *sorted(SYSTEM_AUTHORS)]
     if from_gateway:
         gw = from_gateway.strip().lower()
         sql += " AND (lower(coalesce(origin_gateway, '')) = ? OR instr(lower(author), ?) > 0)"
@@ -188,7 +206,8 @@ def run_wait_comment(args) -> int:
                 print(f"error: no task {args.task_id}")
                 return 2
             hit = find_comment(conn, args.task_id, after_id=args.after_id, from_gateway=args.from_gateway,
-                               contains=args.contains, from_card=getattr(args, "from_card", None))
+                               contains=args.contains, from_card=getattr(args, "from_card", None),
+                               skip_system=bool(getattr(args, "skip_system", False)))
     except sqlite3.Error as exc:
         print(f"error: {exc}")
         return 2

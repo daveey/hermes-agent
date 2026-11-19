@@ -85,7 +85,7 @@ def test_update_and_delete_of_unindexed_child_row_keep_trigram_consistent(db: Se
 
 def test_deferred_rebuild_does_not_reintroduce_children(db: SessionDB):
     ids = _seed(db)
-    with db._lock:
+    with db._fts_runtime_plan(), db._lock:  # truncation needs a plan made before the lock
         db._reset_fts_index_to_empty(db._conn)
         db._seed_fts_rebuild_markers(db._conn, force=True)
         db._conn.commit()

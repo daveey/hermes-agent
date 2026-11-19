@@ -1,8 +1,7 @@
-"""Default ``kanban.llm_pacing`` (``pace_starts: false``): a paced pool holds no start, so the read-only views that
-describe pacing holds must not describe one. ``paced_pools`` feeds the priority-raise guard
-(``kanban_db_edit.paced_raise_refusal``) and the chat-wait / parent-unclaimed notices
-(``kanban_parent_unclaimed._pacing_admission``); each is exercised here on the default config. The opt-in mode is
-covered by ``test_kanban_notice_pacing_admission.py`` and ``test_kanban_edit_priority_paced.py``. [daveey]"""
+"""Default ``kanban.llm_pacing``: a paced pool holds no start, so the read-only views that describe pacing holds must
+not describe one. ``paced_pools`` feeds the priority-raise guard (``kanban_db_edit.paced_raise_refusal``) and the
+chat-wait / parent-unclaimed notices (``kanban_parent_unclaimed._pacing_admission``); each is exercised here on the
+default config. The per-host start limit that once let a paced pool hold (``pace_starts``) is removed. [daveey]"""
 from __future__ import annotations
 
 import time
@@ -24,7 +23,7 @@ board = notices.board
 @pytest.fixture(autouse=True)
 def _default_config(monkeypatch):
     monkeypatch.setattr(pd, "_CACHE", {})
-    assert pd.load_config().pace_starts is False  # this file runs on the shipped default
+    assert pd.load_config() == lp.PacingConfig()  # this file runs on the shipped default
 
 
 def _anthropic_card(conn, priority=900):

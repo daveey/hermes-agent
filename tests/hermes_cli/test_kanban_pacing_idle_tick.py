@@ -68,9 +68,12 @@ def test_periodic_usage_failure_is_unknown_not_stale_pacing(home, monkeypatch):
     with kbc.connect() as conn:
         result = dispatch.dispatch_once(conn, max_spawn=0)
     assert not result.spawned
-    stored = pd._load_state(pd.state_path())['anthropic']
-    pace = pd._stored_pace(stored, time.time(), lp.PacingConfig())
-    assert pace is not None and pace.state == lp.UNKNOWN
+    state = pd._load_state(pd.state_path())
+    stored = state['anthropic']
+    assert time.time() - stored['read_at'] < 60
+    assert lp.PoolPace.from_dict(stored['pace']).state == lp.UNKNOWN
+    pool = state['v2']['pools']['anthropic']  # no reading: not at reserve, no planned rate (fail open)
+    assert pool['at_reserve'] is False and pool['rate_tokens_per_s'] is None
 
 
 def test_remote_only_ready_work_gets_fresh_read_only_notice(hub, monkeypatch):

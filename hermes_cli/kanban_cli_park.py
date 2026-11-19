@@ -77,6 +77,8 @@ def _cli_awaiting(args: argparse.Namespace, wake):
     if probe:
         from hermes_cli import kanban_wake_check as kwc
         wake = (probe, kwc.normalize_every(None), wake[2])
+    elif not wake[0] and kaw.declared_chat_wait(awaiting):
+        wake = (wake[0], wake[1], True)  # its comment probe is added in the park txn (kanban_awaiting.park_probe)
     # ssh/https, so before the park's write txn
     kaw.confirm_remote(awaiting, hint=f"{wake[0] or ''} {getattr(args, 'reason', None) or ''}")
     return awaiting, wake

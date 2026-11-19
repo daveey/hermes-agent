@@ -17,6 +17,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_llm_pacing as lp
 from hermes_cli import kanban_llm_pacing_dispatch as pd
 from hermes_cli import kanban_worker_node as wn
+from tests.hermes_cli import kanban_pacing_state as pacing_state
 from tests.hermes_cli import test_kanban_worker_node as support
 
 svc = support.svc
@@ -41,13 +42,14 @@ def observe(home, board, owner, *, now=None, source="state-turn"):
 
 @pytest.fixture
 def pools(monkeypatch):
-    """codex follows ``state['codex']`` (HELD = at its limit, OPEN = a slot freed)."""
+    """codex follows ``state['codex']`` (HELD = every account at reserve in ``v2``, OPEN = the pool frees); each
+    refresh stores both pools as this machine's dispatcher would. (Since the per-host start limit is gone, a pool
+    at reserve is the only pacing state that holds a start.)"""
     state = {"codex": lp.HELD}
 
     def pace_for(conn, provider, cfg, now):
-        if provider == "openai-codex":
-            return lp.PoolPace(provider, state["codex"], 0.0 if state["codex"] == lp.HELD else 1.0)
-        return lp.PoolPace(provider, lp.OPEN, 1.0)
+        pacing_state.store(("openai-codex", state["codex"], now + 3600), ("anthropic", lp.OPEN), now=now)
+        return lp.PoolPace(provider, state["codex"] if provider == "openai-codex" else lp.OPEN)
     monkeypatch.setattr(pd, "pace_for", pace_for)
     return state
 
@@ -72,15 +74,15 @@ def _hub_queue(hub, n):
     return aged, owner
 
 
-def test_worker_pickup_offers_the_turn_owner_first_when_a_paced_slot_frees(gws, pools):
+def test_worker_pickup_offers_the_turn_owner_first_when_a_held_pool_frees(gws, pools):
     """Hub-homed owner, picked up by a pool worker (``kanban_worker_node._evaluate``)."""
     hub, worker = gws
     _aged, owner = _hub_queue(hub, 12)
     worker.round()
     worker.enter()
     observe(worker.home, "default", owner)
-    assert wn.pickup(worker.conn, budget=1) == []  # codex at its limit: nothing offered, nothing hidden
-    pools["codex"] = lp.OPEN  # one codex run on this worker ends
+    assert wn.pickup(worker.conn, budget=1) == []  # codex at reserve: nothing offered, nothing hidden
+    pools["codex"] = lp.OPEN  # an account resets: the pool is under reserve again
     assert wn.pickup(worker.conn, budget=1) == [owner]  # RED before: the oldest aged codex card
 
 

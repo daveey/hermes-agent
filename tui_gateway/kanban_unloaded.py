@@ -76,6 +76,11 @@ _sweeper_started = False
 _sweeper_lock = threading.Lock()
 _wake_lock = threading.Lock()
 _wake_times: dict[str, list[float]] = {}  # chat -> recent started wakes (this process)
+# [daveey] A worker's question to its orchestrator (``decision_requested``) is never written as a passive row: one
+# that cannot wake its chat now (budget spent, slots busy) is handed back and retried, the budget still pacing
+# wakes; one still undelivered after ASK_OVERDUE_S goes to David as a visible needs_input block
+# (kanban_decision_ask.escalate). Adversarial review of #3647.
+from hermes_cli.kanban_decision_ask import ASK_OVERDUE_S
 _wake_slots = wake_slots.WakeSlots(MAX_PARALLEL_WAKES)
 _slot_waits: dict[tuple, float] = {}  # remote notice -> when slots first refused it (this process)
 
@@ -463,6 +468,28 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 # event-id identity shared with the live poller: a notice it already wrote is not written twice
                 "kanban_event_keys": [f"{slug}:{int(e.id)}" for e in claimed if fmt(sub, task, e, slug)]}
     held_by, verdict = _route_notice(holders, ident, tip, slug, task, texts, now, grace_s)
+    asks = [e for e in claimed if getattr(e, "kind", "") == "decision_requested"]
+    if asks and verdict in ("skipped:budget", "skipped:slots"):
+        if _ask_waits(asks, now):
+            with contextlib.suppress(Exception):
+                _kbn.rewind_notify_cursor(conn, claimed_cursor=new, old_cursor=old, **ident)
+            if _note_stall(_stall_key(slug, ident), f"orchestrator ask waiting for a wake ({verdict})"):
+                logger.info("kanban ask for %s/%s to chat %s deferred (%s); retrying next pass",
+                            slug, ident["task_id"], tip, verdict)
+            return None
+        from hermes_cli import kanban_decision_ask
+        try:
+            escalated = kanban_decision_ask.escalate(
+                conn, ident["task_id"], f"its orchestrator chat {tip} could not be woken for "
+                f"{ASK_OVERDUE_S / 3600:.0f} h ({verdict})")
+        except Exception:  # health: allow BLE001 -- the claim is held: fall back to the passive row below, logged
+            logger.warning("kanban ask escalation for %s/%s failed; writing the notice row", slug, ident["task_id"],
+                           exc_info=True)
+            escalated = False
+        if escalated:  # it is David's now: its blocked event tells the chat; the "parked until you decide" text is stale
+            with contextlib.suppress(Exception):
+                _kbn.ack_notify_claim(conn, upto=new, from_cursor=old, **ident)
+            return None
     if verdict == "skipped:slots" and _slots_may_wait(claimed, now):
         # Every wake slot is busy: hand the range back so the next pass wakes the chat, instead of a passive row
         # that no turn reads (design t_01a1d45d75851804 R4). An OVERDUE_S-old notice gets its row as before.
@@ -494,6 +521,15 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 tip, slug, ident["task_id"], len(texts), verdict)
     return {"board": slug, "task_id": ident["task_id"], "chat_id": ident["chat_id"], "session_id": tip,
             "texts": texts, "woken": verdict == "started", "wake_result": verdict, "held_by": held_by}
+
+
+def _ask_waits(asks: list, now: float) -> bool:
+    """An undelivered orchestrator ask waits for a wake until its oldest event is ``ASK_OVERDUE_S`` old."""
+    try:
+        oldest = min(float(getattr(e, "created_at", 0) or 0) for e in asks)
+    except ValueError:
+        return False
+    return now - oldest < ASK_OVERDUE_S
 
 
 def _slots_may_wait(events: list, now: float) -> bool:

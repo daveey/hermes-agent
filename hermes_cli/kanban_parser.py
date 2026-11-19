@@ -116,7 +116,8 @@ def _WAKE_CHECK_ARGS():
              help="A pure time wait with nothing to probe (soak window, calendar date)"),
         _arg("--awaiting", dest="awaiting", default=None, metavar="KIND:REF|JSON",
              help="Who produces the condition: card:<task id> (JSON adds gateway/board), ci:<run id>, "
-                  "deploy:<id>, external:<vendor/ticket>, clock:<window>, resource:<gate> (an internal "
+                  "deploy:<id>, external:<vendor/ticket>, clock:<window>, chat:<owning orchestrator> (with --awaiting-why "
+                  "<the question>; wakes the card's subscribed chat), resource:<gate> (an internal "
                   "governor/pool hold; needs --wake-check, never escalates, backs off). A wait needs a producer; "
                   "agent-action conditions (grant, permission, install, fix) are work, not waits."),
         _arg("--awaiting-why", dest="awaiting_why", default=None, help="Evidence for --awaiting"),
@@ -503,6 +504,9 @@ _SPECS = [
              help="Only comments written by this card's worker (it commented from inside its run, or the relay "
                   "authored it <gateway>/<task id>). Use it to wait for another card's answer instead of a phrase "
                   "the other card has to reproduce"),
+        _arg("--skip-system", action="store_true", default=False,
+             help="Ignore comments by kernel writers (authors 'kanban-*' and the older dispatcher, placement, sweep "
+                  "and detector notes), so only an answer from an agent or a person fires"),
     ], help="Wake-probe primitive for a reply: exit 0 a matching comment exists, 1 not yet, 2 cannot tell. "
             "Use it instead of matching task_comments.author (the park guard refuses that: author_probe)"),
     _cmd("attach", [

@@ -242,6 +242,7 @@ gateway:
       dependency_parent_unclaimed: "has a parent card waiting with no worker"
       chat_wait_unclaimed: "is ready with no worker claiming it"
       park_progress_notice: "أبلغت عن تقدم أثناء الانتظار؛ لم تكتمل"
+      decision_requested: "is parked until its orchestrator decides"
       spend_budget_decision_ready: "بلغ ميزانية الإنفاق؛ بانتظار قرار إعادة التشغيل أو الأرشفة"
       status_default: "تغيّرت الحالة"
       status_joiner: "، "

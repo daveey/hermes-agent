@@ -53,9 +53,10 @@ def implementer_models(conn, task) -> set[str]:
     Related source cards are traversed with a visited set to tolerate cyclic links.
     """
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_review_sources import source_reader
     seen = set()
 
-    def collect(card):
+    def collect(conn, card):
         if card.id in seen:
             return set()
         seen.add(card.id)
@@ -88,13 +89,12 @@ def implementer_models(conn, task) -> set[str]:
             if isinstance(creator, str) and creator:
                 sources.append(creator)
             for source in sources:
-                related = kb.get_task(conn, source)
-                if related is None:
-                    raise ReviewModelUnavailable(f"Review implementer evidence is unavailable for source {source}")
-                models.update(collect(related))
+                source_conn, related = lookup(source)
+                models.update(collect(source_conn, related))
         return models
 
-    return collect(task)
+    with source_reader(conn) as lookup:
+        return collect(conn, task)
 
 
 def is_review_run(conn, task, lane) -> bool:
