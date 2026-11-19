@@ -67,11 +67,13 @@ def read_owners(*, board: str, now_s: float, path=None) -> set[str]:
         or not _nonempty(value.get("source_revision"))
         or not _finite_clock(observed)
         or not _finite_clock(valid_until)
-        or not observed <= now_s < valid_until <= observed + 120
+        or not observed <= valid_until <= observed + 120
+        or observed > now_s
         or not isinstance(value.get("owners"), list)
     ):
-        expired = _finite_clock(valid_until) and valid_until <= now_s
-        return result(outcome="expired" if expired else "invalid")
+        return result()
+    if valid_until <= now_s:
+        return result(outcome="expired")
     if len(value["owners"]) > 4096:
         return result()
     owners = set()

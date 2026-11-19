@@ -22,6 +22,7 @@ MAX_RECORDS = 1024
 MAX_QUEUE_BYTES = 8 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 256 * 1024
 _SESSIONS = {}
+_DEFAULT_HOME = None
 
 
 def append_records(*args, **kwargs):
@@ -38,9 +39,10 @@ def seal_records(*args, **kwargs):
 
 def _key(board, home=None):
     if home is None:
-        from hermes_constants import get_hermes_home
+        from hermes_constants import get_hermes_home_override
 
-        home = get_hermes_home()
+        # Startup resolves the fallback once. Context and environment reads do no IO.
+        home = get_hermes_home_override() or os.environ.get("HERMES_HOME") or _DEFAULT_HOME
     return (os.getpid(), str(home), board)
 
 
@@ -51,12 +53,68 @@ def enabled(*, board) -> bool:
     return session is not None and not session.stopping.is_set()
 
 
+def invalidate(*, board):
+    """Fail closed after observation failure, without retrying the broken sink or IO.
+
+    Conservatively invalidate matching boards across profile scopes: losing evidence
+    is preferable to certifying a complete epoch after an unrecorded observation.
+    """
+    for session in tuple(_SESSIONS.values()):
+        if session.board == board:
+            session.abandoned.set()
+
+
 def submit(*, board, kind, payload) -> bool:
     """Observe only: callers must not describe an uncommitted write as committed."""
     if not _SESSIONS:
         return False
     session = _SESSIONS.get(_key(board))
     return session.enqueue(kind, payload) if session is not None else False
+
+
+class PayloadLimit(ValueError):
+    """A bounded preflight rejected this input before serialization."""
+
+
+def bounded_payload(payload):
+    """Reject huge/deep/nonprimitive inputs before JSON allocates an unbounded copy."""
+    pending = [iter((payload,))]
+    budget = MAX_PAYLOAD_BYTES
+    while pending:
+        if len(pending) > 32:
+            raise PayloadLimit("payload nesting limit")
+        try:
+            value = next(pending[-1])
+        except StopIteration:
+            pending.pop()
+            continue
+        budget -= 1
+        if type(value) is str:
+            budget -= len(value)
+        elif type(value) in (list, dict):
+            if len(value) > budget:
+                raise PayloadLimit("payload item limit")
+            if type(value) is dict:
+                for key in value:
+                    if type(key) is not str:
+                        raise ValueError("payload keys must be strings")
+                    budget -= len(key) + 1
+                    if budget < 0:
+                        raise PayloadLimit("payload key limit")
+                pending.append(iter(value.values()))
+            else:
+                pending.append(iter(value))
+        elif type(value) is int:
+            if value.bit_length() > 128:
+                raise PayloadLimit("payload integer limit")
+        elif value is not None and type(value) not in (bool, float):
+            raise ValueError("payload must contain JSON primitives")
+        if budget < 0:
+            raise PayloadLimit("payload size limit")
+    raw = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(raw) > MAX_PAYLOAD_BYTES:
+        raise PayloadLimit("encoded payload limit")
+    return raw
 
 
 class Session:
@@ -100,13 +158,13 @@ class Session:
             return False
         try:
             # Snapshot caller-owned data; at most one bounded record is handed to writer.
-            raw = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
-            if len(raw) > MAX_PAYLOAD_BYTES:
-                self.loss["oversize"] += 1
-                return False
+            raw = bounded_payload(payload)
             payload = json.loads(raw)
             self.record(kind, payload, 1)
-        except (TypeError, ValueError, OverflowError, RecursionError):
+        except PayloadLimit:
+            self.loss["oversize"] += 1
+            return False
+        except (TypeError, ValueError, OverflowError, RecursionError, RuntimeError):
             self.loss["unsupported"] += 1
             return False
         if not self.lock.acquire(blocking=False):
@@ -163,14 +221,23 @@ class Session:
         self.thread.join(min(2.0, max(0.0, timeout)))
         if self.thread.is_alive():
             self.abandoned.set()
-        return self.sealed and not self.thread.is_alive()
+        for key, session in tuple(_SESSIONS.items()):
+            if session is self:
+                del _SESSIONS[key]
+        atexit.unregister(self.close)
+        return self.sealed and not self.abandoned.is_set() and not self.thread.is_alive()
 
 
 def activate(config, *, home: Path, board: str, source_gateway: str, board_uid: str,
              clock_error_ns=None):
+    global _DEFAULT_HOME
     settings = resolve(config, home=home)
     if settings is None:
         return None
+    if not os.environ.get("HERMES_HOME"):
+        from hermes_constants import get_process_hermes_home
+
+        _DEFAULT_HOME = str(get_process_hermes_home())
     key = _key(board, home)
     if key in _SESSIONS:
         raise ValueError("capture already active for this profile/board/process")

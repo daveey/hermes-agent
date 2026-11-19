@@ -20,7 +20,7 @@ def receipt(*, board, now_s, raw, outcome, owners):
     # Reader accepts some source documents the evidence privacy allowlist forbids.
     # Preserve actual owner_ids, but never pretend the exact-byte gate was met.
     reason = None
-    if outcome == "valid" and not safe:
+    if outcome in {"valid", "expired"} and not safe:
         outcome, reason = "invalid", "source_not_allowlisted"
     retain = safe and outcome != "invalid"
     return dict(receipt_type="urgency_read", board=board, read_at_s=now_s, outcome=outcome,
@@ -39,8 +39,7 @@ def emit(**observation):
     try:
         payload = receipt(**observation)
         runtime.submit(board=observation["board"], kind="owner_generation", payload=payload)
-    except (ValueError, TypeError, OverflowError, RecursionError):
-        # Observation must never change an existing read result.
-        runtime.submit(board=observation["board"], kind="loss", payload=dict(
-            reason="unsupported", count=1, first_seq=None, last_seq=None,
-            start_wall_ns=None, end_wall_ns=None))
+    except (ValueError, TypeError, OverflowError, RecursionError, OSError, RuntimeError):
+        # Do not retry a failed sink: it may fail again and change the read result.
+        # The in-memory invalidation prevents an apparently complete epoch seal.
+        runtime.invalidate(board=observation["board"])
