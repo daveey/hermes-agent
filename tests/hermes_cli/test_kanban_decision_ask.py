@@ -617,8 +617,92 @@ def test_separately_answered_questions_do_not_escalate(kanban_home, monkeypatch)
             out = _tool("schedule", {"reason": f"waiting for the owning orchestrator decision {n}", "clock_only": True,
                                      "awaiting": {"kind": "chat", "ref": "owning orchestrator", "why": f"question {n}?"}})
             assert out.get("status") == "scheduled", (n, out)
-            kb.add_comment(conn, tid, "default", f"Answer {n}: go with A.")
+            _orchestrator_comment(monkeypatch, conn, tid, f"Answer {n}: go with A.")
             assert kb.unblock_task(conn, tid)
             with kb.write_txn(conn):
                 conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
             assert kb.claim_task(conn, tid, claimer="worker") is not None
+
+
+@pytest.mark.parametrize("answered", [False, True])
+def test_unanswered_chat_wait_goes_to_david_after_two_hours(kanban_home, monkeypatch, answered) -> None:
+    """Adversarial review of #3647: a wake that was refused, failed or never started acked the ask passively.
+    The board backstop: the card's comment probe says "not yet" for 2 h -> needs_input for David."""
+    from hermes_cli import kanban_decision_ask as kda
+    _chat, tid = _parked_ask(monkeypatch)
+    with kbc.connect_closing() as conn:
+        if answered:
+            kb.add_comment(conn, tid, "default", "Decisions: B, authorize, Phase A alone.")
+        assert not kda.escalate_if_overdue(conn, tid, now=int(time.time()) + 60)  # not yet overdue
+        result = kda.escalate_if_overdue(conn, tid, now=int(time.time()) + kda.ASK_OVERDUE_S + 60)
+        task = kb.get_task(conn, tid)
+    if answered:  # the answer beat the deadline: its probe wakes the card instead
+        assert result is False and task.status == "scheduled"
+    else:
+        assert result is True and task.status == "blocked"
+
+
+def test_wake_check_runner_calls_the_backstop(kanban_home, monkeypatch) -> None:
+    """The backstop runs on the probe's own path: a "not yet" from the chat probe past the deadline escalates."""
+    _chat, tid = _parked_ask(monkeypatch)
+    calls = []
+    from hermes_cli import kanban_decision_ask as kda
+    monkeypatch.setattr(kda, "escalate_if_overdue", lambda conn, task_id, now=None: calls.append(task_id) or False)
+    with kbc.connect_closing() as conn:
+        state = kwc.get_state(conn, tid)
+        db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+    monkeypatch.setattr(kwc, "_run_probe", lambda key, cmd, cwd, env: (1, "not yet: no comment"))
+    kwc._probe_and_apply(db_path, tid, state["cmd"], str(kanban_home), {}, None, state["generation"])
+    assert calls == [tid]
+
+
+def test_not_yet_answers_still_end_in_escalation(kanban_home, monkeypatch) -> None:
+    """Adversarial review of #3647: "not yet" replies reset the streak; the daily cap ends the loop."""
+    monkeypatch.setattr(kaw, "_supervisor_profile", lambda task: None)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        for n in range(kaw.CHAT_PARK_CAP):
+            _as_worker(monkeypatch, conn, tid)
+            out = _tool("schedule", {"reason": "waiting for the owning orchestrator decision", "clock_only": True,
+                                     "awaiting": {"kind": "chat", "ref": "owning orchestrator", "why": f"ready? {n}"}})
+            assert out.get("status") == "scheduled", (n, out)
+            _orchestrator_comment(monkeypatch, conn, tid, "Not yet - still waiting on David. Hold.")
+            assert kb.unblock_task(conn, tid)
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+            assert kb.claim_task(conn, tid, claimer="worker") is not None
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": "waiting for the owning orchestrator decision", "clock_only": True,
+                                 "awaiting": {"kind": "chat", "ref": "owning orchestrator", "why": "ready now?"}})
+        assert out.get("code") == "repark_escalated", out
+
+
+def test_the_workers_own_progress_note_is_not_an_answer(kanban_home, monkeypatch) -> None:
+    """Review of #3647: a worker that comments in each run before re-asking never escalated."""
+    monkeypatch.setattr(kaw, "_supervisor_profile", lambda task: None)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        for n in range(2):
+            _as_worker(monkeypatch, conn, tid)
+            out = _tool("schedule", {"reason": f"waiting for the owning orchestrator decision {n}", "clock_only": True,
+                                     "awaiting": {"kind": "chat", "ref": "owning orchestrator", "why": f"q {n}?"}})
+            assert out.get("status") == "scheduled", (n, out)
+            assert kb.unblock_task(conn, tid)
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+            assert kb.claim_task(conn, tid, claimer="worker") is not None
+            _as_worker(monkeypatch, conn, tid)
+            assert _tool("comment", {"task_id": tid, "body": f"Progress: prepared the next prefix ({n})."}).get("ok")
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": "waiting for the owning orchestrator decision", "clock_only": True,
+                                 "awaiting": {"kind": "chat", "ref": "owning orchestrator", "why": "q again?"}})
+        assert out.get("code") == "repark_escalated", out
+
+
+def _orchestrator_comment(monkeypatch, conn, tid, body) -> None:
+    """The orchestrator answers from its own chat, not from inside this card's run."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    kb.add_comment(conn, tid, "default", body)

@@ -21,6 +21,9 @@ from __future__ import annotations
 from typing import Any
 
 NOTICE_KIND = "decision_requested"
+# A chat wait unanswered this long goes to David, whatever happened to its delivery (a wake refused, failed, never
+# started, a budget or slot shortage): checked by the card's own comment probe (escalate_if_overdue).
+ASK_OVERDUE_S = 2 * 3600
 UNANSWERED_KIND = "decision_unanswerable"  # the owner had no chat to take the ask; it became David's
 
 
@@ -62,11 +65,15 @@ def escalate(conn, task_id: str, why_unanswered: str) -> bool:
     """A still-parked card whose orchestrator ask cannot reach anyone: leave the park (``scheduled`` -> ``triage``,
     probe cleared, ``decision_unanswerable``) and block it ``needs_input`` with the question, as the spend-budget hold
     leaves a park. If the block is refused it stays visibly in triage. True when it blocked."""
+    from hermes_cli import kanban_awaiting as kaw
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
     task = kb.get_task(conn, task_id)
     if task is None or task.status != "scheduled":
         return False
+    record, _reason, wake_check, _at = _latest_chat_park(conn, task_id)
+    if record is not None and kaw._answered_since(conn, task_id, wake_check):
+        return False  # answered meanwhile: its probe wakes the card on its next check
     ask = [e for e in kb.list_events(conn, task_id) if e.kind == NOTICE_KIND]
     payload = (ask[-1].payload or {}) if ask else {}
     question = str(payload.get("why") or payload.get("reason") or "").strip()[:1500]
@@ -88,3 +95,31 @@ def escalate(conn, task_id: str, why_unanswered: str) -> bool:
             "scope": f"card {task_id}: {str(task.title or '')[:120]}",
             "evidence": f"decision_requested on {task_id}; {why_unanswered}",
         }))
+
+
+def _latest_chat_park(conn, task_id: str) -> tuple:
+    """``(awaiting, reason, wake_check, created_at)`` of the card's newest park when it is a chat wait."""
+    import json
+    row = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind IN "
+                       "('scheduled', 'continued') ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    try:
+        payload = json.loads(row[0] or "{}") if row else {}
+    except ValueError:
+        payload = {}
+    record = payload.get("awaiting")
+    if not is_chat_wait(record):
+        return None, "", None, None
+    return record, str(payload.get("reason") or ""), payload.get("wake_check"), int(row[1])
+
+
+def escalate_if_overdue(conn, task_id: str, *, now: int | None = None) -> bool:
+    """Called after a chat wait's comment probe said "not yet" (outside its write txn): a chat park older than
+    ``ASK_OVERDUE_S`` with no answer becomes David's. The board-side guarantee behind every delivery path."""
+    import time
+    record, _reason, _cmd, at = _latest_chat_park(conn, task_id)
+    if record is None or at is None:
+        return False
+    now = int(time.time()) if now is None else int(now)
+    if now - at < ASK_OVERDUE_S:
+        return False
+    return escalate(conn, task_id, f"it has had no answer for {ASK_OVERDUE_S // 3600} h")

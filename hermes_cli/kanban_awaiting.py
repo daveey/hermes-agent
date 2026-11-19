@@ -923,6 +923,25 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
 
 
 _AFTER_ID = re.compile(r"--after-id\s+(\d+)")
+CHAT_PARK_CAP = 6  # chat parks per card per 24 h before the next one escalates, however each was answered
+
+
+def chat_parks_today(conn: sqlite3.Connection, task_id: str) -> int:
+    """Chat-wait parks of this card in the last 24 h, since its last escalation."""
+    since = int(time.time()) - 86400
+    count = 0
+    for kind, payload in conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? AND created_at >= ? AND kind IN "
+            "('scheduled', 'continued', ?) ORDER BY id DESC", (task_id, since, ESCALATED_EVENT)):
+        if kind == ESCALATED_EVENT:
+            break
+        try:
+            got = (json.loads(payload or "{}") or {}).get("awaiting") or {}
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(got, dict) and got.get("kind") == CHAT:
+            count += 1
+    return count
 
 
 def _answered_since(conn: sqlite3.Connection, task_id: str, wake_check: Optional[str]) -> bool:
@@ -932,8 +951,19 @@ def _answered_since(conn: sqlite3.Connection, task_id: str, wake_check: Optional
     if not m:
         return False
     from hermes_cli.kanban_comment_origin import is_system_author
-    return any(not is_system_author(author) for (author,) in conn.execute(
-        "SELECT author FROM task_comments WHERE task_id = ? AND id > ?", (task_id, int(m.group(1)))))
+    own_runs = {int(r[0]) for r in conn.execute("SELECT id FROM task_runs WHERE task_id = ?", (task_id,))}
+    for cid, author in conn.execute("SELECT id, author FROM task_comments WHERE task_id = ? AND id > ?",
+                                    (task_id, int(m.group(1)))):
+        if is_system_author(author):
+            continue
+        # The card's own worker leaving a progress note before re-parking is not an answer (review of #3647).
+        row = conn.execute("SELECT json_extract(payload, '$.writer_run_id') FROM task_events WHERE task_id = ? AND "
+                           "kind = 'commented' AND json_extract(payload, '$.comment_id') = ? LIMIT 1",
+                           (task_id, cid)).fetchone()
+        if row is not None and isinstance(row[0], int) and row[0] in own_runs:
+            continue
+        return True
+    return False
 
 
 def probe_fire_reparks(conn: sqlite3.Connection, task_id: str, premise: str, probe: Optional[str]) -> int:
@@ -1022,6 +1052,10 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     from hermes_cli import kanban_passive_intake as passive
     if (not passive.eligible(task_id, wake_check, record, blocker_id)
             and prior_same_premise(conn, task_id, record["premise"], probe=probe) >= REPARK_LIMIT):
+        raise RepeatedPark(record)
+    if record["kind"] == CHAT and chat_parks_today(conn, task_id) >= CHAT_PARK_CAP:
+        # Answered "not yet" each time, the streak above never builds: a card asking its orchestrator this often in
+        # a day is stuck behind something the orchestrator cannot give (adversarial review of #3647).
         raise RepeatedPark(record)
     fired = probe_fire_reparks(conn, task_id, record["premise"], probe)
     if fired >= PROBE_FIRE_REPARK_LIMIT:
