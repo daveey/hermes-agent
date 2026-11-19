@@ -14,61 +14,6 @@ from cron.lifecycle_guard_arith_words import iter_arithmetic_word_payloads, may_
 
 _QUOTED_LITERAL_RES = (re.compile(r"(?='([^']+)')"), re.compile(r'(?="([^"]+)")'))
 _ARGUMENT_PRINTERS = frozenset({"echo", "printf"})
-# Metacharacters that are literal inside single quotes. Letters stay so a
-# quoted shell name can still certify a sink (`| 'bash'`).
-_SINGLE_QUOTE_META = frozenset("|&;<>()$`{}")
-# Any output process or coprocess denies the speculative-quote narrowing, whatever it runs.
-_PROC_SUB_SINK = re.compile(r">\s*>\(|\bcoproc\b")
-
-
-def mask_single_quoted_metacharacters(text: str) -> str:
-    """Blank shell metacharacters inside single-quoted spans of *text*.
-
-    Fail closed (return *text* unchanged) when quote state is unreliable: a
-    heredoc opener, an ANSI-C quote, or an unbalanced quote. Double-quoted
-    spans are never masked; their substitutions stay live.
-    """
-    from cron.lifecycle_guard_lines import strip_shell_comments
-
-    if "<<" in text or "$'" in text:
-        return text
-    stripped = strip_shell_comments(text)
-    result: list[str] = []
-    single = double = escaped = False
-    for char in stripped:
-        if single:
-            if char == "'":
-                single = False
-                result.append(char)
-            else:
-                result.append("_" if char in _SINGLE_QUOTE_META else char)
-            continue
-        result.append(char)
-        if escaped:
-            escaped = False
-        elif char == "\\":
-            escaped = True
-        elif char == '"':
-            double = not double
-        elif char == "'" and not double:
-            single = True
-    if single or double:
-        return text
-    return "".join(result)
-
-
-def quote_aware_shell_sink(command: str) -> bool:
-    """Whether *command* feeds output to a shell outside single-quoted literals.
-
-    A backtick or pipe inside single quotes is data, not evidence that a
-    harvested quote is executed. Unreliable quote state keeps the quote-blind
-    certificate.
-    """
-    from tools.shell_heredoc import output_reaches_shell
-
-    masked = mask_single_quoted_metacharacters(command)
-    return (output_reaches_shell(masked, binding_source=command)
-            or _PROC_SUB_SINK.search(masked) is not None)
 
 
 def quote_scope(cwd, executed, budget) -> tuple:
@@ -77,7 +22,7 @@ def quote_scope(cwd, executed, budget) -> tuple:
 
 
 def iter_recursive_payloads(command, nested_texts, *, cwd, executed, budget, covered_scope):
-    """Yield payload, nested-shell, quote coverage, variable provenance, printer line.
+    """Yield payload, nested-shell, quote coverage, and shell-variable provenance.
 
     Printed strings/overlapping quote spans are conservative candidates, not
     original shell syntax. Resolving their standalone ``$log`` as a command would
@@ -90,24 +35,21 @@ def iter_recursive_payloads(command, nested_texts, *, cwd, executed, budget, cov
         command, aliases_defined=budget.aliases_defined,
     )
     for payload in nested_texts:
-        yield payload, True, None, True, False
+        yield payload, True, None, True
     for payload in guard._iter_shell_command_payloads(command):
-        yield payload, False, None, True, False
+        yield payload, False, None, True
     integer_context = budget.integer_context
     for payload in iter_arithmetic_word_payloads(command, integer_context=integer_context):
-        yield payload, False, None, False, False
+        yield payload, False, None, False
     # Snapshot after preceding nested-shell walks; shared budget state may have changed.
     scope = quote_scope(cwd, executed, budget)
     for payload, raw_quote in iter_printed_shell_payloads(
             command, include_quoted=covered_scope != scope):
-        # Printer lines are decoded data, not syntax. Mark them so a parent
-        # without a real sink can drop placeholder splices without treating
-        # the line as a raw quote (that would omit its own quote walk).
-        yield payload, False, scope if raw_quote else None, False, not raw_quote
+        yield payload, False, scope if raw_quote else None, False
     # Quoted eval text can establish attributes needed by the parent's later assignments.
     if budget.integer_context and not integer_context:
         for payload in iter_arithmetic_word_payloads(command, integer_context=True):
-            yield payload, False, None, False, False
+            yield payload, False, None, False
 
 
 def iter_printed_shell_payloads(

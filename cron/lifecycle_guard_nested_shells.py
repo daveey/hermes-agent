@@ -61,16 +61,13 @@ def shell_scope(budget: _LifecycleScanBudget, nested: bool) -> contextlib.Abstra
 def unvisited_scopes(
     visited: set[object], budget: _LifecycleScanBudget, resolved: Path, *, python_source: bool,
     nested: bool, executed: bool = True, working_directory: Optional[str] = None,
-    direct_invocation: bool = False,
 ) -> list[tuple[bool, tuple]]:
     """``(nested, visit key)`` for each scope *resolved* still needs a walk in. A shell walk
     depends on its scope (alias names, heredoc masking), so ``visited`` keys carry it: a path one
     reference hands to a nested shell and another to the session shell is walked in both scopes
     (review 5897863903 B1), the session one exactly as before. A shell walk in any scope subsumes
     the file's Python regex scan, never the reverse; the caller also records ``key[:2]``, the
-    scope-free ``(resolved, "shell")`` mark, for that. Direct invocations have separate keys:
-    their shebang is not known until the read, and a Python visit cannot cover a later forced
-    shell/source/stdin walk of the same resolved file."""
+    scope-free ``(resolved, "shell")`` mark, for that."""
     if python_source:
         seen = (resolved, "python") in visited or (resolved, "shell") in visited
         return [] if seen else [(False, (resolved, "python"))]
@@ -81,7 +78,7 @@ def unvisited_scopes(
     for flag, scope in wanted:
         # A mention does not cover an execution walk: only the latter
         # resolves variable sinks and fails closed on referenced scan caps.
-        key = (resolved, "direct" if direct_invocation else "shell", scope, budget.integer_context)
+        key = (resolved, "shell", scope, budget.integer_context)
         if working_directory is not None:
             key += (working_directory,)
         keys.setdefault(key if executed else (*key, "mention"), flag)
