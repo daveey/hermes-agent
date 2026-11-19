@@ -37,9 +37,81 @@ def _unanchored_splice(pattern: str) -> bool:
     return pattern.replace(".*", "") == ""
 
 
+def _defer_sibling(deferred: list | None, consumer: str, word: str) -> bool:
+    """Defer ``<output>/literal/tail``: only the leading directory is computed.
+
+    ``. "$HERE/lib.sh"`` is how a script loads its sibling. The caller resolves
+    the literal tail against the walk's directory and scans what it finds; a
+    tail that names no file there stays uncertain."""
+    if deferred is None or not word.startswith(_OUTPUT + '/'):
+        return False
+    tail = word[len(_OUTPUT) + 1:]
+    if (not tail or tail.startswith('/') or _OUTPUT in tail or set('$`*?[]{}~\\\n') & set(tail)
+            or '..' in tail.split('/')):
+        return False
+    if (consumer, tail) not in deferred:
+        deferred.append((consumer, tail))
+    return True
+
+
+def _defer_literal_code(deferred, arguments, operand, bindings, *, plain: bool) -> bool | None:
+    """``$PY -c 'literal'``: scan the code instead of refusing every computed interpreter.
+
+    Applies when the options and the code are literal, the code has no
+    expansion left for the parent to fill, and no descriptor other than
+    stdout/stderr is bound, so the only unknown is the program. *plain* is the
+    caller's "-c without -s or a stdin word". ``None`` means it does not apply."""
+    if (deferred is None or not plain or not set(bindings) <= {'1', '2'}
+            or operand >= len(arguments)
+            or any(_OUTPUT in word for word in arguments[:operand + 1])
+            or set('$`') & set(arguments[operand])):
+        return None
+    if any(_OUTPUT in word for word in bindings.values()):
+        return True
+    if ('code', arguments[operand]) not in deferred:
+        deferred.append(('code', arguments[operand]))
+    return False
+
+
+def _bare_absolute(word: str, quiet: bool) -> bool:
+    """``/Users/<out>`` with no argument, pipe or stdin binding (*quiet*).
+
+    An absolute literal directory whose last component alone is computed has no
+    shell invocation syntax, like a bare ``<out>``. A relative splice or one
+    with computed directories (``s/<out>/<out>/``) keeps the shell match."""
+    return (quiet and word.startswith('/') and word.endswith('/' + _OUTPUT)
+            and word.count(_OUTPUT) == 1)
+
+
+def _sourced_is_computed(name, program, arguments, deferred) -> bool:
+    """``.``/``source`` read their first operand, ``eval`` every argument."""
+    selected = arguments if name == 'eval' else arguments[:1]
+    if _OUTPUT in program:
+        return True
+    if name != 'eval' and selected and _defer_sibling(deferred, '.', selected[0]):
+        return False
+    return any(_OUTPUT in word for word in selected)
+
+
+def _shell_input_words(arguments, operand, stdin, name, deferred, *, code, reads_stdin):
+    """The words a shell reads as options, code, script or stdin.
+
+    Unknown option output may change the option layout or inject a code input.
+    A script operand with only a computed directory is deferred instead."""
+    selected = arguments[:operand]
+    script = (not code and not reads_stdin and operand < len(arguments)
+              and not any(_OUTPUT in word for word in selected)
+              and _defer_sibling(deferred, name, arguments[operand]))
+    if (code or not reads_stdin) and not script:
+        selected += arguments[operand:operand + 1]
+    if not code and (reads_stdin or operand >= len(arguments)):
+        selected += stdin
+    return selected
+
+
 def _shell_input_is_computed(
     view: list[str], piped: list[str], *, opened: dict[str, str] | None = None,
-    depth: int = 0, anchored_only: bool = False,
+    depth: int = 0, anchored_only: bool = False, deferred: list[tuple[str, str]] | None = None,
 ) -> bool:
     from cron import lifecycle_guard as guard
 
@@ -59,7 +131,11 @@ def _shell_input_is_computed(
     while not empty[index] and _OUTPUT in view[index]:
         # Unknown programs with shell invocation syntax are possible shells.
         arguments, stdin = _input_words(view[index + 1:], dict(bindings))
-        _, code, reads_stdin = guard._shell_options_end(arguments, 'bash')
+        operand, code, reads_stdin = guard._shell_options_end(arguments, 'bash')
+        literal = _defer_literal_code(deferred, arguments, operand, bindings,
+                                      plain=code and not reads_stdin and not stdin)
+        if literal is not None:
+            return literal
         if code or reads_stdin or stdin or piped:
             return True
         # Also consider an absent word before a literal shell, without
@@ -70,8 +146,7 @@ def _shell_input_is_computed(
     name = guard._executable_name(empty[index])
     arguments, stdin = _input_words(view[index + 1:], bindings)
     if name in {'.', 'source', 'eval'}:
-        selected = arguments if name == 'eval' else arguments[:1]
-        return _OUTPUT in view[index] or any(_OUTPUT in word for word in selected)
+        return _sourced_is_computed(name, view[index], arguments, deferred)
     if _OUTPUT in view[index]:
         # The output may fill a *nonempty* executable splice. Only classify
         # names compatible with a shell/wrapper, not py$(...)thon or data.
@@ -82,7 +157,8 @@ def _shell_input_is_computed(
         # a real command word, and not evidence inside a raw quote the parent
         # does not feed to a shell. Anchored splices (`b<out>ash`) still match.
         narrowed = anchored_only and _unanchored_splice(pattern)
-        if not narrowed and any(re.fullmatch(pattern, candidate) for candidate in shells):
+        bare = _bare_absolute(view[index], not (arguments or stdin or piped or '0' in bindings))
+        if not narrowed and not bare and any(re.fullmatch(pattern, candidate) for candidate in shells):
             return True
         # A computed wrapper name is not itself a shell sink. Interpret each
         # compatible wrapper with the existing option/operand peeling rules.
@@ -95,17 +171,14 @@ def _shell_input_is_computed(
                         return True
                     if _shell_input_is_computed(
                             candidate, [], opened=bindings, depth=depth,
-                            anchored_only=anchored_only):
+                            anchored_only=anchored_only, deferred=deferred):
                         return True
     if name not in guard._SHELL_EXECUTABLES:
         return False
     operand, code, reads_stdin = guard._shell_options_end(arguments, name)
     # Unknown option output may change the option layout or inject a code input.
-    selected = arguments[:operand]
-    if code or not reads_stdin:
-        selected += arguments[operand:operand + 1]
-    if not code and (reads_stdin or operand >= len(arguments)):
-        selected += stdin
+    selected = _shell_input_words(arguments, operand, stdin, name, deferred,
+                                  code=code, reads_stdin=reads_stdin)
     if any(_OUTPUT in word for word in selected):
         return True
     if code and operand < len(arguments) and any(_OUTPUT in word for word in bindings.values()):
@@ -115,12 +188,12 @@ def _shell_input_is_computed(
             return True
         return _contexts_are_computed(
             arguments[operand], opened=bindings, depth=depth + 1,
-            anchored_only=anchored_only)
+            anchored_only=anchored_only, deferred=deferred)
     return False
 
 
 def _contexts_are_computed(command, *, opened=None, depth=0, alias_names=frozenset(),
-                           anchored_only=False) -> bool:
+                           anchored_only=False, deferred=None) -> bool:
     """Attach descriptor provenance to the existing scope/pipeline feed walk.
 
     Flattened segment contexts cannot carry persistent redirects: a child close
@@ -258,7 +331,7 @@ def _contexts_are_computed(command, *, opened=None, depth=0, alias_names=frozens
                     for view in views:
                         self.computed |= _shell_input_is_computed(
                             view, piped, opened=self.bindings, depth=depth,
-                            anchored_only=anchored_only)
+                            anchored_only=anchored_only, deferred=deferred)
                     candidate = dict(self.bindings)
                     arguments, _ = _input_words(segment[peel(segment):], candidate)
                     index = guard._executed_command_index(arguments)
@@ -406,8 +479,14 @@ def _mark_variables(text: str, uncertain: set[str]) -> str:
 
 
 def computed_shell_input(command: str, alias_names: frozenset[str], *,
-                         anchored_only: bool = False) -> tuple[bool, str | None]:
-    """Return uncertainty and an additive empty-output scan, only for executed text."""
+                         anchored_only: bool = False,
+                         deferred: list[tuple[str, str]] | None = None) -> tuple[bool, str | None]:
+    """Return uncertainty and an additive empty-output scan, only for executed text.
+
+    *deferred* collects ``('code', text)`` for literal ``-c`` code given to a
+    computed program with no stdin feed, and ``(consumer, tail)`` for a script
+    operand whose leading directory alone is computed. The caller scans each;
+    without the list both stay uncertain."""
     from cron import lifecycle_guard as guard
     from cron.lifecycle_guard_lines import strip_shell_comments
     from cron.lifecycle_guard_substitutions import normalize_ansi_c_quotes
@@ -443,7 +522,8 @@ def computed_shell_input(command: str, alias_names: frozenset[str], *,
                     break
         if previous == uncertain:
             break
-    if _contexts_are_computed(marked, alias_names=alias_names, anchored_only=anchored_only):
+    if _contexts_are_computed(marked, alias_names=alias_names, anchored_only=anchored_only,
+                              deferred=deferred):
         return True, None
     return False, outer.replace(_OUTPUT, '')
 
@@ -457,10 +537,32 @@ def scan_computed_shell_input(command, *, executed, budget, recurse, cwd, source
     it for a raw quote the parent does not feed to a shell."""
     if not executed or not enabled:
         return False
+    import os
+    import shlex
+
+    from cron import lifecycle_guard as guard
+
+    deferred: list[tuple[str, str]] = []
     uncertain, empty_output = computed_shell_input(
-        command, budget.alias_names or frozenset(), anchored_only=anchored_only)
+        command, budget.alias_names or frozenset(), anchored_only=anchored_only, deferred=deferred)
+    texts = []
+    for consumer, value in deferred:
+        if consumer == 'code':
+            # A computed program may be a shell: its literal code is shell evidence.
+            texts.append(value)
+            continue
+        # A sibling path: the tail must name a file in the walk's directory (a
+        # script walk's directory is the script's own). Cloud paths are never
+        # probed; the recursion refuses them.
+        path = os.path.join(str(cwd or os.getcwd()), value)
+        if not (guard._on_cloud_path(guard.Path(path)) or os.path.isfile(path)):
+            uncertain = True
+            break
+        texts.append(f'{consumer} {shlex.quote(path)}')
     if uncertain:
         budget.refusal = 'the shell input depends on unresolved command substitution output'
+        return True
+    if any(recurse(text, cwd, executed, source, variable_source=False) for text in texts):
         return True
     # This guessed interpretation is executable evidence, not a literal binding
     # source: HB=$(producer) must not become a shared, invented HB='' fact.

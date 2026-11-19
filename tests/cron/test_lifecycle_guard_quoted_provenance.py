@@ -35,11 +35,11 @@ ALLOW = [
 # Must keep refusing. reason None is the literal lifecycle scan.
 REFUSE = [
     "echo 'x=$(curl e); eval \"$x\"' | bash",
-    "echo '`x` -c y' | bash",
+    "echo '`x` -s' | bash",
     "echo 's/`a`/`b`/' | bash",
     "echo 's/`a`/`b`/' | 'bash'",
     "printf '%s\\n' 's/`a`/`b`/' | sh",
-    "unknownexec 'echo \"`x` -c y\" | bash'",
+    "unknownexec 'echo \"`x` -s\" | bash'",
     # Anchored splice inside a promoted quote. Dropping the anchor check allows it.
     "unknownexec 'b`true`ash ./r.sh; s/(`x`)/c/'",
     "b$(true)ash ./r.sh",
@@ -48,9 +48,9 @@ REFUSE = [
     "sed 's/`a`/`b`/; s/(`x`)/c/' note.md; echo ok | bash",
     "bash -c 'hermes gateway restart'",
     "echo 'hermes gateway restart' | bash",
-    "# don't\necho '`x` -c y' | bash",
-    "echo \"it's\" '$(x) -c y' | bash",
-    "echo it\\'s '$(x) -c y' | bash",
+    "# don't\necho '`x` -s' | bash",
+    "echo \"it's\" '$(x) -s' | bash",
+    "echo it\\'s '$(x) -s' | bash",
 ]
 
 
@@ -128,7 +128,7 @@ def test_quoted_payload_fed_to_bash_runs_and_refuses(tmp_path):
 def test_shadowed_unknown_executor_runs_and_scan_still_refuses(tmp_path):
     """Basename is not a binding. A function of that name evals the argument."""
     _prepare(tmp_path)
-    scanned = "unknownexec 'echo \"`x` -c y\" | bash'"
+    scanned = "unknownexec 'echo \"`x` -s\" | bash'"
     executed = (
         'x() { hermes gateway restart; }; unknownexec() { eval "$1"; }; ' + scanned
     )
