@@ -74,6 +74,18 @@ def test_wrong_identity_preserves_every_row(correction_case, identity):
     assert list(conn.iterdump()) == before
 
 
+def test_missing_task_with_orphan_comment_refused(correction_case):
+    conn, _tid, request = correction_case
+    # Imported corruption: membership matches, but its task row is absent.
+    conn.execute("PRAGMA foreign_keys = OFF")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_comments SET task_id = 'missing-task' WHERE uid = ?", (request["comment_uid"],))
+    before = list(conn.iterdump())
+    with pytest.raises(ValueError, match="identity mismatch"):
+        correct_diagnostics(conn, "missing-task", **request)
+    assert list(conn.iterdump()) == before
+
+
 @pytest.mark.parametrize("status", ["running", "review", "done", "archived"])
 def test_active_or_closed_task_refused(correction_case, status):
     conn, tid, request = correction_case
@@ -85,6 +97,34 @@ def test_active_or_closed_task_refused(correction_case, status):
     assert list(conn.iterdump()) == before
 
 
+@pytest.mark.parametrize("status", ["todo", "ready", "blocked", "scheduled", "triage"])
+def test_inactive_open_status_supported(correction_case, status):
+    conn, tid, request = correction_case
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, tid))
+    result = correct_diagnostics(conn, tid, **request)
+    assert result["after"]["body"] == 'Diagnostic "error"'
+    assert conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == status
+
+
+def test_current_run_alone_refuses(correction_case):
+    conn, tid, request = correction_case
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET current_run_id = 71 WHERE id = ?", (tid,))
+    before = list(conn.iterdump())
+    with pytest.raises(ValueError, match="inactive open task"):
+        correct_diagnostics(conn, tid, **request)
+    assert list(conn.iterdump()) == before
+
+
+def test_matching_primary_supported(correction_case, monkeypatch):
+    conn, tid, request = correction_case
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET created_on = ? WHERE id = ?", ("owner", tid))
+    monkeypatch.setattr(sync, "sync_state", lambda _conn: {"mode": "primary", "gateway_id": "owner"})
+    assert correct_diagnostics(conn, tid, **request)["process_context"]["gateway"] == "owner"
+
+
 @pytest.mark.parametrize("state", [
     {"mode": "shadow", "gateway_id": "owner"},
     {"mode": "primary", "gateway_id": ""},
@@ -94,6 +134,9 @@ def test_primary_owner_required(correction_case, monkeypatch, state):
     conn, tid, request = correction_case
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET created_on = ? WHERE id = ?", ("owner", tid))
+    if not state["gateway_id"]:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET created_on = '' WHERE id = ?", (tid,))
     monkeypatch.setattr(sync, "sync_state", lambda _conn: state)
     before = list(conn.iterdump())
     with pytest.raises(PermissionError, match="owning primary gateway"):
