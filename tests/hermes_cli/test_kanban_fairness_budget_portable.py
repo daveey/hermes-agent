@@ -58,3 +58,72 @@ def test_db_capture_without_unix_primitives(tmp_path, monkeypatch):
     assert not (bounded / "too-large").exists()
     assert calls and calls == [1, 2] * (len(calls) // 2)
     assert budget._used(out) <= budget._limit(out)
+
+
+def _windows_lock(monkeypatch, locking):
+    real_import = builtins.__import__
+    windows = SimpleNamespace(locking=locking, LK_LOCK=1, LK_UNLCK=2)
+
+    def platform_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if globals and globals.get("__name__") == budget.__name__:
+            if name == "fcntl":
+                raise ImportError("Windows has no fcntl")
+            if name == "msvcrt":
+                return windows
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", platform_import)
+
+
+@pytest.mark.parametrize("error_name", ["EACCES", "EAGAIN", "EDEADLK"])
+def test_windows_budget_waits_past_crt_retry_window(tmp_path, monkeypatch, error_name):
+    import errno
+
+    calls = []
+
+    def locking(fd, mode, count):
+        calls.append(mode)
+        assert count == 1
+        if mode == 1 and len(calls) <= 2:
+            raise OSError(getattr(errno, error_name), "CRT ten-attempt window exhausted")
+
+    _windows_lock(monkeypatch, locking)
+    budget.initialize(tmp_path, 4096)
+    assert budget._limit(tmp_path) == 4096
+    assert calls == [1, 1, 1, 2]
+
+
+@pytest.mark.parametrize("mode,error_name", [(1, "EBADF"), (2, "EBADF"), (2, "EACCES")])
+def test_windows_budget_does_not_retry_noncontention_errors(tmp_path, monkeypatch, mode, error_name):
+    import errno
+
+    calls = []
+
+    def locking(fd, operation, count):
+        calls.append(operation)
+        assert len(calls) <= 2, "must not retry a fatal acquisition or failed unlock"
+        if operation == mode:
+            raise OSError(getattr(errno, error_name), "lock failure")
+
+    _windows_lock(monkeypatch, locking)
+    with pytest.raises(OSError) as caught:
+        with budget._locked(tmp_path):
+            pass
+    assert caught.value.errno == getattr(errno, error_name)
+    assert calls == ([1] if mode == 1 else [1, 2])
+
+
+def test_windows_budget_locks_byte_zero_with_existing_sentinel(tmp_path, monkeypatch):
+    (tmp_path / ".capture-budget.lock").write_bytes(b"existing sentinel")
+    calls = []
+
+    def locking(fd, mode, count):
+        assert os.lseek(fd, 0, os.SEEK_CUR) == 0
+        calls.append(mode)
+        # Prove release repositions too, rather than relying on acquisition.
+        os.lseek(fd, 7, os.SEEK_SET)
+
+    _windows_lock(monkeypatch, locking)
+    with budget._locked(tmp_path):
+        pass
+    assert calls == [1, 2]

@@ -8,6 +8,7 @@ are counted on the next write but cannot be prevented by this advisory protocol.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
 import json
 import os
 from pathlib import Path
@@ -35,7 +36,15 @@ def _locked(root):
             # Windows locks a byte range from the current position; seeking is
             # required on both acquisition and release, including an empty file.
             stream.seek(0)
-            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK if acquire else msvcrt.LK_UNLCK, 1)
+            while True:
+                try:
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK if acquire else msvcrt.LK_UNLCK, 1)
+                    return
+                except OSError as exc:
+                    # LK_LOCK waits only ten times, unlike flock(LOCK_EX).
+                    # Continue its blocking windows on contention, not IO errors.
+                    if not acquire or exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise
     if (root / ".capture-budget.lock").is_symlink():
         raise ValueError("budget lock must not be a symlink")
     with (root / ".capture-budget.lock").open("a+b") as stream:
