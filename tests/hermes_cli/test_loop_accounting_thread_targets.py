@@ -263,6 +263,35 @@ def test_thread_carriers_preserve_sequence_args_attribution(carrier, args_type):
     assert la._target_exited[la._target_key(original)]["threads"] == 1
 
 
+@pytest.mark.parametrize("carrier", ["plain", "partial", "context", "context_partial"])
+def test_thread_attribution_does_not_consume_iterator_args(carrier):
+    from contextvars import Context
+    from functools import partial
+
+    la.instrument_thread_targets()
+    seen = []
+
+    def original(*values):
+        seen.append(values)
+
+    target = original
+    values = [2]
+    expected = (2,)
+    if carrier in ("partial", "context_partial"):
+        target = partial(original, 1)
+        expected = (1, 2)
+    if carrier == "context":
+        target, values = Context().run, [target, 2]
+    elif carrier == "context_partial":
+        target = partial(Context().run, target)
+    args = iter(values)
+    th = threading.Thread(target=target, args=args)
+    th.start()
+    th.join()
+    assert seen == [expected]
+    assert list(args) == []  # Only the actual invocation consumes the iterator.
+
+
 def test_context_thread_names_original_target():
     from contextvars import Context
 

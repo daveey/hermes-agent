@@ -1050,7 +1050,9 @@ TARGET_OTHER = "other"
 
 def _target_key(target: Any, args: tuple | list = ()) -> str:
     """Name of a ``Thread`` target (``module.qualname``; a lambda also gets its line number)."""
-    target = _callable_target(target, tuple(args))
+    # Inspection must not consume one-shot iterables before Thread.run uses them.
+    inspect_args = tuple(args) if isinstance(args, (tuple, list)) else ()
+    target = _callable_target(target, inspect_args)
     name = _callable_name(target)
     code = getattr(getattr(target, "__func__", target), "__code__", None)
     if name.endswith("<lambda>") and code is not None:
