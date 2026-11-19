@@ -55,6 +55,17 @@ def test_cli_bad_file_bytes(correction_case, tmp_path, capsys, raw):
     assert list(conn.iterdump()) == before
 
 
+def test_cli_oversize_valid_json_is_rejected(correction_case, tmp_path, capsys):
+    conn, tid, request = correction_case
+    raw = json.dumps(request).encode("utf-8")
+    path = tmp_path / "padded-valid.json"
+    path.write_bytes(raw + b" " * (200001 - len(raw)))
+    before = list(conn.iterdump())
+    assert fixtures._main(["correct-diagnostics", tid, "--request-file", str(path)]) == 2
+    assert "exceeds 200000 bytes" in capsys.readouterr().err
+    assert list(conn.iterdump()) == before
+
+
 def test_cli_and_db_delegation_fences(correction_case, kanban_home, monkeypatch, capsys):
     from hermes_cli.kanban_diagnostic_correction import correct_diagnostics
 

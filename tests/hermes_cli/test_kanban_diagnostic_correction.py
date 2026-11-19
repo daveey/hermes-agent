@@ -94,6 +94,7 @@ def test_worker_refused_before_reading_board(kanban_home, monkeypatch, worker_ke
 
 @pytest.mark.parametrize(("field", "value"), [
     ("reason", "x" * 2001), ("request_id", "x" * 129),
+    ("reason", "   "), ("request_id", "\t"),
     ("reason", None), ("request_id", []), ("expected_body", "x" * 100001),
     ("expected_comment", "x" * 50001), ("comment_uid", "x" * 202),
 ])
