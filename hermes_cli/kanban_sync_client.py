@@ -23,6 +23,7 @@ gateway's hub enrollment (``~/.config/hermes-mail/{config.json,gateway.key}``), 
 from __future__ import annotations
 
 import json
+from hermes_cli import loop_accounting as la
 import logging
 import os
 import re
@@ -1295,6 +1296,7 @@ def _links_unchanged(key: str, inputs: Optional[tuple], slug: str, began: float)
     return True, started
 
 
+@la.accounted("sync.links.inputs")
 def _links_inputs(conn: sqlite3.Connection, path: Path, slug: str, gateway: str, mode: str,
                   ledger: Optional[dict[str, frozenset]], signature: Optional[tuple]) -> Optional[tuple]:
     """Everything one board's links pass (``kanban_chat_links.reconcile`` with its creator-chats backfill) reads,
@@ -1324,6 +1326,7 @@ def _links_inputs(conn: sqlite3.Connection, path: Path, slug: str, gateway: str,
     return (st.st_dev, st.st_ino), revision, replica, ledger.get(slug, frozenset()), mode, signature
 
 
+@la.accounted("sync.links")
 def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchanged: bool = False) -> None:
     """Bring this gateway's chat links up to date in every synced board (kanban_chat_links.reconcile), creating a
     link-only board for each board this gateway's chats have cards on but this host does not have.
@@ -1339,22 +1342,23 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
         ledger: Optional[dict[str, frozenset]] = None
         try:
             from hermes_cli.kanban_session_activity import _remote_links
-            ledger = ledger_slices(_remote_links(), gateway)
+            with la.pass_("sync.links.sources"):
+                ledger = ledger_slices(_remote_links(), gateway)
             local = {slug for slug, _path in boards}
             if not skip_unchanged or set(ledger) - local:
-                created = ensure_link_boards(set(ledger), gateway)
+                created = la.timed("sync.links.ensure_boards", ensure_link_boards, set(ledger), gateway)
                 if created:
                     _log.info("kanban sync: link-only boards %s", created)
                     boards = board_paths()
         except Exception as exc:  # health: allow BLE001 -- link-only boards are best effort; local links still reconcile
             _log.warning("kanban sync: link-only boards failed (%s: %s)", type(exc).__name__, exc)
-        signature = links_signature(gateway, placement) if skip_unchanged else None
+        signature = la.timed("sync.links.signature", links_signature, gateway, placement) if skip_unchanged else None
         for slug, path in boards:
             key = str(path)
             counts: dict = {}
             began = _links_pass_clock()
             try:
-                with connection(path, lambda: _connect(path)) as conn:
+                with la.pass_("sync.links.board") as accounting, connection(path, lambda: _connect(path)) as conn:
                     mode = sync.board_mode(conn)
                     if mode == "off":
                         continue
@@ -1363,6 +1367,7 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
                         inputs = _links_inputs(conn, path, slug, gateway, mode, ledger, signature)
                         skip, started = _links_unchanged(key, inputs, slug, began)
                         if skip:
+                            accounting.skip()
                             continue
                     counts = kanban_chat_links.reconcile(conn, slug, gateway)
                     if inputs is not None:
