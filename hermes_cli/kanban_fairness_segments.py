@@ -137,7 +137,11 @@ def source_rows(cuts):
 
 
 def append_records(out: Path, records, *, max_bytes: int = MAX_CAPTURE_BYTES, _metadata=None) -> dict:
-    """Append one bounded batch. Caller counts rejection as loss; one consumer owns the directory."""
+    """Append a caller-sized batch; rejection is loss. One consumer owns the directory.
+
+    Segment and capture byte ceilings do not bound transient batch memory. Runtime callers must
+    bound their own queue and batch sizes; this writer materializes encoded lines and segments.
+    """
     if type(max_bytes) is not int or not 0 < max_bytes <= MAX_CAPTURE_BYTES:
         raise ValueError("max_bytes outside capture bound")
     if (out / MANIFEST).exists():

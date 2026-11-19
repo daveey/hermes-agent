@@ -249,6 +249,7 @@ BAD_RAW = [
     _j(version=2), _j(version=True), _j(version=1.0),
     _j(board=""), _j(board=" "), _j(board=1), _j(board="b" * 1025), _j(source_revision=None),
     _j(observed_at="9"), _j(valid_until=True), _j(owners={}), _j(owners=["x"]),
+    _j(valid_until=10**400), _j(owners=[_owner(expires_at=10**400)]),
     _j(owners=[_owner(extra="secret")]),
     _j(owners=[{k: v for k, v in _owner().items() if k != "ref"}]),
     _j(owners=[_owner(source="other")]), _j(owners=[_owner(source=["core-lane"])]),
@@ -282,3 +283,37 @@ def test_owner_generation_redacted_receipt_keeps_digest_without_bytes():
     payload = urgency(raw, outcome="invalid", raw_b64=None, raw_complete=False, redacted=True,
                       owner_ids=[], reason="invalid_source")
     assert record("owner_generation", payload)["payload"] == payload
+
+
+@pytest.mark.parametrize("field", ["valid_until", "expires_at"])
+def test_huge_source_time_forged_capture_is_incomplete(tmp_path, field):
+    import importlib.util
+    from pathlib import Path
+
+    from hermes_cli import kanban_fairness_segments as seg
+    from hermes_cli import kanban_fairness_store as store
+
+    item = record("owner_generation", urgency())
+    seg.append_records(tmp_path, [item])
+    manifest = seg.seal_records(tmp_path, expected_sources=seg.receipts(tmp_path)["sources"])
+    doc = source_doc()
+    if field == "valid_until":
+        doc[field] = 10**400
+    else:
+        doc["owners"][0][field] = 10**400
+    item["payload"] = urgency(json.dumps(doc).encode())
+    data = seg.encoded(item) + b"\n"
+    entry = manifest["segments"][0]
+    (tmp_path / entry["name"]).write_bytes(data)
+    entry.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+    manifest["bytes"] = len(data)
+    manifest["final_seal"] = seg.final_seal(manifest)
+    (tmp_path / seg.MANIFEST).write_bytes(seg.encoded(manifest))
+    assert store.load(tmp_path)["gaps"]
+    spec = importlib.util.spec_from_file_location(
+        "fairness_overflow_cli", Path(__file__).resolve().parents[2] / "scripts" / "kanban_fairness.py")
+    assert spec is not None and spec.loader is not None
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    assert cli.main(["report", "--input", str(tmp_path), "--mode", "live",
+                     "--output", str(tmp_path / "report")]) == 2

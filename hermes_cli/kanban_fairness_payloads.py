@@ -138,7 +138,8 @@ def _source_identity(value):
 def _source_time(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return math.isfinite(value)
+    _finite(value, "raw_b64 source time")
+    return True
 
 
 def _validate_source_document(raw):

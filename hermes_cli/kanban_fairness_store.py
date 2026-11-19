@@ -16,7 +16,7 @@ from typing import Optional
 
 from hermes_cli import kanban_fairness_journal as journal
 from hermes_cli import kanban_fairness_segments as segments
-from hermes_cli.kanban_fairness_schema import VERSION, decode_owner, make_record
+from hermes_cli.kanban_fairness_schema import MAX_PAYLOAD_BYTES, VERSION, decode_owner, make_record
 from hermes_cli.kanban_fairness_segments import append_records, seal_records
 
 __all__ = ["append_records", "drain", "load", "seal_records", "write_manifest"]
@@ -78,10 +78,15 @@ def drain(conn: sqlite3.Connection, out: Path) -> dict:
         return receipts
     if (out / MANIFEST).exists():
         return receipts
-    if state.get("trigger_integrity") is not True and not any(g["code"] == "trigger_loss" for g in receipts["gaps"]):
-        _gap(receipts, "trigger_loss", "capture triggers are missing or changed, or seal integrity is unknown")
+    if state.get("trigger_integrity") is not True:
+        previous_gaps = len(receipts["gaps"])
+        if state.get("trigger_integrity") is False:
+            _gap(receipts, "trigger_loss", "capture triggers are missing or changed")
+        else:
+            _gap(receipts, "trigger_integrity_unknown", "journal does not attest capture trigger integrity")
         # Preserve newly observed gaps even when no new rows arrive.
-        _write(out / RECEIPTS, segments.encoded(receipts))
+        if len(receipts["gaps"]) != previous_gaps:
+            _write(out / RECEIPTS, segments.encoded(receipts))
     while True:
         rows = list(journal.rows(conn, receipts["journal_seq"], limit=128))
         if not rows:
@@ -93,13 +98,19 @@ def drain(conn: sqlite3.Connection, out: Path) -> dict:
         try:
             for db_seq, kind, wall_ms, task_id, op, fields in rows:
                 seq += 1
+                record_kind = "opening" if kind == "opening" else "row_change"
+                payload = {"task_id": task_id, "op": op, "fields": json.loads(fields),
+                           "journal_seq": db_seq, "journal_kind": kind,
+                           "database_uid": receipts["database_uid"], "source_uid": None}
+                if len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > MAX_PAYLOAD_BYTES:
+                    record_kind = "loss"
+                    # These are exporter-epoch sequence bounds, not durable journal sequence IDs.
+                    payload = {"reason": "oversize", "count": 1, "first_seq": seq, "last_seq": seq,
+                               "start_wall_ns": wall_ms * 1_000_000, "end_wall_ns": wall_ms * 1_000_000}
                 records.append(make_record(
                     capture_id=state["capture_id"], source_gateway=receipts["source_gateway"],
                     board_uid=receipts["board_uid"], source_epoch=epoch, seq=seq,
-                    kind="opening" if kind == "opening" else "row_change", wall_ns=wall_ms * 1_000_000,
-                    payload={"task_id": task_id, "op": op, "fields": json.loads(fields),
-                             "journal_seq": db_seq, "journal_kind": kind,
-                             "database_uid": receipts["database_uid"], "source_uid": None}))
+                    kind=record_kind, wall_ns=wall_ms * 1_000_000, payload=payload))
             receipts = append_records(out, records, _metadata={"journal_seq": rows[-1][0]})
         except (ValueError, OSError) as exc:
             _gap(receipts, "export_failed", type(exc).__name__)

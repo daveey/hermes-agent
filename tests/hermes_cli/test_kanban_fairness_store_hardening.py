@@ -45,6 +45,42 @@ def test_real_no_gap_roundtrip(tmp_path):
     assert store.load(other)["gaps"] == []
 
 
+@pytest.mark.parametrize("position", [0, 3, 6])
+def test_oversize_journal_row_exports_loss_without_stalling(tmp_path, monkeypatch, position):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_fairness_journal as journal
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    out = tmp_path / "capture"
+    with kbc.connect_closing() as conn:
+        journal.arm(conn, "capture")
+        for index in range(7):
+            kb.create_task(conn, title="fixture", assignee="a",
+                           idempotency_key="x" * 300_000 if index == position else f"key-{index}")
+        rows = list(journal.rows(conn, 0))
+        assert len(rows) == 14
+        result = store.drain(conn, out)
+        assert result["journal_seq"] == rows[-1][0]
+        assert store.drain(conn, out) == result
+        store.write_manifest(conn, out, board="default", assumptions={}, policy={})
+    capture = store.load(out)
+    losses = [r for r in capture["records"] if r["kind"] == "loss"]
+    assert len(losses) == 1
+    assert losses[0]["payload"]["reason"] == "oversize"
+    assert losses[0]["payload"]["count"] == 1
+    exported = [r for r in capture["records"] if r["kind"] != "loss"]
+    expected = [r[0] for r in rows if len(r[-1].encode("utf-8")) < 256 * 1024]
+    assert [r["payload"]["journal_seq"] for r in exported] == expected
+    assert len(exported) == 13
+    assert capture["gaps"]  # Loss never certifies complete coverage.
+    assert "export_failed" not in {g["code"] for g in capture["gaps"]}
+
+
 @pytest.mark.parametrize("value", [None, [], 3, "bad", {"segments": []}])
 def test_malformed_manifest_and_receipts_fail_closed(tmp_path, value):
     (tmp_path / seg.MANIFEST).write_text(json.dumps(value))
