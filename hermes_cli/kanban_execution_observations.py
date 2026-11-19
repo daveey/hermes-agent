@@ -136,7 +136,7 @@ def card(row, *, gateway=None, profile=None, now=None):
         if row.get("stale"):
             value.update(state="unknown", unknown_reason="source_unavailable")
         return project(value, now=now, source_class="sidebar")
-    if row.get("remote") and isinstance(row.get("_replica_run"), dict):
+    if isinstance(row.get("_replica_run"), dict):
         from hermes_cli.kanban_replica_execution import raw as replica_raw
         value = replica_raw(row)
         if value is not None:

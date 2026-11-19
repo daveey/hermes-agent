@@ -474,9 +474,17 @@ def _work_observations(conn, task, board):
         row["_execution_scope"] = {"gateway": gateway, "profile": profile, "board": row["board"]}
         with transaction(conn) as read_at:
             from hermes_cli.kanban_session_activity import _require_local_execution_authority
-            _require_local_execution_authority(conn)
-            sources = assemble(conn, [task.id], board=board or "default", gateway=gateway, profile=profile,
-                               observed_at=read_at)
+            from hermes_cli.kanban_primary_execution import PrimaryMirror, attach
+            try:
+                _require_local_execution_authority(conn)
+            except PrimaryMirror:
+                attach(conn, {task.id: row}, board=row["board"], gateway=gateway, profile=profile)
+                if "_replica_run" not in row:
+                    row["_execution_error"] = True
+                sources = {}
+            else:
+                sources = assemble(conn, [task.id], board=board or "default", gateway=gateway, profile=profile,
+                                   observed_at=read_at)
         row["_execution_source"] = sources.get(task.id)
         return add_cards([row])[0].get("execution_observations", [])
     except ADAPTER_ERRORS:

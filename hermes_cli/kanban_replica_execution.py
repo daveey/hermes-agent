@@ -82,7 +82,8 @@ def raw(row: dict) -> dict | None:
     value = {"version": 1, "identity": identity, "owner": owner, "state": "running",
              "source": "kanban.replica_run", "source_revision": run["ref"], "evidence_refs": [run["ref"]],
              "observed_at": at, "valid_until": at + 180, "generation_portable": True,
-             "last_activity": row.get("activity_at"), "last_activity_kind": row.get("activity_kind"),
+             "last_activity": run.get("activity_at", row.get("activity_at")),
+             "last_activity_kind": run.get("activity_kind", row.get("activity_kind")),
              "last_progress": None, "last_progress_kind": None, "last_progress_ref": None, "wait": None}
     request = row.get("human_request")
     if isinstance(request, dict):

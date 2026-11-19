@@ -1285,6 +1285,9 @@ def _require_local_execution_authority(conn: sqlite3.Connection) -> None:
     """
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_sync_state'").fetchone():
         row = conn.execute("SELECT mode FROM kanban_sync_state LIMIT 1").fetchone()
+        if row is not None and row[0] == "primary":
+            from hermes_cli.kanban_primary_execution import PrimaryMirror
+            raise PrimaryMirror("local execution authority unavailable for primary mirror")
         if row is None or row[0] not in ("off", "shadow"):
             raise ValueError("local execution authority unavailable for sync mirror")
 
@@ -1317,11 +1320,20 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 from hermes_cli.kanban_execution_source import assemble, safe_raw, unknown_raw
                 from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_scope
                 gateway, profile = card_scope(path)
+                from hermes_cli.kanban_primary_execution import PrimaryMirror, attach
                 try:
-                    _require_local_execution_authority(conn)
-                    sources = assemble(conn, {tid for _, tid in reads["pairs"]}, board=_board_slug(path),
-                                       gateway=gateway, profile=profile, observed_at=read_at)
-                    reads["execution"] = {tid: safe_raw(source["task"], source) for tid, source in sources.items()}
+                    try:
+                        _require_local_execution_authority(conn)
+                    except PrimaryMirror:
+                        replica = attach(conn, tasks, board=_board_slug(path), gateway=gateway, profile=profile)
+                        reads["execution"] = {
+                            tid: replica.get(tid) or unknown_raw(tasks[tid], gateway=gateway, profile=profile,
+                                                                 board=_board_slug(path))
+                            for _, tid in reads["pairs"]}
+                    else:
+                        sources = assemble(conn, {tid for _, tid in reads["pairs"]}, board=_board_slug(path),
+                                           gateway=gateway, profile=profile, observed_at=read_at)
+                        reads["execution"] = {tid: safe_raw(source["task"], source) for tid, source in sources.items()}
                 except ADAPTER_ERRORS:
                     # Optional evidence only: legacy counts and asks stay; each card is an explicit unknown.
                     _log.debug("kanban execution source failed for %s", path, exc_info=True)
@@ -1562,18 +1574,28 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
         gateway, profile = card_scope(path)
         for info in found.values():  # board-root owner scope, kept for the failure path too (C9)
             info["_execution_scope"] = {"gateway": gateway, "profile": profile, "board": _board_slug(path)}
+        from hermes_cli.kanban_primary_execution import PrimaryMirror, attach
+        primary = False
         try:
             _require_local_execution_authority(conn)
             authority = True
+        except PrimaryMirror:
+            authority, primary = False, True
         except ADAPTER_ERRORS:
             authority = False  # a pulled mirror attests neither open nor delivered cards
         try:
-            if not authority:
+            if primary:
+                attach(conn, found, board=_board_slug(path), gateway=gateway, profile=profile)
+                for info in found.values():
+                    if "_replica_run" not in info:
+                        info["_execution_error"] = True
+            elif authority:
+                sources = assemble(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
+                                   observed_at=read_at)
+                for tid, source in sources.items():
+                    found[tid]["_execution_source"] = source
+            else:
                 raise RuntimeError("local execution authority unavailable")
-            sources = assemble(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
-                               observed_at=read_at)
-            for tid, source in sources.items():
-                found[tid]["_execution_source"] = source
         except ADAPTER_ERRORS:
             # Optional evidence: the task list and asks stay; each card becomes an explicit unknown.
             _log.debug("kanban execution source failed for %s", path, exc_info=True)
