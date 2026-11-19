@@ -29,7 +29,7 @@ def write(path: Path, data: bytes) -> None:
 def receipts(out: Path) -> dict:
     path = out / RECEIPTS
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     return {"version": VERSION, "capture_id": None, "board_uid": None, "segments": [],
             "sources": [], "gaps": [], "bytes": 0}
 
@@ -142,7 +142,7 @@ def load_records(out: Path) -> dict:
     gaps = []
     try:
         path = out / MANIFEST
-        manifest = json.loads(path.read_text()) if path.exists() else receipts(out)
+        manifest = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else receipts(out)
     except (OSError, ValueError, TypeError):
         return {"manifest": {}, "records": [], "gaps": [{"code": "bad_manifest"}]}
     if manifest.get("sealed") is not True or not manifest.get("final_seal"):
