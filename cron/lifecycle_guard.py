@@ -783,6 +783,7 @@ def _opens_call_arguments(segment: list[str]) -> bool:
 
 def _iter_segment_contexts(
     command: str, alias_names: frozenset[str] = frozenset(),
+    *, carry_descriptors: bool = True,
 ) -> Iterator[tuple[list[str], bool, list[str]]]:
     """``(segment, call_argument, piped_files)``: whether the segment is the argument list of a
     call (the segment right after a ``(`` that follows an ordinary word), and the files a ``cat``
@@ -793,10 +794,11 @@ def _iter_segment_contexts(
     def opens_call(segment: list[str]) -> bool:
         return _opens_call_arguments(segment) and alias_names.isdisjoint(segment)
     for script in heredoc_scripts(command):
+        lines = join_continued_lines(_iter_command_token_lists(script))
+        if carry_descriptors:
+            lines = carry_exec_descriptors(lines, pattern=_REDIRECTION, control_chars=_CONTROL_CHARS)
         yield from iter_script_segment_contexts(
-            carry_exec_descriptors(
-                join_continued_lines(_iter_command_token_lists(script)), pattern=_REDIRECTION,
-                control_chars=_CONTROL_CHARS),
+            lines,
             cat_operands=_cat_operands, cat_relays_stdin=_cat_relays_stdin,
             opens_call_arguments=opens_call, peel_reserved_words=_peel_reserved_words,
             stdin_redirections=lambda words: _split_redirections(words)[1])

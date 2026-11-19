@@ -806,8 +806,11 @@ def _iter_nested_shell_inputs(
 
     # Contextual segments resolve process-substitution file feeds into redirections.
     # Flat command views retain only the substitution placeholder, losing that file.
+    # Reaching-definition proof needs original fd copies, not possible-target
+    # carry views: those lose scope uncertainty and capture-time variable values.
     classified = [(view, _nested_shell_input(view))
-                  for segment, _call_argument, _piped in _iter_segment_contexts(walk_command)
+                  for segment, _call_argument, _piped in _iter_segment_contexts(
+                      walk_command, carry_descriptors=False)
                   for view in _command_segment_views(segment)]
     # Such a shell inside a compound command reads that command's stdin redirections and
     # heredocs (`{ su -l bob; } < f`, `( su -l bob ) <<< T`, `if …; then su -l bob; fi <<E`).
@@ -860,7 +863,8 @@ def _fed_shell_inputs(walk_command: str, *, cwd: Optional[str]) -> Iterator[tupl
     counts too (``t ( su -l bob )``): unknown alias names may make that ``(`` a subshell."""
     from cron.lifecycle_guard import _command_segment_views, _iter_segment_contexts
 
-    for segment, _call_argument, piped in _iter_segment_contexts(walk_command):
+    for segment, _call_argument, piped in _iter_segment_contexts(
+            walk_command, carry_descriptors=False):
         if piped and any(_nested_shell_input(view) == ("stdin", None)
                          for view in _command_segment_views(segment)):
             for source in piped:
