@@ -23,9 +23,12 @@ unknown uncertainty remains null, not zero. An enabled capture ID must be a safe
 is the profile's durable `kanban/evidence/<capture_id>`, never scratch. A byte limit
 must be a positive integer no greater than 536870912; booleans are not integers here.
 
-**Integration status:** draft explicit `runtime arm` / `runtime disarm` commands and
-startup bindings, root export and expected-epoch inventory now exist. Full production
-scope verification remains incomplete. Do not activate this draft on a live board.
+Explicit `runtime arm` / `runtime disarm` commands, startup bindings, root export
+and expected-epoch inventory are implemented. Subprocess fixtures exercise managed
+worker bootstrap, gateway process-service scope, CLI arming/disarming and revocation
+during startup. External providers and dispatcher work are fixture doubles; these
+are not live-fleet coverage or numeric fairness acceptance. Live activation requires
+a separate approved capture plan and supplied roster identities.
 
 The descriptor pins profile home, board, capture directory/ID, supplied gateway/board
 UIDs, byte limit and nullable clock error. It is not inferred from hostnames or a
@@ -46,7 +49,10 @@ before freezing the child snapshot; scheduler settings stay frozen. Safe/config-
 workers never read the live profile. No lazy IO is added to readers,
 submission, enabled checks or config loading. Profile-specific descriptors must be
 armed for their exact home; a root descriptor is not authority for another profile.
-Managed-worker/profile and multiplexed gateway scope still need end-to-end proof.
+Gateway capture boot uses the same cleared process-service context as dispatch;
+managed workers use their admitted exact profile home, including safe/config-bypass
+isolation. Missing or altered authority cannot produce a clean runtime tail; an exact
+retained disarm descriptor allows the final drain to close normally.
 
 ## Actual reads and privacy
 

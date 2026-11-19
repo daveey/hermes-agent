@@ -176,6 +176,25 @@ def test_revocation_during_startup_never_returns_active_epoch(tmp_path, monkeypa
             session.close()
 
 
+def test_short_worker_checks_authority_without_monitor(tmp_path, monkeypatch):
+    from hermes_cli import kanban_fairness_activation as activation
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(activation, "_monitor", lambda *args: None)
+    cfg = config(tmp_path)
+    activation.arm(cfg, home=tmp_path, board="default", source_gateway="gw", board_uid="board")
+    session = activation.start(cfg, home=tmp_path)
+    try:
+        read_owners(board="default", now_s=150, path=tmp_path / "missing")
+        (tmp_path / "capture" / activation.NAME).unlink()
+        session.close()
+        session.thread.join(2)
+        assert not session.sealed
+        assert not (session.out / "runtime-close.json").exists()
+        assert load(session.out)["gaps"]
+    finally:
+        session.close()
+
+
 def test_real_cli_disarm_after_reset(tmp_path, monkeypatch):
     import os
     from pathlib import Path

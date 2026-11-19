@@ -9,6 +9,7 @@ import textwrap
 ROOT = Path(__file__).resolve().parents[2]
 CHILD = textwrap.dedent(
     """\
+    import hermes_bootstrap
     import asyncio
     import json
     import os
