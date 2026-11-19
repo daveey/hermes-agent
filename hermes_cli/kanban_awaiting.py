@@ -891,9 +891,10 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
     from hermes_cli.kanban_wake_check import CONDITION_MET_EVENT
     from hermes_cli.kanban_shared_blockers import CLEARED_EVENT
     count = 0
-    for kind, payload in conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ('scheduled','continued',?,?,?) "
-            "ORDER BY id DESC LIMIT 20", (task_id, ESCALATED_EVENT, CONDITION_MET_EVENT, CLEARED_EVENT)):
+    for kind, payload, park_at in conn.execute(
+            "SELECT kind, payload, created_at FROM task_events WHERE task_id = ? AND kind IN "
+            "('scheduled','continued',?,?,?) ORDER BY id DESC LIMIT 20",
+            (task_id, ESCALATED_EVENT, CONDITION_MET_EVENT, CLEARED_EVENT)):
         if kind == ESCALATED_EVENT:
             break
         try:
@@ -915,7 +916,7 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
             continue  # a continuation with no wait, or a legacy park
         if got["premise"] != premise and not (probe and got.get("probe") == probe):
             break
-        if got.get("kind") == CHAT and _answered_since(conn, task_id, data.get("wake_check")):
+        if got.get("kind") == CHAT and _answered_since(conn, task_id, park_at):
             break  # that ask was answered: a later question is new work, not the same stuck wait
         if not is_healthy(got):
             count += 1
@@ -944,24 +945,32 @@ def chat_parks_today(conn: sqlite3.Connection, task_id: str) -> int:
     return count
 
 
-def _answered_since(conn: sqlite3.Connection, task_id: str, wake_check: Optional[str]) -> bool:
-    """A chat park's own comment probe (``wait-comment --after-id N``) and an answer after it: any comment above N
-    not written by a kernel writer. Review of #3647: three separately answered questions escalated."""
-    m = _AFTER_ID.search(wake_check or "")
-    if not m:
+def _answered_since(conn: sqlite3.Connection, task_id: str, park_at: Optional[int]) -> bool:
+    """A comment at or after a chat park (``park_at``: the park event's ``created_at``) not by a kernel writer and
+    not by this card's own worker. Times and portable uids only: comment and run integers are local to each board
+    file, and a pool worker's park is read on the owner too (review of #3647)."""
+    if park_at is None:
         return False
     from hermes_cli.kanban_comment_origin import is_system_author
-    own_runs = {int(r[0]) for r in conn.execute("SELECT id FROM task_runs WHERE task_id = ?", (task_id,))}
-    for cid, author in conn.execute("SELECT id, author FROM task_comments WHERE task_id = ? AND id > ?",
-                                    (task_id, int(m.group(1)))):
+    run_cols = {r[1] for r in conn.execute("PRAGMA table_info(task_runs)")}
+    own_uids = {r[0] for r in conn.execute("SELECT uid FROM task_runs WHERE task_id = ? AND uid IS NOT NULL",
+                                           (task_id,))} if "uid" in run_cols else set()
+    own_ids = {int(r[0]) for r in conn.execute("SELECT id FROM task_runs WHERE task_id = ?", (task_id,))}
+    has_uid = "uid" in {r[1] for r in conn.execute("PRAGMA table_info(task_comments)")}
+    rows = conn.execute(
+        f"SELECT id, author, {'uid' if has_uid else 'NULL'} FROM task_comments WHERE task_id = ? AND created_at >= ?",
+        (task_id, int(park_at))).fetchall()
+    for cid, author, cuid in rows:
         if is_system_author(author):
             continue
-        # The card's own worker leaving a progress note before re-parking is not an answer (review of #3647).
-        row = conn.execute("SELECT json_extract(payload, '$.writer_run_id') FROM task_events WHERE task_id = ? AND "
-                           "kind = 'commented' AND json_extract(payload, '$.comment_id') = ? LIMIT 1",
-                           (task_id, cid)).fetchone()
-        if row is not None and isinstance(row[0], int) and row[0] in own_runs:
-            continue
+        key, value = ("$.comment_uid", cuid) if cuid else ("$.comment_id", cid)
+        writer = conn.execute(
+            "SELECT json_extract(payload, '$.writer_run_uid'), json_extract(payload, '$.writer_run_id') "
+            f"FROM task_events WHERE task_id = ? AND kind = 'commented' AND json_extract(payload, '{key}') = ? LIMIT 1",
+            (task_id, value)).fetchone()
+        if writer is not None and (writer[0] in own_uids if writer[0] else
+                                   (cuid is None and isinstance(writer[1], int) and writer[1] in own_ids)):
+            continue  # the card's own worker leaving a note before it re-asks is not an answer
         return True
     return False
 

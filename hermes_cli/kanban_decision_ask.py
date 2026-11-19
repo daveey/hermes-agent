@@ -61,7 +61,7 @@ def owner_fallback(conn, task_id: str) -> bool:
     return escalate(conn, task_id, f"no chat subscribed to it on {own or 'its owning gateway'} can be woken")
 
 
-def escalate(conn, task_id: str, why_unanswered: str) -> bool:
+def escalate(conn, task_id: str, why_unanswered: str, *, trust_probe: bool = False) -> bool:
     """A still-parked card whose orchestrator ask cannot reach anyone: leave the park (``scheduled`` -> ``triage``,
     probe cleared, ``decision_unanswerable``) and block it ``needs_input`` with the question, as the spend-budget hold
     leaves a park. If the block is refused it stays visibly in triage. True when it blocked."""
@@ -71,9 +71,11 @@ def escalate(conn, task_id: str, why_unanswered: str) -> bool:
     task = kb.get_task(conn, task_id)
     if task is None or task.status != "scheduled":
         return False
-    record, _reason, wake_check, _at = _latest_chat_park(conn, task_id)
-    if record is not None and kaw._answered_since(conn, task_id, wake_check):
-        return False  # answered meanwhile: its probe wakes the card on its next check
+    record, _reason, _wake_check, park_at = _latest_chat_park(conn, task_id)
+    # ``trust_probe``: the card's own probe just said "not yet", and it is the authority (a worker-supplied probe may
+    # filter: --contains, --from-gateway). Otherwise an answer since the park means its probe wakes the card.
+    if not trust_probe and record is not None and kaw._answered_since(conn, task_id, park_at):
+        return False
     ask = [e for e in kb.list_events(conn, task_id) if e.kind == NOTICE_KIND]
     payload = (ask[-1].payload or {}) if ask else {}
     question = str(payload.get("why") or payload.get("reason") or "").strip()[:1500]
@@ -116,10 +118,13 @@ def escalate_if_overdue(conn, task_id: str, *, now: int | None = None) -> bool:
     """Called after a chat wait's comment probe said "not yet" (outside its write txn): a chat park older than
     ``ASK_OVERDUE_S`` with no answer becomes David's. The board-side guarantee behind every delivery path."""
     import time
-    record, _reason, _cmd, at = _latest_chat_park(conn, task_id)
+    record, _reason, cmd, at = _latest_chat_park(conn, task_id)
     if record is None or at is None:
         return False
+    if not str(cmd or "").startswith("hermes kanban wait-comment "):
+        return False  # it waits on another producer it named (CI, a probe): the answer may be in; not a stuck ask
     now = int(time.time()) if now is None else int(now)
     if now - at < ASK_OVERDUE_S:
         return False
-    return escalate(conn, task_id, f"it has had no answer for {ASK_OVERDUE_S // 3600} h")
+    return escalate(conn, task_id, f"its wake check has seen no answer for {ASK_OVERDUE_S // 3600} h",
+                    trust_probe=True)

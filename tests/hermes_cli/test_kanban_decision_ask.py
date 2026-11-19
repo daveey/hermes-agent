@@ -624,22 +624,43 @@ def test_separately_answered_questions_do_not_escalate(kanban_home, monkeypatch)
             assert kb.claim_task(conn, tid, claimer="worker") is not None
 
 
-@pytest.mark.parametrize("answered", [False, True])
-def test_unanswered_chat_wait_goes_to_david_after_two_hours(kanban_home, monkeypatch, answered) -> None:
+def test_unanswered_chat_wait_goes_to_david_after_two_hours(kanban_home, monkeypatch) -> None:
     """Adversarial review of #3647: a wake that was refused, failed or never started acked the ask passively.
     The board backstop: the card's comment probe says "not yet" for 2 h -> needs_input for David."""
     from hermes_cli import kanban_decision_ask as kda
     _chat, tid = _parked_ask(monkeypatch)
     with kbc.connect_closing() as conn:
-        if answered:
-            kb.add_comment(conn, tid, "default", "Decisions: B, authorize, Phase A alone.")
         assert not kda.escalate_if_overdue(conn, tid, now=int(time.time()) + 60)  # not yet overdue
-        result = kda.escalate_if_overdue(conn, tid, now=int(time.time()) + kda.ASK_OVERDUE_S + 60)
-        task = kb.get_task(conn, tid)
-    if answered:  # the answer beat the deadline: its probe wakes the card instead
-        assert result is False and task.status == "scheduled"
-    else:
-        assert result is True and task.status == "blocked"
+        assert kda.escalate_if_overdue(conn, tid, now=int(time.time()) + kda.ASK_OVERDUE_S + 60)
+        assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_a_chat_wait_on_its_own_named_probe_has_no_deadline(kanban_home, monkeypatch) -> None:
+    """Review of #3647: a chat wait that brought a CI probe may already be answered and waiting on CI."""
+    from hermes_cli import kanban_decision_ask as kda
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": LIVE_REASON, "awaiting": LIVE_AWAITING,
+                                 "wake_check": "gh run view 40443505012 --json status | grep -q completed"})
+        assert out.get("status") == "scheduled", out
+        assert not kda.escalate_if_overdue(conn, tid, now=int(time.time()) + kda.ASK_OVERDUE_S + 60)
+        assert kb.get_task(conn, tid).status == "scheduled"
+
+
+def test_answered_since_uses_times_not_local_ids(kanban_home, monkeypatch) -> None:
+    """Review of #3647: on the owner a pool worker's --after-id is in another file's id space; an old comment with
+    a high local id must not read as an answer, and a comment after the park must."""
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        park_at = int(time.time())
+        old = kb.add_comment(conn, tid, "default", "an old note from before the park")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_comments SET created_at = ? WHERE id = ?", (park_at - 600, old))
+        assert not kaw._answered_since(conn, tid, park_at)
+        _orchestrator_comment(monkeypatch, conn, tid, "Go with premise A.")
+        assert kaw._answered_since(conn, tid, park_at)
 
 
 def test_wake_check_runner_calls_the_backstop(kanban_home, monkeypatch) -> None:
@@ -706,3 +727,19 @@ def _orchestrator_comment(monkeypatch, conn, tid, body) -> None:
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
     kb.add_comment(conn, tid, "default", body)
+
+
+def test_a_filtered_probe_that_misses_the_answer_still_escalates(kanban_home, monkeypatch) -> None:
+    """Adversarial review of #3647: a worker-supplied probe (--contains APPROVED) ignored the answer "Go with A";
+    the 2 h guard counted that answer, so it never escalated and the card slept to its deadline."""
+    from hermes_cli import kanban_decision_ask as kda
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": LIVE_REASON, "awaiting": LIVE_AWAITING,
+                                 "wake_check": f"hermes kanban wait-comment {tid} --after-id 0 --contains APPROVED"})
+        assert out.get("status") == "scheduled", out
+        _orchestrator_comment(monkeypatch, conn, tid, "Go with premise A.")
+        assert kda.escalate_if_overdue(conn, tid, now=int(time.time()) + kda.ASK_OVERDUE_S + 60)
+        assert kb.get_task(conn, tid).status == "blocked"
