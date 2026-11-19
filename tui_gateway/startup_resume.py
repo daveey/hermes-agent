@@ -178,9 +178,6 @@ def _paused_markers_remain(home: Path, cfg: dict | None) -> bool:
 
 def _observe_pauses(handler: Callable, home: Path, cfg: dict, stopped: threading.Event) -> None:
     """Passive lifetime observer; refusals back off, but never retire the observer."""
-    from gateway.code_skew import detect_code_skew
-    from hermes_cli.config import load_config
-
     retry_delay = 5.0
     while not stopped.is_set():
         try:
@@ -192,6 +189,9 @@ def _observe_pauses(handler: Callable, home: Path, cfg: dict, stopped: threading
         if stopped.is_set():
             break
         try:
+            from gateway.code_skew import detect_code_skew
+            from hermes_cli.config import load_config
+
             cfg = load_config()
             if not _settings(cfg)[0] or detect_code_skew() is not None:
                 retry_delay = 30.0
