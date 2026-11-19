@@ -582,7 +582,6 @@ def test_a_refused_plan_is_remembered_by_the_one_shot_gate(tmp_path, monkeypatch
             raise hermes_state_fts_online.OnlineRecoveryRefused("damage outside the index (test)")
 
         monkeypatch.setattr(hermes_state_fts_online, "plan_online_recovery", refuse)
-        db._fts_cached_plan = None
         assert db._oneshot_drop_is_safe(legacy=False) is False
         assert db._oneshot_drop_is_safe(legacy=False) is False
         assert db.recover_stale_fts_online(reason="test") is False
@@ -606,8 +605,60 @@ def test_retry_tick_plans_before_taking_the_session_lock(damaged, monkeypatch):
             return real(db_path)
 
         monkeypatch.setattr(hermes_state_fts_online, "plan_online_recovery", plan)
-        db._fts_cached_plan = None
         assert db.retry_deferred_fts_recovery() is True
-        assert held == [False]  # one check, outside the lock, shared by the gate and the online path
+        assert held == [False]  # one check, outside the lock (holders present: the online path plans for itself)
     finally:
         db.close()
+
+
+def test_holder_leaving_mid_backoff_plans_outside_the_lock_and_never_reuses_an_old_plan(tmp_path, monkeypatch):
+    """#106393's branch: the backoff has not elapsed but the holder set changed. The one-shot then runs; its gate gets a
+    plan made this tick, outside the lock, never one from an earlier attempt."""
+    import hermes_state_fts_online
+
+    path = tmp_path / "state.db"
+    _seed(path)
+    before = _canonical(path)
+    _break_trigram_btree(path)
+    holders = [[(424242, str(path))]]
+    monkeypatch.setattr(SessionDB, "_foreign_state_db_holders", lambda self: holders[0])
+    db = SessionDB(db_path=path)
+    try:
+        assert db._fts_stale is True
+        db._fts_stale_retry_after = time.monotonic() + 600
+        db._fts_deferred_holder_pids = [424242]
+        real = hermes_state_fts_online.plan_online_recovery
+        held = []
+
+        def plan(db_path):
+            held.append(db._lock.locked())
+            return real(db_path)
+
+        monkeypatch.setattr(hermes_state_fts_online, "plan_online_recovery", plan)
+        holders[0] = []  # the supervised holder stops
+        # The gate refuses the DROP (named family), and the same tick recovers online with that plan.
+        assert db.retry_deferred_fts_recovery() is True
+        assert held == [False]
+        assert db._fts_tick_plan is None  # discarded at the end of the tick
+        _drain(db)
+    finally:
+        db.close()
+    assert _canonical(path)[:len(before)] == before
+
+
+def test_gate_never_plans_under_the_lock_inside_a_retry_tick(tmp_path, monkeypatch):
+    import hermes_state_fts_online
+
+    path = tmp_path / "state.db"
+    _seed(path, sessions=1, per=10)
+    db = SessionDB(db_path=path)
+    try:
+        monkeypatch.setattr(hermes_state_fts_online, "plan_online_recovery",
+                            lambda p: pytest.fail("no whole-file check under the lock in a running process"))
+        db._fts_in_retry_tick, db._fts_tick_plan = True, None
+        with db._lock:
+            assert db._oneshot_drop_is_safe(legacy=False) is False
+    finally:
+        db._fts_in_retry_tick = False
+        db.close()
+

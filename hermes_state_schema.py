@@ -581,6 +581,10 @@ class SessionSchemaMixin:
         the plan before taking ``self._lock`` and this reuses it."""
         from hermes_state_fts_online import OnlineRecoveryRefused
 
+        if getattr(self, "_fts_in_retry_tick", False) and getattr(self, "_fts_tick_plan", None) is None:
+            # A holder left between the tick's check and the one-shot's: no plan made outside the lock. Never plan
+            # under it in a running process; the next tick plans first.
+            return False
         try:
             plan = self._fts_plan()
         except OnlineRecoveryRefused as exc:
@@ -656,11 +660,6 @@ class SessionSchemaMixin:
         except sqlite3.Error:
             pass
         now = time.monotonic()
-        if now >= getattr(self, "_fts_stale_retry_after", 0.0):
-            # The whole-file check behind the DROP gate and the online plan runs here, before self._lock: on a large
-            # store it takes minutes, and every write of this process waits on that lock.
-            self.prepare_fts_plan()
-            now = time.monotonic()
         deferred_pids = getattr(self, "_fts_deferred_holder_pids", None)
         if now < getattr(self, "_fts_stale_retry_after", 0.0):
             # The backoff was earned by a specific holder set; once that set changes (the other
@@ -678,6 +677,12 @@ class SessionSchemaMixin:
             max(interval, _FTS_STALE_RETRY_SECONDS, 1.0) * 2.0, _FTS_STALE_RETRY_MAX_SECONDS,
         )
         try:
+            # The one-shot DROP gate needs a whole-file plan, and on a large store that check takes minutes; every
+            # write of this process waits on self._lock, so it runs here, before the lock, and only when the
+            # one-shot can run at all (no foreign holder: with one, the one-shot defers before the gate, and the
+            # online path below plans for itself, also outside the lock). Used for this tick only.
+            self._fts_tick_plan = self._fts_plan_outcome() if not self._foreign_state_db_holders() else None
+            self._fts_in_retry_tick = True
             with self._lock:
                 if self._conn is None or not self._fts_stale:
                     return False
@@ -704,6 +709,9 @@ class SessionSchemaMixin:
                 "In-process retry of the deferred stale state.db FTS rebuild failed; will retry later.", exc_info=True,
             )
             return False
+        finally:
+            self._fts_tick_plan = None
+            self._fts_in_retry_tick = False
 
     def _recover_stale_fts_locked(self, cursor: sqlite3.Cursor, *, legacy: bool) -> bool:
         """Body of :meth:`_recover_stale_fts`; caller holds rebuild authority. One write
