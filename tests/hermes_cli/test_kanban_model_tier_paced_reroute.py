@@ -105,7 +105,7 @@ def test_reroute_after_s_sets_the_threshold(board, clock, monkeypatch, after, un
 
 @pytest.mark.parametrize('state', ['paced', 'open', 'unknown'])
 def test_a_pool_that_is_not_held_never_moves_the_route(board, clock, monkeypatch, state):
-    """A ``paced`` pool keeps limit >= 1 (``admit_limit``): the card waits its turn there, it is not rerouted."""
+    """Only a pool at reserve holds a start: a ``paced`` (or open/unknown) pool starts the card where it is."""
     _deep(monkeypatch)
     _pools(clock, openai_codex=(state, HELD_FAR))
     with kbc.connect() as conn:

@@ -25,7 +25,9 @@ hist.fleet_tokens = lambda provider: {'hub': float(used) * 1000}
 assert not pd._CACHE
 cfg = lp.PacingConfig()
 pace = pd.pace_for(None, 'anthropic', cfg, now)
-print(json.dumps({'pace': pace.as_dict(), 'reads': len(hist.History(pd.history_path(), 'anthropic').recent_reads(now + 1, 9))}))
+with hist.History.open(pd.history_path(), 'anthropic') as store:
+    reads = len(store.recent_reads(now + 1, 9))
+print(json.dumps({'pace': pace.as_dict(), 'reads': reads}))
 """
 
 

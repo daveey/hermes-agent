@@ -152,14 +152,18 @@ def test_the_history_keeps_hashes_and_model_scoped_windows_but_never_counts_them
 
 
 def test_fleet_tokens_advance_by_per_machine_increases_only(tmp_path):
-    store = hist.History(tmp_path / hist.FILE_NAME, "anthropic")
+    path = tmp_path / hist.FILE_NAME
     now = 1_800_000_000.0
     for i, machines in enumerate(({"hub": 100.0}, {"hub": 150.0, "new": 10_000.0}, {"hub": 120.0, "new": 10_050.0},
                                   {"hub": 170.0, "new": 10_050.0})):
-        store.record(now + i * 300, [], machines, [], 8 * DAY)
-    assert [v for _, v in store.tokens(0)] == [0.0, 50.0, 100.0, 150.0]  # joins and a drop are no spend
-    store.record(now + 9 * DAY, [], {"hub": 200.0}, [], 8 * DAY)
-    assert [v for _, v in store.tokens(0)] == [180.0]  # older rows pruned after history_days
+        with hist.History.open(path, "anthropic") as store:
+            store.record(now + i * 300, [], machines, [], 8 * DAY)
+    with hist.History.open(path, "anthropic") as store:
+        assert [v for _, v in store.tokens(0)] == [0.0, 50.0, 100.0, 150.0]  # joins and a drop are no spend
+        store.record(now + 9 * DAY, [], {"hub": 200.0}, [], 8 * DAY)
+        assert [v for _, v in store.tokens(0)] == [180.0]  # older rows pruned after history_days
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == hist.SCHEMA_VERSION
 
 
 def test_registry_machines_report_provider_tokens_else_model_prefixes(monkeypatch):

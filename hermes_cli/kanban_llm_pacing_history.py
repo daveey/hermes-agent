@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Iterable, Mapping, Optional
+from typing import Iterable, Iterator, Mapping, Optional
 
 from hermes_cli import kanban_llm_pacing as lp
 
@@ -39,59 +39,78 @@ _SCHEMA = (
 )
 
 
+LOCK_TIMEOUT_SECONDS = 0.5  # a busy store skips history for one refresh; it never delays a claim longer
+
+
 def connect(path: Path) -> sqlite3.Connection:
-    db = sqlite3.connect(str(path), timeout=5)
-    for statement in _SCHEMA:
-        db.execute(statement)
-    db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    """The store, its schema created on first use only (``user_version`` 0 -> 1)."""
+    db = sqlite3.connect(str(path), timeout=LOCK_TIMEOUT_SECONDS, isolation_level=None)
+    try:
+        if db.execute("PRAGMA user_version").fetchone()[0] == 0:
+            for statement in _SCHEMA:
+                db.execute(statement)
+            db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    except BaseException:
+        db.close()
+        raise
     return db
 
 
 class History:
-    """One provider's view of the store, opened per refresh (no connection outlives it)."""
+    """One provider's view of the store for one refresh: one connection, one write transaction (taken with a
+    :data:`LOCK_TIMEOUT_SECONDS` wait at most), closed on exit. A fault rolls the refresh's writes back."""
 
-    def __init__(self, path: Path, provider: str):
-        self.path, self.provider = Path(path), provider
+    def __init__(self, db: sqlite3.Connection, provider: str):
+        self.db, self.provider = db, provider
 
-    def _db(self):
-        return closing(connect(self.path))
+    @classmethod
+    @contextmanager
+    def open(cls, path: Path, provider: str) -> Iterator[History]:
+        with closing(connect(Path(path))) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                yield cls(db, provider)
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
 
     def samples(self, since: float, kinds: Iterable[str] = lp.GOVERNED_KINDS) -> list[lp.Reading]:
         wanted = tuple(kinds)
         marks = ",".join("?" * len(wanted))
-        with self._db() as db:
-            rows = db.execute(f"SELECT ts, account_hash, kind, used, reset_at FROM samples WHERE provider = ? "
-                              f"AND ts >= ? AND kind IN ({marks}) ORDER BY ts", (self.provider, since, *wanted))
-            return [lp.Reading(float(t), a, k, float(u), None if r is None else float(r)) for t, a, k, u, r in rows]
+        db = self.db
+        rows = db.execute(f"SELECT ts, account_hash, kind, used, reset_at FROM samples WHERE provider = ? "
+                          f"AND ts >= ? AND kind IN ({marks}) ORDER BY ts", (self.provider, since, *wanted))
+        return [lp.Reading(float(t), a, k, float(u), None if r is None else float(r)) for t, a, k, u, r in rows]
 
     def tokens(self, since: float) -> list[tuple[float, float]]:
-        with self._db() as db:
-            return [(float(t), float(v)) for t, v in db.execute(
-                "SELECT ts, cumulative_io FROM tokens WHERE provider = ? AND ts >= ? ORDER BY ts",
-                (self.provider, since))]
+        db = self.db
+        return [(float(t), float(v)) for t, v in db.execute(
+            "SELECT ts, cumulative_io FROM tokens WHERE provider = ? AND ts >= ? ORDER BY ts",
+            (self.provider, since))]
 
     def event_marks(self, since: float) -> list[tuple[str, float]]:
-        with self._db() as db:
-            return [(a, float(t)) for a, t in db.execute(
-                "SELECT account_hash, ts FROM events WHERE provider = ? AND ts >= ? AND account_hash IS NOT NULL",
-                (self.provider, since))]
+        db = self.db
+        return [(a, float(t)) for a, t in db.execute(
+            "SELECT account_hash, ts FROM events WHERE provider = ? AND ts >= ? AND account_hash IS NOT NULL",
+            (self.provider, since))]
 
     def record(self, now: float, readings: Iterable[lp.Reading], machines: Optional[Mapping[str, float]],
                events: Iterable[dict], keep_seconds: float) -> None:
         """One successful read: its (hashed) samples, the fleet token total (when ``machines`` read) and events;
         rows older than ``keep_seconds`` are dropped."""
-        with self._db() as db, db:
-            db.executemany("INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?)",
-                           [(r.ts, self.provider, r.account, r.kind, r.used, r.reset_at) for r in readings])
-            if machines is not None:
-                db.execute("INSERT INTO tokens VALUES (?, ?, ?)", (now, self.provider, self._advance(db, now, machines)))
-            db.executemany("INSERT INTO events VALUES (?, ?, ?, ?, ?)",
-                           [(e["ts"], self.provider, e.get("account"), e["type"],
-                             json.dumps(e.get("detail") or {}, separators=(",", ":"))) for e in events])
-            cutoff = now - keep_seconds
-            for table in ("samples", "tokens", "events"):
-                db.execute(f"DELETE FROM {table} WHERE ts < ?", (cutoff,))
-            db.execute("DELETE FROM machine_counters WHERE ts < ?", (cutoff,))
+        db = self.db
+        db.executemany("INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?)",
+                       [(r.ts, self.provider, r.account, r.kind, r.used, r.reset_at) for r in readings])
+        if machines is not None:
+            db.execute("INSERT INTO tokens VALUES (?, ?, ?)", (now, self.provider, self._advance(db, now, machines)))
+        db.executemany("INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+                       [(e["ts"], self.provider, e.get("account"), e["type"],
+                         json.dumps(e.get("detail") or {}, separators=(",", ":"))) for e in events])
+        cutoff = now - keep_seconds
+        for table in ("samples", "tokens", "events"):
+            db.execute(f"DELETE FROM {table} WHERE ts < ?", (cutoff,))
+        db.execute("DELETE FROM machine_counters WHERE ts < ?", (cutoff,))
 
     def _advance(self, db: sqlite3.Connection, now: float, machines: Mapping[str, float]) -> float:
         row = db.execute("SELECT cumulative_io FROM tokens WHERE provider = ? ORDER BY ts DESC LIMIT 1",
@@ -107,17 +126,17 @@ class History:
 
     def recent_reads(self, before: float, limit: int) -> list[tuple[float, set[str]]]:
         """``(ts, accounts)`` of the newest ``limit`` successful reads before ``before``, newest first."""
-        with self._db() as db:
-            times = [float(t) for (t,) in db.execute(
-                "SELECT DISTINCT ts FROM samples WHERE provider = ? AND ts < ? ORDER BY ts DESC LIMIT ?",
-                (self.provider, before, limit))]
-            return [(t, {a for (a,) in db.execute("SELECT DISTINCT account_hash FROM samples WHERE provider = ? "
-                                                  "AND ts = ?", (self.provider, t))}) for t in times]
+        db = self.db
+        times = [float(t) for (t,) in db.execute(
+            "SELECT DISTINCT ts FROM samples WHERE provider = ? AND ts < ? ORDER BY ts DESC LIMIT ?",
+            (self.provider, before, limit))]
+        return [(t, {a for (a,) in db.execute("SELECT DISTINCT account_hash FROM samples WHERE provider = ? "
+                                              "AND ts = ?", (self.provider, t))}) for t in times]
 
     def seen_since(self, since: float, before: float) -> set[str]:
-        with self._db() as db:
-            return {a for (a,) in db.execute("SELECT DISTINCT account_hash FROM samples WHERE provider = ? AND "
-                                             "ts >= ? AND ts < ?", (self.provider, since, before))}
+        db = self.db
+        return {a for (a,) in db.execute("SELECT DISTINCT account_hash FROM samples WHERE provider = ? AND "
+                                         "ts >= ? AND ts < ?", (self.provider, since, before))}
 
     def read_at(self, ts: float) -> list[lp.Reading]:
         return [r for r in self.samples(ts) if r.ts == ts]
@@ -163,27 +182,45 @@ def fleet_tokens(provider: str) -> Optional[dict[str, float]]:
 def update_v2(state: dict, provider: str, current: list[lp.Reading], model_scoped: list[lp.Reading], now: float,
               cfg: lp.PacingConfig, path: Path) -> list[str]:
     """Record this read in the history at ``path``, re-estimate the pool's exchange rates and replace its ``v2``
-    entry in ``state`` (``version: 2`` added, legacy provider keys untouched). A history fault still re-plans,
-    from the previous rates (or seeds) and without events; returns the fault messages (empty when none)."""
-    previous = state.get("v2") if isinstance(state.get("v2"), dict) else {}
-    prior = (previous.get("pools") or {}).get(provider)
-    readings = lp.hashed(current)
-    seeds = {kind: lp.seed_tpp(provider, kind, cfg) for kind in lp.GOVERNED_KINDS}
-    tpps = {kind: lp.smooth_tpp(lp.stored_tpp(prior, kind), None, now, cfg, seeds[kind]) for kind in lp.GOVERNED_KINDS}
-    events: list[dict] = []
+    entry in ``state`` (``version: 2`` added, legacy provider keys untouched). Returns the fault messages.
+
+    Fails open in layers, and never raises: a history fault (a busy store included) plans from the previous rates
+    or seeds without events; a planning fault stores :func:`kanban_llm_pacing.reserve_pool` (the same at-reserve
+    rule as the legacy ``held`` verdict); every field of the previous ``v2`` is type-checked (malformed = absent)."""
+    previous = lp._dict(state.get("v2"))
+    prior = lp._dict(lp._dict(previous.get("pools")).get(provider))
+    readings = lp.hashed(lp.valid_readings(current))
     faults: list[str] = []
     try:
-        events, tpps = _record_and_estimate(History(path, provider), readings, lp.hashed(model_scoped), prior,
-                                            seeds, now, cfg)
-    except Exception as exc:  # health: allow BLE001 -- a history fault keeps the plan on the last rates
-        faults.append(f"{type(exc).__name__}: {exc}")
-    pool, curve = lp.plan_pool(provider, readings, tpps[lp.SEVEN_DAY], tpps[lp.FIVE_HOUR], now, cfg)
+        seeds = {kind: lp.seed_tpp(provider, kind, cfg) for kind in lp.GOVERNED_KINDS}
+        tpps = {kind: lp.smooth_tpp(lp.stored_tpp(prior, kind), None, now, cfg, seeds[kind])
+                for kind in lp.GOVERNED_KINDS}
+        events: list[dict] = []
+        try:
+            machines = fleet_tokens(provider) if readings else None
+            with History.open(path, provider) as history:
+                events, tpps = _record_and_estimate(history, readings, lp.hashed(lp.valid_readings(model_scoped)),
+                                                    machines, prior, seeds, now, cfg)
+        except Exception as exc:  # health: allow BLE001 -- a history fault keeps the plan on the last rates
+            faults.append(f"history {type(exc).__name__}: {exc}")
+        pool, curve = lp.plan_pool(provider, readings, tpps[lp.SEVEN_DAY], tpps[lp.FIVE_HOUR], now, cfg)
+        v2 = lp.assemble_v2(previous, provider, pool, curve, events, now, cfg)
+    except Exception as exc:  # health: allow BLE001 -- a planning fault must not change what holds a start
+        faults.append(f"plan {type(exc).__name__}: {exc}")
+        v2 = fallback_v2(provider, current, now, cfg)
     state["version"] = lp.V2_VERSION
-    state["v2"] = lp.assemble_v2(previous, provider, pool, curve, events, now, cfg)
+    state["v2"] = v2
     return faults
 
 
-def _record_and_estimate(history: History, readings, scoped, prior, seeds, now, cfg):
+def fallback_v2(provider: str, current: list[lp.Reading], now: float, cfg: lp.PacingConfig) -> dict:
+    """A ``v2`` holding only this provider's at-reserve verdict (:func:`kanban_llm_pacing.reserve_pool`)."""
+    pool = lp.reserve_pool(lp.hashed(lp.valid_readings(current)), now, cfg)
+    return {"computed_at": now, "margin_s": cfg.margin, "pools": {provider: pool}, "global_rate_tokens_per_s": None,
+            "events": [], "curve": {}}
+
+
+def _record_and_estimate(history: History, readings, scoped, machines, prior, seeds, now, cfg):
     events: list[dict] = []
     if readings:
         recent = history.recent_reads(now, lp.REMOVED_AFTER_READS)
@@ -191,7 +228,7 @@ def _record_and_estimate(history: History, readings, scoped, prior, seeds, now, 
             seen = history.seen_since(now - lp.ADDED_UNSEEN_SECONDS, now)
             events = lp.detect_events(history.provider, readings, history.read_at(recent[0][0]),
                                       [accounts for _, accounts in recent[1:]], seen, now)
-        history.record(now, readings + scoped, fleet_tokens(history.provider), events, cfg.history_days * 86400)
+        history.record(now, readings + scoped, machines, events, cfg.history_days * 86400)
     since = now - cfg.tpp_window
     samples, tokens, marks = history.samples(since), history.tokens(since), history.event_marks(since)
     tpps = {kind: lp.smooth_tpp(lp.stored_tpp(prior, kind), lp.tpp_estimate(samples, tokens, kind, now, cfg, marks),

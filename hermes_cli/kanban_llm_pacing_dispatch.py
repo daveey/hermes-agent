@@ -189,9 +189,15 @@ def candidate_providers(conn: sqlite3.Connection, task: Any, lane: str) -> list[
     return candidate_route(conn, task, lane)[1]
 
 
+def _number(value: Any) -> Optional[float]:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) \
+        else None
+
+
 def _history(entry: dict, now: float, cfg: lp.PacingConfig) -> list[lp.Reading]:
-    rows = (lp.Reading.from_row(row) for row in entry.get("samples") or [])
-    return [r for r in rows if r is not None and now - 2 * cfg.rate_window <= r.ts < now]
+    samples = entry.get("samples")
+    rows = (lp.Reading.from_row(row) for row in (samples if isinstance(samples, list) else []))
+    return lp.valid_readings(r for r in rows if r is not None and now - 2 * cfg.rate_window <= r.ts < now)
 
 
 def _refresh(conn: sqlite3.Connection, provider: str, cfg: lp.PacingConfig, now: float) -> lp.PoolPace:
@@ -200,7 +206,8 @@ def _refresh(conn: sqlite3.Connection, provider: str, cfg: lp.PacingConfig, now:
     found = state.get(provider)
     entry: dict = found if isinstance(found, dict) else {}
     shared = lp.PoolPace.from_dict(entry.get("pace"))
-    if (shared is not None and now - float(entry.get("read_at") or 0) < cfg.read_interval
+    read_at = _number(entry.get("read_at"))
+    if (shared is not None and read_at is not None and now - read_at < cfg.read_interval
             and _v2_pool(state, provider) is not None):
         return shared  # another dispatcher on this home read it already (an old file without v2 is re-read)
     try:
@@ -209,10 +216,11 @@ def _refresh(conn: sqlite3.Connection, provider: str, cfg: lp.PacingConfig, now:
         _warn(f"read:{provider}", "kanban pacing: cannot read the %s usage windows (%s); dispatch is ungoverned "
               "until it reads again", provider, exc)
         current = []
+    current = lp.valid_readings(current)  # NaN/inf ``used`` is no reading (and would not serialize)
     history = _history(entry, now, cfg)
     pace = lp.pool_pace(provider, current, history, cfg)
     state[provider] = {"read_at": now, "pace": pace.as_dict(), "samples": [r.as_row() for r in history + current]}
-    _update_v2(state, provider, current, _MODEL_SCOPED.pop(provider, []), now, cfg)
+    _update_v2(state, provider, current, _MODEL_SCOPED.pop(provider, []), now, cfg)  # never raises
     pool = _v2_pool(state, provider)
     if pool is not None:
         _V2_MEMO.setdefault(str(path), {})[provider] = pool
@@ -251,7 +259,11 @@ def refresh_pools(conn: sqlite3.Connection) -> None:
 def _update_v2(state: dict, provider: str, current: list[lp.Reading], scoped: list[lp.Reading], now: float,
                cfg: lp.PacingConfig) -> None:
     from hermes_cli import kanban_llm_pacing_history as hist
-    faults = hist.update_v2(state, provider, current, scoped, now, cfg, history_path())
+    try:
+        faults = hist.update_v2(state, provider, current, scoped, now, cfg, history_path())
+    except Exception as exc:  # health: allow BLE001 -- last resort: the legacy pace, the save and the cache go on
+        faults = [f"{type(exc).__name__}: {exc}"]
+        state["version"], state["v2"] = lp.V2_VERSION, hist.fallback_v2(provider, current, now, cfg)
     if faults:
         _warn(f"history:{provider}", "kanban pacing: %s capacity history unavailable (%s); planned from the last "
               "exchange rates", provider, "; ".join(faults))
@@ -274,7 +286,9 @@ def _hold_state() -> dict:
     pools = dict(v2.get("pools")) if isinstance(v2.get("pools"), dict) else {}
     for provider, pool in mine.items():
         stored = pools.get(provider)
-        if not isinstance(stored, dict) or float(stored.get("read_at") or 0) < float(pool.get("read_at") or 0):
+        older = (_number(stored.get("read_at")) or 0.0) < (_number(pool.get("read_at")) or 0.0) \
+            if isinstance(stored, dict) else True
+        if older:
             pools[provider] = pool
     return {**state, "v2": {**v2, "pools": pools}}
 
@@ -284,14 +298,13 @@ def reserve_hold(state: Any, provider: str, now: float, cfg: lp.PacingConfig) ->
     within :data:`STALE_READ_INTERVALS` read intervals): ``{provider, state: held, until, limit: 0, detail}``.
     None (no hold) when ``v2`` or the pool is missing, malformed, stale or stamped in the future: fail open."""
     pool = _v2_pool(state, provider)
-    read_at = pool.get("read_at") if pool else None
-    if (pool is None or pool.get("at_reserve") is not True or not isinstance(read_at, (int, float))
+    read_at = _number(pool.get("read_at")) if pool else None
+    if (pool is None or pool.get("at_reserve") is not True or read_at is None
             or not 0 <= now - read_at < STALE_READ_INTERVALS * cfg.read_interval):
         return None
-    until = pool.get("until")
-    until = float(until) if isinstance(until, (int, float)) and not isinstance(until, bool) else None
-    accounts = len({a.get("id") for a in pool.get("accounts") or [] if isinstance(a, dict)})
-    return {"provider": provider, "state": lp.HELD, "until": until, "limit": 0,
+    listed = pool.get("accounts")
+    accounts = len({a.get("id") for a in listed if isinstance(a, dict)}) if isinstance(listed, list) else 0
+    return {"provider": provider, "state": lp.HELD, "until": _number(pool.get("until")), "limit": 0,
             "detail": f"{accounts} account(s) all at reserve"}
 
 

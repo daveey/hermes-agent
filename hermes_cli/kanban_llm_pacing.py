@@ -263,6 +263,30 @@ ADDED_UNSEEN_SECONDS = 86400
 REMOVED_AFTER_READS = 3
 _RESET_JUMP_SECONDS = 300
 _EARLY_DROP_POINTS = 10.0
+RESET_SLACK_SECONDS = 86400  # a reset further out than its window plus this is clamped (bad or hostile input)
+MAX_CURVE_POINTS = 64
+
+
+def valid_readings(readings: Iterable[Reading]) -> list[Reading]:
+    """Readings fit to store and plan: a non-finite ``used`` (NaN/inf would not even serialize as JSON) drops the
+    reading as invalid; a non-finite ``reset_at`` reads as no reset."""
+    out = []
+    for r in readings:
+        if not math.isfinite(r.used):
+            continue
+        reset = r.reset_at if r.reset_at is not None and math.isfinite(r.reset_at) else None
+        out.append(r if reset == r.reset_at else Reading(r.ts, r.account, r.kind, r.used, reset))
+    return out
+
+
+def _clamped(r: Reading, now: float) -> Reading:
+    """``r`` with its reset clamped into ``[now, now + window + slack]``, so planning cost and the curve never
+    depend on how far away (or how far past) a reset claims to be (a year-9999 reset once hung the claim path)."""
+    if r.reset_at is None:
+        return r
+    top = now + WINDOW_SECONDS.get(r.kind, WINDOW_SECONDS[SEVEN_DAY]) + RESET_SLACK_SECONDS
+    reset = min(top, max(now, r.reset_at))
+    return r if reset == r.reset_at else Reading(r.ts, r.account, r.kind, r.used, reset)
 
 
 def account_id(label: Any) -> str:
@@ -452,18 +476,18 @@ def _curve(plans: list[AccountPlan], tpp7: Tpp, now: float, cfg: PacingConfig) -
     if not tpp7.value or not plans:
         return []
     step = cfg.reserve[SEVEN_DAY] * tpp7.value
-    horizon = max(p.reset_at for p in plans)
-    resets = []
-    for p in plans:
-        t = p.reset_at
-        while t <= horizon:
-            resets.append(t)
-            t += WINDOW_SECONDS[SEVEN_DAY]
+    week = WINDOW_SECONDS[SEVEN_DAY]
+    horizon = max(p.reset_at for p in plans)  # resets are clamped (``_clamped``): at most window + slack away
+    # Each reset repeats weekly out to the horizon: with clamped resets that is at most two steps per account.
+    resets = sorted(p.reset_at + k * week for p in plans for k in range(int((horizon - p.reset_at) // week) + 1))
     times = sorted({now, horizon, *resets, *(e for p in plans if (e := _exhaust_at(p, now)) is not None)})
+    if len(times) > MAX_CURVE_POINTS:  # keep the ends, thin the middle evenly
+        stride = (len(times) - 1) / (MAX_CURVE_POINTS - 1)
+        times = sorted({times[round(i * stride)] for i in range(MAX_CURVE_POINTS)})
     base = sum(p.remaining or 0.0 for p in plans)
     out = []
     for t in times:
-        capacity = base + step * sum(1 for r in resets if r <= t)
+        capacity = base + step * bisect.bisect_right(resets, t)
         spend = sum(min(p.remaining or 0.0, (p.rate or 0.0) * (t - now)) for p in plans)
         out.append([round(t, 1), round(capacity, 1), round(spend, 1)])
     return out
@@ -474,7 +498,7 @@ def plan_pool(provider: str, current: list[Reading], tpp7: Tpp, tpp5: Tpp, now: 
     """One pool's ``v2.pools`` entry (without ``ratio``) and its curve, from this read's hashed account windows.
     ``at_reserve``: at least one account read and none under reserve (the pool then plans rate 0); no readable
     account = not at reserve and rate ``null`` (fail open). ``until``: the earliest reset that frees an account."""
-    governed = [r for r in current if r.kind in GOVERNED_KINDS]
+    governed = [_clamped(r, now) for r in valid_readings(current) if r.kind in GOVERNED_KINDS]
     by_account: dict[str, list[Reading]] = {}
     for r in governed:
         by_account.setdefault(r.account, []).append(r)
@@ -502,6 +526,20 @@ def plan_pool(provider: str, current: list[Reading], tpp7: Tpp, tpp5: Tpp, now: 
     return pool, _curve(plans, tpp7, now, cfg)
 
 
+def reserve_pool(current: list[Reading], now: float, cfg: PacingConfig) -> dict:
+    """The least ``v2`` pool entry: ``at_reserve`` and ``until`` alone, from the same rule as the legacy ``held``
+    verdict. The fallback when the full plan fails, so a v2 fault never changes what holds a start."""
+    governed = [_clamped(r, now) for r in valid_readings(current) if r.kind in GOVERNED_KINDS]
+    at_reserve = bool(governed) and not ({r.account for r in governed} - {r.account for r in governed
+                                                                          if _reserved(r, cfg)})
+    return {"read_at": now, "accounts": [], "at_reserve": at_reserve, "rate_tokens_per_s": 0.0 if at_reserve else None,
+            "until": _held_until(governed, cfg) if at_reserve else None, "plan_size_assumed_equal": True}
+
+
+def _dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
 def stored_tpp(pool: Any, kind: str) -> Optional[Tpp]:
     """The exchange rate a previous ``v2`` pool entry carried for ``kind`` (the persisted last good value)."""
     if not isinstance(pool, dict):
@@ -510,26 +548,32 @@ def stored_tpp(pool: Any, kind: str) -> Optional[Tpp]:
     value = pool.get(f"tpp_{suffix}")
     source = pool.get("tpp_source" if kind == SEVEN_DAY else "tpp_5h_source")
     at = pool.get("tpp_measured_at" if kind == SEVEN_DAY else "tpp_5h_measured_at")
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
         return None
-    return Tpp(float(value), str(source or UNKNOWN_TPP), float(at) if isinstance(at, (int, float)) else None)
+    at = float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) and math.isfinite(at) else None
+    return Tpp(float(value), source if source in (MEASURED, SEED) else UNKNOWN_TPP, at)
 
 
 def assemble_v2(previous: Any, provider: str, pool: dict, curve: list, events: list[dict], now: float,
                 cfg: PacingConfig) -> dict:
     """The new ``v2`` document: ``previous`` with this provider's pool and curve replaced, the global rate (pools
     whose rate is known) and every pool's ``ratio`` recomputed, the newest 50 events kept, ``computed_at`` now."""
-    old = previous if isinstance(previous, dict) else {}
-    pools = {p: v for p, v in (old.get("pools") or {}).items() if p in cfg.providers and isinstance(v, dict)}
+    old = _dict(previous)  # every field read from the old file is type-checked: malformed reads as absent
+    pools = {p: dict(v) for p, v in _dict(old.get("pools")).items() if p in cfg.providers and isinstance(v, dict)}
     pools[provider] = pool
-    curves = {p: v for p, v in (old.get("curve") or {}).items() if p in pools}
+    curves = {p: v for p, v in _dict(old.get("curve")).items() if p in pools and isinstance(v, list)}
     curves[provider] = curve
-    rates = [v["rate_tokens_per_s"] for v in pools.values() if isinstance(v.get("rate_tokens_per_s"), (int, float))]
+
+    def rate(v: dict) -> Optional[float]:
+        r = v.get("rate_tokens_per_s")
+        return float(r) if isinstance(r, (int, float)) and not isinstance(r, bool) and math.isfinite(r) else None
+    rates = [r for v in pools.values() if (r := rate(v)) is not None]
     total = sum(rates) if rates else None
     for v in pools.values():
-        r = v.get("rate_tokens_per_s")
-        v["ratio"] = (r / total if total else 0.0) if isinstance(r, (int, float)) and total is not None else None
-    kept = [e for e in (old.get("events") or []) if isinstance(e, dict)] + events
+        r = rate(v)
+        v["ratio"] = (r / total if total else 0.0) if r is not None and total is not None else None
+    events_old = old.get("events")
+    kept = [e for e in (events_old if isinstance(events_old, list) else []) if isinstance(e, dict)] + events
     return {"computed_at": now, "margin_s": cfg.margin, "pools": pools, "global_rate_tokens_per_s": total,
             "events": kept[-50:], "curve": curves}
 
