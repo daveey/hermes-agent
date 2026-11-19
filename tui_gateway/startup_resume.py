@@ -176,6 +176,37 @@ def _paused_markers_remain(home: Path, cfg: dict | None) -> bool:
                if (entry := read_turn_marker(h, key)) is not None)
 
 
+def _observe_pauses(handler: Callable, home: Path, cfg: dict, stopped: threading.Event) -> None:
+    """Passive lifetime observer; refusals back off, but never retire the observer."""
+    from gateway.code_skew import detect_code_skew
+    from hermes_cli.config import load_config
+
+    retry_delay = 5.0
+    while not stopped.is_set():
+        try:
+            wait = retry_delay if _paused_markers_remain(home, cfg) else 30.0
+        except Exception:
+            logger.exception("startup resume observer iteration failed")
+            wait = 30.0
+        time.sleep(wait)
+        if stopped.is_set():
+            break
+        try:
+            cfg = load_config()
+            if not _settings(cfg)[0] or detect_code_skew() is not None:
+                retry_delay = 30.0
+                continue
+            done = resume_interrupted_sessions(handler, home, cfg, paused_only=True)
+            if any(not row.get("scheduled") and not row.get("deleted") for row in done):
+                retry_delay = min(300.0, retry_delay * 2)
+                logger.warning("startup resume: paused turns remain unscheduled; retry in %.0fs", retry_delay)
+            else:
+                retry_delay = 5.0
+        except Exception:
+            logger.exception("startup resume observer iteration failed")
+            retry_delay = min(300.0, max(30.0, retry_delay * 2))
+
+
 def start_startup_resume_sweep(*, stop: threading.Event | None = None) -> threading.Thread | None:
     """Backend boot hook: run the sweep on a daemon thread after a short settle delay (no-op unless enabled)."""
     from hermes_cli.proof_home import recovery_home_allowed
@@ -197,6 +228,7 @@ def start_startup_resume_sweep(*, stop: threading.Event | None = None) -> thread
 
     def _run() -> None:
         time.sleep(delay)
+        handler = None
         try:
             from tui_gateway import server
             handler = server._methods.get("session.resume")
@@ -209,14 +241,10 @@ def start_startup_resume_sweep(*, stop: threading.Event | None = None) -> thread
             # A warm successor may boot before the old writer continues and pauses again.
             # An empty scan (or a fixed boot deadline) is not a completed handoff.
             # Keep observing PAUSES only; ordinary crash recovery remains boot-only.
-            stopped = stop or threading.Event()
-            while not stopped.is_set():
-                time.sleep(5.0 if _paused_markers_remain(home, cfg) else 30.0)
-                if stopped.is_set():
-                    break
-                resume_interrupted_sessions(handler, home, cfg, paused_only=True)
         except Exception:
             logger.exception("startup resume sweep failed")
+        if handler is not None:
+            _observe_pauses(handler, home, cfg, stop or threading.Event())
 
     from agent.memory_provider import spawn_context_thread
     t = spawn_context_thread(_run, name="startup-resume-sweep", passive=True)
