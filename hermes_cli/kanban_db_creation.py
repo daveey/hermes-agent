@@ -42,10 +42,14 @@ def tool_creation_audit(args: dict, *, admission=None, **effective) -> dict | No
     return audit
 
 
-def inherit_tool_priority(conn, args, creator_task_id, *, receipt=None):
+def inherit_tool_priority(conn, args, creator_task_id, *, receipt=None, creator_present=True):
     """Resolve omitted worker urgency before placement/courier serialization."""
     from hermes_cli.kanban_fairness_creation import observe_intent
 
+    if not creator_present:
+        # Preserve cross-board lineage without inventing a local priority snapshot.
+        observe_intent(conn, args, creator_task_id, receipt, effective={})
+        return args
     if creator_task_id is None or args.get("priority") is not None:
         observe_intent(conn, args, creator_task_id, receipt)
         return args

@@ -38,9 +38,11 @@ def test_capture_keeps_original_tool_intent(home, monkeypatch, argument, intent,
             records = [json.loads(row[5]) for row in journal.rows(conn) if row[1] == 'creation']
         assert not session.abandoned.is_set()
         assert len(records) == 1
-        assert records[0]['creator_task_uid'] == (creator if creator_present else None)
+        assert records[0]['creator_task_uid'] == creator
         if not creator_present:
-            assert 'creator_task_uid' in records[0]['unknown_fields']
+            assert 'creator_task_uid' not in records[0]['unknown_fields']
+            assert records[0]['effective_parent_priority'] is None
+            assert 'effective_parent_priority' in records[0]['unknown_fields']
             if argument in ('omitted', None):
                 expected = 0
         assert records[0]['priority_intent'] == intent

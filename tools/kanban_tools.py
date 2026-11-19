@@ -1586,7 +1586,8 @@ def _handle_create(args: dict, **kw) -> str:
                     if courier_intent is None and _is_dispatcher_owned_worker() else None)
         self_task = kb.get_task(conn, self_tid) if self_tid else None
         creation_receipt = {} if courier_intent is None else None
-        args = inherit_tool_priority(conn, args, self_tid if self_task is not None else None, receipt=creation_receipt)
+        args = inherit_tool_priority(conn, args, self_tid, receipt=creation_receipt,
+                                     creator_present=self_task is not None)
         session_id = _create_session_id(args, courier_intent, self_task)
         project_id, project_source_task_id = _ca.inherited_project(project_id, workspace_kind, workspace_path, self_task)
         marker_placement, place_origin = None, {"session_id": session_id}
@@ -1649,7 +1650,7 @@ def _handle_create(args: dict, **kw) -> str:
                 # session's current board.
                 board=args.get("board"),
                 project_source_task_id=project_source_task_id, triage=triage,
-                creator_task_id=self_tid if self_task is not None else None,
+                creator_task_id=self_tid,
                 idempotency_key=args.get("idempotency_key"),
                 max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
                 requires=_effective_requires(marker_placement, args),
