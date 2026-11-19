@@ -25,6 +25,42 @@ pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="sy
 psutil = pytest.importorskip("psutil")
 
 
+def _child_scripts(children):
+    names = {}
+    for child in children:
+        try:
+            argv = child.cmdline()
+        except psutil.NoSuchProcess:
+            continue
+        if len(argv) >= 2:
+            names[Path(argv[1]).name] = child.pid
+    return names
+
+
+def test_child_scripts_reads_each_command_line_once():
+    child = MagicMock(pid=123)
+    child.cmdline.side_effect = [["python", "/fixture/main.py", "gateway", "run"], []]
+    assert _child_scripts([child]) == {"main.py": 123}
+    child.cmdline.assert_called_once_with()
+
+
+@pytest.mark.parametrize("argv", [[], ["python"]])
+def test_child_scripts_waits_for_complete_argv(argv):
+    child = MagicMock(pid=123)
+    child.cmdline.return_value = argv
+    assert _child_scripts([child]) == {}
+    child.cmdline.assert_called_once_with()
+
+
+def test_child_scripts_tolerates_exit_but_not_access_denied():
+    child = MagicMock(pid=123)
+    child.cmdline.side_effect = psutil.NoSuchProcess(123)
+    assert _child_scripts([child]) == {}
+    child.cmdline.side_effect = psutil.AccessDenied(123)
+    with pytest.raises(psutil.AccessDenied):
+        _child_scripts([child])
+
+
 @pytest.fixture()
 def wrapper_tree(tmp_path):
     """``wrapper`` (the unit's MainPID) -> [a ``gateway run`` child, a non-gateway card worker child]."""
@@ -44,7 +80,7 @@ def wrapper_tree(tmp_path):
     try:
         def started():
             children = psutil.Process(wrapper.pid).children()
-            names = {Path(c.cmdline()[1]).name: c.pid for c in children if len(c.cmdline()) >= 2}
+            names = _child_scripts(children)
             return names if set(names) == {"main.py", "card_worker.py"} else None
         by_script = wait_until(started, timeout=10, what="the wrapper's two children")
         yield wrapper.pid, by_script["main.py"], by_script["card_worker.py"]

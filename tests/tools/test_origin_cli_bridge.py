@@ -45,14 +45,42 @@ def test_empty_packet_does_not_poison_launch(echo_launch):
     assert bridge.request(echo_launch.locator, {"title": "after-empty"}, timeout=1)["ok"]
 
 
-def test_non_socket_reply_fd_is_closed(echo_launch):
+def _file_fds(path):
+    matches = set()
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            if os.readlink(f"/proc/self/fd/{fd}") == str(path):
+                matches.add(fd)
+        except FileNotFoundError:
+            pass  # The enumeration itself and unrelated threads can retire descriptors.
+    return matches
+
+
+def test_non_socket_reply_fd_is_closed(echo_launch, monkeypatch, tmp_path):
     from tools import origin_cli_bridge as bridge
-    with open(os.devnull, "rb") as file:
-        before = set(os.listdir("/proc/self/fd"))
-        for _ in range(5):
-            packet(echo_launch, b"{}", [file.fileno()])
-        assert bridge.request(echo_launch.locator, {"title": "barrier"}, timeout=1)["ok"]
-        assert set(os.listdir("/proc/self/fd")) == before
+    sent, release = threading.Event(), threading.Event()
+    send = socket.socket.send
+
+    def hold_reply_close(sock, *args, **kwargs):
+        result = send(sock, *args, **kwargs)
+        if threading.current_thread() is echo_launch._thread:
+            sent.set()
+            assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(socket.socket, "send", hold_reply_close)
+    path = tmp_path / "transferred-file"
+    with path.open("w+b") as file:
+        try:
+            for _ in range(5):
+                packet(echo_launch, b"{}", [file.fileno()])
+            assert bridge.request(echo_launch.locator, {"title": "barrier"}, timeout=1)["ok"]
+            assert sent.wait(2)
+            # Serial dispatch has closed the five invalid descriptors, but the
+            # barrier's reply socket deliberately remains open after its send.
+            assert _file_fds(path) == {str(file.fileno())}
+        finally:
+            release.set()
 
 
 def test_bad_nonce_closes_reply_without_timeout(echo_launch):
