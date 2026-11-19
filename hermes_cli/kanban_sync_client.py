@@ -1302,8 +1302,9 @@ def _links_inputs(conn: sqlite3.Connection, path: Path, slug: str, gateway: str,
     """Everything one board's links pass (``kanban_chat_links.reconcile`` with its creator-chats backfill) reads,
     besides state.db (``LINKS_MAX_AGE_S``): the live file's identity and transactional activity revision (tasks,
     events, subscriptions, links; trigger-backed, so dispatcher clocks and sync stamps do not move it), the replica's
-    identity and feed cursor (its only writer besides the ``pulled_at`` stamp is the pull), this gateway's ledger rows
-    for the board, the mode and the configuration. Read before the pass, so a commit during it re-arms the next one.
+    main-file identity/stat and covered activity revision (not transport cursor or heartbeat progress), this gateway's
+    ledger rows for the board, the mode and the configuration. Legacy nonempty replica subscriptions are not covered
+    by shadow revision triggers and refuse the skip. Read before the pass, so a commit during it re-arms the next one.
     None (cannot tell: no counter, unreadable file) always reconciles. [daveey]"""
     from hermes_cli import kanban_activity_revision as rev
     if ledger is None or signature is None:
@@ -1320,7 +1321,14 @@ def _links_inputs(conn: sqlite3.Connection, path: Path, slug: str, gateway: str,
             # The loop's own pooled replica handle (generation-recovered on borrow), not another connection.
             with connection(shadow, lambda: open_shadow(slug, gateway)) as replica_conn:
                 rst = os.stat(shadow)
-                replica = (rst.st_dev, rst.st_ino, int((sync.sync_state(replica_conn) or {}).get("cursor") or 0))
+                # Creator resolution also reads legacy subscriptions, which shadow activity
+                # triggers do not cover. Nonempty legacy stores must use the literal pass.
+                if replica_conn.execute("SELECT 1 FROM kanban_notify_subs LIMIT 1").fetchone():
+                    return None
+                content = rev.read_key(replica_conn, rev.SHADOW_TABLES)
+                if content is None:
+                    return None
+                replica = (rst.st_dev, rst.st_ino, rst.st_size, rst.st_mtime_ns, content)
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return None
     return (st.st_dev, st.st_ino), revision, replica, ledger.get(slug, frozenset()), mode, signature

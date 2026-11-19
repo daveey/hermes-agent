@@ -132,6 +132,21 @@ def test_exact_binding_text_changes_hash_and_origin_without_reset(world, monkeyp
     assert structure.digest(raw, original) == first_digest
 
 
+@pytest.mark.parametrize('change', [{'version': 0}, {'task_record_key': 'mismatched'}])
+def test_invalid_parseable_binding_raises_on_every_read_without_cache_admission(world, change):
+    from hermes_cli import kanban_origin_structure as structure
+
+    _, _, raw = _prepare(world)
+    structure.clear()
+    structure.binding(raw)
+    before = structure._binding.cache_info().currsize
+    text = json.dumps({**json.loads(raw), **change})
+    for _ in range(2):
+        with pytest.raises(ValueError, match='origin_binding_invalid'):
+            structure.binding(text)
+        assert structure._binding.cache_info().currsize == before
+
+
 def test_warm_binding_does_not_freeze_freshness(world):
     path, replica, _ = _prepare(world)
     args = dict(replica=replica, gateway='origin', profile='default')
