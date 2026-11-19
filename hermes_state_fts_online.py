@@ -31,8 +31,8 @@ names as damaged leaves unreachable pages, and those stores already failed every
 recovery. Unlinking rather than renaming a damaged index is deliberate: a damaged index kept under any name can
 later be dropped or drained, and that frees pages that live data may already reuse (the double references).
 
-Used automatically by :meth:`retry_deferred_fts_recovery` once the one-shot rebuild is futile (same holders for
-``_FTS_HOLDER_FUTILE_SECONDS``) or failed with a corrupt-image error, and by ``hermes sessions repair-search``.
+Used automatically by :meth:`retry_deferred_fts_recovery` once the one-shot rebuild is futile (foreign holders at every
+deferral for ``_FTS_HOLDER_FUTILE_SECONDS``) or failed with a corrupt-image error, and by ``hermes sessions repair-search``.
 Never on a read-only or quarantined handle, nor on the legacy inline (pre-v23) layout.
 """
 

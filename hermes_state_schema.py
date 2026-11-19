@@ -42,8 +42,10 @@ logger = logging.getLogger("hermes_state")
 
 _FTS_HOLDER_ESCALATE_ATTEMPTS = 3
 _FTS_HOLDER_ESCALATE_SECONDS = 60.0
-# The same holder PID set blocking this many deferrals over this long is a structurally resident
-# peer (a supervised service on the same HERMES_HOME), not a transient one worth waiting out (#106393).
+# Foreign holders present at every deferral, this many over this long, mean the file is never free: a resident
+# peer (a supervised service on the same HERMES_HOME), not a transient one worth waiting out (#106393). Presence,
+# not identity: the hub's set never stayed equal (short-lived CLI holders come and go, and every process records
+# its own view, which leaves itself out), so a same-set window never closed in two days of deferrals.
 _FTS_HOLDER_FUTILE_ATTEMPTS = 10
 _FTS_HOLDER_FUTILE_SECONDS = 1800.0
 # retry_deferred_fts_recovery cadence: startup paid the full admission wait once; later
@@ -510,11 +512,12 @@ class SessionSchemaMixin:
         (holders remain). After ``_FTS_HOLDER_ESCALATE_ATTEMPTS`` deferrals spanning
         ``_FTS_HOLDER_ESCALATE_SECONDS``, provably inactive orphan Desktop backends are
         reaped and the holders re-checked. The orphan reap is the only exit, so a supervised
-        peer (never an orphan) blocks forever: once the SAME PID set has blocked
-        ``_FTS_HOLDER_FUTILE_ATTEMPTS`` deferrals over ``_FTS_HOLDER_FUTILE_SECONDS`` the
-        record is marked ``futile`` and the escalation names the holders and the remedy that
-        works from inside a gateway session (stop only the other holder; this process's own
-        retry tick admits the rebuild). A changed holder set restarts that window."""
+        peer (never an orphan) blocks forever: once foreign holders have blocked
+        ``_FTS_HOLDER_FUTILE_ATTEMPTS`` consecutive deferrals over ``_FTS_HOLDER_FUTILE_SECONDS``
+        (whichever PIDs they were) the record is marked ``futile`` and the escalation names the
+        holders and the remedy that works from inside a gateway session (stop only the other
+        holder; this process's own retry tick admits the rebuild). The window restarts only
+        when no deferral was recorded for longer than the retry backoff cap (a new episode)."""
         now = time.time()
         try:
             row = cursor.execute(
@@ -529,12 +532,13 @@ class SessionSchemaMixin:
             attempts = int(record.get("attempts", 0)) + 1
             holders_since = float(record.get("holders_since", now))
             holders_attempts = int(record.get("holders_attempts", 0)) + 1
+            last_seen = float(record.get("last_seen", now))
         except (TypeError, ValueError):
-            first_seen, attempts, holders_since, holders_attempts = now, 1, now, 1
+            first_seen, attempts, holders_since, holders_attempts, last_seen = now, 1, now, 1, now
         if first_seen > now or first_seen < 0:
             first_seen = now
         holder_pids = sorted({pid for pid, _path in foreign_holders if pid > 0})
-        if holder_pids != record.get("holder_pids"):
+        if not record.get("holder_pids") or not 0 <= now - last_seen <= _FTS_STALE_RETRY_MAX_SECONDS * 2:
             holders_since, holders_attempts = now, 1
         if attempts >= _FTS_HOLDER_ESCALATE_ATTEMPTS and now - first_seen >= _FTS_HOLDER_ESCALATE_SECONDS:
             reaped = self._reap_inactive_orphan_desktop_holders(
@@ -564,8 +568,8 @@ class SessionSchemaMixin:
         self._fts_deferred_holder_pids = holder_pids
         if futile:
             logger.error(
-                "state.db FTS repair has been blocked by the same holder(s) for %d deferrals over %.0f min "
-                "(%s); waiting is futile. Stop ONLY the other holder(s) — this process keeps running and its "
+                "state.db FTS repair has been blocked by foreign holder(s) at every one of %d deferrals over %.0f "
+                "min (now %s); waiting is futile. Stop ONLY the other holder(s) — this process keeps running and its "
                 "own retry admits the rebuild within %.0fs of the holder leaving. Meanwhile its retry runs the "
                 "online recovery, which needs no holder to stop (`hermes sessions repair-search` runs it now). "
                 "`hermes doctor` shows this.",
