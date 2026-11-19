@@ -923,7 +923,6 @@ def prior_same_premise(conn: sqlite3.Connection, task_id: str, premise: str, *,
     return count
 
 
-_AFTER_ID = re.compile(r"--after-id\s+(\d+)")
 CHAT_PARK_CAP = 6  # chat parks per card per 24 h before the next one escalates, however each was answered
 
 
@@ -946,7 +945,8 @@ def chat_parks_today(conn: sqlite3.Connection, task_id: str) -> int:
 
 
 def _answered_since(conn: sqlite3.Connection, task_id: str, park_at: Optional[int]) -> bool:
-    """A comment at or after a chat park (``park_at``: the park event's ``created_at``) not by a kernel writer and
+    """A comment after a chat park (``park_at``: the park event's ``created_at``; an answer cannot share the ask's
+    second) not by a kernel writer and
     not by this card's own worker. Times and portable uids only: comment and run integers are local to each board
     file, and a pool worker's park is read on the owner too (review of #3647)."""
     if park_at is None:
@@ -958,7 +958,7 @@ def _answered_since(conn: sqlite3.Connection, task_id: str, park_at: Optional[in
     own_ids = {int(r[0]) for r in conn.execute("SELECT id FROM task_runs WHERE task_id = ?", (task_id,))}
     has_uid = "uid" in {r[1] for r in conn.execute("PRAGMA table_info(task_comments)")}
     rows = conn.execute(
-        f"SELECT id, author, {'uid' if has_uid else 'NULL'} FROM task_comments WHERE task_id = ? AND created_at >= ?",
+        f"SELECT id, author, {'uid' if has_uid else 'NULL'} FROM task_comments WHERE task_id = ? AND created_at > ?",
         (task_id, int(park_at))).fetchall()
     for cid, author, cuid in rows:
         if is_system_author(author):

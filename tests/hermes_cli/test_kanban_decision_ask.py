@@ -679,7 +679,14 @@ def test_answered_since_uses_times_not_local_ids(kanban_home, monkeypatch) -> No
         with kb.write_txn(conn):
             conn.execute("UPDATE task_comments SET created_at = ? WHERE id = ?", (park_at - 600, old))
         assert not kaw._answered_since(conn, tid, park_at)
+        same = kb.add_comment(conn, tid, "operator", "a note in the park's own second")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_comments SET created_at = ? WHERE id = ?", (park_at, same))
+        assert not kaw._answered_since(conn, tid, park_at)  # nobody could answer an ask in the second it was made
         _orchestrator_comment(monkeypatch, conn, tid, "Go with premise A.")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_comments SET created_at = ? WHERE id = (SELECT MAX(id) FROM task_comments)",
+                         (park_at + 5,))
         assert kaw._answered_since(conn, tid, park_at)
 
 
