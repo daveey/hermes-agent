@@ -35,28 +35,43 @@ TITLE = 'Independent exact-head review PR #1 @abc (core-wt ship review required)
     ('<!-- implementer-models:  -->', set()),
     ('<!-- implementer-models: a-model -->\n<!-- implementer-models: Bad Name -->', set()),  # a later bad line too
     ('<!-- implementer-models: claude-opus x -->', set()),                                  # the whole entry must match
+    ('<!-- implementer-models: claude-opus-5-5 -->\r\nmore', {'claude-opus-5-5'}),             # a CRLF body
 ])
 def test_declared_implementers(body, expected, monkeypatch):
     monkeypatch.setattr(review, 'registry_refusal', lambda *a: None)  # every well-formed name is registered here
+    monkeypatch.setattr(review, '_routable_models', lambda assignee: _Everything())
     assert review.declared_implementers(body) == expected
+
+
+class _Everything:
+    def __contains__(self, item):
+        return True
 
 
 def test_a_name_the_routing_registry_does_not_know_voids_the_declaration(monkeypatch):
     """Review 5971146857: ``claude-code`` excludes no real route, so it must not count as implementer evidence."""
     known = {'claude-opus-5-5', 'claude-fable-5-2'}
     monkeypatch.setattr(review, 'registry_refusal', lambda model, provider, assignee: None if model in known else 'no')
+    monkeypatch.setattr(review, '_routable_models', lambda assignee: _Everything())
     assert review.declared_implementers('<!-- implementer-models: claude-opus-5-5 -->') == {'claude-opus-5-5'}
     assert review.declared_implementers('<!-- implementer-models: claude-code -->') == set()
     assert review.declared_implementers('<!-- implementer-models: claude-opus-5-5, claude-code -->') == set()
 
 
-def _review(conn, body):
-    tid = kb.create_task(conn, title=TITLE, assignee='a', body=body)
+def _review(conn, body, assignee='default'):
+    tid = kb.create_task(conn, title=TITLE, assignee=assignee, body=body)
     conn.commit()
     return kb.get_task(conn, tid)
 
 
+def _routing(board, routes=None):
+    """A real enabled routing config for the 'default' profile (deep routes OPUS and ASTRA unless given)."""
+    from tests.hermes_cli import test_kanban_review_model as routing
+    return routing.config(board, routes=[OPUS, ASTRA] if routes is None else routes)
+
+
 def test_a_declared_review_has_implementer_evidence(board):
+    _routing(board)
     with kbc.connect_closing() as conn:
         task = _review(conn, f'Review it.\n<!-- implementer-models: {OPUS} -->\n')
         assert review.implementer_models(conn, task) == {OPUS}
@@ -71,6 +86,7 @@ def test_an_undeclared_review_with_no_source_still_fails_closed(board):
 
 
 def test_declared_and_linked_implementers_are_both_excluded(board):
+    _routing(board)
     with kbc.connect_closing() as conn:
         source = base._card(conn, ASTRA)
         task = _review(conn, f'<!-- implementer-models: {OPUS} -->')
@@ -80,6 +96,7 @@ def test_declared_and_linked_implementers_are_both_excluded(board):
 
 
 def test_a_declaration_on_a_card_that_is_not_a_review_is_ignored(board):
+    _routing(board)
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title='implement it', assignee='a',
                              body=f'<!-- implementer-models: {OPUS} -->')
@@ -98,3 +115,32 @@ def test_the_reviewer_is_never_a_declared_implementer(board):
         task = kb.get_task(conn, tid)
         assert review.implementer_models(conn, task) == {routing.OPUS}
         assert review.resolve_review_model(conn, task, cfg)[0] == routing.FABLE
+
+
+def test_a_host_without_a_routing_policy_accepts_no_declaration(board):
+    """Claude Code review of 3525a48bb8 (blocking): on an unmanaged host ``registry_refusal`` refuses nothing, so a
+    junk name lifted the fail-closed refusal. Positive membership: no enabled policy, no declared implementer."""
+    from tests.hermes_cli import test_kanban_review_model as routing
+    with kbc.connect_closing() as conn:
+        task = _review(conn, '<!-- implementer-models: claude-code -->')
+        assert review.implementer_models(conn, task) == set()
+        with pytest.raises(review.ReviewModelUnavailable, match='Downstream review implementer evidence'):
+            review.resolve_review_model(conn, task, {'strong_model': routing.OPUS})
+        task = _review(conn, f'<!-- implementer-models: {OPUS} -->')  # a real model, but no policy to confirm it
+        assert review.implementer_models(conn, task) == set()
+
+
+def test_a_name_outside_the_routing_policy_voids_the_declaration(board):
+    _routing(board)
+    with kbc.connect_closing() as conn:
+        assert review.implementer_models(conn, _review(conn, '<!-- implementer-models: claude-code -->')) == set()
+        assert review.implementer_models(
+            conn, _review(conn, f'<!-- implementer-models: {OPUS}, claude-code -->')) == set()
+        assert review.implementer_models(conn, _review(conn, f'<!-- implementer-models: {OPUS} -->')) == {OPUS}
+
+
+def test_an_unknown_profile_accepts_no_declaration(board):
+    _routing(board)
+    with kbc.connect_closing() as conn:
+        task = _review(conn, f'<!-- implementer-models: {OPUS} -->', assignee='no-such-profile')
+        assert review.implementer_models(conn, task) == set()
