@@ -8,7 +8,7 @@ import type { SessionInfo } from '@/types/hermes'
 
 import { notifyError } from './notifications'
 import { $sessions, lineageAliases, setSessions } from './session'
-import { type MuteRow, parkRows } from './session-park-rows'
+import { cacheParkRow, type MuteRow, parkLineageRows, parkRows } from './session-park-rows'
 
 export { type MuteRow, resetParkRowsForTests } from './session-park-rows'
 
@@ -46,26 +46,31 @@ type LineageRows = Parameters<typeof lineageAliases>[1]
 
 /** Remember drawn rows outside the recent list without retaining an unbounded history. */
 export function rememberParkRow(row: MuteRow): void {
-  parkRows.delete(row.id)
-  parkRows.set(row.id, row)
+  cacheParkRow(row)
 
-  if (parkRows.size > 1000) {
-    parkRows.delete(parkRows.keys().next().value!)
+  if ($muteWriteGuard.get().size === 0) {
+    return
   }
 
-  const aliases = lineageAliases(row.id, [...parkRows.values(), ...$sessions.get()])
+  const aliases = lineageAliases(row.id, parkLineageRows($sessions.get()))
 
   for (const alias of aliases) {
     const write = $muteWriteGuard.get().get(alias)
 
-    if (write?.acked && (row.muted === write.value || Date.now() - write.at >= MUTE_ACK_HOLD_MS)) {
+    // Agreement can be our optimistic setRowMuted, not a fresh backend page.
+    // Keep the original stale-page window even after an agreeing render.
+    if (
+      write?.acked &&
+      Date.now() - write.at >= MUTE_WRITE_GUARD_MS &&
+      (row.muted === write.value || Date.now() - write.at >= MUTE_ACK_HOLD_MS)
+    ) {
       setMuteWrite(alias, null)
     }
   }
 }
 
 export function parkRowFor(id: string): MuteRow | undefined {
-  const rows = [...parkRows.values(), ...$sessions.get()]
+  const rows = parkLineageRows($sessions.get())
 
   for (const alias of lineageAliases(id, rows)) {
     const row = parkRows.get(alias)

@@ -20,6 +20,7 @@ import {
   migrateLocalParks,
   MUTE_ACK_HOLD_MS,
   MUTE_WRITE_GUARD_MS,
+  muteWriteFor,
   parkRowFor,
   rememberParkRow,
   resolveSessionParked,
@@ -28,6 +29,7 @@ import {
   writeSessionMuted
 } from './session-blocked'
 import { sessionStatusStripe } from './session-dot-state'
+import { parkRows } from './session-park-rows'
 
 const row = (overrides: Partial<SessionInfo> = {}): SessionInfo =>
   ({ id: 's1', message_count: 3, profile: 'default', ...overrides }) as unknown as SessionInfo
@@ -161,6 +163,9 @@ describe('drawn rows outside the recent list', () => {
     rememberParkRow(old)
     await writeSessionMuted(old, true, async () => ({}))
     rememberParkRow({ ...old, muted: true })
+    expect($muteWriteGuard.get().has(old.id)).toBe(true)
+    await vi.advanceTimersByTimeAsync(MUTE_WRITE_GUARD_MS)
+    rememberParkRow({ ...old, muted: true })
     expect($muteWriteGuard.get().has(old.id)).toBe(false)
     expect(isSessionParked(old.id, { muted: false })).toBe(false)
   })
@@ -184,6 +189,25 @@ describe('drawn rows outside the recent list', () => {
     expect(isSessionParked(old.id, old)).toBe(false)
     expect($muteWriteGuard.get().size).toBe(0)
     expect(notifyError).toHaveBeenCalledWith(error, 'Could not update the parked state')
+  })
+
+  it('reuses the remembered lineage index across unchanged lookups and invalidates on updates', () => {
+    rememberParkRow(row({ id: 'tip', _lineage_root_id: 'root' }))
+    $muteWriteGuard.set(new Map([['tip', { at: Date.now(), value: true, acked: true }]]))
+    expect(muteWriteFor('root')?.value).toBe(true)
+    const values = vi.spyOn(parkRows, 'values')
+
+    for (let i = 0; i < 300; i++) {
+      expect(muteWriteFor('root')?.value).toBe(true)
+    }
+
+    expect(values).not.toHaveBeenCalled()
+    rememberParkRow(row({ id: 'tip', _lineage_root_id: 'new-root' }))
+    expect(muteWriteFor('new-root')?.value).toBe(true)
+    expect(muteWriteFor('root')).toBeUndefined()
+    setSessions([row({ id: 'listed-tip', _lineage_root_id: 'tip' })])
+    expect(parkRowFor('listed-tip')?.id).toBe('tip')
+    values.mockRestore()
   })
 
   it('bounds the drawn-row registry and refreshes remembered entries', () => {
