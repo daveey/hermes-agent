@@ -445,7 +445,7 @@ def _listed_gateways(source: sqlite3.Connection | None) -> frozenset:
         "SELECT DISTINCT gw FROM replica WHERE coll IN ('gateway','tasks')"))
 
 
-def _removed_owner(source, listed: frozenset, owner: dict, task: dict, me: tuple) -> bool | None:
+def _removed_owner(elsewhere: _Publications, listed: frozenset, owner: dict, task: dict, me: tuple) -> bool | None:
     """True when this binding's owner is a machine the Board removed and its stored observation of the card is closed
     (done or archived), so that observation is its final word; None when the card was re-homed and the binding is not
     projected; False otherwise. [daveey]
@@ -456,28 +456,60 @@ def _removed_owner(source, listed: frozenset, owner: dict, task: dict, me: tuple
     gateway's own cards and an empty or stale replica (``listed`` empty) never count as removed."""
     if not listed or owner['gateway'] in listed or (owner['gateway'], owner['profile']) == me:
         return False
-    if _published_elsewhere(source, owner, task):
+    if elsewhere.has_other(owner, task):
         return None
     # Only a closed card's last word is final: an open one could have moved on before the removal, so it stays unknown.
     return task.get('status') in ('done', 'archived')
 
 
-def _published_elsewhere(source: sqlite3.Connection, owner: dict, task: dict) -> bool:
-    """Another gateway's replica record of this card: same board and id, same non-null ``created_at`` (a re-home
-    keeps it; an unrelated card that reuses the id does not). [daveey]"""
-    created = task.get('created_at')
-    if created is None or isinstance(created, bool) or not isinstance(created, (int, float, str)):
+class _Publications:
+    """Which gateways publish a card, for ``_removed_owner``. [daveey]
+
+    Exact primary-key reads only: each gateway's ``gateway/info`` row lists the (profile, board) scopes it collects,
+    so another gateway's record of a card is at one of a few known keys ``profile/board/id``. The scope list is read
+    once per projection and only when a removed owner's row asks. A per-obligation ``key GLOB`` scanned the whole
+    replica (about 20 ms on 20,000 rows) on every projection, and a scan of all task keys costs 37 ms on the MacBook's
+    23,000 (review 5965756952). A gateway that publishes no info row is not consulted: the binding is then kept,
+    which only errs towards showing the card as unknown."""
+
+    def __init__(self, source: sqlite3.Connection | None):
+        self.source = source
+        self.scopes: dict[str, list[tuple[str, str]]] | None = None  # board -> [(gateway, profile)]
+
+    def _scopes(self) -> dict[str, list[tuple[str, str]]]:
+        if self.scopes is None:
+            self.scopes = {}
+            for gw, raw in self.source.execute("SELECT gw, data FROM replica WHERE coll='gateway' AND key='info'"):
+                try:
+                    info = json.loads(raw)
+                    scopes = info.get('task_scopes') if isinstance(info, dict) else None
+                except (TypeError, ValueError):
+                    continue
+                for scope in scopes if isinstance(scopes, list) else ():
+                    if isinstance(scope, dict) and isinstance(scope.get('profile'), str) \
+                            and isinstance(scope.get('board'), str):
+                        self.scopes.setdefault(scope['board'], []).append((str(gw), scope['profile']))
+        return self.scopes
+
+    def has_other(self, owner: dict, task: dict) -> bool:
+        """Another gateway's replica record of this card: same board and id, same non-null ``created_at`` (a re-home
+        keeps it; an unrelated card that reuses the id does not)."""
+        created = task.get('created_at')
+        if self.source is None or created is None or isinstance(created, bool) \
+                or not isinstance(created, (int, float, str)):
+            return False
+        for gw, profile in self._scopes().get(owner['board'], ()):
+            if gw == owner['gateway']:
+                continue
+            row = self.source.execute("SELECT data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
+                                      (gw, f"{profile}/{owner['board']}/{owner['task_id']}")).fetchone()
+            try:
+                other = json.loads(row[0]) if row else None
+            except (TypeError, ValueError):
+                continue
+            if isinstance(other, dict) and other.get('created_at') == created:
+                return True
         return False
-    pattern = '*/' + owner['board'] + '/' + owner['task_id']
-    for (data,) in source.execute(
-            "SELECT data FROM replica WHERE coll='tasks' AND gw != ? AND key GLOB ?", (owner['gateway'], pattern)):
-        try:
-            other = json.loads(data)
-        except (TypeError, ValueError):
-            continue
-        if isinstance(other, dict) and other.get('created_at') == created:
-            return True
-    return False
 
 
 def _lock_busy(exc: sqlite3.Error) -> bool:
@@ -529,10 +561,12 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
         fresh = False
     result = []
     infos: dict[str, tuple] = {}  # owner gateway -> (decoded gateway/info, or the error decoding it)
-    # [daveey] Gateways the fresh replica still knows (an info row or any task record). An offline owner keeps its
-    # info row; a machine removed from the Board has neither (``removed`` below). Read once per projection.
-    listed = _listed_gateways(source if fresh else None)
     try:
+        # [daveey] Gateways the fresh replica still knows (an info row or any task record). An offline owner keeps
+        # its info row; a machine removed from the Board has neither (``_removed_owner``). Read once per projection,
+        # inside the try so a failed read still closes the replica connection (review 5965756952).
+        listed = _listed_gateways(source if fresh else None)
+        elsewhere = _Publications(source)
         with closing(_ro(path)) as conn:
             from hermes_cli.kanban_origin_legacy import aliases_for_projection
             alias_receipts = {}
@@ -582,7 +616,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     current = current and readable and live
                 # [daveey] An owner the Board removed (``_removed_owner``): a re-homed card's binding is dropped, and
                 # otherwise its stored observation is its last word (``final``), as a current record would be.
-                final = _removed_owner(source, listed, owner, task, (gateway, profile))
+                final = _removed_owner(elsewhere, listed, owner, task, (gateway, profile))
                 if final is None:
                     continue
                 if (owner['gateway'], owner['profile']) == (gateway, profile):

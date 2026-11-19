@@ -125,7 +125,8 @@ def _remove_owner(replica, when, path=None):
     with sqlite3.connect(replica) as db:
         db.execute("DELETE FROM replica WHERE gw='owner'")
         db.execute("INSERT OR REPLACE INTO replica VALUES ('other','gateway','info',1,?)",
-                   (json.dumps({'gateway': 'other', 'task_scopes': []}),))
+                   (json.dumps({'gateway': 'other', 'task_scopes': [
+                       {'profile': 'default', 'board': 'default', 'state': 'ok', 'observed_at': when}]}),))
         db.execute("UPDATE meta SET v=? WHERE k='last_ok'", (str(when),))
 
 
@@ -197,3 +198,101 @@ def test_a_removed_owners_open_card_stays_unknown(world, board):
     _remove_owner(replica, 5000, path)
     row = _project(path, replica, 5001)
     assert (row['status'], row['unfinished'], row['stale']) == ('unknown', True, True)
+
+
+# ---------------------------------------------------------------- review 5965756952: unpinned clauses
+
+
+def test_a_removed_owners_archive_with_evidence_is_closed_not_completed(world, board):
+    """An archive the owner published with its evidence but no verified completion: closed, not done."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tests.hermes_cli.test_kanban_origin_evidence import create_bound, publish_observed
+    from tests.hermes_cli.test_kanban_origin_ledger import accept
+    path, replica, binding = world
+    with kbc.connect_closing() as conn:
+        tid = create_bound(conn, binding)
+        publish_observed(conn, replica, binding, version=3)
+        accept(world)
+        assert kb.archive_task(conn, tid)
+        publish_observed(conn, replica, binding, version=4)
+    _remove_owner(replica, 5000, path)
+    row = _project(path, replica, 5001)
+    assert (row['status'], row['unfinished'], row.get('closed_uncompleted')) == ('archived', False, True)
+
+
+def test_an_owner_with_task_records_but_no_info_row_is_not_removed(world, board):
+    path, replica = _bound_done(world, verified_completion=False)
+    _project(path, replica, 1001)
+    with sqlite3.connect(replica) as db:
+        db.execute("DELETE FROM replica WHERE gw='owner' AND coll='gateway'")
+        db.execute("INSERT INTO replica VALUES ('owner','tasks','default/default/t_unrelated',1,'{}')")
+        db.execute("UPDATE meta SET v='5000' WHERE k='last_ok'")
+    row = _project(path, replica, 5001)
+    assert row['status'] == 'unknown' and row['unfinished']
+
+
+@pytest.mark.parametrize('variant', ['other-board', 'no-created-at-anywhere'])
+def test_a_publication_that_is_not_the_same_card_keeps_the_binding(world, board, variant):
+    path, replica = _bound_done(world, verified_completion=False)
+    _, _, binding = world
+    with sqlite3.connect(replica) as db:
+        task = json.loads(db.execute("SELECT data FROM replica WHERE coll='tasks' AND gw='owner'").fetchone()[0])
+        if variant == 'other-board':
+            task['created_at'] = 1234
+            db.execute("UPDATE replica SET data=?, version=6 WHERE coll='tasks' AND gw='owner'", (json.dumps(task),))
+    _remove_owner(replica, 5000, path)
+    other = {k: v for k, v in task.items() if k != 'origin_observation'} | {'gateway': 'other', 'status': 'running'}
+    board_name = 'elsewhere' if variant == 'other-board' else binding['owner']['board']
+    key = '/'.join((binding['owner']['profile'], board_name, binding['owner']['task_id']))
+    with sqlite3.connect(replica) as db:
+        db.execute("INSERT INTO replica VALUES ('other','tasks',?,1,?)", (key, json.dumps(other)))
+    from hermes_cli import kanban_origin_ledger as ledger
+    rows = ledger.project(path, replica=replica, gateway='origin', profile='default', now=5001)
+    assert len(rows) == 1 and rows[0]['status'] == 'unknown'
+
+
+def test_a_failed_listed_gateways_read_still_closes_the_replica(world, board, monkeypatch):
+    from hermes_cli import kanban_origin as origin
+    from hermes_cli import kanban_origin_ledger as ledger
+    path, replica = _bound_done(world)
+    _hub_synced_at(replica, 1000)
+    opened = []
+    real = origin._ro
+
+    def tracking(p):
+        conn = real(p)
+        opened.append(conn)
+        return conn
+    monkeypatch.setattr(origin, '_ro', tracking)
+
+    def boom(_source):
+        raise sqlite3.OperationalError('disk I/O error')
+    monkeypatch.setattr(ledger, '_listed_gateways', boom)
+    with pytest.raises(sqlite3.OperationalError):
+        ledger.project(path, replica=replica, gateway='origin', profile='default', now=1001)
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute('SELECT 1')
+
+
+def test_a_rehome_is_found_only_through_a_scope_the_new_owner_announces(world, board):
+    """The lookup reads exact keys from the scopes in each gateway's info row: a gateway that does not collect the
+    card's board is not consulted, so the binding is kept (unknown), never wrongly dropped."""
+    path, replica = _bound_done(world, verified_completion=False)
+    _, _, binding = world
+    with sqlite3.connect(replica) as db:
+        task = json.loads(db.execute("SELECT data FROM replica WHERE coll='tasks' AND gw='owner'").fetchone()[0])
+        task['created_at'] = 1234
+        db.execute("UPDATE replica SET data=?, version=6 WHERE coll='tasks' AND gw='owner'", (json.dumps(task),))
+    _remove_owner(replica, 5000, path)
+    moved = {k: v for k, v in task.items() if k != 'origin_observation'} | {'gateway': 'third', 'status': 'running'}
+    key = '/'.join((binding['owner']['profile'], binding['owner']['board'], binding['owner']['task_id']))
+    with sqlite3.connect(replica) as db:
+        db.execute("INSERT INTO replica VALUES ('third','tasks',?,1,?)", (key, json.dumps(moved)))
+        db.execute("INSERT INTO replica VALUES ('third','gateway','info',1,?)",
+                   (json.dumps({'gateway': 'third', 'task_scopes': [
+                       {'profile': 'default', 'board': 'elsewhere', 'state': 'ok', 'observed_at': 5000}]}),))
+    from hermes_cli import kanban_origin_ledger as ledger
+    rows = ledger.project(path, replica=replica, gateway='origin', profile='default', now=5001)
+    assert len(rows) == 1 and rows[0]['status'] == 'unknown'
