@@ -76,6 +76,8 @@ def iterations(keep_running):
     with ExitStack() as scope:
         def rounds():
             while keep_running():
+                if loop_accounting.scopes_enabled():
+                    scope.enter_context(loop_accounting.Scope("sync.round/loop"))
                 scope.enter_context(service("loop"))
                 yield
                 scope.close()

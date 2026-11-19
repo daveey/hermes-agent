@@ -131,7 +131,7 @@ def test_item_hook_restores_and_disabled_scopes_leave_no_rows(monkeypatch):
     assert _WorkItem.run is original
 
 
-@pytest.mark.parametrize('shape', ['legacy', 'task', 'unknown'])
+@pytest.mark.parametrize('shape', ['legacy', 'task', 'unknown', 'malformed'])
 def test_item_shapes_keep_original_invocation(monkeypatch, shape):
     from concurrent.futures.thread import _WorkItem
     from types import SimpleNamespace
@@ -152,10 +152,12 @@ def test_item_shapes_keep_original_invocation(monkeypatch, shape):
         item.fn, item.args = job, ()
     elif shape == 'task':
         item.task = (job, (), {})
+    elif shape == 'malformed':
+        item.task = (job, ())
     assert _WorkItem.run(item, 'context', extra=3) == 42
     assert seen == [(item, ('context',), {'extra': 3})]
     rows = la.counters()
-    if shape == 'unknown':
+    if shape in ('unknown', 'malformed'):
         assert rows == {}
     else:
         assert rows['executor_item/' + la._callable_name(job)]['runs'] == 1

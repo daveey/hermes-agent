@@ -578,6 +578,7 @@ def test_real_probe_failure_reads_awake(live, kanban_home, monkeypatch):
     def unavailable(*args):
         raise OSError("pmset unavailable")
 
+    monkeypatch.setattr(restart_rerun, "_native_fully_awake", lambda: None)
     monkeypatch.setattr(restart_rerun, "_pmset", unavailable)
     host = Host(kanban_home, _pt("2026-11-14 08:00:00"))
     host.round(head=True)

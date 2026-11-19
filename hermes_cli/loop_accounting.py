@@ -919,11 +919,15 @@ def _run_scoped(name: str, fn: Callable, *args: Any, **kwargs: Any) -> Any:
         observed.__enter__()
     except Exception:  # health: allow BLE001 -- diagnostics cannot prevent the operation
         return fn(*args, **kwargs)
+    outcome = (None, None, None)
     try:
         return fn(*args, **kwargs)
+    except BaseException:
+        outcome = sys.exc_info()
+        raise
     finally:
         try:
-            observed.__exit__(*sys.exc_info())
+            observed.__exit__(*outcome)
         except Exception:  # health: allow BLE001 -- never replace results/errors or retry the operation
             logger.debug("loop accounting: scope booking failed", exc_info=True)
 

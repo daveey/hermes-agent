@@ -967,6 +967,7 @@ def test_full_wake_probe_reads_pmset_assertions(monkeypatch):
 
     # The probe's parsing, host-independent: _on_macos is the seam, never the interpreter's platform.
     monkeypatch.setattr(restart_rerun, "_on_macos", lambda: True)
+    monkeypatch.setattr(restart_rerun, "_native_fully_awake", lambda: None)
     outputs = {}
     monkeypatch.setattr(restart_rerun, "_pmset", lambda what: outputs[what])
     monkeypatch.setattr(restart_rerun, "_lid_closed", lambda: outputs["lid"])

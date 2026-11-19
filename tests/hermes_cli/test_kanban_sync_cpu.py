@@ -16,6 +16,8 @@ def measured(monkeypatch):
     monkeypatch.setattr(cpu.time, "thread_time", lambda: clock[0])
     monkeypatch.setattr(cpu.loop_accounting, "record", lambda name, **kw: records.append((name, kw)))
     monkeypatch.setattr(cpu, "_local", threading.local())
+    # This fixture measures the partition's stats, not residual scope booking.
+    monkeypatch.setattr(cpu.loop_accounting, "scopes_enabled", lambda: False)
     return clock, records
 
 

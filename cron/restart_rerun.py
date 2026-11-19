@@ -89,6 +89,11 @@ def _on_macos() -> bool:
     return os_family() == "darwin"
 
 
+def _native_fully_awake():
+    from cron.macos_awake import fully_awake
+    return fully_awake()
+
+
 def host_fully_awake() -> bool:
     """False only on macOS when the host is provably not fully awake (a DarkWake or Power Nap):
     no ``UserIsActive`` assertion and not lid-open on AC. Any other platform, and any probe
@@ -97,6 +102,9 @@ def host_fully_awake() -> bool:
     if not _on_macos():
         return True
     try:
+        native = _native_fully_awake()
+        if native is not None:
+            return native
         for line in _pmset("assertions").splitlines():
             parts = line.split()
             if len(parts) == 2 and parts[0] == "UserIsActive":
