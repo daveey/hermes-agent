@@ -261,8 +261,13 @@ def test_cancel_during_close_releases_lease_and_session_not_open(monkeypatch):
         task = asyncio.create_task(_held(runner, lease))
         await asyncio.to_thread(entered.wait, 5)
         task.cancel()
-        await asyncio.sleep(0)
-        await asyncio.gather(_expect_cancelled(task), asyncio.to_thread(proceed.wait, 5))
+        try:
+            await asyncio.sleep(0)
+            assert released == [], "lease released before capture.close completed"
+            assert runner._kanban_dispatcher_lock_handle is lease.handle
+            assert session.open
+        finally:
+            await asyncio.gather(_expect_cancelled(task), asyncio.to_thread(proceed.wait, 5))
 
     asyncio.run(run())
     assert session.close_calls == 1

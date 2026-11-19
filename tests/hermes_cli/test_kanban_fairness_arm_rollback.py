@@ -81,6 +81,53 @@ def test_drain_failure_preserves_successfully_armed_plan(db, tmp_path, monkeypat
     assert _journal_state(db)["capture_id"] == "one"
 
 
+@pytest.mark.parametrize("error", [OSError, KeyboardInterrupt])
+@pytest.mark.parametrize("replace", [False, True])
+def test_post_commit_failure_keeps_committed_plan(db, tmp_path, monkeypatch, error, replace):
+    out = tmp_path / "out"
+    if replace:
+        assert _arm(db, out, "one") == 0
+        # Same capture id and clock: neither is a reliable commit witness.
+        monkeypatch.setattr(journal, "_NOW_MS", str(_journal_state(db)["armed_ms"]))
+
+    def fail_status(conn):
+        raise error("after commit")
+
+    monkeypatch.setattr(journal, "_open_status", fail_status)
+    args = ("--replace", "--clock-error-s", "7") if replace else ()
+    if error is KeyboardInterrupt:
+        with pytest.raises(KeyboardInterrupt):
+            _arm(db, out, "one", *args)
+    else:
+        assert _arm(db, out, "one", *args) == 3
+    plan = json.loads((out / PLAN).read_text())
+    assert plan["capture_id"] == _journal_state(db)["capture_id"] == "one"
+    if replace:
+        assert plan["assumptions"]["clock_error_s"] == 7
+
+
+@pytest.mark.parametrize("error", [OSError, KeyboardInterrupt])
+def test_pre_commit_failure_restores_plan_and_journal(db, tmp_path, monkeypatch, error):
+    out = tmp_path / "out"
+    assert _arm(db, out, "one") == 0
+    prior = (out / PLAN).read_bytes()
+    before = _journal_state(db)
+
+    def fail_triggers(conn):
+        raise error("before commit")
+
+    original_triggers = journal._triggers
+    monkeypatch.setattr(journal, "_triggers", fail_triggers)
+    if error is KeyboardInterrupt:
+        with pytest.raises(KeyboardInterrupt):
+            _arm(db, out, "two", "--replace")
+    else:
+        assert _arm(db, out, "two", "--replace") == 3
+    monkeypatch.setattr(journal, "_triggers", original_triggers)
+    assert (out / PLAN).read_bytes() == prior
+    assert _journal_state(db) == before
+
+
 def test_refused_replacement_restores_the_prior_plan(db, tmp_path):
     out = tmp_path / "out"
     assert _arm(db, out, "one") == 0

@@ -102,8 +102,16 @@ def _arm(args) -> int:
     armed = False
     try:
         with _connect(db) as conn:
-            state = journal.arm(conn, args.capture_id, replace=args.replace)
-            armed = True
+            schema_before = conn.execute("PRAGMA schema_version").fetchone()[0]
+            # arm always creates (or replaces) its tables transactionally. The
+            # schema cookie witnesses commit even for same-id, same-ms replacement.
+            armed = True  # Keep the plan unless rollback is positively established.
+            try:
+                state = journal.arm(conn, args.capture_id, replace=args.replace)
+            except BaseException:
+                conn.rollback()  # Also discard a transaction interrupted by Ctrl-C.
+                armed = conn.execute("PRAGMA schema_version").fetchone()[0] != schema_before
+                raise
             store.drain(conn, out)
     except BaseException:
         # Budget admission comes first; only roll back before the journal is armed.
