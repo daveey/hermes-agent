@@ -24,16 +24,26 @@ class BudgetExceeded(ValueError):
 def _locked(root):
     try:
         import fcntl
-    except ImportError as exc:
-        raise ValueError("capture budget requires advisory file locking") from exc
+        def lock(stream, acquire):
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX if acquire else fcntl.LOCK_UN)
+    except ImportError:
+        try:
+            import msvcrt
+        except ImportError as exc:
+            raise ValueError("capture budget requires advisory file locking") from exc
+        def lock(stream, acquire):
+            # Windows locks a byte range from the current position; seeking is
+            # required on both acquisition and release, including an empty file.
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK if acquire else msvcrt.LK_UNLCK, 1)
     if (root / ".capture-budget.lock").is_symlink():
         raise ValueError("budget lock must not be a symlink")
     with (root / ".capture-budget.lock").open("a+b") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        lock(stream, True)
         try:
             yield
         finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            lock(stream, False)
 
 
 def _used(root):
@@ -101,6 +111,9 @@ def _write(path, data):
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(tmp, path)
+    if not hasattr(os, "O_DIRECTORY"):
+        # Windows supports file fsync + atomic replacement, not directory fsync.
+        return
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(directory)

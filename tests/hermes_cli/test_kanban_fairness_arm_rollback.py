@@ -93,6 +93,7 @@ def test_post_commit_failure_keeps_committed_plan(db, tmp_path, monkeypatch, err
     def fail_status(conn):
         raise error("after commit")
 
+    original_status = journal._open_status
     monkeypatch.setattr(journal, "_open_status", fail_status)
     args = ("--replace", "--clock-error-s", "7") if replace else ()
     if error is KeyboardInterrupt:
@@ -104,6 +105,12 @@ def test_post_commit_failure_keeps_committed_plan(db, tmp_path, monkeypatch, err
     assert plan["capture_id"] == _journal_state(db)["capture_id"] == "one"
     if replace:
         assert plan["assumptions"]["clock_error_s"] == 7
+    monkeypatch.setattr(journal, "_open_status", original_status)
+    assert main(["capture", "status", "--out", str(out)]) == 0
+    # A committed capture still requires explicit replacement; recovery works
+    # using its retained plan rather than silently overwriting an active journal.
+    assert _arm(db, out, "recovered", "--replace") == 0
+    assert _journal_state(db)["capture_id"] == "recovered"
 
 
 @pytest.mark.parametrize("error", [OSError, KeyboardInterrupt])
