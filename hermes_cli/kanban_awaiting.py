@@ -518,17 +518,21 @@ def wake_probe(conn: sqlite3.Connection, task_id: str, record: Optional[dict]) -
     if not record or record.get("kind") != CHAT:
         return card_probe(record)
     row = conn.execute("SELECT MAX(id) FROM task_comments WHERE task_id = ?", (task_id,)).fetchone()
-    return shlex.join(["hermes", "kanban", "wait-comment", task_id, "--after-id", str(int(row[0] or 0))])
+    return shlex.join(["hermes", "kanban", "wait-comment", task_id, "--after-id", str(int(row[0] or 0)),
+                       "--skip-system"])
 
 
 _MOVED_PREFIX = "moved_to_gateway:"  # tui_gateway.notice_fanout.MOVED_PREFIX
 
 
 def _session_stores() -> list[Path]:
-    """The launch store, then each named profile's: where the unloaded sweeper looks for a chat."""
-    from hermes_constants import get_hermes_home
-    home = get_hermes_home()
-    return [p for p in (home / "state.db", *sorted((home / "profiles").glob("*/state.db"))) if p.is_file()]
+    """The launch store, then each named profile's, under the ROOT home: where the unloaded sweeper looks for a
+    chat. A worker of a named profile runs with ``HERMES_HOME=<root>/profiles/<name>`` (the dispatcher), and its
+    orchestrator chat usually lives in the root store (adversarial review of #3647)."""
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+    root = get_default_hermes_root()
+    stores = (root / "state.db", *sorted((root / "profiles").glob("*/state.db")), get_hermes_home() / "state.db")
+    return [p for p in dict.fromkeys(stores) if p.is_file()]
 
 
 def tui_chat_reachable(chat_id: str) -> bool:
@@ -553,6 +557,18 @@ def tui_chat_reachable(chat_id: str) -> bool:
         return not (source in MACHINE_SESSION_SOURCES
                     or (_HEADLESS_SESSION.fullmatch(chat_id) and source not in _INTERACTIVE_SOURCES))
     return False
+
+
+def _owns_card(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when this gateway owns the card (or the board does not sync). A pool worker parking a hub card has
+    neither the hub's notify subscriptions (machine-local) nor its session stores, so the subscriber check
+    belongs to the owner; the park's ``decision_requested`` reaches it by sync (review of #3647)."""
+    from hermes_cli.kanban_wake_check import own_gateway
+    own = own_gateway(conn)
+    if not own:
+        return True
+    row = conn.execute("SELECT created_on FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return not row or not row[0] or row[0] == own
 
 
 def has_chat_subscriber(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -589,6 +605,8 @@ def _check_chat(conn, task_id, awaiting, text) -> None:
     wall = text_wall(text)
     if wall:
         raise wall_error(task_id, wall, text)
+    if not _owns_card(conn, task_id):
+        return  # subscriptions are machine-local: the owning gateway receives the synced ask and delivers it
     if not has_chat_subscriber(conn, task_id):
         raise AwaitingError(NO_CHAT_SUBSCRIBER, (
             f"{task_id} has no chat subscription that a decision_requested notice can wake (a tui row, or a "

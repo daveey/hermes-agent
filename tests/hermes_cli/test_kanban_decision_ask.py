@@ -299,15 +299,16 @@ def test_clock_only_chat_wait_wakes_on_the_answering_comment(kanban_home, monkey
         out = _tool(op, args)
         assert out.get("ok") is not False and "error" not in out, out
         cmd = (kwc.get_state(conn, tid) or {}).get("cmd", "")
-        assert cmd.startswith(f"hermes kanban wait-comment {tid} --after-id "), cmd
-        after = int(cmd.rsplit(" ", 1)[1])
+        assert cmd.startswith(f"hermes kanban wait-comment {tid} --after-id ") and cmd.endswith(" --skip-system"), cmd
+        after = int(cmd.split("--after-id ", 1)[1].split()[0])
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
     parser = argparse.ArgumentParser(prog="hermes", add_help=False)
     kcli.build_parser(parser.add_subparsers(dest="command"))
 
     def probe() -> int:
-        return kcli.kanban_command(parser.parse_args(["kanban", "wait-comment", tid, "--after-id", str(after)]))
+        return kcli.kanban_command(parser.parse_args(["kanban", "wait-comment", tid, "--after-id", str(after),
+                                                      "--skip-system"]))
 
     assert probe() != 0  # the park's own comment and notice do not count as the answer
     with kbc.connect_closing() as conn:
@@ -348,3 +349,80 @@ def test_orphan_reaped_desktop_chat_still_counts(kanban_home, monkeypatch) -> No
         out = _tool("schedule", {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING})
         assert out.get("ok") is not False and "error" not in out, out
         assert len(_asks(conn, tid)) == 1
+
+
+def test_named_profile_worker_sees_the_root_store_chat(kanban_home, monkeypatch) -> None:
+    """Adversarial review of #3647: a worker for profile 'coder' runs with HERMES_HOME=<root>/profiles/coder; the
+    Desktop orchestrator chat lives in <root>/state.db, which the sweeper reads, so it must count."""
+    import hermes_constants
+    chat = _session()  # in the root (launch) store
+    profile_home = kanban_home / "profiles" / "coder"
+    profile_home.mkdir(parents=True)
+    (profile_home / "config.yaml").write_text("{}\n")
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid, chat)
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+        monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None, raising=False)
+        assert hermes_constants.get_hermes_home() == profile_home
+        assert kaw.tui_chat_reachable(chat)
+        assert kaw.has_chat_subscriber(conn, tid)
+
+
+@pytest.mark.parametrize("op", ["schedule", "block"])
+def test_park_progress_note_does_not_fire_the_chat_probe(kanban_home, monkeypatch, capsys, op) -> None:
+    """Review of #3647: a reason announcing finished work makes the park write a 'kanban-park' progress comment
+    after the probe's --after-id was taken; that kernel note must not count as the orchestrator's answer."""
+    from hermes_cli import kanban as kcli
+
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid)
+        _as_worker(monkeypatch, conn, tid)
+        args = {"reason": LIVE_REASON + " Everything else is done.", "clock_only": True, "awaiting": LIVE_AWAITING}
+        if op == "block":
+            args["kind"] = "time"
+        out = _tool(op, args)
+        assert out.get("ok") is not False and "error" not in out, out
+        assert any(c.author == "kanban-park" for c in kb.list_comments(conn, tid))
+        argv = kwc.get_state(conn, tid)["cmd"].split()[1:]
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    kcli.build_parser(parser.add_subparsers(dest="command"))
+    assert kcli.kanban_command(parser.parse_args(argv)) != 0
+    with kbc.connect_closing() as conn:
+        kb.add_comment(conn, tid, "kanban-dispatcher", "Woken: probe stale", system=True)
+    assert kcli.kanban_command(parser.parse_args(argv)) != 0
+    with kbc.connect_closing() as conn:
+        kb.add_comment(conn, tid, "default", "Decisions: B, authorize, Phase A alone.")
+    assert kcli.kanban_command(parser.parse_args(argv)) == 0
+    capsys.readouterr()
+
+
+def test_foreign_card_parks_without_a_local_subscriber(kanban_home, monkeypatch) -> None:
+    """Review of #3647: a pool worker parking a hub card has no copy of the hub's subscriptions or chat stores.
+    It parks and posts the ask; the owner, which holds the subscriptions, delivers it after sync."""
+    from tests.hermes_cli.test_kanban_release_imported_comments import enable_sync
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+    enable_sync(tid)  # this gateway is "owner"
+    with kbc.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET created_on = 'hub' WHERE id = ?", (tid,))
+        _as_worker(monkeypatch, conn, tid)
+        assert not kaw.has_chat_subscriber(conn, tid)
+        out = _tool("schedule", {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING})
+        assert out.get("ok") is not False and "error" not in out, out
+        assert _park_payload(conn, tid)["awaiting"]["kind"] == "chat" and len(_asks(conn, tid)) == 1
+
+
+def test_owned_card_still_needs_a_subscriber(kanban_home, monkeypatch) -> None:
+    from tests.hermes_cli.test_kanban_release_imported_comments import enable_sync
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+    enable_sync(tid)  # created_on = this gateway
+    with kbc.connect_closing() as conn:
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING})
+        assert kaw.NO_CHAT_SUBSCRIBER in (out.get("code") or "") + out.get("error", ""), out
