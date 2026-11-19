@@ -3,6 +3,7 @@ import { afterAll, afterEach } from 'vitest'
 
 import { resetSubmissionIdSupportForTests } from './src/app/session/hooks/use-prompt-actions/submission-identity-support'
 import { clearPlaybackSourceCache } from './src/lib/playback-source-cache'
+import { resetParkRowsForTests } from './src/store/session-park-rows'
 import { InertResizeObserver } from './src/test/jsdom'
 
 // Shared tooltips measure their arrow through Radix's useSize hook.
@@ -92,6 +93,7 @@ configure({ asyncUtilTimeout: 12_000 })
 afterAll(() => new Promise<void>(resolve => setTimeout(resolve, 0)))
 // Resolved media URLs must not leak between tests.
 afterEach(() => clearPlaybackSourceCache())
+afterEach(() => resetParkRowsForTests())
 // Module-global per-backend memo: a test whose backend refuses submission_id must not make the next
 // test's send skip identity.
 afterEach(() => resetSubmissionIdSupportForTests())

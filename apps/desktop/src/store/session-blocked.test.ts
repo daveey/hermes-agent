@@ -18,7 +18,10 @@ import {
   $muteWriteGuard,
   isSessionParked,
   migrateLocalParks,
+  MUTE_ACK_HOLD_MS,
   MUTE_WRITE_GUARD_MS,
+  parkRowFor,
+  rememberParkRow,
   resolveSessionParked,
   toggleSessionBlocked,
   withRowMuted,
@@ -132,6 +135,79 @@ describe('⌘B mute write-through', () => {
     expect(toggleSessionBlocked('draft-1')).toBe(true)
     expect($blockedSessionIds.get()).toEqual(['draft-1'])
     expect(setSessionMutedRemote).not.toHaveBeenCalled()
+  })
+})
+
+describe('drawn rows outside the recent list', () => {
+  beforeEach(() => vi.useFakeTimers())
+
+  it('POSTs to the remembered owner and holds the ack over a stale drawn row', async () => {
+    const old = row({ id: 'old', muted: false, connection_id: 'remote', profile: 'work' })
+    rememberParkRow(old)
+    vi.mocked(setSessionMutedRemote).mockResolvedValue({ ok: true, muted: true })
+    expect(toggleSessionBlocked('old')).toBe(true)
+    await Promise.resolve()
+    expect(setSessionMutedRemote).toHaveBeenCalledWith(old, true)
+    expect($sessions.get()).toEqual([])
+    await vi.advanceTimersByTimeAsync(MUTE_WRITE_GUARD_MS + 1)
+    expect(isSessionParked('old', old)).toBe(true)
+    expect(toggleSessionBlocked('old')).toBe(false)
+    expect(setSessionMutedRemote).toHaveBeenLastCalledWith(old, false)
+    await Promise.resolve()
+  })
+
+  it('releases an acknowledged hold when a drawn row agrees', async () => {
+    const old = row({ muted: false })
+    rememberParkRow(old)
+    await writeSessionMuted(old, true, async () => ({}))
+    rememberParkRow({ ...old, muted: true })
+    expect($muteWriteGuard.get().has(old.id)).toBe(false)
+    expect(isSessionParked(old.id, { muted: false })).toBe(false)
+  })
+
+  it('expires an acknowledged hold after ten minutes', async () => {
+    const old = row({ muted: false })
+    await writeSessionMuted(old, true, async () => ({}))
+    await vi.advanceTimersByTimeAsync(MUTE_ACK_HOLD_MS - 1)
+    expect(isSessionParked(old.id, old)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(isSessionParked(old.id, old)).toBe(false)
+  })
+
+  it('rolls back and toasts when a remembered row POST fails', async () => {
+    const old = row({ muted: false })
+    rememberParkRow(old)
+    const error = new Error('offline')
+    vi.mocked(setSessionMutedRemote).mockRejectedValue(error)
+    toggleSessionBlocked(old.id)
+    await Promise.resolve()
+    expect(isSessionParked(old.id, old)).toBe(false)
+    expect($muteWriteGuard.get().size).toBe(0)
+    expect(notifyError).toHaveBeenCalledWith(error, 'Could not update the parked state')
+  })
+
+  it('bounds the drawn-row registry and refreshes remembered entries', () => {
+    for (let i = 0; i < 1000; i++) {
+      rememberParkRow(row({ id: `old-${i}` }))
+    }
+
+    rememberParkRow(row({ id: 'old-0', profile: 'updated' }))
+    rememberParkRow(row({ id: 'newest' }))
+    expect(parkRowFor('old-1')).toBeUndefined()
+    expect(parkRowFor('old-0')?.profile).toBe('updated')
+    expect(parkRowFor('newest')?.id).toBe('newest')
+  })
+
+  it('resolves lineage aliases even when neither id is in the recent list', async () => {
+    const tip = row({ id: 'tip', _lineage_root_id: 'root', muted: false })
+    rememberParkRow(tip)
+    vi.mocked(setSessionMutedRemote).mockResolvedValue({ ok: true, muted: true })
+    expect(toggleSessionBlocked('root')).toBe(true)
+    await Promise.resolve()
+    expect(setSessionMutedRemote).toHaveBeenCalledWith(tip, true)
+    expect(isSessionParked('root', tip)).toBe(true)
+    expect(toggleSessionBlocked('root')).toBe(false)
+    await Promise.resolve()
   })
 })
 

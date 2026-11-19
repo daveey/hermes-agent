@@ -8,6 +8,9 @@ import type { SessionInfo } from '@/types/hermes'
 
 import { notifyError } from './notifications'
 import { $sessions, lineageAliases, setSessions } from './session'
+import { type MuteRow, parkRows } from './session-park-rows'
+
+export { type MuteRow, resetParkRowsForTests } from './session-park-rows'
 
 /**
  * [daveey] Sessions the user marked "blocked" with ⌘B — parked on something
@@ -23,17 +26,15 @@ import { $sessions, lineageAliases, setSessions } from './session'
  * `muted` (the row carries no `muted`, or the endpoint 404s): then ⌘B behaves
  * exactly as before.
  */
-export const $blockedSessionIds = persistentAtom<string[]>(
-  'hermes.desktop.blockedSessionIds',
-  [],
-  Codecs.stringArray
-)
+export const $blockedSessionIds = persistentAtom<string[]>('hermes.desktop.blockedSessionIds', [], Codecs.stringArray)
 
 /** [daveey] How long a ⌘B write outranks the row's `muted`: a list page already in flight when we POST can land
  *  after the ack carrying the old value (same pattern as the unread write guard). */
 export const MUTE_WRITE_GUARD_MS = 10_000
+export const MUTE_ACK_HOLD_MS = 10 * 60_000
 
 export interface MuteWrite {
+  acked?: boolean
   at: number
   value: boolean
 }
@@ -42,7 +43,40 @@ export interface MuteWrite {
 export const $muteWriteGuard = atom<ReadonlyMap<string, MuteWrite>>(new Map())
 
 type LineageRows = Parameters<typeof lineageAliases>[1]
-type MuteRow = Pick<SessionInfo, 'id'> & Partial<Pick<SessionInfo, 'connection_id' | 'muted' | 'profile'>>
+
+/** Remember drawn rows outside the recent list without retaining an unbounded history. */
+export function rememberParkRow(row: MuteRow): void {
+  parkRows.delete(row.id)
+  parkRows.set(row.id, row)
+
+  if (parkRows.size > 1000) {
+    parkRows.delete(parkRows.keys().next().value!)
+  }
+
+  const aliases = lineageAliases(row.id, [...parkRows.values(), ...$sessions.get()])
+
+  for (const alias of aliases) {
+    const write = $muteWriteGuard.get().get(alias)
+
+    if (write?.acked && (row.muted === write.value || Date.now() - write.at >= MUTE_ACK_HOLD_MS)) {
+      setMuteWrite(alias, null)
+    }
+  }
+}
+
+export function parkRowFor(id: string): MuteRow | undefined {
+  const rows = [...parkRows.values(), ...$sessions.get()]
+
+  for (const alias of lineageAliases(id, rows)) {
+    const row = parkRows.get(alias)
+
+    if (row) {
+      return row
+    }
+  }
+
+  return undefined
+}
 
 export function isSessionBlocked(
   id: string,
@@ -64,7 +98,7 @@ export function resolveSessionParked(
   write: MuteWrite | undefined,
   now: number = Date.now()
 ): boolean {
-  if (write && now - write.at < MUTE_WRITE_GUARD_MS) {
+  if (write && now - write.at < (write.acked ? MUTE_ACK_HOLD_MS : MUTE_WRITE_GUARD_MS)) {
     return write.value
   }
 
@@ -93,7 +127,9 @@ export function muteWriteFor(
     }
   }
 
-  return undefined
+  const remembered = parkRowFor(id)
+
+  return remembered ? guard.get(remembered.id) : undefined
 }
 
 /** [daveey] Whether `id` is parked, reading the stores. Pass `row` when the caller holds it (a project-tree row is
@@ -171,6 +207,7 @@ export async function writeSessionMuted(
 
   try {
     await post(row, muted)
+    setMuteWrite(row.id, { at: Date.now(), value: muted, acked: true })
     setRowMuted(row.id, muted)
   } catch (error) {
     if (isMissingRestEndpoint(error)) {
@@ -259,7 +296,7 @@ export async function migrateLocalParks(
  *  the backend (`writeSessionMuted`); a draft with no row stays local-only. */
 export function toggleSessionBlocked(id: string): boolean {
   const sessions = $sessions.get()
-  const row = sessions.find(entry => entry.id === id)
+  const row = sessions.find(entry => entry.id === id) ?? parkRowFor(id)
   const next = !isSessionParked(id, row)
 
   if (!row) {
