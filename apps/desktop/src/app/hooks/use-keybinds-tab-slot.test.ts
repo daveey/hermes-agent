@@ -19,6 +19,7 @@ import { findGroup, group, split } from '@/components/pane-shell/tree/model'
 import { $activeTreeGroup, $hoveredTreeGroup, $layoutTree } from '@/components/pane-shell/tree/store'
 import { registry } from '@/contrib/registry'
 import { isMacPlatform } from '@/lib/platform'
+import { setTabStripDefault } from '@/store/tabstrip-prefs'
 
 // ⌘1…⌘9 is one chord with two meanings: the Nth tab of the zone under the
 // pointer (else the focused zone, else the workspace's) when that zone is a
@@ -57,6 +58,7 @@ beforeAll(() => {
 })
 
 beforeEach(() => {
+  setTabStripDefault('auto') // multi-tab fixtures predate Single
   switchProfileToSlot.mockClear()
   unmountKeybinds = renderHook(
     () =>
@@ -108,6 +110,17 @@ describe('⌘N over a tab strip is a tab switch, elsewhere a profile switch', ()
 
     press(2)
 
+    expect(switchProfileToSlot).toHaveBeenCalledWith(2)
+  })
+
+  it('falls through to profile switching for the hidden main strip in Single', () => {
+    setTabStripDefault('single')
+    $layoutTree.set(group(['workspace', 'a'], { active: 'workspace', id: 'main' }))
+    $hoveredTreeGroup.set('main')
+
+    press(2)
+
+    expect(activePane('main')).toBe('workspace')
     expect(switchProfileToSlot).toHaveBeenCalledWith(2)
   })
 
