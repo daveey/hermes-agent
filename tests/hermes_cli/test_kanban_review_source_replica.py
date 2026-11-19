@@ -101,7 +101,7 @@ def test_replica_author_pin_is_refused_without_rewriting_pin(gws, monkeypatch):
     assert kb.get_task(worker.conn, down).model_override == AUTHOR
 
 
-def test_local_source_wins_and_no_replica_is_opened(gws, monkeypatch):
+def test_local_source_wins_over_the_replica_copy(gws, monkeypatch):
     pool._attest(monkeypatch)
     source, down, _ = _carried(gws)
     _, worker = gws
@@ -113,9 +113,12 @@ def test_local_source_wins_and_no_replica_is_opened(gws, monkeypatch):
         replica.close()
     worker.conn.execute('UPDATE tasks SET model_override=? WHERE id=?', ('gpt-6-astra', source))
     worker.conn.commit()
-    def unexpected(conn):
-        pytest.fail('local source must not open replica')
-    monkeypatch.setattr(wn, 'open_replica', unexpected)
+    # The replica copy still has no override: only the local copy can name gpt-6-astra.
+    replica = wn.open_replica(worker.conn)
+    try:
+        assert kb.get_task(replica, source).model_override in (None, '')
+    finally:
+        replica.close()
     assert review.implementer_models(worker.conn, kb.get_task(worker.conn, down)) == {AUTHOR, 'gpt-6-astra'}
 
 
@@ -193,3 +196,62 @@ def test_unsynced_board_never_reads_a_replica(gws, monkeypatch):
     monkeypatch.setattr(wn, 'open_replica', unexpected)
     with pytest.raises(review.ReviewModelUnavailable):
         review.implementer_models(worker.conn, kb.get_task(worker.conn, down))
+
+
+def _linked(gws, *, link_after_pickup=False):
+    """A review card whose only implementer evidence is its link to the source (no creator, no declaration)."""
+    hub, worker = gws
+    hub.enter()
+    source = kb.create_task(hub.conn, title='Implement cache', assignee='default')
+    hub.round()
+    claim = kb.claim_task(hub.conn, source, claimer=kb._claimer_id())
+    assert claim
+    kb._append_event(hub.conn, source, 'worker_result', {'route_model': AUTHOR}, run_id=claim.current_run_id)
+    assert kb.complete_task(hub.conn, source, result='implemented', expected_run_id=claim.current_run_id)
+    down = kb.create_task(hub.conn, title='Independent review: cache', assignee='default')
+    if not link_after_pickup:
+        kb.link_tasks(hub.conn, down, source)
+    hub.conn.commit()
+    hub.round()
+    worker.round()
+    worker.enter()
+    replica = wn.open_replica(worker.conn)
+    assert replica is not None
+    try:
+        assert wn.import_cards(worker.conn, replica, [down]) == [down]
+    finally:
+        replica.close()
+    if link_after_pickup:
+        hub.enter()
+        kb.link_tasks(hub.conn, down, source)
+        hub.conn.commit()
+        hub.round()
+        worker.round()
+        worker.enter()
+    assert kb.get_task(worker.conn, source) is None
+    return source, down
+
+
+@pytest.mark.parametrize('link_after_pickup', [False, True])
+def test_picked_up_review_reads_its_source_links_from_the_replica(gws, monkeypatch, link_after_pickup):
+    """Worker refusals 2026-11-19: pickup copied the review card but not its links to the source, so the worker
+    found no implementer and refused the review. A link the Board adds after pickup never reaches the live file
+    either (the feed keeps a link only when its child is local)."""
+    pool._attest(monkeypatch)
+    source, down = _linked(gws, link_after_pickup=link_after_pickup)
+    _, worker = gws
+    assert not worker.conn.execute('SELECT 1 FROM task_links WHERE parent_id=?', (down,)).fetchone()
+    before = worker.conn.total_changes
+    assert review.implementer_models(worker.conn, kb.get_task(worker.conn, down)) == {AUTHOR}
+    assert worker.conn.total_changes == before
+    assert kb.get_task(worker.conn, source) is None
+
+
+def test_linked_review_without_a_replica_stays_fail_closed(gws, monkeypatch):
+    pool._attest(monkeypatch)
+    _, down = _linked(gws)
+    _, worker = gws
+    monkeypatch.setattr(wn, 'open_replica', lambda conn: None)
+    assert review.implementer_models(worker.conn, kb.get_task(worker.conn, down)) == set()
+    with pytest.raises(review.ReviewModelUnavailable, match='Downstream review implementer evidence'):
+        review.resolve_review_model(worker.conn, kb.get_task(worker.conn, down), {'strong_model': pool.PIN['model']})

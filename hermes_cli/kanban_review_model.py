@@ -107,8 +107,7 @@ def implementer_models(conn, task) -> set[str]:
             created = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created' "
                                    "ORDER BY id LIMIT 1", (card.id,)).fetchone()
             creator = _payload(created[0] if created else None).get("creator_task_id")
-            sources = [row[0] for row in conn.execute(
-                "SELECT child_id FROM task_links WHERE parent_id=?", (card.id,)).fetchall()]
+            sources = lookup.children(card.id)
             if isinstance(creator, str) and creator:
                 sources.append(creator)
             for source in sources:
