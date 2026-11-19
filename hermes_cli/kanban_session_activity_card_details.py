@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from typing import Any
@@ -63,3 +64,42 @@ def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]
     for task_id, (_, url) in prs.items():
         found[task_id]["pr_url"] = url
     add_run_machines(conn, found)  # where each card runs: the strip's hub/worker mark
+    _add_blocked_upstream(conn, found)
+
+
+def _nearest_blocked(conn: sqlite3.Connection, task_id: str) -> dict[str, str] | None:
+    """Breadth-first, so the first match is nearest; ties sort by id."""
+    seen = {task_id}
+    frontier = {task_id}
+    for _ in range(20):
+        parents = {}
+        for child in sorted(frontier):
+            for parent, status in conn.execute(
+                "SELECT t.id, t.status FROM task_links l JOIN tasks t ON t.id = l.parent_id "
+                "WHERE l.child_id = ? ORDER BY t.id", (child,),
+            ):
+                if parent not in seen:
+                    parents[parent] = status
+        if not parents:
+            return None
+        for parent in sorted(parents):
+            if parents[parent] in {"blocked", "triage"}:
+                return {"id": parent, "status": parents[parent]}
+        seen.update(parents)
+        frontier = set(parents)
+    return None
+
+
+def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]) -> None:
+    """Optional local-board presentation evidence; old schemas remain readable."""
+    for task_id, card in found.items():
+        card.pop("blocked_upstream", None)
+        if card.get("status") in {"done", "archived", "blocked", "triage"}:
+            continue
+        try:
+            ancestor = _nearest_blocked(conn, task_id)
+        except sqlite3.Error:
+            logging.getLogger(__name__).debug("Could not read blocked upstream for %s", task_id, exc_info=True)
+            continue
+        if ancestor is not None:
+            card["blocked_upstream"] = ancestor

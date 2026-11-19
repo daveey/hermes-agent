@@ -726,6 +726,24 @@ def _add_links(path: Path, links: list[tuple[str, str]]) -> None:
         conn.executemany("INSERT INTO task_links VALUES (?, ?)", links)
 
 
+@pytest.mark.parametrize("ancestor_status", ["blocked", "triage", "running"])
+def test_session_tasks_include_blocked_upstream(kanban_root, ancestor_status):
+    path = kanban_root / "kanban.db"
+    _make_full_board(path, [
+        ("a", "Ancestor", ancestor_status, "default", "other", 100, None, None),
+        ("b", "Parent", "todo", "default", "s_chain", 100, None, None),
+        ("c", "Child", "todo", "default", "s_chain", 100, None, None),
+    ])
+    _add_links(path, [("a", "b"), ("b", "c"), ("c", "a")])
+    rows = {row["id"]: row for row in ksa.session_tasks(["s_chain"])}
+    assert set(rows) == {"b", "c"}
+    for row in rows.values():
+        if ancestor_status == "running":
+            assert "blocked_upstream" not in row
+        else:
+            assert row["blocked_upstream"] == {"id": "a", "status": ancestor_status}
+
+
 def test_parked_cards_are_counted_apart_from_live_ones(kanban_root):
     """[daveey] Parked = open but nobody is working it: scheduled on a time/event wake, blocked on a non-human
     kind, or todo behind an unfinished parent. A todo whose parents are all done is about to be promoted and stays
