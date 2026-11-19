@@ -23,9 +23,27 @@ unknown uncertainty remains null, not zero. An enabled capture ID must be a safe
 is the profile's durable `kanban/evidence/<capture_id>`, never scratch. A byte limit
 must be a positive integer no greater than 536870912; booleans are not integers here.
 
-**Integration status:** the internal `activate()` API exists; production descriptor
-arming, process-startup binding and assembled export are still integration work.
-Do not use this document as an operational activation recipe.
+**Integration status:** draft explicit `runtime arm` / `runtime disarm` commands and
+startup bindings now exist. Root export/expected-epoch inventory and full production
+scope verification remain incomplete. Do not activate this draft on a live board.
+
+The descriptor pins profile home, board, capture directory/ID, supplied gateway/board
+UIDs, byte limit and nullable clock error. It is not inferred from hostnames or a
+worker's task. Arming does not activate the DB journal. Startup alone does not arm.
+A capture cannot be rearmed or replaced; use a fresh capture. Disarm renames the
+small descriptor and retains it and all evidence. A passive monitor outside scheduler
+locks notices the change on a 0.5-second poll and closes its consumer; filesystem
+stalls may delay noticing it, so no synchronous remote-stop guarantee is made.
+Turning config off prevents new consumers but does not replace explicit disarm for
+already-running consumers. The draft disarm command still needs the original capture
+ID/directory settings even when enabled is false.
+
+Bindings currently enter before standalone dispatch, before the daemon loop, during
+gateway dispatcher lease tenure, and around a managed tool-worker turn using live
+profile config (not the frozen session policy). No lazy IO is added to readers,
+submission, enabled checks or config loading. Profile-specific descriptors must be
+armed for their exact home; a root descriptor is not authority for another profile.
+Managed-worker/profile and multiplexed gateway scope still need end-to-end proof.
 
 ## Actual reads and privacy
 

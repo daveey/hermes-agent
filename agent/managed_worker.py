@@ -378,7 +378,8 @@ def execute(frame, channel):
     agent = None
     completed = False
     try:
-        with policy_scope(policy, home=frame['home']):
+        from hermes_cli.kanban_fairness_activation import serving
+        with policy_scope(policy, home=frame['home']), serving(home=frame['home']):
             agent = _construct_agent(frame, AIAgent, policy, model=policy.model, provider=policy.provider, base_url=policy.base_url,
                 api_key=frame['api_key'], session_db=store, session_id=scope['session_id'],
                 # delegate_task stays offered: each child is reserved by the owner under this

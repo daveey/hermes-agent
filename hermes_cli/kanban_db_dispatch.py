@@ -2738,26 +2738,10 @@ def run_daemon(
                 with contextlib.suppress(ValueError, OSError):
                     signal.signal(sig, _handle)
 
-    while not stop_event.is_set():
-        try:
-            # Re-resolved every tick (config load is mtime-cached) so operator
-            # edits apply without a restart.
-            max_in_progress = resolve_max_in_progress(configured_max_in_progress())
-            with contextlib.closing(_kbc.connect()) as conn:
-                res = dispatch_once(
-                    conn,
-                    max_spawn=max_spawn,
-                    max_in_progress=max_in_progress,
-                    failure_limit=failure_limit,
-                )
-            if on_tick is not None:
-                with contextlib.suppress(Exception):
-                    on_tick(res)
-        except Exception:
-            # Don't let any single tick kill the daemon.
-            import traceback
-            traceback.print_exc()
-        stop_event.wait(timeout=interval)
+    from hermes_cli.kanban_fairness_activation import serving
+    from hermes_cli.kanban_dispatch_daemon import run_loop
+    with serving():
+        run_loop(stop_event, interval, max_spawn, failure_limit, on_tick)
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this

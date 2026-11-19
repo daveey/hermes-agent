@@ -170,9 +170,31 @@ def _export(args) -> int:
     return 0
 
 
+def _runtime(args) -> int:
+    from hermes_cli import kanban_fairness_activation as activation
+    from hermes_cli.config import load_config
+    from hermes_constants import get_hermes_home
+
+    config, home = load_config(), get_hermes_home()
+    if args.action == "arm":
+        activation.arm(config, home=home, board=args.board, source_gateway=args.source_gateway,
+                       board_uid=args.board_uid, clock_error_ns=args.clock_error_ns)
+    else:
+        activation.disarm(config, home=home)
+    _emit({"runtime": args.action, "acceptance_ready": False})
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
+    runtime = sub.add_parser("runtime")
+    runtime.add_argument("action", choices=("arm", "disarm"))
+    runtime.add_argument("--board", default="default")
+    runtime.add_argument("--source-gateway")
+    runtime.add_argument("--board-uid")
+    runtime.add_argument("--clock-error-ns", type=int, default=None)
+    runtime.set_defaults(run=_runtime)
     capture = sub.add_parser("capture")
     capture.add_argument("action", choices=("arm", "status", "drain", "seal", "clear"))
     capture.add_argument("--out", required=True)

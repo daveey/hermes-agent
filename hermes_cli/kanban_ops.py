@@ -93,7 +93,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except Exception:
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
-    with kbc.connect_closing() as conn:
+    from hermes_cli.kanban_fairness_activation import serving
+    with serving(), kbc.connect_closing() as conn:
         res = kbd.dispatch_once(
             conn,
             dry_run=args.dry_run,

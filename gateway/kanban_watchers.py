@@ -366,6 +366,8 @@ class GatewayKanbanWatchersMixin:
         from gateway.kanban_dispatcher_health import DispatcherHealth
         health = DispatcherHealth(getattr(self, "_kanban_dispatcher_lock_handle", None), interval=interval)
         self._kanban_dispatcher_health = health
+        from hermes_cli.kanban_fairness_activation import boot
+        capture = await _to_thread_process_service(boot)
         try:
             # Initial delay so adapters are wired before workers spawn (matches the notifier).
             await asyncio.sleep(5)
@@ -470,6 +472,8 @@ class GatewayKanbanWatchersMixin:
                 await self._sleep_until_tick_or_sync_wake(interval)
 
         finally:
+            if capture is not None:
+                await _to_thread_process_service(capture.close)
             self._release_kanban_dispatcher_lock()
 
     async def _kanban_sync_watcher(self) -> None:
