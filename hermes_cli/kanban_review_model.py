@@ -8,6 +8,23 @@ from typing import Any
 from agent.model_routing import ModelRoutingError, eligible_routes, is_class_selector, validate_policy
 
 _DOWNSTREAM_REVIEW = re.compile(r"\A\W*independent\b[^\n]*\breview\b", re.IGNORECASE)
+# [daveey] A downstream review card's own declaration of who implemented the change, for work no Kanban card wrote
+# (a Claude Code session landing through ``hermes-core-wt ship``): one line ``<!-- implementer-models: a, b -->``
+# in the card body, written by the filing tool from the commits' Co-Authored-By trailers. Concrete model ids only.
+_DECLARED = re.compile(r"^<!-- implementer-models: ([^>\n]*) -->$", re.MULTILINE)
+_MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._-]{1,79}")
+
+
+def declared_implementers(body) -> set[str]:
+    """Models a review card's body declares as the change's implementers (``_DECLARED``). A malformed entry or a
+    class selector makes the whole declaration void: it then proves nothing, as if absent."""
+    found: set[str] = set()
+    for match in _DECLARED.finditer(body or ""):
+        names = [name.strip() for name in match.group(1).split(",")]
+        if not names or any(not _MODEL_ID.fullmatch(name) or is_class_selector(name) for name in names):
+            return set()
+        found.update(names)
+    return found
 
 
 def _downstream(task):
@@ -54,6 +71,8 @@ def implementer_models(conn, task) -> set[str]:
                 if model:
                     models.add(model)
         if downstream:
+            # Declared provenance counts as evidence of its own: the change came from outside the board.
+            models.update(declared_implementers(getattr(stored, "body", None)))
             created = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='created' "
                                    "ORDER BY id LIMIT 1", (card.id,)).fetchone()
             creator = _payload(created[0] if created else None).get("creator_task_id")
