@@ -44,7 +44,8 @@ LOCK_TIMEOUT_SECONDS = 0.5  # a busy store skips history for one refresh; it nev
 
 def connect(path: Path) -> sqlite3.Connection:
     """The store, its schema created on first use only (``user_version`` 0 -> 1)."""
-    db = sqlite3.connect(str(path), timeout=LOCK_TIMEOUT_SECONDS, isolation_level=None)
+    # Not a board: the pacing history file, opened and closed within one refresh (``History.open``).
+    db = sqlite3.connect(str(path), timeout=LOCK_TIMEOUT_SECONDS, isolation_level=None)  # noqa: kanban-lockguard
     try:
         if db.execute("PRAGMA user_version").fetchone()[0] == 0:
             for statement in _SCHEMA:
