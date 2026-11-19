@@ -1048,9 +1048,9 @@ MAX_TARGET_KEYS = 64  # distinct thread targets; later ones fold into TARGET_OTH
 TARGET_OTHER = "other"
 
 
-def _target_key(target: Any, args: tuple = ()) -> str:
+def _target_key(target: Any, args: tuple | list = ()) -> str:
     """Name of a ``Thread`` target (``module.qualname``; a lambda also gets its line number)."""
-    target = _callable_target(target, args)
+    target = _callable_target(target, tuple(args))
     name = _callable_name(target)
     code = getattr(getattr(target, "__func__", target), "__code__", None)
     if name.endswith("<lambda>") and code is not None:

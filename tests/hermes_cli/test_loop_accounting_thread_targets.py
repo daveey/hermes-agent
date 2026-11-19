@@ -239,6 +239,30 @@ def test_reused_native_id_nested_scopes_do_not_double_count(monkeypatch):
     assert la._target_exited[la._target_key(replacement)]["accounted_cpu_s"] == pytest.approx(0.2)
 
 
+@pytest.mark.parametrize("carrier", ["partial", "context_partial"])
+@pytest.mark.parametrize("args_type", [tuple, list])
+def test_thread_carriers_preserve_sequence_args_attribution(carrier, args_type):
+    from contextvars import Context
+    from functools import partial
+
+    la.instrument_thread_targets()
+    seen = []
+
+    def original(first, second):
+        seen.append((first, second))
+
+    target = partial(original, 1)
+    args = args_type([2])
+    if carrier == "context_partial":
+        target = partial(Context().run, target)
+    th = threading.Thread(target=target, args=args)
+    th.start()
+    th.join()
+    assert seen == [(1, 2)]
+    assert la._target_key(original) in la._target_exited
+    assert la._target_exited[la._target_key(original)]["threads"] == 1
+
+
 def test_context_thread_names_original_target():
     from contextvars import Context
 
