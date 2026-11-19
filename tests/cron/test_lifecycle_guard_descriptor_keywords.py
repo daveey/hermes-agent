@@ -57,11 +57,16 @@ def test_child_close_keeps_parent_descriptor(tmp_path, close):
     script.write_text("hermes gateway " + "restart\n")
     command = f"exec 3<{shlex.quote(str(script))}; {close} bash <&3"
     assert scan_gateway_lifecycle(command) == (True, None)
+    # Only the execution premise needs modern Bash; the scanner is portable.
+    if "|&" in close:
+        from tests.cron.bash_execution import require_modern_system_bash
+
+        require_modern_system_bash()
     fake = tmp_path / "hermes"
     fake.write_text("#!/bin/sh\nprintf MARKER\n")
     fake.chmod(0o700)
     result = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-c", f"PATH={shlex.quote(str(tmp_path))}:$PATH; " + command],
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"PATH={shlex.quote(str(tmp_path))}:$PATH; " + command],
         capture_output=True, text=True, encoding="utf-8", check=False,
     )
     assert result.returncode == 0, result.stderr

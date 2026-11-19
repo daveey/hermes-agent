@@ -26,13 +26,18 @@ def test_async_list_preserves_parent(tmp_path, tail, clean):
     fake.write_text("#!/bin/sh\nprintf MARKER")
     fake.chmod(0o700)
     command = f"exec 3<{shlex.quote(str(script))}; exec 3<&- {tail} bash <&3"
+    assert scan_gateway_lifecycle(command) == (not clean, None)
+    # Keep scanner coverage on Bash 3, which cannot execute the |& grammar.
+    if "|&" in tail:
+        from tests.cron.bash_execution import require_modern_system_bash
+
+        require_modern_system_bash()
     result = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-c", f"PATH={shlex.quote(str(tmp_path))}:$PATH; " + command],
+        ["/bin/bash", "--noprofile", "--norc", "-c", f"PATH={shlex.quote(str(tmp_path))}:$PATH; " + command],
         capture_output=True, text=True, encoding="utf-8", check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == ("CLEAN" if clean else "MARKER")
-    assert scan_gateway_lifecycle(command) == (not clean, None)
 
 
 @pytest.mark.parametrize("tail", ["&& true;", "|| false;", "&& true || false;", "&& true; true & wait;"])
