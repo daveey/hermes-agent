@@ -81,6 +81,18 @@ def test_replica_edge_permit_is_insert_only(board):
             board.execute("UPDATE task_links SET parent_id=? WHERE parent_id=? AND child_id=?", (other, task, other))
 
 
+def test_ordinary_edge_insert_cannot_extend_held_graph(board):
+    task = _held(board)
+    other = kb.create_task(board, title="Fixture peer", assignee="default")
+    independent = kb.create_task(board, title="Fixture control", assignee="default")
+    with kb.write_txn(board):
+        with pytest.raises(sqlite3.IntegrityError, match="containment_pending"):
+            board.execute("INSERT INTO task_links(parent_id,child_id) VALUES (?,?)", (task, other))
+        with pytest.raises(sqlite3.IntegrityError, match="containment_pending"):
+            board.execute("INSERT INTO task_links(parent_id,child_id) VALUES (?,?)", (other, task))
+        board.execute("INSERT INTO task_links(parent_id,child_id) VALUES (?,?)", (independent, other))
+
+
 def test_attestation_insert_and_update_are_fenced(board):
     task = _held(board)
     values = (task, "fixture-receipt", "fixture-episode", "a" * 64, "b" * 64)
