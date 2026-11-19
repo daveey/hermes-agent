@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import errno
 import json
 import os
+import time
 from pathlib import Path
 
 NAME = "capture-budget.json"
@@ -38,13 +39,14 @@ def _locked(root):
             stream.seek(0)
             while True:
                 try:
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK if acquire else msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK if acquire else msvcrt.LK_UNLCK, 1)
                     return
                 except OSError as exc:
-                    # LK_LOCK waits only ten times, unlike flock(LOCK_EX).
-                    # Continue its blocking windows on contention, not IO errors.
-                    if not acquire or exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    # LK_LOCK masks every failure as EDEADLK. Nonblocking mode
+                    # preserves errors: only EACCES represents lock contention.
+                    if not acquire or exc.errno != errno.EACCES:
                         raise
+                    time.sleep(0.1)
     if (root / ".capture-budget.lock").is_symlink():
         raise ValueError("budget lock must not be a symlink")
     with (root / ".capture-budget.lock").open("a+b") as stream:

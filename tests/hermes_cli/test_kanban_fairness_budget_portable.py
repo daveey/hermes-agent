@@ -2,6 +2,7 @@
 import builtins
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,7 +31,7 @@ def test_db_capture_without_unix_primitives(tmp_path, monkeypatch):
         fcntl.flock(fd, fcntl.LOCK_EX if mode == 1 else fcntl.LOCK_UN)
 
     real_import = builtins.__import__
-    windows_lock = SimpleNamespace(locking=locking, LK_LOCK=1, LK_UNLCK=2)
+    windows_lock = SimpleNamespace(locking=locking, LK_NBLCK=1, LK_UNLCK=2, LK_LOCK=3)
 
     def platform_import(name, globals=None, locals=None, fromlist=(), level=0):
         # Simulate the budget module's platform without changing unrelated Linux
@@ -62,7 +63,7 @@ def test_db_capture_without_unix_primitives(tmp_path, monkeypatch):
 
 def _windows_lock(monkeypatch, locking):
     real_import = builtins.__import__
-    windows = SimpleNamespace(locking=locking, LK_LOCK=1, LK_UNLCK=2)
+    windows = SimpleNamespace(locking=locking, LK_NBLCK=1, LK_UNLCK=2, LK_LOCK=3)
 
     def platform_import(name, globals=None, locals=None, fromlist=(), level=0):
         if globals and globals.get("__name__") == budget.__name__:
@@ -75,9 +76,8 @@ def _windows_lock(monkeypatch, locking):
     monkeypatch.setattr(builtins, "__import__", platform_import)
 
 
-@pytest.mark.parametrize("error_name", ["EACCES", "EAGAIN", "EDEADLK"])
 @pytest.mark.parametrize("operation", ["initialize", "write"])
-def test_windows_budget_waits_past_crt_retry_window(tmp_path, monkeypatch, error_name, operation):
+def test_windows_budget_waits_past_crt_retry_window(tmp_path, monkeypatch, operation):
     import errno
 
     if operation == "write":
@@ -87,10 +87,12 @@ def test_windows_budget_waits_past_crt_retry_window(tmp_path, monkeypatch, error
     def locking(fd, mode, count):
         calls.append(mode)
         assert count == 1
-        if mode == 1 and len(calls) <= 12:
-            raise OSError(getattr(errno, error_name), "CRT ten-attempt window exhausted")
+        if mode != 2 and len(calls) <= 12:
+            raise OSError(errno.EDEADLK if mode == 3 else errno.EACCES, "lock contention")
 
     _windows_lock(monkeypatch, locking)
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
     if operation == "initialize":
         budget.initialize(tmp_path, 4096)
     else:
@@ -98,9 +100,13 @@ def test_windows_budget_waits_past_crt_retry_window(tmp_path, monkeypatch, error
         assert (tmp_path / "plan.json").read_bytes() == b"previous plan"
     assert budget._limit(tmp_path) == 4096
     assert calls == [1] * 13 + [2]
+    assert sleeps == [0.1] * 12
 
 
-@pytest.mark.parametrize("mode,error_name", [(1, "EBADF"), (2, "EBADF"), (2, "EACCES")])
+@pytest.mark.parametrize("mode,error_name", [
+    (1, "EBADF"), (1, "EINVAL"), (1, "EAGAIN"), (1, "EDEADLK"),
+    (2, "EBADF"), (2, "EACCES"),
+])
 def test_windows_budget_does_not_retry_noncontention_errors(tmp_path, monkeypatch, mode, error_name):
     import errno
 
@@ -160,13 +166,40 @@ def test_windows_arm_rollback_waits_for_budget_lock(tmp_path, monkeypatch):
 
     def locking(fd, mode, count):
         nonlocal attempts
-        if rollback and mode == 1:
+        if rollback and mode != 2:
             attempts += 1
             if attempts <= 12:
-                raise OSError(errno.EACCES, "CRT ten-attempt window exhausted")
+                raise OSError(errno.EDEADLK if mode == 3 else errno.EACCES, "lock contention")
 
     _windows_lock(monkeypatch, locking)
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
     monkeypatch.setattr(journal, "_triggers", fail_triggers)
     assert main([*args, "--replace", "--clock-error-s", "7"]) == 3
     assert attempts == 13
+    assert sleeps == [0.1] * 12
     assert (out / "plan.json").read_bytes() == previous
+
+
+def test_windows_unsupported_volume_errors_without_retry(tmp_path, monkeypatch):
+    import errno
+
+    calls = []
+
+    def locking(fd, mode, count):
+        calls.append(mode)
+        # UCRT LK_LOCK erases GetLastError after its ten attempts. LK_NBLCK
+        # preserves the unsupported-volume mapping to EINVAL. Bound the old
+        # infinite retry loop so a regression fails instead of hanging pytest.
+        assert len(calls) <= 50, "unsupported volume retried indefinitely"
+        raise OSError(errno.EDEADLK if mode == 3 else errno.EINVAL, "unsupported volume")
+
+    _windows_lock(monkeypatch, locking)
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    with pytest.raises(OSError) as caught:
+        budget.initialize(tmp_path, 4096)
+    assert caught.value.errno == errno.EINVAL
+    assert calls == [1]
+    assert sleeps == []
+    assert not (tmp_path / budget.NAME).exists()
