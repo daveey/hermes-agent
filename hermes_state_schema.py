@@ -517,7 +517,8 @@ class SessionSchemaMixin:
         (whichever PIDs they were) the record is marked ``futile`` and the escalation names the
         holders and the remedy that works from inside a gateway session (stop only the other
         holder; this process's own retry tick admits the rebuild). The window restarts only
-        when no deferral was recorded for longer than the retry backoff cap (a new episode)."""
+        when the last deferral saw no holder, or when the gap since it is negative or longer
+        than twice the retry backoff cap (a new episode)."""
         now = time.time()
         try:
             row = cursor.execute(

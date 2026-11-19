@@ -127,3 +127,27 @@ def test_a_quiet_gap_longer_than_the_retry_cap_starts_a_new_window(stale_store):
     # No deferral recorded for longer than any retry backoff: an old episode, not continuous presence.
     record = _defer(db, clock, hermes_state_schema._FTS_STALE_RETRY_MAX_SECONDS * 2 + 1)
     assert record["holders_attempts"] == 1 and not record.get("futile")
+
+
+@pytest.mark.parametrize(
+    "break_continuity", ["clock_went_back", "last_deferral_saw_no_holder"]
+)
+def test_a_broken_presence_record_starts_a_new_window(stale_store, break_continuity):
+    db, _db_path, clock = stale_store
+    attempts = hermes_state_schema._FTS_HOLDER_FUTILE_ATTEMPTS
+    step = hermes_state_schema._FTS_HOLDER_FUTILE_SECONDS / (attempts - 1)
+    for _ in range(attempts - 2):
+        record = _defer(db, clock, step)
+    assert record["holders_attempts"] == attempts - 1, record
+    if break_continuity == "clock_went_back":
+        clock[0] -= 2 * step
+        record = _defer(db, clock, 0.0)
+    else:
+        # What the orphan reap writes when it cleared every holder.
+        db._conn.execute(
+            "UPDATE state_meta SET value = json_set(value, '$.holder_pids', json('[]')) WHERE key = ?",
+            (FTS_REBUILD_DEFERRAL_KEY,),
+        )
+        db._conn.commit()
+        record = _defer(db, clock, step)
+    assert record["holders_attempts"] == 1 and not record.get("futile"), record

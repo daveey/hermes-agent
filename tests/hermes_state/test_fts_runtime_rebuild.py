@@ -736,8 +736,8 @@ class TestRuntimeFtsRebuild:
         self, db, tmp_path, monkeypatch, caplog
     ):
         """#106393: a supervised peer never satisfies the orphan reap, so the generic
-        'remains blocked ... with the gateway stopped' escalation repeats forever. Once the SAME
-        PID set has blocked the futile window, the record is marked futile, the escalation names
+        'remains blocked ... with the gateway stopped' escalation repeats forever. Once foreign
+        holders have blocked every deferral of the futile window, the record is marked futile, the escalation names
         the holder's cmdline and a remedy runnable from inside the gateway, and doctor says so."""
         if not db._fts_enabled:
             pytest.skip("FTS5 unavailable in this build")
