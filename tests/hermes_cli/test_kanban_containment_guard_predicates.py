@@ -84,6 +84,9 @@ def test_export_never_inerts_or_scrubs_source_connection(board, tmp_path, monkey
     monkeypatch.setattr(guard, "inert_snapshot", private_only)
     assert transfer.export_board("default", str(tmp_path / "fixture.tar.gz"))
     assert len(seen) == 1
+    imported = transfer.import_board(str(tmp_path / "fixture.tar.gz"), "fixture-private-import")
+    assert imported["board"] == "fixture-private-import"
+    assert len(seen) == 2 and seen[1] == imported["db_path"]
     row = kb.get_task(board, authority)
     assert row is not None and row.status == "running" and row.current_run_id is not None
     with pytest.raises(sqlite3.IntegrityError, match="containment_pending"):
