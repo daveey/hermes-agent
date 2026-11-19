@@ -53,7 +53,8 @@ def evidence(conn, task_id, run_id):
             return None
         expected = (get_hermes_home() / 'state.db').resolve()
         sessions, models = set(), set()
-        with closing(connect_tracked(expected.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
+        uri = expected.as_uri() + '?mode=ro'
+        with closing(connect_tracked(uri, uri=True, timeout=2, wait_for_tracking=False)) as db:
             for raw, admitted, origin in admissions:
                 payload = json.loads(raw or '{}')
                 if not isinstance(payload, dict) or (origin is not None and origin != gateway):

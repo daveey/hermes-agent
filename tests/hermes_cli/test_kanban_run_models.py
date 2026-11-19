@@ -190,3 +190,102 @@ def test_dead_run_finalizer_stamps_models_through_replay(admitted):
     assert payload['session_models'] == ['model-a', 'model-b']
     assert payload['pid'] == proc.pid
     assert conn.execute('SELECT ended_at FROM task_runs WHERE id=?', (run,)).fetchone()[0] is not None
+
+
+def test_evidence_never_waits_on_tracking_reservation(admitted):
+    """A held tracking reservation must omit evidence, not park the board write transaction."""
+    import threading
+    from hermes_cli import kanban_run_models as models
+    from hermes_cli import sqlite_offline_reservations as offline
+    _, _, tid, run, home = admitted
+    finished, reserved, result = threading.Event(), threading.Event(), []
+
+    def hold():  # A different thread owns the reservation, so a waiter would block on `finished`.
+        offline.reserve(offline.database_key(home / 'state.db'), finished)
+        reserved.set()
+        finished.wait(10)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert reserved.wait(5)
+    def read():  # sqlite connections are thread-bound: reopen the board in the reader thread.
+        with kbc.connect(home / 'worker.db') as own:
+            assert models.local_gateway(own)
+            result.append(models.evidence(own, tid, run))
+
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(3)
+    blocked = worker.is_alive()
+    finished.set()  # Release before asserting so a RED run does not leak a blocked thread.
+    worker.join(5)
+    holder.join(5)
+    assert not blocked, 'evidence() waited for the SQLite tracking reservation'
+    assert result == [None]
+    with kbc.connect(home / 'worker.db') as own:  # Released reservation: evidence is available again.
+        assert models.evidence(own, tid, run)['session_models'] == ['model-a', 'model-b']
+
+
+def test_evidence_opens_state_db_without_waiting_for_tracking(admitted, monkeypatch):
+    from hermes_cli import kanban_run_models as models
+    conn, _, tid, run, _ = admitted
+    seen = {}
+    real = models.connect_tracked
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(models, 'connect_tracked', spy)
+    assert models.evidence(conn, tid, run)['session_models'] == ['model-a', 'model-b']
+    assert seen.get('wait_for_tracking') is False
+
+
+def _stamped(conn, tid, run, home, *, run_start, run_end, admitted, session_start, names=None):
+    """Pin every clock involved, then ask for evidence on a fresh terminal event."""
+    with sqlite3.connect(home / 'state.db') as db:
+        db.execute('UPDATE sessions SET started_at=? WHERE id=?', (session_start, 'session'))
+        if names is not None:
+            db.execute('DELETE FROM session_model_usage WHERE session_id=?', ('session',))
+            db.executemany('INSERT INTO session_model_usage VALUES (?, ?)', [('session', n) for n in names])
+    with kb.write_txn(conn):
+        conn.execute('UPDATE task_runs SET started_at=?, ended_at=? WHERE id=?', (run_start, run_end, run))
+        conn.execute("UPDATE task_events SET created_at=? WHERE kind='owner_admitted'", (admitted,))
+        kb._append_event(conn, tid, 'continued', {'session_models': ['untrusted']}, run_id=run)
+    row = conn.execute("SELECT payload FROM task_events WHERE kind='continued'").fetchone()
+    return json.loads(row[0]).get('session_models')
+
+
+@pytest.mark.parametrize('offset,expected', [(0.999, ['model-a', 'model-b']), (1, None)])
+def test_session_must_start_before_admission_plus_one_second(admitted, offset, expected):
+    conn, _, tid, run, home = admitted
+    got = _stamped(conn, tid, run, home, run_start=1000, run_end=None, admitted=2000,
+                   session_start=2000 + offset)
+    assert got == expected
+
+
+@pytest.mark.parametrize('offset,expected', [(0.999, ['model-a', 'model-b']), (1, None)])
+def test_session_must_start_before_run_end_plus_one_second(admitted, offset, expected):
+    conn, _, tid, run, home = admitted
+    got = _stamped(conn, tid, run, home, run_start=1000, run_end=1500, admitted=5000,
+                   session_start=1500 + offset)
+    assert got == expected
+
+
+@pytest.mark.parametrize('admitted_at,expected', [(1000, ['model-a', 'model-b']), (999.5, None)])
+def test_admission_must_not_precede_run_start(admitted, admitted_at, expected):
+    conn, _, tid, run, home = admitted
+    # The session window [run start, admission + 1) stays non-empty, so only this guard can refuse.
+    got = _stamped(conn, tid, run, home, run_start=1000, run_end=None, admitted=admitted_at,
+                   session_start=1000.25)
+    assert got == expected
+
+
+@pytest.mark.parametrize('names', [[], [''], ['   ', 'class:fast'], ['CLASS: deep']])
+def test_only_selectors_or_blank_names_grant_no_models(admitted, names):
+    conn, _, tid, run, home = admitted
+    with sqlite3.connect(home / 'state.db') as db:
+        db.execute("UPDATE sessions SET model='class:deep' WHERE id=?", ('session',))
+    got = _stamped(conn, tid, run, home, run_start=1000, run_end=None, admitted=1000,
+                   session_start=1000, names=names)
+    assert got is None
