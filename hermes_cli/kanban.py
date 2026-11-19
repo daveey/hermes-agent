@@ -56,7 +56,7 @@ from hermes_cli.kanban_cli_park import (
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_recover, _cmd_repair, _cmd_tail, _cmd_watch,
 )
-from hermes_cli.kanban_parser import build_parser, cmd_resume as _cmd_resume, cmd_quota_release as _cmd_quota_release
+from hermes_cli.kanban_parser import build_parser, cmd_resume as _cmd_resume, cmd_quota_release as _cmd_quota_release, cmd_correct_diagnostics as _cmd_correct_diagnostics
 from hermes_cli.kanban_claim_cli import cmd_claim as _cmd_claim  # moved; re-exported for callers
 from hermes_cli.kanban_source_cli import cmd_source_release as _cmd_source_release
 from hermes_cli.kanban_run_models_cli import command as _cmd_attest_run_models
@@ -211,15 +211,10 @@ def kanban_command(args: argparse.Namespace) -> int:
         board_scope = kb.scoped_current_board(normed)
 
     with board_scope:
-        # `repair` dispatches BEFORE auto-init: on a corrupt DB init_db() itself raises
-        # KanbanDbCorruptError, which would turn every repair into "could not initialize database".
-        if action == "repair":
-            return _cmd_repair(args)
-        # `recover` too: it exists for boards init refuses.
-        if action == "recover":
-            return _cmd_recover(args)
-        # init_db is idempotent (one sqlite_master SELECT when tables exist) and prevents
-        # "no such table: tasks" on first use from a fresh HERMES_HOME.
+        # Maintenance commands must not auto-initialize/migrate before validation.
+        if handler := {"repair": _cmd_repair, "recover": _cmd_recover,
+                       "correct-diagnostics": _cmd_correct_diagnostics}.get(action):
+            return handler(args)
         try:
             kb.init_db()
         except BoardSchemaNotOwned as exc:  # one line, its own "kanban:" prefix
@@ -271,7 +266,7 @@ def _profile_author() -> str:
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "init", "attest-run-models", "create", "swarm", "assign", "reclaim", "move", "reassign", "link", "unlink",
-    "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
+    "claim", "comment", "attach", "attach-rm", "complete", "edit", "block", "correct-diagnostics",
     "schedule", "unblock", "contain", "resume-contained", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
     "request-review", "request-changes", "reopen-review", "reopen", "resume", "quota-release", "source-release",

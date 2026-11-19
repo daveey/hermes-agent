@@ -18,6 +18,7 @@ from hermes_cli.kanban_chat_links_settle import DEFAULT_SETTLE_S
 # The `resume` handler rides kanban.py's existing kanban_parser import, so kanban.py (at its
 # FILE_LINES cap) gains no line for it. [daveey]
 from hermes_cli.kanban_operator_resume import cmd as cmd_resume
+from hermes_cli.kanban_diagnostic_correction import command as cmd_correct_diagnostics
 from hermes_cli.kanban_quota_episode_release import cmd as cmd_quota_release  # same ride as cmd_resume
 
 
@@ -530,6 +531,10 @@ _SPECS = [
              help="Override the live-claim guard: complete a running, claimed task "
                   "even without owning its run (closes the worker's run)."),
     ], help="Mark one or more tasks done"),
+    _cmd("correct-diagnostics", [
+        _TASK_ID,
+        _arg("--request-file", required=True, help="UTF-8 JSON exact-content quotation request (operator only)"),
+    ], help="Audited quotation of diagnostic body/comment prose; preserves lifecycle and delivery requirements"),
     _cmd("edit", [
         _TASK_ID,
         _arg("--requires", metavar="CAPABILITIES",

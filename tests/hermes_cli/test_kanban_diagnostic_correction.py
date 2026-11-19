@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import sqlite3
+from typing import cast
 
 import pytest
 
 from tests.hermes_cli import test_kanban_edit_operator_fields as fixtures
 
+NO_BOARD = cast(sqlite3.Connection, None)
 kanban_home = fixtures.kanban_home
 
 
@@ -83,7 +86,7 @@ def test_worker_refused_before_reading_board(kanban_home, monkeypatch, worker_ke
     monkeypatch.setenv(worker_key, "fixture-worker")
     with pytest.raises(PermissionError, match="independent non-worker operator"):
         correct_diagnostics(
-            None, "fixture-card", comment_uid="fixture-comment", expected_body="error",
+            NO_BOARD, "fixture-card", comment_uid="fixture-comment", expected_body="error",
             expected_comment="error", body_diagnostic="error", comment_diagnostic="error",
             reason="test worker exclusion", request_id="fixture-worker-exclusion",
         )
@@ -102,7 +105,7 @@ def test_invalid_request_refused_before_board_access(kanban_home, field, value):
                    request_id="fixture-limits")
     request[field] = value
     with pytest.raises(ValueError, match="invalid correction field"):
-        correct_diagnostics(None, "fixture-card", **request)
+        correct_diagnostics(NO_BOARD, "fixture-card", **request)
 
 
 @pytest.mark.parametrize("stale", ["body", "comment"])

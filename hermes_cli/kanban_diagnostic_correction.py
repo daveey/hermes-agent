@@ -8,6 +8,40 @@ import os
 import sqlite3
 
 
+def command(args) -> int:
+    """Read a bounded exact request; no actor/force/authority flags exist."""
+    import json
+    import sys
+
+    from hermes_cli.kanban_db_connect import connect_closing
+    from hermes_cli.kanban_review_required import worker_identity
+
+    if worker_identity():
+        print("kanban: diagnostic correction requires an independent non-worker operator", file=sys.stderr)
+        return 2
+    keys = {"comment_uid", "expected_body", "expected_comment", "body_diagnostic",
+            "comment_diagnostic", "reason", "request_id"}
+    try:
+        with open(args.request_file, "rb") as source:
+            raw = source.read(200001)
+        if len(raw) > 200000:
+            raise ValueError("file exceeds 200000 bytes")
+        request = json.loads(raw.decode("utf-8"))
+        if not isinstance(request, dict) or set(request) != keys:
+            raise ValueError("expected exactly: " + ", ".join(sorted(keys)))
+    except (OSError, ValueError) as exc:
+        print(f"kanban: invalid correction request: {exc}", file=sys.stderr)
+        return 2
+    try:
+        with connect_closing() as conn:
+            result = correct_diagnostics(conn, args.task_id, **request)
+    except (ValueError, RuntimeError, PermissionError, sqlite3.Error) as exc:
+        print(f"kanban: correction refused: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def correct_diagnostics(
     conn: sqlite3.Connection, task_id: str, *, comment_uid: str,
     expected_body: str, expected_comment: str, body_diagnostic: str,
@@ -57,7 +91,11 @@ def correct_diagnostics(
             "before": {"body": expected_body, "comment": expected_comment}, "after": after,
         }
         for event in kb.list_events(conn, task_id):
-            if event.kind != "diagnostic_corrected" or event.payload.get("request_id") != request_id:
+            if event.kind != "diagnostic_corrected":
+                continue
+            if not isinstance(event.payload, dict):
+                raise ValueError("malformed correction audit; no correction applied")
+            if event.payload.get("request_id") != request_id:
                 continue
             if any(event.payload.get(key) != value for key, value in request.items()):
                 raise ValueError("request_id conflict; no correction applied")
