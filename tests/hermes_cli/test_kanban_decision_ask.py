@@ -9,6 +9,7 @@ gateway and a notify kind for ``tui`` chats (which the unloaded sweeper turns in
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import time
 
@@ -472,3 +473,57 @@ def test_owner_with_a_wakeable_chat_leaves_the_card_parked(kanban_home) -> None:
     _imported_ask(tid)
     with kbc.connect_closing() as conn:
         assert kb.get_task(conn, tid).status == "scheduled"
+
+
+class _ChatStore:
+    """The session store the sweeper opens for a reachable, live (not archived) orchestrator chat."""
+
+    def get_compression_tip(self, chat_id):
+        return chat_id
+
+    def _read_all(self, sql, params=()):
+        return [{"archived": 0, "end_reason": None}] if "archived" in sql and "end_reason" in sql else []
+
+    def kanban_notice_keys_delivered(self, tip, keys):
+        return set()
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+def test_spent_wake_budget_still_wakes_the_orchestrator_for_an_ask(kanban_home, monkeypatch) -> None:
+    """Adversarial review of #3647: with the chat's hourly wake budget spent by other cards, the sweeper wrote the
+    ask as a passive row and acked it, so no turn ever read it and the card stayed parked."""
+    from tui_gateway import kanban_unloaded as ku
+    chat = _session()
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _subscribe(conn, tid, chat)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": LIVE_REASON, "clock_only": True, "awaiting": LIVE_AWAITING})
+        assert kb.get_task(conn, tid).status == "scheduled", out
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    now = time.time() + 10
+    ku._reset_wake_budget_for_tests()
+    for i in range(ku.WAKES_PER_HOUR):  # the orchestrator's other cards woke it this hour
+        ku._charge_wake(chat, now - 60 * (i + 1))
+    assert not ku._has_wake_budget(chat, now)
+    wakes, rows = [], []
+
+    class Store(_ChatStore):
+        def append_kanban_notice(self, tip, text, metadata):
+            rows.append(text)
+
+    @contextlib.contextmanager
+    def session_db(chat_id):
+        yield Store(), chat_id
+
+    def wake(tip, text, meta):
+        wakes.append(text)
+        return "started"
+
+    ku.sweep_once(set(), grace_s=0, now=now, session_db=session_db, wake=wake, holders=list,
+                  spawn=lambda job: job())
+    assert len(wakes) == 1 and "parked until you decide" in wakes[0] and not rows, (wakes, rows)
+    ku._reset_wake_budget_for_tests()

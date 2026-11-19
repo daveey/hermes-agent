@@ -462,7 +462,11 @@ def _deliver_sub(conn, slug, sub, ident, grace_s, now, session_db, _kb, _kbn, ki
                 "task_id": ident["task_id"], "event_ids": [int(e.id) for e in claimed],
                 # event-id identity shared with the live poller: a notice it already wrote is not written twice
                 "kanban_event_keys": [f"{slug}:{int(e.id)}" for e in claimed if fmt(sub, task, e, slug)]}
-    held_by, verdict = _route_notice(holders, ident, tip, slug, task, texts, now, grace_s)
+    # [daveey] A worker's question to its orchestrator is not budgeted: a passive row nobody reads leaves the card
+    # parked until its deadline (adversarial review of #3647). It cannot chain: each ask is a new park, and an
+    # identical re-park escalates at kanban_awaiting.REPARK_LIMIT.
+    asks = any(getattr(e, "kind", "") == "decision_requested" for e in claimed)
+    held_by, verdict = _route_notice(holders, ident, tip, slug, task, texts, now, grace_s, exempt_budget=asks)
     if verdict == "skipped:slots" and _slots_may_wait(claimed, now):
         # Every wake slot is busy: hand the range back so the next pass wakes the chat, instead of a passive row
         # that no turn reads (design t_01a1d45d75851804 R4). An OVERDUE_S-old notice gets its row as before.
@@ -532,7 +536,8 @@ def _undelivered(db, tip, slug, claimed: list) -> list:
     return [e for e in claimed if f"{slug}:{int(e.id)}" not in done]
 
 
-def _route_notice(holders, ident, tip, slug, task, texts, now, grace_s) -> tuple[Optional[str], Optional[str]]:
+def _route_notice(holders, ident, tip, slug, task, texts, now, grace_s,
+                  exempt_budget: bool = False) -> tuple[Optional[str], Optional[str]]:
     """``(held_by, verdict)``: verdict None means a wake slot was taken and the caller must spawn the wake; any other
     verdict says why the row is written now. Never raises: the events are already claimed."""
     held_by = None
@@ -541,7 +546,8 @@ def _route_notice(holders, ident, tip, slug, task, texts, now, grace_s) -> tuple
         if held_by:
             logger.warning("kanban poller miss: chat %s is held by %s but its poller did not claim %s/%s within "
                            "%.0fs; the sweeper is delivering it", tip, held_by, slug, ident["task_id"], grace_s)
-        skip = _wake_skip_reason(task, texts) or (None if _has_wake_budget(tip, now) else "skipped:budget")
+        skip = _wake_skip_reason(task, texts) or (
+            None if exempt_budget or _has_wake_budget(tip, now) else "skipped:budget")
     except Exception:
         logger.warning("kanban sweep routing for %s failed; writing the notice row", tip, exc_info=True)
         return held_by, "error"

@@ -1628,7 +1628,7 @@ def _after_commit(conn: sqlite3.Connection, result: ApplyResult, board: Optional
         for task_id in sorted(result.decision_asks):
             try:
                 kanban_decision_ask.owner_fallback(conn, task_id)
-            except (sqlite3.Error, ValueError) as exc:  # one card's fallback never stops the rest of the apply
+            except Exception as exc:  # health: allow BLE001 -- post-commit hook: one card's fallback never skips the rest of _after_commit (logged with traceback)
                 _log.warning("kanban sync: decision ask fallback for %s failed: %s", task_id, exc, exc_info=True)
     if result.wake_dispatcher:
         wake_dispatcher()
