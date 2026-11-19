@@ -44,6 +44,11 @@ def released_history_delete(conn: sqlite3.Connection, task_id: str, *, verify_re
     """
     if pending(conn, task_id, verify_release=verify_release):
         raise sqlite3.IntegrityError("containment_pending")
+    # Retire only requests whose stop history was just verified as released,
+    # before removing that history could reinterpret them as unresolved.
+    if conn.in_transaction:
+        from hermes_cli.kanban_containment_requests import retire_released
+        retire_released(conn, task_id)
     token = _DELETE.set((id(conn), task_id))
     try:
         yield

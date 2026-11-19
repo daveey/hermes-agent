@@ -385,11 +385,11 @@ def _evict_one(conn: sqlite3.Connection, tid: str, present: set[str]) -> None:
     from hermes_cli.kanban_scratch_custody import retain
     retain(conn, tid)
     retain_ended_runs(conn, tid)
-    for table in present:
-        conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (tid,))
-    # The copy's own edges go with it; an edge from it to a card still in this file belongs to that child
-    # (own_partition keeps it, the Board still holds it). Dropping it un-gated a hub child of a copy evicted
-    # between review hand-off and re-pickup: 51 promoted / 97 claim_rejected parents_not_done (2026-10-29).
+    from hermes_cli.kanban_containment_connections import released_history_delete
+    with released_history_delete(conn, tid):
+        for table in present:
+            conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (tid,))
+    # Edges to retained children belong to those children, not the evicted copy.
     conn.execute("DELETE FROM task_links WHERE child_id = ? OR (parent_id = ? AND child_id NOT IN "
                  "(SELECT id FROM tasks WHERE id != ?))", (tid, tid, tid))
     conn.execute("DELETE FROM tasks WHERE id = ?", (tid,))
