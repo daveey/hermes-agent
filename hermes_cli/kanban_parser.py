@@ -859,6 +859,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                     "HERMES_KANBAN_BOARD env var). Use `hermes kanban boards "
                                     "list` to see all boards.")
     actions = kanban_parser.add_subparsers(dest="kanban_action")
+    _add_commands(actions, [_cmd('attest-run-models', (
+        _arg('task_ids', nargs='+'), _json_flag()), help='Attest locally admitted run models from managed state.db')])
     _add_commands(actions, _SPECS)
     from hermes_cli.kanban_containment_cli import add_parsers
     add_parsers(actions)

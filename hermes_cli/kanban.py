@@ -57,6 +57,7 @@ from hermes_cli.kanban_ops import (
 from hermes_cli.kanban_parser import build_parser, cmd_resume as _cmd_resume, cmd_quota_release as _cmd_quota_release
 from hermes_cli.kanban_claim_cli import cmd_claim as _cmd_claim  # moved; re-exported for callers
 from hermes_cli.kanban_source_cli import cmd_source_release as _cmd_source_release
+from hermes_cli.kanban_run_models_cli import command as _cmd_attest_run_models
 from hermes_cli.kanban_sync_cli import cmd_sync as _cmd_sync
 from hermes_cli.kanban_admission_explain import cmd_queue as _cmd_queue
 from hermes_cli.kanban_lanes import cli_creator as _lane_creator
@@ -267,7 +268,7 @@ def _profile_author() -> str:
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
-    "init", "create", "swarm", "assign", "reclaim", "move", "reassign", "link", "unlink",
+    "init", "attest-run-models", "create", "swarm", "assign", "reclaim", "move", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "contain", "resume-contained", "promote", "archive", "dispatch", "daemon", "repair", "recover",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
@@ -1847,6 +1848,7 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
 
 
 _HANDLERS = {
+    "attest-run-models": _cmd_attest_run_models,
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show, "wait-check": _cmd_wait_check,
     "wait-comment": _cmd_wait_comment,
