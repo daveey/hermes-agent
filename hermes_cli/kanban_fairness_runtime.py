@@ -22,8 +22,23 @@ from hermes_cli.kanban_fairness_schema import make_record
 MAX_RECORDS = 1024
 MAX_QUEUE_BYTES = 8 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 256 * 1024
+MAX_BATCH_RECORDS = 128
+MAX_BATCH_BYTES = 1024 * 1024
 _SESSIONS = {}
 _DEFAULT_HOME = None
+
+
+def close_all(timeout=2.0):
+    """All profile/board consumers share one process shutdown allowance."""
+    deadline = time.monotonic() + min(2.0, max(0.0, timeout))
+    sessions = [session for key, session in tuple(_SESSIONS.items()) if key[0] == os.getpid()]
+    for session in sessions:
+        session.begin_close(timeout=max(0.0, deadline - time.monotonic()))
+    for session in sessions:
+        session.close(timeout=max(0.0, deadline - time.monotonic()))
+
+
+atexit.register(close_all)
 
 
 def append_records(*args, **kwargs):
@@ -157,7 +172,12 @@ class Session:
         self.sealed = False
         self.seq = 0
         self.readers = 0
+        self.producers = {}
         self.deadline_ns = None
+        self.ready = threading.Event()
+        self.decision = threading.Event()
+        self.approved = False
+        self.close_lock = threading.Lock()
         self.loss_lock = threading.Lock()
         # Validate supplied identities before starting any thread or making directories.
         self.record("loss", self.loss_payload("clock_gap", 1), 1)
@@ -194,6 +214,17 @@ class Session:
             self.loss_lock.release()
 
     def enqueue(self, kind, payload):
+        # Publish custody BEFORE checking stopping. A producer that passed the
+        # check is visible until both queue admission and rejection accounting
+        # finish. Individual dict operations are atomic; no IO or waiting here.
+        token = object()
+        self.producers[token] = True
+        try:
+            return self._enqueue(kind, payload)
+        finally:
+            self.producers.pop(token)
+
+    def _enqueue(self, kind, payload):
         if self.stopping.is_set() or self.failed:
             return False
         if not self.lock.acquire(blocking=False):
@@ -233,14 +264,24 @@ class Session:
                 self.wake.clear()
                 while True:
                     with self.lock:
-                        item = self.queue.popleft() if self.queue else None
-                        done = item is None and self.stopping.is_set()
-                        if item is not None:
-                            self.bytes -= item[2]
-                    if item is None:
+                        batch, size = [], 0
+                        while self.queue and len(batch) < MAX_BATCH_RECORDS:
+                            if size + self.queue[0][2] > MAX_BATCH_BYTES:
+                                break
+                            item = self.queue.popleft()
+                            batch.append(item)
+                            size += item[2]
+                        self.bytes -= size
+                        done = not batch and self.stopping.is_set()
+                        if done and (self.producers or self.readers):
+                            self.abandoned.set()
+                    if not batch:
                         break
-                    kind, payload, _, wall, mono = item
-                    self.write(kind, json.loads(payload), wall, mono)
+                    records = [self.record(kind, json.loads(payload), self.seq + index,
+                                           wall=wall, mono=mono)
+                               for index, (kind, payload, _, wall, mono) in enumerate(batch, 1)]
+                    append_records(self.out, records, max_bytes=self.maximum)
+                    self.seq += len(records)
                 if done:
                     break
             with self.loss_lock:
@@ -252,20 +293,39 @@ class Session:
                                         source_epoch=self.epoch, last_seq=self.seq)])
                 from hermes_cli.kanban_fairness_tail import close_epoch
 
-                completed = time.monotonic_ns()
-                if not self.abandoned.is_set() and self.deadline_ns is not None and completed <= self.deadline_ns:
-                    close_epoch(self.out, self.identity, manifest, self.deadline_ns, completed)
+                self.ready.set()
+                self.decision.wait()
+                if self.approved:
+                    close_epoch(self.out, self.identity, manifest, self.deadline_ns, self.completed_ns)
                     self.sealed = True
         except (OSError, ValueError, TypeError, RuntimeError):
             # Evidence failure cannot change scheduler behavior; unsealed epoch is a gap.
             self.failed = True
             self.note_loss("writer_error")
+        finally:
+            self.ready.set()
 
     def close(self, timeout=2.0):
+        """Authorize a sealed data tail within deadline, NOT attest durable publication.
+
+        True may precede receipt IO completion; only load() proves a durable tail.
+        Once authorized, slow receipt publication cannot turn it into a rejection.
+        """
+        if not self.close_lock.acquire(blocking=False):
+            return False
+        try:
+            return self._close(timeout)
+        finally:
+            self.close_lock.release()
+
+    def begin_close(self, timeout=2.0):
+        """Signal every writer before spending the shared allowance waiting."""
         timeout = min(2.0, max(0.0, timeout))
         if self.deadline_ns is None:
             self.deadline_ns = time.monotonic_ns() + int(timeout * 1_000_000_000)
         self.stopping.set()
+        if self.producers:
+            self.abandoned.set()
         if self.lock.acquire(blocking=False):
             try:
                 if self.readers:
@@ -275,14 +335,28 @@ class Session:
         else:
             self.abandoned.set()
         self.wake.set()
-        self.thread.join(timeout)
-        if self.thread.is_alive():
+
+    def _close(self, timeout):
+        if self.decision.is_set():
+            return self.approved
+        self.begin_close(timeout)
+        assert self.deadline_ns is not None
+        deadline = min(self.deadline_ns, time.monotonic_ns() + int(max(0.0, timeout) * 1_000_000_000))
+
+        def remaining():
+            return max(0.0, (deadline - time.monotonic_ns()) / 1_000_000_000)
+        self.ready.wait(remaining())
+        self.completed_ns = time.monotonic_ns()
+        self.approved = (self.ready.is_set() and self.seq > 0 and not self.failed
+                         and not self.abandoned.is_set() and self.completed_ns <= deadline)
+        if not self.approved:
             self.abandoned.set()
+        self.decision.set()
+        self.thread.join(remaining())
         for key, session in tuple(_SESSIONS.items()):
             if session is self:
                 del _SESSIONS[key]
-        atexit.unregister(self.close)
-        return self.sealed and not self.abandoned.is_set() and not self.thread.is_alive()
+        return self.approved
 
 
 def activate(config, *, home: Path, board: str, source_gateway: str, board_uid: str,
@@ -301,5 +375,4 @@ def activate(config, *, home: Path, board: str, source_gateway: str, board_uid: 
     session = Session(settings, board=board, source_gateway=source_gateway, board_uid=board_uid,
                       clock_error_ns=clock_error_ns)
     _SESSIONS[key] = session
-    atexit.register(session.close)
     return session

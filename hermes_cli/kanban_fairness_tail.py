@@ -1,7 +1,8 @@
 """Runtime-only closing receipts; a late segment seal is not a clean epoch tail.
 
 These lifecycle files do not change the v1 event envelope. The final timestamp is
-observed after segment seal IO, in the same process monotonic clock as the deadline.
+the caller's publication authorization after segment seal IO, in the same process
+monotonic clock as the deadline; it is not receipt-publication completion time.
 Missing or invalid receipts are incomplete evidence, never a zero-loss assertion.
 """
 from __future__ import annotations
