@@ -386,7 +386,7 @@ class SessionFtsOnlineRecoveryMixin:
             plan = self._fts_plan()
         except OnlineRecoveryRefused as exc:
             if startup:
-                self._fts_tick_plan = ("refused", str(exc))
+                self._fts_tick_plan = ("refused", str(exc), bool(getattr(exc, "memoized", False)))
             log = logger.debug if getattr(exc, "memoized", False) else logger.error
             log("%s skipped: %s. `hermes sessions recover` rebuilds the store offline.", context, exc)
             self._fts_gate_outcome = "refused"

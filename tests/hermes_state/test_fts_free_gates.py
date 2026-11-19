@@ -785,3 +785,20 @@ def test_the_schema_memo_still_records_an_open(tmp_path):
     hermes_state_schema_memo.clear()
     SessionDB(db_path=path).close()
     assert hermes_state_schema_memo._memo, "the per-thread plan state disabled the schema-init memo"
+
+
+def test_a_remembered_refusal_replayed_at_open_stays_at_debug(store, caplog):
+    import logging
+
+    path, _before = store
+    _stale_source_view(path, claim=False)
+    _behind_v30(path)
+    hermes_state_fts_online.write_refusal_memo(path, "earlier damage")
+    caplog.set_level(logging.DEBUG, logger="hermes_state")
+    db = SessionDB(db_path=path)
+    try:
+        skipped = [r for r in caplog.records if "skipped: earlier damage" in r.getMessage()]
+        assert skipped and all(r.levelno == logging.DEBUG for r in skipped)
+    finally:
+        hermes_state_fts_online.write_refusal_memo(path, None)
+        db.close()
