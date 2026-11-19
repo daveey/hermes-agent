@@ -4,7 +4,7 @@ from cron.lifecycle_guard import scan_gateway_lifecycle
 
 def test_core_worktree_ssh_quote_fragments_are_not_programs(tmp_path):
     script = tmp_path / "helper.sh"
-    script.write_text('''#!/bin/bash
+    script.write_text('''#!/usr/bin/env bash
 hub_sh() {
   local s="$1"; shift
   ssh some-host "bash -c $(printf '%q' "$s") probe $(printf '%q ' "$@")"
@@ -19,7 +19,7 @@ hub_sh "$s"
 
 def test_core_worktree_python_watchdog_is_not_unknown_shell(tmp_path):
     script = tmp_path / "helper.sh"
-    script.write_text('''#!/bin/bash
+    script.write_text('''#!/usr/bin/env bash
 PY3="$(command -v /usr/bin/python3 || command -v python3)"
 read -r -d '' TRANSFER_BOUND_PY <<'PY' || true
 import sys
