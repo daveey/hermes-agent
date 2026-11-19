@@ -40,6 +40,17 @@ source documents are not successful completeness evidence. Arbitrary malformed
 source bytes are not persisted. Do not use capture configuration as a fairness
 certification or enable it fleet-wide without a separate approved capture plan.
 
+Creation receipts require both the process recorder and an unsealed database
+journal with the same capture ID. They are written in the child's transaction,
+so savepoint or outer rollback removes them; export reads only committed rows.
+Tool receipts retain the original explicit argument (including zero and null)
+or omission, the effective parent value used for inheritance, and the stored
+child result after lane policy. Courier and direct callers without original
+intent are marked unknown, not inferred from their normalized priority. Creator
+episode, parent snapshot cut and producer source hash remain unknown when the
+caller has no authoritative provenance. Missing journal custody invalidates the
+recorder rather than failing creation. Receipts do not certify capture coverage.
+
 ## Standing Kanban intake listeners
 
 `kanban.passive_intake` defaults to `{}`. It maps exact task IDs to exact stored

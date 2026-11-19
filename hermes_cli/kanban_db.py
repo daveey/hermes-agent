@@ -1200,7 +1200,7 @@ def create_task(
     placement_checked: bool = False,
     insert_guard: Optional[Callable[[sqlite3.Connection], None]] = None, placement_audit: Optional[dict] = None,
     admission_class: str = "normal", admission_frees: Optional[str] = None,
-    self_work: Optional[dict] = None,
+    self_work: Optional[dict] = None, creation_receipt: Optional[dict] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1233,9 +1233,8 @@ def create_task(
                       origin_intent=origin_intent, board=board)
     if origin_intent is not None:
         # Capture all caller options before defaults mutate them, including future options.
-        creation_options = dict(locals())
-        creation_options.pop("conn")
-        creation_options.pop("origin_intent")
+        creation_options = {key: value for key, value in locals().items()
+                            if key not in ("conn", "origin_intent", "creation_receipt")}
         from hermes_cli.kanban_origin_creation import create_with_origin
 
         return create_with_origin(conn, origin_intent, creation_options)
@@ -1364,7 +1363,7 @@ def create_task(
                     skills=skills_list, goal_mode=goal_mode, model_override=model_override,
                     provider_override=provider_override, created_by=created_by, requires=required,
                     human_request=human_request, placement_audit=placement_audit, placement_policy=placement_policy,
-                )
+                    creation_receipt=creation_receipt, board=board)
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 initialize_ownership(conn, task_id, creator_task_id, parents, now, chat_origin, native_origin)
                 native_admission.require_receipt(conn, task_id)

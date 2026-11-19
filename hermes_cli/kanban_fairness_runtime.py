@@ -69,6 +69,21 @@ def enabled(*, board) -> bool:
     return session is not None and not session.stopping.is_set()
 
 
+def capture_id(*, board):
+    """In-memory binding for transaction-owned receipts; never arms a journal."""
+    session = _SESSIONS.get(_key(board)) if _SESSIONS else None
+    if session is not None and not session.stopping.is_set() and not session.abandoned.is_set():
+        return session.identity["capture_id"]
+    return None
+
+
+def active_boards():
+    """Profile-bound fast gate before a creation caller resolves its connection's board."""
+    scope = _key(None)[:2]
+    return tuple(key[2] for key, session in tuple(_SESSIONS.items())
+                 if key[:2] == scope and not session.stopping.is_set() and not session.abandoned.is_set())
+
+
 def invalidate(*, board):
     """Fail closed after observation failure, without retrying the broken sink or IO."""
     session = _SESSIONS.get(_key(board)) if _SESSIONS else None

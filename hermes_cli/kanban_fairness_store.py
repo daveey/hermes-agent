@@ -105,6 +105,8 @@ def drain(conn: sqlite3.Connection, out: Path) -> dict:
                 payload = {"task_id": task_id, "op": op, "fields": json.loads(fields),
                            "journal_seq": db_seq, "journal_kind": kind,
                            "database_uid": receipts["database_uid"], "source_uid": None}
+                if kind == "creation":
+                    record_kind, payload = "creation", json.loads(fields)
                 if len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > MAX_PAYLOAD_BYTES:
                     record_kind = "loss"
                     # These are exporter-epoch sequence bounds, not durable journal sequence IDs.
@@ -167,6 +169,11 @@ def _load_one(out: Path) -> dict:
     gaps.extend(validate_tail(out, manifest))
     expected = 1
     for record in records:
+        if record["kind"] == "creation" and "journal" in manifest:
+            # Exactly one exported record per journal row; creation's frozen payload has no cut.
+            # Adjacent lifecycle cuts and the sealed journal count fence this position.
+            expected += 1
+            continue
         if record["kind"] not in ("opening", "row_change"):
             continue
         payload = record["payload"]

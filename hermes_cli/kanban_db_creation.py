@@ -42,20 +42,26 @@ def tool_creation_audit(args: dict, *, admission=None, **effective) -> dict | No
     return audit
 
 
-def inherit_tool_priority(conn, args, creator_task_id):
+def inherit_tool_priority(conn, args, creator_task_id, *, receipt=None):
     """Resolve omitted worker urgency before placement/courier serialization."""
+    from hermes_cli.kanban_fairness_creation import observe_intent
+
     if creator_task_id is None or args.get("priority") is not None:
+        observe_intent(conn, args, creator_task_id, receipt)
         return args
     from hermes_cli.kanban_admission_score import effective_priorities
 
     # Explicit zero wins; this snapshot excludes age/class/unblock bonuses.
-    return {**args, "priority": effective_priorities(conn, [creator_task_id]).get(creator_task_id, 0)}
+    effective = effective_priorities(conn, [creator_task_id])
+    observe_intent(conn, args, creator_task_id, receipt, effective=effective)
+    return {**args, "priority": effective.get(creator_task_id, 0)}
 
 
 def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
                    tenant, workspace_kind, workspace_path, branch_name, project_id,
                    skills, goal_mode, model_override, provider_override, created_by, requires,
-                   placement_policy, human_request=None, placement_audit=None, lane=None):
+                   placement_policy, human_request=None, placement_audit=None, lane=None,
+                   creation_receipt=None, board=None):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_consent import snapshot
 
@@ -81,6 +87,8 @@ def record_created(conn, task_id, *, assignee, status, parents, creator_task_id,
         "priority": conn.execute("SELECT priority FROM tasks WHERE id=?", (task_id,)).fetchone()[0],
         "consent_stops": snapshot(conn, task_id, creator_task_id),
     })
+    from hermes_cli.kanban_fairness_creation import stage
+    stage(conn, task_id, creator_task_id=creator_task_id, board=board, receipt=creation_receipt)
     from hermes_cli.kanban_lanes import record as record_lane
     record_lane(conn, task_id, lane)
     if isinstance(placement_audit, dict) and placement_audit.get("hub_admission"):

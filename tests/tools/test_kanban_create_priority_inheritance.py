@@ -11,6 +11,37 @@ from tests.tools import test_kanban_worker_created_chats as helpers
 home = helpers.home
 
 
+@pytest.mark.parametrize('argument,intent,expected', [
+    ("omitted", "omitted", 37), (0, "explicit", 0), (None, "explicit", 37), (60000, "explicit", 1000)])
+def test_capture_keeps_original_tool_intent(home, monkeypatch, argument, intent, expected):
+    from hermes_cli import kanban_fairness_journal as journal
+    from hermes_cli import kanban_fairness_runtime as runtime
+
+    with kbc.connect_closing() as conn:
+        creator = kb.create_task(conn, title='creator', priority=37, session_id=helpers.CHAT)
+        journal.arm(conn, 'tool-intent')
+    config = {'kanban': {'fairness_capture': {'enabled': True, 'capture_id': 'tool-intent',
+                                           'directory': str(home / 'capture')}}}
+    session = runtime.activate(config, home=home, board='default', source_gateway='test', board_uid='board')
+    monkeypatch.setenv('HERMES_KANBAN_TASK', creator)
+    monkeypatch.setenv('HERMES_SESSION_ID', helpers.WORKER)
+    try:
+        args = {'title': 'child', 'assignee': 'default', 'requires': [], 'placement': 'local'}
+        if argument != 'omitted':
+            args['priority'] = argument
+        result = json.loads(tools._handle_create(args))
+        assert result.get('ok'), result
+        with kbc.connect_closing() as conn:
+            records = [json.loads(row[5]) for row in journal.rows(conn) if row[1] == 'creation']
+        assert len(records) == 1
+        assert records[0]['priority_intent'] == intent
+        assert records[0]['priority_argument'] == (None if argument == 'omitted' else argument)
+        assert records[0]['stored_child_priority'] == expected
+    finally:
+        session.close()
+
+
+
 @pytest.mark.parametrize('explicit,expected', [(None, 37), (0, 0), (11, 11), (60000, 1000)])
 def test_tool_default_inherits_but_explicit_priority_wins(home, monkeypatch, explicit, expected):
     with kbc.connect_closing() as conn:

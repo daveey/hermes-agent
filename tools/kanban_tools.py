@@ -1585,7 +1585,8 @@ def _handle_create(args: dict, **kw) -> str:
         self_tid = (os.environ.get("HERMES_KANBAN_TASK")
                     if courier_intent is None and _is_dispatcher_owned_worker() else None)
         self_task = kb.get_task(conn, self_tid) if self_tid else None
-        args = inherit_tool_priority(conn, args, self_tid if self_task is not None else None)
+        creation_receipt = {} if courier_intent is None else None
+        args = inherit_tool_priority(conn, args, self_tid if self_task is not None else None, receipt=creation_receipt)
         session_id = _create_session_id(args, courier_intent, self_task)
         project_id, project_source_task_id = _ca.inherited_project(project_id, workspace_kind, workspace_path, self_task)
         marker_placement, place_origin = None, {"session_id": session_id}
@@ -1640,7 +1641,7 @@ def _handle_create(args: dict, **kw) -> str:
             creation_options = dict(
                 title=_redact(str(title).strip()), body=_redact_opt(args.get("body")), assignee=str(assignee),
                 parents=tuple(parents), tenant=_ca.effective_tenant(args, courier_intent),
-                priority=_opt_int(args.get("priority"), 0),
+                priority=_opt_int(args.get("priority"), 0), creation_receipt=creation_receipt,
                 admission_class=args.get("admission_class", "normal"), admission_frees=args.get("admission_frees"),
                 self_work=self_work,
                 workspace_kind=workspace_kind, workspace_path=workspace_path, project_id=project_id,
