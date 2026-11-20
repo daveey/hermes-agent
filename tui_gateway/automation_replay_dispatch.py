@@ -2,6 +2,8 @@
 from pathlib import Path
 import sqlite3
 
+from hermes_state_errors import SessionTurnLeaseLostError, CompressionSessionClosedError
+
 
 class Delivery:
     def __init__(self, journal, batch):
@@ -68,8 +70,8 @@ class Delivery:
                                              display_metadata=self.staged.get("display_metadata"),
                                              replay_delivery=self)
             return accepted
-        except sqlite3.Error:
-            # Storage is not a failed model/build attempt; keep the durable budget intact.
+        except (sqlite3.Error, SessionTurnLeaseLostError, CompressionSessionClosedError):
+            # Storage/ownership/rotation waits are not failed model or build attempts.
             return False
         finally:
             if not accepted:

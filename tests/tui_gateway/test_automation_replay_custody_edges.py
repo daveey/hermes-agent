@@ -142,6 +142,57 @@ def test_transfer_in_progress_fences_local_admission_and_stop_fences_late_publis
     assert not permits[0].admit()
 
 
+def test_handoff_never_consumes_replacement_created_during_publication(wired, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from tui_gateway.automation_replay_handoff import Journal
+    monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
+    helpers._arm_mixed(wired.path.parent)
+    original = Journal.publish
+    entered, release = threading.Event(), threading.Event()
+    published = []
+    def delayed(self, owner, items):
+        published.append([i["id"] for i in items])
+        if len(published) == 1:
+            entered.set()
+            assert release.wait(10)
+        return original(self, owner, items)
+    monkeypatch.setattr(Journal, "publish", delayed)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        transferred = pool.submit(ar.handoff, KEY)
+        try:
+            assert entered.wait(10)
+            ar.reset()
+            ar.schedule(KEY, text="replacement", display_kind="process_complete", display_metadata={},
+                        due=9000, cause="quota", persisted=False, now=5000, profile_home=wired.path.parent)
+        finally:
+            release.set()
+        assert transferred.result(timeout=10)
+    assert len(published) == 1
+    replacement = ar._entries[(str(wired.path.parent), KEY)]
+    assert [i.text for i in replacement.items] == ["replacement"]
+    assert not replacement.transferring and replacement.due == 9000
+
+
+def test_partial_cancel_during_worker_admission_rearms_only_survivor(wired, monkeypatch):
+    from tui_gateway import server
+    monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
+    permits = []
+    monkeypatch.setattr(server, "_wake_session_turn", lambda *a, **kw:
+                        permits.append(kw["replay_delivery"]) or "started")
+    helpers._arm_mixed(wired.path.parent)
+    ar._entries[(str(wired.path.parent), KEY)].items[0].persisted = False
+    ar._fire(KEY)
+    ar.cancel_carried(KEY, profile_home=wired.path.parent, through=1e20)
+    assert not permits[0].admit()
+    entry = ar._entries[(str(wired.path.parent), KEY)]
+    assert len(entry.items) == 1 and not entry.items[0].persisted
+    assert entry.fire_token is None
+    ar._fire(KEY)
+    assert len(permits) == 2 and permits[1].admit()
+    assert not ar.pending(KEY)
+
+
 def test_failed_transfer_rearms_without_spending_local_busy_budget(wired, monkeypatch):
     from tui_gateway import server
     from tui_gateway.automation_replay_handoff import Journal

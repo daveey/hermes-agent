@@ -116,6 +116,30 @@ def test_wrong_profile_store_cannot_write_replay(store, tmp_path):
         other.close()
 
 
+@pytest.mark.parametrize("refusal", ["foreign_lease", "compression_rotation"])
+def test_foreign_live_turn_lease_refuses_staging_without_spending_budget(store, monkeypatch, refusal):
+    from tui_gateway import server, automation_replay as ar
+    db, journal, batch = store
+    if refusal == "foreign_lease":
+        assert db.try_acquire_session_turn_lease("chat", "foreign-live-turn", ttl_seconds=300)
+    else:
+        db.end_session("chat", "compression")
+    session = {"session_key": "chat", "history_lock": threading.RLock()}
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _: True)
+    monkeypatch.setattr(server, "_session_db", lambda _: nullcontext(db))
+    monkeypatch.setattr(server, "_notif_release_claim", lambda *a: None)
+    monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
+    def wake(owner, text, **kw):
+        accepted = kw["replay_delivery"].submit("rid", "sid", session, text,
+                                             kw["display_kind"], kw["display_metadata"], "test")
+        return "started" if accepted else "refused"
+    for _ in range(ar.HANDOFF_FAILURES_MAX + 2):
+        ar._run_batch(journal, batch, "chat", None, wake)
+        batch = journal.claim("chat", 100, "successor", lambda _: False)
+        assert batch is not None and batch.get("failures", 0) == 0
+    assert db.get_messages("chat") == []
+
+
 def test_real_dispatch_storage_refusal_releases_claim_without_failure_charge(store, monkeypatch):
     from tui_gateway import server, automation_replay as ar
     db, journal, batch = store
