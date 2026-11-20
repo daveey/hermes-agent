@@ -415,19 +415,17 @@ def test_local_shape_vetoes(case, defect, reason):
     live.execute("PRAGMA foreign_keys=OFF")
     with kbc.write_txn(live):
         live.execute("UPDATE kanban_sync_state SET applying=1")
-        if defect == "no_link":
-            live.execute("DELETE FROM task_links WHERE parent_id=?", (parent,))
-        elif defect == "no_endpoint":
-            live.execute("DELETE FROM tasks WHERE id=?", (parent,))
-        elif defect == "no_ops":
-            live.execute("DELETE FROM kanban_sync_outbox WHERE row_uid=?", (uid,))
-        elif defect == "endpoint_tombstone":
-            live.execute("INSERT INTO kanban_sync_tombstones VALUES ('tasks',?,5)", (parent,))
-        elif defect == "no_tombstone":
-            live.execute("DELETE FROM kanban_sync_tombstones WHERE row_uid=?", (uid,))
-        elif defect == "extra_event":
-            live.execute("INSERT INTO task_events(uid,task_id,kind,payload,created_at) VALUES ('x',?,'unlinked',?,1)",
-                         (child, json.dumps({"parent": parent, "child": child})))
+        statements = {
+            "no_link": ("DELETE FROM task_links WHERE parent_id=?", (parent,)),
+            "no_endpoint": ("DELETE FROM tasks WHERE id=?", (parent,)),
+            "no_ops": ("DELETE FROM kanban_sync_outbox WHERE row_uid=?", (uid,)),
+            "endpoint_tombstone": ("INSERT INTO kanban_sync_tombstones VALUES ('tasks',?,5)", (parent,)),
+            "no_tombstone": ("DELETE FROM kanban_sync_tombstones WHERE row_uid=?", (uid,)),
+            "extra_event": ("INSERT INTO task_events(uid,task_id,kind,payload,created_at) VALUES ('x',?,'unlinked',?,1)",
+                            (child, json.dumps({"parent": parent, "child": child}))),
+        }
+        sql, params = statements[defect]
+        live.execute(sql, params)
         live.execute("UPDATE kanban_sync_state SET applying=0")
     p = recovery.plan(live, hub, BOARD, uid, "retain link")
     if reason is None:
