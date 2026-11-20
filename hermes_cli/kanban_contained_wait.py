@@ -31,14 +31,14 @@ def _json(raw: Any) -> dict:
 
 
 def _local_status(conn: sqlite3.Connection, ids: list[str]) -> dict[str, tuple[str, Optional[float]]]:
-    """``{id: (status, finished_at)}`` for cards this board file holds. ``finished_at`` is ``completed_at``, else the
-    newest event (an archived card keeps no completion time)."""
+    """``{id: (status, finished_at)}`` using the terminal transition, never later comments."""
     out: dict[str, tuple[str, Optional[float]]] = {}
     marks = ",".join("?" * len(ids))
     for tid, status, done_at, last in conn.execute(
             f"SELECT t.id, t.status, t.completed_at, (SELECT MAX(e.created_at) FROM task_events e "
-            f"WHERE e.task_id = t.id) FROM tasks t WHERE t.id IN ({marks})", ids):
-        out[str(tid)] = (str(status), done_at or last)
+            f"WHERE e.task_id = t.id AND e.kind = CASE t.status WHEN 'archived' THEN 'archived' "
+            f"ELSE 'completed' END) FROM tasks t WHERE t.id IN ({marks})", ids):
+        out[str(tid)] = (str(status), last if status == "archived" else done_at)
     return out
 
 
@@ -52,14 +52,8 @@ def _replica_status(ids: list[str]) -> dict[str, tuple[str, Optional[float]]]:
         if not rest:
             break
 
-        def read(conn: sqlite3.Connection, rest=rest) -> list:
-            return conn.execute(
-                f"SELECT t.id, t.status, t.completed_at, (SELECT MAX(e.created_at) FROM task_events e "
-                f"WHERE e.task_id = t.id) FROM tasks t WHERE t.id IN ({','.join('?' * len(rest))})", rest).fetchall()
-
         try:
-            for tid, status, done_at, last in with_reader(path, read):
-                out[str(tid)] = (str(status), done_at or last)
+            out.update(with_reader(path, lambda conn: _local_status(conn, rest)))
         except sqlite3.Error:
             continue
     return out

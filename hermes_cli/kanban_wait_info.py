@@ -159,7 +159,7 @@ def describe_contained(info: dict[str, Any], *, now: Optional[float] = None) -> 
     done_at = epoch_s(authority.get("at"))
     shown = {"episode": info["episode"], "authority": {"id": authority["id"], "status": authority["status"]},
              "producer": {"id": producer["id"], "status": producer["status"]} if producer else None}
-    base = {"wait_state": "waiting", "waiting_since": done_at, "agent_owned": False, "agent_owned_certain": True,
+    base = {"wait_state": "waiting", "waiting_since": done_at if done_at is not None else epoch_s(info.get("contained_at")), "agent_owned": False, "agent_owned_certain": True,
             "premise": None, "contained": shown}
     if authority["status"] not in ("done", "archived"):
         return {**base, "waiting_on": f"release by card {authority['id']} ({authority['status']})"}

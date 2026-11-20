@@ -29,6 +29,9 @@ def _contained(conn, *, producer=False):
 
 def _finish(conn, task, status="done", at=NOW - 45 * MIN):
     conn.execute("UPDATE tasks SET status=?, completed_at=?, current_run_id=NULL WHERE id=?", (status, at, task))
+    if status == "archived" and at is not None:
+        kb._append_event(conn, task, "archived", {})
+        conn.execute("UPDATE task_events SET created_at=? WHERE task_id=? AND kind='archived'", (at, task))
 
 
 def _wait(conn, task, now=NOW) -> dict:

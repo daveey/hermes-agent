@@ -72,12 +72,15 @@ def test_worker_sweep_does_not_escalate_a_retained_contained_copy(gws):
     home, worker, target = _retained_pair(gws)
     now = int(time.time())
     finished = now - 45 * 60
-    worker.enter()
-    authority = kb.create_task(worker.conn, title="done authority", assignee="default")
-    worker.conn.execute(
+    home.enter()
+    authority = kb.create_task(home.conn, title="done authority", assignee="default")
+    home.conn.execute(
         "UPDATE tasks SET status='done', completed_at=?, current_run_id=NULL WHERE id=?",
         (finished, authority),
     )
+    home.round()
+    worker.round()
+    assert kb.get_task(worker.conn, authority) is None
     home_name = home.name
     payload = {
         "version": 1,
@@ -85,16 +88,22 @@ def test_worker_sweep_does_not_escalate_a_retained_contained_copy(gws):
         "policy": {"version": 1, "authority": {"gateway": home_name, "board": "default", "task_id": authority}},
         "producer_baseline": None,
     }
-    with kb.write_txn(worker.conn):
-        kb._append_event(worker.conn, target, "contained", payload)
-        uid = worker.conn.execute(
-            "SELECT uid FROM task_events WHERE task_id=? AND kind='contained' ORDER BY id DESC LIMIT 1",
-            (target,),
-        ).fetchone()[0]
-        worker.conn.execute(
-            "UPDATE tasks SET status='triage', containment_episode=?, current_run_id=NULL WHERE id=?",
-            (uid, target),
-        )
+    for gateway in (home, worker):
+        gateway.enter()
+        with kb.write_txn(gateway.conn):
+            kb._append_event(gateway.conn, target, "contained", payload)
+            uid = gateway.conn.execute(
+                "SELECT uid FROM task_events WHERE task_id=? AND kind='contained' ORDER BY id DESC LIMIT 1",
+                (target,),
+            ).fetchone()[0]
+            gateway.conn.execute(
+                "UPDATE tasks SET status='triage', containment_episode=?, current_run_id=NULL WHERE id=?",
+                (uid, target),
+            )
+    # Read the authority through the worker's real Board replica, not a stub.
+    from hermes_cli import kanban_contained_wait
+    worker.enter()
+    assert kanban_contained_wait.read(worker.conn, [target])[target]["authority"]["status"] == "done"
     created = ts.escalate_stranded_contained(worker.conn, now=now)
     assert created == []
     assert worker.conn.execute(
@@ -104,6 +113,11 @@ def test_worker_sweep_does_not_escalate_a_retained_contained_copy(gws):
     assert worker.conn.execute(
         "SELECT COUNT(*) FROM tasks WHERE created_by='triage-sweep'"
     ).fetchone()[0] == 0
+    home.enter()
+    ts.sweep_stale_triage(home.conn, now=now + ts.TRIAGE_STALE_SECONDS + 1)
+    assert home.conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE created_by='triage-sweep'"
+    ).fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("legacy", [False, True])

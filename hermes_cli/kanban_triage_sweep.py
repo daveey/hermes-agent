@@ -132,10 +132,13 @@ def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float
     from hermes_cli.kanban_origin import gateway_name
     from hermes_cli.kanban_wake_check import foreign_ids
 
-    stranded = stranded_contained(conn, now=now)
+    skipped = foreign_ids(conn) if skip is None else skip
+    stranded = [card for card in stranded_contained(conn, now=now)
+                if card["id"] not in skipped and not conn.execute(
+                    "SELECT 1 FROM tasks WHERE idempotency_key = ?",
+                    (f"containment-strand:{card['id']}:{card['episode']}",)).fetchone()]
     if not stranded:
         return []
-    skipped = foreign_ids(conn) if skip is None else skip
     try:
         linked = {link["task_id"] for link in _local_links(conn, gateway_name()).values() if not link.get("released")}
     except Exception:
