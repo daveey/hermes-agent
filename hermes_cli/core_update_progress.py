@@ -59,6 +59,7 @@ def read_progress(now: Optional[float] = None) -> Optional[dict]:
                    | applying (``hermes update`` is running) | blocked (owed, but nothing can apply it)
     ``due_at``     Unix seconds the update became (or becomes) due; ``state_since`` when ``state`` began
     ``elapsed_s``  seconds since ``due_at`` on this host's clock (negative while batching: due in the future)
+    ``state_elapsed_s`` seconds since ``state_since``: the drain's own clock, which ``cap_s`` is measured on
     ``cap_s``      the drainer's own apply-over-anything cap while draining, when it published one
     ``waiting_on`` what the latest deferral named (sessions, cron runs, holds), at most MAX_WAITING_ON
     """
@@ -76,6 +77,7 @@ def read_progress(now: Optional[float] = None) -> Optional[dict]:
         "due_at": window["window_at"],
         "state_since": window["state_since"],
         "elapsed_s": round(now - window["window_at"], 1),
+        "state_elapsed_s": round(max(0.0, now - window["state_since"]), 1),
         "cap_s": cap_s,
         "waiting_on": _waiting_on(cu, now) if window["state"] in ("draining", "blocked") else [],
     }

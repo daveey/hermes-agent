@@ -43,7 +43,7 @@ def test_hold_queue_marker_still_replaces_dead_paused_or_own_markers(tmp_path):
     dead.wait()
     for prior in ({"writer_pid": dead.pid},                                        # crashed writer
                   {"writer_pid": os.getpid()},                                     # this backend's own
-                  {"writer_pid": os.getpid() + 0, "reason": "core_update_pause"}):  # a paused turn
+                  {"writer_pid": dead.pid, "reason": "core_update_pause"}):        # a crashed writer's paused turn
         _seed(tmp_path, {"attempts": 0, "prompt": "old", "started_at": time.time(), "auto_continue": True, **prior})
         assert record_turn_start(tmp_path, "S", "queued", reason=UPDATE_HOLD_QUEUE_REASON) is True
         got = read_turn_marker(tmp_path, "S")

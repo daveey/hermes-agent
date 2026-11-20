@@ -18,6 +18,8 @@ export interface UpdateProgressResponse {
     due_at: number
     state_since: number
     elapsed_s: number
+    /** Seconds in the current state (the drain's own clock, which `cap_s` is measured on). Absent on older hosts. */
+    state_elapsed_s?: number
     cap_s: null | number
     waiting_on: string[]
   }
@@ -27,6 +29,8 @@ export interface BackgroundUpdateProgress {
   state: BackgroundUpdateState
   /** Seconds since the update was due, on the host's clock when fetched (negative while batching). */
   elapsedS: number
+  /** Seconds in the current state when fetched; the bar measures the drainer's cap on this clock. */
+  stateElapsedS: number
   capS: null | number
   waitingOn: string[]
   /** Local `Date.now()` when fetched: elapsed advances from here, so a skewed client clock never matters. */
@@ -58,6 +62,9 @@ export function mapUpdateProgress(
   return {
     state: raw.state as BackgroundUpdateState,
     elapsedS: raw.elapsed_s,
+    stateElapsedS: Number.isFinite(raw.state_elapsed_s)
+      ? Math.max(0, raw.state_elapsed_s as number)
+      : Math.max(0, raw.elapsed_s),
     capS: typeof raw.cap_s === 'number' && raw.cap_s > 0 ? raw.cap_s : null,
     waitingOn: Array.isArray(raw.waiting_on) ? raw.waiting_on.filter(item => typeof item === 'string') : [],
     fetchedAt
@@ -103,7 +110,8 @@ export function describeBackgroundUpdate(
     return null
   }
 
-  const elapsed = progress.elapsedS + Math.max(0, now - progress.fetchedAt) / 1000
+  const since = Math.max(0, now - progress.fetchedAt) / 1000
+  const elapsed = progress.elapsedS + since
 
   switch (progress.state) {
     case 'batching': {
@@ -121,7 +129,8 @@ export function describeBackgroundUpdate(
 
     case 'draining': {
       const cap = progress.capS
-      const pastCap = cap !== null && elapsed >= cap
+      const drained = progress.stateElapsedS + since
+      const pastCap = cap !== null && drained >= cap
 
       return {
         busy: true,
@@ -130,7 +139,7 @@ export function describeBackgroundUpdate(
           copy.tooltipDraining(formatDuration(elapsed)) +
           (pastCap ? `\n${copy.tooltipPastCap(formatDuration(cap))}` : '') +
           waitingLine(progress.waitingOn, copy),
-        bar: { fraction: cap !== null && !pastCap ? Math.min(1, Math.max(0, elapsed / cap)) : null }
+        bar: { fraction: cap !== null && !pastCap ? Math.min(1, Math.max(0, drained / cap)) : null }
       }
     }
 

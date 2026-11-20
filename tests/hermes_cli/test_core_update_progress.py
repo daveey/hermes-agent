@@ -34,13 +34,13 @@ def window(cu, **changes):
 
 
 def test_draining_reports_elapsed_cap_and_what_it_waits_on(cu):
-    window(cu)
+    window(cu, state_since=NOW - 45)  # due 701 s ago; this drain pass began 45 s ago
     (cu / "drain.json").write_text(json.dumps({"pid": 1, "state": "draining", "total_cap_s": 60.0}))
     reasons = [f"default:2026111{i}_000000_aaaaa{i}" for i in range(10)]
     (cu / "governor-other-defers.json").write_text(json.dumps({"ts": NOW - 30, "reasons": reasons}))
     assert cup.read_progress(NOW) == {
-        "state": "draining", "due_at": NOW - 701, "state_since": NOW - 701, "elapsed_s": 701.0,
-        "cap_s": 60.0, "waiting_on": reasons[:cup.MAX_WAITING_ON]}
+        "state": "draining", "due_at": NOW - 701, "state_since": NOW - 45, "elapsed_s": 701.0,
+        "state_elapsed_s": 45.0, "cap_s": 60.0, "waiting_on": reasons[:cup.MAX_WAITING_ON]}
 
 
 def test_applying_has_no_waiting_list_and_batching_is_due_in_the_future(cu):

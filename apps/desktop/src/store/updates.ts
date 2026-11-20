@@ -1376,6 +1376,8 @@ export const UPDATE_PROGRESS_POLL_MS = 10_000
 
 const progressBusy = (p: BackgroundUpdateProgress | null): boolean => p?.state === 'draining' || p?.state === 'applying'
 
+const progressInFlight: Record<UpdateTarget, boolean> = { backend: false, client: false }
+
 async function pollProgressFor(target: UpdateTarget): Promise<void> {
   const store = target === 'backend' ? $backendUpdateProgress : $clientUpdateProgress
 
@@ -1385,6 +1387,11 @@ async function pollProgressFor(target: UpdateTarget): Promise<void> {
     return
   }
 
+  if (progressInFlight[target]) {
+    return // a slow host: never stack requests or let an older answer land after a newer one
+  }
+
+  progressInFlight[target] = true
   const requestKey = connectionKey($connection.get())
   let next: BackgroundUpdateProgress | null
 
@@ -1395,7 +1402,11 @@ async function pollProgressFor(target: UpdateTarget): Promise<void> {
       Date.now()
     )
   } catch {
-    next = null // an older backend without the route, or no local backend: nothing to show
+    // Unreachable (restarting for this very update, an older backend without the route, no warm local
+    // backend): keep what the pill shows. Only a host that answers "nothing in progress" ends an update.
+    return
+  } finally {
+    progressInFlight[target] = false
   }
 
   if (target === 'backend' && connectionKey($connection.get()) !== requestKey) {
@@ -1403,6 +1414,7 @@ async function pollProgressFor(target: UpdateTarget): Promise<void> {
   }
 
   const finished = progressBusy(store.get()) && !progressBusy(next)
+
   store.set(next)
 
   if (finished) {
@@ -1484,9 +1496,12 @@ export function startUpdatePoller(): void {
     }
 
     lastConnectionKey = key
+    // Another host now: the previous remote's update state is not this one's.
+    $backendUpdateProgress.set(null)
 
     if (conn?.mode === 'remote') {
       void checkBackendUpdates()
+      void pollProgressFor('backend')
     }
   })
 

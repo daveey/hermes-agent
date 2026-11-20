@@ -33,8 +33,17 @@ const remote: HermesConnection = {
 }
 
 const draining = {
-  progress: { state: 'draining', due_at: 1, state_since: 1, elapsed_s: 40, cap_s: 60, waiting_on: ['default:s'] }
+  progress: {
+    state: 'draining',
+    due_at: 1,
+    state_since: 1,
+    elapsed_s: 40,
+    state_elapsed_s: 40,
+    cap_s: 60,
+    waiting_on: ['default:s']
+  }
 }
+
 const applying = { progress: { ...draining.progress, state: 'applying' } }
 const clientCheck = vi.fn().mockResolvedValue({ supported: true, behind: 0 })
 
@@ -68,17 +77,58 @@ describe('pollUpdateProgress', () => {
     })
   })
 
-  it('asks no remote host while local, and a missing route reads as no update', async () => {
+  it('asks no remote host while local', async () => {
     setConnection({ ...remote, mode: 'local' })
-    updates.$backendUpdateProgress.set({ state: 'applying', elapsedS: 1, capS: null, waitingOn: [], fetchedAt: 0 })
-    progressSpy.mockRejectedValue(new Error('404'))
+    updates.$backendUpdateProgress.set({
+      state: 'applying',
+      elapsedS: 1,
+      stateElapsedS: 1,
+      capS: null,
+      waitingOn: [],
+      fetchedAt: 0
+    })
+    progressSpy.mockResolvedValue({ progress: null })
 
     await updates.pollUpdateProgress()
 
     expect(progressSpy).toHaveBeenCalledTimes(1)
     expect(progressSpy).toHaveBeenCalledWith({ connectionId: 'local' })
-    expect(updates.$clientUpdateProgress.get()).toBeNull()
     expect(updates.$backendUpdateProgress.get()).toBeNull()
+  })
+
+  it('an unreachable host (restarting for this update) keeps the pill as it was and refreshes nothing', async () => {
+    setConnection(remote)
+    progressSpy.mockImplementation(async (scope?: { connectionId?: string }) => (scope ? { progress: null } : applying))
+    await updates.pollUpdateProgress()
+
+    progressSpy.mockImplementation(async (scope?: { connectionId?: string }) => {
+      if (scope) {
+        return { progress: null }
+      }
+
+      throw new Error('backend restarting')
+    })
+    await updates.pollUpdateProgress()
+
+    expect(updates.$backendUpdateProgress.get()).toMatchObject({ state: 'applying' })
+    expect(checkHermesUpdateSpy).not.toHaveBeenCalled()
+  })
+
+  it('never stacks a second request on a host that has not answered yet', async () => {
+    setConnection(remote)
+
+    let release: (value: unknown) => void = () => {}
+    progressSpy.mockImplementation((scope?: { connectionId?: string }) =>
+      scope ? Promise.resolve({ progress: null }) : new Promise(r => (release = r))
+    )
+
+    const first = updates.pollUpdateProgress()
+    await updates.pollUpdateProgress()
+    release(draining)
+    await first
+
+    expect(progressSpy.mock.calls.filter(([scope]) => scope === undefined)).toHaveLength(1)
+    expect(updates.$backendUpdateProgress.get()).toMatchObject({ state: 'draining' })
   })
 
   it('refreshes the backend version check once its update finishes, not while it runs', async () => {

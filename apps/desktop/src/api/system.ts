@@ -162,18 +162,22 @@ export function updateHermes(): Promise<ActionResponse> {
   })
 }
 
-/** Query the connected backend's own update state. In remote mode this is the
- *  authoritative source for the backend's behind-count + "what's changed",
- *  distinct from the Electron client clone's git state. */
 /** [daveey] The host's own background core update (hermes-sync); `{ progress: null }` when none is owed.
- *  `scope` pins the host: `{ connectionId: 'local' }` for this machine, omitted for the active backend. */
+ *  `scope` pins the host: `{ connectionId: 'local' }` for this machine, omitted for the active backend.
+ *  A 10 s background poll: passive (never cold-starts a backend) and never `foreground` (that would count as
+ *  user activity and open the sleep gate, electron/power-settle.ts). */
 export function getHermesUpdateProgress(scope?: ProfileScope): Promise<UpdateProgressResponse> {
   return hermesApi<UpdateProgressResponse>({
     ...(scope ? capabilityScoped(scope) : profileScoped()),
+    passive: true,
+    priority: undefined,
     path: '/api/hermes/update/progress'
   })
 }
 
+/** Query the connected backend's own update state. In remote mode this is the
+ *  authoritative source for the backend's behind-count + "what's changed",
+ *  distinct from the Electron client clone's git state. */
 export function checkHermesUpdate(force = false): Promise<BackendUpdateCheckResponse> {
   return hermesApi<BackendUpdateCheckResponse>({
     ...profileScoped(),

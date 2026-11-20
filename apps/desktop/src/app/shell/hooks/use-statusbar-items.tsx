@@ -113,7 +113,7 @@ function UpdateProgressBar({ fraction }: { fraction: null | number }) {
   return (
     <span
       aria-hidden
-      className="pointer-events-none absolute inset-x-0 -bottom-1 h-0.5 overflow-hidden rounded-full bg-primary/20"
+      className="pointer-events-none absolute inset-x-1.5 bottom-0.5 h-0.5 overflow-hidden rounded-full bg-primary/20"
       data-slot="version-update-bar"
     >
       {fraction === null ? (
@@ -142,19 +142,23 @@ function versionItem(
   const busy = applying || Boolean(bg?.busy)
   const text = bg ? `${status.label} · ${bg.suffix}` : status.label
 
+  const spinner = busy ? <Loader2 className="size-3 animate-spin" /> : <Hash className="size-3" />
+
   return {
-    className: status.hasUpdate || busy ? 'text-primary hover:text-primary' : undefined,
+    // `relative` anchors the bar to the pill's button; it rides the icon slot because the label sits in a
+    // truncating (overflow-hidden) span that would clip anything drawn under the text.
+    className: cn((status.hasUpdate || busy) && 'text-primary hover:text-primary', bg?.bar && 'relative'),
     hidden: status.unknown || hidden,
-    icon: busy ? <Loader2 className="size-3 animate-spin" /> : <Hash className="size-3" />,
-    id: `version-${target}`,
-    label: bg?.bar ? (
-      <span className="relative inline-flex" data-slot="version-update-label">
-        {text}
+    icon: bg?.bar ? (
+      <>
+        {spinner}
         <UpdateProgressBar fraction={bg.bar.fraction} />
-      </span>
+      </>
     ) : (
-      text
+      spinner
     ),
+    id: `version-${target}`,
+    label: text,
     // Update state is not a preference: hiding it is how a user misses that
     // they are behind. Listed in the menu, but locked on.
     lockedVisible: true,

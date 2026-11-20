@@ -13,7 +13,16 @@ const copy = en.shell.statusbar.backgroundUpdate
 const FETCHED = 1_000_000
 
 const wire = (over: Partial<NonNullable<UpdateProgressResponse['progress']>> = {}): UpdateProgressResponse => ({
-  progress: { state: 'draining', due_at: 1, state_since: 1, elapsed_s: 30, cap_s: 60, waiting_on: [], ...over }
+  progress: {
+    state: 'draining',
+    due_at: 1,
+    state_since: 1,
+    elapsed_s: 30,
+    state_elapsed_s: 30,
+    cap_s: 60,
+    waiting_on: [],
+    ...over
+  }
 })
 
 describe('mapUpdateProgress', () => {
@@ -21,6 +30,7 @@ describe('mapUpdateProgress', () => {
     expect(mapUpdateProgress(wire(), FETCHED)).toEqual({
       state: 'draining',
       elapsedS: 30,
+      stateElapsedS: 30,
       capS: 60,
       waitingOn: [],
       fetchedAt: FETCHED
@@ -46,7 +56,7 @@ describe('describeBackgroundUpdate', () => {
     const waiting = ['default:a', 'default:b', 'default:c', 'default:d', 'default:e', 'default:f']
 
     const view = describeBackgroundUpdate(
-      mapUpdateProgress(wire({ elapsed_s: 701, waiting_on: waiting }), FETCHED),
+      mapUpdateProgress(wire({ elapsed_s: 701, state_elapsed_s: 90, waiting_on: waiting }), FETCHED),
       FETCHED,
       copy
     )
@@ -55,6 +65,20 @@ describe('describeBackgroundUpdate', () => {
     expect(view?.tooltip).toContain(copy.tooltipDraining('12m'))
     expect(view?.tooltip).toContain(copy.tooltipPastCap('1m'))
     expect(view?.tooltip).toContain(copy.waitingOn('default:a, default:b, default:c, default:d +2'))
+  })
+
+  it('measures the bar on the drain pass clock, the tooltip on time since the update was due', () => {
+    // hermes-hub 2026-11-19: due 701 s ago, but this drain pass (and its 60 s cap) began 30 s ago.
+    const view = describeBackgroundUpdate(
+      mapUpdateProgress(wire({ elapsed_s: 701, state_elapsed_s: 30 }), FETCHED),
+      FETCHED,
+      copy
+    )
+
+    expect(view?.bar).toEqual({ fraction: 0.5 })
+    expect(view?.tooltip).toContain(copy.tooltipDraining('12m'))
+    // An older host without state_elapsed_s falls back to time since due.
+    expect(mapUpdateProgress(wire({ elapsed_s: 40, state_elapsed_s: undefined }), FETCHED)?.stateElapsedS).toBe(40)
   })
 
   it('installing is busy with an indeterminate bar; blocked and batching are quiet', () => {

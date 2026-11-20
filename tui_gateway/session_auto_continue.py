@@ -897,8 +897,13 @@ def _queue_submit_behind_update_hold(rid, sid: str, session: dict, text: Any, tr
         # that the post-restart ``session.resume`` replays through auto-continue.
         if envelope is not None and (queued_now := session.get("queued_prompt")):
             from tui_gateway.turn_marker import record_turn_start
-            record_turn_start(_session_home(session), str(session.get("session_key") or ""),
-                              str(queued_now.get("text") or text), reason=UPDATE_HOLD_QUEUE_REASON)
+            if not record_turn_start(_session_home(session), str(session.get("session_key") or ""),
+                                     str(queued_now.get("text") or text), reason=UPDATE_HOLD_QUEUE_REASON):
+                # [daveey] Not journaled: a sibling backend's live turn holds this session's marker (it must keep
+                # the drain from updating over that turn), or the write failed. The message stays queued in memory;
+                # a restart for the update before the hold lifts leaves it "not sent" with Retry.
+                logger.warning("update-hold queue for session %s: not journaled for replay (marker held or "
+                               "unwritable); a restart before the hold lifts drops it to Retry", sid)
         if not retry_queued_prompt(rid, sid, session) and session.get("queued_prompt"):
             # Retirement raced in between: the queue is the client's to replay; keep the 5035.
             logger.info("update-hold queue for session %s: retry unavailable, kept queued", sid)

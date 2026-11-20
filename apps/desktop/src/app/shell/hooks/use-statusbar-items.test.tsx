@@ -195,6 +195,7 @@ describe('statusbar background core update (hermes-sync)', () => {
     nodeVersion: '22',
     platform: 'darwin'
   }
+
   const markup = (node: ReactNode) => renderToStaticMarkup(<>{node}</>)
 
   it('spins the client pill, names the update and draws a bar filling toward the drainer cap', () => {
@@ -202,6 +203,7 @@ describe('statusbar background core update (hermes-sync)', () => {
       $desktopVersion.set(desktop)
       $updateStatus.set({ behind: 0, supported: true })
       $clientUpdateProgress.set({
+        stateElapsedS: 30,
         state: 'draining',
         elapsedS: 30,
         capS: 60,
@@ -211,27 +213,36 @@ describe('statusbar background core update (hermes-sync)', () => {
     })
 
     const version = renderStatusbarItems().statusbarItems.find(item => item.id === 'version-client')
-    const label = markup(version?.label)
+    const icon = markup(version?.icon)
 
-    expect(label).toContain('v0.23.1 · updating')
-    expect(label).toContain('data-slot="version-update-bar"')
-    expect(label).toMatch(/width:\s*5\d%/)
-    expect(markup(version?.icon)).toContain('animate-spin')
+    // The bar rides the icon slot, outside the label's truncating (overflow-hidden) span, anchored to the button.
+    expect(version?.label).toBe('v0.23.1 · updating')
+    expect(icon).toContain('animate-spin')
+    expect(icon).toContain('data-slot="version-update-bar"')
+    expect(icon).toMatch(/width:\s*50%/)
     expect(version?.className).toContain('text-primary')
+    expect(version?.className).toContain('relative')
     expect(version?.title).toContain(en.shell.statusbar.backgroundUpdate.waitingOn('default:s1'))
   })
 
   it('shows the remote host installing on the backend pill with a sweeping bar', () => {
     act(() => {
       $connection.set({ mode: 'remote' } as never)
-      $backendUpdateProgress.set({ state: 'applying', elapsedS: 720, capS: 60, waitingOn: [], fetchedAt: Date.now() })
+      $backendUpdateProgress.set({
+        state: 'applying',
+        stateElapsedS: 120,
+        elapsedS: 720,
+        capS: 60,
+        waitingOn: [],
+        fetchedAt: Date.now()
+      })
     })
 
     const items = renderStatusbarItems().statusbarItems
     const backend = items.find(item => item.id === 'version-backend')
 
     // No backend version known yet in this fixture: the pill stays hidden, but carries the update state.
-    expect(markup(backend?.label)).toContain('update-bar-sweep')
+    expect(markup(backend?.icon)).toContain('update-bar-sweep')
     expect(backend?.title).toContain(en.shell.statusbar.backgroundUpdate.tooltipApplying('12m'))
   })
 
@@ -240,6 +251,7 @@ describe('statusbar background core update (hermes-sync)', () => {
       $desktopVersion.set(desktop)
       $updateStatus.set({ behind: 0, supported: true })
       $clientUpdateProgress.set({
+        stateElapsedS: 0,
         state: 'batching',
         elapsedS: -1860,
         capS: null,
