@@ -21,6 +21,8 @@ def cards_today(conn, lane, *, now=None):
 def exempt(conn, lane, opts):
     from hermes_cli import kanban_lanes as lanes
 
+    if opts.get("_stored_card") and not opts.get("creator_task_id"):
+        return False  # Stored provenance never comes from the evaluating worker's environment.
     if any(p.search(opts.get("title") or "") for p in lane.gate_exempt):
         row = lanes._creator_row(conn, opts)
         return row is not None and not (row["status"] == "triage" and row["block_kind"] == lanes.GATE_KIND)
@@ -46,6 +48,7 @@ def reason(conn, pol, lane_name, opts, *, now=None):
 def row_opts(conn, row):
     """A stored card as creation options, including the creator fields the exemptions read."""
     opts = dict(row)
+    opts["_stored_card"] = True
     created = conn.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind='created' ORDER BY id LIMIT 1", (row["id"],)).fetchone()
     if created:

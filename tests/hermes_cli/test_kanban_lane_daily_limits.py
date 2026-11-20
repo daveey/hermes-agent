@@ -14,6 +14,32 @@ configured = base.configured
 person = base.person
 
 
+@pytest.mark.parametrize("cap", ["cards_per_day", "usd_per_day"])
+@pytest.mark.parametrize("entry", ["release", "plan", "flow"])
+def test_creatorless_stored_card_never_inherits_evaluating_worker(conn, configured, monkeypatch, cap, entry):
+    from hermes_cli import kanban_lanes_flow as flow
+    from hermes_cli import kanban_lanes_flow_pr as prs
+    from agent import delegation_context
+
+    parent = base._hermes_parent(conn)
+    limits(configured, "hermes", **{cap: 0})
+    tid = kb.create_task(conn, title="Independent review", assignee="default", created_by="self-heal")
+    assert base._task(conn, tid)["status"] == "triage"
+    monkeypatch.setenv("HERMES_KANBAN_TASK", parent)
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_TASK", parent)
+    monkeypatch.setattr(delegation_context, "is_dispatcher_owned_worker_context", lambda: True)
+    if entry == "release":
+        kb.recompute_ready(conn)
+    elif entry == "plan":
+        result = plan.apply(conn, [{"action": "admit", "card": tid, "reason": "evaluate"}])
+        assert result["rejected"][0]["why"] == f"limit:{cap}"
+    else:
+        monkeypatch.setattr(prs.Reader, "get", lambda self, url: {})
+        card = next(c for c in flow.snapshot(conn)["cards"] if c["id"] == tid)
+        assert card["reason"] == f"limit:{cap}"
+    assert base._task(conn, tid)["status"] == "triage"
+
+
 def limits(configured, lane="babybear", **values):
     mapping = json.loads(json.dumps(base.LANES))
     mapping[lane].update(values)

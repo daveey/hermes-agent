@@ -1,5 +1,6 @@
 """Bounded read-only PR observations for the lane-flow report. [daveey]"""
 import json
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,9 +22,11 @@ def _bot(person):
 
 
 def independent_approval(data):
-    """True when each non-author human's latest verdict is clean and one approves the current head.
+    """Observe a current-head review verdict, not authorization to ship.
 
-    ``reviewDecision`` is empty on repositories that require no PR reviews, so it alone never shows approval.
+    Fleet reviewer sessions share a GitHub login and publish COMMENTED reviews headed by
+    VERDICT: APPROVE / REQUEST_CHANGES. Ship separately verifies independent session custody.
+    Standard GitHub APPROVED reviews still require a non-author human.
     """
     head = data.get("headRefOid")
     latest = {}
@@ -31,10 +34,19 @@ def independent_approval(data):
         if not isinstance(review, dict):
             continue
         who = _login(review.get("author"))
-        if not who or _bot(review.get("author")) or who == _login(data.get("author")):
+        if not who or _bot(review.get("author")):
             continue
-        if review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
-            latest[who] = review
+        state = review.get("state")
+        if state == "COMMENTED":
+            first = str(review.get("body") or "").strip().splitlines()
+            verdict = re.match(r"^(?:\*\*)?VERDICT:\s*(APPROVE|REQUEST_CHANGES)(?:\*\*)?(?=\s|$)",
+                               first[0] if first else "", re.IGNORECASE)
+            state = {"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED"}.get(
+                verdict[1].upper() if verdict else "")
+        elif who == _login(data.get("author")):
+            continue
+        if state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[who] = dict(review, state=state)
     if not latest or any(r.get("state") == "CHANGES_REQUESTED" for r in latest.values()):
         return False
     return any(r.get("state") == "APPROVED" and (r.get("commit") or {}).get("oid") == head

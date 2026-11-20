@@ -73,6 +73,39 @@ def _review(login, state, oid, bot=False):
     return {"author": {"login": login, "is_bot": bot}, "state": state, "commit": {"oid": oid}}
 
 
+@pytest.mark.parametrize("body,oid,bot,expected", [
+    ("VERDICT: APPROVE\nIndependent exact-head review.", "a" * 40, False, True),
+    ("\nVERDICT: APPROVE\n", "a" * 40, False, True),
+    ("**Verdict: APPROVE** at exact head `" + "a" * 40 + "` (independent exact-head review).",
+     "a" * 40, False, True),
+    ("VERDICT: APPROVED", "a" * 40, False, False),
+    ("VERDICT: REQUEST_CHANGES\n", "a" * 40, False, False),
+    ("VERDICT: APPROVE\n", "b" * 40, False, False),
+    ("VERDICT: APPROVE\n", "a" * 40, True, False),
+    ("Quoted verdict below\nVERDICT: APPROVE", "a" * 40, False, False),
+    ("Looks approved to me", "a" * 40, False, False),
+])
+def test_fleet_comment_verdict_same_github_identity(monkeypatch, body, oid, bot, expected):
+    review = dict(_review("author", "COMMENTED", oid, bot), body=body)
+    view = {"state": "OPEN", "headRefOid": "a" * 40, "reviewDecision": "",
+            "author": {"login": "author"}, "reviews": [review]}
+    monkeypatch.setattr(Reader, "_read", lambda self, argv: [{"bucket": "pass"}] if "checks" in argv else view)
+    from hermes_cli.kanban_lanes_flow import classify_step
+    observed = Reader().get("https://github.com/example/repo/pull/1")
+    assert observed["approved"] is expected
+    assert classify_step({"status": "scheduled", "pr": observed}) == (
+        "merge" if expected else "landing_unclassified")
+
+
+def test_fleet_comment_change_request_supersedes_approval(monkeypatch):
+    reviews = [dict(_review("author", "COMMENTED", "a" * 40), body=f"VERDICT: {v}")
+               for v in ("APPROVE", "REQUEST_CHANGES")]
+    view = {"state": "OPEN", "headRefOid": "a" * 40, "reviewDecision": "",
+            "author": {"login": "author"}, "reviews": reviews}
+    monkeypatch.setattr(Reader, "_read", lambda self, argv: [{"bucket": "pass"}] if "checks" in argv else view)
+    assert Reader().get("https://github.com/example/repo/pull/1")["approved"] is False
+
+
 @pytest.mark.parametrize("reviews,approved", [
     ([_review("rev", "APPROVED", "a" * 40)], True),
     ([_review("rev", "APPROVED", "b" * 40)], False),                          # older head
