@@ -77,7 +77,7 @@ def test_journal_failure_does_not_advance_cursor(synced_conn, monkeypatch):
     conn = synced_conn
     target, _, change, hub, _original = conflict(conn)
     old = sync.sync_state(conn)["cursor"]
-    monkeypatch.setattr(quarantine, "_wire", lambda ch: (_ for _ in ()).throw(OSError("disk unavailable")))
+    monkeypatch.setattr(quarantine, "wire", lambda ch: (_ for _ in ()).throw(OSError("disk unavailable")))
     with pytest.raises(OSError, match="disk unavailable"):
         quarantine.certified_page(conn, hub, "fixture", [change])
     assert sync.sync_state(conn)["cursor"] == old

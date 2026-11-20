@@ -817,10 +817,11 @@ _SPECS = [
                                    _arg("--expect", metavar="TOKEN", default=None)],
              help="Abandon containment-refused historical deletes in favor of the live canonical link (audited preview by default)"),
         _cmd("quarantine", [_json_flag(), _arg("--release", metavar="RECEIPT", default=None,
-                                               help="Release one receipt's host-local hold (needs --reason)"),
-                            _arg("--reason", metavar="TEXT", default=None)],
-             help="List receipts quarantined for a changed certified identity and the tasks they hold; "
-                  "--release RECEIPT --reason TEXT lifts one after you have ruled on the Board's copy"),
+                                               help="Accept the Board's live evidence for RECEIPT and replay its "
+                                                    "withheld rows (needs --reason)"),
+                            _arg("--reason", metavar="TEXT", default=None, help="Recorded with the acceptance")],
+             help="List receipts quarantined for conflicting containment evidence and the tasks they hold; "
+                  "--release RECEIPT --reason TEXT releases one after you have ruled on the Board's copy"),
         _cmd("reserved-key", [_json_flag(), _arg("task_id", metavar="TASK_ID"),
                               _arg("--new-key", required=True, metavar="KEY",
                                    help="Replacement idempotency key (non-empty, not pickup-stall:/worker-resources-unknown:)"),

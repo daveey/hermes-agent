@@ -13,7 +13,7 @@ import sqlite3
 from collections.abc import Iterator
 
 from hermes_cli import kanban_containment_canonical as canonical
-from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
+from hermes_cli.kanban_containment_lifecycle import ContainmentConflict, ContainmentRefused
 from hermes_cli.kanban_containment_state import _payload
 
 _CACHE = contextvars.ContextVar("containment_cache_write", default=None)
@@ -62,9 +62,12 @@ def remember(conn: sqlite3.Connection, evidence: dict, *, board: str, task: str,
         if prior is not None:
             # Identity is the certified fields only; volatile transport keys of the
             # evidence response (feed `head` etc.) are ignored. The first stored
-            # evidence is kept: the cache is append-only.
+            # evidence is kept: the cache is append-only. An operator's recorded acceptance of exactly this
+            # evidence (``hermes kanban sync quarantine --release``) is the only other match.
             if tuple(prior)[:6] != values[:6] or _certified(prior[6]) != _certified(raw):
-                raise ContainmentRefused("canonical receipt identity changed")
+                from hermes_cli.kanban_sync_quarantine_release import accepted
+                if not accepted(conn, uid, raw):
+                    raise ContainmentConflict("canonical receipt identity changed", kind="identity_changed", uid=uid)
             return
         token = _CACHE.set(id(conn))
         try:
@@ -90,8 +93,12 @@ def _certified(raw: str) -> tuple:
 
 
 def _cached(conn: sqlite3.Connection, uid: str) -> dict | None:
+    """The receipt's certified evidence: an operator-accepted newer Board copy, else the first observation."""
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='containment_canonical_receipts'").fetchone():
         return None
+    from hermes_cli.kanban_sync_quarantine_release import accepted_evidence
+    if (newer := accepted_evidence(conn, uid)) is not None:
+        return newer
     row = conn.execute("SELECT evidence FROM containment_canonical_receipts WHERE uid=?", (uid,)).fetchone()
     return json.loads(row[0]) if row else None
 
@@ -141,7 +148,7 @@ def certify_page(conn: sqlite3.Connection, hub, board: str, changes) -> None:
             stop = hub.row_evidence(board, "task_events", data.get("episode"))
         remember(conn, proof, board=board, task=ch.fields.get("task_id"), uid=ch.uid, stop_evidence=stop)
         if not _matches({**ch.fields, "uid": ch.uid}, proof) or ch.origin_gateway != proof["row"]["origin_gateway"]:
-            raise ContainmentRefused("replica event differs from its canonical receipt")
+            raise ContainmentConflict("replica event differs from its canonical receipt", kind="event_differs", uid=ch.uid)
 
 
 def adopt_receipts(conn: sqlite3.Connection, source: sqlite3.Connection, changes) -> None:

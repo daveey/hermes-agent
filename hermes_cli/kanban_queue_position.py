@@ -213,6 +213,9 @@ def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Op
     lock = conn.execute("SELECT claim_lock, worker_pid FROM tasks WHERE id = ?", (task.id,)).fetchone()
     if lock is not None and lock[0]:
         return {"lane": "leftover_claim", "claim_lock": lock[0], "worker_pid": lock[1]}
+    from hermes_cli.kanban_sync_quarantine import refusal as quarantine_refusal
+    if held := quarantine_refusal(conn, task.id):  # the dispatcher drops it (drop_held): say why and how [daveey]
+        return {"lane": "sync_quarantine", "reason": held}
     guard = recorded_guard(conn, task.id)
     if guard:
         return {"lane": "respawn_guard", "reason": guard}
@@ -335,6 +338,8 @@ def _describe_lane(place: Optional[dict[str, Any]]) -> Optional[str]:
     if not place:
         return None
     lane = place.get("lane")
+    if lane == "sync_quarantine":
+        return place.get("reason")
     if lane == "respawn_guard":
         return (f"last recorded dispatch hold: respawn guard ({place.get('reason')}). "
                 "Check the current dispatcher verdict and resolve that guard; priority changes do not clear it")

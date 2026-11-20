@@ -50,7 +50,7 @@ def _status(args: argparse.Namespace) -> int:
     from hermes_cli.kanban_sync_claims import describe
     out["claims"] = describe(_path(slug), out.get("mode") or "off")  # the dispatcher's first-round gate
     if out.get("quarantined"):
-        out["quarantined"] = f"{out['quarantined']} receipt(s) held; run `hermes kanban sync quarantine`"
+        out["quarantined"] = f"{out['quarantined']} receipt(s) held; run `hermes kanban --board {slug} sync quarantine`"
     shadow = ksc.shadow_path(slug)
     if shadow.exists():
         sconn = kbc.connect(shadow)
@@ -263,32 +263,30 @@ def _reserved_key(args: argparse.Namespace) -> int:
 
 
 def _quarantine(args: argparse.Namespace) -> int:
-    """List (default) or release (``--release RECEIPT --reason TEXT``) host-local receipt quarantines."""
+    """List (default) or release (``--release RECEIPT --reason TEXT``) host-local receipt quarantines. A release
+    records the operator's acceptance of the Board's live evidence and replays the withheld rows through
+    certify+apply, replica first, under the board's sync lock (``kanban_sync_quarantine_release``). Exit 0 released,
+    1 no such receipt, 2 refused (no reason, evidence not live, catch-up failed, round busy): the hold stays."""
     from hermes_cli import kanban_sync_quarantine as quarantine
     slug = _board(args)
     release = getattr(args, "release", None)
-    if release and not (getattr(args, "reason", None) or "").strip():
-        print("kanban sync: --reason TEXT is required to release a quarantine")
-        return 2
-    paths = [_path(slug)] + ([ksc.shadow_path(slug)] if ksc.shadow_path(slug).exists() else [])
-    released = 0
+    if release is not None:
+        reason = (getattr(args, "reason", None) or "").strip()
+        if not reason:
+            print("kanban sync: --reason TEXT is required to release a quarantine (it is recorded with the acceptance)")
+            return 2
+        from hermes_cli.kanban_sync_quarantine_release import release_board
+        code, text = release_board(slug, _path(slug), release, reason)
+        print(text)
+        return code
     listed: dict[str, dict] = {}
-    for path in paths:
+    for path in [_path(slug)] + ([ksc.shadow_path(slug)] if ksc.shadow_path(slug).exists() else []):
         conn = kbc.connect(path)
         try:
-            if release:
-                released += quarantine.release(conn, release)
             for entry in quarantine.entries(conn):
                 listed.setdefault(entry["receipt"], entry)
         finally:
             conn.close()
-    if release:
-        if not released:
-            print(f"kanban sync: no quarantined receipt {release} on board {slug}")
-            return 1
-        print(f"kanban sync: released {release} ({args.reason.strip()}); its refused rows are redelivered by a "
-              "replica rebuild, and it quarantines again if the Board's receipt still conflicts")
-        return 0
     _print({"board": slug, "quarantined": list(listed.values())}, args.json)
     return 0
 

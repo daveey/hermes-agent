@@ -1047,8 +1047,8 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         except (HubError, OSError) as exc:
             _log.info("kanban sync: %s push before the pull failed (%s); pulling anyway", slug, exc)
         with quarantine.mirroring(live), _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
-            from hermes_cli.kanban_sync_quarantine import adopt
-            adopt(replica, live)
+            quarantine.adopt(replica, live)
+            quarantine.notify(live, slug)  # one hub card per new receipt (kanban_sync_quarantine_notice); never raises
             result.pulled = pulled
             result.behind = pulled.more
             acw.expedite(live, pulled.status_changed)  # a park naming a card the pull moved re-probes now [daveey]

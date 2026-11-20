@@ -21,6 +21,18 @@ class ContainmentRefused(ValueError):
     code = "containment_refused"
 
 
+class ContainmentConflict(ContainmentRefused):
+    """A deterministic evidence conflict, never a transient one: the Board's authenticated evidence for a receipt
+    no longer equals this host's first certified observation (``identity_changed``), or a feed event differs from
+    its canonical receipt (``event_differs``). Only these quarantine one task (``kanban_sync_quarantine``); every
+    other refusal (unproven or non-live evidence, unavailable proof, an invalid page) refuses the whole page.
+    ``uid`` is the receipt whose evidence conflicted (a release's stop receipt can be the one). [daveey]"""
+
+    def __init__(self, message: str, *, kind: str, uid: str | None = None):
+        super().__init__(message)
+        self.kind, self.uid = kind, uid
+
+
 def _local(conn: sqlite3.Connection) -> None:
     exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_sync_state'").fetchone()
     if exists and conn.execute("SELECT 1 FROM kanban_sync_state LIMIT 1").fetchone():
