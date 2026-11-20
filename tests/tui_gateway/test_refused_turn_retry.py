@@ -185,7 +185,8 @@ def _closing_agent(results, lines):
 
 def _wake_into(session, calls, monkeypatch):
     """``_wake_session_turn`` stand-in: records the replay and runs it as a turn in ``session``."""
-    def wake(key, text, *, display_kind=None, display_metadata=None, label="wake", build_timeout=120.0):
+    def wake(key, text, *, display_kind=None, display_metadata=None, label="wake", build_timeout=120.0,
+             profiles=None):
         calls.append({"key": key, "text": text, "display_kind": display_kind, "meta": display_metadata,
                       "label": label})
         session["running"] = True
@@ -198,6 +199,36 @@ def _wake_into(session, calls, monkeypatch):
 def _deliver(session, kind, text="card done"):
     session["running"] = True
     server._run_prompt_submit("rid", "sid", session, text, display_kind=kind, display_metadata=dict(META))
+
+
+def test_successful_prompt_uses_its_context_start_for_replay_cancellation(
+        emits, turn_env, marker_home, timers, replay, monkeypatch):
+    home = marker_home / "profiles" / "owner"
+    foreign = marker_home / "profiles" / "foreign"
+    clock = {"now": 100.0}
+    monkeypatch.setattr(replay.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(replay, "stale_code_reason", lambda: None)
+
+    def schedule(text, *, persisted=True, now=90, profile=home):
+        replay.schedule("session-key", text=text, display_kind="kanban_notice", display_metadata={},
+                        due=1000, cause="quota", persisted=persisted, now=now, profile_home=profile)
+
+    schedule("carried")
+    schedule("unpersisted", persisted=False)
+    schedule("foreign", profile=foreign)
+
+    def run(message, **kwargs):
+        schedule("joined after context", now=110)
+        clock["now"] = 120.0
+        return dict(OK)
+
+    session = _session(agent=_agent(run), running=True, profile_home=str(home))
+    assert server._run_prompt_submit("rid", "sid", session, "continue")
+    terminal = [payload for event, _, payload in emits if event == "message.complete"][-1]
+    assert terminal["status"] == "complete"
+    assert [i.text for i in replay._entries[(str(home), "session-key")].items] == [
+        "unpersisted", "joined after context"]
+    assert [i.text for i in replay._entries[(str(foreign), "session-key")].items] == ["foreign"]
 
 
 @pytest.mark.parametrize("kind", KINDS)
