@@ -201,9 +201,15 @@ def _historical_proof(origin, creator, gateway, request):
             raise ValueError('self_work_creator_unauthorized')
         if ended is not None and (type(ended) not in (int, float) or not math.isfinite(ended) or at > ended):
             raise ValueError('self_work_creator_unauthorized')
+        # Board claims carry portable run_uid/holder; local claimed receipts
+        # carry only lock bookkeeping and must not shadow that authority.
         claimed = conn.execute(
-            "SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='claimed' ORDER BY id DESC LIMIT 1",
-            (creator['task_id'], run_id)).fetchone()
+            """SELECT payload FROM task_events WHERE task_id=? AND kind='claimed'
+               AND (run_id=? OR (run_id IS NULL AND json_extract(payload,'$.run_uid')=?))
+               AND (json_type(payload,'$.holder') IS NOT NULL
+                    OR json_type(payload,'$.run_uid') IS NOT NULL)
+               ORDER BY id DESC LIMIT 1""",
+            (creator['task_id'], run_id, creator['run_uid'])).fetchone()
         if claimed is None:
             raise ValueError('self_work_creator_unauthorized')
         try:
@@ -211,6 +217,7 @@ def _historical_proof(origin, creator, gateway, request):
         except (TypeError, ValueError):
             raise ValueError('self_work_creator_unauthorized') from None
         if (not isinstance(data, dict) or data.get('holder') != sender[3:]
+                or ('run_uid' in data and data['run_uid'] != creator['run_uid'])
                 or not isinstance(data.get('holder'), str) or not _ID.fullmatch(data['holder'])):
             raise ValueError('self_work_creator_unauthorized')
         return proof
