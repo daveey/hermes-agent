@@ -134,3 +134,36 @@ def test_holder_description_keeps_a_non_python_dash_c():
     finally:
         proc.stdin.close()
         proc.wait(timeout=30)
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_doctor_lists_holders_with_their_whole_command_line(tmp_path):
+    """Doctor's holder list is what a person reads to decide what to stop: no 80-character cut there,
+    while the default description (log and error lines) keeps it."""
+    from hermes_state_holders import describe_holder_pid
+
+    db_path = tmp_path / "state.db"
+    sqlite3.connect(str(db_path)).execute("CREATE TABLE t (x)").connection.close()
+    tail = "--profile " + "p" * 120 + " --the-end"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute('select * from t');"
+            " print('ready', flush=True); sys.stdin.read()",
+            str(db_path),
+            *tail.split(),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        ((pid, desc, _is_gateway),) = _live_state_db_holders(db_path)
+        assert pid == holder.pid and desc.endswith(f"{db_path} {tail})"), desc
+        short = describe_holder_pid(holder.pid)
+        assert len(short) < len(desc) and "--the-end" not in short
+    finally:
+        holder.stdin.close()
+        holder.wait(timeout=30)

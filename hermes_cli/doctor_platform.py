@@ -113,7 +113,7 @@ def _report_database_holders(name: str, db_path: Path) -> None:
         else:
             by_pid.setdefault(pid, set()).add(Path(target.removesuffix(" (deleted)")).name)
     for pid in sorted(by_pid):
-        check_info(f"{name} is held by {describe_holder_pid(pid)}: {', '.join(sorted(by_pid[pid]))}")
+        check_info(f"{name} is held by {describe_holder_pid(pid, limit=None)}: {', '.join(sorted(by_pid[pid]))}")
     if unknown:
         check_warn(f"{name}: cannot prove the database is quiet",
                    f"(holder scan incomplete: {unknown[0][:120]}" + (f"; +{len(unknown) - 1} more" if len(unknown) > 1 else "") + ")")

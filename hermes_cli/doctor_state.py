@@ -98,7 +98,7 @@ def _live_state_db_holders(state_db_path: Path):
     pids = db_holder_pids(state_db_path)
     if pids is None:
         return None
-    return [(pid, describe_holder_pid(pid), _looks_like_gateway_process(pid)) for pid in pids if pid != os.getpid()]
+    return [(pid, describe_holder_pid(pid, limit=None), _looks_like_gateway_process(pid)) for pid in pids if pid != os.getpid()]
 
 
 def _render_state_db_stats(stats: dict, holders=None, host_note: str = "", live_holders=None) -> list:
@@ -516,7 +516,7 @@ def _retired_wal_holders(f: Finding, state_db_path: Path, _DHH: str) -> bool:
     pids = list(dict.fromkeys(pid for pid, _ in iter_deleted_sqlite_sidecar_holders(state_db_path)))
     if not pids:
         return False
-    rendered = ", ".join(describe_holder_pid(pid) for pid in pids)
+    rendered = ", ".join(describe_holder_pid(pid, limit=None) for pid in pids)
     check_warn(f"{_DHH}/state.db: {len(pids)} process(es) still hold a retired WAL generation ({rendered})",
                "(every new session refuses to open until they exit; health/stats probes skipped)")
     f.issues.append(f"state.db retired WAL generation held by {rendered}{host_gateway_note()} — stop the host "
