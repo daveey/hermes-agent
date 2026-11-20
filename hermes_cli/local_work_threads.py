@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import weakref
 
 from hermes_cli.local_work import ACTIVE_SCOPE, WorkScope, get_registry
+from hermes_cli.local_work_handle import WorkHandle
 
 
 class _Reservation:
@@ -205,8 +206,7 @@ class ScopeAwareExecutor(ThreadPoolExecutor):
         return _submit_owned(self, function, args, kwargs, owner, "executor")
 
 
-# ── Call-site helpers for ingress seams (no-ops while no registry is installed;
-# installation/attestation is the bootstrap owner's job, never lazily done here) ──
+# Call-site helpers: updater and drain activation are independent. Neither is installed here.
 
 def installed_registry():
     from hermes_cli import local_work
@@ -239,32 +239,22 @@ def _resolve(kind, source, home):
     return registry, home
 
 
-class WorkHandle:
-    """One reservation plus its captured scope; finish() is idempotent per handle."""
-
-    __slots__ = ("_done", "_lock", "owner", "token")
-
-    def __init__(self, registry, kind, home, source):
-        self.owner = WorkScope(registry, kind, home, source)
-        self.token = registry.reserve(kind, home=home, source=source)
-        self._lock = threading.Lock()
-        self._done = False
-
-    def finish(self, _unused=None):
-        with self._lock:
-            if self._done:
-                return False
-            self._done = True
-        return self.owner.registry.finish(self.token)
-
-
 def begin_work(kind, source, home=None):
-    """Reserve BEFORE scheduling/starting. Returns a WorkHandle or None (no registry)."""
-    resolved = _resolve(kind, source, home)
-    if resolved is None:
-        return None
-    registry, home = resolved
-    return WorkHandle(registry, kind, home, source)
+    """Reserve BEFORE scheduling; drain custody does not depend on the updater registry."""
+    from hermes_cli.worker_drain_fence import admit
+
+
+    lease = admit('local_work.' + kind)
+    try:
+        resolved = _resolve(kind, source, home)
+        if resolved is None and lease is None:
+            return None
+        registry, home = resolved if resolved is not None else (None, home)
+        return WorkHandle(registry, kind, home, source, drain=lease)
+    except BaseException:
+        if lease is not None:
+            lease.close()
+        raise
 
 
 def end_work(handle):
@@ -291,13 +281,14 @@ class work_scope:
     def __enter__(self):
         self._handle = begin_work(*self._args)
         if self._handle is not None:
-            self._ctx = ACTIVE_SCOPE.set(self._handle.owner)
+            self._ctx = self._handle.bind()
+            self._ctx.__enter__()
         return self._handle
 
     def __exit__(self, *exc):
         try:
             if self._ctx is not None:
-                ACTIVE_SCOPE.reset(self._ctx)
+                self._ctx.__exit__(*exc)
         finally:
             end_work(self._handle)
         return False
@@ -310,18 +301,20 @@ def create_tracked_task(create, kind, source, home=None):
     handle = begin_work(kind, source, home)
     if handle is None:
         return create()
-    ctx = ACTIVE_SCOPE.set(handle.owner)
     try:
-        task = create()
+        with handle.bind():
+            task = create()
     except BaseException:
-        handle.finish()
+        handle.uncertain()
         raise
-    finally:
-        ACTIVE_SCOPE.reset(ctx)
-    if hasattr(task, "add_done_callback"):
-        task.add_done_callback(handle.finish)
-    else:  # test sentinel: no physical task exists to outlive this call
-        handle.finish()
+    try:
+        if isinstance(task, asyncio.Future):
+            task.add_done_callback(handle.finish)
+        else:  # no completion receipt: do not attest coverage of an unknown survivor
+            handle.uncertain()
+    except BaseException:
+        handle.uncertain()
+        raise
     return task
 
 
