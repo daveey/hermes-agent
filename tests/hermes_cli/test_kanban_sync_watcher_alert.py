@@ -286,3 +286,16 @@ def test_an_unresolved_create_older_than_six_hours_is_not_waited_on_forever(home
     _crash(since=later)
     assert _check(hub, later + 300) == f"kanban-sync-watcher-dead:worker-1:{int(later)}"
     assert len(hub.sent("create-task")) == 2
+
+
+def test_a_create_the_courier_rejected_is_not_waited_on(home, monkeypatch):
+    from hermes_cli import kanban_placement as kp
+    _crash()
+    hub = FakeHubCli()
+    _check(hub, SINCE + 300)
+    _round_completed()
+    _check(hub, 1_900.0)
+    monkeypatch.setattr(kp, "remote_state", lambda rid: "rejected")
+    _crash(since=2_000.0)
+    assert _check(hub, 2_300.0) == "kanban-sync-watcher-dead:worker-1:2000"
+    assert len(hub.sent("create-task")) == 2

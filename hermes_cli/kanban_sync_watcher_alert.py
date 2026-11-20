@@ -102,6 +102,15 @@ def _replica_rows(hub_cli: str, runner) -> list[dict]:
     return [r for r in rows if isinstance(r, dict)]
 
 
+def _create_failed(request_id: str) -> bool:
+    """True when the courier ended the create as rejected/expired/failed: no card will ever exist for it."""
+    try:
+        from hermes_cli import kanban_placement as kp
+        return kp.remote_state(request_id) in kp.FAILED_STATES
+    except Exception:  # health: allow BLE001 -- an unreadable courier db means "not known yet"
+        return False
+
+
 def _open_card(host: str, state: dict, hub_cli: str, runner, now: float) -> Optional[str]:
     prefix = f"{KEY_PREFIX}:{host}:"
     rows = _replica_rows(hub_cli, runner)
@@ -123,7 +132,8 @@ def _open_card(host: str, state: dict, hub_cli: str, runner, now: float) -> Opti
         if now - float(state.get("filed_at") or 0) < _FRESH_S:
             return str(tid)
     elif (state.get("request_id") and now - float(state.get("filed_at") or 0) < _FRESH_S
-          and not any(r.get("idempotency_key") == state["request_id"] for r in rows)):
+          and not any(r.get("idempotency_key") == state["request_id"] for r in rows)
+          and not _create_failed(state["request_id"])):
         # The first create is queued but neither the courier nor the replica knows its card yet. That is
         # "unknown", not "no open card": a second create would carry a different request id and could
         # file a duplicate card once delivery catches up.
