@@ -190,3 +190,57 @@ def test_gate_refuses_exactly_what_the_turn_refuses_on_the_stored_override(
     assert refused is _turn_rejects(stored), (stored, response)
     assert ("error" in response) is refused
     assert bool(sessions) is not refused
+
+
+# --- the gate's re-derived provider, its config default, and the pin ``create_overrides`` stores ---------
+
+
+def _write_custom_entry(home, *, default, shape):
+    """The stock policy, profile default ``default``, and a custom entry serving ``anthropic-deep``."""
+    cfg = policy()
+    cfg["model"] = {"default": default, "provider": "anthropic"}
+    cfg["model_routing"]["enforce_subscription_only"] = True
+    entry = {"base_url": "http://127.0.0.1:9/v1", "model": "anthropic-deep"}
+    if shape == "providers":
+        cfg["providers"] = {"mine": entry}
+    else:
+        cfg["custom_providers"] = [{"name": "mine", **entry}]
+    atomic_config_write(home / "config.yaml", cfg)
+
+
+@pytest.mark.parametrize("shape", ["custom_providers", "providers"])
+@pytest.mark.parametrize("default, refused", [
+    pytest.param("anthropic-fast", True, id="entry-heals-the-empty-provider"),
+    pytest.param("anthropic-deep", False, id="profile-default-skips-the-healing"),
+])
+def test_empty_provider_is_judged_on_the_custom_entry_unless_it_is_the_profile_default(
+        _create, tmp_path, monkeypatch, default, refused, shape):
+    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_cli.model_options_managed import drop_refused_managed_pins
+    from tui_gateway import server
+    from tui_gateway.methods_session_model_guard import create_overrides
+
+    _write_custom_entry(tmp_path, default=default, shape=shape)
+    monkeypatch.setattr(server, "_load_cfg", load_user_config_effective)
+
+    stored, _, _ = create_overrides({"model": "anthropic-deep"})
+    response, sessions = _create({"model": "anthropic-deep"})
+    row = {"slug": "", "models": ["anthropic-deep"]}
+    drop_refused_managed_pins([row])  # the picker judges the same pin
+
+    assert _turn_rejects(stored) is refused  # the turn's verdict: gate and picker must match it
+    assert (row["models"] == []) is refused, row
+    assert ("error" in response) is refused, response
+    assert bool(sessions) is not refused
+
+
+def test_gate_judges_the_pin_create_overrides_stores_not_the_raw_pick(_create, tmp_path, monkeypatch):
+    """An unqualified ``gpt-*`` pick the account serves on openai-codex is stored (and run) as that pin."""
+    _write_routes(tmp_path, (("deep", "openai-codex", "gpt-5.5"),))
+    monkeypatch.setattr("hermes_cli.models_detect.preferred_subscription_model",
+                        lambda model: "gpt-5.5" if model == "gpt-5" else None)
+
+    response, sessions = _create({"model": "gpt-5"})
+
+    assert "error" not in response, response
+    assert sessions
