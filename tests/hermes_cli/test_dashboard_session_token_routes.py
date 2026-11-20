@@ -114,6 +114,9 @@ _EXEMPT = {
     ("hermes_cli/always_on_rollover.py", "_http_post"):
         "roller -> its own loopback-only always-on backend (never gated); the path is a parameter "
         "(only /api/health/retirement, already a session-token route)",
+    ("hermes_cli/always_on_rollover.py", "_loopback_control_get"):
+        "superseded always-on backend -> the active successor on 127.0.0.1 (serve --isolated, never gated); "
+        "the path is a parameter because CONTROL_READ_PATHS is an allowlist, not a gated-dashboard route",
 }
 _API_PATH = re.compile(r"/api/[A-Za-z0-9_\-/{}.]*")
 

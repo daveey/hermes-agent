@@ -181,6 +181,8 @@ def handoff_control_read(port: int, path: str, *, get: Optional[Callable] = None
 
 
 def _loopback_control_get(port: int, path: str, timeout: float) -> tuple[Optional[int], float, Optional[dict]]:
+    # Loopback-only always-on backend (serve --isolated, never gated). Path is a parameter
+    # (CONTROL_READ_PATHS); same exemption class as _http_get for the session-token route scanner.
     token, _nonce = aod.ensure_credentials()
     started = time.monotonic()
     request = urllib.request.Request(f"http://127.0.0.1:{int(port)}{path}",
