@@ -104,15 +104,18 @@ def test_secrets_are_masked(argv, expected):
             "--port",
             "0",
             "--ssh-session-token-file",
-            "/Users/x/.hermes/desktop-ssh/5b38f00bfab44cbcc8f1a2b3c4d5e6f7/token",
+            "/Users/x/.hermes/desktop-ssh/session-a/token",
         ],
         ["chat", "--resume", "20261119_163442_8f3a2c"],
         ["kanban", "run", "t_01a1ecf2c3d6367b"],
-        ["checkout", "0362a20c0e39651291280105e81f7c42f4f435f7"],
+        [
+            "checkout",
+            "0362a20c0e39",
+        ],  # a short commit; a full 40-hex digest is masked (hex keys look the same)
         ["--resume=8ec9ab93-b372-4c03-ac51-7abb31174eb9", "--model=claude-fable-5-2"],
         ["chat", "--model", "anthropic/claude-opus-4.7"],
-        ["--password-file", "/home/ubuntu/.hermes/chrome-agent-vnc.pass"],
-        ["--auth", "~/.hermes/egress-socks.auth"],
+        ["--password-file", "/opt/vnc/chrome-agent-vnc.pass"],
+        ["--auth", "/opt/egress/egress-socks.auth"],
         [
             "--variations-seed-version=20261117-170111.083000-production",
             "--num-raster-threads=4",
@@ -163,7 +166,7 @@ def test_secrets_are_masked(argv, expected):
             "--auth-mode",
             "oauth",
             "--cookie-jar",
-            "~/.hermes/cookies.txt",
+            "/opt/jar/cookies.txt",
         ],
         ["--key-file", "C:\\Users\\x\\key.pem"],
         ["--token-file", "./token.txt"],
@@ -304,3 +307,261 @@ def test_remaining_secret_shapes_are_masked(argv, program, expected):
 )
 def test_identifiers_survive_the_stricter_rules(argv, program):
     assert mask_argv_secrets(argv, program=program) == argv
+
+
+# ---- fail closed: generated secrets of every common shape are masked; identifiers people read are kept -----------
+
+import base64
+import random
+import secrets as _secrets
+import string
+
+_RNG = random.Random(20261119)
+
+
+def _shape(kind: str, length: int) -> str:
+    pick = lambda alphabet: "".join(_RNG.choice(alphabet) for _ in range(length))
+    return {
+        "alnum": lambda: pick(string.ascii_letters + string.digits),
+        "lower_digits": lambda: pick(string.ascii_lowercase + string.digits),
+        "upper_digits": lambda: pick(string.ascii_uppercase + string.digits),
+        "base32": lambda: pick(string.ascii_uppercase + "234567"),
+        "hex": lambda: pick("0123456789abcdef"),
+        "mixed_letters": lambda: pick(string.ascii_letters),
+        "symbols": lambda: pick(string.ascii_letters + string.digits + "!@#$%^&*"),
+        "base64": lambda: base64.b64encode(_RNG.randbytes(length)).decode()[
+            : length + 4
+        ],
+        "urlsafe": lambda: (
+            base64.urlsafe_b64encode(_RNG.randbytes(length)).decode().rstrip("=")
+        ),
+        "lower": lambda: pick(string.ascii_lowercase),
+        "upper": lambda: pick(string.ascii_uppercase),
+    }[kind]()
+
+
+# Leak rate allowed per secret length (a random string sometimes reads as a name; the shorter, the likelier).
+_LEAK_CEILING = {16: 0.05, 20: 0.03, 24: 0.02, 32: 0.006, 40: 0.006}
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "alnum",
+        "lower_digits",
+        "upper_digits",
+        "base32",
+        "hex",
+        "mixed_letters",
+        "symbols",
+        "base64",
+        "urlsafe",
+        "lower",
+        "upper",
+    ],
+)
+@pytest.mark.parametrize("length", sorted(_LEAK_CEILING))
+def test_generated_secrets_are_masked_at_the_documented_rate(kind, length):
+    leaked = 0
+    for _ in range(1000):
+        secret = _shape(kind, length)
+        shown = " ".join(mask_argv_secrets(["worker.py", secret], program="python3"))
+        leaked += secret in shown or secret[-8:] in shown
+    assert leaked / 1000 <= _LEAK_CEILING[length], (
+        f"{kind}/{length}: {leaked / 10:.1f}% shown"
+    )
+
+
+@pytest.mark.parametrize(
+    "make, ceiling",
+    [
+        (lambda: _secrets.token_urlsafe(16), _LEAK_CEILING[20]),  # 22 characters
+        (lambda: _secrets.token_hex(16), 0.0),  # 32 hex: always masked
+        (lambda: _secrets.token_urlsafe(32), _LEAK_CEILING[40]),  # 43 characters
+    ],
+)
+def test_python_secrets_module_tokens_are_masked_at_the_documented_rate(make, ceiling):
+    tokens = [make() for _ in range(1000)]
+    leaked = sum(
+        token in " ".join(mask_argv_secrets(["--opt", "x", token], program="tool"))
+        for token in tokens
+    )
+    assert leaked / len(tokens) <= ceiling
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        # models, versions, platforms
+        "gpt-5.6-sol-900k",
+        "grok-code-fast-1",
+        "qwen3-14b-ctx16k",
+        "Qwen3.8-27B-Q4_K_M",
+        "claude-opus-4-5-20250929",
+        "anthropic/claude-opus-4.7",
+        "1.2.3-beta.4+build.567",
+        "manylinux2014_x86_64",
+        "python3.14-nodejs22",
+        "macosarm64",
+        "x86_64",
+        "utf8",
+        "v1beta1",
+        "k8s",
+        # ids people match on
+        "proc_467899b1fa1b",
+        "i-0abc123def4567890",
+        "t_01a1ecf2c3d6367b",
+        "20261119_163442_8f3a2c",
+        "8ec9ab93-b372-4c03-ac51-7abb31174eb9",
+        "0362a20c0e39",
+        "GIT_CONFIG_KEY_17",
+        "HERMES_RELAY_ID_2024",
+        # files, programs, hosts, refs
+        "Wide310x150Logo.png",
+        "VCRUNTIME140.dll",
+        "libpython3.14.dylib",
+        "hermes_hub.py",
+        "origin/main",
+        "feature/argv-secret-gaps",
+        "hermes-hub",
+        "127.0.0.1:8000",
+        "api.openrouter.ai",
+        "alice@example.com",
+        "git@github.com:org/repo.git",
+        "python:3.12-slim",
+        "npm:react@18.3.1",
+        "github:org/repo@v1",
+        "https://github.com/org/repo@main",
+        "git+https://github.com/org/tool@v1.2.0",
+        # words and camelCase
+        "internationalization",
+        "isHermesHubPickerUrl",
+        "WebKitWebContentProcess",
+        "ServerAliveCountMax",
+        "testSessionOwnerByRuntimeId",
+        "production",
+        "gateway",
+        "serve",
+        "dashboard",
+        "_runtime-serve",
+    ],
+)
+def test_identifiers_people_read_are_kept(token):
+    assert mask_argv_secrets([token], program="tool") == [token]
+
+
+@pytest.mark.parametrize(
+    "argv, program, expected",
+    [
+        # wrappers keep the inner program's own password flags
+        (["mysql", "-uroot", "-phunter2"], "sudo", ["mysql", "-uroot", f"-p{MASK}"]),
+        (
+            ["exec", "-it", "db", "mysql", "-phunter2"],
+            "docker",
+            ["exec", "-it", "db", "mysql", f"-p{MASK}"],
+        ),
+        (["-c", "mysql -phunter2 shop"], "bash", ["-c", f"mysql -p{MASK} shop"]),
+        # sshpass hides its password, not the wrapped ssh's port
+        (
+            ["-p", "hunter2", "ssh", "-p", "2222", "host"],
+            "sshpass",
+            ["-p", MASK, "ssh", "-p", "2222", "host"],
+        ),
+        # curl user:pass in every spelling, a key as the user, a random token as the user
+        (
+            ["--user=alice:hunter2", "--proxy-user=bob:pw123"],
+            "curl",
+            [f"--user=alice:{MASK}", f"--proxy-user=bob:{MASK}"],
+        ),
+        (["-su", "alice:hunter2"], "curl", ["-su", f"alice:{MASK}"]),
+        (["-u", "sk9Lm2QxPz7Rt4Wb:"], "curl", ["-u", f"{MASK}:{MASK}"]),
+        (["-u", "Xk9mP2qL7vN4aB3cZ8wRtY5u"], "curl", ["-u", MASK]),
+        (["--user=alice%hunter2"], "smbclient", [f"--user=alice%{MASK}"]),
+        (
+            ["-u", "alice,hunter2", "sftp://h"],
+            "lftp",
+            ["-u", f"alice,{MASK}", "sftp://h"],
+        ),
+        # more programs' password flags
+        (["-p", "hunter2"], "mongosh", ["-p", MASK]),
+        (["-w", "hunter2"], "ldapsearch", ["-w", MASK]),
+        (["-P", "hunter2"], "sqlcmd", ["-P", MASK]),
+        (["-storepass", "hunter2"], "keytool", ["-storepass", MASK]),
+        (["-phunter2", "x.7z"], "7z", [f"-p{MASK}", "x.7z"]),
+        (["-P", "hunter2"], "zip", ["-P", MASK]),
+        (["-N", "hunter2"], "ssh-keygen", ["-N", MASK]),
+        # secrets that start with "-" after a secret flag
+        (["--password", "-abcdefgh"], "tool", ["--password", MASK]),
+        (["--token", "-12345678"], "tool", ["--token", MASK]),
+        (["--password", "--Xy9kq2LmZ"], "tool", ["--password", MASK]),
+        # a secret header, a webhook URL, a secret inside a command
+        (["-H", "X-Api-Key: hunter2"], "curl", ["-H", f"X-Api-Key: {MASK}"]),
+        (["-H", "Authorization: Bearer abc"], "curl", ["-H", f"Authorization: {MASK}"]),
+        (
+            ["--webhook-url", "https://hooks.slack.com/services/T0/B0/x"],
+            "tool",
+            ["--webhook-url", MASK],
+        ),
+        (["-c", "credential.helper=!f() { echo password=hunter2; }; f"], "git", None),
+        # symbol passwords and a path-shaped secret after a secret flag
+        (["P@ssw0rd!2024xyz"], "tool", [MASK]),
+        (["--token=/K7MDENG+bPxRfiCYEXAMPLEKEY=="], "tool", [f"--token={MASK}"]),
+        # nested values are judged under their own names
+        (
+            ["--env=API_TOKEN=abc", "--annotation=password=x"],
+            "tool",
+            [f"--env=API_TOKEN={MASK}", f"--annotation=password={MASK}"],
+        ),
+    ],
+)
+def test_named_and_program_secrets_are_masked(argv, program, expected):
+    shown = mask_argv_secrets(argv, program=program)
+    if expected is None:
+        assert "hunter2" not in " ".join(shown), shown
+    else:
+        assert shown == expected
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (["-p", "coder", "gateway", "run"], "hermes"),
+        (
+            [
+                "chat",
+                "--model",
+                "gpt-5.6-sol-900k",
+                "--session-key",
+                "20261119_163442_8f3a2c",
+            ],
+            "hermes",
+        ),
+        (
+            [
+                "--show-tokens",
+                "default",
+                "--rotate-tokens",
+                "work",
+                "--migrate-secrets",
+                "x",
+            ],
+            "hermes",
+        ),
+        (["mcp", "add", "--auth", "oauth", "srv"], "hermes"),
+        (["auth", "login", "--with-token", "github.com"], "gh"),
+        (["--auth-server-whitelist=*.corp.example.com"], "Electron"),
+        (["-c", "user.signingkey=ABCDEF0123456789"], "git"),
+        (["-k", "testSessionOwnerByRuntimeId"], "pytest"),
+        (["start-session", "--target", "i-0abc123def4567890"], "aws"),
+        (["process", "kill", "proc_467899b1fa1b"], "hermes"),
+    ],
+)
+def test_hermes_and_tool_arguments_are_kept(argv, program):
+    assert mask_argv_secrets(argv, program=program) == argv
+
+
+def test_deep_nesting_is_masked_not_a_crash():
+    assert (
+        mask_argv_secrets(["a=" * 1000 + "x"], program="x") == [f"a={MASK}"]
+        or MASK in mask_argv_secrets(["a=" * 1000 + "x"], program="x")[0]
+    )

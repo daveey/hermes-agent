@@ -74,7 +74,8 @@ def describe_holder_pid(pid: int, *, limit: Optional[int] = 80) -> str:
         at = inline_source_flag_index(argv)
         if at is not None and at + 1 < len(argv):
             # An interpreter's inline source (launcher wrappers) would fill the description; its arguments follow.
-            argv = [*argv[:at + 1], "<inline code>", *argv[at + 2:]]
+            from hermes_state_argv_secrets import INLINE_CODE
+            argv = [*argv[:at + 1], INLINE_CODE, *argv[at + 2:]]
     if not argv:
         return f"PID {pid} (command line unavailable)"
     # Redacted before the cut: holder lists are pasted into issues, and a process's argv can carry
