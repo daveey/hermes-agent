@@ -38,11 +38,11 @@ def file_holds(path: Path) -> bool:
         # Short-lived read-only peek, closed below; never a pooled handle.
         peek = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)  # noqa: kanban-lockguard
     except sqlite3.Error:
-        return False
+        return True  # cannot tell: fail closed so the caller adopts through the real connection
     try:
         return _exists(peek) and peek.execute("SELECT 1 FROM containment_sync_quarantine LIMIT 1").fetchone() is not None
     except sqlite3.Error:
-        return False
+        return True
     finally:
         peek.close()
 
@@ -72,6 +72,58 @@ def tasks(conn) -> set[str]:
 
 def held(conn, task: str) -> bool:
     return task in tasks(conn)
+
+
+def entries(conn) -> list[dict]:
+    """Owner-visible view: one dict per quarantined receipt, with every task it holds."""
+    if not _exists(conn):
+        return []
+    out = []
+    for uid, task, board, reason in conn.execute("SELECT uid,task_id,board,reason FROM containment_sync_quarantine ORDER BY rowid"):
+        held_tasks = [r[0] for r in conn.execute(
+            "SELECT task_id FROM containment_sync_quarantine_tasks WHERE receipt_uid=? ORDER BY task_id", (uid,))]
+        out.append({"receipt": uid, "board": board, "task": task, "held_tasks": held_tasks, "reason": reason})
+    return out
+
+
+def refusal(conn, task: str) -> str | None:
+    """Accurate text for a hold that ``resume-contained`` cannot release (it is host-local, not an episode)."""
+    if not held(conn, task):
+        return None
+    mine = [e["receipt"] for e in entries(conn) if task in e["held_tasks"]]
+    cause = f"receipt {mine[0]}" if mine else "a quarantined parent task"
+    return (f"containment_quarantine: held by {cause}, whose identity changed after first certification. "
+            "resume-contained cannot release it; list with `hermes kanban sync quarantine`, rule on the Board's "
+            "receipt, then `hermes kanban sync quarantine --release <receipt> --reason <why>`")
+
+
+def release(conn, receipt: str) -> int:
+    """Operator release of one receipt's host-local hold. The refused wire rows are NOT replayed: a replica
+    rebuild or the next ordinary change redelivers them. A still-conflicting receipt quarantines again on its
+    next delivery, so releasing without ruling on the Board's copy is self-correcting, never a bypass."""
+    from hermes_cli import kanban_db as kb
+    if not _exists(conn):
+        return 0
+    with kb.write_txn(conn, allow_nested=True):
+        found = conn.execute("SELECT 1 FROM containment_sync_quarantine WHERE uid=?", (receipt,)).fetchone()
+        if not found:
+            return 0
+        saved = {}
+        for table in _TABLES:
+            for op in ("update", "delete"):
+                name = f"{table}_{op}"
+                row = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)).fetchone()
+                saved[name] = row[0]
+                conn.execute(f"DROP TRIGGER {name}")
+        conn.execute("DELETE FROM containment_sync_quarantine_tasks WHERE receipt_uid=?", (receipt,))
+        conn.execute("DELETE FROM containment_sync_quarantine WHERE uid=?", (receipt,))
+        if conn.execute("SELECT 1 FROM containment_sync_quarantine LIMIT 1").fetchone() is None:
+            # Only dependency marks can remain; with no receipt left they have no cause.
+            conn.execute("DELETE FROM containment_sync_quarantine_tasks WHERE receipt_uid='dependency'")
+        for sql in saved.values():
+            conn.execute(sql)
+    log.warning("kanban sync: released quarantine for receipt %s", receipt)
+    return 1
 
 
 def _subjects(conn, table: str, uid: str, fields: dict) -> set[str]:
@@ -166,8 +218,16 @@ def sendable(conn, rows: list[dict], *, blocked: set[str] | None = None) -> list
     for row in rows:
         fields = row["fields"]
         fields = json.loads(fields) if isinstance(fields, str) else fields
-        subjects = _subjects(conn, row["table_name"], row["row_uid"], fields or {})
+        try:
+            subjects = _subjects(conn, row["table_name"], row["row_uid"], fields or {})
+        except ContainmentRefused:
+            continue  # unidentifiable: stays pending, never pushed
         if subjects and not subjects & blocked:
+            safe.append(row)
+        elif not subjects and row.get("op") == "delete":
+            # A delete envelope of a chat link/attachment carries no fields and its local row is gone, so
+            # the owning task is unknowable. Removing such a row cannot release a hold; do not let one
+            # quarantined task pin every unrelated delete pending.
             safe.append(row)
     return safe
 
@@ -181,7 +241,7 @@ def snapshot(conn) -> dict:
     return data
 
 
-def restore(conn, data: dict) -> None:
+def restore(conn, data: dict, checkpoint: Path | None = None) -> None:
     if not data:
         return
     from hermes_cli import kanban_containment_replica as replica
@@ -201,6 +261,9 @@ def restore(conn, data: dict) -> None:
             for row in data[table]:
                 marks = ",".join("?" for _ in row)
                 conn.execute(f"INSERT OR IGNORE INTO {table} VALUES ({marks})", row)
+    if checkpoint is not None:
+        # The data now lives in the database; a later open must not re-certify every receipt again.
+        checkpoint.with_suffix(".quarantine.json").unlink(missing_ok=True)
 
 
 def adopt(source, dest) -> None:

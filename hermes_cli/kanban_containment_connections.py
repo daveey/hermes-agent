@@ -49,6 +49,9 @@ def drop_held(conn: sqlite3.Connection, rows: list) -> list:
 
 
 def refusal(conn: sqlite3.Connection, task_id: str) -> str | None:
+    from hermes_cli.kanban_sync_quarantine import held as quarantined, refusal as quarantine_refusal
+    if quarantined(conn, task_id):  # a host-local hold: resume-contained has no episode to release  [daveey]
+        return quarantine_refusal(conn, task_id)
     return "containment_pending: scoped resume-contained required" if held(conn, task_id) else None
 
 

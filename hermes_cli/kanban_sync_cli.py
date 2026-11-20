@@ -49,6 +49,8 @@ def _status(args: argparse.Namespace) -> int:
         conn.close()
     from hermes_cli.kanban_sync_claims import describe
     out["claims"] = describe(_path(slug), out.get("mode") or "off")  # the dispatcher's first-round gate
+    if out.get("quarantined"):
+        out["quarantined"] = f"{out['quarantined']} receipt(s) held; run `hermes kanban sync quarantine`"
     shadow = ksc.shadow_path(slug)
     if shadow.exists():
         sconn = kbc.connect(shadow)
@@ -260,6 +262,37 @@ def _reserved_key(args: argparse.Namespace) -> int:
         report.get("action") == "preview" and report.get("eligible")) else 1
 
 
+def _quarantine(args: argparse.Namespace) -> int:
+    """List (default) or release (``--release RECEIPT --reason TEXT``) host-local receipt quarantines."""
+    from hermes_cli import kanban_sync_quarantine as quarantine
+    slug = _board(args)
+    release = getattr(args, "release", None)
+    if release and not (getattr(args, "reason", None) or "").strip():
+        print("kanban sync: --reason TEXT is required to release a quarantine")
+        return 2
+    paths = [_path(slug)] + ([ksc.shadow_path(slug)] if ksc.shadow_path(slug).exists() else [])
+    released = 0
+    listed: dict[str, dict] = {}
+    for path in paths:
+        conn = kbc.connect(path)
+        try:
+            if release:
+                released += quarantine.release(conn, release)
+            for entry in quarantine.entries(conn):
+                listed.setdefault(entry["receipt"], entry)
+        finally:
+            conn.close()
+    if release:
+        if not released:
+            print(f"kanban sync: no quarantined receipt {release} on board {slug}")
+            return 1
+        print(f"kanban sync: released {release} ({args.reason.strip()}); its refused rows are redelivered by a "
+              "replica rebuild, and it quarantines again if the Board's receipt still conflicts")
+        return 0
+    _print({"board": slug, "quarantined": list(listed.values())}, args.json)
+    return 0
+
+
 def _dependency_delete(args: argparse.Namespace) -> int:
     """Preview/apply audited abandonment of one refused historical link delete."""
     from hermes_cli import kanban_sync_dependency_delete as recovery
@@ -279,14 +312,15 @@ def _dependency_delete(args: argparse.Namespace) -> int:
 
 _ACTIONS = {"status": _status, "attach": _attach, "import": _import, "diff": _diff, "run": _run,
             "links": _links, "links-diff": _links_diff, "reconcile": _reconcile, "machine-links": _machine_links,
-            "refill-history": _refill_history, "reserved-key": _reserved_key, "dependency-delete": _dependency_delete}
+            "refill-history": _refill_history, "reserved-key": _reserved_key, "dependency-delete": _dependency_delete,
+            "quarantine": _quarantine}
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
     action = getattr(args, "sync_action", None)
     if action not in _ACTIONS:
         print("usage: hermes kanban sync {status,attach,import,diff,run,links,links-diff,reconcile,machine-links,"
-              "refill-history,reserved-key} [--board B]")
+              "refill-history,reserved-key,quarantine} [--board B]")
         return 2
     try:
         return _ACTIONS[action](args)

@@ -945,7 +945,7 @@ def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
         cleanup.callback(conn.close)
         ensure_identity(conn, slug, gateway)
         from hermes_cli import kanban_sync_quarantine as quarantine
-        quarantine.restore(conn, quarantine.load_rebuild(path))
+        quarantine.restore(conn, quarantine.load_rebuild(path), path)
         cleanup.pop_all()
         return conn
 
@@ -1767,6 +1767,9 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
            "cursor": st.get("cursor"), "pending": counts.get("pending", 0), "rejected": counts.get("rejected", 0),
            "oldest_pending_age_s": round(age) if st and (age := outbox_age.oldest_pending_age_s(conn)) is not None
            else None, "last_error": last_error}
+    from hermes_cli import kanban_sync_quarantine as quarantine
+    if quarantined := len(quarantine.entries(conn)):  # a held task is otherwise silent [daveey]
+        out["quarantined"] = quarantined
     if mode != "off":
         # A refused start writes no outbox row, so ``last_error`` alone read a stalled board as healthy. [daveey]
         from hermes_cli import kanban_sync_runstate as runstate
