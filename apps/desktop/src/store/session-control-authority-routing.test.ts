@@ -7,7 +7,7 @@ import { sessionsHost } from '@/sdk/sessions'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $gateway, setPrimaryGateway, setPrimaryGatewayConnection } from '@/store/gateway'
 import { $profiles } from '@/store/profile'
-import { $activeSessionId, _resetSessionOwnerHintsForTests, setSessions } from '@/store/session'
+import { $activeSessionId, $cronSessions, $messagingSessions, _resetSessionOwnerHintsForTests, setSessions } from '@/store/session'
 import { $sessionControlBySession, clearAllSessionControl, refreshSessionControl } from '@/store/session-control'
 import { sessionStatusStripe } from '@/store/session-dot-state'
 import { $sessionTiles, clearAllSessionStates, publishSessionState } from '@/store/session-states'
@@ -57,6 +57,8 @@ describe('control authority at the real idle row hook', () => {
     clearAllSessionStates()
     $sessionTiles.set([])
     setSessions([])
+    $messagingSessions.set([])
+    $cronSessions.set([])
     $unavailableWorkSources.set({})
     $profiles.set([])
     $gateway.set(null as never)
@@ -374,6 +376,39 @@ describe('control authority at the real idle row hook', () => {
       })
       expect(stripe(result.current)).not.toBe('done')
     } finally {
+      unmount()
+    }
+  })
+
+  it.each([
+    ['messaging', $messagingSessions],
+    ['cron', $cronSessions]
+  ] as const)('a row listed only in the %s slice keeps both lineage rules', (_slice, slice) => {
+    const row = aliasRow()
+    setSessions([])
+    slice.set([row])
+    $activeSessionId.set('rt-main')
+    const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
+
+    try {
+      // Displayed through the alias: no reads is no proof.
+      expect(stripe(result.current)).not.toBe('done')
+      act(() => $activeSessionId.set(null))
+      expect(stripe(result.current)).toBe('done')
+      // Undisplayed: a failed current read under the alias vetoes.
+      act(() => {
+        const read = sessionsHost.beginWorkSourceRead({
+          connectionId: 'local',
+          profile: 'default',
+          storedSessionId: 'stored-chat',
+          source: 'tasks'
+        })
+
+        sessionsHost.reportWorkSourceRead({ ...read, available: false })
+      })
+      expect(stripe(result.current)).not.toBe('done')
+    } finally {
+      $activeSessionId.set(null)
       unmount()
     }
   })

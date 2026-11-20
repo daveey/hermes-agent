@@ -1,7 +1,16 @@
 import { useStore } from '@nanostores/react'
 import { useEffect } from 'react'
 
-import { $sessions, knownSessionOwner, lineageAliases } from '@/store/session'
+import { $projectTree } from '@/store/project-tree'
+import {
+  $cronSessions,
+  $messagingSessions,
+  $sessions,
+  $unlistedSessionOwnerRows,
+  knownSessionOwner,
+  lineageAliases,
+  ownerLookupSessionRows
+} from '@/store/session'
 import { $unavailableWorkSources, workSourceAuthorityComplete, workSourceVetoed } from '@/store/session-work-source'
 import {
   $workSourceAuthorityRevision,
@@ -18,13 +27,18 @@ import type { SessionInfo } from '@/types/hermes'
 export function useWorkSourceUnavailable(row: SessionInfo | null | undefined): boolean {
   'use no memo'
   const sources = useStore($unavailableWorkSources)
-  const sessions = useStore($sessions)
+  // A row may live only in the cron / messaging slice or the project tree: its lineage comes from every loaded row.
+  useStore($sessions)
+  useStore($cronSessions)
+  useStore($messagingSessions)
+  useStore($projectTree)
+  useStore($unlistedSessionOwnerRows)
   useStore($workSourceAuthorityRevision)
 
   const owner = row ? qualifiedWorkSourceOwner(knownSessionOwner([row], row.id)) : undefined
   const connectionId = owner?.connectionId
   const profile = owner?.profile
-  const ids = row ? lineageAliases(row.id, sessions) : []
+  const ids = row ? rowLineage(row) : []
   // Every lineage member is tracked: the runtime on screen and reads may hold any of them (compression rotates the
   // tip), and only a tracked id gets an authority epoch and runtime roles that republish the revision on change.
   const trackedIds = ids.join('\u0000')
@@ -56,4 +70,9 @@ export function useWorkSourceUnavailable(row: SessionInfo | null | undefined): b
   return workSourceVetoed(owner.connectionId, owner.profile, ids, authority, sources, id =>
     peekWorkSourceAuthorityForSession(owner.connectionId, owner.profile, id)
   )
+}
+
+/** A row in no loaded list gets no tracked authority, so the no-live-authority veto holds it as before. */
+function rowLineage(row: SessionInfo): string[] {
+  return lineageAliases(row.id, ownerLookupSessionRows())
 }
