@@ -38,3 +38,24 @@ def test_guard_policy_at_entry(request_envelope, monkeypatch, capsys, surface, m
         else:
             assert result.get('created') is True, result
     assert len([r for r in caplog.records if 'guard creation frozen' in r.message]) == (mode in {'refuse', 'append'})
+
+
+def test_shipped_default_is_on(request_envelope):
+    """No config patching: the real DEFAULT_CONFIG merge must freeze guards."""
+    request_envelope['args']['create']['self_work']['kind'] = 'guard'
+    result = receive(request_envelope)
+    assert result['status'] == 'rejected' and result['code'] == 'self_work_guard_frozen', result
+    with kbc.connect_closing() as conn:
+        assert not kb.list_tasks(conn)
+
+
+def test_create_path_refusal_stays_definitive(request_envelope, monkeypatch):
+    """Switch reads off during replay, on during admit: still rejected, not retryable pending."""
+    from hermes_cli import kanban_selfwork_guards as module
+    reads = iter([False])
+    monkeypatch.setattr(module, "frozen", lambda: next(reads, True))
+    request_envelope['args']['create']['self_work']['kind'] = 'guard'
+    result = receive(request_envelope)
+    assert result['status'] == 'rejected' and result['code'] == 'self_work_guard_frozen', result
+    with kbc.connect_closing() as conn:
+        assert not kb.list_tasks(conn)

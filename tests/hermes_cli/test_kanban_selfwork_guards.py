@@ -103,3 +103,11 @@ def test_malformed_switch_does_not_unfreeze(board, settings, bad):
     settings['freeze_guards'] = bad
     with pytest.raises(policy.SelfWorkError, match='freeze_guards'):
         admit(board)
+
+
+def test_oldest_open_guard_owner_receives(board, settings):
+    older, newer = seed(board), seed(board)
+    board.execute('UPDATE tasks SET created_at=100 WHERE id=?', (older,))
+    board.execute('UPDATE tasks SET created_at=200 WHERE id=?', (newer,))
+    board.commit()
+    assert admit(board)['task_id'] == older
