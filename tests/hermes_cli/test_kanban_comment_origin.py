@@ -128,6 +128,17 @@ def test_wait_comment_probe_parks(kanban_home, monkeypatch) -> None:
         assert out.get("status") == "scheduled", out
 
 
+def test_own_skip_system_wait_comment_without_subscriber_is_refused(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": "Decide premise A/B/C; waiting on the next reply.",
+                                 "awaiting": {"kind": "external", "ref": "origin session", "why": "Decide premise A/B/C."},
+                                 "wake_check": f"hermes kanban wait-comment {tid} --after-id 0 --skip-system"})
+        assert out.get("code") == "no_chat_subscriber", out
+        assert kb.get_task(conn, tid).status == "running"
+
+
 def test_guard_can_be_switched_off(kanban_home, monkeypatch) -> None:
     # The documented undo: ``kanban.author_probe_guard: false`` in config.yaml.
     (kanban_home / "config.yaml").write_text("kanban:\n  author_probe_guard: false\n")

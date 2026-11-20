@@ -31,6 +31,20 @@ def envelope(task: dict) -> dict | None:
     return notice
 
 
+def _named_comment_producer(args: list[str]) -> bool:
+    """``--from-gateway`` / ``--from-card`` already names a producer other than the creator chat."""
+    i = 0
+    while i < len(args):
+        word = args[i]
+        for flag in ('--from-gateway', '--from-card'):
+            if word == flag:
+                return bool(i + 1 < len(args) and not str(args[i + 1]).startswith('-') and str(args[i + 1]).strip())
+            if word.startswith(flag + '='):
+                return bool(word.split('=', 1)[1].strip())
+        i += 1
+    return False
+
+
 def own_comment_wait(cmd: str | None, task_id: str) -> bool:
     """A wait on replies to this card is a chat ask, not an external producer."""
     import os
@@ -39,8 +53,11 @@ def own_comment_wait(cmd: str | None, task_id: str) -> bool:
         words = shlex.split(cmd or '')
     except ValueError:
         return False
-    return any(os.path.basename(words[i]) == 'hermes' and words[i + 1:i + 4] == ['kanban', 'wait-comment', task_id]
-               for i in range(len(words) - 3))
+    for i in range(len(words) - 3):
+        if os.path.basename(words[i]) == 'hermes' and words[i + 1:i + 4] == ['kanban', 'wait-comment', task_id]:
+            if not _named_comment_producer(words[i + 4:]):
+                return True
+    return False
 
 
 def notifiable(task: dict) -> bool:

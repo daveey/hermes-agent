@@ -135,3 +135,18 @@ def test_malformed_decision_envelope_is_not_notifiable(change):
     assert not notifiable({'status': 'scheduled', 'ask_notice': {**ask, **change}})
     assert not notifiable({'status': 'running', 'ask_notice': ask})
 
+
+@pytest.mark.parametrize('cmd,want', [
+    ('hermes kanban wait-comment t_x --after-id 0 --skip-system', True),
+    ('hermes kanban wait-comment t_x --after-id 0 --contains APPROVED', True),
+    ('nice hermes kanban wait-comment t_x --after-id 0', True),
+    ('hermes kanban wait-comment t_x --after-id 0 --from-gateway macbook', False),
+    ('hermes kanban wait-comment t_x --after-id 0 --from-gateway=macbook', False),
+    ('hermes kanban wait-comment t_x --after-id 0 --from-card t_other', False),
+    ('hermes kanban wait-comment t_other --after-id 0 --skip-system', False),
+    ('gh run view 1 --json status', False),
+])
+def test_own_comment_wait_excludes_named_producers(cmd, want):
+    from hermes_cli.kanban_remote_ask import own_comment_wait
+    assert own_comment_wait(cmd, 't_x') is want
+
