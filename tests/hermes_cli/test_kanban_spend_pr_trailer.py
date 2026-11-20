@@ -7,7 +7,11 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_spend_budget as spend
 from tests.hermes_cli import test_kanban_spend_budget as helpers
-from tests.hermes_cli.test_kanban_spend_pr_owner import PR, github, kanban_home, owner
+from tests.hermes_cli import test_kanban_spend_pr_owner as base
+from tests.hermes_cli.test_kanban_spend_pr_owner import PR, owner
+
+kanban_home = helpers.kanban_home
+github = base.github
 
 
 def _stamped(conn, tid, body, *, writer="owner"):
