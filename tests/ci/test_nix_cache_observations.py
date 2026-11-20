@@ -69,6 +69,44 @@ fi
     assert ('::error::' in result.stdout) is not success
 
 
+@pytest.mark.parametrize(('mode', 'expected'), [('over-budget', 1), ('build-fails', 42), ('within-budget', 0)])
+def test_root_workflow_propagates_failures(tmp_path, mode, expected):
+    doc = YAML(typ='safe').load((ROOT / '.github/workflows/nix.yml').read_text())
+    steps = doc['jobs']['flake-check']['steps']
+    root = next(s for s in steps if s.get('name') == 'Root stable Nix outputs before cache GC')
+    assert 'if' not in root
+    assert not root.get('continue-on-error', False)
+    nix = tmp_path / 'nix'
+    nix.write_text('''#!/usr/bin/env bash
+if [ "$1" = build ]; then
+  if [ "$MODE" = build-fails ]; then echo build-failed >&2; exit 42; fi
+  while [ "$1" != --out-link ]; do shift; done
+  ln -s /nix/store/stable-tools "$2"
+else
+  if [ "$MODE" = over-budget ]; then size=5368709121; else size=1024; fi
+  printf '[{"closureSize":%s}]\\n' "$size"
+fi
+''')
+    nix.chmod(0o755)
+    result = subprocess.run(
+        ['bash', '-e', '-c', root['run']], cwd=ROOT,
+        env=dict(os.environ, PATH=f'{tmp_path}:{os.environ["PATH"]}', MODE=mode,
+                 RUNNER_TEMP=str(tmp_path), GITHUB_STEP_SUMMARY=str(tmp_path / 'summary')),
+        capture_output=True, text=True, encoding='utf-8', check=False,
+    )
+    assert result.returncode == expected, result.stdout + result.stderr
+    log = (tmp_path / 'nix-cache-roots.log').read_text()
+    assert ('::error::' in log) is (mode == 'over-budget')
+    if mode == 'build-fails':
+        assert 'build-failed' in log
+
+
+def test_cache_roots_only_tools_used_by_checks():
+    packages = (ROOT / 'nix/packages.nix').read_text()
+    roots = packages.split('lib.attrVals [', 1)[1].split(']', 1)[0]
+    assert roots.split() == ['"pnpm"', '"ripgrep"', '"ffmpeg"', '"node"', '"python"', '"uv"']
+
+
 def test_workflow_tee_retains_failure_and_summary_is_always_run(tmp_path):
     doc = YAML(typ='safe').load((ROOT / '.github/workflows/nix.yml').read_text())
     steps = doc['jobs']['flake-check']['steps']

@@ -81,7 +81,7 @@
         # GC root for the expensive tool outputs and shared runtime dependencies.
         # The build inputs alone do not keep patchelf alive after GC.
         ci-cache = pkgs.writeText "hermes-ci-cache" (lib.concatStringsSep "\n" (
-          map toString ((lib.attrVals [ "npm" "pnpm" "ripgrep" "ffmpeg" "node" "python" "uv" "just" ] pmPackages) ++ [
+          map toString ((lib.attrVals [ "pnpm" "ripgrep" "ffmpeg" "node" "python" "uv" ] pmPackages) ++ [
             (pkgs.callPackage ./patchelf-fixed.nix { })
             full.hermesVenv
             full.hermesNpmLib.pnpmDeps
