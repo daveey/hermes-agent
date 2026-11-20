@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from '@testing-library/react'
-import { afterEach, expect, it, vi } from 'vitest'
+import { useState } from 'react'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { registry } from '@/contrib/registry'
 import * as areas from '@/sdk/areas'
@@ -17,9 +18,60 @@ vi.mock('@/components/pane-shell/tree/renderer', () => ({
 vi.mock('./use-touch-titlebar', () => ({ useTitlebarHeight: () => 34 }))
 
 const disposers: (() => void)[] = []
+const resizeCallbacks = new Set<() => void>()
+beforeEach(() => {
+  // jsdom has no layout; model the strip's natural block height from its content.
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    return { height: this.querySelector('button') ? 24 : 0 } as DOMRect
+  })
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      constructor(private callback: () => void) {}
+      observe() {
+        resizeCallbacks.add(this.callback)
+      }
+      disconnect() {
+        resizeCallbacks.delete(this.callback)
+      }
+    }
+  )
+})
 afterEach(() => {
   cleanup()
   disposers.splice(0).forEach(dispose => dispose())
+  expect(resizeCallbacks.size).toBe(0)
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
+
+it('keeps old geometry for a registered component returning null, including internal state transitions', () => {
+  let setVisible!: (visible: boolean) => void
+
+  function Strip() {
+    const [visible, update] = useState(false)
+    setVisible = update
+
+    return visible ? <button>Working</button> : null
+  }
+
+  disposers.push(registry.register({ id: 'conditional', area: 'shell.topStrip', render: () => <Strip /> }))
+  const { container } = render(<ShellWorkspace />)
+  const workspace = screen.getByTestId('workspace')
+
+  const assertGeometry = (visible: boolean) => {
+    expect(container.querySelector('[data-shell-titlebar-band]') !== null).toBe(visible)
+    expect(workspace.dataset.titlebar).toBe(String(!visible))
+    expect(screen.getByTestId('workspace')).toBe(workspace)
+  }
+
+  assertGeometry(false)
+  act(() => setVisible(true))
+  act(() => resizeCallbacks.forEach(callback => callback()))
+  assertGeometry(true)
+  act(() => setVisible(false))
+  act(() => resizeCallbacks.forEach(callback => callback()))
+  assertGeometry(false)
 })
 
 it('exports the shell-wide area alongside the statusbar areas', () => {
