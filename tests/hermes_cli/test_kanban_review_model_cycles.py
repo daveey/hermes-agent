@@ -217,3 +217,61 @@ def test_structural_exhaustion_blocks_once_without_spawn_retry_loop(board, monke
         assert len(kb.list_runs(conn, task.id)) == runs
         assert len([e for e in kb.list_events(conn, task.id) if e.kind == "gave_up"]) == 1
         assert spawned == []
+
+
+def test_downstream_review_keeps_full_history_of_source_authors(board):
+    with kbc.connect() as conn:
+        src = kb.get_task(conn, kb.create_task(conn, title="source work", assignee="default"))
+        run(conn, src.id, MODELS[0])
+        run(conn, src.id, MODELS[1], "review")
+        run(conn, src.id, MODELS[2])
+        down = kb.get_task(conn, kb.create_task(conn, title="Independent exact-head review of PR",
+                                                assignee="default", creator_task_id=src.id))
+        # The PR diff holds both epochs' commits; only the card's own lane is bounded.
+        assert review.implementer_models(conn, down) == {MODELS[0], MODELS[2]}
+        assert review.implementer_models(conn, kb.get_task(conn, src.id)) == {MODELS[2]}
+
+
+def test_completed_review_outcome_is_an_epoch_boundary(board):
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, kb.create_task(conn, title="completed verdict", assignee="default"))
+        run(conn, task.id, MODELS[0])
+        verdict_run = run(conn, task.id, MODELS[1], "review")
+        conn.execute("UPDATE task_runs SET outcome='completed' WHERE id=?", (verdict_run,))
+        run(conn, task.id, MODELS[2])
+        assert review.implementer_models(conn, kb.get_task(conn, task.id)) == {MODELS[2]}
+
+
+def _walled(monkeypatch):
+    from hermes_cli import kanban_provider_walls as walls
+    monkeypatch.setattr(walls, "active_walls", lambda **kwargs: {"anthropic": 99999999999})
+
+
+def test_walled_override_with_no_other_candidate_is_retryable_not_exhausted(board, monkeypatch):
+    cfg = helpers.config(board, strong=helpers.OPUS, routes=[helpers.OPUS])
+    _walled(monkeypatch)
+    with kbc.connect() as conn:
+        task = helpers.task(conn, helpers.OPUS)
+        kb.claim_task(conn, task.id)
+        assert kb.request_review(conn, task.id, metadata={"review_model": helpers.FABLE})
+        with pytest.raises(review.ReviewModelUnavailable) as raised:
+            review.resolve_review_model(conn, kb.get_task(conn, task.id), cfg)
+        assert not isinstance(raised.value, review.ReviewModelsExhausted)
+
+
+def test_walled_standard_candidate_is_retryable_not_exhausted(board, monkeypatch):
+    import json
+    cfg = helpers.config(board, strong=helpers.OPUS, routes=[helpers.OPUS])
+    path = board.joinpath("config.yaml")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    deep = data["model_routing"]["routes"]["deep"][0]
+    data["model_routing"]["routes"]["standard"] = [{**deep, "model": helpers.FABLE}]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    _walled(monkeypatch)
+    with kbc.connect() as conn:
+        task = helpers.task(conn, helpers.OPUS)
+        kb.claim_task(conn, task.id)
+        assert kb.request_review(conn, task.id)
+        with pytest.raises(review.ReviewModelUnavailable) as raised:
+            review.resolve_review_model(conn, kb.get_task(conn, task.id), cfg)
+        assert not isinstance(raised.value, review.ReviewModelsExhausted)

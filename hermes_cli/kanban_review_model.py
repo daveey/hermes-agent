@@ -81,7 +81,7 @@ def implementer_models(conn, task) -> set[str]:
     from hermes_cli.kanban_review_sources import source_reader
     seen = set()
 
-    def collect(conn, card):
+    def collect(conn, card, bounded=True):
         if card.id in seen:
             return set()
         seen.add(card.id)
@@ -92,7 +92,7 @@ def implementer_models(conn, task) -> set[str]:
         pin = str(getattr(card, "model_override", None) or "").strip()
         boundary = False
         if not downstream and not skilled:
-            models, boundary = _current_authors(conn, card.id)
+            models, boundary = _current_authors(conn, card.id, bounded)
         # Preserve conservative pin provenance on the first epoch and when the
         # current epoch has no concrete receipt; an old pin is not a new author.
         if pin and not is_class_selector(pin) and not downstream and (not boundary or not models):
@@ -108,14 +108,15 @@ def implementer_models(conn, task) -> set[str]:
                 sources.append(creator)
             for source in sources:
                 source_conn, related = lookup(source)
-                models.update(collect(source_conn, related))
+                # The exact-head diff holds every epoch's commits: keep full history.
+                models.update(collect(source_conn, related, bounded=False))
         return models
 
     with source_reader(conn) as lookup:
         return collect(conn, task)
 
 
-def _current_authors(conn, task_id):
+def _current_authors(conn, task_id, bounded=True):
     """Authors since the review preceding the latest implementation, plus epoch boundary.
 
     Consecutive review retries keep the same author set. A pre-spawn refusal is
@@ -141,7 +142,7 @@ def _current_authors(conn, task_id):
             # Launch/result receipts prove execution, not that anyone judged the
             # head. Parked and crashed reviewers must not release its authors.
             verdict = row[1] in ("changes_requested", "completed")
-            if verdict and models and not unknown_author:
+            if bounded and verdict and models and not unknown_author:
                 return models, True
             continue
         if row[0] in repeats:
