@@ -34,7 +34,6 @@ def _exists(conn) -> bool:
 
 def file_holds(path: Path) -> bool:
     """Cheap peek: does this database file hold any quarantine row? Opens no pooled shadow connection."""
-    import sqlite3
     try:
         peek = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
     except sqlite3.Error:
