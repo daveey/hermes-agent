@@ -69,8 +69,16 @@ def test_foreign_original_completes_normally_without_materializing_it(foreign):
     lambda e: e.update(events=[]),
     lambda e: next(row for row in e['events'] if row['kind'] == 'blocked').update(payload='{'),
     lambda e: e['task'].update(workspace_kind='dir', workspace_path=None),
+    lambda e: e['task'].update(uid='t_0000000000000000'),
+    lambda e: e.update(runs_complete=False),
+    lambda e: e.update(version=2),
+    lambda e: e.update(board='other'),
+    lambda e: next(row for row in e['events'] if row['kind'] == 'blocked').update(task_id='t_0000000000000000'),
+    lambda e: next(row for row in e['events'] if row['kind'] == 'blocked').update(deleted_at=1),
 ], ids=['missing', 'unassigned', 'deleted', 'wrong-task', 'incomplete', 'missing-field',
-        'bad-requires', 'missing-block', 'bad-block', 'missing-directory-path'])
+        'bad-requires', 'missing-block', 'bad-block', 'missing-directory-path',
+        'wrong-uid', 'runs-incomplete', 'wrong-version', 'wrong-board',
+        'wrong-event-task', 'deleted-event'])
 def test_foreign_evidence_fails_closed(foreign, mutate):
     conn, _, repair, _, evidence, _ = foreign
     mutate(evidence)
@@ -112,6 +120,46 @@ def test_foreign_model_validation_is_not_skipped(foreign, monkeypatch):
     monkeypatch.setattr(models, 'validate_model_assignment', refuse)
     with pytest.raises(ValueError, match='model refused'):
         kb.complete_task(conn, repair, result='Verified')
+
+
+def test_unenrolled_gateway_is_typed_refusal(foreign, monkeypatch):
+    conn, _, repair, _, _, calls = foreign
+
+    def unenrolled():
+        raise client.SyncUnavailable('kanban sync: hub url, gateway name and key are all required')
+
+    monkeypatch.setattr(client, 'load_identity', unenrolled)
+    with pytest.raises(routing.AssignmentRoutingError):
+        kb.complete_task(conn, repair, result='Verified')
+    assert not calls
+    assert kb.get_task(conn, repair).status != 'done'
+
+
+@pytest.mark.parametrize('gate', ['disabled', 'unselected'])
+def test_prepare_refuses_with_zero_board_reads_when_sync_not_selected(foreign, monkeypatch, gate):
+    conn, _, repair, _, _, calls = foreign
+    if gate == 'disabled':
+        monkeypatch.setattr(sync, 'sync_config', lambda: {'enabled': False})
+    else:
+        monkeypatch.setattr(sync, 'board_selected', lambda *args: False)
+    with pytest.raises(routing.AssignmentRoutingError):
+        kb.complete_task(conn, repair, result='Verified')
+    assert not calls
+    assert kb.get_task(conn, repair).status != 'done'
+
+
+def test_newest_matching_block_is_authority(foreign):
+    conn, _, repair, _, evidence, _ = foreign
+    matching = next(row for row in evidence['events'] if row['kind'] == 'blocked')
+    older = copy.deepcopy(matching)
+    data = json.loads(older['payload'])
+    data['reason'] = 'unblock t_0000000000000000'
+    older['payload'] = json.dumps(data)
+    newer = copy.deepcopy(matching)
+    newer.update(uid='event-newer', ord=max(row['ord'] for row in evidence['events']) + 1)
+    evidence['events'].remove(matching)
+    evidence['events'].extend([older, newer])
+    assert kb.complete_task(conn, repair, result='Verified')
 
 
 def test_board_failure_has_no_replica_fallback(foreign, monkeypatch):

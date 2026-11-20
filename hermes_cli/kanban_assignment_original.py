@@ -120,7 +120,8 @@ def prepare(conn, task_id):
                          f'{quote(original, safe="")}/execution-evidence')
         task, payloads = _inventory(data, board, original, task_id)
         return OriginalObservation(task_id, key, expires, task, payloads)
-    except (OSError, ValueError, TypeError, KeyError, client.HubError, client.Resync) as exc:
+    except (OSError, ValueError, TypeError, KeyError, client.HubError, client.Resync,
+            client.SyncUnavailable) as exc:
         raise _invalid() from exc
     finally:
         if hub is not None:
