@@ -146,6 +146,29 @@ def test_review_card_of_admitted_creator_skips_gate_but_not_of_held_one(conn, co
     assert _task(conn, review2)["status"] == "triage"
 
 
+@pytest.mark.parametrize("creator", [None, "t_0123456789abcdef"])
+def test_chat_exact_head_review_without_creator_row_skips_gate(conn, configured, creator):
+    configured({**LANES, "hermes": {**LANES["hermes"], "gate_exempt": ["independent.*review"]}})
+    opts = {"title": "Independent exact-head review PR #1", "created_by": "agent",
+            "creator_task_id": creator}
+    assert lanes._creator_row(conn, opts) is None
+    status, tenant, decision = lanes.initial_state(conn, [], "ready", False, "hermes", opts)
+    assert (status, tenant, decision.gated, decision.would_gate) == ("ready", "hermes", False, False)
+    assert lanes.admitted_today(conn, "hermes") == 0
+
+
+@pytest.mark.parametrize("creator", [None, "t_0123456789abcdef"])
+@pytest.mark.parametrize("detector", [{"created_by": "self-heal"},
+                                      {"idempotency_key": "ci-main-watch:review"}])
+def test_detector_exact_head_review_without_creator_row_stays_gated(conn, configured, detector, creator):
+    configured({**LANES, "hermes": {**LANES["hermes"], "gate_exempt": ["independent.*review"]}})
+    opts = {"title": "Independent exact-head review PR #1", "created_by": "agent",
+            "creator_task_id": creator, **detector}
+    assert lanes._creator_row(conn, opts) is None
+    status, tenant, decision = lanes.initial_state(conn, [], "ready", False, "hermes", opts)
+    assert (status, tenant, decision.gated) == ("triage", "hermes", True)
+
+
 def test_triage_sweep_leaves_gate_held_card(conn, configured):
     from hermes_cli.kanban_triage_sweep import sweep_stale_triage
 

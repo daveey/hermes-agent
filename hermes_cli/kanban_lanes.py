@@ -342,7 +342,11 @@ def _gated(conn, pol: Policy, lane_name: str, opts: dict) -> bool:
     if any(p.search(title) for p in lane.gate_exempt):
         # Review and land work of an admitted card must be able to finish it.
         row = _creator_row(conn, opts)
-        if row is not None and not (row["status"] == "triage" and row["block_kind"] == GATE_KIND):
+        if row is None:
+            # Chat-filed reviews have no local creator row; detectors still need admission.
+            if opts.get("created_by") not in lane.creators and not _key_matches(lane, key):
+                return False
+        elif not (row["status"] == "triage" and row["block_kind"] == GATE_KIND):
             return False
     return True
 
