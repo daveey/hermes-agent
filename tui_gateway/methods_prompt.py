@@ -756,7 +756,8 @@ def _run_after_agent_ready(
         _close_agent_init_failed_turn(session, message, surface, notice)
         # Terminal frame + retained snapshot (not a bare "error" event): the snapshot is
         # the only way resume shows this to a disconnected client.
-        _emit_terminal_turn_error(sid, session, message, error_surface=surface)
+        # [daveey] retire_marker=False: the turn never reached _run_prompt_submit, so it wrote no marker.
+        _emit_terminal_turn_error(sid, session, message, error_surface=surface, retire_marker=False)
         with session["history_lock"]:
             if not owns(session):
                 return

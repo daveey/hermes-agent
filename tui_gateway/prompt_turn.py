@@ -156,6 +156,7 @@ def _admit_prompt_turn(
                 return None
             # [daveey] A submit refused while an admitted turn runs on this record owns none of that turn's
             # state: its running, admission ref, in-flight turn and marker stay the live turn's (2026-11-20).
+            # Defensive: every current caller claims ``running`` first (turn_admission.LIVE_TURN).
             spared = live_turn_holds(session)
             if not spared:
                 session["running"] = False
@@ -223,9 +224,11 @@ def _admit_prompt_turn(
         # thread with ``running`` still True — the prompt vanished and the session stayed "busy" (#111531).
         reason = session.get("agent_error") or AGENT_MISSING_FOR_TURN
         logger.info("Refusing turn for session %s: no agent attached (%s)", session.get("session_key") or sid, reason)
+        # [daveey] retire_marker=False: refused before its body ran, this turn wrote no marker; one on disk is
+        # another turn's (a sibling record's live turn, or a marker a resume will continue).
         _emit_terminal_turn_error(
             sid, session, reason,
-            error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
+            error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True}, retire_marker=False)
         return None
     return images, agent
 
@@ -277,6 +280,7 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     killed_jobs = session.pop("_auto_continue_killed_jobs", None)
     marker_text = session.pop("_auto_continue_prompt", None) or text
     session.pop("_refused_turn_marker_key", None)
+    session.pop("_turn_concluding_marker_key", None)  # [daveey] a new turn: its marker is live again
     refused_prompt = session.pop("_refused_turn_prompt", None)
     session.pop("_refused_turn_earlier", None)
     if refused_prompt and not marker_attempt:  # a new message overtook the replay: if it is refused too, it carries it
@@ -1259,6 +1263,8 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
         st.receipt_committed = True
     if st.receipt_committed:
         _hold_refused_turn(session, st.marker_key, getattr(st, "display_kind", None), _error_surface)
+        # [daveey] Read by update_pause's lost-marker WARNING: from here the turn retires its own marker.
+        session["_turn_concluding_marker_key"] = st.marker_key
         _retire_turn_marker(session, st.marker_key)
     return payload, raw, status
 
@@ -1548,6 +1554,7 @@ def _run_admitted_prompt(
                     st.error_detail)
                 # Backstop for turns that never reached a terminal frame.
                 if st.receipt_committed:
+                    session["_turn_concluding_marker_key"] = st.marker_key
                     _retire_turn_marker(session, st.marker_key, concluding_turn=concluding)
                     with session["history_lock"]:
                         if session.get("_active_turn_marker_key") == st.marker_key:

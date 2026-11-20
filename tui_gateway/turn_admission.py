@@ -10,8 +10,10 @@ from hermes_cli.worker_drain_fence import admit, DrainRefused, lease_scope
 
 _current: ContextVar[tuple | None] = ContextVar("turn_admission_owner", default=None)
 _KEY = "_turn_admission"
-# [daveey] Set when ``_admit_prompt_turn`` admits a turn, popped when that turn settles: while it is set and
-# ``running`` holds, a refused submit on the record is a sibling of a live turn and owns none of its state.
+# [daveey] Set when ``_admit_prompt_turn`` admits a turn, dropped when that turn settles or clears ``running``:
+# while it is set and ``running`` holds, a refused submit on the record is a sibling of a live turn and owns none
+# of its state. DEFENSIVE: every current caller claims ``running`` before it submits, so no caller reaches a
+# refusal over a live turn on its own record today; this guards a future caller that skips the claim.
 LIVE_TURN = "_admitted_live_turn"
 _spared: ContextVar[bool] = ContextVar("turn_admission_refusal_spared_live_turn", default=False)
 
@@ -216,6 +218,7 @@ def settle_prompt_state(session, st):
             return
         st.agent.interim_assistant_callback = None
         session["running"] = False
+        session.pop(LIVE_TURN, None)  # the record means "this turn holds running": both end together
         session["last_active"] = time.time()
         session.pop("_turn_user_input", None)
         session.pop("_stop_issuer", None)

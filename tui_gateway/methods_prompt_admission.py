@@ -263,8 +263,9 @@ def _accept_claimed(server, rid, sid, session, params, text):
         pending = {**params, 'lock': threading.Lock()}
         session['_admission_cancel_pending'] = pending
         try:
+            # [daveey] retire_marker=False: the dispatch never started a turn, so no marker is this one's.
             server._emit_terminal_turn_error(sid, session, exc, error_surface={
-                "layer": "runtime", "code": "admission_dispatch_failed", "retryable": False})
+                "layer": "runtime", "code": "admission_dispatch_failed", "retryable": False}, retire_marker=False)
         finally:
             try:
                 with pending['lock']:

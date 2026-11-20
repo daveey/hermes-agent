@@ -238,30 +238,19 @@ def test_clarify_blocked_turn_still_pauses_after_a_refused_sibling_submit(env, m
     assert af.state(env.home)["reservations"] == 0, "the live turn's reservation was not released"
 
 
-# --- T5: a refused submit on the live turn's own record leaves its running state alone -----------------------------
+# --- T5: a refused submit on the live turn's own record leaves its running state alone (defensive) ----------------
+# Every current caller claims ``running`` before it submits, so none reaches this today; the record state is set up
+# by a real admitted turn and the submit functions are called directly on it.
 
 def test_refused_submit_on_the_live_record_keeps_running_ref_and_inflight(env, monkeypatch):
     live, agent = _start_live_turn(env, monkeypatch)
-    rewound: list = []
-    real_claim = server._notif_claim_turn
     try:
         with live["history_lock"]:
             token = live["_turn_admission"]
             refs, inflight, claim = token.refs, live["inflight_turn"], live["_notif_turn_claim"]
-        # The sibling reached admission on this record (its claim raced the live turn's); the poll is the real one.
-        monkeypatch.setattr(server, "_notif_claim_turn", lambda session: True)
-        monkeypatch.setattr(server, "_kb_settle_held", lambda session: None)
-        monkeypatch.setattr(server, "_kb_gateway_owns", lambda session: False)
-        monkeypatch.setattr(server, "_kb_owner_refusal", lambda sid, session: None)
-        monkeypatch.setattr(server, "_kb_persist_batch", lambda session, batch, diagnostic: ("unkeyed", batch, {}))
-        monkeypatch.setattr(server, "_kb_rewind_refused",
-                            lambda session, batch, not_owned=False: rewound.append((list(batch), not_owned)))
-        live["_kanban_pending"] = ["task t_1 done"]
         env.slot["refuse"] = NOT_OWNED
-        server._notif_poll_kanban_scoped("ui-live", live, prepared=([], []))
-
-        # The refused notice is handed back exactly as before (an owner refusal: not_owned, per its backoff).
-        assert [batch for batch, _ in rewound] == [["task t_1 done"]], "the refused kanban notice was not rewound"
+        assert server._notif_submit("rid-n", "ui-live", live, "kanban notice", "kanban dispatch failed") is False
+        assert server._run_prompt_submit("rid-p", "ui-live", live, "another submit") is False
         with live["history_lock"]:
             assert live["running"] is True
             assert live["_turn_admission"] is token and token.refs == refs
@@ -269,7 +258,7 @@ def test_refused_submit_on_the_live_record_keeps_running_ref_and_inflight(env, m
             assert live["_notif_turn_claim"] is claim
         assert read_turn_marker(env.home, KEY) is not None
         assert not [p for e, sid, p in env.frames if e == "message.complete"], "the live turn's client got a refusal"
-        assert real_claim(live) is False, "a second submit started over the live turn"
+        assert server._notif_claim_turn(live) is False, "a second submit started over the live turn"
     finally:
         _finish(live, agent)
     assert live["running"] is False
@@ -299,14 +288,126 @@ def test_pause_hook_warns_once_when_a_live_turn_lost_its_marker(env, monkeypatch
     assert not [r for r in caplog.records if "live turn lost its marker" in r.getMessage()]
 
 
-# --- review: the live-turn record never spares a refusal that owns its own claim ------------------------------------
+# --- review: the live-turn record means "running" ---------------------------------------------------------------
 
-def test_a_turn_refused_for_a_missing_agent_leaves_no_live_turn_record(env, monkeypatch):
+def _refused_direct_claim(env, session, sid):
+    """A caller that claims ``running`` without ``admission()`` (the kickoff's way), then is refused."""
+    with session["history_lock"]:
+        session["running"] = True
+    env.slot["refuse"] = NOT_OWNED
+    assert server._run_prompt_submit("rid", sid, session, "hello") is False
+
+
+def test_settle_prompt_state_drops_the_record_and_a_refusal_after_it_is_normal(env):
+    from tui_gateway import turn_admission
+    session = _record(env.home, types.SimpleNamespace(session_id=KEY, clear_interrupt=lambda: None), "ui-settle")
+    with session["history_lock"]:
+        session["running"] = True
+        turn_admission.mark_live_turn(session)
+    # A turn whose failure was retained (error_retained) ends through settle_prompt_state alone.
+    st = types.SimpleNamespace(agent=types.SimpleNamespace(), error_retained=True)
+    turn_admission.settle_prompt_state(session, st)
+    assert turn_admission.LIVE_TURN not in session and session["running"] is False
+    _refused_direct_claim(env, session, "ui-settle")
+    assert session["running"] is False, "a refusal after the turn ended was treated as a live turn's sibling"
+    assert [p for e, sid, p in env.frames if e == "message.complete" and sid == "ui-settle"]
+
+
+def test_settle_drops_the_record_of_a_turn_that_never_started(env, monkeypatch):
     from tui_gateway.turn_admission import LIVE_TURN
+    session = _record(env.home, types.SimpleNamespace(session_id=KEY, clear_interrupt=lambda: None), "ui-x")
+    session["running"] = True
+    # Admitted, then not started (another record is registered under this sid): settle runs, settle_prompt_state not.
+    monkeypatch.setitem(server._sessions, "ui-x", _record(env.home, None, "ui-x-other"))
+    assert server._run_prompt_submit("rid", "ui-x", session, "hello") is False
+    assert LIVE_TURN not in session and session["running"] is False
+    _refused_direct_claim(env, session, "ui-x")
+    assert session["running"] is False
+
+
+def test_missing_agent_refusal_never_marks_a_live_turn_nor_retires_a_sibling_marker(env, monkeypatch):
+    from tui_gateway.turn_admission import LIVE_TURN
+    record_turn_start(env.home, KEY, "a sibling record's live turn")
     session = _record(env.home, None, "ui-noagent")
     session["running"] = True
-    assert server._run_prompt_submit("rid", "ui-noagent", session, "hello") is False
-    assert LIVE_TURN not in session and session["running"] is False
+    seen: list = []
+    real = server._emit_terminal_turn_error
+
+    def spy(*args, **kwargs):  # before _fail_inflight_turn's settle can drop a record set too early
+        seen.append(LIVE_TURN in session)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(server, "_emit_terminal_turn_error", spy)
+    assert server._admit_prompt_turn("ui-noagent", session, "hello", None, None, None, None) is None
+    assert seen == [False], "the agent-None branch marked a live turn"
+    assert read_turn_marker(env.home, KEY)["prompt"] == "a sibling record's live turn"
+
+
+def test_agent_init_failure_keeps_a_sibling_marker(env, monkeypatch):
+    record_turn_start(env.home, KEY, "a sibling record's live turn")
+    session = _record(env.home, None, "ui-init")
+    session["running"] = True
+    monkeypatch.setattr(server, "_wait_agent_for_prompt",
+                        lambda *a, **k: {"error": {"message": "agent initialization failed"}})
+    server._run_after_agent_ready("rid", "ui-init", session, "hello", None, None, None)
+    assert [p for e, sid, p in env.frames if e == "message.complete" and sid == "ui-init"]
+    assert read_turn_marker(env.home, KEY)["prompt"] == "a sibling record's live turn"
+
+
+def test_kickoff_releases_its_claim_only_when_no_live_turn_holds_the_record(env, monkeypatch, caplog):
+    from tui_gateway import turn_admission
+    from tui_gateway.turn_marker import mark_turn_paused
+
+    class Inline:
+        def __init__(self, target=None, daemon=None, args=(), kwargs=None, name=None):
+            self._t, self._a, self._k = target, args, kwargs or {}
+
+        def start(self):
+            self._t(*self._a, **self._k)
+
+        def is_alive(self):
+            return False
+
+        def join(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(server.threading, "Thread", Inline)
+    monkeypatch.setattr(server, "_start_agent_build", lambda sid, session: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda session, rid, timeout=30.0: None)
+    caplog.set_level(logging.INFO)
+    results = {}
+    for live in (False, True):
+        record_turn_start(env.home, KEY, "fix the flaky test", attempts=1)
+        mark_turn_paused(env.home, KEY, up.PAUSE_REASON)
+        session = _record(env.home, LiveAgent(), f"ui-k{live}")
+        calls = []
+
+        def slot(sid, s, _calls=calls, _live=live, **kw):
+            _calls.append(sid)
+            if len(_calls) == 1:  # the kickoff's own check passes; a live turn takes the record (defensive case)
+                if _live:
+                    turn_admission.mark_live_turn(s)
+                return None
+            return NOT_OWNED  # admission's check refuses
+
+        monkeypatch.setattr(server, "_ensure_active_session_slot", slot)
+        assert server._maybe_schedule_auto_continue(f"ui-k{live}", session, KEY) is not None
+        results[live] = (session["running"], "_notif_turn_claim" in session, session.get("_auto_continue_scheduled"))
+    assert results[False] == (False, False, False), "a refused kickoff kept its own claim"
+    assert results[True][:2] == (True, True), "a refused kickoff released a live turn's running/claim"
+    assert results[True][2] is False
+    assert sum("never started" in r.getMessage() for r in caplog.records) == 2
+
+
+def test_a_stale_spared_verdict_never_leaks_into_a_later_submit(env, monkeypatch):
+    from tui_gateway.turn_admission import note_refusal
+    session = _record(env.home, types.SimpleNamespace(session_id=KEY, clear_interrupt=lambda: None), "ui-stale")
+    assert server._notif_claim_turn(session) is True
+    note_refusal(spared_live_turn=True)  # an earlier refusal on this thread spared a live turn
+    # This submit is refused before admission ever runs (so admission's own reset never happens).
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda *a, **k: False)
+    assert server._notif_submit("rid", "ui-stale", session, "notice", "dispatch failed") is False
+    assert session["running"] is False and "_notif_turn_claim" not in session, "the stale verdict kept the claim"
 
 
 def test_a_fresh_claim_drops_a_leftover_live_turn_record_and_its_refusal_releases(env):
@@ -318,3 +419,30 @@ def test_a_fresh_claim_drops_a_leftover_live_turn_record_and_its_refusal_release
     assert server._notif_submit("rid", "ui-claim", session, "notice", "dispatch failed") is False
     assert session["running"] is False and "_turn_admission" not in session
     assert af.state(env.home)["reservations"] == 0
+
+
+# --- review: the lost-marker WARNING skips a turn retiring its own marker --------------------------------------------
+
+def test_no_lost_marker_warning_while_a_turn_concludes_but_a_lost_marker_still_warns(env, monkeypatch, caplog):
+    session = _record(env.home, types.SimpleNamespace(), "ui-c")
+    session.update(running=True, _active_turn_marker_key=KEY, _turn_concluding_marker_key=KEY)
+    caplog.set_level(logging.INFO)
+    assert up.not_resumable_reason(session, KEY) == "no turn marker"
+    assert not [r for r in caplog.records if "live turn lost its marker" in r.getMessage()]
+    session.pop("_turn_concluding_marker_key")
+    assert up.not_resumable_reason(session, KEY) == "no turn marker"
+    assert [r for r in caplog.records if "live turn lost its marker" in r.getMessage()]
+
+
+def test_a_pause_poll_during_post_turn_work_does_not_warn(env, monkeypatch, caplog):
+    polled: list = []
+
+    def after_complete(sid, session, st, raw):  # post-turn work: the marker is already retired, running still True
+        polled.append((session.get("running"), up.not_resumable_reason(session, KEY)))
+
+    monkeypatch.setattr(server, "_after_complete_turn", after_complete)
+    caplog.set_level(logging.INFO)
+    live, agent = _start_live_turn(env, monkeypatch)
+    _finish(live, agent)
+    assert polled == [(True, "no turn marker")], polled
+    assert not [r for r in caplog.records if "live turn lost its marker" in r.getMessage()]

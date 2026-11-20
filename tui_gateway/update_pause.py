@@ -181,6 +181,8 @@ def _warn_live_turn_lost_marker(session: dict, marker_key: str) -> None:
     from tui_gateway.turn_admission import LIVE_TURN
     if not session.get("running") or session.get("_active_turn_marker_key") != marker_key:
         return
+    if session.get("_turn_concluding_marker_key") == marker_key:  # its own conclusion retired it (prompt_turn)
+        return
     stamp = (marker_key, session.get(LIVE_TURN))
     if session.get("_lost_marker_warned") == stamp:
         return
