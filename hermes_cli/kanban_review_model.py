@@ -290,15 +290,15 @@ def admission_refusal(conn, task_id, exc):
     return isinstance(exc, (RestartSafeScopeUnavailable, ReviewModelUnavailable, OfferLost)), False, None
 
 
-def independent_routes(pin, cfg, assignee):
-    """Concrete strong tier followed by eligible deep routes, excluding every author model.
+def independent_routes(pin, cfg, assignee, *, level="deep"):
+    """Eligible routes at *level*, with concrete strong first for deep, excluding every author model.
 
     Accept a single model for legacy callers, or the complete implementer set.
-    Read-only; an unreadable routing policy contributes no deep candidates.
+    Read-only; an unreadable routing policy contributes no policy candidates.
     """
     excluded = {pin} if isinstance(pin, str) else set(pin or ())
     strong = str(cfg.get("strong_model") or "").strip()
-    if strong and strong not in excluded and not is_class_selector(strong):
+    if level == "deep" and strong and strong not in excluded and not is_class_selector(strong):
         from hermes_cli.kanban_model_tier import infer_provider
         yield strong, str(cfg.get("strong_provider") or "").strip() or infer_provider(strong)
     from agent.model_routing_agent import class_requirements
@@ -313,7 +313,7 @@ def independent_routes(pin, cfg, assignee):
     if not policy.get("enabled", False):
         return
     providers = config.get("providers") or {}
-    for route in eligible_routes(policy, "deep", class_requirements(config), eligible=lambda r: is_provider_enabled(
+    for route in eligible_routes(policy, level, class_requirements(config), eligible=lambda r: is_provider_enabled(
             providers.get(r["provider"], {}))):
         if route["model"] not in excluded:
             yield route["model"], route["provider"]
@@ -384,7 +384,13 @@ def resolve_review_model(conn, task, cfg):
         reason = (OVERRIDE_REFUSED if refusal else "review_override" if class_override or override_moved
                   else "review_unpinned")
         return model, provider, reason
-    detail = f"No eligible deep review model distinct from {sorted(excluded)!r}"
+    # Refused overrides retain their existing registered-deep-only recovery contract.
+    for model, provider in (() if refusal else independent_routes(excluded, cfg, assignee, level="standard")):
+        if _unavailable(model, provider) or (override and registry_refusal(model, provider, assignee)):
+            continue
+        return model, provider, "review_tier_fallback"
+    levels = "deep" if refusal else "deep or standard"
+    detail = f"No eligible {levels} review model distinct from {sorted(excluded)!r}"
     if refusal and override:
         detail = f"review_model {override[0]!r} is refused here ({refusal.code}); {detail}"
     raise ReviewModelUnavailable(detail)

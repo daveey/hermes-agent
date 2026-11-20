@@ -338,6 +338,11 @@ def test_rerouted_pin_reviewer_is_distinct_from_the_model_that_ran(board, overri
     _receipts(conn, tid, **({'route': ran} if receipt == 'run_route' else {'ran': ran}))
     seen = []
     dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
+    if override is None:
+        assert seen == ['claude-sonnet-5-5']
+        event = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
+        assert event['reason'] == 'review_tier_fallback'
+        return
     assert seen == []
     task = kb.get_task(conn, tid)
     assert task.status == 'review' and task.consecutive_failures == 0
