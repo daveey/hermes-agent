@@ -46,7 +46,8 @@ from hermes_cli.kanban_session_activity_card_details import _add_card_details
 from hermes_cli.kanban_watch import not_watch_sql as _not_watch
 from hermes_cli.kanban_links_refresh import ScopeRefresher
 from hermes_cli import kanban_links_narrow as _links_narrow
-from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows, _stored_needs_human
+from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows
+from hermes_cli.kanban_open_asks import card_is_open_human_ask, stamp_needs_you
 import contextlib
 import json
 import logging
@@ -146,10 +147,10 @@ def _status_filter(conn: sqlite3.Connection, statuses: tuple[str, ...]) -> tuple
     """
     ph = ",".join("?" for _ in statuses)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-    conn.create_function("kanban_needs_human", 2, _stored_needs_human, deterministic=True)
+    conn.create_function("kanban_open_ask", 3, card_is_open_human_ask, deterministic=True)
     evidence = "t.human_request" if "human_request" in cols else "NULL"
     kind = "t.block_kind" if "block_kind" in cols else "NULL"
-    human = f"kanban_needs_human({evidence}, {kind})"
+    human = f"kanban_open_ask(t.status, {kind}, {evidence})"
     parked = "t.status IN ('blocked', 'triage')"
     if statuses == BLOCKED_STATUSES:
         return f"({parked} AND {human})", ()
@@ -272,7 +273,7 @@ def _parked_on(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]
         return {}, {}
     info: dict[str, tuple[str, bool]] = {
         str(tid): (status, bool(human)) for tid, status, human in conn.execute(
-            f"SELECT t.id, t.status, kanban_needs_human({evidence}, {kind}) FROM tasks t "
+            f"SELECT t.id, t.status, kanban_open_ask(t.status, {kind}, {evidence}) FROM tasks t "
             f"WHERE t.status NOT IN ({','.join('?' * len(_FINISHED_STATUSES))})", _FINISHED_STATUSES)}
     parents: dict[str, list[str]] = {}
     try:
@@ -521,13 +522,12 @@ def _self_gateway(conn: sqlite3.Connection) -> str:
 
 
 def _replica_bucket(task: dict[str, Any]) -> str | None:
-    """'active' | 'blocked' | None, by the same rules as ``_status_filter`` for local boards. ``human_request`` may be
-    the decoded dict or the stored JSON text (``_stored_needs_human`` reads both). [daveey]"""
+    """'active' | 'blocked' | None, by the same rules as ``_status_filter`` for local boards. [daveey]"""
     status = task.get("status")
     if status in PENDING_RELEASE_STATUSES and task.get("unfinished"):  # closed, release not yet verified
         return "active"
     if status in BLOCKED_STATUSES:
-        return "blocked" if _stored_needs_human(task.get("human_request"), task.get("block_kind")) else "active"
+        return "blocked" if card_is_open_human_ask(status, task.get("block_kind"), task.get("human_request")) else "active"
     return "active" if status in ACTIVE_STATUSES else None
 
 
@@ -1921,6 +1921,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]], *, display: bool = Fals
                 row[key] = n
             else:
                 row.pop(key, None)
+        stamp_needs_you(row, ids, remote_keys)  # [daveey] the open human asks, same snapshot/predicate as kanban_blocked
         # [daveey] The open card ids the chat waits on (lineage-wide, capped): the sidebar's "waiting on N cards".
         open_ids = {tid for sid in ids for tid in waiting.get(sid, ())}
         # Plugin sources (pending close-outs) must not recount local OR scoped remote obligations.

@@ -78,10 +78,10 @@ describe('sessionStatusStripe with a stored outcome', () => {
     ['unresolved', 'attention']
   ] as const)('%s paints %s', (kind, stripe) => {
     expect(outcomeStripe(OUTCOMES[kind])).toBe(stripe)
-    // Wins over every derived input that would otherwise paint something else, except that a stored
-    // `done` never hides known unfinished work (blocked/waiting cards, background work): that stays non-green.
+    // Open asks always paint red; without an ask, stored done still cannot hide unfinished work.
     const held = kind === 'done'
-    expect(sessionStatusStripe('idle', true, false, 3, true, 'stuck', 2, 4, 1, OUTCOMES[kind])).toBe(held ? sessionStatusStripe('idle', true, false, 3, true, 'stuck', 2, 4, 1) : stripe)
+    expect(sessionStatusStripe('idle', true, false, 0, true, null, 2, 4, 1, OUTCOMES[kind])).toBe(held ? sessionStatusStripe('idle', true, false, 0, true, null, 2, 4, 1) : stripe)
+    expect(sessionStatusStripe('idle', true, false, 3, true, 'stuck', 2, 4, 1, OUTCOMES[kind])).toBe('stuck')
     expect(sessionStatusStripe('background', false, false, 0, false, null, 0, 0, 0, OUTCOMES[kind])).toBe(held ? sessionStatusStripe('background', false, false, 0, false, null, 0, 0, 0) : stripe)
     expect(sessionStatusStripe('unread', true, false, 0, false, null, 0, 0, 0, OUTCOMES[kind])).toBe(stripe)
   })

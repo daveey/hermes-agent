@@ -104,5 +104,6 @@ def mark_unknown(rows):
         row.pop("kanban_observed_at", None)
         row.pop("kanban_waiting_on", None)
         row.pop("kanban_blocked_on", None)
+        row.pop("needs_you", None)
         row["kanban_unknown"] = True
     return rows

@@ -88,7 +88,11 @@ export function useSessionRowStripe(
     recordStripeTransition(session, statusStripe, dotState)
   }, [session, statusStripe, dotState, promptInputsKey])
 
-  return { outcomePainted: outcomePaintsStripe(dotState, userBlocked) && statusStripe === outcomeStripe(session.outcome), statusStripe, userBlocked }
+  // Only explain the stripe with the outcome when it actually painted it: open asks and unfinished work override it.
+  const outcomePainted =
+    outcomePaintsStripe(dotState, userBlocked) && statusStripe === outcomeStripe(session.outcome)
+
+  return { outcomePainted, statusStripe, userBlocked }
 }
 
 /** [daveey] Stripes drawn as a small glyph in the stripe's place: a cron loop, or the card glyph for kanban waits. */

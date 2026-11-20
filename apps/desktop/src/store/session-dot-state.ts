@@ -381,6 +381,13 @@ const derivedStatusStripe = (
   )
 }
 
+/** [daveey] The invariant's test, shared by the stripe and the violation report. */
+export const hasOpenHumanAsk = (
+  userBlocked: boolean,
+  kanbanBlocked: number,
+  reviewWait: null | ReviewWait | undefined
+): boolean => !userBlocked && (kanbanBlocked > 0 || reviewWait === 'stuck')
+
 /** [daveey] Whether a stored outcome may paint the stripe: a ⌘B park or the chat's own live turn beats it, but work
  *  that outlives the turn (a running card, a background job) does not. The stripe's tooltip must use this same test,
  *  or a red decision stripe on a chat whose card is running shows no question. */
@@ -405,6 +412,13 @@ export const sessionStatusStripe = (
   kanbanExternal = 0,
   kanbanExternalDown = 0
 ): null | SessionStatusStripe => {
+  // [daveey] The one invariant: an open human ask (blocked/held cards, `needs_you`, an outstanding execution ask, a
+  // stuck review) is red unless the user ⌘B-parked the row. Outcome, periodic and working only choose among the
+  // non-red stripes below (the badge and the stripe once disagreed through each of those precedence edges).
+  if (hasOpenHumanAsk(userBlocked, kanbanBlocked, reviewWait)) {
+    return 'stuck'
+  }
+
   if (outcomePaintsStripe(state, userBlocked)) {
     const fromOutcome = outcomeStripe(outcome)
     // Completion is historical intent, not permission to hide current unfinished/unknown work.
@@ -447,6 +461,7 @@ type KanbanCounts = Pick<SessionInfo, 'kanban_active' | 'kanban_blocked' | 'kanb
       | 'kanban_external_down'
       | 'kanban_external_unknown'
       | 'kanban_stalled'
+      | 'needs_you'
     >
   >
 
@@ -477,7 +492,10 @@ export const kanbanStripeCounts = (
   // Optional execution evidence only adds: asks (even retained by an expired entry) are red, current waits are grey,
   // current running/queued work defers the grey wait exactly like a live card does.
   const exec = rowExecution(row, nowSeconds)
-  const blocked = (row.kanban_blocked ?? 0) + (row.kanban_held ?? 0) + (exec ? Math.max(exec.needsUser, exec.outstanding) : 0)
+  // `needs_you` (one backend predicate, same snapshot as the counts) is authoritative when the backend stamps it;
+  // an older backend falls back to the blocked-card count.
+  const asks = row.needs_you === undefined ? (row.kanban_blocked ?? 0) : row.needs_you.length
+  const blocked = asks + (row.kanban_held ?? 0) + (exec ? Math.max(exec.needsUser, exec.outstanding) : 0)
   const execLive = exec?.live ?? 0
   const execWaiting = exec?.waiting ?? 0
   const ext = kanbanExternalStripeCounts(row, nowSeconds)
@@ -951,31 +969,31 @@ export function stuckReasons(
     reasons.push('stalled')
   }
 
-  if (dotState !== 'working') {
-    const counts = kanbanStripeCounts(row, nowSeconds)
+  // [daveey] Open asks are red whatever the dot says (a working turn no longer hides them), so their reasons are
+  // always listed.
+  const counts = kanbanStripeCounts(row, nowSeconds)
 
-    if (counts.blocked > 0) {
-      const exec = rowExecution(row, nowSeconds)
-      const parts = [`kanban-blocked:${counts.blocked}`]
+  if (counts.blocked > 0) {
+    const exec = rowExecution(row, nowSeconds)
+    const parts = [`kanban-blocked:${counts.blocked}`]
 
-      if (row.kanban_blocked_on?.length) {
-        parts.push(`on=${row.kanban_blocked_on.join(',')}`)
-      }
-
-      if ((row.kanban_held ?? 0) > 0) {
-        parts.push(`held=${row.kanban_held}`)
-      }
-
-      if (exec && Math.max(exec.needsUser, exec.outstanding) > 0) {
-        parts.push(`asks=${Math.max(exec.needsUser, exec.outstanding)}`)
-      }
-
-      reasons.push(parts.join(' '))
+    if (row.kanban_blocked_on?.length) {
+      parts.push(`on=${row.kanban_blocked_on.join(',')}`)
     }
 
-    if (row.review_wait === 'stuck') {
-      reasons.push(`review:${row.review_wait_pr ?? '?'}`)
+    if ((row.kanban_held ?? 0) > 0) {
+      parts.push(`held=${row.kanban_held}`)
     }
+
+    if (exec && Math.max(exec.needsUser, exec.outstanding) > 0) {
+      parts.push(`asks=${Math.max(exec.needsUser, exec.outstanding)}`)
+    }
+
+    reasons.push(parts.join(' '))
+  }
+
+  if (row.review_wait === 'stuck') {
+    reasons.push(`review:${row.review_wait_pr ?? '?'}`)
   }
 
   if (!hasOwnLiveTurn(dotState) && outcomeStripe(row.outcome) === 'stuck') {
@@ -1011,6 +1029,19 @@ let stripeReasonReporter: null | StripeReasonReporter = null
 
 export const setStripeReasonReporter = (reporter: null | StripeReasonReporter): void => {
   stripeReasonReporter = reporter
+}
+
+/** [daveey] The reason string a non-red stripe reports while the row has an open human ask and is not ⌘B-parked (the
+ *  backend logs `stripe-invariant-violation <sid>` for it). `stripe` is already the result of `sessionStatusStripe`,
+ *  so this fires only when some caller bypassed the invariant. */
+function stripeInvariantViolation(row: StripeTraceRow, stripe: null | SessionStatusStripe, nowSeconds: number): null | string {
+  if (stripe === 'stuck' || stripe === 'blocked') {
+    return null
+  }
+
+  const asks = kanbanStripeCounts(row, nowSeconds).blocked + (row.review_wait === 'stuck' ? 1 : 0)
+
+  return asks > 0 ? `needs_you:${asks}` : null
 }
 
 function reportStripeReason(
@@ -1088,6 +1119,7 @@ export function recordStripeTransition(
     const entry = stripeTrace.get(key)
     const reasons = stripe === 'stuck' ? stuckReasons(row, dotState, now / 1000) : []
     const reasonsKey = reasons.join('|')
+    const violation = stripeInvariantViolation(row, stripe, now / 1000)
 
     if (!entry) {
       stripeTrace.set(key, { emitted: [], reasonsKey, stripe, suppressed: 0 })
@@ -1096,6 +1128,8 @@ export function recordStripeTransition(
       // explain later: report it, though the log still skips first sightings.
       if (stripe === 'stuck') {
         reportStripeReason(row, stripe, null, reasons)
+      } else if (violation) {
+        reportStripeReason(row, stripe, null, [violation])
       }
 
       return
@@ -1110,6 +1144,10 @@ export function recordStripeTransition(
     entry.stripe = stripe
     entry.reasonsKey = reasonsKey
     entry.emitted = entry.emitted.filter(at => now - at < STRIPE_TRANSITION_WINDOW_MS)
+
+    if (violation) {
+      reportStripeReason(row, stripe, from, [violation])
+    }
 
     if (entry.emitted.length >= STRIPE_TRANSITION_LOG_CAP_PER_MIN) {
       entry.suppressed += 1

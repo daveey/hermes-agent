@@ -47,6 +47,9 @@ export interface SessionActivityFields {
   kanban_blocked?: number
   /** Owner-qualified blocked card keys, from the same snapshot as kanban_blocked (capped). */
   kanban_blocked_on?: string[]
+  /** [daveey] The open human asks (blocked/triage cards with a validated human_request), from the same snapshot as
+   *  `kanban_blocked`. Present only when non-empty, then its length is the authoritative ask count; absent = fall back to `kanban_blocked`. */
+  needs_you?: { kind: string; question: string; ref: string }[]
   /** [daveey] How many of `kanban_active` nobody is working: scheduled on a timed/event wake, blocked on a
    *  non-human kind, or todo behind an unfinished parent. Stamped (even 0) whenever `kanban_active` is, so its
    *  absence means a backend that predates it. */

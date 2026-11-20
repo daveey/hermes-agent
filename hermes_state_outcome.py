@@ -326,7 +326,7 @@ def _gateway_running(home: Path) -> bool:
 def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
     """(decision items, waits) from the cards these chats created or shepherd: a card parked on a
     validated ``human_request`` is a decision, every other open card is a wait."""
-    from hermes_cli.kanban_human_request import needs_human
+    from hermes_cli.kanban_open_asks import card_is_open_human_ask
     from hermes_cli.kanban_session_activity import LISTED_STATUSES, session_outcome_tasks
 
     decisions, waits = [], []
@@ -346,8 +346,7 @@ def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
                 request = json.loads(request)
         status = str(card.get("status") or "")
         wait = card.get("wait") if isinstance(card.get("wait"), dict) else {}
-        human = status in ("blocked", "triage") and (
-            needs_human(request, kind=card.get("block_kind")))
+        human = card_is_open_human_ask(status, card.get("block_kind"), request)
         if human:
             req = request if isinstance(request, dict) else {}
             decisions.append({"id": f"card:{tid}", "question": _str(req.get("action")) or _str(card.get("title")),

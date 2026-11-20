@@ -4,7 +4,10 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable, Optional
 
+from hermes_cli.kanban_outcome_refresh import refreshes_origin_outcomes
 
+
+@refreshes_origin_outcomes
 def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via: Optional[str] = None,
                  event_extra: Optional[dict] = None, comment: Optional[tuple[str, str]] = None,
                  precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None) -> bool:
@@ -78,3 +81,17 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
     forward_archive(conn, task_id)
     return True
 
+
+
+def _install_outcome_refresh() -> None:  # reads the module-level ``_kb`` bound below
+    """[daveey] Wrap the block/unblock/complete transitions (defined in the kanban_db facade, which only imports
+    this tail module) so each refreshes the origin chats' stored outcomes after commit. Idempotent."""
+    for name in ("block_task", "unblock_task", "complete_task"):
+        fn = getattr(_kb, name)
+        if not getattr(fn, "_refreshes_outcomes", False):
+            setattr(_kb, name, refreshes_origin_outcomes(fn))
+
+
+from hermes_cli import kanban_db as _kb  # at the tail: kanban_db imports this module back
+
+_install_outcome_refresh()

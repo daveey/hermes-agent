@@ -46,6 +46,12 @@ def _clean_reasons(reasons: Iterable[Any]) -> list[str]:
     return out
 
 
+def invariant_violated(stripe: Optional[str], reasons: Iterable[str]) -> bool:
+    """True when the Desktop reported a stripe that is neither red (``stuck``) nor a ⌘B park (``blocked``) together
+    with a ``needs_you:<n>`` reason: an open human ask that did not paint red (``sessionStatusStripe``'s invariant)."""
+    return stripe not in ("stuck", "blocked") and any(str(r).startswith("needs_you:") for r in reasons or ())
+
+
 def record(home: Path, session_id: str, stripe: Optional[str], reasons: Iterable[Any], *,
            previous: Optional[str] = None, now: Optional[float] = None) -> dict[str, Any]:
     """Append one report and log it. ``stripe`` None means the row has no stripe (``none``)."""
@@ -58,6 +64,9 @@ def record(home: Path, session_id: str, stripe: Optional[str], reasons: Iterable
     }
     logger.info("desktop stripe report: session=%s %s->%s reasons=%s", entry["session_id"], entry["previous"],
                 entry["stripe"], ",".join(entry["reasons"]) or "-")
+    if invariant_violated(entry["stripe"], entry["reasons"]):
+        logger.warning("stripe-invariant-violation %s stripe=%s reasons=%s", entry["session_id"], entry["stripe"],
+                       ",".join(entry["reasons"]))
     path = report_path(home)
     line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
     with _lock:

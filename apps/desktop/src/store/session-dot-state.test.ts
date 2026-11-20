@@ -139,33 +139,32 @@ describe('sessionStatusStripe', () => {
     expect(sessionStatusStripe('idle', false)).toBeNull()
   })
 
-  it('paints stuck (red) when kanban cards the session created are blocked, unless a turn is working', () => {
-    for (const state of ['idle', 'unread', 'background', 'draft'] as const) {
+  it('paints stuck (red) when kanban cards the session created are blocked, even while a turn is working', () => {
+    for (const state of ['idle', 'unread', 'background', 'draft', 'working'] as const) {
       expect(sessionStatusStripe(state, true, false, 2)).toBe('stuck')
     }
 
-    expect(sessionStatusStripe('working', true, false, 1)).toBeNull()
     expect(sessionStatusStripe('idle', true, true, 1)).toBe('blocked')
     expect(sessionStatusStripe('idle', true, false, 0)).toBe('done')
   })
 
-  it('paints periodic (grey loop) for a session owning a live cron job, unless a prompt waits', () => {
+  it('paints periodic (grey loop) for a session owning a live cron job, unless a prompt waits or an ask is open', () => {
     for (const state of ['idle', 'unread', 'working', 'background', 'stalled'] as const) {
       expect(sessionStatusStripe(state, true, false, 0, true)).toBe('periodic')
     }
 
-    expect(sessionStatusStripe('idle', true, false, 3, true)).toBe('periodic')
+    expect(sessionStatusStripe('idle', true, false, 3, true)).toBe('stuck')
     expect(sessionStatusStripe('needs-input', true, false, 0, true)).toBe('stuck')
     expect(sessionStatusStripe('idle', true, true, 0, true)).toBe('blocked')
   })
 
-  it('[daveey] a PR waiting on my review is red; on others for <24h is grey; working wins', () => {
+  it('[daveey] a PR waiting on my review is red; on others for <24h is grey; red even while working', () => {
     for (const state of ['idle', 'unread', 'background'] as const) {
       expect(sessionStatusStripe(state, true, false, 0, false, 'stuck')).toBe('stuck')
       expect(sessionStatusStripe(state, true, false, 0, false, 'parked')).toBe('blocked')
     }
 
-    expect(sessionStatusStripe('working', true, false, 0, false, 'stuck')).toBeNull()
+    expect(sessionStatusStripe('working', true, false, 0, false, 'stuck')).toBe('stuck')
     expect(sessionStatusStripe('working', true, false, 0, false, 'parked')).toBeNull()
     expect(sessionStatusStripe('needs-input', true, false, 0, false, 'parked')).toBe('stuck')
     expect(sessionStatusStripe('idle', true, true, 0, false, 'stuck')).toBe('blocked')
@@ -859,10 +858,10 @@ describe('kanbanStripeCounts', () => {
     expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('stuck')
   })
 
-  it('held plus live: a live turn still is not red, but a background row is', () => {
+  it('held plus live: a held ask is red for a working turn too (the invariant)', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 0, kanban_held: 1 }
     const counts = kanbanStripeCounts(row)
-    expect(sessionStatusStripe('working', true, false, counts.blocked, false, null, 0, counts.waiting)).toBeNull()
+    expect(sessionStatusStripe('working', true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('stuck')
     expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('stuck')
   })
 
@@ -1165,10 +1164,10 @@ describe('stuckReasons and the red report', () => {
     expect(stuckReasons({ ...row, review_wait: 'stuck', review_wait_pr: 'o/r#9' }, 'idle')).toEqual(['review:o/r#9'])
     expect(stuckReasons({ ...row, review_wait: 'stuck' }, 'idle')).toEqual(['review:?'])
     expect(stuckReasons({ ...row, outcome: { kind: 'decision' } } as never, 'idle')).toEqual(['outcome:decision'])
-    // A working turn beats cards, reviews and the stored outcome, exactly as sessionStatusStripe does.
+    // An open ask (a blocked card here) is red whatever the dot says; the outcome only covers the non-red stripes.
     expect(
       stuckReasons({ ...row, kanban_blocked: 1, outcome: { kind: 'decision' }, review_wait: 'stuck' } as never, 'working')
-    ).toEqual([])
+    ).toEqual(['kanban-blocked:1', 'review:?'])
     expect(stuckReasons({ ...row, review_wait: 'parked', outcome: { kind: 'done' } } as never, 'idle')).toEqual([])
   })
 
@@ -1205,5 +1204,85 @@ describe('stuckReasons and the red report', () => {
       throw new Error('boom')
     })
     expect(() => recordStripeTransition({ ...row, id: 'x' }, 'stuck', 'stalled', 1_000)).not.toThrow()
+  })
+})
+
+describe('open human ask invariant (blocked > 0 && !parked => stuck)', () => {
+  const dots = ['background', 'draft', 'idle', 'needs-input', 'stalled', 'unread', 'working'] as const
+  const kinds = [null, 'done', 'running', 'waiting', 'decision', 'unknown-kind'] as const
+  const outcomeOf = (kind: (typeof kinds)[number]) => (kind ? ({ kind } as unknown as SessionInfo['outcome']) : null)
+
+  // Seeded generator: the property must hold for every combination, not a few hand-picked ones.
+  const rng = (seed: number) => () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296
+
+  it('paints stuck whenever a human ask is open and the row is not parked, whatever outcome/periodic/dot say', () => {
+    const next = rng(20261120)
+    const bools = [false, true]
+    const reviews = [null, 'parked', 'stuck'] as const
+
+    const cases = dots.flatMap(dot =>
+      kinds.flatMap(kind =>
+        bools.flatMap(periodic =>
+          bools.flatMap(hasTurns =>
+            bools.flatMap(parked => reviews.map(review => ({ dot, hasTurns, kind, parked, periodic, review })))
+          )
+        )
+      )
+    )
+
+    for (const { dot, hasTurns, kind, parked, periodic, review } of cases) {
+      const blocked = 1 + Math.floor(next() * 5)
+      const waiting = Math.floor(next() * 3)
+
+      const stripe = sessionStatusStripe(
+        dot,
+        hasTurns,
+        parked,
+        blocked,
+        periodic,
+        review,
+        Math.floor(next() * 2),
+        waiting,
+        0,
+        outcomeOf(kind)
+      )
+
+      expect(stripe, `${dot}/${kind}/periodic=${periodic}/parked=${parked}/review=${review}`).toBe(
+        parked ? 'blocked' : 'stuck'
+      )
+    }
+
+    expect(cases.length).toBeGreaterThan(400)
+  })
+
+  it('does not paint red from the invariant when no ask is open', () => {
+    for (const kind of ['done', 'running', 'waiting'] as const) {
+      expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, outcomeOf(kind))).not.toBe('stuck')
+    }
+  })
+
+  it('counts needs_you authoritatively and falls back to kanban_blocked + kanban_held without it', () => {
+    const base = { kanban_active: 2, kanban_parked: 0 }
+
+    expect(kanbanStripeCounts({ ...base, kanban_blocked: 2, needs_you: [] }).blocked).toBe(0)
+
+    expect(
+      kanbanStripeCounts({ ...base, needs_you: [{ kind: 'card', question: 'q', ref: 'default/t_a' }] } as never).blocked
+    ).toBe(1)
+
+    expect(kanbanStripeCounts({ ...base, kanban_blocked: 1, kanban_held: 2 }).blocked).toBe(3)
+  })
+
+  it('reports an invariant violation for a non-red stripe that has an open ask', () => {
+    const report = vi.fn()
+    setStripeReasonReporter(report)
+    resetStripeTransitionLog()
+
+    recordStripeTransition({ id: 'inv', kanban_blocked: 2 } as never, 'done', 'idle', 1_000)
+    expect(report.mock.calls[0].slice(1)).toEqual(['done', null, ['needs_you:2']])
+
+    recordStripeTransition({ id: 'ok', kanban_blocked: 2 } as never, 'stuck', 'idle', 1_000)
+    expect(report.mock.calls[1][3]).not.toContain('needs_you:2')
+    setStripeReasonReporter(null)
   })
 })
