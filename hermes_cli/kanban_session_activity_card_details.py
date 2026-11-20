@@ -8,6 +8,7 @@ import sqlite3
 from typing import Any
 
 from hermes_cli.kanban_run_machine import add_run_machines
+from hermes_cli.kanban_run_model import add_run_models
 
 _PR_URL_RE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _NOTE_CHARS = 200
@@ -64,6 +65,7 @@ def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]
     for task_id, (_, url) in prs.items():
         found[task_id]["pr_url"] = url
     add_run_machines(conn, found)  # where each card runs: the strip's hub/worker mark
+    add_run_models(conn, found)  # which model its newest run uses (route class/pin, or attested models)
     _add_blocked_upstream(conn, found)
 
 
