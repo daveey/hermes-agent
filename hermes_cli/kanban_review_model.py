@@ -117,6 +117,17 @@ def implementer_models(conn, task) -> set[str]:
 
 
 def _current_authors(conn, task_id, bounded=True):
+    from hermes_cli.kanban_review_artifacts import artifact_author_runs
+    delivered = artifact_author_runs(conn, task_id) if bounded else None
+    if delivered is None:
+        return _legacy_current_authors(conn, task_id, bounded)
+    models = {model for rid in delivered
+              if (model := (_run_model(conn, task_id, rid, "worker_result", "route_model")
+                            or _run_model(conn, task_id, rid, "run_route", "model")))}
+    return models, False
+
+
+def _legacy_current_authors(conn, task_id, bounded=True):
     """Authors since the review preceding the latest implementation, plus epoch boundary.
 
     Consecutive review retries keep the same author set. A pre-spawn refusal is

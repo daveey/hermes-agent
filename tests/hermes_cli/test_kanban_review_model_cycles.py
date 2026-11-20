@@ -181,6 +181,51 @@ def test_dispatch_fifth_review_after_four_real_verdict_cycles(board, monkeypatch
         assert events[-1]["implementer_models"] == [MODELS[-1]]
 
 
+@pytest.mark.parametrize("merged", [True, False])
+@pytest.mark.parametrize("middle", ["continue", "crash", "route_only", "other_artifact"])
+def test_artifact_authors_survive_nonhandoff_rework(board, middle, merged):
+    from hermes_cli.kanban_continuation import continue_task
+    from tests.hermes_cli.test_kanban_review_retry_custody import ARTIFACT
+    artifact = ARTIFACT if merged else {key: value for key, value in ARTIFACT.items()
+                                      if key not in ("pr_state", "merge_commit")}
+    cfg = helpers.config(board, strong=MODELS[0], routes=MODELS)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="artifact custody", assignee="default")
+
+        def deliver(model, artifact):
+            claimed = kb.claim_task(conn, tid, claimer=kb._claimer_id())
+            assert claimed
+            kb._append_event(conn, tid, "run_route", {"model": model, "lane": "ready"},
+                             run_id=claimed.current_run_id)
+            assert kb.request_review(conn, tid, metadata=artifact)
+
+        deliver(MODELS[0], artifact)
+        verdict(conn, tid, MODELS[1])
+        if middle == "other_artifact":
+            deliver(MODELS[2], {**ARTIFACT, "published_pr": "https://github.com/example/project/pull/13",
+                                "merge_commit": "c" * 40, "reviewed_sha": "d" * 40})
+            verdict(conn, tid, MODELS[1])
+        else:
+            claimed = kb.claim_task(conn, tid, claimer=kb._claimer_id())
+            assert claimed
+            kb._append_event(conn, tid, "run_route", {"model": MODELS[2], "lane": "ready"},
+                             run_id=claimed.current_run_id)
+            if middle == "continue":
+                assert continue_task(conn, tid, checkpoint="Rework remains")["ok"]
+            else:
+                if middle == "crash":
+                    kb._append_event(conn, tid, "spawned", {"pid": 123}, run_id=claimed.current_run_id)
+                provenance._end_run(conn, claimed.current_run_id)
+                conn.execute("UPDATE tasks SET status='triage', current_run_id=NULL, claim_lock=NULL WHERE id=?", (tid,))
+                assert kb.promote_task(conn, tid, actor="operator")[0]
+        deliver(MODELS[3], artifact)
+        claimed = kb.claim_review_task(conn, tid, claimer=kb._claimer_id())
+        excluded = review.implementer_models(conn, claimed)
+        assert MODELS[0] in excluded
+        chosen, _, _ = tier.resolve_model_tier(conn, claimed, lane="review", cfg=cfg)
+        assert chosen not in excluded
+
+
 def test_provider_wall_does_not_become_structural_exhaustion(board, monkeypatch):
     cfg = helpers.config(board)
     from hermes_cli import kanban_provider_walls as walls

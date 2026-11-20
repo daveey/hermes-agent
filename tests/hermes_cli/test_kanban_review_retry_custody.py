@@ -86,14 +86,14 @@ def test_verdict_between_identical_handoffs_keeps_original_author(identity_board
         assert review.implementer_models(conn, kb.get_task(conn, tid)) == {authors.ASTRA}
 
 
-def test_verdict_then_changed_handoff_still_starts_new_epoch(identity_board):
+def test_changed_merge_does_not_release_same_head_author(identity_board):
     with authors.kbc.connect() as conn:
         tid = authors._card(conn)
         handoff(conn, tid, authors.ASTRA, ARTIFACT)
         rid = authors._run(conn, tid, receipt=authors.GROK, lane='review')
         conn.execute("UPDATE task_runs SET outcome='changes_requested' WHERE id=?", (rid,))
         handoff(conn, tid, authors.OPUS, {**ARTIFACT, 'merge_commit': 'c' * 40})
-        assert review.implementer_models(conn, kb.get_task(conn, tid)) == {authors.OPUS}
+        assert review.implementer_models(conn, kb.get_task(conn, tid)) == {authors.ASTRA, authors.OPUS}
 
 
 def test_three_refusals_park_and_wake_stay_review(board, monkeypatch):
