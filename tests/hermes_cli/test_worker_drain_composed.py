@@ -75,28 +75,34 @@ def test_idle_node_with_every_proof_reaches_scaler_as_zero(node):
     assert not scale_in_allowed(sample, IID, 'i-fedcba9876543210f', int(time.time() * 1000))  # other instance
 
 
+def _insert_outbox_row(board):
+    conn = sqlite3.connect(board)
+    conn.execute("INSERT INTO kanban_sync_outbox(op_id,table_name,row_uid,op,fields,hlc,created_at) "
+                 "VALUES ('o','task_runs','r','upsert','{}','h',1)")
+    conn.commit()
+    conn.close()
+
+
+def _hold_sync_round(board, held):
+    lock = board_sync_lock(board)
+    lock.__enter__()
+    held.append(lock)
+
+
 @pytest.mark.parametrize('breaker', ['activation', 'process_unknown', 'lease', 'outbox_row', 'sync_round', 'board_missing'])
 def test_any_missing_proof_never_reaches_scaler_as_zero(node, monkeypatch, breaker):
     root, board = node
     held = []
-    if breaker == 'activation':
-        monkeypatch.setattr(fence, 'load_activation', lambda path=None: None)
-    elif breaker == 'process_unknown':
-        monkeypatch.setattr(census, 'observe_processes', lambda *a, **k: census.Observation(census.UNKNOWN))
-    elif breaker == 'lease':
-        held.append(fence.acquire_lease(root, IDENT, 'live-work'))
-    elif breaker == 'outbox_row':
-        conn = sqlite3.connect(board)
-        conn.execute("INSERT INTO kanban_sync_outbox(op_id,table_name,row_uid,op,fields,hlc,created_at) "
-                     "VALUES ('o','task_runs','r','upsert','{}','h',1)")
-        conn.commit()
-        conn.close()
-    elif breaker == 'sync_round':
-        lock = board_sync_lock(board)
-        lock.__enter__()
-        held.append(lock)
-    elif breaker == 'board_missing':
-        board.unlink()
+    breakers = {
+        'activation': lambda: monkeypatch.setattr(fence, 'load_activation', lambda path=None: None),
+        'process_unknown': lambda: monkeypatch.setattr(
+            census, 'observe_processes', lambda *a, **k: census.Observation(census.UNKNOWN)),
+        'lease': lambda: held.append(fence.acquire_lease(root, IDENT, 'live-work')),
+        'outbox_row': lambda: _insert_outbox_row(board),
+        'sync_round': lambda: _hold_sync_round(board, held),
+        'board_missing': board.unlink,
+    }
+    breakers[breaker]()
     try:
         b = produce_and_send()
         sample = b.registry[IID]

@@ -182,7 +182,7 @@ def observe_all(adapters: dict | None = None) -> dict:
     for name in ADAPTERS:
         try:
             out[name] = adapters[name]()
-        except Exception as exc:  # an adapter fault is unknown, never zero
+        except Exception as exc:  # health: allow BLE001 -- an adapter fault is unknown, never zero
             out[name] = Observation(UNKNOWN, reason=type(exc).__name__)
     return out
 
