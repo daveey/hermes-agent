@@ -18,10 +18,10 @@ masked. This is a rate, not a guarantee, and some secrets look exactly like iden
 passwords (``correcthorse``), all-digit values, UUIDs, strings under 12 characters and a secret shaped like a
 kebab-case ``--flag`` right after a secret-named flag (read as the next flag, as switches need), unless a name marks
 them secret. Short hex (up to 12 characters) is shown on purpose: it is how commits are abbreviated; longer hex (full
-commits, digests, container ids) is masked with the keys it looks like. Encoded query values are judged decoded;
-non-ASCII characters in them (``%E2%9C%93``) are shown. ``--pin`` and ``--private`` are not secret names on purpose
-(switches or provider slugs in Hermes and common tools); the query names ``code``, ``session`` and ``hash`` are, so
-harmless values there are masked too.
+commits, digests, container ids) is masked with the keys it looks like. Encoded query values are judged decoded,
+with non-ASCII characters (``%E2%9C%93``) left out of the judgement and shown. ``--pin`` and ``--private`` are not
+secret names on purpose (switches or provider slugs in Hermes and common tools); the query names ``code``,
+``session`` and ``hash`` are, so harmless values there are masked too.
 """
 
 from __future__ import annotations
@@ -104,7 +104,9 @@ _USER_FLAG_PROGRAMS = frozenset({
 _CONTAINER_PROGRAMS = frozenset({"docker", "podman", "nerdctl"})
 # A wrapper's own flags that take a value, which is not the wrapped program (sudo -u admin ps …, nice -n 5 cmd).
 _WRAPPER_VALUE_FLAGS = {
-    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D", "-R", "-T"}),
+    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D", "-R", "-T", "--user", "--group",
+                       "--close-from", "--host", "--prompt", "--other-user", "--role", "--type", "--chdir",
+                       "--chroot", "--command-timeout"}),
     "doas": frozenset({"-u", "-C"}),
     "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
     "nice": frozenset({"-n", "--adjustment"}),
@@ -503,7 +505,7 @@ def _judge_query_value(value: str, *, depth: int) -> str:
     decoded = urllib.parse.unquote(value)
     if decoded == value:
         return _judge(value, secret=False, depth=depth)
-    words = [word for word in re.split(r"[\s+]+", re.sub(r"[^\x00-\x7f]", " ", decoded)) if word]
+    words = [word for word in re.split(r"[\s+]+", re.sub(r"[^\x00-\x7f]", "", decoded)) if word]
     shown = [_judge(word, secret=False, depth=depth) for word in words]
     return value if all(MASK not in word for word in shown) else MASK
 
@@ -826,11 +828,13 @@ def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) ->
         if (wrapped := _program_flags(token)) is not None:
             flags, wrapper = wrapped, False  # sudo mysql …, docker exec db mysql …, env X=1 mysql …
             current = os.path.basename(token).lower()
+            container, before_image = current in _CONTAINER_PROGRAMS, 2  # sudo docker run img tool …
             out.append(token)
             continue
         if wrapper and not skip_handoff and "=" not in token and not _DURATION.fullmatch(token):
             # sshpass -p x ssh -p 2222 …: from the wrapped program on, its own flags (here none) apply
             current = os.path.basename(token).lower()
             flags, wrapper = _NO_FLAGS, current in _COMMAND_WRAPPERS
+            container, before_image = current in _CONTAINER_PROGRAMS, 2  # sudo docker run img tool …
         out.append(_judge(token, secret=False, depth=_depth))
     return out

@@ -672,14 +672,15 @@ def _shape(rng: random.Random, kind: str, length: int) -> str:
     }[kind]()
 
 
-# The two query positions take only the shortest and longest lengths: they share the URL path's code, and the
-# suite stays fast.
+# Every position runs the shortest and longest lengths; the middle ones run where the code differs most (bare
+# arguments, paths, URLs, env values), so the suite stays fast. Query positions share the URL code.
+_FULL_POSITIONS = frozenset({"bare", "path", "url", "spaced_env"})
 _RATE_CASES = [
     (position, kind, length)
     for position in sorted(_POSITIONS)
     for kind in _SHAPES
     for length in sorted(_LEAK_CEILING)
-    if not position.startswith("query_") or length in (16, 40)
+    if length in (16, 40) or (length == 24 and not position.startswith("query_")) or position in _FULL_POSITIONS
 ]
 
 
@@ -1215,3 +1216,38 @@ def test_a_docker_login_password_is_masked():
 def test_encoded_non_ascii_query_values_are_kept():
     value = "https://h/?q=%E2%9C%93&x=caf%C3%A9"
     assert shown([value]) == [value]
+
+
+# ---- the ninth review: containers behind a wrapper, wrapper long flags, durations, non-ASCII in a secret ----------
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (["docker", "run", "--rm", "img", "tool", "-u", "admin:sunshine"], "sudo"),
+        (["-u", "root", "docker", "run", "img", "tool", "-u", "admin:sunshine"], "sudo"),
+        (["DOCKER_HOST=x", "docker", "run", "img", "tool", "-u", "admin:sunshine"], "env"),
+        (["60", "docker", "exec", "ctr", "tool", "--user", "admin:sunshine"], "timeout"),
+        (["podman", "run", "img", "./t", "-u", "admin:sunshine"], "nohup"),
+        (["-c", "sudo docker run img tool -u admin:sunshine"], "bash"),
+    ],
+)
+def test_a_container_started_through_a_wrapper_masks_the_inner_programs_password(argv, program):
+    out = " ".join(shown(argv, program))
+    assert "sunshine" not in out and f":{MASK}" in out
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (["docker", "run", "-u", "app:app", "img"], "sudo"),
+        (["--user", "admin", "ps", "-u", "daveey:staff"], "sudo"),
+        (["5m", "ps", "-u", "daveey:staff"], "timeout"),
+    ],
+)
+def test_wrapper_long_flag_values_and_durations_are_not_the_wrapped_program(argv, program):
+    assert shown(argv, program) == argv
+
+
+def test_non_ascii_inside_an_encoded_secret_does_not_cut_it_into_short_pieces():
+    assert shown(["https://h/?q=Xk9%C3%A9mP2q%C3%BCL7vN4%C3%9FaB3c"]) == [f"https://h/?q={MASK}"]
