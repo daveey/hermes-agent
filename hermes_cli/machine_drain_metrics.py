@@ -70,9 +70,9 @@ def send_compatible(send, sample, on_counters_rejected=None, on_claiming_rejecte
                                           if k not in persistent and k not in CPU},
                                     on_counters_rejected, on_claiming_rejected)
         if "claiming" in sample:
-            # Newest field. Remember the rejection so the next fresh report can
-            # omit it and keep a CPU sample the Board already accepts.
-            if on_claiming_rejected is not None:
+            # Newest field. Remember the rejection only when the Board names
+            # claiming, so an unrelated 400 cannot hide claiming for 10 minutes.
+            if on_claiming_rejected is not None and "claiming" in str(exc):
                 on_claiming_rejected()
             from hermes_cli.machine_cpu_metrics import FIELDS as CPU
             return send_compatible(send, {k: v for k, v in sample.items()

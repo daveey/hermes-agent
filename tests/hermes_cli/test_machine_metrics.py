@@ -285,6 +285,38 @@ def test_collect_attaches_cached_throughput_counters(tmp_path, monkeypatch):
 COUNTERS = {"tokens_io_total": 45, "tokens_cache_total": 310, "sessions_started_total": 3, "sessions_ended_total": 2}
 
 
+def test_claiming_only_rejection_does_not_disable_counters():
+    """A 400 that names claiming must not start the counter backoff."""
+    sent, now = [], [1000.0]
+    counters = {"tokens_io_total": 9, "tokens_cache_total": 1,
+                "sessions_started_total": 1, "sessions_ended_total": 0}
+
+    def board(value):
+        sent.append(dict(value))
+        if "claiming" in value:
+            raise ksc.HubError(400, "unknown field(s): claiming")
+
+    r = mm.Reporter(board, collect_fn=lambda: {"cpus": 4, "drain_active": 0, "claiming": 1, **counters},
+                    clock=lambda: now[0])
+    assert r.report_due()
+    assert r.counters_off_until == 0.0
+    assert r.claiming_off_until == now[0] + mm.UNSUPPORTED_RETRY_S
+    assert sent[1]["tokens_io_total"] == 9
+
+
+def test_unrelated_400_does_not_back_off_claiming():
+    """A 400 that does not name claiming must not hide claiming for 10 minutes."""
+    now = [1000.0]
+
+    def board(value):
+        raise ksc.HubError(400, "tokens_io_total must be a non-negative integer")
+
+    r = mm.Reporter(board, collect_fn=lambda: {"cpus": 4, "claiming": 0, "tokens_io_total": -1},
+                    clock=lambda: now[0])
+    assert r.report_due() is False
+    assert r.claiming_off_until == 0.0
+
+
 def test_rejected_claiming_backs_off_so_the_next_report_keeps_cpu():
     """A Board that accepts CPU and rejects claiming must store a fresh CPU sample on the next report."""
     sent, now = [], [1000.0]
@@ -321,9 +353,9 @@ def test_board_without_counters_gets_the_normal_report_and_is_not_asked_again_fo
     without_claiming = {k: v for k, v in sample.items() if k != "claiming"}
     assert sent == [sample, without_claiming, {"cpus": 4, "drain_active": 0}]
     assert r.counters_off_until == now[0] + mm.UNSUPPORTED_RETRY_S
-    assert r.claiming_off_until == now[0] + mm.UNSUPPORTED_RETRY_S
+    assert r.claiming_off_until == 0.0  # the 400 names the counters, not claiming
     now[0] += mm.REPORT_EVERY_S
-    assert r.report_due() and sent[3:] == [{"cpus": 4, "drain_active": 0}]
+    assert r.report_due() and sent[3:] == [{"cpus": 4, "drain_active": 0, "claiming": 1}]
     now[0] = 1000.0 + mm.UNSUPPORTED_RETRY_S
     assert r.report_due() and sent[4] == sample  # asks again after the backoff, claiming included
 
