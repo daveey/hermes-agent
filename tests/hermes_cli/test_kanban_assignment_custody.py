@@ -16,6 +16,17 @@ payload = local_tests.payload
 task_with_drift = local_tests.task_with_drift
 
 
+def _blocked(evidence):
+    return next(row for row in evidence['events'] if row['kind'] == 'blocked')
+
+
+def _rewrite_block_supervisor(evidence, other):
+    event = _blocked(evidence)
+    data = json.loads(event['payload'])
+    data['supervisor_task_id'] = other
+    event['payload'] = json.dumps(data)
+
+
 @pytest.fixture
 def foreign(board, monkeypatch):
     conn, home = board
@@ -75,10 +86,14 @@ def test_foreign_original_completes_normally_without_materializing_it(foreign):
     lambda e: e.update(board='other'),
     lambda e: next(row for row in e['events'] if row['kind'] == 'blocked').update(task_id='t_0000000000000000'),
     lambda e: next(row for row in e['events'] if row['kind'] == 'blocked').update(deleted_at=1),
+    lambda e: _rewrite_block_supervisor(e, 't_0000000000000000'),
+    lambda e: e.update(task_id='t_0000000000000000'),
+    lambda e: _blocked(e).update(payload='[]'),
 ], ids=['missing', 'unassigned', 'deleted', 'wrong-task', 'incomplete', 'missing-field',
         'bad-requires', 'missing-block', 'bad-block', 'missing-directory-path',
         'wrong-uid', 'runs-incomplete', 'wrong-version', 'wrong-board',
-        'wrong-event-task', 'deleted-event'])
+        'wrong-event-task', 'deleted-event', 'foreign-repair-block',
+        'wrong-echo-task-id', 'non-dict-block'])
 def test_foreign_evidence_fails_closed(foreign, mutate):
     conn, _, repair, _, evidence, _ = foreign
     mutate(evidence)
