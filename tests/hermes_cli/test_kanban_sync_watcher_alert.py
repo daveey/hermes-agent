@@ -143,6 +143,7 @@ def test_a_cleared_record_ends_the_incident_and_a_new_crash_is_a_new_one(home):
     _round_completed()
     assert _check(hub, SINCE + 400) is None
     assert "first_seen_dead" not in alert._read_state()
+    hub.open = [{"id": "t_first", "status": "done", "idempotency_key": KEY}]  # the first card was resolved and closed
     _crash(since=5_000.0, why=CRASH_2)
     assert _check(hub, 5_000.0 + 299) is None
     assert _check(hub, 5_000.0 + 300) == "kanban-sync-watcher-dead:worker-1:5000"
@@ -252,3 +253,36 @@ def test_dispatcher_tick_runs_the_dead_watcher_check(home, monkeypatch):
     # The 60 s outbox throttle must not skip the dead-watcher courier (incident: 20 min local-only cards).
     ids = outbox_age.check(mono=lambda: 1e6 + 10, boards=[], age=lambda _p: None)
     assert seen and "t_dead" in ids
+
+
+def test_new_incident_while_the_first_create_is_unresolved_waits_instead_of_a_second_create(home):
+    _crash()
+    hub = FakeHubCli()  # create-task exits 0 ("queued"): no task id is known and the replica shows no row
+    _check(hub, SINCE + 300)
+    assert len(hub.sent("create-task")) == 1
+    _round_completed()
+    _check(hub, 1_900.0)
+    _crash(since=2_000.0)
+    assert _check(hub, 2_300.0) is None
+    assert len(hub.sent("create-task")) == 1
+    state = alert._read_state()
+    assert state["request_id"] == KEY and state["key"] == KEY  # the first request identity is retained
+    # Delivery catches up: the replica shows the first card, so the later incident comments on it.
+    hub.open = [{"id": "t_first", "status": "ready", "idempotency_key": KEY}]
+    rid = _check(hub, 2_300.0 + alert.RETRY_S)
+    assert rid == "kanban-sync-watcher-dead:worker-1:2000:comment"
+    assert len(hub.sent("create-task")) == 1
+    (comment,) = hub.sent("request")
+    assert "default/default/t_first" in comment
+
+
+def test_an_unresolved_create_older_than_six_hours_is_not_waited_on_forever(home):
+    _crash()
+    hub = FakeHubCli()
+    _check(hub, SINCE + 300)
+    _round_completed()
+    _check(hub, 1_900.0)
+    later = 2_000.0 + 7 * 3600
+    _crash(since=later)
+    assert _check(hub, later + 300) == f"kanban-sync-watcher-dead:worker-1:{int(later)}"
+    assert len(hub.sent("create-task")) == 2

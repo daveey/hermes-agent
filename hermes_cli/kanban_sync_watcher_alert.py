@@ -122,6 +122,12 @@ def _open_card(host: str, state: dict, hub_cli: str, runner, now: float) -> Opti
             return str(tid) if str(seen.get("status") or "") not in _CLOSED else None
         if now - float(state.get("filed_at") or 0) < _FRESH_S:
             return str(tid)
+    elif (state.get("request_id") and now - float(state.get("filed_at") or 0) < _FRESH_S
+          and not any(r.get("idempotency_key") == state["request_id"] for r in rows)):
+        # The first create is queued but neither the courier nor the replica knows its card yet. That is
+        # "unknown", not "no open card": a second create would carry a different request id and could
+        # file a duplicate card once delivery catches up.
+        raise CourierFailed(f"create request {state['request_id']} is not resolved yet; later incident deferred")
     return None
 
 
