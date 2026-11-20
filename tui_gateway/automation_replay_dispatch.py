@@ -15,10 +15,10 @@ class Delivery:
         """Write on the journal's transaction, then adopt its exact committed content."""
         from agent.context_compressor import _DB_PERSISTED_MARKER
         from agent.message_metadata import stamp_message_timestamp
-        from tui_gateway.session_workdir import _submit_row_target_key, _SUBMIT_ROW_SESSION_KEY
+        from tui_gateway import server
         if db is None or Path(db.db_path).resolve() != self.journal.path:
             raise ValueError("replay profile store mismatch")
-        target = _submit_row_target_key(session)
+        target = server._submit_row_target_key(session)
         staged = stamp_message_timestamp({"role": "user", "content": text,
                                           "display_kind": kind, "display_metadata": metadata})
 
@@ -48,7 +48,7 @@ class Delivery:
                       "display_kind": row["display_kind"],
                       "display_metadata": json.loads(row["display_metadata"] or "{}")}
         staged[_DB_PERSISTED_MARKER] = True
-        staged[_SUBMIT_ROW_SESSION_KEY] = receipt["target"]
+        staged[server._SUBMIT_ROW_SESSION_KEY] = receipt["target"]
         session["_submit_user_row"] = staged
         session["_marker_until_tool"] = True
         self.session, self.staged = session, staged
