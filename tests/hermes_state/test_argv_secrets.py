@@ -594,6 +594,39 @@ def test_long_hex_is_masked_like_the_keys_it_resembles(token):
     assert MASK in shown([token])[0]
 
 
+_HEX_POSITIONS = {
+    "bare": lambda s: s,
+    "path": lambda s: f"/srv/{s}/file.json",
+    "url": lambda s: f"https://example.com/{s}",
+    "query": lambda s: f"https://example.com/?value={s}",
+    "assignment": lambda s: f"VALUE={s}",
+    "flag": lambda s: f"--value={s}",
+}
+
+
+@pytest.mark.parametrize("secret", [
+    "22015686243846424052243111151650",  # synthetic seed-66 token_hex-shaped numeric sample
+    "feedface" * 4,
+    "FEEDFACE" * 4,
+    "a" * 32,
+    "0" * 32,
+    "1234567890123",  # first length beyond abbreviated commits
+    "abcdefabcdefa",
+])
+@pytest.mark.parametrize("position", sorted(_HEX_POSITIONS))
+def test_degenerate_long_hex_is_masked(secret, position):
+    assert shown([_HEX_POSITIONS[position](secret)]) == [_HEX_POSITIONS[position](MASK)]
+
+
+@pytest.mark.parametrize("value", [
+    "123456789012", "abcdefabcdef", "012345abcdef", "4096",
+    "naïve", "12345678-1234-1234-1234-123456789012",
+    "t_01234567890123456789012345678901", "i-01234567890123456",
+])
+def test_hex_mask_retains_short_and_typed_identifiers(value):
+    assert shown([value]) == [value]
+
+
 def test_deep_nesting_is_masked_not_a_crash():
     out = shown(["a=" * 1000 + "x"])[0]
     assert out.startswith("a=") and out.endswith(MASK)

@@ -16,7 +16,7 @@ secrets, 3% of 24-character, 2% of 32-character and 1.5% of 40-character ones (r
 the tests hold these under 10%, 5%, 3% and 2% (32 characters in bare, path, URL and spaced-env positions, 24 in all
 but the query ones, 16 and 40 in all). About 0.15% of this repo's identifiers and 0.1% of its env names are
 masked. This is a rate, not a guarantee, and some secrets look exactly like identifiers and are shown: pronounceable
-passwords (``correcthorse``), all-digit values, UUIDs, strings under 12 characters and a secret shaped like a
+passwords (``correcthorse``), all-digit values up to 12 characters, UUIDs, strings under 12 characters and a secret shaped like a
 kebab-case ``--flag`` right after a secret-named flag (read as the next flag, as switches need), unless a name marks
 them secret. Short hex (up to 12 characters) is shown on purpose: it is how commits are abbreviated; longer hex (full
 commits, digests, container ids) is masked with the keys it looks like. Encoded query values are judged decoded,
@@ -241,14 +241,15 @@ def _alpha_ok(run: str) -> bool:
 
 def _segment_ok(segment: str) -> bool:
     """One separator-free piece of an identifier."""
+    # Hex can be entirely digits or entirely A-F; neither is exempt from the long-hex mask.
+    if re.fullmatch(r"[0-9a-fA-F]+", segment):
+        return len(segment) <= _SHORT_HEX
     if not segment or segment.isdigit():
         return True
     if not segment.isascii():
         return segment.isalnum()  # a word in another script (naïve, café, Cyrillic names)
     if not segment.isalnum():
         return False  # symbols: passwords, not identifiers
-    if re.fullmatch(r"[0-9a-fA-F]+", segment) and re.search(r"\d", segment) and re.search(r"[A-Fa-f]", segment):
-        return len(segment) <= _SHORT_HEX
     runs = re.findall(r"[A-Za-z]+|\d+", segment)
     if len(segment) >= 10 and len(runs) >= 6:
         return False  # letters and digits alternating: generated, not named
