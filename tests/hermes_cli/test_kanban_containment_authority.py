@@ -157,4 +157,27 @@ def test_placement_settle_is_not_gated_by_open_episodes(board):
 
 def test_context_has_no_blank_line_without_episodes(board):
     relay = local.setup(board)[0]
-    assert "\n\n\n" not in kb.build_worker_context(board, relay)
+    kb.add_comment(board, relay, "reviewer", "Later section keeps internal spacing observable")
+    context = kb.build_worker_context(board, relay)
+    assert "Later section keeps internal spacing observable" in context
+    assert "\n\n\n" not in context
+
+
+def test_containment_committed_after_precheck_still_refuses(board, monkeypatch):
+    from hermes_cli import kanban_containment_authority as authority_gate
+    from hermes_cli import kanban_completion_receipt as receipt
+    relay, _, authority, target, spec = local.setup(board)
+    real_prepare = receipt.prepare
+
+    def prepare(conn, task_id, metadata, **kwargs):
+        # Commit a real episode after the advisory precheck, before the write transaction.
+        episode = local.contain(board, relay, target, spec)["episode"]
+        assert kb.get_task(board, relay).containment_episode == episode
+        return real_prepare(conn, task_id, metadata, **kwargs)
+
+    monkeypatch.setattr(receipt, "prepare", prepare)
+    with pytest.raises(authority_gate.AuthorityOpen) as refused:
+        kb.complete_task(board, authority, summary="Review finished")
+    assert refused.value.code == "containment_authority_open"
+    assert refused.value.episodes[0]["task_id"] == relay
+    assert kb.get_task(board, authority).status == "running"
