@@ -154,7 +154,11 @@ def adopt_receipts(conn: sqlite3.Connection, source: sqlite3.Connection, changes
     never trusted for sitting in the replica, and the event must still equal its receipt. A missing or invalid
     receipt raises ``ContainmentRefused``: nothing is permitted for that event.
     """
+    from hermes_cli.kanban_sync_quarantine import held
     for ch in changes:
+        task = ch.uid if ch.table == "tasks" else ch.fields.get("task_id")
+        if task and held(source, task):
+            raise ContainmentRefused(f"task {task} has quarantined containment evidence")
         if ch.table != "task_events" or ch.fields.get("kind") not in ("contained", "containment_released"):
             continue
         if ch.op != "upsert":

@@ -48,6 +48,7 @@ from hermes_cli import kanban_sync_outbox_age as outbox_age  # oldest pending op
 from hermes_cli.kanban_sync_backlog import BUSY_RETRY_S, PULL_PAGE_BUDGET, Pulled
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli import kanban_sync_cpu as sync_cpu
+from hermes_cli.kanban_sync_pending import pending_task_fields, without_pending
 from hermes_cli import kanban_sync_refusal as refusal  # one board's ContainmentRefused ends only its round
 from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
@@ -697,12 +698,11 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
     refuse_if_schema_ahead(conn)  # an older core would strip the newer columns; the ops stay pending [daveey]
     out, seen = PushResult(), {} if seen is None else seen
     for _ in range(max_batches):
-        rows = selected = [dict(r) for r in conn.execute(
-            "SELECT * FROM kanban_sync_outbox WHERE state = 'pending' AND (retry_after IS NULL OR retry_after <= ?) "
-            "ORDER BY created_at, rowid LIMIT ?", (int(time.time()), PUSH_BATCH))]
+        from hermes_cli.kanban_sync_quarantine import pending_batch
+        rows = selected = pending_batch(conn, int(time.time()), PUSH_BATCH)
         stopped = False
         if before_head:
-            rows, stopped = backlog.sendable_before_head(conn, hub, board, selected, seen)
+            rows, stopped = backlog.sendable_before_head(conn, hub, board, rows, seen)
         if not rows:
             break
         with write_txn(conn):
@@ -805,28 +805,6 @@ def adapt(change: dict) -> Optional[sync.RemoteChange]:
     )
 
 
-def pending_task_fields(conn: sqlite3.Connection) -> dict[str, set[str]]:
-    """Wire fields per task with a local edit still in the outbox (not rejected)."""
-    out: dict[str, set[str]] = {}
-    for uid, fields in conn.execute("SELECT row_uid, fields FROM kanban_sync_outbox "
-                                    "WHERE table_name = 'tasks' AND op IN ('upsert', 'import') AND state != 'rejected'"):
-        out.setdefault(uid, set()).update(json.loads(fields))
-    return out
-
-
-def without_pending(changes: list[sync.RemoteChange], pending: dict[str, set[str]]) -> list[sync.RemoteChange]:
-    """A field with an unanswered local edit keeps the local value until that edit's answer arrives
-    (RFC "Offline queue and reconnect": pull first, local-pending fields win locally)."""
-    out = []
-    for ch in changes:
-        keep = pending.get(ch.uid) if ch.table == "tasks" and ch.op == "upsert" else None
-        if keep:
-            ch = sync.RemoteChange(ch.seq, ch.table, ch.uid, ch.op, {k: v for k, v in ch.fields.items() if k not in keep},
-                                   ch.version, ch.hlc, ch.origin_gateway, ch.client_op_id)
-        out.append(ch)
-    return out
-
-
 def own_partition(conn: sqlite3.Connection, changes: list[sync.RemoteChange], gateway: str) -> list[sync.RemoteChange]:
     """The changes for cards this gateway created (``created_on`` = it, or unset) and their child rows.
 
@@ -899,8 +877,8 @@ def pull(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool,
             return Pulled(total, status_changed=changed)
         # [daveey] The pre-filter above can miss a local edit committed after it read the outbox (a claim in
         # flight): ``local_pending_wins`` checks again inside the apply transaction.
-        from hermes_cli.kanban_containment_replica import certify_page
-        certify_page(conn, hub, board, changes)
+        from hermes_cli.kanban_sync_quarantine import certified_page
+        changes = certified_page(conn, hub, board, changes)
         applied = sync.apply_remote_changes(conn, changes, new_cursor=nxt, board=board, observers=observers,
                                             local_pending_wins=True)
         changed.update(getattr(applied, "status_changed", None) or {})
@@ -928,8 +906,8 @@ def resync(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool, p
             if partition is not None:
                 changes = own_partition(conn, changes, partition)
             cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
-            from hermes_cli.kanban_containment_replica import certify_page
-            certify_page(conn, hub, board, changes)
+            from hermes_cli.kanban_sync_quarantine import certified_page
+            changes = certified_page(conn, hub, board, changes)
             sync.apply_remote_changes(conn, changes, new_cursor=cursor, board=board, observers=observers,
                                       local_pending_wins=True)  # [daveey] an unpushed local edit outlives a rebuild
             count += len(rows)
@@ -966,6 +944,8 @@ def open_shadow(slug: str, gateway: str) -> sqlite3.Connection:
         conn = _connect(path)
         cleanup.callback(conn.close)
         ensure_identity(conn, slug, gateway)
+        from hermes_cli import kanban_sync_quarantine as quarantine
+        quarantine.restore(conn, quarantine.load_rebuild(path))
         cleanup.pop_all()
         return conn
 
@@ -987,6 +967,8 @@ def _pulled_replica(slug: str, hub: Hub, gateway: str, max_pages: Optional[int] 
                 raise
             before = acw.statuses(replica, getattr(exc, "status_changed", None))  # read before the file goes
             _log.warning("kanban sync: %s replica cursor below the retention floor; rebuilding from a snapshot", slug)
+            from hermes_cli import kanban_sync_quarantine as quarantine
+            quarantine.save_rebuild(replica, path)
             stack.close()
             invalidate(path)  # must close the pooled descriptor BEFORE unlinking its database
             path.unlink(missing_ok=True)
@@ -1046,6 +1028,13 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
             return result
         refuse_if_schema_ahead(live)  # before pull/repair: an older core must not act on a newer board [daveey]
         ensure_identity(live, slug, gateway)
+        from hermes_cli import kanban_sync_quarantine as quarantine
+        # An earlier round may have committed a quarantine before a later page
+        # failed. Copy that safety state before sending anything this round.
+        replica_path = shadow_path(slug)
+        if replica_path.exists():
+            with connection(replica_path, lambda: open_shadow(slug, gateway)) as replica:
+                quarantine.adopt(replica, live)
         # Send before pulling as well as after: a pull backlog never holds local edits back (9 h, t_01a1d36ddcea59fe).
         # Safe: the Board merges on base_version + field HLC, an acked task's sync_version fences off older feed
         # copies of it, and rejections are resolved here as after the pulls. A failed send never stops the pulls
@@ -1057,7 +1046,9 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
             _send(live, hub, slug, gateway, mode, result, after_pull=False, before_head=True, seen=evidence)
         except (HubError, OSError) as exc:
             _log.info("kanban sync: %s push before the pull failed (%s); pulling anyway", slug, exc)
-        with _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
+        with quarantine.mirroring(live), _pulled_replica(slug, hub, gateway) as (replica, pulled, rebuilt):
+            from hermes_cli.kanban_sync_quarantine import adopt
+            adopt(replica, live)
             result.pulled = pulled
             result.behind = pulled.more
             acw.expedite(live, pulled.status_changed)  # a park naming a card the pull moved re-probes now [daveey]

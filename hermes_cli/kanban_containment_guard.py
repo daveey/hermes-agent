@@ -72,6 +72,9 @@ def inert_snapshot(conn: sqlite3.Connection) -> None:
 
 def pending(conn: sqlite3.Connection, task_id: str, *, verify_release: Callable | None = None) -> bool:
     """Read only; old no-UID histories remain held rather than inventing identity."""
+    from hermes_cli.kanban_sync_quarantine import held
+    if held(conn, task_id):
+        return True
     columns = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
     uid = "uid" if "uid" in columns else "NULL AS uid"
     cursor = conn.execute(f"SELECT {uid},task_id,kind,payload FROM task_events WHERE task_id=? "
