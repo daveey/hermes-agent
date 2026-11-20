@@ -26,7 +26,8 @@ sync identity matching the local board/gateway and binds its nonsecret endpoint 
 - The local and refreshed replica link must already exist with exactly the requested parent and child.
 - Every operation for that link must be a rejected empty-fields DELETE with the exact Board refusal
   `containment_hold: use scoped resume-contained; generic writes cannot satisfy containment`.
-  Both endpoint task rows must exist, with no endpoint task outbox work.
+  Endpoint task outbox work is forbidden, including work for an endpoint absent locally.
+  Each endpoint must either exist locally or qualify as an absent foreign-origin endpoint below.
 - The only eligible tombstone is this link's, with its deletion clock equal to the latest covered DELETE.
   Matching `unlinked` history must remain available and is copied into the receipt without rewriting its payload.
 - Both canonical endpoint rows and the link must be live, with valid versions/identities. Endpoint origin and
@@ -41,6 +42,22 @@ sync identity matching the local board/gateway and binds its nonsecret endpoint 
 
 This is a bounded observation, not an atomic reservation or a distributed Board lock.
 No server mutation is sent. Operators must recheck authoritative state after recovery.
+
+### Absent foreign endpoints
+
+The live database intentionally contains only this gateway's partition. Recovery never imports
+a foreign task to satisfy eligibility. Instead, an absent endpoint must exist in the completed
+full replica and in authenticated live row evidence at the same empty-feed cut. Its nonblank,
+valid `created_on` must be foreign to the enrolled gateway and match the replica; its positive
+version must match the replica's settled version. The validated containment context must name
+that same origin, board and task. Status, containment marker and lease mirror must agree too.
+An absent own-origin or origin-less task still refuses `missing_endpoint`.
+
+The replica's endpoint rows, link, cursor and certified containment predicates are read in one
+transaction, bound into the preview token/receipt, and compared again after evidence reads and
+inside the local apply/settlement transaction. Replica movement requires fresh evidence. Local,
+replica or canonical active containment (including a renewed episode) refuses recovery; a
+certified natural release or no hold is required. This command cannot authorize that release.
 
 ## Writes and audit custody
 

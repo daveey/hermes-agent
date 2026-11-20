@@ -11,6 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_sync_dependency_foreign as foreign
 from hermes_cli import kanban_sync_reserved_key as keys
 from hermes_cli.kanban_db_connect import write_txn
 
@@ -70,7 +71,7 @@ def _snapshot(conn, uid):
 def _local(snap, uid, *, settlement=False):
     parent, child = _ids(uid)
     _require(snap["link"] == [{"parent_id": parent, "child_id": child}], "local_link_changed")
-    _require(len(snap["tasks"]) == 2, "missing_endpoint")
+    # Missing rows are admitted only by the full replica/authenticated proof.
     _require(not any(snap["held"]), "local_containment_hold")
     _require(not snap["endpoint_ops"], "endpoint_local_work")
     _require(bool(snap["ops"]), "no_rejected_deletes")
@@ -128,6 +129,10 @@ def _proof(conn, hub, board, uid, snap, *, refresh=True):
                  "shadow_link_changed")
     finally:
         shadow.close()
+    replica = foreign.snapshot(board, hub.ident.gateway, uid, snap)
+    if replica is not None:
+        _require(replica["cursor"] == head, "replica_inputs_changed")
+        _require(replica["link"] == snap["link"], "shadow_link_changed")
     empty = _empty(hub, board, head)
     link = _evidence(hub, board, "task_links", uid, head)
     parent, child = _ids(uid)
@@ -135,19 +140,28 @@ def _proof(conn, hub, board, uid, snap, *, refresh=True):
     endpoints = []
     for task in sorted((parent, child)):
         e = _evidence(hub, board, "tasks", task, head)
-        local = next(t for t in snap["tasks"] if t["id"] == task)
-        _require(e["row"].get("id") == task and e["row"].get("created_on") == local["created_on"]
-                 and local["sync_version"] == e["row"]["version"], "endpoint_identity_changed")
+        local = next((t for t in snap["tasks"] if t["id"] == task), None)
+        _require(e["row"].get("id") == task, "endpoint_identity_changed")
+        if local is not None:
+            _require(e["row"].get("created_on") == local["created_on"]
+                     and local["sync_version"] == e["row"]["version"], "endpoint_identity_changed")
         c = context(hub, board, task)
+        if local is None:
+            foreign.validate(e["row"], replica, hub.ident.gateway, c)
         _require(c["held"] is False and e["row"].get("containment_episode") is None, "canonical_containment_hold")
         endpoints.append(e["row"])
     _empty(hub, board, head)
-    return {"link": link["row"], "endpoints": endpoints, "cut": empty}
+    proof = {"link": link["row"], "endpoints": endpoints, "cut": empty}
+    if replica is not None:
+        proof["foreign"] = replica
+    foreign.recheck(board, hub.ident.gateway, uid, snap, proof)
+    return proof
 
 
 def _token(hub, board, uid, reason, snap, proof):
     return keys._sha({"v": 1, "board": board, "uid": uid, "endpoint": keys._endpoint(hub), "reason": reason,
-                      "snapshot": snap, "link": proof["link"], "endpoints": proof["endpoints"]})
+                      "snapshot": snap, "link": proof["link"], "endpoints": proof["endpoints"],
+                      **({"foreign": proof["foreign"]} if "foreign" in proof else {})})
 
 
 def _prepare(conn, hub, board, uid, reason):
@@ -184,6 +198,7 @@ def apply(conn, hub, board, uid, expect, reason):
             _require(keys._fresh(started), "evidence_expired")
             _require(keys._identity_refusal(conn, hub, board) is None, "sync_identity_changed")
             _require(_snapshot(conn, uid) == snap, "local_inputs_changed")
+            foreign.recheck(board, hub.ident.gateway, uid, snap, proof)
             _schema(conn)
             raw = keys._canon(snap)
             conn.execute(f"INSERT INTO {TABLE} VALUES (?,?,?,?,?,?,?,?)",
@@ -225,6 +240,7 @@ def settle(conn, hub, board, op, receipt):
             _require(keys._fresh(started), "evidence_expired")
             _require(keys._identity_refusal(conn, hub, board) is None, "sync_identity_changed")
             _require(_snapshot(conn, op["row_uid"]) == snap, "local_inputs_changed")
+            foreign.recheck(board, hub.ident.gateway, op["row_uid"], snap, proof)
             _require(receipt_for_op(conn, op) == receipt, "receipt_changed")
             conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id=? AND state='rejected'", (op["op_id"],))
         report.update(classification="superseded", action="retired", proof="immutable dependency recovery receipt")
