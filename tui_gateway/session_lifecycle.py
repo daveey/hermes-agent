@@ -156,9 +156,9 @@ def latest_user_turn_kind(conn, session_key: str) -> str | None:
         return None
     if row[0]:
         return row[0]
-    # Imported functions are not rebound onto server.py (method_ctx.bind_module): import here.
-    from tui_gateway.session_history import _legacy_display_kind
-    return _legacy_display_kind("user", row[1] or "") if isinstance(row[1], str) else None
+    # Split-module helpers must use the facade's rebound globals.
+    from tui_gateway import server
+    return server._legacy_display_kind("user", row[1] or "") if isinstance(row[1], str) else None
 
 
 def _automation_holder_kind(session: dict) -> str | None:
