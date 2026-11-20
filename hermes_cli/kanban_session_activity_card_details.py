@@ -84,7 +84,6 @@ def _replica_for(conn: sqlite3.Connection) -> sqlite3.Connection | None:
             return None
         replica = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         replica.row_factory = sqlite3.Row
-        replica._hermes_owned = True  # type: ignore[attr-defined]
         return replica
     except (OSError, TypeError, ValueError, sqlite3.Error):
         return None
@@ -198,7 +197,6 @@ def _walk(conn: sqlite3.Connection, task_id: str,
 def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]) -> None:
     """Optional presentation evidence; old schemas remain readable. Replica fills foreign parents."""
     replica = _replica_for(conn)
-    owned = bool(getattr(replica, "_hermes_owned", False))
     try:
         for task_id, card in found.items():
             card.pop("blocked_upstream", None)
@@ -215,7 +213,7 @@ def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, A
             elif upstream is not None:
                 card["upstream"] = upstream
     finally:
-        if owned and replica is not None:
+        if replica is not None:
             replica.close()
 
 
@@ -239,7 +237,6 @@ def annotate_remote_upstream(cards: list[dict[str, Any]]) -> None:
                 continue
             replica = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             replica.row_factory = sqlite3.Row
-            replica._hermes_owned = True  # type: ignore[attr-defined]
             _add_blocked_upstream(replica, found)
         except (OSError, TypeError, ValueError, sqlite3.Error):
             logging.getLogger(__name__).debug("Could not annotate remote upstream for %s", board, exc_info=True)

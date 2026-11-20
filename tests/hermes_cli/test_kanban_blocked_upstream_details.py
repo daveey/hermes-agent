@@ -1,4 +1,4 @@
-"""Blocked ancestor presentation on local session task rows."""
+"""Blocked ancestor presentation on local and replica session task rows."""
 import json
 import sqlite3
 
@@ -8,26 +8,19 @@ from hermes_cli import kanban_session_activity_card_details as card_details
 from hermes_cli.kanban_session_activity_card_details import _add_card_details
 
 
+SCHEMA = (
+    "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, containment_episode TEXT); "
+    "CREATE TABLE task_links (parent_id TEXT, child_id TEXT); "
+    "CREATE TABLE task_events (task_id TEXT, kind TEXT, uid TEXT, payload TEXT);")
+
+
 @pytest.fixture
 def board():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript(
-        "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, containment_episode TEXT); "
-        "CREATE TABLE task_links (parent_id TEXT, child_id TEXT); "
-        "CREATE TABLE task_events (task_id TEXT, kind TEXT, uid TEXT, payload TEXT);")
+    conn.executescript(SCHEMA)
     yield conn
     conn.close()
-
-
-def replica_board():
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, containment_episode TEXT); "
-        "CREATE TABLE task_links (parent_id TEXT, child_id TEXT); "
-        "CREATE TABLE task_events (task_id TEXT, kind TEXT, uid TEXT, payload TEXT);")
-    return conn
 
 
 def details(conn, statuses, links, listed):
@@ -83,61 +76,58 @@ def test_upstream_when_no_blocked_ancestor(board):
     assert rows["b"]["upstream"] == {"id": "a", "status": "running"}
 
 
-def test_contained_triage_ancestor(board):
-    board.executemany("INSERT INTO tasks VALUES (?, ?, ?)",
-                      [("auth", "done", None), ("leaf", "triage", "ep-1"), ("child", "todo", None)])
-    board.execute("INSERT INTO task_links VALUES (?, ?)", ("leaf", "child"))
-    board.execute("INSERT INTO task_events VALUES (?, ?, ?, ?)",
-                  ("leaf", "contained", "ep-1", json.dumps({"policy": {"authority": {"task_id": "auth"}}})))
-    found = {"child": {"id": "child", "status": "todo"}}
-    _add_card_details(board, found)
-    assert found["child"]["blocked_upstream"] == {
+def seed_contained(conn):
+    conn.executemany("INSERT INTO tasks VALUES (?, ?, ?)", [
+        ("auth", "scheduled", None), ("leaf", "triage", "ep-1"),
+        ("b", "todo", None), ("c", "todo", None), ("child", "todo", None)])
+    conn.executemany("INSERT INTO task_links VALUES (?, ?)",
+                     [("leaf", "b"), ("b", "c"), ("c", "child")])
+    conn.execute("INSERT INTO task_events VALUES (?, ?, ?, ?)",
+                 ("leaf", "contained", "ep-1", json.dumps({"policy": {"authority": {"task_id": "auth"}}})))
+
+
+def assert_contained(row):
+    assert row["blocked_upstream"] == {
         "id": "leaf", "status": "triage",
-        "contained": {"episode": "ep-1", "authority": {"id": "auth", "status": "done"}},
+        "contained": {"episode": "ep-1", "authority": {"id": "auth", "status": "scheduled"}},
     }
 
 
-def test_foreign_parent_resolved_through_replica(board):
-    replica = replica_board()
-    replica.executemany("INSERT INTO tasks VALUES (?, ?, ?)",
-                        [("a", "blocked", None), ("b", "todo", None), ("c", "todo", None)])
-    replica.executemany("INSERT INTO task_links VALUES (?, ?)", [("a", "b"), ("b", "c")])
-    card_details._replica_for = lambda conn: replica
-    try:
+def test_contained_triage_ancestor(board):
+    seed_contained(board)
+    found = {"child": {"id": "child", "status": "todo"}}
+    _add_card_details(board, found)
+    assert_contained(found["child"])
+
+
+@pytest.fixture
+def shadow(tmp_path, monkeypatch):
+    from hermes_cli import kanban_sync_client
+    path = tmp_path / "replica.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(SCHEMA)
+        seed_contained(conn)
+    monkeypatch.setattr(kanban_sync_client, "shadow_path", lambda board: path)
+    return path
+
+
+def test_foreign_parent_resolved_through_replica(board, shadow, monkeypatch):
+    from hermes_cli import kanban_db_sync
+    monkeypatch.setattr(kanban_db_sync, "_db_key", lambda conn: str(shadow.parent / "local.db"))
+    monkeypatch.setattr(kanban_db_sync, "board_slug_for_path", lambda key: "default")
+    rows = details(board, [("child", "todo")], [("c", "child")], ["child"])
+    assert_contained(rows["child"])
+
+
+def test_remote_row_annotated_through_replica(shadow):
+    rows = [{"id": "child", "status": "todo", "board": "default"}]
+    card_details.annotate_remote_upstream(rows)
+    assert_contained(rows[0])
+
+
+def test_missing_replica_fails_soft(board, caplog, monkeypatch):
+    monkeypatch.setattr(card_details, "_replica_for", lambda conn: None)
+    with caplog.at_level("DEBUG"):
         rows = details(board, [("c", "todo")], [("b", "c")], ["c"])
-        assert rows["c"]["blocked_upstream"] == {"id": "a", "status": "blocked"}
-    finally:
-        card_details._replica_for = lambda conn: None
-        replica.close()
-
-
-def test_remote_row_annotated_through_replica(board):
-    replica = replica_board()
-    replica.executemany("INSERT INTO tasks VALUES (?, ?, ?)",
-                        [("a", "triage", "ep-1"), ("c", "todo", None)])
-    replica.execute("INSERT INTO task_links VALUES (?, ?)", ("a", "c"))
-    replica.execute("INSERT INTO task_events VALUES (?, ?, ?, ?)",
-                    ("a", "contained", "ep-1", json.dumps({"policy": {"authority": {"task_id": "auth"}}})))
-    replica.execute("INSERT INTO tasks VALUES (?, ?, ?)", ("auth", "scheduled", None))
-    card_details._replica_for = lambda conn: replica
-    try:
-        found = {"c": {"id": "c", "status": "todo"}}
-        _add_card_details(board, found)
-        assert found["c"]["blocked_upstream"] == {
-            "id": "a", "status": "triage",
-            "contained": {"episode": "ep-1", "authority": {"id": "auth", "status": "scheduled"}},
-        }
-    finally:
-        card_details._replica_for = lambda conn: None
-        replica.close()
-
-
-def test_missing_replica_fails_soft(board, caplog):
-    card_details._replica_for = lambda conn: None
-    try:
-        with caplog.at_level("DEBUG"):
-            rows = details(board, [("c", "todo")], [("b", "c")], ["c"])
-        assert "blocked_upstream" not in rows["c"]
-        assert "upstream" not in rows["c"]
-    finally:
-        card_details._replica_for = lambda conn: None
+    assert "blocked_upstream" not in rows["c"]
+    assert "upstream" not in rows["c"]
