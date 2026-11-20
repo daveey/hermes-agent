@@ -965,3 +965,66 @@ def test_long_paths_are_judged_in_linear_time():
     start = time.monotonic()
     shown([value])
     assert time.monotonic() - start < 5
+
+
+# ---- the fifth review: queries on plain paths, "#" inside URL secrets, globs, the generic -u rule -------------------
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("/cb?pass=sunshine", f"/cb?pass={MASK}"),
+        ("/cb?sid=sunshine", f"/cb?sid={MASK}"),
+        ("//h/x?pwd=sunshine", f"//h/x?pwd={MASK}"),
+        ("h.example.com/x?sid=sunshine", f"h.example.com/x?sid={MASK}"),
+        ("https://h/?next=/a?pass=sunshine", f"https://h/?next=/a?pass={MASK}"),
+    ],
+)
+def test_queries_are_judged_by_name_on_plain_paths_and_nested(value, expected):
+    assert shown([value]) == [expected]
+
+
+@pytest.mark.parametrize(
+    "value, secret",
+    [
+        ("https://api.example.com/v1/hook/0*%0N5Mq#4r-uGb2", "4r-uGb2"),
+        ("https://api.example.com/v1/hook/=RUVZN7R&#vdsGC+", "vdsGC"),
+    ],
+)
+def test_a_hash_inside_a_url_secret_does_not_cut_it(value, secret):
+    assert secret not in shown([value])[0]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://h/x?email=a@b.com&page=2#top",
+        "https://github.com/org/repo/blob/main/x.py#L10",
+    ],
+)
+def test_ordinary_queries_and_fragments_are_kept(value):
+    assert shown([value]) == [value]
+
+
+def test_a_star_between_password_symbols_is_not_a_glob():
+    assert shown(["0*%0N5Mq"]) == [MASK]
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (["-url=http://127.0.0.1:8080/x", "-upstream=host:8080"], "tool"),
+        (["run", "--user", "app:app", "img"], "docker"),
+        (["-u", "1000:1000", "img"], "docker"),
+        (["-u", "root", "id"], "sudo"),
+    ],
+)
+def test_the_generic_user_rule_leaves_users_groups_and_other_flags(argv, program):
+    assert shown(argv, program) == argv
+
+
+def test_the_generic_user_rule_masks_a_password():
+    assert shown(["CURL_ARGS=-u admin:sunshine", "./x"], "env") == [
+        f"CURL_ARGS=-u admin:{MASK}",
+        "./x",
+    ]

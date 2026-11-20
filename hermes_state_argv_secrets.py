@@ -86,8 +86,11 @@ _PROGRAM_SECRET_FLAGS = {
     "curl": (("-b",), ("-b",), ("-u", "--user", "-U", "--proxy-user")), "smbclient": ((), (), ("-U", "--user")),
     "lftp": ((), (), ("-u", "--user")),
 }
-# Any program: -u/--user user:pass (curl-style); a bare user or a numeric uid:gid (docker -u 1000:1000) stays.
-_NO_FLAGS = ((), (), ("-u", "--user"))
+_NO_FLAGS = ((), (), ())
+# Any program: a separate -u/--user argument that is user:pass has its password masked (curl-style options passed
+# through env or shell text); a bare user, user:same-group (docker --user app:app) and uid:gid stay. Only as a separate
+# argument: -url=…, -upstream=… are other flags.
+_GENERIC_USER_FLAGS = frozenset({"-u", "--user"})
 _COOKIE_FLAGS = frozenset({"-b", "--cookie", "cookie"})
 # Programs that run a command given as their first positional argument: that program's own flags apply after it.
 _COMMAND_WRAPPERS = frozenset({"sshpass", "sudo", "doas", "env", "nice", "nohup", "timeout", "xargs", "exec", "time",
@@ -147,7 +150,8 @@ _NOT_USERINFO = frozenset({"mailto", "npm", "github", "gitlab", "bitbucket", "pk
 _STRUCTURE = re.compile(r"[/?&#=;@]")  # between the components of a path or URL
 _NAME_COLON = re.compile(r"^([A-Za-z_][\w.-]*):(\S+)$")  # name:value, judged by the name
 _IMAGE_DIGEST = re.compile(r"^[\w.-]+@sha\d+:[0-9a-fA-F]+$")  # image@sha256:… (the long hex is still masked)
-# A file that holds a key or credential, named after a secret flag (openssl -key server.key).
+# A file that holds a key or credential, named after a secret flag (openssl -key server.key). A secret that looks
+# exactly like such a file name (--password notes.txt) is shown, like other secrets shaped as identifiers.
 _SECRET_FILE = re.compile(r"^[\w.-]+\.(?:key|pem|crt|cer|der|p12|pfx|jks|keystore|pub|asc|gpg|txt|json|ya?ml|env)$")
 _NPM_SPEC = re.compile(r"^@[\w.-]+/[\w.-]+(?:@[\w.^~<>=-]+)?$")  # @playwright/mcp@latest
 
@@ -302,7 +306,7 @@ def is_identifier(token: str) -> bool:
     token = _KNOWN_ID_INSIDE.sub("id", token)  # followup:t_01a1ecf2c3d6367b:notify, hermes-kanban-t_…
     if not _NPM_SPEC.match(token):
         # globs (*.example.com, dir/*, gc*) and printf tokens (%r@%h:%p) are not password symbols
-        unglobbed = re.sub(r"(?<![A-Za-z0-9])\*|\*(?![A-Za-z0-9])|%[A-Za-z]", "", token)
+        unglobbed = re.sub(r"(?:(?<=[./:\-*(])|^)\*|\*(?=[./:\-*)]|$)|%[A-Za-z]", "", token)
         if re.search(r"[A-Za-z0-9]", unglobbed) and (
                 re.search(r"[!^$*]", unglobbed) or len(re.findall(r"[&#%@]", unglobbed)) >= 2):
             return False  # shell-unsafe symbols, or several of &#%@, in a name: a password, not an identifier
@@ -419,9 +423,13 @@ def _mask_password_segments(parts: list[str], seps: list[str], bad: list[bool], 
                 bad[index] = True
 
 
-def _mask_components(value: str) -> str:
-    """A path or URL path keeps its structure; each component that is not an identifier is masked, base64 pieces next
-    to a masked piece too, and a segment that is a symbol password cut into pieces as a whole."""
+def _mask_components(value: str, *, depth: int = 0) -> str:
+    """A path or URL path (with any query and fragment) keeps its structure: each path component that is not an
+    identifier is masked, base64 pieces next to a masked piece too, and a segment that is a symbol password cut into
+    pieces (# & @ %) as a whole; the query after the first "?" is judged pair by pair under its names."""
+    path, question, query = value.partition("?")
+    if question and not _password_cut_at_question(path, query):
+        return f"{_mask_components(path, depth=depth)}?{_mask_query(query, depth=depth)}"
     parts = _STRUCTURE.split(value)
     seps = _STRUCTURE.findall(value)
     content_bad = [not is_identifier(part) for part in parts]
@@ -432,6 +440,17 @@ def _mask_components(value: str) -> str:
     for sep, part, masked in zip(seps, parts[1:], bad[1:]):
         out += [sep, MASK if masked else part]
     return "".join(out)
+
+
+def _password_cut_at_question(path: str, query: str) -> bool:
+    """A "?" inside a symbol password, not a query: the last path piece already looks like part of a secret, and it
+    and the first query word, joined, are not a name and carry password symbols."""
+    last = path.rsplit("/", 1)[-1]
+    if not last or (is_identifier(last) and not re.search(r"[!^$*#%@&]", last)):
+        return False  # a clean path piece: the "?" starts a real query
+    first = re.split(r"[&/]", query, maxsplit=1)[0]
+    joined = f"{last}?{first}"
+    return bool(re.search(r"[!^$*#%@]", joined)) and not is_identifier(joined.replace("?", "-"))
 
 
 def _mask_query(query: str, *, depth: int) -> str:
@@ -450,21 +469,15 @@ def _mask_query(query: str, *, depth: int) -> str:
 
 def _mask_url(value: str, *, depth: int = 0) -> str:
     scheme, rest = value.split("://", 1)
-    rest, hash_sign, fragment = rest.partition("#")
-    rest, question, query = rest.partition("?")
-    authority, slash, path = rest.partition("/")
+    split = re.search(r"[/?#]", rest)
+    authority, tail = (rest[: split.start()], rest[split.start():]) if split else (rest, "")
     if "@" in authority:
         authority = f"{MASK}@{authority.rsplit('@', 1)[1]}"  # userinfo is a credential either way
     host = authority.rsplit("@", 1)[-1]
     if not is_identifier(host.split(":")[0]):
         authority = authority[: len(authority) - len(host)] + MASK
-    shown = f"{scheme}://{authority}{slash}{_mask_components(path) if slash else ''}"
-    if question:
-        shown += "?" + _mask_query(query, depth=depth)
-    if hash_sign:
-        # after a masked piece, a "#" is most likely inside the same secret: the fragment is its tail
-        shown += "#" + (MASK if MASK in shown or not is_identifier(fragment) else fragment)
-    return shown
+    # path, query and fragment together: a "#" or "?" inside a secret must not cut it into innocent pieces
+    return f"{scheme}://{authority}{_mask_components(tail, depth=depth) if tail else ''}"
 
 
 def _mask_userpass(value: str) -> str:
@@ -474,8 +487,8 @@ def _mask_userpass(value: str) -> str:
     if split is None:
         return value if is_identifier(value) else MASK
     user, sep, secret = split.groups()
-    if user.isdigit() and secret.isdigit():
-        return value  # uid:gid
+    if (user.isdigit() and secret.isdigit()) or (sep == ":" and user == secret):
+        return value  # uid:gid, app:app
     return f"{user if user and is_identifier(user) else MASK}{sep}{MASK}"
 
 
@@ -534,8 +547,6 @@ def _shell_words(text: str) -> list[tuple[str, str]] | None:
                 current = []
         else:
             current.append(char)
-    if quote or escaped:
-        return None
     if current:
         raws.append("".join(current))
     words = []
@@ -701,6 +712,10 @@ def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) ->
             if (shown := _pending_value(token, kind, name, depth=_depth)) is not None:
                 out.append(shown)
                 continue
+        if token in _GENERIC_USER_FLAGS and flags is _NO_FLAGS:
+            out.append(token)
+            pending = ("userpass", token)
+            continue
         if (handled := _program_flag(token, flags)) is not None:
             shown, kind = handled
             out.append(shown)
