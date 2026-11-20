@@ -9,6 +9,25 @@ This page is the contract. It exists for two audiences:
 
 If you're writing the worker code itself — the agent that runs *inside* a lane — the kanban lifecycle and reference details are injected into the worker's system prompt automatically (the `KANBAN_GUIDANCE` block in [`agent/prompt_builder.py`](https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py)).
 
+## Project-lane classification (fork)
+
+Project lanes (`kanban.admission.lanes`) are separate from executor profiles below.
+Each lane's `match` accepts OR-ed `creators`, `key_prefixes`, `repos`, `self_work`,
+`skills` (exact pinned skill names), and `title_patterns` (case-insensitive regular
+expressions over the title only). Repos match a basename, an optional `.git` suffix,
+or the repository immediately before `/.worktrees/`; arbitrary ancestor directories
+and mentions in the body do not count. Explicit user lane choices still win.
+
+Use `hermes kanban lanes reclassify --json` to preview new rule matches for open
+cards in the default lane whose latest assignment was unclassified or inherited.
+`--apply` repairs those labels with an audited `source=rule` assignment. It does not
+change priorities, lifecycle, claims, existing admission or holds, including containment;
+it never admits a held card. Manual/planner assignments, previous rule assignments,
+and completed/archived history are left alone. Run it on each owning board, not a
+read-only fleet replica. Usage is charged by the current card label, so repaired
+open cards also move their trailing-window run-hours; terminal history does not.
+Deploy matcher support before publishing policy keys to older clients.
+
 ## The hierarchy
 
 ```text

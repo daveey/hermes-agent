@@ -87,6 +87,8 @@ class Lane:
     key_prefixes: tuple = ()
     repos: frozenset = frozenset()
     self_work: bool = False
+    title_patterns: tuple = ()
+    skills: frozenset = frozenset()
     gate_exempt: tuple = ()
     never_admit: tuple = ()
 
@@ -162,8 +164,8 @@ def _lane(name, raw) -> Lane:
     if max_workers is not None and (type(max_workers) is not int or max_workers < 0):
         raise ValueError(f"lane {name}: max_workers must be a nonnegative integer")
     match = raw.get("match") or {}
-    if not isinstance(match, dict) or set(match) - {"creators", "key_prefixes", "repos", "self_work"}:
-        raise ValueError(f"lane {name}: match takes creators, key_prefixes, repos, self_work")
+    if not isinstance(match, dict) or set(match) - {"creators", "key_prefixes", "repos", "self_work", "title_patterns", "skills"}:
+        raise ValueError(f"lane {name}: match takes creators, key_prefixes, repos, self_work, title_patterns, skills")
     return Lane(
         name=name, share=float(share), gated=raw.get("gated") is True, admit_per_day=per_day,
         cards_per_day=cards_per_day, max_workers=max_workers,
@@ -172,6 +174,8 @@ def _lane(name, raw) -> Lane:
         creators=frozenset(_strings(match.get("creators"), "match.creators")),
         key_prefixes=_strings(match.get("key_prefixes"), "match.key_prefixes"),
         repos=frozenset(_strings(match.get("repos"), "match.repos")), self_work=match.get("self_work") is True,
+        title_patterns=_patterns(match.get("title_patterns"), "match.title_patterns"),
+        skills=frozenset(_strings(match.get("skills"), "match.skills")),
         gate_exempt=_patterns(raw.get("gate_exempt"), "gate_exempt"),
         never_admit=_patterns(raw.get("never_admit"), "never_admit"))
 
@@ -266,11 +270,15 @@ def _key_matches(lane: Lane, key) -> bool:
 
 
 def _rule_lane(pol: Policy, opts: dict) -> Optional[str]:
-    repos = {os.path.basename(str(p).rstrip("/")) for p in (opts.get("project_repo"), opts.get("workspace_path"))
-             if p}
+    from hermes_cli.kanban_lane_matching import repo_names, skill_names
+
+    repos = repo_names(opts)
+    skills = skill_names(opts.get("skills"))
     for lane in pol.lanes.values():
         if (opts.get("created_by") in lane.creators or _key_matches(lane, opts.get("idempotency_key"))
-                or (lane.self_work and opts.get("self_work") is not None) or repos & lane.repos):
+                or (lane.self_work and opts.get("self_work") is not None) or repos & lane.repos
+                or skills & lane.skills
+                or any(p.search(opts.get("title") or "") for p in lane.title_patterns)):
             return lane.name
     return None
 

@@ -700,6 +700,8 @@ _SPECS = [
              help="Cards waiting at a lane gate, oldest first"),
         _cmd("unclassified", [_arg("--limit", type=int, default=200), _json_flag()],
              help="Open cards no rule or parent placed in a lane"),
+        _cmd("reclassify", [_arg("--apply", action="store_true"), _json_flag()],
+             help="Preview rule matches for default-lane open cards; --apply repairs labels, not admissions"),
         _cmd("assign", [_TASK_ID, _arg("lane"), _reason("Why the card belongs there"),
                         _arg("--source", choices=("given", "llm"), default="given")], help="Move a card to a lane"),
         _cmd("admit", [_TASK_ID, _reason("Why it should run now")], help="Release a card held at a lane gate"),

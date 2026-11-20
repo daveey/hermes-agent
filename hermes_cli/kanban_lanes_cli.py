@@ -276,6 +276,10 @@ def command(args: argparse.Namespace) -> int:
     if action is None:
         args.hours, args.local = 6.0, False
     try:
+        if action == "reclassify":
+            from hermes_cli.kanban_lane_reclassify import command as reclassify_command
+
+            return reclassify_command(args)
         return _ACTIONS[action](args)
     except ValueError as exc:
         print(f"lanes: {exc}", file=sys.stderr)
