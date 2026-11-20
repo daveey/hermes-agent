@@ -99,6 +99,7 @@ import {
 import { CompactTabPicker } from './compact-tab-picker'
 import { startPaneDrag } from './drag-session'
 import { KeepAlivePaneSlot, useStablePaneHosts } from './keep-alive-panes'
+import { MainPaneTop } from './main-pane-top'
 import { PaneBody } from './pane-body'
 import { usePanelTitlebar } from './panel-titlebar'
 import { tabStripVisibleForZone } from './strip-visibility'
@@ -391,6 +392,20 @@ function CollapsedZoneRail({ activeId, children, menu, railSide }: CollapsedZone
   )
 }
 
+function WindowControlsDragBand({
+  overlap
+}: {
+  overlap: { x: number; y: number; height: number; width: number } | null
+}) {
+  return overlap ? (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none absolute z-10 [-webkit-app-region:drag]"
+      style={{ height: overlap.height, left: overlap.x, top: overlap.y, width: overlap.width }}
+    />
+  ) : null
+}
+
 export function TreeGroup({
   node,
   parentAxis,
@@ -677,13 +692,7 @@ export function TreeGroup({
             : undefined
       }
     >
-      {wcOverlap && (
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute z-10 [-webkit-app-region:drag]"
-          style={{ height: wcOverlap.height, left: wcOverlap.x, top: wcOverlap.y, width: wcOverlap.width }}
-        />
-      )}
+      <WindowControlsDragBand overlap={wcOverlap} />
 
       {/* Minimized in a ROW: a narrow vertical rail — same PaneTab shell as
           the horizontal strip, just `vertical`. Click a tab to restore +
@@ -948,6 +957,8 @@ export function TreeGroup({
           )}
         </div>
       )}
+
+      <MainPaneTop panes={node.panes} />
 
       {/* Body: the zone's pane content — the active pane and bounded hot-hidden
           cache stay mounted in absolute layers; parked panes are unmounted.

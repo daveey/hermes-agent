@@ -6,6 +6,9 @@ export const PANES_AREA = 'panes'
 /** Full-window strip between the native titlebar band and workspace tabs.
  *  Render contributions in order; an empty area takes no space. */
 export const TOP_STRIP_AREA = 'shell.topStrip'
+/** Persistent strip inside the workspace zone, below its titlebar/header and
+ * above the active chat/page. Ordered guests returning null take no space. */
+export const MAIN_PANE_TOP_AREA = 'workspace.mainTop'
 export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' } as const
 /** Titlebar slots are PERMANENT mount points: a component registered here
  *  stays mounted across chat ↔ page navigation, so `useEffect` setup/cleanup
