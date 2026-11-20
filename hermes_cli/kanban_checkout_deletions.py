@@ -43,6 +43,12 @@ def published_checkout_deletions(tree: str, budget) -> bool:
             return False
         if probe(["merge-base", "--is-ancestor", "HEAD", "@{upstream}"]) is None:
             return False
+        # A local upstream/trunk is not publication. Require positive remote-ref
+        # reachability here; the legacy unpushed predicate allows a local-trunk
+        # baseline when there are no remote refs, which must not grant this exception.
+        published = probe(["for-each-ref", "--contains=HEAD", "--format=%(refname)", "refs/remotes/"])
+        if not published or not published.strip():
+            return False
         return not hidden_index_edits(tree, env=env, budget=budget)
     except subprocess.TimeoutExpired:
         raise timed_out(budget) from None

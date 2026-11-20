@@ -83,7 +83,41 @@ def test_upstream_may_be_ahead(tmp_path, empty_index):
     assert kmp.tree_state([str(repo)]) is None
 
 
-@pytest.mark.parametrize("probe_name", ["status", "symbolic-ref", "merge-base", "ls-files"])
+@pytest.mark.parametrize("empty_index", [False, True])
+@pytest.mark.parametrize("publication", ["none", "unrelated", "published"])
+@pytest.mark.parametrize("upstream", ["local", "remote"])
+@pytest.mark.parametrize("refresh", [False, True])
+def test_upstream_requires_remote_publication(tmp_path, empty_index, publication, upstream, refresh):
+    _ws, repo = _checkout(tmp_path, empty_index=empty_index)
+    if publication != "published":
+        pq._commit(repo, "private.txt")
+        if empty_index:
+            pq._git(repo, "rm", "-q", "-f", "private.txt")
+    if publication == "none":
+        pq._git(repo, "remote", "remove", "origin")
+    if upstream == "local":
+        pq._git(repo, "branch", "-f", "main", "HEAD")
+        pq._git(repo, "branch", "--set-upstream-to=main")
+    state = kmp.tree_state([str(repo)], refresh=refresh)
+    assert (state is None) == (publication == "published")
+
+
+@pytest.mark.parametrize("output", ["", " \n\t"])
+def test_empty_remote_publication_is_not_proof(tmp_path, monkeypatch, output):
+    from hermes_cli import worktree_ops
+    _ws, repo = _checkout(tmp_path)
+    real = worktree_ops._git
+
+    def git(args, *a, **kw):
+        if args[0] == "for-each-ref" and "--contains=HEAD" in args:
+            return subprocess.CompletedProcess(args, 0, output, "")
+        return real(args, *a, **kw)
+
+    monkeypatch.setattr(worktree_ops, "_git", git)
+    assert kmp.tree_state([str(repo)]) is not None
+
+
+@pytest.mark.parametrize("probe_name", ["status", "symbolic-ref", "merge-base", "ls-files", "for-each-ref"])
 @pytest.mark.parametrize("failure", ["exit", "stderr", "timeout"])
 def test_unknown_probe_still_pins(tmp_path, monkeypatch, probe_name, failure):
     from hermes_cli import worktree_ops
@@ -91,7 +125,8 @@ def test_unknown_probe_still_pins(tmp_path, monkeypatch, probe_name, failure):
     real = worktree_ops._git
 
     def git(args, *a, **kw):
-        if args[0] == probe_name and (probe_name != "status" or "--porcelain=v1" in args):
+        selected = args[0] == probe_name and (probe_name != "status" or "--porcelain=v1" in args)
+        if selected and (probe_name != "for-each-ref" or "--contains=HEAD" in args):
             if failure == "timeout":
                 raise subprocess.TimeoutExpired(args, 10)
             return subprocess.CompletedProcess(args, 128 if failure == "exit" else 0, "", "warning: unknown")
