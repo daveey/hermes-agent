@@ -58,10 +58,10 @@ def validate_home(conn, intent, board):
 
 
 def creator_task(conn, intent):
-    """Resolve private provenance only in its authoritative home namespace.
+    """Return only an authoritative LOCAL lookup ID, never a foreign replica.
 
-    Foreign creator policy is not yet supported: a same-ID replica must never
-    silently stand in for an authenticated creator from another namespace.
+    The authenticated origin vouches for its foreign creator. Full provenance
+    remains in the immutable intake intent, not in the local creator-ID field.
     """
     if 'creator' not in intent:
         return None
@@ -69,9 +69,15 @@ def creator_task(conn, intent):
     if (not isinstance(creator, dict)
             or set(creator) != {'gateway', 'profile', 'board', 'task_id', 'run_uid'}
             or not all(isinstance(v, str) and re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}', v)
-                       for v in creator.values())
-            or {k: creator[k] for k in ('gateway', 'profile', 'board')} != intent['owner']):
+                       for v in creator.values())):
         raise policy.SelfWorkError('self-work creator namespace unavailable at intake home')
+    if {k: creator[k] for k in ('gateway', 'profile', 'board')} != intent['owner']:
+        origin = intent.get('origin')
+        if (not isinstance(origin, dict)
+                or any(creator[k] != origin.get(k) for k in ('gateway', 'profile'))
+                or intent.get('sender') != 'gw:' + creator['gateway']):
+            raise policy.SelfWorkError('self-work creator namespace unavailable at intake home')
+        return None  # Do not read a colliding local task, its tenant or subscriptions.
     columns = {row[1] for row in conn.execute('PRAGMA table_info(tasks)')}
     provenance = 'created_on' if 'created_on' in columns else 'NULL'
     row = conn.execute(f'SELECT {provenance} FROM tasks WHERE id=?', (creator['task_id'],)).fetchone()

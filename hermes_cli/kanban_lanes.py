@@ -404,7 +404,10 @@ def _gated(conn, pol: Policy, lane_name: str, opts: dict) -> bool:
     if not lane.gated or _by_user(opts) or opts.get("created_by") in RECOVERY_CREATORS:
         return False
     key = opts.get("idempotency_key")
-    filed_by_agent = bool(_agent_task(opts)) or opts.get("created_by") in lane.creators \
+    # Courier self-work has no local creator row when its producer is foreign.
+    # Keep that durable sender/declaration pair agent-filed, never a human exemption.
+    courier_work = opts.get("self_work") is not None and str(opts.get("created_by", "")).startswith("gw:")
+    filed_by_agent = bool(_agent_task(opts)) or courier_work or opts.get("created_by") in lane.creators \
         or _key_matches(lane, key)
     if not filed_by_agent or _alarm_key(key) or opts.get("admission_class") == "urgent":
         return False
@@ -415,7 +418,7 @@ def _gated(conn, pol: Policy, lane_name: str, opts: dict) -> bool:
         # it finishes too. A named detector (``creators``) filing such a title still waits.
         row = _creator_row(conn, opts)
         if row is None:
-            if opts.get("created_by") not in lane.creators:
+            if not courier_work and opts.get("created_by") not in lane.creators:
                 return False
         elif not (row["status"] == "triage" and row["block_kind"] == GATE_KIND):
             return False
