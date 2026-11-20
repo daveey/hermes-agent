@@ -52,6 +52,25 @@ def test_owner_publication_stamps_current_ancestor(tmp_path, monkeypatch, status
         conn.close()
 
 
+@pytest.mark.parametrize("status", ["todo", "done", "archived", "blocked", "triage"])
+def test_replica_stamp_precedence_and_ineligible_cards(status):
+    from hermes_cli.kanban_replica_upstream import enrich
+
+    with sqlite3.connect(":memory:") as conn:
+        conn.executescript("CREATE TABLE tasks(id TEXT, status TEXT);"
+                           "CREATE TABLE task_links(parent_id TEXT, child_id TEXT);"
+                           "INSERT INTO tasks VALUES ('graph-parent', 'triage');"
+                           "INSERT INTO task_links VALUES ('graph-parent', 'child');")
+        conn.execute("INSERT INTO tasks VALUES ('child', ?)", (status,))
+        stamp = {"id": "owner-parent", "status": "blocked"}
+        row = {"id": "child", "status": status, "blocked_upstream": json.dumps(stamp)}
+        result = enrich(conn, [row])[0]
+    if status == "todo":
+        assert result["blocked_upstream"] == stamp
+    else:
+        assert "blocked_upstream" not in result
+
+
 @pytest.mark.parametrize("transport", ["stamped", "graph", "old"])
 def test_replica_session_tasks_preserves_optional_ancestor(tmp_path, monkeypatch, transport):
     path = tmp_path / "replica.db"

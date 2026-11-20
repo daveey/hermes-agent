@@ -21,7 +21,10 @@ def enrich(conn: sqlite3.Connection, rows: list[dict]) -> list[dict]:
     for row in rows:
         stamp = _decoded_request(row.get("blocked_upstream"))
         row.pop("blocked_upstream", None)
-        ancestor = stamp or cards[row["id"]].get("blocked_upstream")
+        # Match owner publication eligibility even for optional stored stamps.
+        ancestor = None
+        if row["status"] not in {"done", "archived", "blocked", "triage"}:
+            ancestor = stamp or cards[row["id"]].get("blocked_upstream")
         if ancestor:
             row["blocked_upstream"] = ancestor
     return rows
