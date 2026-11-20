@@ -175,10 +175,18 @@ def test_receipt_cache_ignores_volatile_evidence_head(synced_conn):
     assert len(stored) == 1 and json.loads(stored[0][0])["head"] == 100
 
 
+def _foreign_origin(evidence):
+    # origin_gateway must stay aligned with containment_v1.gateway so certified_stop
+    # still passes; identity comparison is what must refuse.
+    evidence["row"].update(origin_gateway="foreign")
+    evidence["containment_v1"].update(gateway="foreign")
+
+
 @pytest.mark.parametrize("mutate", [
-    lambda e: e["row"].update(payload=e["row"]["payload"] + " "),
-    lambda e: e["row"].update(origin_gateway="foreign"),
-    lambda e: e["containment_v1"].update(request="changed"),
+    lambda e: e["row"].update(payload=json.dumps(json.loads(e["row"]["payload"]))),
+    _foreign_origin,
+    # request="changed" is refused by canonical_event (_uid) before identity compare.
+    lambda e: e["containment_v1"].update(request=sync.uuid7()),
     lambda e: e["row"].update(created_at=12345),
 ], ids=["payload", "origin", "proof", "row"])
 def test_receipt_cache_still_refuses_certified_changes_with_head(synced_conn, mutate):
@@ -190,7 +198,7 @@ def test_receipt_cache_still_refuses_certified_changes_with_head(synced_conn, mu
     altered = copy.deepcopy(proof)
     altered["head"] = 200
     mutate(altered)
-    with pytest.raises(ContainmentRefused):
+    with pytest.raises(ContainmentRefused, match="identity changed"):
         replica.remember(conn, altered, board="fixture", task=target, uid=stop["event_uid"])
 
 
