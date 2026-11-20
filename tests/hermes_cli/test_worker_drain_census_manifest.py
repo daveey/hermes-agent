@@ -51,11 +51,19 @@ def _proc(root, pid, ppid=1, cgroup=CG, exe='/usr/sbin/idled', uid_dir=True, lin
 
 
 def _ident(root, cgroup=CG, exe='/usr/sbin/idled'):
-    return (os.stat(root).st_uid, cgroup, exe)
+    return (10, 100, os.stat(root).st_uid, cgroup, exe)
 
 
-def test_baseline_exempts_only_exact_identity_with_no_working_descendant(tmp_path):
-    base = frozenset({_ident(tmp_path)})
+@pytest.fixture
+def live_baseline(monkeypatch):
+    from hermes_cli import worker_drain_fence as fence
+    monkeypatch.setattr(fence, 'load_activation', dict)
+    monkeypatch.setattr(fence, 'current_identity', lambda act: fence.Identity('iid', 'boot', 'epoch'))
+    return lambda entries: c.Baseline('boot', 'iid', 'epoch', frozenset(entries))
+
+
+def test_baseline_exempts_only_exact_identity_with_no_working_descendant(tmp_path, live_baseline):
+    base = live_baseline({_ident(tmp_path)})
     _proc(tmp_path, 10)
     assert c.observe_processes(str(tmp_path), base) == c.Observation(c.ZERO)
     _proc(tmp_path, 11, ppid=10, exe='/usr/bin/python3')  # unlisted descendant of an exempt daemon
@@ -63,8 +71,8 @@ def test_baseline_exempts_only_exact_identity_with_no_working_descendant(tmp_pat
     assert seen.state == c.POSITIVE and seen.count == 2  # parent is dragged in: a unit name exempts no descendants
 
 
-def test_same_exe_in_other_cgroup_is_work(tmp_path):
-    base = frozenset({_ident(tmp_path)})
+def test_same_exe_in_other_cgroup_is_work(tmp_path, live_baseline):
+    base = live_baseline({_ident(tmp_path)})
     _proc(tmp_path, 10, cgroup='/user.slice/job.scope')
     assert c.observe_processes(str(tmp_path), base).state == c.POSITIVE
 
@@ -74,14 +82,14 @@ def test_unlisted_process_without_baseline_is_work(tmp_path):
     assert c.observe_processes(str(tmp_path), None).state == c.POSITIVE
 
 
-def test_empty_proc_without_baseline_is_unknown(tmp_path):
+def test_empty_proc_without_baseline_is_unknown(tmp_path, live_baseline):
     assert c.observe_processes(str(tmp_path), None) == c.Observation(c.UNKNOWN, reason='no trusted live baseline')
-    assert c.observe_processes(str(tmp_path), frozenset()).state == c.ZERO
+    assert c.observe_processes(str(tmp_path), live_baseline(set())).state == c.ZERO
 
 
-def test_unreadable_exe_blocks_zero(tmp_path):
+def test_unreadable_exe_blocks_zero(tmp_path, live_baseline):
     _proc(tmp_path, 10, link=False)  # alive, exe not readable (foreign uid)
-    seen = c.observe_processes(str(tmp_path), frozenset({_ident(tmp_path)}))
+    seen = c.observe_processes(str(tmp_path), live_baseline({_ident(tmp_path)}))
     assert seen.state == c.UNKNOWN and 'unobservable' in seen.reason
 
 
