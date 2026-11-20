@@ -126,21 +126,30 @@ def _contained_chat_owners(conn: sqlite3.Connection, ids: list[str]) -> set[str]
     machine/placeholder sessions are not owners. Read failures propagate to the sweep's
     fail-closed boundary rather than becoming evidence of absent ownership. [daveey]
     """
-    from hermes_cli.kanban_chat_links import _local_links
-    from hermes_cli.kanban_db_notify import _owning_sub_clause, is_machine_session
+    from hermes_cli.kanban_db_notify import is_machine_session
+    from hermes_cli.kanban_session_activity import _counted_sub_clause
     from hermes_cli.kanban_origin import OriginError, gateway_name, parse_origin
     from hermes_cli.kanban_placement import is_placeholder_session
 
     gateway = gateway_name()
-    owned = {r["task_id"] for r in _local_links(conn, gateway).values() if not r.get("released")}
+    owned: set[str] = set()
     has_links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone()
     for tid in ids:
         rows = [dict(r) for r in conn.execute("SELECT * FROM task_chat_links WHERE task_id=?", (tid,))] if has_links else []
         known = {(r["chat_gateway"], r["chat_profile"] or "default", r["chat_session"]) for r in rows}
         candidates = [r for r in rows if not r["released"] and r["kind"] in ("created", "shepherd")]
+        # Per-card reads only (no board-wide scan on the dispatcher hot path). Subs count the way
+        # _owner_hub_links does: creators, shepherds and origin bindings, not notice-only subs.
+        made_in = conn.execute("SELECT session_id FROM tasks WHERE id=?", (tid,)).fetchone()
+        if made_in and made_in[0]:
+            candidates.append({"chat_gateway": gateway, "chat_profile": None, "chat_session": made_in[0]})
+        for local in conn.execute(
+                "SELECT s.chat_id FROM kanban_notify_subs s JOIN tasks t ON t.id=s.task_id "
+                f"WHERE s.task_id=? AND s.platform='tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)}", (tid,)):
+            candidates.append({"chat_gateway": gateway, "chat_profile": None, "chat_session": local[0]})
         for sub in conn.execute(
-                "SELECT s.chat_id FROM kanban_notify_subs s LEFT JOIN tasks p ON p.id=s.task_id "
-                f"WHERE s.task_id=? AND s.platform='hub' AND {_owning_sub_clause()}", (tid,)):
+                "SELECT s.chat_id FROM kanban_notify_subs s JOIN tasks t ON t.id=s.task_id "
+                f"WHERE s.task_id=? AND s.platform='hub' AND s.chat_id != '' AND {_counted_sub_clause(conn)}", (tid,)):
             try:
                 origin = parse_origin(sub[0])
             except OriginError:

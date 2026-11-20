@@ -54,3 +54,25 @@ def test_unreadable_remote_ownership_does_not_escalate(board, monkeypatch):
     monkeypatch.setattr(kanban_db_notify, "is_machine_session", unavailable)
     assert h.sweep.escalate_stranded_contained(board, now=h.NOW) == []
     assert board.execute(f"SELECT COUNT(*) FROM tasks WHERE {h.KEY}").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("reason,expected", [("shepherd", 0), ("origin", 0), ("send_refused", 1)])
+def test_hub_subscription_reasons_before_link_row_lands(board, reason, expected):
+    """A remote shepherd's hub sub counts as an owner even before its link row syncs; send_refused does not."""
+    relay, authority, _ = h._contained(board)
+    h._finish(board, authority)
+    board.execute("INSERT INTO kanban_notify_subs(task_id,platform,chat_id,created_at,delivery_metadata) "
+                  "VALUES (?,'hub','remote-chat-host/default/20261120_000000_abcdef',?,?)",
+                  (relay, h.NOW - 3600, json.dumps({"reason": reason})))
+    assert len(h.sweep.escalate_stranded_contained(board, now=h.NOW)) == expected
+
+
+def test_ownership_read_is_per_card_not_board_wide(board, monkeypatch):
+    from hermes_cli import kanban_chat_links
+    relay, authority, _ = h._contained(board)
+    h._finish(board, authority)
+    board.execute("INSERT INTO task_chat_links VALUES ('owner',?,'remote-chat-host','default',"
+                  "'20261120_000000_abcdef','created',0,?)", (relay, h.NOW))
+    monkeypatch.setattr(kanban_chat_links, "_local_links",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("board-wide scan")))
+    assert h.sweep.escalate_stranded_contained(board, now=h.NOW) == []
