@@ -341,6 +341,7 @@ def independent_routes(pin, cfg, assignee, *, level="deep"):
 
 def resolve_review_model(conn, task, cfg):
     """Concrete independent reviewer when author evidence exists; legacy routing otherwise."""
+    import math
     import time
     from hermes_cli import kanban_provider_walls as pw
     excluded = implementer_models(conn, task)
@@ -379,13 +380,22 @@ def resolve_review_model(conn, task, cfg):
         if not norm or norm == "auto":
             return True
         live_wall = pw.live_quota_wall(norm, model)
-        deadlines = [value for value in (walls.get(norm), holds.get(norm), live_wall)
-                     if isinstance(value, (int, float)) and not isinstance(value, bool) and value > now]
+        sources = (walls.get(norm), holds.get(norm), live_wall)
+        def finite_future(value):
+            return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(value) and value > now)
+        # Pool membership still refuses the route when its reset is unknown or
+        # elapsed. A second finite wall cannot prove when that hold will clear.
+        if norm in holds and not finite_future(holds[norm]):
+            return True
+        if live_wall is True or (isinstance(live_wall, (int, float)) and not math.isfinite(live_wall)):
+            return True
+        deadlines = [value for value in sources if finite_future(value)]
         if deadlines:
             if registry_refusal(model, provider, assignee) is None:
                 waits.append(max(deadlines))  # a route needs ALL its overlapping walls/holds to clear
             return True
-        return live_wall is True  # legacy boolean unavailability has no provable deferral deadline
+        return False
 
     # A concrete, independent handoff override is honored unless its pool is held or walled (the fast return
     # used to skip that check and run the reviewer into the hold/wall): then the next independent route takes it.

@@ -1,4 +1,6 @@
 """Temporary reviewer unavailability must not consume claim/failure budgets."""
+import math
+
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -98,3 +100,41 @@ def test_review_wait_boundaries(board, monkeypatch, case):
                 tier.apply_model_tier(conn, task, lane="review", cfg={"enabled": True})
             monkeypatch.setattr(review, "deferral_exhausted", lambda *_a: True)
             assert review.admission_refusal(conn, tid, caught.value) == (True, False, None)
+
+
+@pytest.mark.parametrize("deadline", [math.inf, math.nan, True, START - 1])
+@pytest.mark.parametrize("wall", [None, RESET])
+def test_unknown_or_elapsed_pacing_reset_is_not_a_deferral_deadline(
+        board, monkeypatch, deadline, wall):
+    monkeypatch.setattr(kb.time, "time", lambda: START)
+    monkeypatch.setattr(review, "implementer_models", lambda *_a: {"author-model"})
+    monkeypatch.setattr(review, "independent_routes", lambda *_a, **_kw: iter([
+        ("claude-opus-5-5", "anthropic")]))
+    monkeypatch.setattr(review, "registry_refusal", lambda *_a: None)
+    monkeypatch.setattr(walls, "active_walls", lambda **_kw: {"anthropic": wall} if wall else {})
+    monkeypatch.setattr(walls, "live_quota_wall", lambda *_a: None)
+    monkeypatch.setattr(pacing, "held_pools", lambda *_a: {"anthropic": deadline})
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="Build", assignee="a")
+        with pytest.raises(review.ReviewModelUnavailable) as caught:
+            review.resolve_review_model(conn, kb.get_task(conn, tid), {})
+        assert not isinstance(caught.value, review.ReviewRouteDeferred)
+
+
+@pytest.mark.parametrize("failure", [ValueError("invalid review metadata"), RuntimeError("policy read failed")])
+def test_preclaim_resolver_error_does_not_abort_dispatch(
+        board, monkeypatch, all_assignees_spawnable, failure):
+    monkeypatch.setattr(tier, "load_tier_config", lambda: {"enabled": True})
+    monkeypatch.setattr(review, "resolve_review_model", lambda *_a: (_ for _ in ()).throw(failure))
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="Build", assignee="a")
+        sibling = kb.create_task(conn, title="Ordinary implementation", assignee="a")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
+        seen = []
+        dispatch.dispatch_once(conn, spawn_fn=lambda task, _ws: seen.append(task.id))
+        assert sibling in seen
+        assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='claimed'",
+                            (tid,)).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='review_route_deferred'",
+                            (tid,)).fetchone()[0] == 0
