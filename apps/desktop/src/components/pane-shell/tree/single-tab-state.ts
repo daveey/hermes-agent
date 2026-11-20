@@ -1,6 +1,7 @@
 import { registry } from '@/contrib/registry'
 import { $tabStripDefault } from '@/store/tabstrip-prefs'
 
+import { isPreviewOnlyZone } from './main-tab-policy'
 import { allPaneIds, findGroup, findGroupOfPane, type LayoutNode, removePane } from './model'
 import { isTreePaneParked, isTreePaneParkedByOthers, setTreePaneParked, TREE_PARK_SINGLE } from './parked-panes'
 import { singleTabMemory as memory, type ParkedTab } from './single-tab-memory'
@@ -25,7 +26,7 @@ function enforce(tree: LayoutNode): LayoutNode {
     const mains = node.panes.filter(isMain)
 
     // A preview-only zone is not the session tab slot: keep every Browser tab.
-    if (mains.length < 2 || mains.every(id => id.startsWith('preview-tile:'))) {
+    if (mains.length < 2 || isPreviewOnlyZone(mains)) {
       return node
     }
 

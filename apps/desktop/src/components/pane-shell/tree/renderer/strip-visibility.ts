@@ -12,6 +12,7 @@
 import type { Contribution } from '@/contrib/types'
 import { $tabStripDefault, effectiveTabStripMode } from '@/store/tabstrip-prefs'
 
+import { isPreviewOnlyZone } from '../main-tab-policy'
 import type { TabStripMode } from '../model'
 
 import { paneChrome } from './track-model'
@@ -117,7 +118,7 @@ export function tabStripVisibleForZone(zone: {
     $tabStripDefault.get() === 'single' &&
     zone.shown.length > 0 &&
     zone.shown.every(id => paneChrome(zone.paneFor(id)).placement === 'main') &&
-    !zone.shown.every(id => id.startsWith('preview-tile:'))
+    !isPreviewOnlyZone(zone.shown)
   ) {
     return false
   }

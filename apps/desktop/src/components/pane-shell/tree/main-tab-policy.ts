@@ -2,6 +2,11 @@ import type { Contribution } from '@/contrib/types'
 
 import type { GroupNode } from './model'
 
+/** A zone whose main tabs are all Browser previews is not the session tab slot. */
+export function isPreviewOnlyZone(mains: readonly string[]): boolean {
+  return mains.length > 0 && mains.every(id => id.startsWith('preview-tile:'))
+}
+
 /** Visibility eligibility shared by store/keyboard policy. */
 export function shownGroupPanes(
   group: { active?: string; panes: readonly string[] },
@@ -44,6 +49,11 @@ export function singleMainTabPanes(
   }
 
   const main = shown.filter(isMain)
+
+  if (isPreviewOnlyZone(main)) {
+    return [...shown]
+  }
+
   const retained = main.includes(group.active) ? group.active : main[0]
 
   return shown.filter(id => !isMain(id) || id === retained)

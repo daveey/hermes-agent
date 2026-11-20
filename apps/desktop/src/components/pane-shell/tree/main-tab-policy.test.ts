@@ -117,3 +117,10 @@ describe('Single main slots through the actual tree store', () => {
     expect(shown()).toContain('files')
   })
 })
+
+it("keeps every Browser tab in a preview-only zone under Single", () => {
+  const previews = ["preview-tile:url:one", "preview-tile:url:two"]
+  const all = (id: string) => id.startsWith("preview-tile:")
+
+  expect(singleMainTabPanes({ active: previews[1]!, panes: previews }, previews, all, true)).toEqual(previews)
+})
