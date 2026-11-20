@@ -65,16 +65,26 @@ def test_reference_scope(w2, monkeypatch, mutation):
     assert archive.portable(w2.conn, tid, text) is (mutation == "valid")
 
 
-def test_comments_after_move_and_no_old_fallback(w2, monkeypatch):
+@pytest.mark.parametrize("move_gap", [0, 1, 2])
+def test_comments_after_move_and_no_old_fallback(w2, monkeypatch, move_gap):
     tid, text = _task(w2, monkeypatch)
     _backdate_run(w2.conn, tid, 5)
     kb.add_comment(w2.conn, tid, author="default", body=text)
     with kb.write_txn(w2.conn):
         kb._append_event(w2.conn, tid, "moved", {})
+        # Exercise a move in the comment's second, the next second, or after a pause.
+        w2.conn.execute("UPDATE task_events SET created_at = "
+                        "(SELECT MAX(created_at) FROM task_comments WHERE task_id = ?) + ? "
+                        "WHERE task_id = ? AND kind = 'moved'", (tid, move_gap, tid))
+        moved_at = w2.conn.execute("SELECT MAX(created_at) FROM task_events "
+                                   "WHERE task_id = ? AND kind = 'moved'", (tid,)).fetchone()[0]
     monkeypatch.setattr(archive, "verify", lambda *args: True)
     assert not archive.portable(w2.conn, tid, "resume")
     with kb.write_txn(w2.conn):
-        w2.conn.execute("UPDATE task_comments SET created_at = created_at + 1 WHERE task_id = ?", (tid,))
+        w2.conn.execute("UPDATE task_comments SET created_at = ? WHERE task_id = ?", (moved_at, tid))
+    assert not archive.portable(w2.conn, tid, "resume")  # Same-second publication is excluded.
+    with kb.write_txn(w2.conn):
+        w2.conn.execute("UPDATE task_comments SET created_at = ? WHERE task_id = ?", (moved_at + 1, tid))
     assert archive.portable(w2.conn, tid, "resume")
     monkeypatch.setattr(archive, "verify", lambda path, sha, *args: sha == 'a' * 64)
     assert not archive.portable(w2.conn, tid, text.replace('a' * 64, 'b' * 64))
