@@ -69,7 +69,12 @@ def test_timer_replays_only_its_profile(homes, monkeypatch):
     schedule(alpha, "alpha work")
     schedule(beta, "beta work")
     calls = []
-    monkeypatch.setattr("tui_gateway.server._wake_session_turn", lambda key, text, **kw: calls.append((text, kw)) or "started")
+    def wake(key, text, **kw):
+        calls.append((text, kw))
+        assert kw["replay_delivery"].admit()
+        return "started"
+
+    monkeypatch.setattr("tui_gateway.server._wake_session_turn", wake)
     timers[0].callback()
     assert len(calls) == 1 and "alpha work" in calls[0][0] and "beta work" not in calls[0][0]
     assert calls[0][1]["profiles"] == ["alpha"]

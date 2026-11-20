@@ -209,6 +209,16 @@ def test_a_busy_replay_is_still_pending_when_the_yield_window_ends(recovery, hom
     monkeypatch.setattr(ar, "ENABLED", True)
     monkeypatch.setattr(ar, "_arm", lambda key, entry, delay, fire: timers.append((delay, fire, key)))
     verdicts = []
+    real_submit = server._run_prompt_submit
+
+    def submit(*a, **kw):
+        # The recovery fixture replaces the worker; retain its worker-entry permit.
+        permit = kw.get("replay_delivery")
+        if permit is not None:
+            assert permit.admit()
+        return real_submit(*a, **kw)
+
+    monkeypatch.setattr(server, "_run_prompt_submit", submit)
     real_wake = server._wake_session_turn
     monkeypatch.setattr(server, "_wake_session_turn",
                         lambda *a, **kw: (verdicts.append(real_wake(*a, **kw)), verdicts[-1])[1])
