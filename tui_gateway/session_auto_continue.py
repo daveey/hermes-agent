@@ -418,6 +418,12 @@ def _paused_turn_to_ledger_owner(sid: str, session: dict, session_key: str, mark
         retire_paused_turn(session, session_key, marker, f"the gateway's ledger holds {status} work for the chat, "
                            "which only Discard or a gateway resume resolves; nothing will run the continuation here")
         return True
+    # The legacy owner-forward protocol carries text, not retry-deadline custody.
+    # Keep this marker and use the existing per-turn retry (no sleeping scheduler)
+    # until its absolute epoch is served. Forwarding earlier could retry a 503 early.
+    retry_not_before = marker.get("provider_retry_not_before")
+    if retry_not_before and time.time() < retry_not_before:
+        return False
     # It runs after the owner's queued turns, so it is never worded as the chat's previous turn.
     text = pause_note(marker["prompt"], marker.get("killed_jobs"), carried=bool(marker.get("carried_turn_paused")),
                       paused_at=marker.get("paused_at"), queued=True, pauses=int(marker.get("pauses") or 0),

@@ -126,7 +126,11 @@ def before_provider_work(agent: Any, messages: Any, conversation_history: Any, a
     retry = SimpleNamespace(restart_with_redirected_messages=False)
     while True:
         try:
-            verdict = wait_restored(agent, retry, messages, api_call_count)
+            # This gate runs before begin_iteration reserves the next request.
+            # Tracking expects that prospective request count (and a nonempty
+            # transcript even at a cold continuation's pre-prepare boundary).
+            tracked_messages = messages or [{"role": "user", "content": ""}]
+            verdict = wait_restored(agent, retry, tracked_messages, api_call_count + 1)
         except InterruptedError:
             return {"messages": messages, "final_response": "", "interrupted": True,
                     "turn_exit_reason": "interrupted_by_user"}
@@ -135,7 +139,7 @@ def before_provider_work(agent: Any, messages: Any, conversation_history: Any, a
         if verdict == "redirect":
             continue
         update_pause_cancel.take_pending(agent)
-        pause = _step_boundary_pause(agent, messages, api_call_count)
+        pause = _step_boundary_pause(agent, tracked_messages, api_call_count)
         agent.clear_interrupt(only_reason=update_pause_cancel.CANCEL_TOOL_REASON)
         if update_pause_cancel.user_stop_pending(agent):
             return {"messages": messages, "final_response": "", "interrupted": True,
