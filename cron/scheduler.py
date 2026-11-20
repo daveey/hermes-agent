@@ -830,7 +830,8 @@ def try_register_running_job(job_id: str, *, owner=None, future=_FUTURE_PENDING)
     with retirement.work() as admitted, _running_lock:
         if not admitted or key in _running_job_ids:
             return False
-        _take_run_reservation(key)
+        if not _take_run_reservation(key):
+            return False  # draining/sealed/unknown: no new cron work may start on this node
         _running_job_ids.add(key)
         # Same critical section as the add: no window where an in-flight id lacks an age the sweep
         # can bound. Sentinel is replaced by the real future once ``pool.submit`` returns.
@@ -866,9 +867,12 @@ def release_running_job(
 
 # in-flight key -> its core-update admission reservation (``hermes_cli.admission_fence``). [daveey]
 _running_reservations: dict = {}
+# in-flight key -> its worker-drain work lease (``hermes_cli.worker_drain_fence``); the run's own
+# descendants inherit it through ``lease_scope`` in ``run_one_job``. [daveey]
+_running_leases: dict = {}
 
 
-def _take_run_reservation(key) -> None:
+def _take_run_reservation(key) -> bool:
     """Hold a core-update admission reservation for the whole run (caller holds ``_running_lock``).
 
     hermes-sync's drain only reads reservations; the gateway's restart wait, which counts this run,
@@ -878,20 +882,35 @@ def _take_run_reservation(key) -> None:
     A manual run during a hold also counts, so the window waits for it instead of restarting under it.
     Waits out a busy admission.lock for up to ``backend_retirement.BUSY_WAIT_S`` (a hub claim holds it up to
     CLAIM_MAX_HOLD_S; ``_running_lock`` is cron's own, not a session lock, and no turn-waiter is registered).
-    Best-effort: an unavailable fence never blocks a run. The flock dies with this process.
+    Best-effort for the UPDATE fence: an unavailable fence never blocks a run. The worker-drain lease
+    is the opposite: a refusal (draining, sealed, unknown state) returns False and the run is not
+    registered; no drain lease is held for a run that was not admitted. Flocks die with this process.
     """
+    from hermes_cli.worker_drain_fence import DrainRefused, admit
+    try:
+        drain_lease = admit('cron.run')
+    except DrainRefused as exc:
+        logger.warning("cron run %s refused by worker drain: %s", key[1], exc)
+        return False
+    if drain_lease is not None:
+        _running_leases[key] = drain_lease
     try:
         from hermes_cli.admission_fence import extend, SUPPORTED
         if not SUPPORTED:
-            return
+            return True
         from hermes_cli.backend_retirement import BUSY_WAIT_S
         from hermes_constants import get_default_hermes_root
         _running_reservations[key] = extend(get_default_hermes_root(home=key[0]), timeout=BUSY_WAIT_S)
     except (ImportError, OSError, TimeoutError) as exc:
         logger.debug("cron run %s: no update admission reservation (%s)", key[1], exc)
+    return True
 
 
 def _drop_run_reservation(key) -> None:
+    lease = _running_leases.pop(key, None)
+    if lease is not None:
+        with contextlib.suppress(Exception):
+            lease.close()
     reservation = _running_reservations.pop(key, None)
     if reservation is not None:
         with contextlib.suppress(Exception):
@@ -3082,7 +3101,9 @@ def run_one_job(job: dict, **kwargs) -> bool:
     """Run ONE due job (see ``_run_one_job_unscoped``). Reserves at entry so claim/setup before the agent
     reservation (``run_job``) is covered; cron itself is never gated by quiet."""
     from agent import local_work_agent
-    with local_work_agent.scope("cron_fire", "cron.scheduler.run_one_job"):
+    from hermes_cli.worker_drain_fence import lease_scope
+    with local_work_agent.scope("cron_fire", "cron.scheduler.run_one_job"), lease_scope(
+            _running_leases.get(_inflight_key(job.get("id"), _get_hermes_home()))):
         return _run_one_job_unscoped(job, **kwargs)
 
 
@@ -4010,8 +4031,11 @@ def _launch_external_cron_worker(job: dict) -> bool:
     try:
         stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            process = subprocess.Popen(
+            from hermes_cli.worker_drain_fence import popen_worker  # [daveey] the worker keeps the run's lease fd
+            process = popen_worker(
+                subprocess.Popen,
                 dispatch.argv,
+                drain_purpose="cron.worker",
                 cwd=str(repo_root),
                 env=worker_env,
                 stdin=subprocess.DEVNULL,

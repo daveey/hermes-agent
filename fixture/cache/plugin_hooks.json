@@ -1,1 +1,1 @@
-{"version": 1, "fingerprint": "30663ffde4ba2fde515cfd40d8ec58f7b50afd3ffdb9e8ba36a5784433787f44", "hooks": ["on_session_end", "post_tool_call", "pre_tool_call", "transform_tool_result"]}
+{"version": 1, "fingerprint": "bc6addb52d356cf0d1d4ea21156c615dc8cc13e7ef46c0c9366b5972e9252d33", "hooks": ["on_session_end", "post_tool_call", "pre_tool_call", "transform_tool_result"]}

@@ -1,4 +1,5 @@
 import json
+import os
 import multiprocessing
 import time
 
@@ -93,18 +94,20 @@ def test_missing_corrupt_other_boot_never_open(root):
     f.apply_request(root, IDENT, req('establish', 1))
     refuses('unknown-state', f.acquire_lease, root, f.Identity(IDENT.iid, 'boot-2', IDENT.node_epoch), 'x')
     refuses('identity-mismatch', f.acquire_lease, root, f.Identity('i-ffffffff', 'boot-1', 'epoch-1'), 'x')
-    (root / 'core-update' / f.LATCH_FILE).write_text('{bad')
+    (root / 'core-update' / f.LATCH_FILE).write_text('{bad', encoding='utf-8')
     refuses('unknown-state', f.acquire_lease, root, IDENT, 'x')
     (root / 'core-update' / f.LATCH_FILE).unlink()
     refuses('unknown-state', f.acquire_lease, root, IDENT, 'x')
 
 
-def test_activation(tmp_path):
+def test_activation(tmp_path, monkeypatch):
+    monkeypatch.setattr(f, 'ACTIVATION_OWNERS', (os.geteuid(),))  # windows-footgun: ok
     path = tmp_path / 'act.json'
     assert f.load_activation(path) is None
-    path.write_text('{nope')
+    path.write_text('{nope', encoding='utf-8')
     refuses('unknown-state', f.load_activation, path)
-    path.write_text(json.dumps({'version': 1, 'iid': IDENT.iid, 'uid': 1000, 'node_epoch': 'e', 'home': '/home/ubuntu'}))
+    path.write_text(json.dumps({'version': 1, 'iid': IDENT.iid, 'uid': 1000, 'node_epoch': 'e', 'home': '/home/ubuntu'}), encoding='utf-8')
+    path.chmod(0o644)
     assert f.load_activation(path)['uid'] == 1000
 
 

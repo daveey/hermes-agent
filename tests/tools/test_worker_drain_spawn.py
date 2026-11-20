@@ -20,9 +20,11 @@ def node(tmp_path, monkeypatch):
     root.mkdir()
     ident = f.Identity(IID, f.read_boot_id(), 'epoch-1')
     f.install_state(root, ident)
-    act.write_text(json.dumps({'version': 1, 'iid': IID, 'uid': os.getuid(), 'node_epoch': 'epoch-1',
+    act.write_text(json.dumps({'version': 1, 'iid': IID, 'uid': os.getuid(), 'node_epoch': 'epoch-1',  # windows-footgun: ok
                                'home': str(tmp_path)}))
+    act.chmod(0o644)
     monkeypatch.setattr(f, 'ACTIVATION_PATH', act)
+    monkeypatch.setattr(f, 'ACTIVATION_OWNERS', (os.geteuid(),))  # windows-footgun: ok
     monkeypatch.setattr(f, '_state_base', lambda: root)
     monkeypatch.setattr(f, 'read_imds_iid', lambda timeout=1.5: IID)
     monkeypatch.delenv(f.LEASE_FD_ENV, raising=False)

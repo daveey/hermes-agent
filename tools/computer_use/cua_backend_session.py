@@ -221,6 +221,7 @@ class _CuaDriverSession:
         # Phase marker surfaced by the ready-timeout error (issue #57025): when startup wedges, the caller
         # reports HOW FAR it got instead of an opaque "never reached ready".
         self._startup_phase = "binary-check"
+        _drain_lease = None
         try:
             driver_cmd = _driver.resolve_cua_driver_cmd()
             if not driver_cmd and _cb.sandbox_mcp_invocation() is None:
@@ -233,6 +234,9 @@ class _CuaDriverSession:
             _t_manifest = _time.monotonic()
             # Telemetry policy first (default: disabled), then strip Hermes secrets.
             params = StdioServerParameters(command=command, args=args, env=_sanitize_subprocess_env(child_env))
+            # [daveey] SDK-spawned driver: the lease is held here for the session's whole life.
+            from hermes_cli.worker_drain_fence import admit as _drain_admit
+            _drain_lease = _drain_admit('cua.stdio')
             async with stdio_client(params) as (read, write):
                 self._startup_phase = "mcp-initialize"
                 async with ClientSession(read, write) as session:
@@ -252,6 +256,8 @@ class _CuaDriverSession:
             self._ready_event.set()
             raise
         finally:
+            if _drain_lease is not None:
+                _drain_lease.close()
             # A session that dies for ANY reason must be re-enterable: the next call sees _started False and
             # rebuilds. Atomic bool write — stop() may hold _lock.
             self._session, self._started = None, False

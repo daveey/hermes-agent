@@ -55,6 +55,44 @@ class Identity:
     iid: str
     boot: str
     node_epoch: str
+    uid: int | None = None  # worker account uid from the activation; a root process also trusts it
+
+
+ACTIVATION_OWNERS: tuple = (0,)  # who may own the activation file (tests rebind)
+
+
+def _trusted(uid: int | None = None) -> set:
+    return {0, os.geteuid(), *(() if uid is None else (uid,))}  # windows-footgun: ok — POSIX-only module
+
+
+def _check_stat(st, what: str, owners: set, *, directory: bool = False) -> None:
+    import stat as _stat
+    kind = _stat.S_ISDIR(st.st_mode) if directory else (_stat.S_ISREG(st.st_mode) and st.st_nlink == 1)
+    if not kind or st.st_uid not in owners or st.st_mode & 0o022:
+        raise DrainRefused('unknown-state', f'{what} untrusted owner/mode/type')
+
+
+def _secure_read(path: Path, owners: set) -> bytes:
+    """Read a state file through O_NOFOLLOW; reject non-regular, hardlinked, foreign-owner or
+    group/world-writable files (checked on the opened descriptor, not the path)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise DrainRefused('unknown-state', f'{Path(path).name} unreadable: {type(exc).__name__}') from exc
+    try:
+        _check_stat(os.fstat(fd), Path(path).name, owners)
+        return os.read(fd, 1 << 20)
+    finally:
+        os.close(fd)
+
+
+def _check_dir(d: Path, owners: set) -> None:
+    try:
+        _check_stat(os.lstat(d), d.name, owners, directory=True)  # lstat: a symlinked dir is refused
+    except OSError as exc:
+        raise DrainRefused('unknown-state', f'{d.name} unreadable: {type(exc).__name__}') from exc
 
 
 def read_boot_id() -> str:
@@ -72,11 +110,9 @@ def request_hash(req: dict) -> str:
 def load_activation(path: Path = ACTIVATION_PATH) -> dict | None:
     """None when absent (hooks no-op). Raises DrainRefused('unknown-state') when present but invalid."""
     try:
-        raw = Path(path).read_bytes()
+        raw = _secure_read(Path(path), set(ACTIVATION_OWNERS))
     except FileNotFoundError:
         return None
-    except OSError as exc:
-        raise DrainRefused('unknown-state', f'activation unreadable: {type(exc).__name__}') from exc
     try:
         doc = json.loads(raw)
         if (doc.get('version') != 1 or not IID_RE.match(doc.get('iid', '')) or not isinstance(doc.get('uid'), int)
@@ -95,8 +131,11 @@ def _state_root(root: Path) -> Path:
 def account_lock(root: Path, *, timeout: float = 2.0):
     """Nonblocking-poll flock on the shared admission.lock; never unlinks or replaces it."""
     d = _state_root(root)
-    d.mkdir(parents=True, exist_ok=True)
-    fd = os.open(d / LOCK_FILE, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        fd = os.open(d / LOCK_FILE, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise DrainRefused('unknown-state', f'admission lock unavailable: {type(exc).__name__}') from exc
     deadline = time.monotonic() + timeout
     try:
         while True:
@@ -128,9 +167,9 @@ def _write_atomic(path: Path, doc: dict) -> None:
         os.close(dfd)
 
 
-def _read_json(path: Path) -> dict:
+def _read_json(path: Path, owners: set | None = None) -> dict:
     try:
-        doc = json.loads(path.read_bytes())
+        doc = json.loads(_secure_read(path, _trusted() if owners is None else owners))
     except (OSError, ValueError) as exc:
         raise DrainRefused('unknown-state', f'{path.name} unreadable') from exc
     if not isinstance(doc, dict) or doc.get('version') != 1:
@@ -142,13 +181,13 @@ def install_state(root: Path, ident: Identity) -> None:
     """Installer only: immutable install binding (O_EXCL) plus an open latch at generation 0."""
     d = _state_root(root)
     with account_lock(root):
-        d.mkdir(parents=True, exist_ok=True)
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
         (d / LEASE_DIR).mkdir(mode=0o700, exist_ok=True)
         binding = {'version': 1, 'iid': ident.iid, 'node_epoch': ident.node_epoch}
         try:
-            fd = os.open(d / INSTALL_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            fd = os.open(d / INSTALL_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
         except FileExistsError:
-            if _read_json(d / INSTALL_FILE) != binding:
+            if _read_json(d / INSTALL_FILE, _trusted(ident.uid)) != binding:
                 raise DrainRefused('identity-mismatch', 'install binding differs') from None
         else:
             try:
@@ -168,8 +207,10 @@ def _latch_doc(ident: Identity, phase: str, generation: int, attempt: str, last)
 def read_latch(root: Path, ident: Identity) -> dict:
     """Validated latch. Missing/corrupt/other-IID/other-epoch/other-boot raise; never read as open."""
     d = _state_root(root)
-    install = _read_json(d / INSTALL_FILE)
-    latch = _read_json(d / LATCH_FILE)
+    owners = _trusted(ident.uid)
+    _check_dir(d, owners)
+    install = _read_json(d / INSTALL_FILE, owners)
+    latch = _read_json(d / LATCH_FILE, owners)
     if install.get('iid') != ident.iid or install.get('node_epoch') != ident.node_epoch:
         raise DrainRefused('identity-mismatch', 'install binding')
     if latch.get('iid') != ident.iid or latch.get('node_epoch') != ident.node_epoch:
@@ -193,7 +234,13 @@ def apply_request(root: Path, ident: Identity, req: dict, *, now_ms: int | None 
         raise DrainRefused('unknown-state', 'request expired')
     digest = request_hash(req)
     d = _state_root(root)
-    with account_lock(root):
+    remaining = max(0.0, (req['not_after_ms'] - now_ms) / 1000)
+    started = time.monotonic()
+    with account_lock(root, timeout=min(2.0, remaining)):
+        # Lock waits and slow disks spend the request's own deadline: the monotonic elapsed time is
+        # added to the supplied clock, so a stalled holder or a stepped wall clock cannot extend it.
+        if (now_ms + int((time.monotonic() - started) * 1000)) > req['not_after_ms']:
+            raise DrainRefused('unknown-state', 'request expired waiting for lock')
         latch = read_latch(root, ident)
         last = latch.get('last')
         if last and last['request_id'] == req['request_id']:
@@ -336,12 +383,24 @@ def current_identity(act: dict, *, imds=None) -> Identity:
         _iid_cache[boot] = iid
     if iid != act['iid']:
         raise DrainRefused('identity-mismatch', 'activation bound to another instance')
-    return Identity(iid=iid, boot=boot, node_epoch=act['node_epoch'])
+    return Identity(iid=iid, boot=boot, node_epoch=act['node_epoch'], uid=act['uid'])
 
 
 def _state_base() -> Path:
     from hermes_cli.worker_compute_capacity import policy_root
     return policy_root()
+
+
+def _activation_root(act: dict) -> Path:
+    """State root for the activated account. A root-run process (sync, installer, core update) has
+    root's home as its policy root, which is a different latch from the worker's; it must use the
+    activated account's. Any other foreign uid is refused, never given an empty state."""
+    me = os.geteuid()  # windows-footgun: ok — POSIX-only module
+    if me == act['uid']:
+        return _state_base()
+    if me != 0:
+        raise DrainRefused('identity-mismatch', 'process uid is not the activated account')
+    return Path(act['home']) / '.hermes'
 
 
 def _inherited_parent(root: Path):
@@ -449,7 +508,7 @@ def admit(purpose: str, *, activation_path: Path | None = None, imds=None):
     if act is None:
         return None
     try:
-        root = _state_base()
+        root = _activation_root(act)
         ident = current_identity(act, imds=imds)
         return acquire_lease(root, ident, purpose, parent=_inherited_parent(root))
     except OSError as exc:

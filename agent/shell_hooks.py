@@ -511,9 +511,11 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> dict[str, Any]:
     try:
         if IS_WINDOWS:
             argv = _windows_script_argv(argv)
-        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, encoding='utf-8', errors='replace', shell=False,
-                                env=build_subprocess_env(scrub_secrets=is_multiplex_active()), **popen_kwargs)
+        from hermes_cli.worker_drain_fence import popen_worker  # DrainRefused falls to the generic failure below
+        proc = popen_worker(subprocess.Popen, argv, drain_purpose='shell_hook',
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding='utf-8', errors='replace', shell=False,
+                            env=build_subprocess_env(scrub_secrets=is_multiplex_active()), **popen_kwargs)
     except Exception as exc:
         for cls, msg in _POPEN_ERRORS:
             if isinstance(exc, cls):

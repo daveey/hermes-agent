@@ -423,6 +423,14 @@ class MCPServerTransportMixin:
         # Subprocess stderr goes to ~/.hermes/logs/mcp-stderr.log so banners can't corrupt the TUI.
         _config._write_stderr_log_header(self.name)
         stderr = _config._StderrTee(_config._get_mcp_stderr_log())
+        # [daveey] The server child is spawned by the SDK, so it cannot inherit an fd: this process holds
+        # the work lease for the whole connection and refuses to spawn at all once the node drains.
+        from hermes_cli.worker_drain_fence import admit as _drain_admit
+        try:
+            _drain_lease = _drain_admit('mcp.stdio')
+        except BaseException:
+            stderr.close(timeout=0)
+            raise
         try:
             async with _core.stdio_client(server_params, errlog=stderr.sink) as (read_stream, write_stream):
                 # New PIDs for force-kill cleanup, minus non-MCP children (slash_worker, LSP) racing
@@ -444,6 +452,8 @@ class MCPServerTransportMixin:
             raise
         finally:  # clean exit, exceptions AND cancellation
             stderr.close(timeout=0)
+            if _drain_lease is not None:
+                _drain_lease.close()
             if new_pids:
                 self._release_spawned_children(new_pids)
 

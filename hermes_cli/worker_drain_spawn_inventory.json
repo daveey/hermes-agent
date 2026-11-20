@@ -1,0 +1,1505 @@
+{
+ "files": {
+  "agent/acp_client.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/anthropic_adapter.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/anthropic_credentials.py": {
+   "direct": 4,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/command_token_source.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/context_references.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/credential_relay_preflight.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/credential_relay_repull.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/deadline.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/lsp/client.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/lsp/install.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/proxy_sources/iron_proxy.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/secret_sources/base.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/secret_sources/command.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/skill_preprocessing.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/trace_upload.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/transports/codex_app_server.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/vault_backends/base.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "agent/verify/runner.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "apps/desktop/e2e/update/seed.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "apps/desktop/electron/fixtures/source-backend.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "apps/desktop/electron/native/hud-modifier-x11.test.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "cli.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "cron/restart_rerun.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "cron/scheduler.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "cron/scheduler_script.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/boot_pinned_imports.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/platforms/base.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/platforms/webhook_filters.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/run.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/run_inbound_hooks.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/run_shutdown.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/runtime_bootstrap_windows.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/session_managed_worker.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/session_shell.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/shutdown_forensics.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/slash_commands.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "gateway/status.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_bootstrap.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/_early_recovery.py": {
+   "direct": 7,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/_old_updater.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/_secrets_common.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/_subprocess_compat.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/_update_takeover.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/always_on_dashboard.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/always_on_rollover.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/bang_shell.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/boot_bootstrap.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/browser_connect.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/bundled_app.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/cli_commands_mixin.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/cli_session_mixin.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/clipboard.py": {
+   "direct": 9,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/code_attestation.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/commands_completion.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/config.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/dashboard_procs.py": {
+   "direct": 5,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/default_plugins.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/desktop_build_reuse.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/doctor_platform.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/doctor_state.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/doctor_tools.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/dump.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/gateway.py": {
+   "direct": 15,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/gateway_connections_ssh_transport.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/gateway_launchd.py": {
+   "direct": 22,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/gateway_launchd_runtime.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/gateway_migrate_guards.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/gateway_runtime_service.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/gateway_runtime_start.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/gateway_windows.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/git_commit_graph.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/git_credentials.py": {
+   "direct": 5,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/github_api.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/gitlock.py": {
+   "direct": 7,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/goals.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/journey.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_aggregate_scope.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_capability_registry.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_capability_routing.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_ci_progress.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_continue_archive.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_db.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_db_connect.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_db_dispatch_guard_notice.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_db_dispatch_pid.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_db_dispatch_pr_state.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_db_recover.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_db_workspace.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_dead_ancestry.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_dependency_review_relink.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_failed_result_observer.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_failed_result_service.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_host_identity.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_host_reboot.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_lanes_flow_pr.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_notify_reconcile_exec.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_operator_labels.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_placement.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_placement_forward.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_pr_acceptance.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_priority_runner.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_published_worktree.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_quiet.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_quota_recovery.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_scratch_archive.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_scratch_archive_omit.py": {
+   "direct": 11,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_selfwork_outbound.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_shared_blocker_checks.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_source_cli.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_source_clones.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_source_launch.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_source_publish.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_sync_schema_alert.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_wait_check.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_wake_check.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_worker_scope.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/kanban_workspace_publication.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/launch_probe.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/linux_desktop_entry.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/local_runtime/devices.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/local_runtime/hardware.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/local_runtime/processes.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
+  },
+  "hermes_cli/local_runtime/supervisor.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/macos_signing.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/macos_tcc_anchor.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/main.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/main_container.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/main_dashboard.py": {
+   "direct": 4,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/main_desktop.py": {
+   "direct": 15,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/main_desktop_apparmor.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/main_desktop_tcc.py": {
+   "direct": 5,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/main_platform_setup.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/main_tui_launch.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/main_web_build.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/mcp_catalog.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/memory_setup.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/model_setup_flows.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/onepassword_secrets_cli.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/plugin_host.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/plugin_host_profiles.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/plugin_validate.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/plugins_provenance.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/process_identity.py": {
+   "direct": 1,
+   "routed": 1,
+   "status": "pending"
+  },
+  "hermes_cli/profiles.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/profiles_service_cleanup.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/pty_bridge.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
+  },
+  "hermes_cli/quiet_single_query.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/relaunch.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/restart_ignore_paths.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/review_session_activity.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/secrets_cli.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/service_manager.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/session_handover.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/session_lost_and_found.py": {
+   "direct": 4,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/setup_agent_import.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/setup_terminal.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/setup_tts.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/source_build.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/source_check.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/source_completion.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/source_releases.py": {
+   "direct": 6,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/sqlite_runtime.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/sqlite_safe_read.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/ssh_workspace_fs.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/stderr_timestamp.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/tools_config_cua.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/top_level_env.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/uninstall.py": {
+   "direct": 6,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_abort_recovery.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_cmd.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_cmd_commit.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_cmd_fleet.py": {
+   "direct": 4,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_cmd_force_stop.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_cmd_git.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_cmd_maint.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_cmd_posix_pause.py": {
+   "direct": 5,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_cmd_validation.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_cmd_windows.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_completion.py": {
+   "direct": 4,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_custody.py": {
+   "direct": 7,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_gateway_fence.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_lock.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_owning_install.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_pause_deferrals.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_stage.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/update_upstream_conflict.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/venv_sync.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/version_info.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/web_git.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/web_routers/files.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/web_routers/messaging.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/web_routers/profiles.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/web_server_gateway.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/web_server_lifecycle.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/web_server_memory.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/win_pty_bridge.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/windows_ssh_runtime.py": {
+   "direct": 4,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/worker_compute_capacity.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/worktree_archive.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/worktree_gc.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/worktree_ops.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/worktree_retention.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_cli/worktree_sweep.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_constants.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_constants_scratch.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_constants_scratch_detach.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_dir_acl.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_state_corruption_confirm.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hermes_state_lockowners.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "hosts/hermes-ci-runners/bootstrap/serve-manifest.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "nix/tests/agent-references.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "nix/tests/desktop-backend.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/google_meet/audio_bridge.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/google_meet/cli.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/google_meet/meet_bot.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/google_meet/process_manager.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/memory/byterover/__init__.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/buzz/adapter.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/discord/adapter.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/discord/voice_mixer.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/matrix/adapter.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/photon/adapter.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/photon/cli.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/qqbot/adapter.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/signal/adapter.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/simplex/adapter.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/telegram/adapter.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/telegram/telegram_audio_meta.py": {
+   "direct": 4,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/platforms/whatsapp/adapter.py": {
+   "direct": 7,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/teams_pipeline/pipeline.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "plugins/web/ddgs/provider.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/build_compilers.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/cli.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/client.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/environment.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/extras.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/features.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/libatomic.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/package.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/packages.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/plugin_eviction.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/pnpm_release_age.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/progress.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/recovery.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/runtime.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/runtime_stage.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/security_packages.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/shell.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "pm/workspace.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/async_delegation_recovery_hints.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/bot_desktop/install.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/bot_desktop/runtime.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/bot_desktop/sandbox_host.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/bot_mode_dm.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/bot_mode_dm_coordination.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/browser_lightpanda.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/browser_use_cli.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/checkpoint_manager.py": {
+   "direct": 5,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/code_execution_env.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/computer_use/cua_backend.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/computer_use/cua_backend_capture.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/computer_use/cua_backend_daemon.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/computer_use/cua_backend_session.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
+  },
+  "tools/computer_use/doctor.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/computer_use/permissions.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/delegate_tool_resumable.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/env_probe.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/environments/docker.py": {
+   "direct": 4,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/environments/docker_ownership.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/environments/reattach.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/environments/remote_common.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/environments/sandbox_conformance.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/environments/ssh.py": {
+   "direct": 4,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/environments/streams.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/file_operations_lint.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/file_operations_search.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/mcp_tool_config.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/mcp_tool_transport.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
+  },
+  "tools/plugin_guard.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/process_registry.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/process_registry_survivable.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
+  },
+  "tools/process_registry_termination.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/read_extract.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/self_repo_guard.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/skillevaluator_scan.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/subagent_worktree.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/terminal_http_readback.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/terminal_tool_backends.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/transcription_audio.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/transcription_local.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/tts_command_provider.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/tts_tool_delivery.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/tts_tool_local.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/vision_tools_image_prep.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/voice_mode.py": {
+   "direct": 3,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tools/working_diff.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tui_gateway/compute_host.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tui_gateway/host_supervisor.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tui_gateway/methods_complete_helpers.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
+  "tui_gateway/methods_prompt.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  }
+ },
+ "version": 1
+}

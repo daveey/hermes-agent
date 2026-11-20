@@ -38,6 +38,20 @@ def _outbox_rows(path: Path) -> int:
         conn.close()
 
 
+def _sync_running(path: Path) -> int:
+    """1 when a sync round holds this board's sync lock, else 0. Probe failure raises (UNKNOWN).
+
+    Takes and immediately drops the same nonblocking flock a round holds, so a clear answer means no
+    round is between reading outbox rows and acknowledging them.
+    """
+    from hermes_cli.kanban_sync_guard import SyncRoundBusy, board_sync_lock
+    try:
+        with board_sync_lock(path):
+            return 0
+    except SyncRoundBusy:
+        return 1
+
+
 def local_results_state(boards: list[Path] | None = None) -> ResultsState:
     """Fail closed: unreadable inventory or board is UNKNOWN, a pending row is PENDING."""
     try:
@@ -45,10 +59,15 @@ def local_results_state(boards: list[Path] | None = None) -> ResultsState:
             from hermes_cli import worker_account_boards
             boards = worker_account_boards.paths()
         pending = 0
+        running = 0
         for path in boards:
             pending += _outbox_rows(Path(path))
+            running += _sync_running(Path(path))
     except (OSError, ValueError, sqlite3.Error) as exc:
         return ResultsState(UNKNOWN, reason=f'outbox unreadable: {type(exc).__name__}')
+    if running and not pending:
+        # A round that popped rows may be mid-acknowledgement; its lock is the only witness.
+        return ResultsState(PENDING, running, 'kanban sync round in flight')
     if pending:
         return ResultsState(PENDING, pending, 'unsent local results in kanban_sync_outbox')
     return ResultsState(CLEAR)
