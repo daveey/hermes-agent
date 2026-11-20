@@ -340,11 +340,12 @@ def _gated(conn, pol: Policy, lane_name: str, opts: dict) -> bool:
         return False
     title = opts.get("title") or ""
     if any(p.search(title) for p in lane.gate_exempt):
-        # Review and land work of an admitted card must be able to finish it.
+        # Review and land work of an admitted card must be able to finish it. A chat's own ship files its review
+        # with no creator card (only a ``key_prefixes`` match makes it agent-filed): nothing upstream is held, so
+        # it finishes too. A named detector (``creators``) filing such a title still waits.
         row = _creator_row(conn, opts)
         if row is None:
-            # Chat-filed reviews have no local creator row; detectors still need admission.
-            if opts.get("created_by") not in lane.creators and not _key_matches(lane, key):
+            if opts.get("created_by") not in lane.creators:
                 return False
         elif not (row["status"] == "triage" and row["block_kind"] == GATE_KIND):
             return False

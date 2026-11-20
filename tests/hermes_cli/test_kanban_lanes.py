@@ -146,27 +146,28 @@ def test_review_card_of_admitted_creator_skips_gate_but_not_of_held_one(conn, co
     assert _task(conn, review2)["status"] == "triage"
 
 
-@pytest.mark.parametrize("creator", [None, "t_0123456789abcdef"])
-def test_chat_exact_head_review_without_creator_row_skips_gate(conn, configured, creator):
-    configured({**LANES, "hermes": {**LANES["hermes"], "gate_exempt": ["independent.*review"]}})
-    opts = {"title": "Independent exact-head review PR #1", "created_by": "agent",
-            "creator_task_id": creator}
-    assert lanes._creator_row(conn, opts) is None
-    status, tenant, decision = lanes.initial_state(conn, [], "ready", False, "hermes", opts)
-    assert (status, tenant, decision.gated, decision.would_gate) == ("ready", "hermes", False, False)
-    assert lanes.admitted_today(conn, "hermes") == 0
+def _review_lanes():
+    mapping = json.loads(json.dumps(LANES))
+    mapping["hermes"]["match"]["key_prefixes"].append("core-wt-review:")
+    mapping["hermes"]["gate_exempt"] = [r"\breview\b"]  # the hub's pattern: matches "exact-head review"
+    return mapping
 
 
-@pytest.mark.parametrize("creator", [None, "t_0123456789abcdef"])
-@pytest.mark.parametrize("detector", [{"created_by": "self-heal"},
-                                      {"idempotency_key": "ci-main-watch:review"}])
-def test_detector_exact_head_review_without_creator_row_stays_gated(conn, configured, detector, creator):
-    configured({**LANES, "hermes": {**LANES["hermes"], "gate_exempt": ["independent.*review"]}})
-    opts = {"title": "Independent exact-head review PR #1", "created_by": "agent",
-            "creator_task_id": creator, **detector}
-    assert lanes._creator_row(conn, opts) is None
-    status, tenant, decision = lanes.initial_state(conn, [], "ready", False, "hermes", opts)
-    assert (status, tenant, decision.gated) == ("triage", "hermes", True)
+@pytest.mark.parametrize("title, created_by, held", [
+    pytest.param("Independent exact-head review PR #3741 @a2a991b7a2", "agent", False, id="chat-ship-review"),
+    pytest.param("Independent exact-head review PR #3741 @a2a991b7a2", "self-heal", True, id="detector-review"),
+    pytest.param("core-wt follow-up for PR #3741", "agent", True, id="not-exempt-title"),
+])
+def test_key_matched_card_without_creator_card(conn, configured, monkeypatch, title, created_by, held):
+    """A key-prefix match makes a chat's ship-filed review agent-filed with no creator card behind it: an exempt
+    title runs, a named detector's or a non-exempt title still waits at the gate."""
+    configured(_review_lanes())
+    monkeypatch.setattr(lanes, "_human_shell", lambda: False)
+    tid = kb.create_task(conn, title=title, assignee="default", created_by=created_by,
+                         idempotency_key="core-wt-review:softmax-universe/daveey-hermes#3741:a2a991b7")
+    row = _task(conn, tid)
+    assert row["tenant"] == "hermes"
+    assert (row["status"] == "triage") is held
 
 
 def test_triage_sweep_leaves_gate_held_card(conn, configured):
