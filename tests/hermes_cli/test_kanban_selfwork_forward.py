@@ -286,6 +286,43 @@ def _local_request(case, tid):
     return case.request
 
 
+def test_local_detector_outbound_prepare_send_to_receiver(case, tmp_path, monkeypatch):
+    from hermes_cli import kanban_origin, kanban_selfwork_outbound as outbound
+    tid = _seed_local_creator(tmp_path, monkeypatch, holder='worker-gw')
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    monkeypatch.setenv('HERMES_KANBAN_WORKER_TASK', tid)
+    monkeypatch.setenv('HERMES_KANBAN_RUN_ID', '1')
+    monkeypatch.setenv('HERMES_ORIGIN_SESSION', '@session:default@origin-gw/chat')
+    monkeypatch.setattr(kanban_origin, '_replica_task_owners',
+                        lambda task, board: [('origin-gw', 'default')])
+    home, body, request_id = outbound.prepare({
+        'title': 'Improve', 'idempotency_key': 'detector-transport', 'tenant': 'hermes',
+        'self_work': case.request['args']['create']['self_work']})
+    assert body['creator'] == {'gateway': 'origin-gw', 'profile': 'default', 'board': 'default',
+                               'task_id': tid, 'run_uid': 'run'}
+    case.lease['task_id'] = tid
+    case.page['next'] = tid
+    received = []
+
+    def courier(argv, **kwargs):
+        assert argv[2:6] == ['origin-gw', 'sessions', 'default/chat', 'selfwork-forward']
+        rid = argv[argv.index('--id') + 1]
+        envelope = {'id': rid, 'from': 'gw:worker-gw', 'to_gw': argv[2],
+                    'coll': argv[3], 'key': argv[4], 'action': argv[5],
+                    'args': json.loads(kwargs['input'])}
+        received.append(forward.receive(envelope))
+        return SimpleNamespace(returncode=0, stdout=rid + '\n', stderr='')
+
+    monkeypatch.setattr(outbound.subprocess, 'run', courier)
+    queued = outbound.send(home, body, request_id)
+    assert queued['created'] is False
+    assert queued['handoff_complete'] is False
+    assert received[0]['code'] == 'self_work_forward_authorized'
+    assert received[0]['request_id'] == request_id
+    assert received[0]['downstream']['args']['creator'] == body['creator']
+    assert len(case.calls) == 1
+
+
 def test_origin_local_live_creator_does_not_need_remote_obligation(case, tmp_path, monkeypatch):
     tid = _seed_local_creator(tmp_path, monkeypatch)
     result = forward.receive(_local_request(case, tid))
@@ -351,7 +388,7 @@ def test_stopped_local_creator_without_rejected_journal_stays_unauthorized(case,
 
 
 def test_repair_rejects_mismatched_journal_envelope(case, tmp_path, monkeypatch):
-    tid = _seed_local_creator(tmp_path, monkeypatch, current=False)
+    tid = _seed_local_creator(tmp_path, monkeypatch, current=False, holder='worker-gw')
     request = _local_request(case, tid)
     other = copy.deepcopy(request)
     other['args']['create']['title'] = 'forged'
@@ -361,7 +398,7 @@ def test_repair_rejects_mismatched_journal_envelope(case, tmp_path, monkeypatch)
 
 
 def test_repair_rejects_other_failure_codes(case, tmp_path, monkeypatch):
-    tid = _seed_local_creator(tmp_path, monkeypatch, current=False)
+    tid = _seed_local_creator(tmp_path, monkeypatch, current=False, holder='worker-gw')
     request = _local_request(case, tid)
     _journal_rejected(tmp_path, monkeypatch, request, code='self_work_route_mismatch')
     with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
@@ -459,6 +496,49 @@ def test_historical_repair_rejects_never_holder_sender(case, tmp_path, monkeypat
     _journal_rejected(tmp_path, monkeypatch, request)
     with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
         forward.receive(request)
+
+
+def test_historical_repair_rejects_journal_before_start(case, tmp_path, monkeypatch):
+    tid = _seed_local_creator(tmp_path, monkeypatch, current=False, holder='worker-gw')
+    request = _local_request(case, tid)
+    _journal_rejected(tmp_path, monkeypatch, request, at=0)
+    with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
+        forward.receive(request)
+    assert not case.calls
+
+
+@pytest.mark.parametrize('historical', [False, True])
+@pytest.mark.parametrize('damage', ['session', 'created_on'])
+def test_local_provenance_rechecked_before_admission(case, tmp_path, monkeypatch, historical, damage):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    tid = _seed_local_creator(tmp_path, monkeypatch, current=not historical, holder='worker-gw')
+    request = _local_request(case, tid)
+    if historical:
+        _journal_rejected(tmp_path, monkeypatch, request)
+    seam = '_historical_proof' if historical else '_lease'
+    real = getattr(forward, seam)
+    injected = []
+
+    def change_provenance(*args, **kwargs):
+        proof = real(*args, **kwargs)
+        if not injected:
+            with connect_closing(kb.kanban_db_path('default')) as conn:
+                if damage == 'session':
+                    conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='owner_admitted'",
+                                 (json.dumps({'session_id': 'other'}), tid))
+                else:
+                    conn.execute('UPDATE tasks SET created_on=? WHERE id=?', ('foreign-gw', tid))
+                conn.commit()
+            injected.append(True)
+        return proof
+
+    monkeypatch.setattr(forward, seam, change_provenance)
+    with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
+        forward.receive(request)
+    assert injected == [True]
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute('SELECT count(*) FROM selfwork_forward_admissions').fetchone()[0] == 0
 
 
 def test_historical_repair_rejects_stale_journal_after_stop(case, tmp_path, monkeypatch):

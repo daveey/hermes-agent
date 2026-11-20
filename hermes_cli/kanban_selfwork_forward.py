@@ -5,7 +5,8 @@ Same-gateway creators with an accepted obligation use that path too.
 Origin-local detector tasks without an obligation prove the live task/run/session plus that lease.
 A stopped local producer may repair the SAME rejected unauthorized envelope
 from the origin hub journal using historical local provenance (sender held the
-run; the refusal happened while that run was live), never a new id.
+run; the journal's last-handled timestamp is within that run), never a new id.
+A later journal replay can advance that timestamp and conservatively refuse repair.
 """
 from __future__ import annotations
 
