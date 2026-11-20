@@ -56,8 +56,8 @@ _CI = re.compile(r"\bgh\s+(?:run|pr\s+checks|workflow)\b|actions/runs|/check-run
 _SCRIPT = re.compile(r"([\w.-]+\.(?:py|sh|mjs|js))\b")
 _TASK_ID = re.compile(r"\bt_[0-9a-f]{6,}\b")
 _SHELL_NOISE = {"[", "[[", "test", "!", "if", "then", "set", "export", "env", "timeout", "sh", "bash", "-c", "exec"}
-# A naive stamp reads as UTC; ``Z`` / ``+HH:MM`` / ``-HH:MM`` are honoured (``park_fields``).
-_SCHEDULED_UNTIL = re.compile(r"SCHEDULED_UNTIL=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)")
+# A naive stamp reads as UTC; ``Z`` / ``+HH:MM`` / ``+HHMM`` (and minus) are honoured (``park_fields``).
+_SCHEDULED_UNTIL = re.compile(r"SCHEDULED_UNTIL=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)")
 
 
 def epoch_s(value: Any) -> Optional[float]:

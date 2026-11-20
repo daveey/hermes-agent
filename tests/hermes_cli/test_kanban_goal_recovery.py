@@ -121,3 +121,52 @@ def test_goal_recovery_pins_and_no_triage_cycle_after_two_resumes(board, monkeyp
         assert ksr.get_request(conn, out['request_id'])['result'][0]['outcome'] == 'applied'
         assert kb.claim_task(conn, tid)
     assert kb.get_task(conn, tid).body == task.body
+
+
+TIMED = 'nightly data refresh lands later; SCHEDULED_UNTIL=2099-01-01T00:00:00Z'
+
+
+def _goal_loop(surface, conn, tid, task, max_turns):
+    from types import SimpleNamespace
+    if surface == 'cli':
+        from hermes_cli.cli_single_query import _run_kanban_goal_loop_q
+        with kb.write_txn(conn):
+            conn.execute('UPDATE tasks SET goal_max_turns=? WHERE id=?', (max_turns, tid))
+        _run_kanban_goal_loop_q(SimpleNamespace(), 'evidence', run_turn=lambda _: '')
+    else:
+        from gateway.session_kanban import _run_task_turns
+        agent = SimpleNamespace(session_id='test', run_conversation=lambda *a, **kw: {'final_response': 'evidence'})
+        _run_task_turns(agent, {'text': 'work'}, [], dict(skills=[], context='', task_id=tid,
+                        run_id=task.current_run_id, goal_mode=True, goal_text=task.body, goal_max_turns=max_turns))
+
+
+@pytest.mark.parametrize('verdict', ['blocked', 'continue'])
+@pytest.mark.parametrize('surface', ['cli', 'gateway'])
+def test_goal_judge_timed_park_names_its_wake_reason(board, monkeypatch, surface, verdict):
+    """A judge reason carrying SCHEDULED_UNTIL: the turn-budget block (``block_fn``, verdict continue) takes
+    block_task's timed branch on both the CLI and the gateway loop and declares the clock with the judge's reason
+    (before, the >2 h guard refused it and the card stayed running). An unachievable park (``park``, verdict
+    blocked) is a goal_unachievable triage park, never timed, and stays one. [daveey]"""
+    from hermes_cli import goals
+    conn, tid, task = board
+    monkeypatch.setenv('HERMES_KANBAN_TASK', tid)
+    monkeypatch.setenv('HERMES_KANBAN_RUN_ID', str(task.current_run_id))
+    monkeypatch.setenv('HERMES_KANBAN_GOAL_MODE', '1')
+    monkeypatch.setattr(goals, 'judge_goal', lambda *a, **kw: (verdict, TIMED, False, None, False))
+    _goal_loop(surface, conn, tid, task, 1)
+    if verdict == 'blocked':
+        assert kb.get_task(conn, tid).status == 'triage'
+        return
+    assert kb.get_task(conn, tid).status == 'scheduled'
+    park = next(e for e in reversed(kb.list_events(conn, tid)) if e.kind == 'scheduled').payload
+    assert park['awaiting']['kind'] == 'clock' and park['awaiting']['why'].startswith('goal judge: '), park
+    assert 'nightly data refresh' in park['awaiting']['why']
+
+
+def test_goal_awaiting_only_for_timed_reasons():
+    from hermes_cli.kanban_goal_recovery import goal_awaiting
+    assert goal_awaiting('missing prerequisite') is None
+    assert goal_awaiting(TIMED) == {'kind': 'clock', 'why': 'goal judge: ' + TIMED}
+    from hermes_cli.kanban_goal_recovery import goal_block_kwargs
+    assert goal_block_kwargs('missing prerequisite') == {}
+    assert goal_block_kwargs(TIMED) == {'awaiting': goal_awaiting(TIMED), 'clock_only': True}

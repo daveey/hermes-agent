@@ -652,6 +652,12 @@ def _check_chat(conn, task_id, awaiting, text) -> None:
 
 
 def _check_clock(conn, task_id, awaiting, text) -> None:
+    if not awaiting.get("why"):
+        # [daveey] The why IS a clock wait's wake reason: a bare {kind:'clock'} names nothing.
+        raise AwaitingError(INVALID_AWAITING, (
+            "awaiting kind='clock' needs why=<why this time: the cooldown, release slot or quota reset it waits "
+            "for> (CLI: --awaiting clock: --awaiting-why '<why>'). If something produces the condition, name it "
+            "instead: awaiting={kind:'card'|'ci'|'deploy'|'external', ref:'<producer>', why:'<evidence>'}."))
     wall = text_wall(text)
     if wall:
         raise wall_error(task_id, wall, text)
@@ -745,8 +751,9 @@ def wall_error(task_id: str, wall: tuple[str, str], text: str, *, named: Optiona
 
 def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optional[str],
             wake_check: Optional[str] = None, clock_only: bool = False, op: str = "schedule",
-            wake_in: Optional[int] = None) -> dict:
-    """The ``awaiting`` record for a park, or ``AwaitingError``. Read-only."""
+            wake_in: Optional[int] = None, blocker_id: Optional[str] = None) -> dict:
+    """The ``awaiting`` record for a park, or ``AwaitingError``. Read-only. ``blocker_id``: the shared blocker the
+    park stays behind, its wake reason when nothing else names one (``_infer``)."""
     # [daveey] A probe that matches comment authors misses relayed replies (hub:gw:<gw>): author_probe.
     from hermes_cli.kanban_comment_origin import check_park
     check_park(conn, task_id, wake_check)
@@ -754,7 +761,7 @@ def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Op
     from hermes_cli import kanban_soak_wait
     if declared is None:
         inferred = _infer(conn, task_id, reason=reason, wake_check=wake_check, clock_only=clock_only,
-                          op=op, wake_in=wake_in)
+                          op=op, wake_in=wake_in, blocker_id=blocker_id)
         kanban_soak_wait.check(conn, task_id, inferred, reason, short_continue=_short_continue(op, wake_in))
         return inferred
     kanban_soak_wait.check(conn, task_id, declared, reason, short_continue=_short_continue(op, wake_in))
@@ -819,7 +826,7 @@ def opaque_probe_error(probe: str) -> AwaitingError:
         "kanban_block(kind='needs_input', human_request={...}) instead."))
 
 
-def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in) -> dict:
+def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in, blocker_id=None) -> dict:
     text = reason or ""
     producer = _live_card_ref(conn, task_id, f"{text} {wake_check or ''}")
     short = _short_continue(op, wake_in)
@@ -843,22 +850,35 @@ def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in) -> dic
         return {"kind": "external", "ref": probe_ref(wake_check), "inferred": True}
     if short:
         return {"kind": "clock", "inferred": True}
+    if blocker_id:
+        # [daveey] A shared blocker is a wake reason: its probe clears the wall and wakes every card behind it.
+        return shared_blocker_wait(blocker_id, reason)
     # An observation window is refused as one (its remedy is to run the check now), before the missing reason.
     from hermes_cli import kanban_soak_wait
     kanban_soak_wait.check(conn, task_id, {"kind": "clock"}, reason, short_continue=False)
-    raise no_wake_reason_error(task_id)
+    raise no_wake_reason_error(task_id, probe_is_clock_only=bool(wake_check and clock_only))
 
 
-def no_wake_reason_error(task_id: str) -> AwaitingError:
+def shared_blocker_wait(blocker_id: str, reason: Optional[str]) -> dict:
+    """The declared wait of a park behind shared blocker ``blocker_id`` that names nothing else."""
+    why = " ".join((reason or "").split())[:300] or "the shared blocker's probe clears the wall"
+    return {"kind": "external", "ref": f"shared blocker {blocker_id}", "why": why, "shared_blocker": blocker_id}
+
+
+def no_wake_reason_error(task_id: str, *, probe_is_clock_only: bool = False) -> AwaitingError:
     """[daveey] A scheduled wait needs a wake reason: a bare park read "a producer the owner did not publish" on
     every other gateway and "nothing named" here, and nobody could tell a cooldown from a forgotten card."""
+    what = ("clock_only says this park has no producer, so its wake_check is only when to look, not a wake reason"
+            if probe_is_clock_only else "this park names none (no awaiting, no wake_check, no live card in its "
+            "reason)")
     return AwaitingError(NO_WAKE_REASON, (
-        f"{task_id}: a scheduled wait needs a wake reason, and this park names none (no awaiting, no wake_check, "
-        "no live card in its reason). Say what ends the wait: "
+        f"{task_id}: a scheduled wait needs a wake reason, and {what}. Declare it in awaiting: "
         "awaiting={kind:'clock', why:'<why this time: the cooldown, release slot or quota reset>'} for a deliberate "
         "time wait; awaiting={kind:'card'|'ci'|'deploy'|'external', ref:'<the producer: card id, run id/URL, "
-        "release, vendor or ticket>', why:'<evidence it will>'} when something produces it; or a wake_check probe "
-        "that passes once it is true. If it needs David, kanban_block(kind='needs_input', human_request={...}) "
+        "release, vendor or ticket>', why:'<evidence it will>'} when something produces it; or "
+        + ("drop clock_only so the wake_check names what it probes. " if probe_is_clock_only else
+           "a wake_check probe that passes once it is true. ")
+        + "If it needs David, kanban_block(kind='needs_input', human_request={...}) "
         "instead."))
 
 
@@ -1069,15 +1089,21 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     """``resolve`` plus re-park escalation: the record to store on the parking event.
 
     Raises ``RepeatedPark`` on the third park in a row on one premise. Card waits (their producer
-    is accountable), inferred clock waits (short pacing continues, the only bare park left) and re-parks after the
+    is accountable), clock waits with no wake probe (declared or a short pacing continue: a clock is its own
+    producer), shared-blocker waits (the blocker's probe ends them) and re-parks after the
     same probe fired (``prior_same_premise``: a natural window that closed again) do not escalate
     until ``PROBE_FIRE_REPARK_LIMIT`` such cycles (``probe_fire_reparks``: a broken probe), nor does
     a deploy wait behind a healthy core update window (``kanban_deploy_window``), whose
     evidence lands on the record as ``deploy_window`` for the caller's wake floor."""
     from hermes_cli import kanban_deploy_window as kdw
     record = resolve(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
-                     clock_only=clock_only, op=op, wake_in=wake_in)
-    if record["kind"] == "card" or (record["kind"] == "clock" and record.get("inferred")):
+                     clock_only=clock_only, op=op, wake_in=wake_in, blocker_id=blocker_id)
+    if (record["kind"] == "card" or record.get("shared_blocker")
+            or (record["kind"] == "clock" and not (wake_check and str(wake_check).strip()))):
+        # A clock is its own producer: re-parking a recurring cooldown on a stable why is not a stuck premise.
+        # A clock that also carries a wake probe keeps the probe's escalations (the fire cap catches a probe
+        # looser than the worker's own check, t_f6d930b7; deadline-only wakes are a stuck premise).
+        # A shared-blocker wait is ended by the blocker's own probe, which one card per interval runs.
         return record
     record["premise"] = premise_hash(record, reason, wake_check)
     if record["kind"] == RESOURCE:

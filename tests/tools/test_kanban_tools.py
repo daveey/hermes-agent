@@ -474,10 +474,8 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
         assert any(
             event.kind == "scheduled" and event.payload == {
                 "reason": reason, "wake_at": event.payload.get("wake_at"),
-                # the declared wake reason (a scheduled wait needs one), with its re-park premise
-                "awaiting": {"kind": "clock", "why": "reconnect window",
-                             "premise": event.payload["awaiting"].get("premise")}}
-            and event.payload["awaiting"]["premise"]
+                # the declared wake reason (a scheduled wait needs one); a clock never escalates, so no premise
+                "awaiting": {"kind": "clock", "why": "reconnect window"}}
             and event.payload["wake_at"]  # SCHEDULED_UNTIL= sets a real wake time
             for event in kb.list_events(conn, worker_env)
         )

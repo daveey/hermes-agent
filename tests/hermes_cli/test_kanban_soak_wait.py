@@ -68,7 +68,7 @@ def test_short_continue_exempt(kanban_home, monkeypatch, seconds, declared):
         tid = helpers._running(conn)
         helpers._as_worker(monkeypatch, conn, tid)
         out = helpers._tool("continue", {"checkpoint": SOAKS[0], "resume_after_seconds": seconds,
-                                        "awaiting": {"kind": "clock"} if declared else None})
+                                        "awaiting": {"kind": "clock", "why": "pacing the build"} if declared else None})
         assert out.get("status") == "scheduled", out
 
 
@@ -132,7 +132,8 @@ def test_request_in_park_reason_is_not_card_opt_in(kanban_home):
 def test_non_observation_and_quota_clocks(kanban_home, reason):
     with kbc.connect_closing() as conn:
         tid = helpers._running(conn)
-        assert kaw.resolve(conn, tid, awaiting={"kind": "clock"}, reason=reason)["kind"] == "clock"
+        # A declared clock names its why (kanban_awaiting); here the same window text as the reason.
+        assert kaw.resolve(conn, tid, awaiting={"kind": "clock", "why": reason}, reason=reason)["kind"] == "clock"
 
 
 @pytest.mark.parametrize("kind", ["ci", "deploy", "external", "resource", "card"])
@@ -150,4 +151,5 @@ def test_why_is_checked_but_ref_is_not_observation_prose(kanban_home):
         tid = helpers._running(conn)
         with pytest.raises(kaw.AwaitingError, match="soak_wait"):
             kaw.resolve(conn, tid, awaiting={"kind": "clock", "why": SOAKS[0]}, reason="pending")
-        assert kaw.resolve(conn, tid, awaiting={"kind": "clock", "ref": "soak"}, reason="release slot")
+        assert kaw.resolve(conn, tid, awaiting={"kind": "clock", "ref": "soak", "why": "the release slot"},
+                           reason="release slot")

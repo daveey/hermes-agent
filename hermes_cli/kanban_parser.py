@@ -122,7 +122,7 @@ def _WAKE_CHECK_ARGS():
                   "governor/pool hold; needs --wake-check, never escalates, backs off). Required: a scheduled "
                   "wait needs a wake reason. A park with no --awaiting, no --wake-check and no live card in its "
                   "reason is refused (no_wake_reason); for a deliberate time wait pass --awaiting clock: "
-                  "--awaiting-why '<why this time>'. Agent-action conditions (grant, permission, install, fix) "
+                  "--awaiting-why '<why this time>' (a clock without --awaiting-why text is refused). Agent-action conditions (grant, permission, install, fix) "
                   "are work, not waits."),
         _arg("--awaiting-why", dest="awaiting_why", default=None, help="Evidence for --awaiting"),
     )

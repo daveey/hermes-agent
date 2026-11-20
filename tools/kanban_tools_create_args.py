@@ -46,7 +46,8 @@ def validate_immediate_human_action(conn, args, parents, human_action_now):
                "human action. For 'after X, then Y', keep parents and omit initial_status "
                "so the task waits in todo; the worker must request any required approval "
                "when it becomes due, never assume approval. For an external/time condition, "
-               "use kanban_schedule with wake_check (clock_only for a pure time wait). "
+               "use kanban_schedule with wake_check, or clock_only plus awaiting={kind:'clock', why:'<why this time>'} for a "
+               "pure time wait (a park must name its wake reason). "
                "If a human really can act now despite the unfinished parents, set "
                "human_action_now=true and explain that present action in body. Nothing changed.",
                rejection="invalid_args")

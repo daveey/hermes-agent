@@ -116,9 +116,9 @@ def test_real_reviewer_lifecycle_only_verdict_releases_authors(board, how):
         else:
             if how == "schedule":
                 from hermes_cli.kanban_db_schedule import schedule_task
-                assert schedule_task(conn, tid, reason="CI", clock_only=True)
+                assert schedule_task(conn, tid, reason="CI", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
             else:
-                assert kb.block_task(conn, tid, reason="wall", kind="transient", clock_only=True)
+                assert kb.block_task(conn, tid, reason="wall", kind="transient", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
             assert kb.unblock_task(conn, tid)
             # Main resumes the review phase after a parked review; model the later re-open to ready.
             conn.execute("UPDATE tasks SET status='ready', current_run_id=NULL WHERE id=?", (tid,))

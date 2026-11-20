@@ -14,13 +14,30 @@ class GoalRejection:
     snapshot: str
 
 
+def goal_awaiting(reason):
+    """[daveey] The wake reason of a goal-judge park: a judge reason carrying ``SCHEDULED_UNTIL=`` makes
+    ``block_task`` take the timed branch, which needs one (``kanban_awaiting`` no_wake_reason). None otherwise."""
+    from hermes_cli.kanban_timed_park import _MARKER
+    if not isinstance(reason, str) or not _MARKER.search(reason):
+        return None
+    return {'kind': 'clock', 'why': ('goal judge: ' + ' '.join(reason.split()))[:300]}
+
+
+def goal_block_kwargs(reason):
+    """``block_task`` kwargs for the goal loop's own block (``block_fn``): a judge reason with ``SCHEDULED_UNTIL=``
+    is a pure time wait, so it declares the clock (its wake reason) and ``clock_only`` (else the >2 h park guard
+    refused it and the loop's block silently failed, leaving the card running). [daveey]"""
+    awaiting = goal_awaiting(reason)
+    return {'awaiting': awaiting, 'clock_only': True} if awaiting else {}
+
+
 def park(conn, task, reason, *, expected_run_id):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_workspace_publication import involuntary_park
     if not task or expected_run_id is None:
         return False
     return involuntary_park(task.id, kb.block_task, conn, task.id, kind='transient', reason=reason,
-                         expected_run_id=expected_run_id,
+                         expected_run_id=expected_run_id, awaiting=goal_awaiting(reason),
                          goal_rejection=GoalRejection(digest(subject(task, reason))))
 
 

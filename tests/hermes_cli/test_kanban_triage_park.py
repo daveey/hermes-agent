@@ -42,7 +42,8 @@ def _triage(conn):
 
 
 def _park(conn, tid, op, surface):
-    args = {"reason": "rate-limit cooldown", "clock_only": True, "awaiting": {"kind": "clock"}}
+    args = {"reason": "rate-limit cooldown", "clock_only": True,
+            "awaiting": {"kind": "clock", "why": "rate-limit cooldown"}}
     if op == "block":
         args["kind"] = "time"
     if surface == "db":
@@ -54,7 +55,7 @@ def _park(conn, tid, op, surface):
         return True
     parser = argparse.ArgumentParser()
     cli.build_parser(parser.add_subparsers(dest="command"))
-    argv = ["kanban", op, tid, "rate-limit cooldown", "--clock-only", "--awaiting", '{"kind":"clock"}']
+    argv = ["kanban", op, tid, "rate-limit cooldown", "--clock-only", "--awaiting", '{"kind":"clock","why":"rate-limit cooldown"}']
     if op == "block":
         argv += ["--kind", "time"]
     return cli.kanban_command(parser.parse_args(argv)) == 0

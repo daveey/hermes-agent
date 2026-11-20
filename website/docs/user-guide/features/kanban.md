@@ -476,6 +476,14 @@ a soak) instead of polling inside the run: the card parks in `scheduled` and
 the dispatcher re-queues it after `N` seconds (at most 24 h). A plain
 `kanban_schedule` park wakes at its `SCHEDULED_UNTIL=` marker, else after 24 h.
 
+Every park needs a wake reason, its `awaiting`: `{kind: "clock", why: "<why this
+time>"}` for a deliberate time wait, or the producer (`{kind: "card"|"ci"|"deploy"|
+"external", ref, why}`). A park that names none (no `awaiting`, no `wake_check`, no
+live card in its reason, no `blocker_id`) is refused with `no_wake_reason`; only a
+`kanban_continue` of 2 h or less (pacing) may omit it. The owner publishes the park
+(`awaiting`, `wake_check`, wake time) in its replica record, so other gateways show
+what the card waits on. CLI: `--awaiting clock: --awaiting-why '<why>'`.
+
 Condition wakes: `kanban_schedule`, `kanban_block(kind="time")` and
 `kanban_continue(resume_after_seconds=N)` accept `wake_check` (a shell command)
 and `check_every` (seconds, default 900, min 120, max 21600). While the card is

@@ -296,8 +296,7 @@ def test_finished_other_route_wall_has_no_live_owner(kanban_home, scoped_routing
         if park == "continue":
             result = kt._handle_continue({**args, "checkpoint": "provider wall", "resume_after_seconds": 600})
         else:
-            result = kt._handle_schedule({**args, "reason": f"SCHEDULED_UNTIL={_future_iso(600)} provider wall",
-                                          "awaiting": {"kind": "clock", "why": "provider wall cooldown"}})
+            result = kt._handle_schedule({**args, "reason": f"SCHEDULED_UNTIL={_future_iso(600)} provider wall"})
         assert json.loads(result)["status"] == "scheduled", result
     with kbc.connect_closing() as conn:
         assert ksb.blocker_states(conn)[BID].is_open

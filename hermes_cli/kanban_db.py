@@ -2778,7 +2778,7 @@ def _refuse_untimed_probe(kind: Optional[str], wake_check: Optional[str], clock_
         f"refused: {what} only applies to a timed park (kind='time', a SCHEDULED_UNTIL=<ISO8601> "
         f"reason, or an agent-owned block with no human_request). This block (kind={kind!r}) would "
         f"land '{'todo' if kind == 'dependency' else 'blocked'}' and drop the {what}, so nothing "
-        "would run it. Use kind='time' to wait on it; for a human ask, put it in human_request.resolved_check.")
+        "would run it. Use kind='time' (with its wake reason in awaiting) to wait on it; for a human ask, put it in human_request.resolved_check.")
 
 
 @publication_guard

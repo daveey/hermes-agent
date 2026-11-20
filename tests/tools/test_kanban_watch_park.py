@@ -60,7 +60,7 @@ def _schedule(tid: str, hours: float, ref: str = "credential expiry", **extra) -
     from tools import kanban_tools as kt
     return json.loads(kt._handle_schedule({
         "task_id": tid, "reason": f"SCHEDULED_UNTIL={_wake_iso(hours)} verify the credential renewed ({ref})",
-        "clock_only": True, "awaiting": {"kind": "clock", "ref": ref}, **extra}))
+        "clock_only": True, "awaiting": {"kind": "clock", "ref": ref, "why": f"the watch check due {ref}"}, **extra}))
 
 
 def _open_for_chat(kb) -> tuple[int, list]:

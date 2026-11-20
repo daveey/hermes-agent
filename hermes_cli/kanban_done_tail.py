@@ -29,7 +29,7 @@ def notice_text(payload: dict) -> str:
         reason = reason[:6000] + "\n[… full report in the card comment …]\n" + reason[-2000:]
     return ("Progress report while parked (not a completion):\n" + reason
             + "\nThe card remains scheduled for its pending check. If the deliverable is finished and only "
-            "a follow-up check remains, use kanban_schedule(watch=true), or kanban_complete plus a child "
+            "a follow-up check remains, use kanban_schedule(watch=true, awaiting=<its wake reason>), or kanban_complete plus a child "
             "watch card. Do not mark unfinished acceptance complete.")
 
 

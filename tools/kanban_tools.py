@@ -1153,7 +1153,8 @@ def _handle_schedule(args: dict, **kw) -> str:
         _check(not (task and task.goal_mode),
                "goal_mode tasks cannot be scheduled: for a wait on time or a cron use "
                "kanban_block with kind='time' (SCHEDULED_UNTIL=<ISO8601> in the reason sets "
-               "the wake), or kanban_complete so the completion judge can evaluate it.")
+               "the wake; awaiting={kind:'clock', why:'<why this time>'} or the producer names its wake "
+               "reason), or kanban_complete so the completion judge can evaluate it.")
         wake = _wake_check_args(args, conn=conn, tid=tid)
         awaiting, wake = _awaiting_arg(args, wake)
         blocker_id = _blocker_id_arg(args)

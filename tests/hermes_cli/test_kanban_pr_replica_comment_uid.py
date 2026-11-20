@@ -57,7 +57,7 @@ def _owner_parked(conn, monkeypatch, now):
     run_id = conn.execute("SELECT id FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0]
     _worker_comment(conn, tid, run_id, monkeypatch, f"Opened {URL}")
     monkeypatch.setattr(time, "time", lambda: now + 1)
-    assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z CI", clock_only=True)
+    assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z CI", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
     monkeypatch.setattr(time, "time", lambda: now + 8)
     return tid, run_id
 

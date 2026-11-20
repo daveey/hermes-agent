@@ -432,6 +432,8 @@ def test_parked_waits_keeps_local_cards_when_the_remote_read_fails(kanban_root, 
     ("2026-12-04T12:32:41Z", (2026, 12, 4, 12, 32, 41)),
     ("2026-12-04T12:32:41", (2026, 12, 4, 12, 32, 41)),  # naive: read as UTC, as before
     ("2026-12-04T12:32-08:00", (2026, 12, 4, 20, 32, 0)),
+    ("2026-12-04T12:32:41-0800", (2026, 12, 4, 20, 32, 41)),  # +HHMM, no colon
+    ("2026-12-04T12:32:41+0530", (2026, 12, 4, 7, 2, 41)),
 ])
 def test_park_fields_honours_the_scheduled_until_offset(stamp, utc):
     import calendar

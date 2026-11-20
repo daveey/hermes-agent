@@ -905,6 +905,8 @@ def test_undeclared_probe_parks_still_escalate_on_the_third_park(kanban_home, mo
 
 
 def test_a_past_or_far_clock_window_still_escalates(kanban_home, monkeypatch) -> None:
+    """A clock with a wake probe keeps the probe's stuck-premise escalation unless its ref states a window within
+    14 days; a clock with no probe never escalates (``test_a_recurring_declared_clock_never_escalates``)."""
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     for offset in (-3600, 30 * 86400):
         when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + offset))
@@ -1101,4 +1103,66 @@ def test_gate_inferred_clock_early_return_is_only_short_continues(kanban_home) -
             kaw.gate(conn, tid, awaiting=None, reason="pacing", op="continue", wake_in=20000)
         assert err.value.code == kaw.NO_WAKE_REASON
         rec = kaw.gate(conn, tid, awaiting={"kind": "clock", "why": "quota resets at 00:00 UTC"}, reason="quota")
-        assert rec["kind"] == "clock" and rec.get("premise")
+        assert rec == {"kind": "clock", "why": "quota resets at 00:00 UTC"}  # a clock never escalates: no premise
+
+
+def test_a_recurring_declared_clock_never_escalates(kanban_home, monkeypatch) -> None:
+    """A clock is its own producer: four identical cooldown re-parks in a row all park, none escalates."""
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        for _ in range(4):
+            _as_worker(monkeypatch, conn, tid)
+            out = _tool("schedule", {"reason": "rate-limit cooldown", "clock_only": True,
+                                     "awaiting": {"kind": "clock", "why": "the provider's hourly rate-limit window"}})
+            assert out.get("status") == "scheduled", out
+            assert kb.unblock_task(conn, tid)
+            assert kb.claim_task(conn, tid) is not None
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        assert kinds.count("scheduled") == 4 and kaw.ESCALATED_EVENT not in kinds
+
+
+def test_declared_clock_needs_its_why(kanban_home, monkeypatch, capsys) -> None:
+    from hermes_cli import kanban as kcli
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        for bare in ({"kind": "clock"}, {"kind": "clock", "ref": "2026-12-01T00:00:00Z"}, "clock:"):
+            out = _tool("schedule", {"reason": "cooldown", "clock_only": True, "awaiting": bare})
+            assert kaw.INVALID_AWAITING in out["error"] and "why=" in out["error"], (bare, out)
+        assert kb.get_task(conn, tid).status == "running"
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    kcli.build_parser(parser.add_subparsers(dest="command"))
+    with kbc.connect_closing() as conn:
+        other = kb.create_task(conn, title="t", assignee="worker")
+    assert kcli.kanban_command(parser.parse_args(["kanban", "schedule", other, "later", "--clock-only",
+                                                  "--awaiting", "clock:"])) != 0
+    assert kaw.INVALID_AWAITING in capsys.readouterr().err
+
+
+def test_clock_only_probe_is_told_clock_only_names_no_producer(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": "later", "clock_only": True, "wake_check": "test -f /tmp/x.flag"})
+        assert out.get("code") == kaw.NO_WAKE_REASON, out
+        assert "clock_only says this park has no producer" in out["error"] and "drop clock_only" in out["error"]
+
+
+@pytest.mark.parametrize("op", ["block", "schedule"])
+@pytest.mark.parametrize("timing", [{"clock_only": True}, {"reason_marker": True}])
+def test_a_shared_blocker_is_a_wake_reason(kanban_home, monkeypatch, op, timing) -> None:
+    """A park behind a named shared blocker with no other wake reason records the blocker as its producer."""
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        soon = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))  # under the 2 h probe guard
+        reason = "Actions refuses jobs: billing" + (f" SCHEDULED_UNTIL={soon}" if timing.get("reason_marker") else "")
+        args = {"reason": reason, "blocker_id": "github-actions-billing",
+                **({"clock_only": True} if timing.get("clock_only") else {}),
+                **({"kind": "time"} if op == "block" else {})}
+        out = _tool(op, args)
+        assert out.get("status") == "scheduled", out
+        rec = _park_payload(conn, tid)["awaiting"]
+        assert rec["kind"] == "external" and rec["ref"] == "shared blocker github-actions-billing", rec
+        assert rec["shared_blocker"] == "github-actions-billing" and "billing" in rec["why"] and not rec.get("inferred")

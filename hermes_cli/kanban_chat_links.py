@@ -625,17 +625,20 @@ def _ledger_index(stale_ok: bool = False, cards: Optional[list[dict[str, Any]]] 
         if c.get("gateway") and c.get("board") and c.get("id") and c.get("profile"):
             out.setdefault((str(c["board"]), str(c["id"])), []).append(
                 (str(c["gateway"]), str(c["profile"]), str(c.get("session") or ""), bool(c.get("released"))))
-            wait = {k: c[k] for k in LEDGER_WAIT_FIELDS if c.get(k)}
+            status = c.get("reported_status", c.get("status"))
+            parked = status == "scheduled" or (status == "blocked" and c.get("block_kind") == "time")
+            wait = {k: c[k] for k in LEDGER_WAIT_FIELDS if c.get(k)} if parked else {}
             if wait:
                 waits[(str(c["gateway"]), str(c["profile"]), str(c["board"]), str(c["id"]))] = {
-                    **wait, "_status": c.get("reported_status", c.get("status"))}
+                    **wait, "_status": status}
     profile_cards = [c for c in cards if _is_profile_board_card(c)]
     _owners_memo = (cards, out, profile_cards, waits)
     return out, profile_cards, waits
 
 
-# What a scheduled card waits on, published by its owner (``kanban_wait_replica.published_park``) and carried by the
-# origin-ledger cards only: a Board replica row has no park. ``replica_cards`` copies them onto its row. [daveey]
+# What a scheduled (or blocked kind=time) card waits on, published by its owner (``kanban_wait_replica.published_park``)
+# and carried by the origin-ledger cards only: a Board replica row has no park. ``replica_cards`` copies them onto its
+# row. Other rows' run-derived ``park`` is not a wait and is never copied. [daveey]
 LEDGER_WAIT_FIELDS = ("park", "awaiting", "wake_check")
 
 

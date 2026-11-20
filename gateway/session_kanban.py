@@ -572,7 +572,9 @@ def _run_task_turns(agent, frame, history, context):
             return kb.goal_run_status(conn, context['task_id'], context['run_id'])
     def block(reason):
         with connect_closing() as conn:
-            kb.block_task(conn, context['task_id'], reason=reason, expected_run_id=context['run_id'])
+            from hermes_cli.kanban_goal_recovery import goal_block_kwargs
+            kb.block_task(conn, context['task_id'], reason=reason, expected_run_id=context['run_id'],
+                          **goal_block_kwargs(reason))
     def unachievable(reason):
         from hermes_cli.kanban_goal_recovery import park
         with connect_closing() as conn:

@@ -64,7 +64,8 @@ _ASYNC_UNSUPPORTED_NOTE = (
 _KANBAN_WAIT_HANDOFF_NOTE = (
     " Kanban worker: if this takes more than ~10 minutes, do not sit in a poll/wait loop — call "
     "kanban_continue(checkpoint=<what is running: pid, log path, how to check it, next steps>, "
-    "resume_after_seconds=N) and end the run; the card re-queues itself after N seconds. A job that "
+    "resume_after_seconds=N) and end the run; the card re-queues itself after N seconds (over 2 h, also pass "
+    "awaiting naming what it waits on). A job that "
     "must outlive this run needs persist_on_release=true (or nohup); the next run is a new process, "
     "so check it by pid/log path, not by process id."
 )

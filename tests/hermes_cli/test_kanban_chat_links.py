@@ -524,3 +524,20 @@ def test_replica_row_carries_the_owner_published_wait(tmp_path):
     assert {k: got["t_sched"][k] for k in wait} == wait
     assert describe_replica(got["t_sched"])["waiting_on"] == "card t_0123456789abcdef"
     assert not {"park", "awaiting", "wake_check"} & set(got["t_moved"])  # published for an earlier status
+
+
+def test_only_parked_ledger_cards_lend_their_wait(tmp_path):
+    """A running card's run-derived ``park`` is not a wait: only scheduled and blocked kind=time ledger cards lend
+    park/awaiting/wake_check to the replica row (``_ledger_index``)."""
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_run", "running", "running", OTHER), ("t_time", "time block", "blocked", OTHER),
+                   ("t_ask", "needs input", "blocked", OTHER)],
+             [(t, ME, "s1", "shepherd", 0) for t in ("t_run", "t_time", "t_ask")])
+    wait = {"park": {"wake_at": 4102444800, "reason": "r", "ended_at": 1, "outcome": None},
+            "awaiting": {"kind": "clock", "why": "cooldown"}}
+    ledger = [{**_ledger_row(t, "s1", status=s), "profile": "default", "reported_status": s, "block_kind": k, **wait}
+              for t, s, k in (("t_run", "running", None), ("t_time", "blocked", "time"),
+                              ("t_ask", "blocked", "needs_input"))]
+    got = {c["id"]: c for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)], origin_cards=ledger)}
+    assert not {"park", "awaiting"} & set(got["t_run"]) and not {"park", "awaiting"} & set(got["t_ask"])
+    assert {k: got["t_time"][k] for k in wait} == wait

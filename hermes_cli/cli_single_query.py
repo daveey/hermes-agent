@@ -104,7 +104,8 @@ def _run_kanban_goal_loop_q(cli: HermesCLI, first_response: str, run_turn=None, 
 
     def _block(reason: str) -> None:
         with _kbc.connect_closing() as c:
-            _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
+            from hermes_cli.kanban_goal_recovery import goal_block_kwargs
+            _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id, **goal_block_kwargs(reason))
 
     def _unachievable(reason: str) -> bool:
         from hermes_cli.kanban_goal_recovery import park

@@ -453,7 +453,7 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "block on things you can resolve yourself. Waiting on time or an "
         "external event (a cap, a soak, a release window) is not a block: use "
         "kind='time' (put SCHEDULED_UNTIL=<ISO8601> in the reason to set the wake; "
-        "default 24h), since a blocked card marks its chat as needing a human. "
+        "default 24h) with its wake reason in ``awaiting``, since a blocked card marks its chat as needing a human. "
         "A timed wait needs a wake reason, named in ``awaiting`` (a live card, a CI "
         "run, a vendor ticket, or {kind:'clock', why:'<why this time>'} for a real "
         "clock window): kind='time' without awaiting, wake_check or a live card in "
@@ -503,7 +503,8 @@ KANBAN_BLOCK_SCHEMA = _schema(
         },
         "blocker_id": _prop("string", _BLOCKER_ID_DESC + (
             " With SCHEDULED_UNTIL, kind='time', wake_check or clock_only the card parks "
-            "'scheduled' with that wake and stays behind the blocker; with none of them it "
+            "'scheduled' with that wake and stays behind the blocker (the shared blocker is its wake "
+            "reason when ``awaiting`` names none); with none of them it "
             "parks 'scheduled' and wakes after the shared probe interval. With human_request "
             "it stays a visible block."
         )),
@@ -943,7 +944,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "auto-decomposer specifies and dispatches triage cards after "
                 "~2 min (kanban.auto_decompose_min_age_seconds); to keep a "
                 "card from running, park it with kanban_schedule right after "
-                "creating it."
+                "creating it, naming its wake reason in awaiting."
         )),
         "distinct_from": {"type": "array", "items": {"type": "string"}, "description": (
                 "Ids of open cards a create_overlap refusal named that this card is NOT a duplicate of. "
@@ -1022,7 +1023,7 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "set parents and omit initial_status: the card waits in todo until parents "
                 "finish. The worker must still obtain any required approval when due. "
                 "For external conditions use kanban_schedule with wake_check (clock_only "
-                "for pure time waits). With unfinished parents, 'blocked' requires explicit "
+                "plus awaiting={kind:'clock', why:'<why this time>'} for pure time waits). With unfinished parents, 'blocked' requires explicit "
                 "human_action_now=true. Defaults to 'running' (usual dispatch path)."
             ),
         },
@@ -1194,7 +1195,8 @@ KANBAN_SUPERVISOR_REQUEST_SCHEMA = _schema(
         "Pass dry_run=true first to see, per op, whether you can do it yourself "
         "(self), need the supervisor (supervisor), it is already so (noop), or it "
         "is refused (cards another task created, cycles), and whether an executor is live. After a real request, park "
-        "with kanban_schedule (or kanban_block kind='time') naming the request id; "
+        "with kanban_schedule (or kanban_block kind='time') naming the request id as the wake reason: "
+        "awaiting={kind:'external', ref:'supervisor request #<id>', why:'the supervisor executor runs it'}; "
         "it wakes you on the result. Completing this card does not cancel a filed request (archiving it "
         "does); park only if you need the result. "
         "Op reconcile_notify {task_id, chat_id, thread_id?} instead asks the executor to retire a "

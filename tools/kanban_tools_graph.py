@@ -104,7 +104,9 @@ def handle_supervisor_request(args: dict, **kw) -> str:
         out["next_step"] = (
             f"Supervisor request #{out['request_id']} is {out['status']}. It is agent-owned, not a human "
             "ask. Park this card with kanban_schedule(reason='SCHEDULED_UNTIL=<ISO8601> waiting on "
-            f"supervisor request #{out['request_id']}'); the result wakes it, also if it lands first.")
+            f"supervisor request #{out['request_id']}', awaiting={{kind:'external', ref:'supervisor request "
+            f"#{out['request_id']}', why:'the supervisor executor runs it'}}); the result wakes it, also if it "
+            "lands first.")
         if ksr._is_operator(out.get("ops") or []):
             out["next_step"] += (
                 " An operator call is executed by the card's home gateway; add wake_check="
