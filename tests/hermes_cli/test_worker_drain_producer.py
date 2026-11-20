@@ -80,6 +80,7 @@ def test_atomic_writer_owner_mode_and_failed_capture_invalidates(tmp_path, monke
     # own control and the production writer always uses fchown(0, 0).
     path = tmp_path / 'baseline.json'
     monkeypatch.setattr(producer.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(producer, '_trusted_parent', lambda path: os.open(path.parent, os.O_DIRECTORY), raising=False)
     chowns = []
     monkeypatch.setattr(producer.os, 'fchown', lambda fd, uid, gid: chowns.append((uid, gid)))
     producer.write_baseline(path, {'version': 2})

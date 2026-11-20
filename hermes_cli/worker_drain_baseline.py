@@ -108,24 +108,42 @@ def capture(manifest_path, ident, *, proc_root='/proc') -> dict:
             'manifest_digest': fence.request_hash(manifest), 'idle': idle}
 
 
-def validate_baseline(base, ident) -> bool:
+def validate_baseline(base, ident, *, proc_root='/proc') -> bool:
     """Re-read provenance AND daemon capability on every census, not only capture."""
     try:
         manifest = load_manifest(MANIFEST_PATH)
         if fence.request_hash(manifest) != base.manifest_digest:
             return False
-        entries = [_unit_entry(unit, unit_state(unit), '/proc', ident, manifest) for unit in manifest['units']]
+        entries = [_unit_entry(unit, unit_state(unit), proc_root, ident, manifest) for unit in manifest['units']]
         return frozenset(census._entry_identity(e) for e in entries) == base.idle
     except (OSError, ValueError, CaptureRefused):
         return False
 
 
-def write_baseline(path: Path, doc: dict) -> None:
-    if os.geteuid() != 0:  # windows-footgun: ok -- root-only Linux installer
-        raise CaptureRefused('baseline writer requires root')
-    path = Path(path)
-    tmp = path.with_name(f'.{path.name}.{uuid.uuid4().hex}')
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+def _trusted_parent(path: Path) -> int:
+    """Pin every root-owned, non-mutable directory without following symlinks."""
+    if not path.is_absolute() or '..' in path.parts:
+        raise CaptureRefused('baseline parent must be an absolute trusted path')
+    flags = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open('/', flags)
+    try:
+        for component in path.parent.parts[1:]:
+            next_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+            st = os.fstat(fd)
+            if st.st_uid != 0 or st.st_mode & 0o022:
+                raise CaptureRefused('baseline parent is not root-owned and immutable')
+        return fd
+    except (OSError, CaptureRefused):
+        os.close(fd)
+        raise
+
+
+def _write_at(dfd: int, name: str, doc: dict) -> None:
+    tmp = f'.{name}.{uuid.uuid4().hex}'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600, dir_fd=dfd)
     try:
         os.fchown(fd, 0, 0)
         with os.fdopen(fd, 'wb', closefd=False) as fh:
@@ -133,15 +151,25 @@ def write_baseline(path: Path, doc: dict) -> None:
             fh.flush()
             os.fchmod(fd, 0o644)
             os.fsync(fd)
-        os.replace(tmp, path)
-        dfd = os.open(path.parent, os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        os.fsync(dfd)
     finally:
         os.close(fd)
-        tmp.unlink(missing_ok=True)
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+
+
+def write_baseline(path: Path, doc: dict) -> None:
+    if os.geteuid() != 0:  # windows-footgun: ok -- root-only Linux installer
+        raise CaptureRefused('baseline writer requires root')
+    path = Path(path)
+    dfd = _trusted_parent(path)
+    try:
+        _write_at(dfd, path.name, doc)
+    finally:
+        os.close(dfd)
 
 
 def install(manifest_path=MANIFEST_PATH, ident=None, *, path=Path(census.BASELINE_PATH)) -> dict:
@@ -149,7 +177,16 @@ def install(manifest_path=MANIFEST_PATH, ident=None, *, path=Path(census.BASELIN
         raise CaptureRefused('baseline installation requires root')
     # Failed re-capture must invalidate a previous baseline, never retain an old
     # daemon attestation after an unsuccessful upgrade/activation.
-    Path(path).unlink(missing_ok=True)
-    doc = capture(manifest_path, ident)
-    write_baseline(Path(path), doc)
-    return doc
+    path = Path(path)
+    dfd = _trusted_parent(path)
+    try:
+        try:
+            os.unlink(path.name, dir_fd=dfd)
+        except FileNotFoundError:
+            pass
+        os.fsync(dfd)
+        doc = capture(manifest_path, ident)
+        _write_at(dfd, path.name, doc)
+        return doc
+    finally:
+        os.close(dfd)

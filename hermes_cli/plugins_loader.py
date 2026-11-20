@@ -570,6 +570,8 @@ class PluginLoaderMixin:
 
     def _load_plugin(self, manifest: PluginManifest) -> None:
         """Import a plugin module and call its ``register(ctx)`` function."""
+        from hermes_cli.worker_drain_capability import revoke
+        revoke('plugin package has no reviewed drain coverage')
         with self._discovery_lock, _plugin_home_scope(self.home_path):
             self._load_plugin_scoped(manifest)
 
@@ -755,6 +757,8 @@ class PluginLoaderMixin:
 
     def _load_portable_plugin(self, manifest: PluginManifest, loaded: LoadedPlugin) -> None:
         """Load validated portable components without importing Python code."""
+        from hermes_cli.worker_drain_capability import revoke
+        revoke('portable plugin has no reviewed drain coverage')
         from hermes_cli.plugins import PluginContext
         lookup_key = manifest_key(manifest)
         try:
@@ -831,6 +835,8 @@ class PluginLoaderMixin:
     ) -> types.ModuleType:
         """Import a directory plugin as ``hermes_plugins.<slug>`` (slug from ``manifest.key`` so
         ``image_gen/openai`` cannot collide with ``tts/openai``)."""
+        from hermes_cli.worker_drain_capability import revoke
+        revoke('directory plugin has no reviewed drain coverage')
         plugin_dir = Path(manifest.path)  # type: ignore[arg-type]
         init_file = plugin_dir / "__init__.py"
         if not init_file.exists():
@@ -866,6 +872,8 @@ class PluginLoaderMixin:
     def _load_entrypoint_module(self, manifest: PluginManifest) -> types.ModuleType | Callable[..., Any]:
         """Load a pip-installed plugin via its entry-point reference: the module for a bare ``module`` target,
         the referenced attribute (normally ``register``) for the ``module:function`` form."""
+        from hermes_cli.worker_drain_capability import revoke
+        revoke('entrypoint plugin has no reviewed drain coverage')
         for ep in _select_entry_point_group(importlib.metadata.entry_points(), ENTRY_POINTS_GROUP):
             if ep.name == manifest.name:
                 return ep.load()

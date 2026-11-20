@@ -222,10 +222,16 @@ class TurnFacadeMixin:
         """One local-work reservation spanning the whole turn: before the durable lease admits, through the
         outermost finally after it releases, on every exit (including pre-agent failures)."""
         from agent import local_work_agent
+        from hermes_cli.worker_drain_fence import admit, lease_scope
 
-        with local_work_agent.scope("agent_turn", "agent.turn_facade.run_conversation"):
-            # Through the class, not self: callers drive this on stand-in agents (tests, relays).
-            return TurnFacadeMixin._run_conversation_scoped(self, *args, **kwargs)
+        lease = admit('agent.turn')
+        try:
+            with lease_scope(lease), local_work_agent.scope("agent_turn", "agent.turn_facade.run_conversation"):
+                # Through the class, not self: callers drive this on stand-in agents (tests, relays).
+                return TurnFacadeMixin._run_conversation_scoped(self, *args, **kwargs)
+        finally:
+            if lease is not None:
+                lease.close()
 
     # Signature (inspect/autospec) follows the scoped body; __name__/__qualname__ stay run_conversation.
     run_conversation.__dict__["__wrapped__"] = _run_conversation_scoped

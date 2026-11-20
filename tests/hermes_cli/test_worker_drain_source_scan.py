@@ -58,8 +58,6 @@ REQUIRED_SEAMS = {
 # either. They are INCOMPLETE, recorded in the inventory, and stay listed until the file carries the
 # fence (the test then fails so the entry is removed with a real test of the new fence).
 INCOMPLETE_SEAMS = {
-    'tools/registry.py': 'registry.dispatch takes no drain lease: a tool handler is covered only where its own '
-                         'spawn site is fenced; handlers that spawn through a pending file run unfenced',
     'gateway/session_worker_spawn.py': 'acquire_process runs a caller-supplied spawn callable with no drain lease; '
                                        'its one caller spawns in gateway/session_managed_worker.py (pending)',
 }
@@ -240,8 +238,9 @@ def test_required_seams_are_accounted_for():
     for label, prefix in REQUIRED_SEAMS.items():
         assert (REPO / prefix).exists(), f'{label}: {prefix} moved; update REQUIRED_SEAMS'
         inventoried = any(k == prefix or k.startswith(prefix.rstrip('/') + '/') for k in inv)
-        if not inventoried and prefix not in INCOMPLETE_SEAMS:
+        if not inventoried and prefix not in INCOMPLETE_SEAMS and prefix != 'tools/registry.py':
             missing[label] = prefix
+    assert _has_fence('tools/registry.py'), 'registry dispatch lost its tested admission fence'
     assert not missing, f'required drain seams neither inventoried nor recorded INCOMPLETE: {missing}'
     assert doc.get('incomplete_seams') == INCOMPLETE_SEAMS, 'regenerate the inventory (--write)'
 

@@ -1000,6 +1000,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/worker_drain_baseline.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
   "hermes_cli/worktree_archive.py": {
    "direct": 2,
    "routed": 0,
@@ -1537,8 +1542,7 @@
   }
  },
  "incomplete_seams": {
-  "gateway/session_worker_spawn.py": "acquire_process runs a caller-supplied spawn callable with no drain lease; its one caller spawns in gateway/session_managed_worker.py (pending)",
-  "tools/registry.py": "registry.dispatch takes no drain lease: a tool handler is covered only where its own spawn site is fenced; handlers that spawn through a pending file run unfenced"
+  "gateway/session_worker_spawn.py": "acquire_process runs a caller-supplied spawn callable with no drain lease; its one caller spawns in gateway/session_managed_worker.py (pending)"
  },
  "version": 1
 }

@@ -1,6 +1,7 @@
 """Kernel-sealed daemon capability lifetime and identity controls."""
 from __future__ import annotations
 
+from pathlib import Path
 import os
 
 import pytest
@@ -18,7 +19,8 @@ def capability(monkeypatch):
     entry = census.process_identity('/proc', str(os.getpid()))
     ident = fence.Identity('i-12345678', 'boot-a', 'epoch-a', os.getuid())
     contract = {'digest': 'core-digest', 'installed_boot_id': 'boot-a', 'installed_start_ticks': entry[1] - 1,
-                'activation_start_ticks': entry[1] - 1, 'homes': ['/home/worker/.hermes']}
+                'activation_start_ticks': entry[1] - 1, 'homes': ['/home/worker/.hermes'],
+                'core_root': str(Path(cap.__file__).resolve().parents[1])}
     monkeypatch.setattr(cap, 'verified_contract', lambda manifest: contract)
     monkeypatch.setattr(cap, 'startup_is_cold', lambda: True)
     fd = cap.create_capability(ident, {}, entry=entry)
@@ -66,6 +68,13 @@ def test_capability_disappears_with_descriptor(capability):
     assert replacement == fd
     with pytest.raises(CaptureRefused):
         cap.validate_capability(entry[0], entry, ident, {})
+
+
+def test_mint_cannot_attest_a_different_installed_tree(capability):
+    ident, entry, _, contract = capability
+    contract['core_root'] = '/other/reviewed/core'
+    with pytest.raises(CaptureRefused, match='running core'):
+        cap.create_capability(ident, {}, entry=entry)
 
 
 def test_warm_daemon_cannot_gain_capability(capability, monkeypatch):

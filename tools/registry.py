@@ -1138,7 +1138,18 @@ class ToolRegistry:
             f"Tool handler returned unsupported result type: {result_type}",
             error_type="tool_result_contract", tool=name, result_type=result_type)
 
-    def dispatch(
+    def dispatch(self, name: str, args: dict, *, scope: Optional[str] = None, **kwargs) -> str | dict:
+        """Hold admission through the handler, including async bridging and cleanup."""
+        from hermes_cli.worker_drain_fence import admit, lease_scope
+        lease = admit('registry.dispatch')
+        try:
+            with lease_scope(lease):
+                return self._dispatch_admitted(name, args, scope=scope, **kwargs)
+        finally:
+            if lease is not None:
+                lease.close()
+
+    def _dispatch_admitted(
         self, name: str, args: dict, *, scope: Optional[str] = None, **kwargs) -> str | dict:
         """Execute a tool handler by name: async handlers bridged via ``_run_async()``,
         results normalized, every exception returned as ``{"error": ...}``."""
