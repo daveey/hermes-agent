@@ -470,3 +470,14 @@ def test_named_launch_profile_is_consumed(monkeypatch, tmp_path):
     monkeypatch.setattr(ar, "consume_handoffs", lambda homes, **kw: seen.extend(homes))
     pa._consume_replay_handoffs()
     assert seen == [home]
+
+
+def test_rewalled_replay_is_not_fenced_by_an_earlier_success_but_is_by_stop(wired):
+    ar.cancel_durable(wired.path.parent, (KEY,), 60.0)  # earlier turn succeeded after the first failure (created=50)
+    rewalled = dict(item("rewall", created=50), source_batch="parent-batch")
+    wired.publish(KEY, [rewalled])
+    got = wired.claim(KEY, 200, "h", lambda _: False)
+    assert got and [r["id"] for r in json.loads(got["payload"])] == ["rewall"]
+    ar.cancel_durable(wired.path.parent, (KEY,), 999.0, stop=True)
+    wired.publish(KEY, [dict(item("rewall2", created=50), source_batch="parent-batch")])
+    assert wired.claim(KEY, 300, "h2", lambda _: False) is None

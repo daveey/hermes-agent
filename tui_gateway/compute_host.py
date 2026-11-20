@@ -200,7 +200,10 @@ class ComputeHost:
                 return
             # In the child the shared helper interrupts the local agent and releases this
             # process's pending clarify Event (the parent only has a metadata mirror).
-            server._interrupt_session_turn(sid, session, reason=frame.get("reason") or None)
+            # [daveey] The parent already applied the durable Stop fence for a plain Stop before sending this
+            # frame (its frame carries no origin); the child must never write one for send-now/rewind/plugin.
+            server._interrupt_session_turn(sid, session, reason=frame.get("reason") or None,
+                                           cancel_automation_replays=False)
             self._reply("interrupt.ack", sid, request_id, applied=True, applied_ns=now_ns())
         self._guarded(frame, "interrupt.ack", body, applied=False)
 

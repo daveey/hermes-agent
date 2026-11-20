@@ -286,3 +286,21 @@ def test_turn_start_runs_the_turn_with_the_forwarded_input_origin(turn_env, fram
         server._sessions.pop("s-origin", None)
         host.close()
     assert seen == [expected]
+
+
+@pytest.mark.parametrize("reason", [None, "send_now", "plugin:hermes-bots"])
+def test_child_interrupt_never_writes_the_durable_stop_fence(monkeypatch, reason):
+    from tui_gateway import automation_replay
+    monkeypatch.setenv("HERMES_COMPUTE_HOST_CHILD", "1")
+    fenced = []
+    monkeypatch.setattr(automation_replay, "cancel_durable", lambda *a, **k: fenced.append(a))
+    host = ComputeHost(stdout=io.StringIO(), heartbeat_secs=0)
+    session = _session(types.SimpleNamespace(interrupt=lambda: None))
+    session["running"] = True
+    server._sessions["s9"] = session
+    try:
+        host._handle_interrupt({"sid": "s9", "request_id": "r", "reason": reason})
+    finally:
+        server._sessions.pop("s9", None)
+        host.close()
+    assert fenced == []
