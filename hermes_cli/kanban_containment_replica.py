@@ -144,6 +144,37 @@ def certify_page(conn: sqlite3.Connection, hub, board: str, changes) -> None:
             raise ContainmentRefused("replica event differs from its canonical receipt")
 
 
+def adopt_receipts(conn: sqlite3.Connection, source: sqlite3.Connection, changes) -> None:
+    """Certify a pickup copy's protected events from the host's own pulled replica, offline.
+
+    The Board feed fills ``source`` (the replica file) only through :func:`certify_page`, so its receipt cache
+    holds the authenticated evidence for every protected event it applied. A pickup copy goes replica -> live
+    file without the Hub, so :func:`event_permit` finds no receipt in the live cache unless we carry it over.
+    Each carried receipt is certified again by :func:`remember` (signature, board, origin, stop/release pair),
+    never trusted for sitting in the replica, and the event must still equal its receipt. A missing or invalid
+    receipt raises ``ContainmentRefused``: nothing is permitted for that event.
+    """
+    for ch in changes:
+        if ch.table != "task_events" or ch.fields.get("kind") not in ("contained", "containment_released"):
+            continue
+        if ch.op != "upsert":
+            raise ContainmentRefused("protected containment history cannot be deleted")
+        proof = _cached(source, ch.uid)
+        if proof is None:
+            raise ContainmentRefused(f"no certified receipt for {ch.fields['kind']} event {ch.uid} in the replica")
+        stop = None
+        if ch.fields["kind"] == "containment_released":
+            data = _payload(ch.fields)
+            if data is None:
+                raise ContainmentRefused("invalid canonical release event")
+            stop = _cached(source, str(data.get("episode")))
+            if stop is None:
+                raise ContainmentRefused(f"no certified stop receipt for release event {ch.uid} in the replica")
+        remember(conn, proof, board=proof["board"], task=ch.fields.get("task_id"), uid=ch.uid, stop_evidence=stop)
+        if not _matches({**ch.fields, "uid": ch.uid}, proof) or ch.origin_gateway != proof["row"]["origin_gateway"]:
+            raise ContainmentRefused("replica event differs from its canonical receipt")
+
+
 @contextlib.contextmanager
 def projection(conn: sqlite3.Connection, change) -> Iterator[None]:
     """Internal apply scope: one connection, transaction and exact wire row only."""

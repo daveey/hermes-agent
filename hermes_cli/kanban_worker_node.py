@@ -514,15 +514,39 @@ def _changes_for(replica: sqlite3.Connection, tid: str, card: sqlite3.Row) -> li
     return out
 
 
+_IMPORT_REFUSALS: dict[str, str] = {}
+
+
+def import_refusals() -> dict[str, str]:
+    """Cards the latest :func:`import_cards` call left out (id -> why). The call keeps its list-of-ids contract
+    (wrappers and other callers rely on it); the pickup tick reads the reasons here for its skip evidence."""
+    return dict(_IMPORT_REFUSALS)
+
+
 def import_cards(conn: sqlite3.Connection, replica: sqlite3.Connection, ids: Iterable[str]) -> list[str]:
-    """Copy cards (and their history) from the replica into the live file, without capture and without hooks."""
+    """Copy cards (and their history) from the replica into the live file, without capture and without hooks.
+
+    A card whose protected containment events cannot be certified from the replica's receipts is left out and
+    named in :func:`import_refusals`: one refused row aborts the whole apply transaction, so it must never reach
+    it. The containment guard itself is untouched."""
+    from hermes_cli import kanban_containment_replica as containment
+    from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
+    _IMPORT_REFUSALS.clear()
     changes: list[sync.RemoteChange] = []
     done: list[str] = []
     for tid in ids:
         card = replica.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()
         if card is None:
             continue
-        changes.extend(_changes_for(replica, tid, card))
+        card_changes = _changes_for(replica, tid, card)
+        try:
+            containment.adopt_receipts(conn, replica, card_changes)
+        except (ContainmentRefused, KeyError, ValueError, TypeError) as exc:  # malformed evidence refuses too
+            why = f"containment receipts not certified for task_events: {exc}"
+            _log.warning("kanban worker node: not importing %s (table task_events): %s", tid, why)
+            _IMPORT_REFUSALS[tid] = why
+            continue
+        changes.extend(card_changes)
         done.append(tid)
     if changes:
         cursor = int((sync.sync_state(conn) or {}).get("cursor") or 0)
@@ -736,10 +760,12 @@ def pickup(conn: sqlite3.Connection, *, budget: Any,
         picked, plans, judged = admission.screen(conn, replica, own, [tid for tid in picked if tid not in behind])
         skips.update(judged)
         imported = import_cards(conn, replica, picked)
+        refused = import_refusals()
     finally:
         replica.close()
     denied = admission.apply(conn, own, plans, imported)
     skips.update({tid: ("other", "import failed") for tid in picked if tid not in imported})
+    skips.update({tid: ("other", why) for tid, why in refused.items()})
     skips.update(denied)
     imported = [tid for tid in imported if tid not in denied]
     kph.remember({tid: sig for tid, sig in held.items() if tid in imported})
