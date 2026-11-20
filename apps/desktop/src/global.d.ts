@@ -703,6 +703,20 @@ declare global {
           restoreKey?: string
           resumeOnly?: boolean
         }) => Promise<HermesTerminalSession>
+        /** Account recovery: main runs `hermes auth reauth <provider> <row>` on
+         *  the named gateway and nothing else; the caller supplies no command.
+         *  Absent on a Desktop without it. `unavailable` names why nothing ran
+         *  (`invalid`, `missing`, `no-shell`, `no-runtime`, `unsupported`); a
+         *  gateway without a shell is never replaced by this device. Output is
+         *  delivered only through `onData` to the window that started it. */
+        startRecovery?: (options: {
+          cols?: number
+          connectionId: string
+          credentialId: string
+          profile?: string
+          provider: string
+          rows?: number
+        }) => Promise<{ connectionId?: string; id: string; recovery: true; unavailable?: string }>
         write: (id: string, data: string) => Promise<boolean>
       }
       reachPreviewUrl?: (url: string) => Promise<string>

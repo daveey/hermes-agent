@@ -252,7 +252,7 @@ import { openExternalUrl as externalOpen, type ExternalOpenDeps, reportPreOpenSt
 import {
   buildTerminalScript,
   resolveTerminalLaunch,
-  terminalScriptEnv,
+  terminalLauncher,
   terminalScriptExtension,
   tuiResumeArgs
 } from './external-terminal'
@@ -13894,8 +13894,9 @@ ipcMain.handle('hermes:window:openInTerminal', async (_event, sessionId, opts) =
   try {
     const profile = typeof opts?.profile === 'string' ? opts.profile.trim() : ''
     const backend = await resolveHermesBackend(tuiResumeArgs(sessionId.trim(), profile || undefined))
+    const launcher = terminalLauncher(backend, HERMES_HOME)
 
-    if (!backend.command) {
+    if (!launcher) {
       return { ok: false, error: 'Hermes is not installed yet' }
     }
 
@@ -13908,16 +13909,7 @@ ipcMain.handle('hermes:window:openInTerminal', async (_event, sessionId, opts) =
       `hermes-${crypto.randomBytes(6).toString('hex')}${terminalScriptExtension()}`
     )
 
-    fs.writeFileSync(
-      scriptPath,
-      buildTerminalScript({
-        args: backend.args,
-        command: backend.command,
-        cwd,
-        env: terminalScriptEnv(backend.env, HERMES_HOME)
-      }),
-      { mode: 0o700 }
-    )
+    fs.writeFileSync(scriptPath, buildTerminalScript({ ...launcher, cwd }), { mode: 0o700 })
 
     const launch = resolveTerminalLaunch({ findOnPath, scriptPath })
 
@@ -16803,7 +16795,9 @@ const terminalIpc = registerTerminalIpc({
   ensureGatewayBackend: owner =>
     backendDialClaims.run(backendScopeKey(owner.connectionId, owner.profile), () =>
       ensureRegistryBackend(owner.connectionId, owner.profile, '', { use: true })
-    )
+    ),
+  // Resolution only, as for "open in terminal": a recovery never starts a first-run install.
+  localHermesCli: async args => terminalLauncher(await resolveHermesBackend(args), HERMES_HOME)
 })
 
 const disposeTerminalSession = terminalIpc.disposeTerminalSession

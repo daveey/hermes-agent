@@ -586,6 +586,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     dispose: id => ipcRenderer.invoke('hermes:terminal:dispose', id),
     resize: (id, size) => ipcRenderer.invoke('hermes:terminal:resize', id, size),
     start: options => ipcRenderer.invoke('hermes:terminal:start', options),
+    startRecovery: options => ipcRenderer.invoke('hermes:terminal:recovery:start', options),
     write: (id, data) => ipcRenderer.invoke('hermes:terminal:write', id, data),
     onData: (id, callback) => {
       const channel = `hermes:terminal:${id}:data`

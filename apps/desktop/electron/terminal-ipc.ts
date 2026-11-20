@@ -11,6 +11,7 @@ import { app, ipcMain } from 'electron'
 import nodePty from 'node-pty'
 
 import { resolveTerminalConnection, resolveTerminalConnectionForSender } from './connection-apply'
+import type { TerminalLauncher } from './external-terminal'
 import { ensureSpawnHelperExecutable } from './spawn-helper-perms'
 import { buildInteractiveSshArgs } from './ssh-connection'
 import {
@@ -20,6 +21,7 @@ import {
   type TerminalGatewayTarget
 } from './terminal-gateway-target'
 import { createTerminalOutputGate } from './terminal-output-gate'
+import { recoveryCliArgs, remoteRecoveryCommand, requestedRecovery } from './terminal-recovery'
 import { applyWindowsMsysBashEnvDefaults } from './windows-msys-bash-env'
 import { buildWindowsInteractiveCommand } from './windows-remote-lifecycle'
 
@@ -31,12 +33,23 @@ export interface TerminalIpcDeps {
   /** The ssh client to spawn for remote terminals (resolveSshBinary). */
   sshBinary: () => string
   ensureBackend: (webContentsId: number) => Promise<unknown>
-  getSshConnectionState: (scope: string) => undefined | { registryConnectionId?: null | string; remotePlatform?: string }
+  getSshConnectionState: (scope: string) =>
+    | undefined
+    | {
+        hermesHome?: null | string
+        hermesPath?: null | string
+        registryConnectionId?: null | string
+        remotePlatform?: string
+      }
   /** The host of the gateway a tab was opened on. A tab owns its gateway: the
    *  window-backend route (which a Sessions pick never re-points) only serves
    *  tabs that recorded none. */
   gatewayTarget: (owner: TerminalGatewayOwner) => TerminalGatewayTarget
   ensureGatewayBackend: (owner: TerminalGatewayOwner) => Promise<unknown>
+  /** This device's Hermes launcher for `hermes <args>`, resolved the way the
+   *  app resolves its own backend; null when no runtime is installed. Absent
+   *  on hosts that cannot run an account recovery. */
+  localHermesCli?: (args: string[]) => Promise<null | TerminalLauncher>
 }
 
 export interface TerminalIpcApi {
@@ -69,7 +82,8 @@ export function registerTerminalIpc({
   ensureBackend,
   getSshConnectionState,
   gatewayTarget,
-  ensureGatewayBackend
+  ensureGatewayBackend,
+  localHermesCli
 }: TerminalIpcDeps): TerminalIpcApi {
   const terminalSessions = new Map()
 
@@ -342,7 +356,9 @@ export function registerTerminalIpc({
     webContentsId: number
   ): Promise<{ sshTarget: null | SshTerminalTarget } | { unavailable: 'missing' | 'no-shell' }> {
     if (!owner) {
-      return { sshTarget: await resolveTerminalConnectionForSender(webContentsId, activeSshTerminalTarget, ensureBackend) }
+      return {
+        sshTarget: await resolveTerminalConnectionForSender(webContentsId, activeSshTerminalTarget, ensureBackend)
+      }
     }
 
     const target = await resolveTerminalConnection(
@@ -366,6 +382,138 @@ export function registerTerminalIpc({
     return sshTarget ? getSshConnectionState(sshTarget.scope)?.registryConnectionId || null : 'local'
   }
 
+  // Wire a spawned PTY to the renderer that asked for it and register it.
+  function trackSession(event, id: string, ptyProcess, extra: Record<string, unknown>) {
+    const send = (suffix, payload) => {
+      if (event.sender.isDestroyed()) {
+        return
+      }
+
+      event.sender.send(terminalChannel(id, suffix), payload)
+    }
+
+    const outputGate = createTerminalOutputGate({
+      onExitFlushed: () => disposeTerminalSession(id),
+      sendData: data => send('data', data),
+      sendExit: payload => send('exit', payload)
+    })
+
+    terminalSessions.set(id, { outputGate, pty: ptyProcess, webContentsId: event.sender.id, ...extra })
+
+    ptyProcess.onData(data => outputGate.data(data))
+    ptyProcess.onExit(({ exitCode, signal }) => {
+      outputGate.exit({ code: exitCode, signal: signal == null ? null : String(signal) })
+
+      // The child is gone but node-pty keeps the /dev/ptmx master fd open
+      // until kill() runs; release it here instead of waiting for the tab to
+      // close (or the renderer to attach), or repeated `exit`s exhaust macOS
+      // PTYs (#128942). The map entry stays until the gate flushes the
+      // buffered exit, so a late attach still receives it.
+      try {
+        ptyProcess.kill()
+      } catch {
+        // Already reaped.
+      }
+    })
+    event.sender.once('destroyed', () => disposeTerminalSession(id))
+  }
+
+  // An account-recovery PTY carries a sign-in: only the renderer that started
+  // it may type into it, size it, read its cwd or end it.
+  function sessionFor(event, id) {
+    const sessionInfo = terminalSessions.get(String(id || ''))
+
+    if (!sessionInfo || (sessionInfo.recovery && sessionInfo.webContentsId !== event?.sender?.id)) {
+      return null
+    }
+
+    return sessionInfo
+  }
+
+  const ptyDimension = (value: unknown, fallback: number) =>
+    Math.max(2, Number.parseInt(String(value || fallback), 10) || fallback)
+
+  // The one process a recovery may start on its gateway, or why none can.
+  async function recoveryLaunch(
+    target: Exclude<TerminalGatewayTarget, 'missing' | 'no-shell' | 'pending'>,
+    args: string[]
+  ) {
+    if (target === 'local') {
+      const cli = localHermesCli ? await localHermesCli(args) : null
+
+      // A shell shim would put the arguments on a shell command line; only a direct exec runs here.
+      return cli?.command && !cli.shell
+        ? { args: cli.args, command: cli.command, env: { ...terminalShellEnv(), ...cli.env } }
+        : 'no-runtime'
+    }
+
+    const state = getSshConnectionState(target.scope)
+    const posix = state?.remotePlatform === 'Linux' || state?.remotePlatform === 'Darwin'
+    const remoteCommand = posix ? remoteRecoveryCommand(state, args) : null
+
+    return remoteCommand
+      ? {
+          args: buildInteractiveSshArgs(target.ssh, '', undefined, remoteCommand),
+          command: sshBinary(),
+          env: terminalShellEnv()
+        }
+      : 'unsupported'
+  }
+
+  // Account recovery: run `hermes auth reauth <provider> <row>` on the gateway
+  // that owns the row, and nothing else. The request names a gateway, a
+  // provider and a row id; a request that fails any check starts no process,
+  // and a gateway without a shell transport is reported, never replaced by
+  // this device.
+  ipcMain.handle('hermes:terminal:recovery:start', async (event, payload = {}) => {
+    const refused = (unavailable: string) => ({ id: '', recovery: true, unavailable })
+    const request = requestedRecovery(payload)
+    const owner = requestedTerminalGateway(payload)
+    const args = request && owner ? recoveryCliArgs(request, owner.profile) : null
+
+    if (!request || !owner || !args) {
+      return refused('invalid')
+    }
+
+    if (isWindows) {
+      return refused('unsupported')
+    }
+
+    const target = await resolveTerminalConnection(
+      () => gatewayTarget(owner),
+      () => ensureGatewayBackend(owner)
+    )
+
+    if (target === 'missing' || target === 'no-shell') {
+      return refused(target)
+    }
+
+    const launch = await recoveryLaunch(target, args)
+
+    if (typeof launch === 'string') {
+      return refused(launch)
+    }
+
+    ensureNodePtySpawnHelper()
+
+    const ptyProcess = nodePty.spawn(launch.command, launch.args, {
+      cols: ptyDimension(payload?.cols, 80),
+      cwd: app.getPath('home'),
+      env: launch.env,
+      name: 'xterm-256color',
+      rows: ptyDimension(payload?.rows, 24)
+    })
+
+    const id = crypto.randomUUID()
+
+    trackSession(event, id, ptyProcess, {
+      recovery: true,
+      ...(target === 'local' ? {} : { sshScope: target.scope })
+    })
+
+    return { connectionId: owner.connectionId, id, recovery: true }
+  })
+
   ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
     ensureNodePtySpawnHelper()
 
@@ -381,7 +529,13 @@ export function registerTerminalIpc({
     // Removed gateway, or one with no shell transport: report it instead of
     // spawning a local shell the tab would label with the remote's name.
     if ('unavailable' in resolved) {
-      return { connectionId: owner?.connectionId ?? null, cwd: null, id: '', shell: '', unavailable: resolved.unavailable }
+      return {
+        connectionId: owner?.connectionId ?? null,
+        cwd: null,
+        id: '',
+        shell: '',
+        unavailable: resolved.unavailable
+      }
     }
 
     const { sshTarget } = resolved
@@ -401,43 +555,12 @@ export function registerTerminalIpc({
         )
       : nodePty.spawn(command, args, { cols, cwd, env: terminalShellEnv(), name: 'xterm-256color', rows })
 
-    const send = (suffix, payload) => {
-      if (event.sender.isDestroyed()) {
-        return
-      }
-
-      event.sender.send(terminalChannel(id, suffix), payload)
-    }
-
-    const outputGate = createTerminalOutputGate({
-      onExitFlushed: () => disposeTerminalSession(id),
-      sendData: data => send('data', data),
-      sendExit: payload => send('exit', payload)
-    })
-
-    terminalSessions.set(id, {
-      outputGate,
-      pty: ptyProcess,
-      webContentsId: event.sender.id,
-      ...(remote ? { sshScope: sshTarget.scope, remoteCwd: String(payload?.cwd || '') } : {})
-    })
-
-    ptyProcess.onData(data => outputGate.data(data))
-    ptyProcess.onExit(({ exitCode, signal }) => {
-      outputGate.exit({ code: exitCode, signal: signal == null ? null : String(signal) })
-
-      // The child is gone but node-pty keeps the /dev/ptmx master fd open
-      // until kill() runs; release it here instead of waiting for the tab to
-      // close (or the renderer to attach), or repeated `exit`s exhaust macOS
-      // PTYs (#128942). The map entry stays until the gate flushes the
-      // buffered exit, so a late attach still receives it.
-      try {
-        ptyProcess.kill()
-      } catch {
-        // Already reaped.
-      }
-    })
-    event.sender.once('destroyed', () => disposeTerminalSession(id))
+    trackSession(
+      event,
+      id,
+      ptyProcess,
+      remote ? { sshScope: sshTarget.scope, remoteCwd: String(payload?.cwd || '') } : {}
+    )
 
     return { connectionId: spawnedOn(owner, sshTarget), cwd: remote ? null : cwd, id, shell: remote ? 'ssh' : name }
   })
@@ -454,8 +577,8 @@ export function registerTerminalIpc({
     return true
   })
 
-  ipcMain.handle('hermes:terminal:write', (_event, id, data) => {
-    const sessionInfo = terminalSessions.get(String(id || ''))
+  ipcMain.handle('hermes:terminal:write', (event, id, data) => {
+    const sessionInfo = sessionFor(event, id)
 
     if (!sessionInfo) {
       return false
@@ -466,8 +589,8 @@ export function registerTerminalIpc({
     return true
   })
 
-  ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
-    const sessionInfo = terminalSessions.get(String(id || ''))
+  ipcMain.handle('hermes:terminal:resize', (event, id, size = {}) => {
+    const sessionInfo = sessionFor(event, id)
 
     if (!sessionInfo) {
       return false
@@ -480,17 +603,19 @@ export function registerTerminalIpc({
 
     return true
   })
-  ipcMain.handle('hermes:terminal:cwd', async (_event, id) => {
-    const sessionInfo = terminalSessions.get(String(id || ''))
+  ipcMain.handle('hermes:terminal:cwd', async (event, id) => {
+    const sessionInfo = sessionFor(event, id)
 
-    if (!sessionInfo) {
+    if (!sessionInfo || sessionInfo.recovery) {
       return null
     }
 
     return sessionInfo.sshScope !== undefined ? null : readProcessCwd(sessionInfo.pty.pid)
   })
 
-  ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
+  ipcMain.handle('hermes:terminal:dispose', (event, id) =>
+    sessionFor(event, id) ? disposeTerminalSession(String(id || '')) : false
+  )
 
   return { disposeTerminalSession, disposeTerminalSessionsForSshScope, disposeAllTerminalSessions }
 }

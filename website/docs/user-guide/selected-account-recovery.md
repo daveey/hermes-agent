@@ -6,10 +6,18 @@ This initial command supports Anthropic `manual:hermes_pkce` and Codex `manual:d
 
 The selected row must still exist, be enabled, and be unchanged when login finishes. Its ID, label, priority and unrelated metadata are preserved. Login runs without holding the auth-store lock; a concurrent deletion or edit prevents replacement. A Codex login must match both the stored account/workspace and subject. Legacy Anthropic grants lack a verifiable principal, so the terminal requires explicit replacement confirmation and reports identity as unverified, never as a confirmed same-account reconnect.
 
-Anthropic authorization-code input is masked; if terminal echo cannot be disabled, recovery stops rather than reading an unmasked code. Do not run this in an agent-readable or recorded terminal. A future Desktop recovery surface must provide a private terminal and bind the owning gateway and profile explicitly; this command alone does not provide that transport.
+Anthropic authorization-code input is masked; if terminal echo cannot be disabled, recovery stops rather than reading an unmasked code. Do not run this in an agent-readable or recorded terminal. Hermes Desktop provides that private transport (below); the command alone does not.
 
 The completion message confirms credential persistence, not provider health. Refresh and verify account health separately. If interrupted during persistence, the command reports an unverified outcome rather than claiming no change occurred.
 
 ## Dashboard device sign-in for a selected Codex credential
 
 `POST /api/providers/oauth/openai-codex/start` accepts an optional JSON body `{"credential_id": "<pool id>"}`. The session is then bound to that exact owned row before any provider call, and its response carries `target_bound: true`. On approval the grant is committed into the selected row with the same checks as the command above (unchanged row, same account/workspace and subject, enabled), instead of the singleton login that would add a second row. The poll response reports `credential_id` and `identity_verified` on success, or `status: error` with `reason: reauth_conflict` and no write. A malformed id, an unsupported provider or an unreplaceable row is refused (400/409); a named target never degrades to the ordinary untargeted login. Cancelling the session before commit leaves the row untouched. Callers on an older core receive no `target_bound` field and must cancel that session rather than let it complete as an account-add.
+
+## Desktop recovery terminal
+
+Hermes Desktop can run this command for a renderer (for example a plugin panel) through `window.hermesDesktop.terminal.startRecovery({connectionId, profile, provider, credentialId})`. The caller names a gateway, a provider and a pool row id; it never supplies command text. Desktop's main process checks each field against a fixed pattern and runs only `hermes [--profile NAME] auth reauth PROVIDER CREDENTIAL_ID`: with this device's own Hermes runtime for the local gateway, or with the gateway's recorded Hermes launcher over that gateway's SSH connection. Only `anthropic` is accepted; Codex uses the dashboard device sign-in above.
+
+A request that fails a check, a removed gateway, a gateway with no shell transport (URL/token or cloud), a Windows host and a gateway whose launcher path is unknown all start no process and return `unavailable` (`invalid`, `missing`, `no-shell`, `unsupported`, `no-runtime`). A gateway without a shell is never replaced by a shell on this device. Feature-detect the method: an older Desktop does not have it.
+
+The session is not a terminal tab: it is not listed, saved, restored or readable by agent terminal tools, and only the window that started it can attach to it, type into it, resize it or end it. Ending it stops the command. The command's exit says nothing about account health; read the credential back afterwards.

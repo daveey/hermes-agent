@@ -75,6 +75,29 @@ export function terminalScriptEnv(
   return out
 }
 
+export interface TerminalLauncher {
+  args: string[]
+  command: string
+  env: Record<string, string>
+  /** The command is a shell shim, not something to exec directly. */
+  shell: boolean
+}
+
+/** A resolved Hermes backend as a command to launch in a terminal, or null when no runtime is installed. */
+export function terminalLauncher(
+  backend: { args: string[]; command?: null | string; env?: Record<string, string | undefined>; shell?: boolean },
+  hermesHome?: string
+): null | TerminalLauncher {
+  return backend.command
+    ? {
+        args: backend.args,
+        command: backend.command,
+        env: terminalScriptEnv(backend.env, hermesHome),
+        shell: Boolean(backend.shell)
+      }
+    : null
+}
+
 export interface TerminalScriptSpec {
   command: string
   args: string[]
