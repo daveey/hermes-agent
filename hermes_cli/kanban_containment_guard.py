@@ -12,6 +12,7 @@ import sqlite3
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
+from hermes_cli.kanban_containment_functions import register as register_function
 from hermes_cli.kanban_containment_state import reduce_events
 
 _WRITE: contextvars.ContextVar[tuple[int, str] | None] = contextvars.ContextVar("containment_write", default=None)
@@ -67,7 +68,7 @@ def inert_snapshot(conn: sqlite3.Connection) -> None:
     for name, arity in (("kanban_containment_held", 1), ("kanban_containment_write", 1), ("kanban_containment_delete", 1),
                         ("kanban_containment_sync_task", 1), ("kanban_containment_sync_event", 4),
                         ("kanban_containment_sync_edge", 2), ("kanban_containment_cache_write", 0)):
-        conn.create_function(name, arity, lambda *a: 0)
+        register_function(conn, name, arity, lambda *a: 0)
 
 
 def pending(conn: sqlite3.Connection, task_id: str, *, verify_release: Callable | None = None) -> bool:
@@ -101,17 +102,17 @@ def pending(conn: sqlite3.Connection, task_id: str, *, verify_release: Callable 
 
 def register(conn: sqlite3.Connection, *, verify_release: Callable | None = None) -> None:
     """Register per-connection functions without schema writes or network I/O."""
-    conn.create_function("kanban_containment_held", 1,
+    register_function(conn, "kanban_containment_held", 1,
                          lambda task: int(pending(conn, task, verify_release=verify_release)))
-    conn.create_function("kanban_containment_delete", 1,
+    register_function(conn, "kanban_containment_delete", 1,
                          lambda task: int(conn.in_transaction and _DELETE.get() == (id(conn), task)))
-    conn.create_function("kanban_containment_write", 1,
+    register_function(conn, "kanban_containment_write", 1,
                          lambda task: int(conn.in_transaction and _WRITE.get() == (id(conn), task)))
     from hermes_cli import kanban_containment_replica as replica
-    conn.create_function("kanban_containment_sync_task", 1, lambda task: replica.task_permit(conn, task))
-    conn.create_function("kanban_containment_sync_event", 4,
+    register_function(conn, "kanban_containment_sync_task", 1, lambda task: replica.task_permit(conn, task))
+    register_function(conn, "kanban_containment_sync_event", 4,
                          lambda uid, task, kind, payload: replica.event_permit(conn, uid, task, kind, payload))
-    conn.create_function("kanban_containment_sync_edge", 2, lambda parent, child: replica.edge_permit(conn, parent, child))
+    register_function(conn, "kanban_containment_sync_edge", 2, lambda parent, child: replica.edge_permit(conn, parent, child))
     replica.register(conn)
 
 

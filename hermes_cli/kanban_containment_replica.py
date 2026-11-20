@@ -13,6 +13,7 @@ import sqlite3
 from collections.abc import Iterator
 
 from hermes_cli import kanban_containment_canonical as canonical
+from hermes_cli.kanban_containment_functions import register as register_function
 from hermes_cli.kanban_containment_lifecycle import ContainmentConflict, ContainmentRefused
 from hermes_cli.kanban_containment_state import _payload
 
@@ -21,7 +22,7 @@ _SCOPE = contextvars.ContextVar("containment_replica_projection", default=None)
 
 
 def register(conn: sqlite3.Connection) -> None:
-    conn.create_function("kanban_containment_cache_write", 0, lambda: int(_CACHE.get() == id(conn) and conn.in_transaction))
+    register_function(conn, "kanban_containment_cache_write", 0, lambda: int(_CACHE.get() == id(conn) and conn.in_transaction))
 
 
 def install(conn: sqlite3.Connection) -> None:
