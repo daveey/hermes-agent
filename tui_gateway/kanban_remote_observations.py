@@ -77,11 +77,6 @@ def _summary(task) -> dict | None:
             "completion_notice": {"created_at": notice.get("created_at")}}
 
 
-def _terminal_states():
-    from tui_gateway.kanban_remote_notices import _TERMINAL
-    return _TERMINAL
-
-
 def _changed_rows_cards(conn, replica: Path, me, decoded: dict, lane=None) -> list[tuple]:
     """``decoded`` is the caller's (replica, owner, key) -> (seq, terminal summary or None) map.
 

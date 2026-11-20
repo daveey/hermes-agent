@@ -7,8 +7,7 @@ def state(task: dict) -> str:
     if notice is not None:
         return f"request_withdrawn@{notice['event_id']}"
     from hermes_cli.kanban_remote_ask import envelope as ask_envelope
-    from tui_gateway.kanban_remote_notices import drop_mark
-    if (ask := ask_envelope(task)) is not None and drop_mark(task) is None:
+    if (ask := ask_envelope(task)) is not None:
         return f"{ask['kind']}@{ask['event_id']}"
     from tui_gateway.kanban_remote_notices import _terminal_at
     at = _terminal_at(task) if task.get("status") in ("done", "blocked") else None

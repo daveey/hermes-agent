@@ -4,7 +4,10 @@ import time
 
 import pytest
 
+from hermes_cli import kanban_awaiting as kaw
+from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
 from hermes_cli.kanban_origin_creation import adopt_with_origin
 from hermes_cli.kanban_origin_ledger import observe_owner_task
 from tests.hermes_cli import test_kanban_decision_ask as helpers
@@ -149,4 +152,25 @@ def test_malformed_decision_envelope_is_not_notifiable(change):
 def test_own_comment_wait_excludes_named_producers(cmd, want):
     from hermes_cli.kanban_remote_ask import own_comment_wait
     assert own_comment_wait(cmd, 't_x') is want
+
+
+@pytest.mark.parametrize('reason', ['send_refused', 'touch'])
+def test_notice_only_hub_row_is_not_a_decision_subscriber(kanban_home, monkeypatch, reason):
+    """Review of #3730: the hub collector never publishes touch/send_refused rows as sessions."""
+    with kbc.connect_closing() as conn:
+        tid = helpers._running(conn)
+        kbn.add_notify_sub(
+            conn, task_id=tid, platform='hub',
+            chat_id=f'macbook/default/{remote.CHAT}', notifier_profile='default',
+            delivery_metadata={'reason': reason})
+        helpers._as_worker(monkeypatch, conn, tid)
+        out = helpers._tool('schedule', {
+            'reason': 'Decide premise A/B/C; waiting on the next reply.',
+            'wake_check': f'hermes kanban wait-comment {tid} --after-id 0 --skip-system',
+            'awaiting': {'kind': 'chat', 'why': 'Decide premise A/B/C.', 'ref': 'origin session'},
+        })
+        assert kaw.NO_CHAT_SUBSCRIBER in (out.get('code') or '') + out.get('error', ''), out
+        task = kb.get_task(conn, tid)
+        assert task is not None and task.status == 'running'
+        assert not [e for e in kb.list_events(conn, tid) if e.kind == 'decision_requested']
 

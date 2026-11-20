@@ -593,23 +593,30 @@ def has_chat_subscriber(conn: sqlite3.Connection, task_id: str) -> bool:
     """A subscribed chat that ``decision_requested`` can wake.
 
     A reachable local TUI chat, a wake-enabled messaging row, or a fully
-    qualified hub relay destination (current asks travel in the owner snapshot).
+    qualified hub relay destination the publisher would count (not
+    ``touch``/``send_refused``). Current asks travel in the owner snapshot.
     Plain notify messaging rows are not agent wakes.
     """
     try:
-        rows = conn.execute("SELECT platform, chat_id, delivery_mode FROM kanban_notify_subs WHERE task_id = ?",
-                            (task_id,)).fetchall()
+        rows = conn.execute(
+            "SELECT platform, chat_id, delivery_mode, delivery_metadata FROM kanban_notify_subs WHERE task_id = ?",
+            (task_id,)).fetchall()
     except sqlite3.OperationalError:
         return False
-    for platform, chat_id, mode in rows:
+    from hermes_cli.kanban_db_notify import UNCOUNTED_SUB_REASONS, _decode_notify_delivery_metadata
+    from hermes_cli.kanban_restore_chat_subs import _safe
+    for platform, chat_id, mode, meta in rows:
         platform = (platform or "").lower()
         if platform == "hub":
-            # The owner collector publishes current asks with the origin link.
-            # Reject malformed destinations rather than silently parking them.
-            from hermes_cli.kanban_restore_chat_subs import _safe
-            if isinstance(chat_id, str) and len(chat_id.split('/')) == 3 and all(_safe(p) for p in chat_id.split('/')):
-                return True
-            continue
+            # Same counted predicate as hermes-hub collect_tasks / _counted_sub_clause:
+            # notice-only hub rows never appear in the card's sessions.
+            if not (isinstance(chat_id, str) and len(chat_id.split('/')) == 3
+                    and all(_safe(p) for p in chat_id.split('/'))):
+                continue
+            reason = _decode_notify_delivery_metadata(meta).get("reason") or ""
+            if reason in UNCOUNTED_SUB_REASONS:
+                continue
+            return True
         if platform == "tui":
             if chat_id and tui_chat_reachable(chat_id):
                 return True

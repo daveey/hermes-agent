@@ -373,7 +373,7 @@ def _shared_key(owner: str, key: str, task: dict, profile: str, sid: str) -> str
     notice = task.get("completion_notice")
     if task.get("status") == "done" and isinstance(notice, dict) and "event_id" in notice:
         return _event_key(owner, key, notice)
-    if (ask := _ask(task)) is not None and drop_mark(task) is None:
+    if (ask := _ask(task)) is not None:
         return f"remote:{owner}:{key}:{ask['kind']}:{ask['event_id']}"
     at = _terminal_at(task)
     return f"remote:{owner}:{key}:{task.get('status')}@{int(at) if at else 0}:{profile}:{sid}"
