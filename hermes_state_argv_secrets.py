@@ -13,7 +13,8 @@ passwords, single- and mixed-case letters, grouped keys) as a bare argument, in 
 URL, as a URL query name or value, in a list, inside a spaced env value or a flag value and as a ``NAME=`` value --
 a shown tail of 8+ characters counts as a leak: the worst shape and position shows about 8.5% of 16-character
 secrets, 3% of 24-character, 2% of 32-character and 1.5% of 40-character ones (random letters can read like words);
-the tests hold these under 10%, 5%, 3% and 2%. About 0.15% of this repo's identifiers and 0.1% of its env names are
+the tests hold these under 10%, 5%, 3% and 2% (32 characters in bare, path, URL and spaced-env positions, 24 in all
+but the query ones, 16 and 40 in all). About 0.15% of this repo's identifiers and 0.1% of its env names are
 masked. This is a rate, not a guarantee, and some secrets look exactly like identifiers and are shown: pronounceable
 passwords (``correcthorse``), all-digit values, UUIDs, strings under 12 characters and a secret shaped like a
 kebab-case ``--flag`` right after a secret-named flag (read as the next flag, as switches need), unless a name marks
@@ -828,7 +829,6 @@ def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) ->
         if (wrapped := _program_flags(token)) is not None:
             flags, wrapper = wrapped, False  # sudo mysql …, docker exec db mysql …, env X=1 mysql …
             current = os.path.basename(token).lower()
-            container, before_image = current in _CONTAINER_PROGRAMS, 2  # sudo docker run img tool …
             out.append(token)
             continue
         if wrapper and not skip_handoff and "=" not in token and not _DURATION.fullmatch(token):
