@@ -328,7 +328,16 @@ def plan_turn_failure(display_kind: Any, display_metadata: Any, text: Any, resul
 
 
 def _arm(key: str, entry: _Entry, delay: float, fire: Callable[[str], None]) -> None:
-    timer = threading.Timer(max(delay, 0.0), lambda: fire(key))
+    def guarded_fire():
+        if fire is _fire:
+            _fire(key, expected_timer=timer)
+        else:
+            with _lock:
+                current = _entries.get(key) is entry and entry.timer is timer
+            if current:
+                fire(key)
+
+    timer = threading.Timer(max(delay, 0.0), guarded_fire)
     timer.daemon = True
     entry.timer = timer
     timer.start()
@@ -506,22 +515,23 @@ def schedule_for_turn(session: dict, st: Any) -> None:
              profile_home=session.get("profile_home"))
 
 
-def _fire(key: str) -> None:
-    if stale_code_reason():
-        # [daveey] A retiring backend starts no wake (``retiring_backend_refuses``): that is not a busy chat, so it
-        # must neither spend the busy budget nor drop the delivery. Hand it to the successor, or keep it.
-        with _lock:
-            entry = _entries.get(key)
-            custody = entry is not None and bool(entry.home) and bool(entry.items)
-        if custody:
-            if not handoff(key):
-                with _lock:
-                    kept = _entries.get(key)
-                    if kept is not None:
-                        _arm(key, kept, BUSY_RECHECK_S, _fire)
-            return
+def _fire(key: str, *, expected_timer=None) -> None:
+    retired = stale_code_reason()
     with _lock:
-        entry = _entries.pop(key, None)
+        entry = _entries.get(key)
+        if entry is None or (expected_timer is not None and entry.timer is not expected_timer):
+            return
+        custody = retired and bool(entry.home) and bool(entry.items)
+        if not custody:
+            _entries.pop(key)
+    if custody:
+        # Retirement is a transfer, not a busy attempt. Keep the due/reset unchanged.
+        if not handoff(key):
+            with _lock:
+                kept = _entries.get(key)
+                if kept is not None:
+                    _arm(key, kept, BUSY_RECHECK_S, _fire)
+        return
     if entry is None or not entry.items:
         return  # cancelled by a later successful turn
     text, kind, meta = replay_payload(entry.items)

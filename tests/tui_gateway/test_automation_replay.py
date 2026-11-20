@@ -66,6 +66,21 @@ def test_one_timer_per_chat_and_a_later_reset_rearms(timers):
     assert len(timers) == 2 and timers[0][2].cancelled and timers[1][0] == 7200
 
 
+def test_cancelled_timer_cannot_consume_replacement(timers, monkeypatch):
+    from tui_gateway import server
+    wakes = []
+    monkeypatch.setattr(server, "_wake_session_turn", lambda *a, **kw: wakes.append(a) or "started")
+    ar.schedule("k", text="old", display_kind="kanban_notice", display_metadata={}, due=NOW + 60,
+                cause="c", persisted=True, now=NOW)
+    old_fire = timers[-1][1]
+    ar.schedule("k", text="later reset", display_kind="kanban_notice", display_metadata={}, due=NOW + 7200,
+                cause="q", persisted=True, now=NOW)
+    old_fire()  # Timer.cancel cannot stop a callback already waiting for the lock.
+    assert wakes == [] and ar.pending("k")
+    timers[-1][1]()
+    assert len(wakes) == 1 and not ar.pending("k")
+
+
 def test_cancel_carried_keeps_an_unpersisted_delivery(timers):
     ar.schedule("k", text="a", display_kind="kanban_notice", display_metadata={}, due=NOW, cause="c", persisted=True,
                 now=NOW)

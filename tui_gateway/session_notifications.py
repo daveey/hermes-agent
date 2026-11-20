@@ -1702,7 +1702,8 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
     if retiring_backend_refuses(label, key):
         return "busy"
     try:
-        live = _find_live_session_by_key(key)
+        from tui_gateway.wake_profiles import live_for_profiles, compression_live
+        live = live_for_profiles(key, profiles)
         if live is None:
             # [daveey] A paused turn is its restarting backend's: here its viewers are not attached (update_pause).
             from tui_gateway.update_pause import left_to_successor
@@ -1726,13 +1727,10 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
                     return "refused"
             if not resumed:
                 return "missing"
-            live = _find_live_session_by_key(key)
+            live = live_for_profiles(key, profiles)
             if live is None:
-                tip = None
                 with contextlib.suppress(Exception):
-                    from hermes_state import SessionDB
-                    tip = SessionDB().get_compression_tip(key)
-                live = _find_live_session_by_key(tip) if tip else None
+                    live = compression_live(key, profiles)
             if live is None:
                 logger.warning("%s: %s resumed but no live session holds it", label, key)
                 return "error"

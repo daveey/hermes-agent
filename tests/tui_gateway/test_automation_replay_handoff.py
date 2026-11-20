@@ -375,7 +375,7 @@ def test_seam_run_pass_consumes_handoffs(monkeypatch):
 def test_seam_wake_resumes_only_in_the_given_profile(monkeypatch):
     from tui_gateway import server
     resumed = []
-    monkeypatch.setattr(server, "_find_live_session_by_key", lambda key: None)
+    monkeypatch.setattr(server, "_find_live_session_by_key", lambda key, **kw: None)
     monkeypatch.setattr(server, "_readopt_wake_profiles", lambda: [None, "a", "b"])
     monkeypatch.setattr("tui_gateway.update_pause.left_to_successor", lambda *a, **k: False)
     monkeypatch.setattr(ar, "retiring_backend_refuses", lambda *a, **k: False)
