@@ -168,6 +168,9 @@ def _pr(**kw):
 
 
 def _pr_poll(monkeypatch, routes, sha=HEAD):
+    # the verdict also reads the base's required checks (none here: an unprotected ``main``)
+    routes = {**routes, f"repos/{REPO}/branches/": {}, f"repos/{REPO}/rules/branches/": []}
+    github._REQUIRED.clear()
     monkeypatch.setattr(kcp, "_gh_api", _api(routes))
     return github.poll(f"{REPO}/pull/12@{sha[:12]}", now=NOW)
 
@@ -182,7 +185,8 @@ def test_pr_with_running_checks_is_running(monkeypatch):
 @pytest.mark.parametrize("conclusions,job", [(["success", "success"], "succeeded"), (["success", "failure"], "failed"),
                                              (["cancelled"], "cancelled")])
 def test_pr_with_finished_checks_reports_them(monkeypatch, conclusions, job):
-    runs = {"workflow_runs": [{"id": i, "status": "completed", "conclusion": c} for i, c in enumerate(conclusions)]}
+    runs = {"workflow_runs": [{"id": i, "status": "completed", "conclusion": c, "workflow_id": i,
+                               "updated_at": _iso(600)} for i, c in enumerate(conclusions)]}
     got = _pr_poll(monkeypatch, {f"repos/{REPO}/pulls/12": _pr(), f"repos/{REPO}/actions/runs?head_sha": runs})
     assert got.poll["job"] == job
 

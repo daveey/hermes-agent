@@ -62,6 +62,10 @@ class FakeGitHub:
             raise RuntimeError("gh api exit 1: HTTP 502: Bad Gateway (https://api.github.com/)")
         if mode == "429":
             raise RuntimeError("gh api exit 1: HTTP 429: rate limit exceeded retry-after: 700")
+        if mode == "404":
+            raise RuntimeError("gh api exit 1: HTTP 404: Not Found (https://api.github.com/)")
+        if mode == "quota":
+            raise RuntimeError("GitHub quota guard refused/failed (Denied); inspect local attribution ledger.")
         if mode == "401":
             raise kcp.NoCredential("gh api exit 1: HTTP 401: Bad credentials")
         if mode == "timeout":
@@ -235,14 +239,17 @@ def test_case7_429_never_counts_toward_red_and_honours_retry_after(kanban_home, 
 
 
 # 8 ---------------------------------------------------------------------------------------------------------
-def test_case8_401_is_red_at_once_without_waking(kanban_home, gh, clock):
+def test_case8_401_is_red_at_once_and_wakes_one_probe_behind_the_blocker(kanban_home, gh, clock):
     with kbc.connect_closing() as conn:
-        tid = park(conn)
+        tid, behind = park(conn), park(conn, 1002)
         gh.mode = "401"
-        tick(conn, gh, clock, 0)
-        got = derived(conn, tid, clock)
+        (woken,) = tick(conn, gh, clock, 0)
+        (parked,) = {tid, behind} - {woken}
+        got = derived(conn, parked, clock)
         assert (got["state"], got["health"]) == ("external_down", "auth_failed")
-        assert status(conn, tid) == "scheduled"
+        assert status(conn, parked) == "scheduled" and status(conn, woken) == "ready"
+        assert events(conn, woken, kew.WATCH_EVENT)[-1]["state"] == "external_down"
+        assert ksb.blocker_states(conn)[kew.blocker_id("github_run", REPO)].is_open
 
 
 # 9 ---------------------------------------------------------------------------------------------------------
@@ -315,7 +322,7 @@ def test_case11_declared_every_has_a_floor(kanban_home, gh, clock):
             payload = json.loads(row[1] or "{}")
             payload["watch"] = {"every": 5}
             conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(payload), row[0]))
-        assert kcp._declared_every(conn, tid) == 120
+        assert kcp._cadence(conn, tid, T0)[:2] == (120, 120)
 
 
 # 12 --------------------------------------------------------------------------------------------------------
@@ -347,9 +354,11 @@ def test_case13_a_deadline_park_still_wakes_and_is_not_external(kanban_home):
 
 # 14 --------------------------------------------------------------------------------------------------------
 def test_case14_old_host_silence_stays_grey_and_an_advertising_host_goes_red(kanban_home, gh, clock):
+    """Shell probes another host runs (a GitHub run is read by every gateway's own sweep, so it is never grey)."""
     with kbc.connect_closing() as conn:
-        old, new = park(conn, 4001), park(conn, 4002)
+        old, new = (park(conn, n, kind="external", ref=f"job {n}", wake_check="probe.sh") for n in (4001, 4002))
         with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_wake_checks")  # neither probe runs on this host
             for tid, host in ((old, "old-host"), (new, "new-host")):
                 row = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='scheduled'",
                                    (tid,)).fetchone()
@@ -357,7 +366,7 @@ def test_case14_old_host_silence_stays_grey_and_an_advertising_host_goes_red(kan
                 payload["probe_host"] = host
                 conn.execute("UPDATE task_events SET payload=? WHERE id=?", (json.dumps(payload), row[0]))
             # new-host wrote one watch record at T0 (as a synced event would arrive); old-host never has
-            kb._append_event(conn, new, kew.WATCH_EVENT, {"adapter": "github_run", "scope": REPO, "host": "new-host",
+            kb._append_event(conn, new, kew.WATCH_EVENT, {"adapter": "shell", "scope": "", "host": "new-host",
                                                           "job": "running", "service": "ok", "observed_at": T0,
                                                           "next_due_at": T0 + EVERY, "every": EVERY,
                                                           "consecutive_failures": 0})

@@ -70,7 +70,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -675,7 +675,16 @@ def _wall_now() -> float:
     return time.time()
 
 
-def _record_watch(conn: sqlite3.Connection, task_id: str, watched, wall: float) -> Optional[str]:
+def _mono_now() -> float:
+    """Monotonic clock that spaces the sweeps and each card's reads; a seam, so a test can run real cadence."""
+    return time.monotonic()
+
+
+_JITTER: dict[tuple[str, str], tuple[Any, float]] = {}  # (db, task) -> (park event id, this wait's jitter factor)
+
+
+def _record_watch(conn: sqlite3.Connection, task_id: str, watched, wall: float,
+                  rand: Optional[float] = None) -> Optional[str]:
     """[daveey] Write the poll as the card's external-watch record (and wake / assert / clear as it says). A failure
     to record never fails the sweep. Returns the wake event kind or None."""
     from hermes_cli import kanban_external_watch as kew
@@ -685,37 +694,48 @@ def _record_watch(conn: sqlite3.Connection, task_id: str, watched, wall: float) 
         declared = ctx["payload"].get("watch") if isinstance(ctx["payload"].get("watch"), dict) else {}
         return kew.apply_poll(conn, task_id, watched.poll, now=wall, adapter=watched.adapter, scope=watched.scope,
                               every=clamp_every(declared.get("every"), DEFAULT_CI_EVERY),
-                              service_name=watched.service_name)
+                              service_name=watched.service_name, rand=rand)
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError):
         logger.warning("kanban external watch: could not record the poll of %s", task_id, exc_info=True)
         return None
 
 
-def _due_wall(conn: sqlite3.Connection, task_id: str, wall: float) -> bool:
-    """False while a 429's ``retry_after`` has not elapsed since the card's last record: the sweep's coarse
-    ``RECHECK_SECONDS`` spacing alone would read a rate-limited run too soon. Otherwise the interval is
-    ``_declared_every``."""
+def _cadence(conn: sqlite3.Connection, task_id: str, wall: float) -> tuple[int, int, Any, bool]:
+    """``(every, floor, park id, wall_ok)`` for one waiting card: seconds between its reads (the park's declared
+    ``watch.every``, never under ``MIN_EVERY``; else ``RECHECK_SECONDS``), the id of its current park (a new park
+    is read at once) and False while a 429's ``retry_after`` has not elapsed since its last record."""
     from hermes_cli import kanban_external_watch as kew
+    from hermes_cli.kanban_external_state import MIN_EVERY, clamp_every
     try:
         ctx = kew.park_context(conn, task_id)
         rec = kew.latest_record(conn, task_id, ctx["event_id"]) if ctx else None
     except sqlite3.Error:
-        return True
-    return rec is None or wall >= float(rec.get("observed_at") or 0) + float(rec.get("retry_after") or 0)
-
-
-def _declared_every(conn: sqlite3.Connection, task_id: str) -> int:
-    """Seconds between reads of this card: its park's declared ``watch.every`` (min 120), else ``RECHECK_SECONDS``."""
-    from hermes_cli import kanban_external_watch as kew
-    from hermes_cli.kanban_external_state import clamp_every
-    try:
-        ctx = kew.park_context(conn, task_id)
-    except sqlite3.Error:
-        return RECHECK_SECONDS
+        return RECHECK_SECONDS, 0, None, True
     watch = ((ctx or {}).get("payload") or {}).get("watch")
-    if isinstance(watch, dict) and watch.get("every") is not None:
-        return clamp_every(watch["every"])
-    return RECHECK_SECONDS
+    declared = isinstance(watch, dict) and watch.get("every") is not None
+    wall_ok = rec is None or wall >= float(rec.get("observed_at") or 0) + float(rec.get("retry_after") or 0)
+    return (clamp_every(watch["every"]) if declared else RECHECK_SECONDS, MIN_EVERY if declared else 0,
+            (ctx or {}).get("event_id"), wall_ok)
+
+
+def _due(conn: sqlite3.Connection, db: str, waits: list, now: float, wall: float) -> list[tuple]:
+    """The waiting cards to read now, least recently read first: each ``every`` × its jitter factor (±10 %, drawn
+    when it was last read, so the record's ``next_due_at`` is when this returns it) after its last read."""
+    with _LOCK:
+        last_at = {task_id: _LAST_CHECK.get((db, task_id), float("-inf")) for task_id, _r, _h in waits}
+        stamps = {task_id: _JITTER.get((db, task_id)) for task_id, _r, _h in waits}
+    due = []
+    for task_id, ref, hint in waits:
+        every, floor, park_id, wall_ok = _cadence(conn, task_id, wall)
+        last, factor = last_at[task_id], 1.0
+        stamp = stamps[task_id]
+        if stamp is not None and stamp[0] != park_id:
+            last = float("-inf")  # parked again since its last read: a new wait
+        elif stamp is not None:
+            factor = stamp[1]
+        if wall_ok and now - last >= max(every * factor, floor) - 1e-3:
+            due.append((last, task_id, ref, hint, park_id))
+    return sorted(due, key=lambda d: d[:2])
 
 
 def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
@@ -734,20 +754,22 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
         deadline = time.monotonic() + SWEEP_BUDGET_SECONDS
         waits = _ci_waits(conn)
         live = {(db, task_id) for task_id, _ref, _hint in waits}
-        now = time.monotonic()
+        now = _mono_now()
         wall = _wall_now()
         with _LOCK:
-            for key in [k for k in _LAST_CHECK if k[0] == db and k not in live]:
-                del _LAST_CHECK[key]  # re-parked on something else, woken or gone
-            last_at = {task_id: _LAST_CHECK.get((db, task_id), float("-inf")) for task_id, _r, _h in waits}
-        due = sorted((last_at[task_id], task_id, ref, hint) for task_id, ref, hint in waits
-                     if now - last_at[task_id] >= _declared_every(conn, task_id) and _due_wall(conn, task_id, wall))
-        for checked, (_last, task_id, ref, hint) in enumerate(due):
+            for state in (_LAST_CHECK, _JITTER):
+                for key in [k for k in state if k[0] == db and k not in live]:
+                    del state[key]  # re-parked on something else, woken or gone
+        from hermes_cli import kanban_external_watch as external_watch
+        from hermes_cli.kanban_external_adapters import github as external_github
+        from hermes_cli.kanban_external_state import jitter_factor
+        for checked, (_last, task_id, ref, hint, park_id) in enumerate(_due(conn, db, waits, now, wall)):
             if checked >= MAX_CARDS_PER_SWEEP or time.monotonic() >= deadline:
                 break  # the rest are the least recently checked ones next sweep
+            rand = external_watch._rand()
             with _LOCK:
-                _LAST_CHECK[(db, task_id)] = time.monotonic()
-            from hermes_cli.kanban_external_adapters import github as external_github
+                _LAST_CHECK[(db, task_id)] = _mono_now()
+                _JITTER[(db, task_id)] = (park_id, jitter_factor(rand))
             watched = external_github.poll(ref, hint, parked_at=_parked_at(conn, task_id), now=wall, fetch=fetch,
                                            fetch_runners=fetch_runners, fetch_run=fetch_run, deadline=deadline)
             p = watched.progress if watched is not None else progress(
@@ -764,7 +786,7 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
             if p.state == NOT_STARTING and apply(conn, task_id, ref, p):
                 woken.append(task_id)
                 continue
-            if watched is not None and watched.poll is not None and _record_watch(conn, task_id, watched, wall):
+            if watched is not None and watched.poll is not None and _record_watch(conn, task_id, watched, wall, rand):
                 woken.append(task_id)
     except Exception:
         logger.warning("kanban ci run progress sweep failed", exc_info=True)
@@ -822,7 +844,7 @@ def _sweep_due(db: str) -> bool:
     if running is not None and not running.done():
         return False
     last = _LAST_SWEEP.get(db)
-    return last is None or time.monotonic() - last >= SWEEP_EVERY_SECONDS
+    return last is None or _mono_now() - last >= SWEEP_EVERY_SECONDS
 
 
 def submit_sweep(conn: sqlite3.Connection, pool, *, slots_free: int = 1) -> Optional[Future]:
@@ -846,7 +868,7 @@ def submit_sweep(conn: sqlite3.Connection, pool, *, slots_free: int = 1) -> Opti
         with _LOCK:
             if not _sweep_due(db):  # another tick on this board started one while _LOCK was released
                 return None
-            _LAST_SWEEP[db] = time.monotonic()
+            _LAST_SWEEP[db] = _mono_now()
             fut = pool.submit(_sweep_db, db, home)
             _SWEEPS[db] = fut
         return fut

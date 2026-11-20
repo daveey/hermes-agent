@@ -96,6 +96,11 @@ class Api:
             raise RuntimeError("gh api exit 1: HTTP 403: Resource not accessible by integration")
         if "/actions/runs?status=" in path:
             return {"total_count": 0, "workflow_runs": []}
+        # [external-run cards] the PR adapter's verdict reads the base's required checks: this base requires none
+        if path == f"repos/{REPO}/branches/state":
+            return {"name": "state", "protected": False}
+        if path == f"repos/{REPO}/rules/branches/state":
+            return []
         raise AssertionError(f"unexpected gh api {path}")
 
 

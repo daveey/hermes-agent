@@ -24,6 +24,7 @@ import json
 import logging
 import random
 import sqlite3
+import threading
 import time
 from typing import Any, Iterable, Optional
 
@@ -36,8 +37,9 @@ RECOVERED_EVENT = "external_recovered"
 SERVICE_DOWN = "external_service_down"
 BLOCKER_PREFIX = "service-down"
 AUTHOR = "kanban-dispatcher"
-ADVERTISED_SCAN = 2000  # newest watch events read to learn which hosts write records
 SHELL_DEFAULT_EVERY = 900
+REF_BROKEN = "external_ref_broken"
+SERVICE_HEALTHS = ("down", "unreachable", "auth_failed")  # the service's trouble, shared by a scope's cards
 
 
 def _json(raw: Any) -> dict:
@@ -67,14 +69,39 @@ def latest_record(conn: sqlite3.Connection, task_id: str, after_event: int = 0) 
     return _json(row[0]) if row else None
 
 
+_HOSTS_LOCK = threading.Lock()
+_HOSTS: dict[str, tuple[int, dict[str, float]]] = {}  # board file -> (last event id read, host -> newest record)
+
+
+def hosts_seen(conn: sqlite3.Connection) -> dict[str, float]:
+    """``{host: when it last wrote a watch record}`` on this board: the hosts that advertise
+    ``external-watch-v1``. Read incrementally (only events newer than the last read, through the
+    ``(kind, task_id)`` index, no sort), because it runs on every wait-info read and session-list refresh."""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        key = str(row[2] or id(conn)) if row else str(id(conn))
+        with _HOSTS_LOCK:
+            cursor, hosts = _HOSTS.get(key, (0, {}))
+        top = conn.execute("SELECT MAX(id) FROM task_events").fetchone()[0] or 0
+        if top < cursor:  # another database behind the same key (a test's fresh file): start over
+            cursor, hosts = 0, {}
+        hosts = dict(hosts)
+        for _eid, payload in conn.execute("SELECT id, payload FROM task_events WHERE kind = ? AND id > ?",
+                                         (WATCH_EVENT, cursor)):
+            rec = _json(payload)
+            if rec.get("host"):
+                at = float(rec.get("observed_at") or 0)
+                hosts[str(rec["host"])] = max(hosts.get(str(rec["host"]), 0.0), at)
+        with _HOSTS_LOCK:
+            _HOSTS[key] = (int(top), hosts)
+        return hosts
+    except (sqlite3.Error, TypeError, ValueError):
+        return {}
+
+
 def advertising_hosts(conn: sqlite3.Connection) -> set[str]:
     """Hosts seen writing watch records on this board (``external-watch-v1``)."""
-    try:
-        rows = conn.execute("SELECT payload FROM task_events WHERE kind = ? ORDER BY id DESC LIMIT ?",
-                            (WATCH_EVENT, ADVERTISED_SCAN)).fetchall()
-    except sqlite3.Error:
-        return set()
-    return {str(h) for h in (_json(r[0]).get("host") for r in rows) if h}
+    return set(hosts_seen(conn))
 
 
 def own_host(conn: Optional[sqlite3.Connection]) -> str:
@@ -108,29 +135,22 @@ def plan(conn: sqlite3.Connection, task_id: str, ctx: dict) -> Optional[dict]:
     return {"adapter": adapter, "ref": ref, "hint": hint, "every": ks.clamp_every(watch.get("every"), default)}
 
 
-def _shell_seen(conn: sqlite3.Connection, task_id: str, rec: dict, every: Any, local: bool) -> tuple[dict, Any]:
-    """A shell record is written on change only, so its freshness is the newest sign the probe still runs: the
-    check's own ``last_at`` on this host, the ``wake_check_alive`` a worker node sends every ``ALIVE_EVERY``. A
-    probe relayed from another host is judged against that slower heartbeat plus its interval, as the lost-probe
-    guard does, or a healthy remote probe would read as silent."""
-    from hermes_cli import kanban_wake_check as kwc
+def _shell_seen(conn: sqlite3.Connection, task_id: str, rec: dict, every: Any) -> tuple[dict, Any]:
+    """A shell probe THIS host runs: its freshness is the check's own machine-local ``last_at`` (an unsynced
+    board writes a record on change only). A probe another host runs is judged by its records alone: that host
+    writes one per interval (``record_poll``), so the 2-interval rule holds for it too."""
     seen = float(rec.get("observed_at") or 0)
     try:
         row = conn.execute("SELECT last_at FROM task_wake_checks WHERE task_id = ?", (task_id,)).fetchone()
         seen = max(seen, float(row[0] or 0) if row else 0.0)
-        alive = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind = ?",
-                             (task_id, kwc.ALIVE_EVENT)).fetchone()
-        seen = max(seen, float(alive[0] or 0) if alive else 0.0)
     except sqlite3.Error:
         pass
     every = ks.clamp_every(every, SHELL_DEFAULT_EVERY)
-    if not local:
-        every = every + kwc.ALIVE_EVERY // 2
     return dict(rec, observed_at=seen, next_due_at=seen + ks.clamp_every(rec.get("every"), SHELL_DEFAULT_EVERY)), every
 
 
 def card_state(conn: sqlite3.Connection, task_id: str, *, now: Optional[float] = None,
-               hosts: Optional[set[str]] = None, status: Optional[str] = None) -> Optional[dict]:
+               hosts: Optional[dict[str, float]] = None, status: Optional[str] = None) -> Optional[dict]:
     """The derived external state of one card (see ``kanban_external_state.derive``), or None: not a scheduled
     ci/deploy/external park, an old host's silence, or a deadline-only wait. Adds ``blocker_id`` / ``triage_card``
     to ``external`` while a service-down blocker holds the card."""
@@ -146,18 +166,23 @@ def card_state(conn: sqlite3.Connection, task_id: str, *, now: Optional[float] =
     watch = plan(conn, task_id, ctx)
     rec = latest_record(conn, task_id, ctx["event_id"])
     probe_host = ctx["payload"].get("probe_host")
-    local = not probe_host or probe_host == own_host(conn) or probe_host == "local"
-    advertises = rec is not None or local or probe_host in (advertising_hosts(conn) if hosts is None else hosts)
+    own = own_host(conn)
+    hosts = hosts_seen(conn) if hosts is None else hosts
+    adapter = (rec or {}).get("adapter") or (watch or {}).get("adapter")
+    # A GitHub run/PR is polled by every gateway's own sweep; a shell probe only by its ``probe_host``.
+    local = adapter in ("github_run", "github_pr_checks") or not probe_host or probe_host in (own, "local")
+    advertises = rec is not None or local or probe_host in hosts
     if rec is None and watch is None:
         derived = ks.derive(None, now=now, every=ks.DEFAULT_CI_EVERY, since=ctx["since"], watch_missing=local,
                             advertises=advertises)
     else:
         every = (rec or {}).get("every") or (watch or {}).get("every")
-        if rec is not None and rec.get("adapter") == "shell":
-            rec, every = _shell_seen(conn, task_id, rec, every, local)
+        if rec is not None and rec.get("adapter") == "shell" and local:
+            rec, every = _shell_seen(conn, task_id, rec, every)
+        # This host polls the card and wrote some record within the interval: it is alive, only behind here.
+        alive = local and adapter != "shell" and now - hosts.get(own, 0.0) <= ks.clamp_every(every) + ks.GRACE
         derived = ks.derive(rec, now=now, every=every, since=ctx["since"], advertises=advertises,
-                            adapter=(rec or {}).get("adapter") or (watch or {}).get("adapter"),
-                            service_name=(rec or {}).get("service_name"))
+                            adapter=adapter, service_name=(rec or {}).get("service_name"), host_alive=alive)
     if derived is not None:
         derived["adapter"] = derived["external"]["adapter"]
         _name_blocker(conn, derived, rec)
@@ -167,7 +192,7 @@ def card_state(conn: sqlite3.Connection, task_id: str, *, now: Optional[float] =
 def _name_blocker(conn: sqlite3.Connection, derived: dict, rec: Optional[dict]) -> None:
     if derived["state"] != ks.DOWN or not rec or not rec.get("adapter") or not rec.get("scope"):
         return
-    if derived["health"] not in ("down", "unreachable", "auth_failed"):
+    if derived["health"] not in SERVICE_HEALTHS:
         return
     bid = blocker_id(rec["adapter"], rec["scope"])
     try:
@@ -184,7 +209,7 @@ def card_states(conn: sqlite3.Connection, task_ids: Iterable[str], *, now: Optio
     """``{task id: derived state}`` for the scheduled external cards among ``task_ids``. Never raises."""
     out: dict[str, dict] = {}
     try:
-        hosts = advertising_hosts(conn)
+        hosts = hosts_seen(conn)
         for tid in dict.fromkeys(str(t) for t in task_ids):
             derived = card_state(conn, tid, now=now, hosts=hosts)
             if derived is not None:
@@ -221,16 +246,17 @@ def record_poll(conn: sqlite3.Connection, task_id: str, poll: dict, *, now: floa
     watch = plan(conn, task_id, ctx) or {}
     every = ks.clamp_every(every if every is not None else (prev or {}).get("every") or watch.get("every"))
     rec = ks.next_record(prev, poll, now=now, every=every, adapter=adapter, scope=scope,
-                         rand=random.random() if rand is None else rand, host=own_host(conn))
+                         rand=_rand() if rand is None else rand, host=own_host(conn))
     name = service_name or poll.get("service_name") or ks.SERVICE_NAMES.get(adapter, "external service")
     derived = ks.derive(rec, now=now, every=every, adapter=adapter, service_name=name) or {}
     prev_written = (prev or {}).get("state")
     changed = (prev is None or prev_written != derived["state"] or prev.get("job") != rec["job"]
                or prev.get("service") != rec["service"])
-    due = prev is None or (adapter != "shell" and now - float(prev.get("observed_at") or 0) >= 0.9 * every)
-    # A shell probe's heartbeat is not an event per check (test_clean_checks_do_not_append_one_event_each): the
-    # check's own ``task_wake_checks.last_at`` (this host) and ``wake_check_alive`` (a worker node, every
-    # ALIVE_EVERY) carry it; ``_shell_seen`` reads them.
+    # The heartbeat: one record per interval, so a reader on another gateway sees silence within 2 intervals.
+    # A shell probe on a board that does not sync has no such reader and its own ``task_wake_checks.last_at``
+    # is its freshness (``_shell_seen``): it writes on change only, not one event per clean check.
+    beats = adapter != "shell" or own_host(conn) != "local"
+    due = prev is None or (beats and now - float(prev.get("observed_at") or 0) >= 0.9 * every)
     if changed or due:
         write_record(conn, task_id, rec, derived)
     was_down = prev_written == ks.DOWN
@@ -272,11 +298,53 @@ def apply_poll(conn: sqlite3.Connection, task_id: str, poll: dict, *, now: float
             if woke:
                 kb.add_comment(conn, task_id, AUTHOR, _finished_note(rec, derived))
             return woke
-        if derived["state"] == ks.DOWN and derived["health"] in ("down", "unreachable") and scope:
+        health = derived["health"]
+        if derived["state"] == ks.DOWN and health in SERVICE_HEALTHS and scope and not poll.get("host_only"):
+            if _scope_answers(conn, task_id, rec):
+                return _wake_ref_broken(conn, task_id, rec, derived, cmd)
             return _assert_blocker(conn, task_id, rec, derived)
-        if derived["health"] in ("ok", "degraded") and scope:
+        if derived["state"] == ks.DOWN and health == "probe_broken" and adapter != "shell":
+            return _wake_ref_broken(conn, task_id, rec, derived, cmd)
+        if health in ("ok", "degraded") and scope:
             _clear_blocker(conn, rec)
         return None
+
+
+def _rand() -> float:
+    """Where in ±JITTER the next poll lands; the seam tests pin."""
+    return random.random()
+
+
+def _scope_answers(conn: sqlite3.Connection, task_id: str, rec: dict) -> bool:
+    """Another scheduled card on this adapter and scope read the service fine after this card began failing: the
+    trouble is this card's ref (a run only it names answers 5xx / 403), not an outage of the scope."""
+    since = float(rec.get("failing_since") or rec.get("observed_at") or 0)
+    rows = conn.execute(
+        "SELECT e.payload FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.kind = ? AND e.task_id != ? "
+        "AND t.status = 'scheduled' ORDER BY e.id DESC LIMIT 200", (WATCH_EVENT, task_id)).fetchall()
+    for row in rows:
+        other = _json(row[0])
+        if (other.get("adapter"), other.get("scope")) == (rec["adapter"], rec["scope"]) and other.get(
+                "service") in ("ok", "degraded") and float(other.get("observed_at") or 0) >= since:
+            return True
+    return False
+
+
+def _wake_ref_broken(conn: sqlite3.Connection, task_id: str, rec: dict, derived: dict, cmd: str) -> Optional[str]:
+    """What this card waits on cannot be read and that is not the service's doing (a deleted run: 404/410/422, or
+    a failure only this ref has). Wake this card alone, no shared blocker: nobody else is affected."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_wake_check import _wake
+    note = (f"Woken: the {derived['external']['service']} job this card waits on cannot be read "
+            f"({derived['reason']}) and that is this card's ref, not an outage of {rec.get('scope') or 'the service'}"
+            ": no shared blocker is asserted. The run or PR was probably deleted or renamed: re-park on a ref that "
+            "exists, or finish without it.")
+    woke = _wake(conn, task_id, REF_BROKEN, {"adapter": rec["adapter"], "scope": rec.get("scope"),
+                                             "health": derived["health"], "wake_check": cmd or None,
+                                             "detail": rec.get("detail") or "", "note": note})
+    if woke:
+        kb.add_comment(conn, task_id, AUTHOR, note)
+    return woke
 
 
 def _finished_note(rec: dict, derived: dict) -> str:
@@ -340,7 +408,7 @@ def note_probe_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any,
             return None  # a GitHub run/PR park is recorded by the CI sweep's richer adapter
         poll = shell.poll(rc, out)
         got = record_poll(conn, task_id, poll, now=now, adapter="shell", scope="", every=every,
-                          service_name=poll.get("service_name"))
+                          service_name=poll.get("service_name"), rand=0.5)  # a probe runs every ``every``: no jitter
     except (sqlite3.Error, ValueError, KeyError, TypeError):
         logger.warning("kanban external watch: could not record the probe result of %s", task_id, exc_info=True)
         return None

@@ -33,9 +33,13 @@ def _rows_for(conn, monkeypatch, pairs, rows):
 
 def test_counts_are_subsets_and_cards_carry_service_status_and_check_times(kanban_home, gh, clock, monkeypatch):
     with kbc.connect_closing() as conn:
-        a, b, c = park(conn, 5001), park(conn, 5002), park(conn, 5003)
-        gh.run_modes = {"5002": "5xx", "5003": "401"}  # b: one failed poll (unknown); c: auth failure (red)
+        a, b = park(conn, 5001), park(conn, 5002)
+        # another repo's credential is refused: the first of its two cards is woken as the blocker's probe, the
+        # other stays parked and red behind it
+        other = [park(conn, n, ref=f"https://github.com/acme/other/actions/runs/{n}") for n in (5003, 5004)]
+        gh.run_modes = {"5002": "5xx", "5003": "401", "5004": "401"}  # b: one failed poll (unknown)
         tick(conn, gh, clock, 0)
+        (c,) = [t for t in other if helpers.status(conn, t) == "scheduled"]
         rows = _rows_for(conn, monkeypatch, [("s1", a), ("s1", b), ("s1", c), ("s2", a)],
                          [{"id": "s1", "kanban_parked": 3}, {"id": "s3", "kanban_parked": 1}])
         row = rows[0]
