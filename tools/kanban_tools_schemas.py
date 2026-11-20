@@ -180,6 +180,16 @@ def _completion_receipt_schema() -> dict[str, Any]:
     }
 
 
+_ENDING_SOURCE_PATH = {
+    "source_path": _prop("string", (
+        "Optional absolute path to this scratch task's ONE owned linked worktree in a configured clone. "
+        "The dispatcher-bound worker may explicitly attach it for the first time during this ending, "
+        "before artifact staging and source publication. Omit to preserve the existing source; "
+        "never selects an unrelated tree or changes an already attached source identity."
+    )),
+}
+
+
 KANBAN_COMPLETE_SCHEMA = _schema(
     "kanban_complete",
     (
@@ -209,6 +219,7 @@ KANBAN_COMPLETE_SCHEMA = _schema(
         "what each scope's disposition is, with evidence and remaining work."
     ),
     {
+        **_ENDING_SOURCE_PATH,
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "summary": _prop("string", (
                 "Human-readable handoff, 1-3 sentences. Appears in "
@@ -462,6 +473,7 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "a parent link (kanban_link), not a park."
     ),
     {
+        **_ENDING_SOURCE_PATH,
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "reason": _prop("string", (
                 "The human's unblock instructions. Lead with the ask, not "
@@ -527,6 +539,7 @@ KANBAN_SCHEDULE_SCHEMA = _schema(
         "pass clear_blocker=true only when you saw the wall gone."
     ),
     {
+        **_ENDING_SOURCE_PATH,
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "reason": _prop("string", (
             "Optional reason or machine-readable wake-up marker recorded on "
@@ -573,6 +586,7 @@ KANBAN_MOVE_SCHEMA = _schema(
         "leaves, not state on another one."
     ),
     {
+        **_ENDING_SOURCE_PATH,
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "runs_on": {"type": "array", "items": {"type": "string"}, "description": (
             "Labels the next machine must have, e.g. [\"pool:worker\"] (any worker with a free slot: the default "
@@ -613,6 +627,7 @@ KANBAN_CONTINUE_SCHEMA = _schema(
         "with a one-line reply; do not call more tools."
     ),
     {
+        **_ENDING_SOURCE_PATH,
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "checkpoint": _prop("string", (
             "Everything the next run needs to resume without re-deriving it: "
@@ -652,6 +667,7 @@ KANBAN_REQUEST_REVIEW_SCHEMA = _schema(
         "free-form 'review-required:' reason."
     ),
     {
+        **_ENDING_SOURCE_PATH,
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "summary": _prop("string", (
                 "What was implemented and how it was verified, in one or "

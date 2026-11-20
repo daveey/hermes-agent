@@ -42,6 +42,21 @@ def heartbeat_source(conn, task_id, args, *, worker_task, expected_run_id):
             "path": run.path if run else None, "artifacts": len(chosen or [])}
 
 
+def register_for_ending(conn, task_id, args, *, worker_task, expected_run_id):
+    """Explicit first attachment in the owning worker's ending, before staging/receipt.
+
+    No source_path means no new adoption. A refused or uncertain attach raises,
+    retaining the durable observation and leaving the ending unperformed.
+    """
+    if "source_path" not in args:
+        return
+    path = args["source_path"]
+    if not isinstance(path, str) or not path.strip() or not Path(path).is_absolute():
+        raise ValueError("source_path must be a non-empty absolute path")
+    heartbeat_source(conn, task_id, {"source_path": path},
+                     worker_task=worker_task, expected_run_id=expected_run_id)
+
+
 def stage_completion(conn, task_id, metadata, *, expected_run_id):
     """Called after worker ownership, foreign-card and completion gates.
 

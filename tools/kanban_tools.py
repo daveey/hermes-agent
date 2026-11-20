@@ -900,7 +900,9 @@ def _handle_complete(args: dict, **kw) -> str:
         goal_verification = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip(), conn=conn)
         try:
             event_mark = _kc.event_mark(conn, tid)  # a refusal's own pr_acceptance event lands above it
-            from tools.kanban_tools_source import stage_completion
+            from tools.kanban_tools_source import register_for_ending, stage_completion
+            register_for_ending(conn, tid, args, worker_task=os.environ.get("HERMES_KANBAN_TASK"),
+                                expected_run_id=run_id)
             metadata = stage_completion(conn, tid, metadata, expected_run_id=run_id)
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
@@ -974,30 +976,8 @@ def _handle_complete(args: dict, **kw) -> str:
 
 
 def _awaiting_arg(args: dict, wake: tuple) -> tuple[Optional[dict], tuple]:
-    """``(awaiting, wake)``: the declared producer (``kanban_awaiting``), and the park's probe
-    with ``hermes kanban wait-check`` filled in for a card wait that brought none. [daveey]"""
-    from hermes_cli import kanban_awaiting as kaw
-
-    try:
-        awaiting = kaw.normalize(args.get("awaiting"))
-    except kaw.AwaitingError as exc:
-        raise _Reject(str(exc), exc.code) from exc
-    if awaiting and awaiting["kind"] == "human":
-        exc = kaw.human_error(os.environ.get("HERMES_KANBAN_TASK") or "",
-                              " ".join(str(args.get(k) or "") for k in ("reason", "checkpoint")) + " "
-                              + str(awaiting.get("why") or ""))
-        raise _Reject(str(exc), exc.code)
-    probe = None if wake[0] else kaw.card_probe(awaiting)
-    if probe:
-        from hermes_cli import kanban_wake_check as kwc
-        wake = (probe, kwc.normalize_every(None), wake[2])
-    elif not wake[0] and kaw.declared_chat_wait(awaiting):
-        wake = (wake[0], wake[1], True)  # its comment probe is added in the park txn (kanban_awaiting.park_probe)
-    try:
-        kaw.confirm_remote(awaiting, hint=" ".join(str(x) for x in (wake[0], args.get("reason"), args.get("checkpoint")) if x))
-    except kaw.AwaitingError as exc:
-        raise _Reject(str(exc), exc.code) from exc
-    return awaiting, wake
+    from tools.kanban_tools_park_args import _awaiting_arg as awaiting_arg
+    return awaiting_arg(args, wake)
 
 
 def _route_needs(op: str, args: dict, tid: str, reason: Optional[str]) -> Optional[str]:
@@ -1075,6 +1055,8 @@ def _handle_block(args: dict, **kw) -> str:
     reason = _redact(
         _require_text(args, "reason", "reason is required — explain what input you need"))
     kind = args.get("kind")
+    _check(not (args.get("needs") and "source_path" in args),
+           "source_path cannot be combined with capability routing (needs); register it first with kanban_heartbeat")
     routed = _route_needs("block", args, tid, reason)
     if routed is not None:
         return routed
@@ -1108,6 +1090,9 @@ def _handle_block(args: dict, **kw) -> str:
                     human_request=args.get("human_request"))
         _check(*ask_checks(args.get("human_request"), context=filing_context(conn, tid)))  # lint + probe [daveey]
         from hermes_cli.kanban_cli_actor import tool_actor
+        from tools.kanban_tools_source import register_for_ending
+        register_for_ending(conn, tid, args, worker_task=os.environ.get("HERMES_KANBAN_TASK"),
+                            expected_run_id=_worker_run_id(tid))
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
                            actor=tool_actor(worker_task=_own_task_env(tid, "HERMES_KANBAN_TASK")),
                            blocker_id=blocker_id, wake_check=wake[0], check_every=wake[1], awaiting=awaiting,
@@ -1156,6 +1141,8 @@ def _handle_schedule(args: dict, **kw) -> str:
     raw_reason = args.get("reason")
     _check(raw_reason is None or isinstance(raw_reason, str), "reason must be a string")
     reason = _redact(raw_reason.strip()) if raw_reason and raw_reason.strip() else None
+    _check(not (args.get("needs") and "source_path" in args),
+           "source_path cannot be combined with capability routing (needs); register it first with kanban_heartbeat")
     routed = _route_needs("schedule", args, tid, reason)
     if routed is not None:
         return routed
@@ -1175,6 +1162,9 @@ def _handle_schedule(args: dict, **kw) -> str:
         from hermes_cli import kanban_watch as kwatch
         raw_watch = args.get("watch")
         _check(raw_watch is None or isinstance(raw_watch, bool), "watch must be true or false")
+        from tools.kanban_tools_source import register_for_ending
+        register_for_ending(conn, tid, args, worker_task=os.environ.get("HERMES_KANBAN_TASK"),
+                            expected_run_id=_worker_run_id(tid))
         ok = kb.schedule_task(
             conn, tid, watch=kwatch.resolve(conn, tid, raw_watch), reason=reason,
             expected_run_id=_worker_run_id(tid),
@@ -1219,6 +1209,9 @@ def _handle_continue(args: dict, **kw) -> str:
         wake = _wake_check_args(args, conn=conn, tid=tid)
         awaiting, wake = _awaiting_arg(args, wake)
         _park_guard(conn, tid, "continue", wake, resume_after=int(raw_after or 0))
+        from tools.kanban_tools_source import register_for_ending
+        register_for_ending(conn, tid, args, worker_task=os.environ.get("HERMES_KANBAN_TASK"),
+                            expected_run_id=_worker_run_id(tid))
         res = continue_task(conn, tid, checkpoint=checkpoint, resume_after_seconds=int(raw_after or 0),
                             expected_run_id=_worker_run_id(tid), metadata=metadata, awaiting=awaiting,
                             wake_check=wake[0], check_every=wake[1], clock_only=wake[2],
@@ -1242,6 +1235,7 @@ def _handle_move(args: dict, **kw) -> str:
     Another card: only the origin repin of a worker-first card the caller's task created (kanban_creator_repin)."""
     from hermes_cli import kanban_creator_repin as kcr
     if kcr.other_card(args):
+        _check("source_path" not in args, "source_path is only valid for the owning worker's ending")
         return kcr.tool_repin(args, board=_board, check=_check, ok=_ok, reject_child=_reject_delegated_child_mutation)
     tid = _worker_guard("kanban_move", args)
     checkpoint = _redact(_require_text(
@@ -1252,6 +1246,9 @@ def _handle_move(args: dict, **kw) -> str:
     _check(isinstance(runs_on, list) and runs_on, "runs_on must be a non-empty list of labels, e.g. ['pool:worker']")
     from hermes_cli.kanban_move import move_task
     with _board(args.get("board")) as (kb, conn):
+        from tools.kanban_tools_source import register_for_ending
+        register_for_ending(conn, tid, args, worker_task=os.environ.get("HERMES_KANBAN_TASK"),
+                            expected_run_id=_worker_run_id(tid))
         res = move_task(conn, tid, runs_on=runs_on, reason=reason, checkpoint=checkpoint, expected_run_id=_worker_run_id(tid),
                         force=bool(args.get("force")), host_reason=args.get("host_reason"))
         _check(res.get("ok"), f"could not move {tid}: {res.get('error')}")
@@ -1294,7 +1291,9 @@ def _handle_request_review(args: dict, **kw) -> str:
         _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary, conn=conn)
         run_id = _worker_run_id(tid)
         try:
-            from tools.kanban_tools_source import stage_completion
+            from tools.kanban_tools_source import register_for_ending, stage_completion
+            register_for_ending(conn, tid, args, worker_task=os.environ.get("HERMES_KANBAN_TASK"),
+                                expected_run_id=run_id)
             metadata = stage_completion(conn, tid, metadata, expected_run_id=run_id)
             ok, fail_reason = kb.request_review(
                 conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,

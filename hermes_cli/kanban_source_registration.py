@@ -248,7 +248,10 @@ def register_initial(conn: sqlite3.Connection, task_id: str, source_path: str, *
         run = board.AttachedRun(run_id, task_id, uid, "initial", 0, branch, path, head, None, "pending", machine, 2,
                                 identity)
     run = _persist_observation(conn, run)
-    _attach_settled(conn, run, "initial")
+    # Replaying an explicit ending after publication must not re-attach revision
+    # zero. Identity and live-run checks above still run on every replay.
+    if run.state != "attached":
+        _attach_settled(conn, run, "initial")
     return board.attached_run(conn, run_id)
 
 

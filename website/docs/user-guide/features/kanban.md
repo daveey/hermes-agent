@@ -858,9 +858,19 @@ moves. As the worker:
    (drop `-b` if the branch already exists). The clone must pass the same proof
    as above (GitHub `origin`, no rewrites), and a path another active card uses
    is refused.
-3. Register it from the live run with `kanban_heartbeat(source_path=<path>)`.
-   Only an implementation run may register a first source (a review run may only
-   resume one), and a replay with the same path is harmless.
+3. Register it from the live run with `kanban_heartbeat(source_path=<path>)`,
+   or supply the absolute `source_path` for the first time on `kanban_complete`,
+   `kanban_request_review`, `kanban_block`, `kanban_schedule`, `kanban_continue`
+   or `kanban_move`. These tool calls register before selected artifact staging
+   and the existing source-publication preflight. Only the dispatcher-bound
+   implementation worker may register a first source (a review run may only
+   resume one). Replaying the same identity is harmless, including after
+   publication; changing an attached identity is refused. Omit `source_path`
+   to leave source selection unchanged: unrelated trees are never discovered.
+   An unanswered attachment stays pending and the ending is not performed.
+   `source_path` cannot be combined with capability routing (`needs`) on block
+   or schedule; register with heartbeat first in that case. This does not add
+   CLI registration or a `source_path` argument to `kanban_request_changes`.
 4. Optionally carry up to 32 files that are not in Git with
    `kanban_heartbeat(artifacts=[...])` (or `artifacts` on the ending call). Each
    call replaces the selection with byte snapshots taken at that moment; `[]`

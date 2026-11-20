@@ -15,6 +15,34 @@ def _check(cond: Any, message: str, rejection: Optional[str] = None) -> None:
     check(cond, message, rejection)
 
 
+def _awaiting_arg(args: dict, wake: tuple) -> tuple[Optional[dict], tuple]:
+    """``(awaiting, wake)``: declared producer and the park's optional card probe."""
+    import os
+    from tools.kanban_tools import _Reject
+    from hermes_cli import kanban_awaiting as kaw
+
+    try:
+        awaiting = kaw.normalize(args.get("awaiting"))
+    except kaw.AwaitingError as exc:
+        raise _Reject(str(exc), exc.code) from exc
+    if awaiting and awaiting["kind"] == "human":
+        exc = kaw.human_error(os.environ.get("HERMES_KANBAN_TASK") or "",
+                              " ".join(str(args.get(k) or "") for k in ("reason", "checkpoint")) + " "
+                              + str(awaiting.get("why") or ""))
+        raise _Reject(str(exc), exc.code)
+    probe = None if wake[0] else kaw.card_probe(awaiting)
+    if probe:
+        from hermes_cli import kanban_wake_check as kwc
+        wake = (probe, kwc.normalize_every(None), wake[2])
+    elif not wake[0] and kaw.declared_chat_wait(awaiting):
+        wake = (wake[0], wake[1], True)  # its comment probe is added in the park txn (kanban_awaiting.park_probe)
+    try:
+        kaw.confirm_remote(awaiting, hint=" ".join(str(x) for x in (wake[0], args.get("reason"), args.get("checkpoint")) if x))
+    except kaw.AwaitingError as exc:
+        raise _Reject(str(exc), exc.code) from exc
+    return awaiting, wake
+
+
 def _blocker_id_arg(args: dict) -> Optional[str]:
     """Validated ``blocker_id`` (shared external blocker slug) or None. [daveey]"""
     raw = args.get("blocker_id")
