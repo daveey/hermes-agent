@@ -41,7 +41,7 @@ def _complete_zero(at_ms: int) -> dict:
         if fence.load_activation() is None:
             return {}
         count = census.complete_count()
-    except Exception:
+    except Exception:  # health: allow BLE001 -- any census/fence fault must degrade to UNKNOWN, never zero
         return {}
     if count is None:
         return {}

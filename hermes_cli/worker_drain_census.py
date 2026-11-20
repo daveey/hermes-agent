@@ -34,7 +34,7 @@ def census(proc_root: str = "/proc", uid: int | None = None) -> int | None:
     """Return the count of non-baseline worker processes, or None if UNKNOWN."""
     if not sys.platform.startswith("linux"):
         return None
-    uid = os.getuid() if uid is None else uid
+    uid = os.getuid() if uid is None else uid  # windows-footgun: ok
     me = str(os.getpid())
     try:
         entries = [e for e in os.listdir(proc_root) if e.isdigit()]

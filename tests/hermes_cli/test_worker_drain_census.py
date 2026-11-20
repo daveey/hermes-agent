@@ -21,7 +21,7 @@ U = "/user.slice/user-1000.slice/user@1000.service"
 def test_baseline_only_is_zero(tmp_path):
     _proc(tmp_path, 10, U + "/init.scope")
     _proc(tmp_path, 11, U + "/app.slice/gpg-agent.service")
-    assert census.census(str(tmp_path), uid=os.getuid()) == 0
+    assert census.census(str(tmp_path), uid=os.stat(str(tmp_path)).st_uid) == 0
 
 
 def test_unscoped_and_app_slice_work_counts(tmp_path):
@@ -29,20 +29,20 @@ def test_unscoped_and_app_slice_work_counts(tmp_path):
     _proc(tmp_path, 11, U + "/app.slice/hermes-core-update.service")
     _proc(tmp_path, 12, "/user.slice/user-1000.slice/session-3.scope")
     _proc(tmp_path, 13, U + "/hermes.slice/hermes-kanban.slice/x.service")
-    assert census.census(str(tmp_path), uid=os.getuid()) == 3
+    assert census.census(str(tmp_path), uid=os.stat(str(tmp_path)).st_uid) == 3
 
 
 def test_kernel_thread_ignored(tmp_path):
     _proc(tmp_path, 10, "/", cmdline="")
-    assert census.census(str(tmp_path), uid=os.getuid()) == 0
+    assert census.census(str(tmp_path), uid=os.stat(str(tmp_path)).st_uid) == 0
 
 
 def test_unreadable_entry_is_unknown(tmp_path):
     d = tmp_path / "10"
     d.mkdir()  # no cgroup file readable -> exited => skipped
-    assert census.census(str(tmp_path), uid=os.getuid()) == 0
+    assert census.census(str(tmp_path), uid=os.stat(str(tmp_path)).st_uid) == 0
     (d / "cgroup").mkdir()  # IsADirectoryError is an OSError we cannot classify
-    assert census.census(str(tmp_path), uid=os.getuid()) is None
+    assert census.census(str(tmp_path), uid=os.stat(str(tmp_path)).st_uid) is None
 
 
 def test_missing_proc_is_unknown(tmp_path):
