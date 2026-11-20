@@ -516,6 +516,15 @@ class SessionSessionsMixin:
 
     def _reopen_session_conn(self, conn, session_id: str) -> None:
         """Reopen on the caller's transaction, preserving queue and lineage invariants."""
+        ended = conn.execute("SELECT end_reason FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if ended is not None and ended["end_reason"] == "compression":
+            # Clearing a compression parent's stamp cuts the lineage: the turn-lease key (the compression
+            # root, walked while the parent is stamped) of every descendant moves from this root to the
+            # child, so a holder admitted on the old key would read "missing lease row" on its next flush
+            # and lose a turn it validly owns. A lease-less mutation of the root must not run under a live
+            # turn: refuse it like every other one (a stale row is reclaimed, a parked turn is refused).
+            self._check_transcript_write_guards(
+                conn, session_id, None, reject_active_turn_lease=True, allow_closed_compression_parent=True)
         self._retire_undrained_queue_rows_conn(conn, session_id)
         conn.execute(
             "UPDATE sessions AS child SET model_config = json_set("
