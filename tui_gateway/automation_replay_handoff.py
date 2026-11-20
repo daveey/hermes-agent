@@ -179,6 +179,10 @@ class Journal:
                              "WHERE batch=? AND status='batched'", (row["batch"],))
 
     def owners(self) -> list[str]:
-        with self.transaction() as conn:
-            return [row[0] for row in conn.execute(
-                "SELECT DISTINCT owner FROM automation_replay_items WHERE status IN ('queued','batched')")]
+        """Read-only (no write lock, no DDL): owners with undelivered custody."""
+        try:
+            with closing(sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=5.0)) as conn:
+                return [row[0] for row in conn.execute(
+                    "SELECT DISTINCT owner FROM automation_replay_items WHERE status IN ('queued','batched')")]
+        except sqlite3.OperationalError:  # table not created yet
+            return []

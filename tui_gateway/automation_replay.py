@@ -22,7 +22,8 @@ This module is the retry owner between the two, bounded so it cannot loop either
   fired at the recorded reset, the provider still refused and rebooked an hour, the replay gave up and the notice
   waited 8.5 h for a manual "resume", provider-169ae0ed1f).
 
-The timers live in this process: a backend restart drops a pending replay (the boot sweeps and the notice
+The timers live in this process. A backend RETIRED by an update hands its pending replays to the successor through
+the chat's profile store (automation_replay_handoff); a hard crash still drops them (the boot sweeps and the notice
 guarantee own that case). The boundary row an automation turn leaves says what failed and what happens next
 (``failure_line``), never "send it again".
 """
@@ -353,7 +354,7 @@ def schedule(session_key: str, *, text: str, display_kind: str, display_metadata
     item = _Item(text, display_kind, dict(display_metadata or {}), persisted, cause,
                  now if failed_at is None else failed_at, attempt)
     fire = fire or _fire
-    home = str(profile_home) if profile_home else None
+    home = _home_of(profile_home)
     with _lock:
         entry = _entries.get(key)
         if entry is not None:
@@ -549,6 +550,17 @@ def _fire(key: str) -> None:
 # --- replays into the chat's own profile store; the successor's continuing producer-admission pass replays them.
 
 
+def _home_of(profile_home: Any) -> str | None:
+    """The chat's exact profile home; ``None`` in a session record means the LAUNCH profile (resolved here)."""
+    if profile_home:
+        return str(profile_home)
+    try:
+        from hermes_constants import get_process_hermes_home
+        return str(get_process_hermes_home())
+    except Exception:  # health: allow BLE001 -- no resolvable home: custody stays local
+        return None
+
+
 def _item_dict(item: _Item, due: float) -> dict:
     return {"id": item.id, "text": item.text, "display_kind": item.display_kind,
             "display_metadata": item.display_metadata, "persisted": item.persisted, "cause": item.cause,
@@ -623,6 +635,7 @@ def _has_journal(home: Any) -> bool:
 
 def cancel_durable(home: Any, keys: Any, through: float, *, stop: bool = False) -> None:
     """A successful turn (context started at ``through``) or an explicit Stop fences handed-off custody."""
+    home = _home_of(home)
     if not home or not _has_journal(home):
         return
     try:
@@ -648,13 +661,31 @@ def _holder_alive(holder: str) -> bool:
         return False
 
 
+HANDOFF_FAILURES_MAX = 3  # error/refused verdicts one batch gets before the successor gives it up
+_failures: dict[str, int] = {}
+_consume_mu = threading.Lock()
+
+
 def consume_handoffs(homes: list, wake: Callable[..., str] | None = None, now: float | None = None) -> int:
     """The successor's pass: replay every due handed-off delivery through the ordinary wake admission, in the exact
-    profile that owns it. Returns how many batches ran. A refused admission leaves the batch pending (the
-    predecessor spent no budget). Delivery is at-least-once: a crash between the wake and settlement replays once
-    more (marked and bounded), never loses it. Never raises."""
-    if stale_code_reason():
+    profile that owns it. Returns how many batches ran. A busy admission leaves the batch pending (the
+    predecessor spent no budget); error/refused verdicts are bounded (``HANDOFF_FAILURES_MAX``) and a build failure
+    that already armed a local replay settles the batch (one owner). Delivery is at-least-once: a crash between the
+    wake and settlement replays once more (marked and bounded). Storage errors are contained per batch."""
+    if stale_code_reason() or not _consume_mu.acquire(blocking=False):
         return 0
+    try:
+        return _consume(homes, wake, now)
+    finally:
+        _consume_mu.release()
+
+
+def _own_or_alive(holder: str) -> bool:
+    # Inside ``_consume_mu`` a claim held by THIS process is a leftover of an earlier pass that failed to release.
+    return holder != _holder() and _holder_alive(holder)
+
+
+def _consume(homes: list, wake: Callable[..., str] | None, now: float | None) -> int:
     from tui_gateway.automation_replay_handoff import Journal
     ran = 0
     for home in homes:
@@ -668,26 +699,50 @@ def consume_handoffs(homes: list, wake: Callable[..., str] | None = None, now: f
             continue
         profile = Path(str(home)).name if Path(str(home)).parent.name == "profiles" else None
         for owner in owners:
-            batch = journal.claim(owner, time.time() if now is None else now, _holder(), _holder_alive)
+            try:
+                batch = journal.claim(owner, time.time() if now is None else now, _holder(), _own_or_alive)
+            except Exception:  # health: allow BLE001 -- retried on the next pass
+                logger.warning("automation-replay: claiming the handed-off replay of %s failed", owner, exc_info=True)
+                continue
             if batch is None:
                 continue
             ran += 1
             try:
-                items = [_item_from(d) for d in json.loads(batch["payload"])]
-                text, kind, meta = replay_payload(items)
-                if wake is None:
-                    from tui_gateway import server
-                    wake = server._wake_session_turn
-                verdict = wake(owner, text, display_kind=kind, display_metadata=meta, label="automation-replay",
-                               profiles=[profile])
-            except Exception:  # health: allow BLE001 -- retried on the next pass
-                logger.warning("automation-replay: handed-off replay of %s raised", owner, exc_info=True)
-                verdict = "error"
-            if verdict in ("started", "missing"):
-                if verdict == "missing":
-                    logger.warning("automation-replay: %s is gone; dropping its handed-off replay", owner)
-                journal.commit_message(batch, lambda conn, uid, v=verdict: (0, v))
-                journal.settle(batch)
-            else:
-                journal.release(batch)
+                _run_batch(journal, batch, owner, profile, wake)
+            except Exception:  # health: allow BLE001 -- storage error: the claim is ours, the next pass re-claims it
+                logger.warning("automation-replay: handed-off replay of %s hit a storage error", owner, exc_info=True)
     return ran
+
+
+def _run_batch(journal, batch: dict, owner: str, profile: str | None, wake) -> None:
+    try:
+        items = [_item_from(d) for d in json.loads(batch["payload"])]
+        text, kind, meta = replay_payload(items)
+        if wake is None:
+            from tui_gateway import server
+            wake = server._wake_session_turn
+        verdict = wake(owner, text, display_kind=kind, display_metadata=meta, label="automation-replay",
+                       profiles=[profile])
+    except Exception:  # health: allow BLE001 -- bounded below
+        logger.warning("automation-replay: handed-off replay of %s raised", owner, exc_info=True)
+        verdict = "error"
+    bid = batch["id"]
+    if verdict == "busy":
+        journal.release(batch)
+        return
+    if verdict not in ("started", "missing"):
+        with _lock:
+            _failures[bid] = _failures.get(bid, 0) + 1
+            tries = _failures[bid]
+            local = bool(_entries.get(owner))  # the failed wake already armed a local replay: it owns the delivery
+        if not local and tries < HANDOFF_FAILURES_MAX:
+            journal.release(batch)
+            return
+        logger.warning("automation-replay: giving up the handed-off replay of %s (%s after %d tries%s)", owner,
+                       verdict, tries, "; a local replay owns it" if local else "")
+        verdict = "gave_up"
+    elif verdict == "missing":
+        logger.warning("automation-replay: %s is gone; dropping its handed-off replay", owner)
+    _failures.pop(bid, None)
+    journal.commit_message(batch, lambda conn, uid, v=verdict: (0, v))
+    journal.settle(batch)

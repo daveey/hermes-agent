@@ -291,11 +291,110 @@ def test_retirement_hook_hands_off_pending(wired, monkeypatch):
     assert ar.handoff_all() == 1 and not ar.pending(KEY) and wired.owners() == [KEY]
 
 
-def test_entry_without_profile_home_stays_local_and_old_busy_budget_still_applies(wired, monkeypatch):
-    ar.schedule(KEY, text="x", display_kind="kanban_notice", display_metadata={}, due=1060.0, cause="q",
-                persisted=True, now=1000.0)
+def test_launch_profile_chat_hands_off_and_fences_via_the_launch_home(wired, monkeypatch):
+    # session records carry profile_home=None for the launch profile: that is the default case, not a leftover
+    monkeypatch.setattr("hermes_constants.get_process_hermes_home", lambda: wired.path.parent)
+    ar.schedule(KEY, text="x", display_kind="kanban_notice", display_metadata={}, due=1060.0,
+                cause="q", persisted=True, now=1000.0, profile_home=None)
     monkeypatch.setattr(ar, "stale_code_reason", lambda: "superseded")
-    assert not ar.handoff(KEY) and ar.pending(KEY)
+    for _ in range(ar.BUSY_RECHECKS_MAX + 2):
+        ar._fire(KEY)
+    assert not ar.pending(KEY) and wired.owners() == [KEY]
+    ar.cancel_durable(None, (KEY,), 1001.0, stop=True)  # None = launch store here too
+    assert wired.claim(KEY, 5000, "h", lambda _: False) is None
+
+
+def test_failing_batch_is_bounded_not_rewoken_every_pass(wired, monkeypatch):
+    wired.publish(KEY, [item(due=0)])
+    calls = []
+    for verdict in ("error", "refused"):
+        for _ in range(50):
+            ar.consume_handoffs([wired.path.parent], wake=lambda *a, **k: calls.append(1) or verdict, now=5000.0)
+        assert len(calls) <= ar.HANDOFF_FAILURES_MAX and not wired.owners()
+        wired.publish(KEY, [item(verdict, due=0)])
+        calls.clear()
+
+
+def test_build_failure_with_local_replay_settles_instead_of_double_owning(wired, monkeypatch):
+    wired.publish(KEY, [item(due=0)])
+
+    def wake(*a, **k):  # the real wake's build failure arms a local replay before returning "error"
+        ar.schedule(KEY, text="x", display_kind="kanban_notice", display_metadata={}, due=9e9, cause="build",
+                    persisted=False, now=1000.0, profile_home=wired.path.parent)
+        return "error"
+
+    assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 1
+    assert not wired.owners() and ar.pending(KEY)
+
+
+def test_storage_error_after_claim_does_not_strand_the_batch_or_raise(wired, monkeypatch):
+    wired.publish(KEY, [item(due=0)])
+    real, boom = Journal.release, {"n": 1}
+
+    def flaky(self, batch):
+        if boom["n"]:
+            boom["n"] = 0
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, batch)
+
+    monkeypatch.setattr(Journal, "release", flaky)
+    verdicts = iter(["busy", "started"])
+    wake = lambda *a, **k: next(verdicts)
+    assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 1  # no raise
+    assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 1  # own stale claim re-claimed
+    assert not wired.owners()
+
+
+# --- the wiring seams the retirement fix depends on ----------------------------------------------------------------
+
+
+def test_seam_retire_host_loops_publishes_pending(wired, monkeypatch):
+    from hermes_cli import host_loop_lease as hl
+    done = threading.Event()
+    monkeypatch.setattr(ar, "handoff_all", lambda: done.set() or 1)
+    monkeypatch.setattr(hl, "_RETIRED", {})
+    monkeypatch.setattr(hl, "_LEASES", [])
+    assert hl.retire_host_loops("t-seam", "superseded")
+    assert done.wait(5)
+
+
+def test_seam_run_pass_consumes_handoffs(monkeypatch):
+    from tui_gateway import producer_admission as pa
+    seen = []
+    monkeypatch.setattr(pa, "sweep_once", lambda: None)
+    monkeypatch.setattr(ar, "consume_handoffs", lambda homes, **k: seen.append(list(homes)) or 0)
+    monkeypatch.setattr(pa, "_server", lambda: types.SimpleNamespace(_readopt_wake_profiles=lambda: [None, "work"]))
+    lease = types.SimpleNamespace(held=lambda: True, beat=lambda: None)
+    assert pa.run_pass(lease)
+    assert len(seen) == 1 and len(seen[0]) == 2 and seen[0][1].name == "work"
+
+
+def test_seam_wake_resumes_only_in_the_given_profile(monkeypatch):
+    from tui_gateway import server
+    resumed = []
+    monkeypatch.setattr(server, "_find_live_session_by_key", lambda key: None)
+    monkeypatch.setattr(server, "_readopt_wake_profiles", lambda: [None, "a", "b"])
+    monkeypatch.setattr("tui_gateway.update_pause.left_to_successor", lambda *a, **k: False)
+    monkeypatch.setattr(ar, "retiring_backend_refuses", lambda *a, **k: False)
+
+    def resume(rid, params):
+        resumed.append(params.get("profile"))
+        return {"error": {"code": 4007}}
+
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    assert server._wake_session_turn(KEY, "x", label="t", profiles=["b"]) == "missing"
+    assert resumed == ["b"]
+    resumed.clear()
+    server._wake_session_turn(KEY, "x", label="t")
+    assert resumed == [None, "a", "b"]
+
+
+def test_seam_turn_success_and_user_stop_call_cancel_durable():
+    import inspect
+    from tui_gateway import prompt_turn, session_lifecycle
+    assert "cancel_durable" in inspect.getsource(prompt_turn._run_admitted_prompt)
+    src = inspect.getsource(session_lifecycle._interrupt_session_turn)
+    assert 'reason == "user_stop"' in src and "stop=True" in src
 
 
 def test_durable_success_and_stop_fences(wired):
