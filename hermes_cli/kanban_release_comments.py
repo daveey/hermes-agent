@@ -156,9 +156,9 @@ def _resolve(rows, event, payload, *, local_writer=False):
     Legacy synced events have no portable reference. Require acknowledgement of
     every plausible same-time/author row rather than guess among collisions.
     The timestamp tolerance covers the writer crossing a second between inserts;
-    body length alone cannot disambiguate (add_comment stores stripped text and
-    records the unstripped length); ``_own_write`` uses it only alongside the
-    event's own integer, author and write clocks.
+    body length alone cannot disambiguate (legacy add_comment events recorded
+    unstripped lengths; new events match the stored stripped text); ``_own_write``
+    uses it only alongside the event's own integer, author and write clocks.
     """
     if payload.get("comment_uid"):
         return [r for r in rows if "uid" in r.keys() and r["uid"] == payload["comment_uid"]]

@@ -103,6 +103,13 @@ def test_duplicate_uid_falls_back_and_fails_closed(monkeypatch):
         _replicate_with_uid(conn, tid, cid, "01a1f9cd-c774-709c-b90d-720d0241b4b4", len_delta=1)
         conn.execute("UPDATE task_comments SET uid = '01a1f9cd-c774-709c-b90d-720d0241b4b4' WHERE task_id = ?",
                      (tid,))
+        rows = prs._comment_rows(conn, tid)
+        # A hold alone can be supplied by duplicate-event protection even if the resolver
+        # incorrectly picks the first UID hit. Assert the ambiguity fallback itself.
+        event = {"comment_uid": "01a1f9cd-c774-709c-b90d-720d0241b4b4",
+                 "comment_id": cid, "author": "kanban-dispatcher",
+                 "len": len(f"Woken: the job finished: succeeded ({URL}). ")}
+        assert prs._event_row_id(rows, now + 8, event) is None
         assert prs.active_pr_reason(conn, tid, now + 700) == "active_pr"
 
 

@@ -281,7 +281,7 @@ def _row_matches(row: tuple[str, Optional[int], int], at: int, author: str, leng
     r_author, r_at, r_len = row
     if r_at is None or r_author != author or not 0 <= at - r_at <= COMMENT_EVENT_SKEW_SECONDS:
         return False
-    # The row body is stripped and the payload ``len`` is not: stripping only shortens.
+    # Legacy payloads counted unstripped bodies; new payloads match the stored stripped length.
     return r_len == length if exact else r_len <= length
 
 
