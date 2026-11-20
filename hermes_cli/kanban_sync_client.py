@@ -1032,7 +1032,7 @@ def _sync_board_locked(slug: str, path: Path, hub: Hub, gateway: str) -> RoundRe
         # An earlier round may have committed a quarantine before a later page
         # failed. Copy that safety state before sending anything this round.
         replica_path = shadow_path(slug)
-        if replica_path.exists():
+        if replica_path.exists() and quarantine.file_holds(replica_path):
             with connection(replica_path, lambda: open_shadow(slug, gateway)) as replica:
                 quarantine.adopt(replica, live)
         # Send before pulling as well as after: a pull backlog never holds local edits back (9 h, t_01a1d36ddcea59fe).

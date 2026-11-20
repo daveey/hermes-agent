@@ -32,6 +32,21 @@ def _exists(conn) -> bool:
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='containment_sync_quarantine'").fetchone() is not None
 
 
+def file_holds(path: Path) -> bool:
+    """Cheap peek: does this database file hold any quarantine row? Opens no pooled shadow connection."""
+    import sqlite3
+    try:
+        peek = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return False
+    try:
+        return _exists(peek) and peek.execute("SELECT 1 FROM containment_sync_quarantine LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        peek.close()
+
+
 def install(conn) -> None:
     from hermes_cli import kanban_containment_guard as guard
     from hermes_cli.kanban_containment_connections import verifier
