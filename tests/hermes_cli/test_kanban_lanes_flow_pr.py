@@ -12,7 +12,7 @@ from hermes_cli.kanban_lanes_flow_pr import Reader
     ("OPEN", "APPROVED", ["pass"], {"merged": False, "approved": True, "checks": "green"}),
     ("OPEN", "REVIEW_REQUIRED", ["pending"], {"merged": False, "approved": False, "checks": "pending"}),
     ("OPEN", "APPROVED", [], {"merged": False, "approved": True}),
-    ("OPEN", "APPROVED", ["fail"], {"merged": False, "approved": True}),
+    ("OPEN", "APPROVED", ["fail"], {"merged": False, "approved": True, "checks": "red"}),
     ("MERGED", "APPROVED", [], {"merged": True}),
     ("CLOSED", "APPROVED", [], {}),
 ])

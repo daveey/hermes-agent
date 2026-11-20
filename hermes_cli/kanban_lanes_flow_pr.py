@@ -108,6 +108,8 @@ class Reader:
                 buckets = [c.get("bucket") for c in checks if isinstance(c, dict)]
                 if len(buckets) == len(checks) and all(b == "pass" for b in buckets):
                     out["checks"] = "green"
+                elif "fail" in buckets:
+                    out["checks"] = "red"
                 elif "pending" in buckets:
                     out["checks"] = "pending"
         self.cache[url] = out

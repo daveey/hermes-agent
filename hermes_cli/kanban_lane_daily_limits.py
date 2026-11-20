@@ -85,5 +85,5 @@ def release_due(conn, *, foreign=()):
         opts = row_opts(conn, row)
         if lanes._gated(conn, pol, row["tenant"], opts) or reason(conn, pol, row["tenant"], opts):
             continue
-        count += lanes.admit(conn, tid, actor="lane-limit-reset", reason="daily lane capacity available")
+        count += lanes.admit(conn, tid, actor="lane-limit-reset", reason="daily lane capacity available", budget=False)
     return count

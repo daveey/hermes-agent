@@ -279,6 +279,8 @@ def _agent_task(opts: dict) -> Optional[str]:
     """
     if creator := opts.get("creator_task_id"):
         return creator
+    if opts.get("_stored_card"):
+        return None  # Stored provenance cannot inherit the evaluating worker's creator.
     owned = os.environ.get("HERMES_KANBAN_WORKER_TASK") or os.environ.get("HERMES_KANBAN_TASK")
     if not owned:
         return None

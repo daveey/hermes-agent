@@ -74,7 +74,7 @@ def _landing_step(card: dict) -> str:
         return "deploy"
     if approved is True and checks == "green" and merged is False:
         return "merge"
-    if checks == "pending":
+    if checks in ("pending", "red"):
         return "ci"
     if review_event:
         return "review"
