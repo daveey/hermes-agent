@@ -17,6 +17,7 @@ import { enErrorCodes } from './en_error_codes'
 import { enErrorLayers } from './en_error_layers'
 import { enExternalOpenFailed } from './en_external_open'
 import { enFirstRun } from './en_first_run'
+import { enForceUpdate } from './en_force_update'
 import { enGatewayHost } from './en_gateway_host'
 import { enLocalModels } from './en_local_models'
 import { enMemoryLayers } from './en_memory_layers'
@@ -4173,6 +4174,7 @@ export const en: Translations = {
       update: 'update',
       updateInProgress: 'Update in progress',
       backgroundUpdate: enBackgroundUpdate,
+      forceUpdate: enForceUpdate,
       commitsBehind: (count, branch) => `${count} commit${count === 1 ? '' : 's'} behind ${branch}`,
       releaseAvailable: (tag: string) => `Version ${tag} is available.`,
       desktopVersion: version => `Hermes Desktop v${version}`,

@@ -10,6 +10,8 @@ import type {
   CuratorStatusResponse,
   DebugShareResponse,
   ElevenLabsVoicesResponse,
+  ForceUpdateResponse,
+  ForceUpdateState,
   MemoryProviderConfig,
   MemoryProviderOAuthStatus,
   MemoryStatusResponse
@@ -158,6 +160,24 @@ export function updateHermes(): Promise<ActionResponse> {
   return hermesApi<ActionResponse>({
     ...profileScoped(),
     path: '/api/hermes/update',
+    method: 'POST'
+  })
+}
+
+/** [daveey] "Force update" on the backend version pill: whether hermes-sync owes an update on the active backend's
+ *  host, how many turns forcing it would stop, and any request already pending. */
+export function getForceUpdateState(): Promise<ForceUpdateState> {
+  return hermesApi<ForceUpdateState>({
+    ...profileScoped(),
+    path: '/api/hermes/update/force'
+  })
+}
+
+/** Ask hermes-sync to apply the pending core update now: running turns stop at their next step boundary. */
+export function forceHermesUpdate(): Promise<ForceUpdateResponse> {
+  return hermesApi<ForceUpdateResponse>({
+    ...profileScoped(),
+    path: '/api/hermes/update/force',
     method: 'POST'
   })
 }

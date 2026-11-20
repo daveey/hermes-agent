@@ -345,12 +345,27 @@ def pause_requested(home):
         return False
 
 
-def request_pause(home, *, expires_at, pid=None):
+def pause_forced(home):
+    """[daveey] The live pause request (``pause_requested``) carries ``"force": true``: hermes-sync's drainer is
+    serving a "Force update" request (``hermes_cli.core_update_force``), so turns the next backend would not
+    auto-continue stop at their next step boundary too. Never raises."""
+    if not pause_requested(home):
+        return False
+    try:
+        body = json.loads((Path(home) / "core-update" / PAUSE_REQUEST).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(body, dict) and body.get("force") is True
+
+
+def request_pause(home, *, expires_at, pid=None, force=False):
     root = Path(home) / "core-update"
     root.mkdir(parents=True, exist_ok=True)
     tmp = root / f".{PAUSE_REQUEST}.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps({"version": 1, "pid": pid or os.getpid(), "requested_at": time.time(),
-                               "expires_at": float(expires_at)}) + "\n", encoding="utf-8")
+    body = {"version": 1, "pid": pid or os.getpid(), "requested_at": time.time(), "expires_at": float(expires_at)}
+    if force:
+        body["force"] = True
+    tmp.write_text(json.dumps(body) + "\n", encoding="utf-8")
     os.replace(tmp, root / PAUSE_REQUEST)
 
 

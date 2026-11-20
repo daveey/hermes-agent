@@ -15,7 +15,8 @@ A continuation's pre-turn and pre-first-request pauses (t_01a1d31bf400d56c) make
 (``drain_retry_pending``, at most ``PARK_MAX_S``) without having taken a step. That is the intended bound: a
 window that cannot apply should not keep re-running the same request.
 
-A turn the next backend would not auto-continue is never paused. A paused turn whose window ends without
+A turn the next backend would not auto-continue is never paused (a forced pause stops it instead:
+``FORCED_STOP_REASON``). A paused turn whose window ends without
 an update (expired, apply refused) continues in place (``start_in_place_watcher``), unless its pause
 budget is spent and the drainer still runs. Drainer exit/cancellation releases that wait automatically, and
 so does ``PARK_MAX_S`` since the pause: a paused turn never waits on a drainer that cannot apply. A turn
@@ -64,9 +65,15 @@ PAUSE_RESTARTS_FRESHNESS = True
 # own grace), a still-running call of an auto-continuable turn
 # is cancelled through the user-Stop interrupt path (``start_mid_tool_cancel``), its result is persisted as
 # ``interrupted_tool_result`` and the turn pauses at the step boundary right after it, as ``boundary_pause_hook``
-# does. Turns ``not_resumable_reason`` rejects are never cancelled.
+# does. Turns ``not_resumable_reason`` rejects are never cancelled, unless the pause is forced (below).
 MID_TOOL_CANCEL = True
 MID_TOOL_GRACE_S = 30.0
+# [daveey] "Force update" (hermes_cli.core_update_force): while the pause request carries ``"force": true``
+# (``admission_fence.pause_forced``), a turn ``not_resumable_reason`` rejects is no longer left running: its
+# in-flight calls are cancelled after the same grace and the hook ends it at the next step boundary with this
+# reason. Nothing keeps its marker, so it ends like a stopped turn and is not continued: the user re-sends it.
+# Resumable turns pause and auto-continue exactly as without force.
+FORCED_STOP_REASON = "core_update_forced_stop"
 MID_TOOL_POLL_S = 1.0
 WATCH_POLL_S = 5.0
 WATCH_MAX_S = 6 * 3600.0
@@ -144,6 +151,15 @@ def pause_requested(session: dict) -> bool:
     try:
         return requested(_root(session))
     except Exception:
+        return False
+
+
+def pause_forced(session: dict) -> bool:
+    from hermes_cli.admission_fence import pause_forced as forced
+    try:
+        return forced(_root(session))
+    except Exception:
+        logger.debug("core-update pause: force flag unreadable", exc_info=True)
         return False
 
 
@@ -289,6 +305,9 @@ def boundary_pause_hook(session: dict, marker_key: str, *, carried: bool = False
         if user_stop_pending(session):  # before the marker is stamped or any job stopped; rechecked below
             return None
         why = not_resumable_reason(session, marker_key)
+        if why and pause_forced(session):
+            logger.info("core-update pause (forced): session %s stops its non-resumable turn (%s)", marker_key, why)
+            return FORCED_STOP_REASON
         if why:
             if not declined:
                 declined.append(why)
@@ -464,7 +483,10 @@ def mid_tool_cancel_step(session: dict, marker_key: str, agent: Any, state: dict
     if not running or now - max(seen, max(running.values())) < MID_TOOL_GRACE_S:
         return None
     why = not_resumable_reason(session, marker_key)
-    if why:
+    if why and pause_forced(session):
+        logger.info("core-update pause (forced): session %s cancels the running tool call(s) of its non-resumable "
+                    "turn (%s)", marker_key, why)
+    elif why:
         if state.get("declined") != why:
             state["declined"] = why
             logger.info("core-update pause: session %s keeps its running tool call (%s)", marker_key, why)
@@ -504,6 +526,9 @@ def start_mid_tool_cancel(session: dict, marker_key: str, agent: Any) -> Callabl
 CLARIFY_PAUSE_STATUS = "paused_for_update"
 CLARIFY_PAUSE_NOTICE = ("Hermes is pausing this turn at a step boundary for an update, so this question was "
                         "withdrawn unanswered. The turn continues automatically after the update: ask it again then.")
+# A forced update stops a turn that will not continue automatically: the user sends the request again.
+CLARIFY_FORCED_NOTICE = ("A forced Hermes update is stopping this turn, so this question was withdrawn unanswered. "
+                         "The turn does not continue automatically; the user will send the request again.")
 _clarify_provider_lock = threading.Lock()
 _clarify_provider_installed = False
 
@@ -527,12 +552,15 @@ def clarify_pause_provider(session_id: str, tool_call_id: str):
     if session is None or getattr(session.get("agent"), "step_boundary_pause", None) is None:
         return None
     marker_key = str(session.get("session_key") or "")
-    if not marker_key or not pause_requested(session) or not_resumable_reason(session, marker_key):
+    if not marker_key or not pause_requested(session):
+        return None
+    stops = bool(not_resumable_reason(session, marker_key))  # the forced pause ends it unpaused
+    if stops and not pause_forced(session):
         return None
     from tools.clarify_early import EarlyAnswer
     logger.info("core-update pause: session %s withdrew a pending clarify to pause for a Hermes update", marker_key)
     return EarlyAnswer({"status": CLARIFY_PAUSE_STATUS, "outcome": CLARIFY_PAUSE_STATUS,
-                        "notice": CLARIFY_PAUSE_NOTICE}, commit=lambda: None)
+                        "notice": CLARIFY_FORCED_NOTICE if stops else CLARIFY_PAUSE_NOTICE}, commit=lambda: None)
 
 
 def install_clarify_pause_provider() -> None:

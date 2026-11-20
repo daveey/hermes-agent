@@ -22,6 +22,7 @@ import type { CronControlCopy } from './types_cron_control'
 import type { GatewayGroupOpenCopy, SkillDeepLinkCopy } from './types_deep_links'
 import type { ExternalOpenFailedCopy } from './types_external_open'
 import type { FirstRunCopy } from './types_first_run'
+import type { ForceUpdateCopy } from './types_force_update'
 import type { GatewayHostTranslations } from './types_gateway_host'
 import type { MemoryLayersTranslations } from './types_memory_layers'
 import type { ModelMenuTranslations } from './types_model_menu'
@@ -3622,6 +3623,8 @@ export interface Translations extends NoticeTranslations {
       updateInProgress: string
       /** [daveey] A core update the host runs on its own (hermes-sync). */
       backgroundUpdate: BackgroundUpdateCopy
+      /** [daveey] "Force update" on the backend version pill's context menu. */
+      forceUpdate: ForceUpdateCopy
       commitsBehind: (count: number, branch: string) => string
       releaseAvailable: (tag: string) => string
       desktopVersion: (version: string) => string

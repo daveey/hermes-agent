@@ -1529,6 +1529,31 @@ export interface ActionResponse {
   already_running?: boolean
 }
 
+/** [daveey] A live "Force update" request (`<root>/core-update/force-request`), epoch seconds. */
+export interface ForceUpdateRequest {
+  version: number
+  requested_at: number
+  expires_at: number
+  by: string
+}
+
+/** `GET /api/hermes/update/force`: whether hermes-sync owes an update on this host, and what forcing it stops. */
+export interface ForceUpdateState {
+  available: boolean
+  running_turns: number
+  pending: ForceUpdateRequest | null
+  /** Why it is unavailable (only when `available` is false). */
+  message?: string
+}
+
+/** `POST /api/hermes/update/force` (a 409 with `detail` when no update is owed). */
+export interface ForceUpdateResponse {
+  ok: boolean
+  requested_at: number
+  expires_at: number
+  running_turns: number
+}
+
 export interface UpdateReceiptSummary {
   outcome: 'running' | 'success' | 'partial' | 'failed' | 'refused' | string
   started_at: string | null

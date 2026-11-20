@@ -59,3 +59,46 @@ def test_clear_removes_the_request(tmp_path):
     af.clear_pause_request(tmp_path)
     assert af.pause_requested(tmp_path) is False
     af.clear_pause_request(tmp_path)  # idempotent
+
+
+# ── [daveey] "Force update": the drainer stamps ``"force": true`` on the pause request ────────────────
+
+
+def test_forced_request_under_the_hold_is_forced(tmp_path):
+    _hold(tmp_path)
+    af.request_pause(tmp_path, expires_at=time.time() + 60, force=True)
+    assert af.pause_requested(tmp_path) is True and af.pause_forced(tmp_path) is True
+    body = json.loads((tmp_path / "core-update" / "pause-request").read_text())
+    assert body["force"] is True
+
+
+def test_unforced_request_is_not_forced(tmp_path):
+    _hold(tmp_path)
+    af.request_pause(tmp_path, expires_at=time.time() + 60)
+    assert af.pause_requested(tmp_path) is True and af.pause_forced(tmp_path) is False
+    assert "force" not in json.loads((tmp_path / "core-update" / "pause-request").read_text())
+
+
+def test_force_must_be_literally_true(tmp_path):
+    _hold(tmp_path)
+    (tmp_path / "core-update" / "pause-request").write_text(
+        json.dumps({"version": 1, "expires_at": time.time() + 60, "force": "yes"}))
+    assert af.pause_requested(tmp_path) is True and af.pause_forced(tmp_path) is False
+
+
+def test_expired_forced_request_is_not_forced(tmp_path):
+    _hold(tmp_path)
+    af.request_pause(tmp_path, expires_at=time.time() - 1, force=True)
+    assert af.pause_forced(tmp_path) is False
+
+
+def test_forced_request_without_the_hold_is_not_forced(tmp_path):
+    af.request_pause(tmp_path, expires_at=time.time() + 60, force=True)
+    assert af.pause_forced(tmp_path) is False
+
+
+def test_forced_check_never_raises_on_garbage(tmp_path):
+    _hold(tmp_path)
+    (tmp_path / "core-update" / "pause-request").write_text("[1, 2]")
+    assert af.pause_forced(tmp_path) is False
+    assert af.pause_forced(tmp_path / "missing") is False

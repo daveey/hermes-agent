@@ -187,6 +187,30 @@ describe('statusbar update channel vocabulary', () => {
   })
 })
 
+describe('statusbar Force update (hermes-sync)', () => {
+  it('offers Force update on the backend pill context menu and not on the client pill', () => {
+    act(() => {
+      $connection.set({ mode: 'remote' } as never)
+      $desktopVersion.set({
+        appVersion: '0.23.1',
+        electronVersion: '37',
+        hermesRoot: '/h',
+        nodeVersion: '22',
+        platform: 'darwin'
+      })
+      $updateStatus.set({ behind: 0, supported: true })
+    })
+
+    const items = renderStatusbarItems().statusbarItems
+    const backend = items.find(item => item.id === 'version-backend')
+    const client = items.find(item => item.id === 'version-client')
+
+    expect(backend?.contextMenuItems?.map(action => action.label)).toEqual([en.shell.statusbar.forceUpdate.menuItem])
+    expect(client).toBeDefined()
+    expect(client?.contextMenuItems ?? []).toEqual([])
+  })
+})
+
 describe('statusbar background core update (hermes-sync)', () => {
   const desktop = {
     appVersion: '0.23.1',

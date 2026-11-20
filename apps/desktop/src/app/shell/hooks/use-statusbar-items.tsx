@@ -9,6 +9,7 @@ import type { CommandCenterSection } from '@/app/command-center'
 import { toggleTerminalPane } from '@/app/right-sidebar/terminal/reveal-focus'
 import { useApprovalModeStatusbarItem } from '@/app/shell/approval-mode-menu'
 import { ContextMeterDetail, ContextUsagePanel } from '@/app/shell/context-usage-panel'
+import { forceBackendUpdate } from '@/app/shell/force-backend-update'
 import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
 import { useChangeWorkspaceItem } from '@/app/shell/hooks/use-change-workspace'
 import { useCompactConversation } from '@/app/shell/hooks/use-compact-conversation'
@@ -135,7 +136,8 @@ function versionItem(
   applying: boolean,
   toggleLabel: string,
   hidden = false,
-  background: BackgroundUpdateView | null = null
+  background: BackgroundUpdateView | null = null,
+  contextMenuItems?: StatusbarItem['contextMenuItems']
 ): StatusbarItem {
   // An apply Desktop started owns the pill; a host's own background update shows only otherwise.
   const bg = applying ? null : background
@@ -148,6 +150,7 @@ function versionItem(
     // `relative` anchors the bar to the pill's button; it rides the icon slot because the label sits in a
     // truncating (overflow-hidden) span that would clip anything drawn under the text.
     className: cn((status.hasUpdate || busy) && 'text-primary hover:text-primary', bg?.bar && 'relative'),
+    contextMenuItems,
     hidden: status.unknown || hidden,
     icon: bg?.bar ? (
       <>
@@ -541,7 +544,14 @@ export function useStatusbarItems({
 
     const background = describeBackgroundUpdate(backendUpdateProgress, Date.now(), copy.backgroundUpdate)
 
-    return versionItem('backend', status, applying, copy.toggleBackendVersion, false, background)
+    // [daveey] Right-click: push the host's pending core update through now (hermes-sync), stopping running turns.
+    const forceUpdate = {
+      id: 'force-update',
+      label: copy.forceUpdate.menuItem,
+      onSelect: () => void forceBackendUpdate(copy.forceUpdate)
+    }
+
+    return versionItem('backend', status, applying, copy.toggleBackendVersion, false, background, [forceUpdate])
   }, [
     backendUpdateProgress,
     cloudOwnsUpdates.backend,

@@ -87,6 +87,9 @@ export interface StatusbarItem {
    *  center, update/version pills) would strand the user if they could be
    *  hidden from the surface that hides them. */
   lockedVisible?: boolean
+  /** Actions shown at the top of the bar's right-click menu when the
+   *  right-click lands on this item (e.g. the backend pill's "Force update"). */
+  contextMenuItems?: readonly StatusbarMenuItem[]
 }
 
 export interface StatusbarSelectModifiers {
@@ -101,9 +104,25 @@ interface StatusbarControlsProps extends ComponentProps<'footer'> {
   items?: readonly StatusbarItem[]
 }
 
-export function StatusbarControls({ className, leftItems = [], items = [], ...props }: StatusbarControlsProps) {
+export function StatusbarControls({
+  className,
+  leftItems = [],
+  items = [],
+  onContextMenuCapture,
+  ...props
+}: StatusbarControlsProps) {
   const navigate = useNavigate()
   const hiddenIds = useStore($statusbarHiddenIds)
+  // The item a right-click landed on: its own actions head the bar's one context menu.
+  const [contextItemId, setContextItemId] = useState<null | string>(null)
+
+  const contextActions = useMemo(
+    () =>
+      [...leftItems, ...items]
+        .find(item => item.id === contextItemId)
+        ?.contextMenuItems?.filter(action => !action.hidden) ?? [],
+    [contextItemId, items, leftItems]
+  )
 
   const visible = (item: StatusbarItem) =>
     !item.hidden && (item.lockedVisible || !item.toggleLabel || !hiddenIds.includes(item.id))
@@ -117,6 +136,11 @@ export function StatusbarControls({ className, leftItems = [], items = [], ...pr
             className
           )}
           data-slot="statusbar"
+          onContextMenuCapture={event => {
+            const target = event.target instanceof Element ? event.target.closest('[data-statusbar-item]') : null
+            setContextItemId(target?.getAttribute('data-statusbar-item') ?? null)
+            onContextMenuCapture?.(event)
+          }}
           {...props}
         >
           {/* `overflow-x-clip` (not `overflow-x-auto`) so a wide status item — for
@@ -135,7 +159,7 @@ export function StatusbarControls({ className, leftItems = [], items = [], ...pr
           </div>
         </footer>
       </ContextMenuTrigger>
-      <StatusbarVisibilityMenu hiddenIds={hiddenIds} items={items} leftItems={leftItems} />
+      <StatusbarVisibilityMenu actions={contextActions} hiddenIds={hiddenIds} items={items} leftItems={leftItems} />
     </ContextMenu>
   )
 }
@@ -145,10 +169,12 @@ export function StatusbarControls({ className, leftItems = [], items = [], ...pr
  *  menu reads like the surface it edits. Hiding the whole bar lives at the
  *  bottom — VS Code puts it on the same context menu. */
 function StatusbarVisibilityMenu({
+  actions,
   hiddenIds,
   items,
   leftItems
 }: {
+  actions: readonly StatusbarMenuItem[]
   hiddenIds: readonly string[]
   items: readonly StatusbarItem[]
   leftItems: readonly StatusbarItem[]
@@ -175,6 +201,23 @@ function StatusbarVisibilityMenu({
 
   return (
     <ContextMenuContent className="w-52">
+      {actions.length > 0 && (
+        <>
+          {actions.map(action => (
+            <ContextMenuItem
+              className={action.className}
+              disabled={action.disabled}
+              key={action.id}
+              onSelect={() => action.onSelect?.()}
+              title={action.title}
+            >
+              {action.icon}
+              <span className="truncate">{action.label}</span>
+            </ContextMenuItem>
+          ))}
+          <ContextMenuSeparator />
+        </>
+      )}
       {toggles.length > 0 && (
         <>
           <ContextMenuLabel>{copy.customizeTitle}</ContextMenuLabel>
@@ -261,7 +304,12 @@ const StatusbarItemView = memo(function StatusbarItemView({
     // way profile-switcher.tsx stacks Popover/ContextMenu/Tooltip triggers.
     const trigger = (
       <DropdownMenuTrigger asChild>
-        <button className={cn(STATUSBAR_ACTION_CLASS, item.className)} disabled={item.disabled} type="button">
+        <button
+          className={cn(STATUSBAR_ACTION_CLASS, item.className)}
+          data-statusbar-item={item.id}
+          disabled={item.disabled}
+          type="button"
+        >
           {content}
         </button>
       </DropdownMenuTrigger>
@@ -333,6 +381,7 @@ const StatusbarItemView = memo(function StatusbarItemView({
             'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] text-(--ui-text-tertiary)',
             item.className
           )}
+          data-statusbar-item={item.id}
         >
           {content}
         </div>
@@ -343,7 +392,13 @@ const StatusbarItemView = memo(function StatusbarItemView({
   if (item.href || item.variant === 'link') {
     return (
       <Tip label={tooltipLabel}>
-        <a className={cn(STATUSBAR_ACTION_CLASS, item.className)} href={item.href} rel="noreferrer" target="_blank">
+        <a
+          className={cn(STATUSBAR_ACTION_CLASS, item.className)}
+          data-statusbar-item={item.id}
+          href={item.href}
+          rel="noreferrer"
+          target="_blank"
+        >
           {content}
         </a>
       </Tip>
@@ -354,6 +409,7 @@ const StatusbarItemView = memo(function StatusbarItemView({
     <Tip label={tooltipLabel}>
       <button
         className={cn(STATUSBAR_ACTION_CLASS, item.className)}
+        data-statusbar-item={item.id}
         disabled={item.disabled}
         onClick={event => {
           if (item.to) {

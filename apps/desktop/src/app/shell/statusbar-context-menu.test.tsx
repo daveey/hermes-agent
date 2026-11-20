@@ -58,3 +58,49 @@ describe('statusbar context menu coordination', () => {
     expect($contextMenu.get()).toBeNull()
   })
 })
+
+describe('statusbar item context actions', () => {
+  const onForce = vi.fn()
+
+  const items = [
+    {
+      contextMenuItems: [{ id: 'force-update', label: 'Force update', onSelect: onForce }],
+      id: 'version-backend',
+      label: 'backend v1',
+      toggleLabel: 'Backend version',
+      variant: 'action' as const
+    },
+    { id: 'version-client', label: 'client v1', toggleLabel: 'Client version', variant: 'action' as const }
+  ]
+
+  function rightClick(target: HTMLElement) {
+    fireEvent.pointerDown(target, { button: 2, ctrlKey: false, pointerType: 'mouse' })
+    fireEvent.contextMenu(target, { button: 2 })
+  }
+
+  it('heads the menu with the right-clicked item’s own actions and runs them', async () => {
+    render(
+      <MemoryRouter>
+        <StatusbarControls items={items} />
+      </MemoryRouter>
+    )
+
+    rightClick(screen.getByText('backend v1'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Force update' }))
+
+    expect(onForce).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not offer them for another item', async () => {
+    render(
+      <MemoryRouter>
+        <StatusbarControls items={items} />
+      </MemoryRouter>
+    )
+
+    rightClick(screen.getByText('client v1'))
+
+    expect(await screen.findByRole('menuitemcheckbox', { name: 'Client version' })).toBeTruthy()
+    expect(screen.queryByRole('menuitem', { name: 'Force update' })).toBeNull()
+  })
+})

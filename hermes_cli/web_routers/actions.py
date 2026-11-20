@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from hermes_cli.config import format_docker_update_message, recommended_update_command_for_method
 from hermes_cli.update_contract import COMMIT_BUILD_UPDATE_MESSAGE, is_commit_build
@@ -293,6 +294,52 @@ async def hermes_update_progress():
     from hermes_cli.core_update_progress import read_progress
 
     return {"progress": await asyncio.to_thread(read_progress)}
+
+
+_FORCE_UNAVAILABLE_MESSAGE = ("No background core update is pending on this host, so there is nothing to force. "
+                               "Force update only applies to an update hermes-sync is waiting to apply here.")
+
+
+def _force_update_state() -> dict[str, Any]:
+    """[daveey] What Desktop's "Force update" needs: whether hermes-sync has an update owed here (the same signal
+    as the version pill's ``/api/hermes/update/progress``), the turns it would stop, and any live request."""
+    from hermes_cli.core_update_force import read_force_request, running_turn_count
+    from hermes_cli.core_update_progress import read_progress
+    from hermes_constants import get_default_hermes_root
+
+    root = get_default_hermes_root()
+    available = read_progress() is not None
+    state: dict[str, Any] = {"available": available, "running_turns": running_turn_count(get_hermes_home()),
+                             "pending": read_force_request(root)}
+    if not available:
+        state["message"] = _FORCE_UNAVAILABLE_MESSAGE
+    return state
+
+
+@router.get("/api/hermes/update/force")
+async def hermes_update_force_state():
+    """``{"available", "running_turns", "pending"}`` for Desktop's "Force update" confirm (``message`` when
+    unavailable). See hermes_cli.core_update_force."""
+    return await asyncio.to_thread(_force_update_state)
+
+
+@router.post("/api/hermes/update/force")
+async def hermes_update_force(request: Request):
+    """Ask hermes-sync to push the pending core update through now: running turns stop at their next step
+    boundary (resumable ones continue after the update). Writes ``<root>/core-update/force-request``."""
+    from hermes_cli.core_update_force import write_force_request
+    from hermes_constants import get_default_hermes_root
+
+    state = await asyncio.to_thread(_force_update_state)
+    if not state["available"]:
+        # 409 with ``detail`` (what Desktop's error toast reads) and the ``ok: false`` shape of the update refusals.
+        return JSONResponse(status_code=409, content={"ok": False, "error": "force_update_unavailable",
+                                                      "message": state["message"], "detail": state["message"]})
+    principal = getattr(getattr(request.state, "token_principal", None), "principal", None) or "dashboard"
+    body = await asyncio.to_thread(write_force_request, get_default_hermes_root(), str(principal))
+    _log.info("Hermes core update FORCE requested by %s (%d running turn(s))", principal, state["running_turns"])
+    return {"ok": True, "requested_at": body["requested_at"], "expires_at": body["expires_at"],
+            "running_turns": state["running_turns"]}
 
 
 @router.get("/api/hermes/update/check")

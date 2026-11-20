@@ -2377,5 +2377,12 @@
   "shell.statusbar.backgroundUpdate.tooltipPastCap": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "shell.statusbar.backgroundUpdate.tooltipApplying": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "shell.statusbar.backgroundUpdate.tooltipBlocked": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
-  "shell.statusbar.backgroundUpdate.waitingOn": ["ar","de","es","fr","ja","ru","zh","zh-hant"]
+  "shell.statusbar.backgroundUpdate.waitingOn": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.forceUpdate.menuItem": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.forceUpdate.confirmTitle": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.forceUpdate.confirmBody": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.forceUpdate.confirmLabel": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.forceUpdate.cancelLabel": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.forceUpdate.requested": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.forceUpdate.failed": ["ar","de","es","fr","ja","ru","zh","zh-hant"]
 }
