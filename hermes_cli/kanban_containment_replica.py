@@ -73,9 +73,20 @@ def remember(conn: sqlite3.Connection, evidence: dict, *, board: str, task: str,
             _CACHE.reset(token)
 
 
+# Server bookkeeping the Board re-stamps when it rewrites an unchanged event row (version 1 -> 2 with
+# a new seq/hlc/updated_at; seen 2026-11-20 06:30Z on a `contained` receipt). They place the row in
+# the feed; they are not part of what the containment proof certifies, so a re-fetch that differs
+# only there is the same receipt. Every other row field (uid, kind, payload, origin, created_at,
+# run_uid, deleted_at, ord, ...) stays identity.
+_ROW_BOOKKEEPING = frozenset({"seq", "hlc", "updated_at", "version"})
+
+
 def _certified(raw: str) -> tuple:
     data = json.loads(raw)
-    return tuple(json.dumps(data.get(k), sort_keys=True) for k in ("row", "containment_v1"))
+    row = data.get("row")
+    if isinstance(row, dict):
+        row = {k: v for k, v in row.items() if k not in _ROW_BOOKKEEPING}
+    return (json.dumps(row, sort_keys=True), json.dumps(data.get("containment_v1"), sort_keys=True))
 
 
 def _cached(conn: sqlite3.Connection, uid: str) -> dict | None:

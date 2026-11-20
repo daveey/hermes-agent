@@ -175,6 +175,22 @@ def test_receipt_cache_ignores_volatile_evidence_head(synced_conn):
     assert len(stored) == 1 and json.loads(stored[0][0])["head"] == 100
 
 
+def test_receipt_cache_ignores_board_row_restamp(synced_conn):
+    # Live 2026-11-20 06:30Z: the Board rewrote an unchanged `contained` row (version 1 -> 2, new
+    # seq/hlc/updated_at). Every replica holding the first copy crashed its sync loop on re-fetch.
+    conn = synced_conn
+    target, _, stop, _, hub = scenario(conn)
+    proof = hub.events[stop["event_uid"]]
+    proof["row"].update(seq=3668634, hlc="1795143677540-0000-server", updated_at=1795143677540, version=1)
+    replica.remember(conn, proof, board="fixture", task=target, uid=stop["event_uid"])
+    restamped = copy.deepcopy(proof)
+    restamped["head"] = 3699180
+    restamped["row"].update(seq=3695610, hlc="1795156252424-0000-server", updated_at=1795156252424, version=2)
+    replica.remember(conn, restamped, board="fixture", task=target, uid=stop["event_uid"])
+    stored = conn.execute("SELECT evidence FROM containment_canonical_receipts").fetchall()
+    assert len(stored) == 1 and json.loads(stored[0][0])["row"]["seq"] == 3668634  # first copy kept
+
+
 def _foreign_origin(evidence):
     # origin_gateway must stay aligned with containment_v1.gateway so certified_stop
     # still passes; identity comparison is what must refuse.
@@ -188,7 +204,8 @@ def _foreign_origin(evidence):
     # request="changed" is refused by canonical_event (_uid) before identity compare.
     lambda e: e["containment_v1"].update(request=sync.uuid7()),
     lambda e: e["row"].update(created_at=12345),
-], ids=["payload", "origin", "proof", "row"])
+    lambda e: e["row"].update(run_uid=sync.uuid7()),
+], ids=["payload", "origin", "proof", "row", "run_uid"])
 def test_receipt_cache_still_refuses_certified_changes_with_head(synced_conn, mutate):
     conn = synced_conn
     target, _, stop, _, hub = scenario(conn)
