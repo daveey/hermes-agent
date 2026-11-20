@@ -6,14 +6,16 @@ import math
 def publish(conn, task: dict) -> dict | None:
     """Publish only the latest current park's ask, never a historical question."""
     status = task.get('status')
-    if status not in ('scheduled', 'blocked'):
+    # A blocked card already reaches the origin chat through the terminal notice, whose identity must not change
+    # on rollout (re-notifying delivered blocks / resurrecting stale ones): only a parked ask is enveloped.
+    if status != 'scheduled':
         return None
-    kinds = ('scheduled', 'continued', 'decision_requested') if status == 'scheduled' else ('blocked',)
+    kinds = ('scheduled', 'continued', 'decision_requested')
     marks = ','.join('?' for _ in kinds)
     row = conn.execute(
         f'SELECT id,kind,created_at,payload FROM task_events WHERE task_id=? AND kind IN ({marks}) ORDER BY id DESC LIMIT 1',
         (task['id'], *kinds)).fetchone()
-    if row is None or (status == 'scheduled' and row[1] != 'decision_requested'):
+    if row is None or row[1] != 'decision_requested':
         return None
     return {'event_id': row[0], 'kind': row[1], 'created_at': row[2], 'payload': json.loads(row[3] or '{}')}
 
@@ -23,7 +25,7 @@ def envelope(task: dict) -> dict | None:
     notice = task.get('ask_notice')
     if not isinstance(notice, dict):
         return None
-    expected = {'scheduled': 'decision_requested', 'blocked': 'blocked'}.get(task.get('status'))
+    expected = 'decision_requested' if task.get('status') == 'scheduled' else None
     if (expected is None or notice.get('kind') != expected or type(notice.get('event_id')) is not int
             or notice['event_id'] <= 0 or type(notice.get('created_at')) not in (int, float)
             or not math.isfinite(notice['created_at']) or not isinstance(notice.get('payload'), dict)):
