@@ -2,7 +2,7 @@
  "counts": {
   "http": {
    "keep-host-wide": 1,
-   "undecided": 351
+   "undecided": 352
   },
   "rpc": {
    "authority": 114,
@@ -109,6 +109,7 @@
   {"current_path": "hermes_cli.web_routers.status:get_health", "decision": "undecided", "handler": "GET /api/health", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.status:get_health_idle", "decision": "undecided", "handler": "GET /api/health/idle", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.actions:check_hermes_update", "decision": "undecided", "handler": "GET /api/hermes/update/check", "kind": "http", "ref": ""},
+  {"current_path": "hermes_cli.web_routers.actions:hermes_update_progress", "decision": "undecided", "handler": "GET /api/hermes/update/progress", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.actions:get_update_receipt", "decision": "undecided", "handler": "GET /api/hermes/update/receipt", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.status:get_host_identity", "decision": "undecided", "handler": "GET /api/host/identity", "kind": "http", "ref": ""},
   {"current_path": "hermes_cli.web_routers.status:get_learning_graph", "decision": "undecided", "handler": "GET /api/learning/graph", "kind": "http", "ref": ""},
