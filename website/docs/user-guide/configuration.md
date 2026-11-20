@@ -51,6 +51,18 @@ episode, parent snapshot cut and producer source hash remain unknown when the
 caller has no authoritative provenance. Missing journal custody invalidates the
 recorder rather than failing creation. Receipts do not certify capture coverage.
 
+## Scheduled probe premise notices
+
+`kanban.wake_check_notice_hours` (default `6`, positive finite hours) controls a
+passive notice for a scheduled probe that keeps returning clean exit 1. After
+at least three consecutive not-ready checks spanning that age in the current
+park, the dispatcher notifies the linked chat/owner once, naming the command
+and last output, only if the backstop remains more than 24 hours away. Re-parking
+starts a new notice episode; failed probes break its streak. Clock-only waits
+and explicitly eligible `kanban.passive_intake` listeners never get this notice.
+Invalid values fall back to six hours. This does not change probe results,
+backstops, admission, or the separate 48-hour stale-probe reconsideration.
+
 ## Standing Kanban intake listeners
 
 `kanban.passive_intake` defaults to `{}`. It maps exact task IDs to exact stored

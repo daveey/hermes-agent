@@ -932,7 +932,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                     kb.add_comment(conn, task_id, "kanban-dispatcher", stale["note"])
                 return woke
             from hermes_cli import kanban_wake_unproven as unproven  # [daveey] one early passive notice
-            unproven.note_check(conn, task_id, cmd, tail, now)
+            unproven.note_check(conn, task_id, cmd, tail, now, passive_policy=passive_policy)
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "
                 "next_at = ? WHERE task_id = ?", (now, tail, _after_probe(state, claimed_next_at, now), task_id))

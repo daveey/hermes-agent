@@ -12,7 +12,6 @@ so they never reach this.
 """
 from __future__ import annotations
 
-import json
 import math
 import sqlite3
 from typing import Optional
@@ -43,21 +42,12 @@ def notice_seconds() -> float:
 
 def _latest_park(conn: sqlite3.Connection, task_id: str) -> Optional[tuple[int, int, int]]:
     """``(event_id, parked_at, wake_at)`` of the card's newest park, or None."""
-    from hermes_cli import kanban_timed_park as ktp
+    from hermes_cli.kanban_continuation import park_state
 
-    row = conn.execute("SELECT id, payload, created_at FROM task_events WHERE task_id = ? "
-                       "AND kind IN ('scheduled', 'continued') ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
-    if row is None:
+    park = park_state(conn, task_id)
+    if not park["timed"] or park["payload"].get("clock_only"):
         return None
-    try:
-        payload = json.loads(row[1] or "{}")
-    except ValueError:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    if payload.get("clock_only"):
-        return None  # a pure time wait has no probe to doubt
-    return int(row[0]), int(row[2]), int(ktp.implied_wake(payload, int(row[2])))
+    return park["event_id"], park["parked_at"], int(park["payload"]["wake_at"])
 
 
 def maybe_notice(conn: sqlite3.Connection, task_id: str, cmd: str, out: str, *, now: int, first_at: int,
@@ -86,10 +76,33 @@ def maybe_notice(conn: sqlite3.Connection, task_id: str, cmd: str, out: str, *, 
     return True
 
 
-def note_check(conn: sqlite3.Connection, task_id: str, cmd: str, out: str, now: int) -> bool:
-    """After a counted clean exit 1: notice from the card's wake episode, when there is one."""
-    ep = conn.execute("SELECT first_at, checks FROM task_wake_episodes WHERE task_id = ?", (task_id,)).fetchone()
-    return bool(ep) and maybe_notice(conn, task_id, cmd, out, now=now, first_at=ep[0], checks=ep[1])
+def note_check(conn: sqlite3.Connection, task_id: str, cmd: str, out: str, now: int, *,
+               passive_policy=None) -> bool:
+    """Count clean not-ready observations within this park, not the longer stale-wake episode.
+
+    Local observation state is deliberately separate from the portable same-probe age: re-parking
+    resets this notice's count without renewing the existing 48 h stale-wake lease.
+    """
+    from hermes_cli import kanban_passive_intake as passive
+
+    park = _latest_park(conn, task_id)
+    if park is None or passive.current(conn, task_id, cmd, policy=passive_policy):
+        return False
+    conn.execute("""CREATE TABLE IF NOT EXISTS task_wake_notice_checks (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+        park_id INTEGER NOT NULL, first_at INTEGER NOT NULL, checks INTEGER NOT NULL)""")
+    previous = conn.execute("SELECT last_rc FROM task_wake_checks WHERE task_id = ?", (task_id,)).fetchone()
+    # A failed/invalid probe breaks the consecutive not-ready streak, but not notice deduplication.
+    if previous is not None and previous[0] != 1:
+        conn.execute("DELETE FROM task_wake_notice_checks WHERE task_id = ?", (task_id,))
+    conn.execute("INSERT INTO task_wake_notice_checks VALUES (?, ?, ?, 1) ON CONFLICT(task_id) DO UPDATE SET "
+                 "park_id = excluded.park_id, "
+                 "first_at = CASE WHEN park_id = excluded.park_id THEN first_at ELSE excluded.first_at END, "
+                 "checks = CASE WHEN park_id = excluded.park_id THEN checks + 1 ELSE 1 END",
+                 (task_id, park[0], now))
+    first, checks = conn.execute("SELECT first_at, checks FROM task_wake_notice_checks WHERE task_id = ?",
+                                 (task_id,)).fetchone()
+    return maybe_notice(conn, task_id, cmd, out, now=now, first_at=first, checks=checks)
 
 
 def notice_text(payload: dict) -> str:

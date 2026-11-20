@@ -110,6 +110,135 @@ def test_clock_only_wait_never_notifies(kanban_home, monkeypatch):
         assert not notices(conn, tid)
 
 
+def test_minimum_checks_belong_to_current_park(parked):
+    conn, tid, clock = parked
+    for hour in (0, 1, 2, 6):
+        result(parked, hour)
+    clock[0] += 9 * HOUR
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+    assert kb.claim_task(conn, tid, claimer="worker")
+    _park(conn, tid, clock, wake_check=PROBE)
+    result(parked, 7)
+    result(parked, 14)
+    assert len(notices(conn, tid)) == 1
+    result(parked, 15)
+    assert len(notices(conn, tid)) == 2
+    assert notices(conn, tid)[-1].payload["checks"] == 3
+
+
+def test_check_age_starts_at_first_check_not_park(parked):
+    conn, tid, _ = parked
+    for hour in (5, 6, 10.9):
+        result(parked, hour)
+    assert not notices(conn, tid)
+    result(parked, 11)
+    assert len(notices(conn, tid)) == 1
+
+
+def test_exact_age_and_backstop_boundaries(parked):
+    conn, tid, _ = parked
+    # Seven-day backstop minus 24 h: exactly the far-backstop boundary.
+    for hour in (138, 140, 144):
+        result(parked, hour)
+    assert not notices(conn, tid)
+
+
+def test_exact_age_notifies(parked):
+    conn, tid, _ = parked
+    for hour in (0, 1, 6):
+        result(parked, hour)
+    assert len(notices(conn, tid)) == 1
+
+
+def test_configurable_notice_age(parked, monkeypatch):
+    from hermes_cli import config
+
+    conn, tid, _ = parked
+    monkeypatch.setattr(config, "load_config_readonly", lambda: {"kanban": {"wake_check_notice_hours": 2}})
+    for hour in (0, 1, 2):
+        result(parked, hour)
+    assert len(notices(conn, tid)) == 1
+
+
+def test_notice_key_is_registered():
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["kanban"]["wake_check_notice_hours"] == 6
+
+
+def test_passive_listener_does_not_notify(parked, monkeypatch):
+    from hermes_cli import kanban_passive_intake as passive
+
+    conn, tid, clock = parked
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+    assert kb.claim_task(conn, tid, claimer="worker")
+    _park(conn, tid, clock, wake_check=PROBE,
+          awaiting={"kind": "external", "ref": "example vendor", "why": "standing external listener"})
+    monkeypatch.setattr(passive, "snapshot", lambda: {tid: PROBE})
+    for hour in (0, 1, 7):
+        result(parked, hour)
+    assert not notices(conn, tid)
+
+
+def test_continued_park_notifies(parked):
+    conn, tid, _ = parked
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_events SET kind='continued' WHERE task_id=? AND kind='scheduled'", (tid,))
+    for hour in (0, 1, 7):
+        result(parked, hour)
+    assert len(notices(conn, tid)) == 1
+
+
+@pytest.mark.parametrize("value, expected", [(2, 7200), (None, 21600), ("bad", 21600),
+                                                 (0, 21600), (-1, 21600), (float("inf"), 21600)])
+def test_notice_config_values(monkeypatch, value, expected):
+    from hermes_cli import config
+
+    monkeypatch.setattr(config, "load_config_readonly", lambda: {"kanban": {"wake_check_notice_hours": value}})
+    assert unproven.notice_seconds() == expected
+
+
+def test_minimum_three_checks(parked):
+    conn, tid, _ = parked
+    result(parked, 0)
+    result(parked, 7)
+    assert not notices(conn, tid)
+    result(parked, 8)
+    assert len(notices(conn, tid)) == 1
+
+
+def test_failed_probe_breaks_notice_streak(parked):
+    conn, tid, clock = parked
+    result(parked, 0)
+    result(parked, 3)
+    state = wc.get_state(conn, tid)
+    wc.apply_result(conn, tid, state["cmd"], 2, "temporary probe failure", generation=state["generation"],
+                    now=clock[0] + 4 * HOUR)
+    for hour in (7, 8, 12):
+        result(parked, hour)
+    assert not notices(conn, tid)
+    result(parked, 13)
+    assert len(notices(conn, tid)) == 1
+    assert notices(conn, tid)[0].payload["checks"] == 4
+
+
+def test_spent_park_is_not_used(parked):
+    conn, tid, _ = parked
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
+    assert kb.claim_task(conn, tid, claimer="worker")
+    assert unproven._latest_park(conn, tid) is None
+
+
+def test_notice_without_park(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = helpers._running(conn)
+        with kb.write_txn(conn):
+            assert not unproven.note_check(conn, tid, PROBE, "", int(time.time()))
+
+
 def test_notice_is_a_delivered_passive_kind():
     from gateway import kanban_watchers_notifier as gw
     from tui_gateway import session_notifications as tui
