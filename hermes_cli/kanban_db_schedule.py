@@ -61,9 +61,8 @@ def schedule_task(
         task = _kb.get_task(conn, task_id)
         source_status = (_kb._retry_status_for_run(conn, task_id) if task and task.status == 'running'
                          else _kb._resume_status_from_events(conn, task_id))
-        if task and task.status == 'review':
-            source_status = 'review'
-        payload['resume_status'] = source_status
+        if source_status == 'review':
+            payload['resume_status'] = source_status
         if watch:
             payload["watch"] = True
         wake_check, check_every = kwc.validate_park(
@@ -80,7 +79,7 @@ def schedule_task(
                    claim_expires= NULL,
                    worker_pid   = NULL
              WHERE id = ?
-               AND status IN ('todo', 'ready', 'running', 'blocked', 'triage', 'review')
+               AND status IN ('todo', 'ready', 'running', 'blocked', 'triage')
         """
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"

@@ -133,7 +133,7 @@ def test_three_admission_failures_then_legacy_deep_wake_keeps_reviewer(board, mo
 
 
 @pytest.mark.parametrize('wake', ['unblock', 'timer'])
-@pytest.mark.parametrize('source', ['review', 'ready', 'running'])
+@pytest.mark.parametrize('source', ['triage', 'ready', 'running'])
 def test_schedule_unblock_preserves_source_lane(board, source, wake):
     conn, _ = board
     tid = kb.create_task(conn, title='Wait', assignee='worker')
@@ -141,6 +141,8 @@ def test_schedule_unblock_preserves_source_lane(board, source, wake):
     conn.commit()
     if source == 'running':
         assert kb.claim_review_task(conn, tid, claimer=kb._claimer_id())
+    elif source == 'triage':
+        kb._append_event(conn, tid, 'gave_up', {'resume_status': 'review'})
     assert kb.schedule_task(conn, tid, clock_only=True, awaiting={'kind': 'clock', 'why': 'cooldown'})
     if wake == 'unblock':
         assert kb.unblock_task(conn, tid)
