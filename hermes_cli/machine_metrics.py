@@ -304,6 +304,7 @@ class Reporter:
         self.cpu_take_fn = cpu_take_fn
         self.next_at = 0.0
         self.counters_off_until = 0.0  # a Board without throughput counters 400s them: skip until then
+        self.claiming_off_until = 0.0  # a Board that rejects claiming: skip it so the next report can keep CPU
         # The sync loop (report_due) and the anchored sender thread (report_tick, machine_metrics_sender) share one
         # Reporter: one report at a time (non-blocking), and report starts at least REPORT_EVERY_S / 2 apart (the
         # loop's next_at is always a full period after the latest start; the sender checks started_at).
@@ -395,12 +396,17 @@ class Reporter:
             if now < self.counters_off_until:  # this Board rejected them lately: the normal report only
                 from hermes_cli.machine_throughput_metrics import FIELDS
                 sample = {k: v for k, v in sample.items() if k not in FIELDS and k != "tokens_by_model"}
+            if now < self.claiming_off_until:
+                sample.pop("claiming", None)
 
             def counters_rejected() -> None:
                 self.counters_off_until = now + UNSUPPORTED_RETRY_S
+
+            def claiming_rejected() -> None:
+                self.claiming_off_until = now + UNSUPPORTED_RETRY_S
             self.started_at = now
             with timing.span("send"):  # preserve the transport's existing hard 2 s budget
-                send_compatible(send, sample, counters_rejected)
+                send_compatible(send, sample, counters_rejected, claiming_rejected)
             self.sent_at = self.clock()  # a failed send left the row as it was: it is no keepalive
             return True
         except Exception as exc:  # health: allow BLE001 -- load reporting must never stop kanban sync

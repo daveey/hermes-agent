@@ -285,6 +285,29 @@ def test_collect_attaches_cached_throughput_counters(tmp_path, monkeypatch):
 COUNTERS = {"tokens_io_total": 45, "tokens_cache_total": 310, "sessions_started_total": 3, "sessions_ended_total": 2}
 
 
+def test_rejected_claiming_backs_off_so_the_next_report_keeps_cpu():
+    """A Board that accepts CPU and rejects claiming must store a fresh CPU sample on the next report."""
+    sent, now = [], [1000.0]
+    cpu = {"cpu_busy_pct": 12.5, "cpu_busy_window_ms": 1000, "cpu_busy_sample_end_ms": 1}
+
+    def board(value):
+        sent.append(dict(value))
+        if "claiming" in value:
+            raise ksc.HubError(400, "unknown field(s): claiming")
+
+    r = mm.Reporter(board, collect_fn=lambda: {"cpus": 4, "drain_active": 0, "claiming": 1, **cpu},
+                    clock=lambda: now[0])
+    assert r.report_due()
+    assert "cpu_busy_pct" in sent[0] and "claiming" in sent[0]
+    assert "cpu_busy_pct" not in sent[1] and "claiming" not in sent[1]
+    assert r.claiming_off_until == now[0] + mm.UNSUPPORTED_RETRY_S
+    now[0] += mm.REPORT_EVERY_S
+    assert r.report_due() and len(sent) == 3
+    assert sent[2]["cpu_busy_pct"] == 12.5 and "claiming" not in sent[2]
+    now[0] = 1000.0 + mm.UNSUPPORTED_RETRY_S
+    assert r.report_due() and sent[3]["claiming"] == 1
+
+
 def test_board_without_counters_gets_the_normal_report_and_is_not_asked_again_for_600s():
     sent, now = [], [1000.0]
     sample = {"cpus": 4, "drain_active": 0, "claiming": 1, **COUNTERS}
@@ -298,8 +321,9 @@ def test_board_without_counters_gets_the_normal_report_and_is_not_asked_again_fo
     without_claiming = {k: v for k, v in sample.items() if k != "claiming"}
     assert sent == [sample, without_claiming, {"cpus": 4, "drain_active": 0}]
     assert r.counters_off_until == now[0] + mm.UNSUPPORTED_RETRY_S
+    assert r.claiming_off_until == now[0] + mm.UNSUPPORTED_RETRY_S
     now[0] += mm.REPORT_EVERY_S
-    assert r.report_due() and sent[3:] == [{"cpus": 4, "drain_active": 0, "claiming": 1}]
+    assert r.report_due() and sent[3:] == [{"cpus": 4, "drain_active": 0}]
     now[0] = 1000.0 + mm.UNSUPPORTED_RETRY_S
     assert r.report_due() and sent[4] == sample  # asks again after the backoff, claiming included
 

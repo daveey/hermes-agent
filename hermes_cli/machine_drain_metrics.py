@@ -38,7 +38,7 @@ def collect():
 ADDITIVE_FIELDS = ("drain_active", "drain_until_ms", "cpu_busy_pct", "cpu_busy_window_ms", "cpu_busy_sample_end_ms") + ADMISSION_FIELDS
 
 
-def send_compatible(send, sample, on_counters_rejected=None):
+def send_compatible(send, sample, on_counters_rejected=None, on_claiming_rejected=None):
     """Old Boards reject unknown metrics atomically; downgrade each optional generation once.
 
     Only a 400 on a sample that carried an additive field is retried; any other error (timeouts included) is raised
@@ -67,25 +67,31 @@ def send_compatible(send, sample, on_counters_rejected=None):
         if any(k in sample for k in persistent):
             from hermes_cli.machine_cpu_metrics import FIELDS as CPU
             return send_compatible(send, {k: v for k, v in sample.items()
-                                          if k not in persistent and k not in CPU}, on_counters_rejected)
+                                          if k not in persistent and k not in CPU},
+                                    on_counters_rejected, on_claiming_rejected)
         if "claiming" in sample:
-            # Newest field. An older Board rejects it atomically; drop it once and
-            # keep counters, drain and admission for the next generation.
+            # Newest field. Remember the rejection so the next fresh report can
+            # omit it and keep a CPU sample the Board already accepts.
+            if on_claiming_rejected is not None:
+                on_claiming_rejected()
             from hermes_cli.machine_cpu_metrics import FIELDS as CPU
             return send_compatible(send, {k: v for k, v in sample.items()
-                                          if k != "claiming" and k not in CPU}, on_counters_rejected)
+                                          if k != "claiming" and k not in CPU},
+                                    on_counters_rejected, on_claiming_rejected)
         if "tokens_by_model" in sample:
             # A scalar-capable Board may predate the model map. Keep its counters
             # enabled, and never restamp the already attempted CPU sample.
             from hermes_cli.machine_cpu_metrics import FIELDS as CPU
             return send_compatible(send, {k: v for k, v in sample.items()
-                                          if k != "tokens_by_model" and k not in CPU}, on_counters_rejected)
+                                          if k != "tokens_by_model" and k not in CPU},
+                                    on_counters_rejected, on_claiming_rejected)
         if any(k in sample for k in COUNTERS) and "unknown field" in str(exc):
             if on_counters_rejected is not None:
                 on_counters_rejected()
             # CPU busy fields are never resent (above), on this retry either.
             from hermes_cli.machine_cpu_metrics import FIELDS as CPU
-            return send_compatible(send, {k: v for k, v in sample.items() if k not in COUNTERS and k not in CPU})
+            return send_compatible(send, {k: v for k, v in sample.items() if k not in COUNTERS and k not in CPU},
+                                    on_counters_rejected, on_claiming_rejected)
         if not any(k in sample for k in ADDITIVE_FIELDS):
             raise
         return send({k: v for k, v in sample.items() if k not in ADDITIVE_FIELDS})
