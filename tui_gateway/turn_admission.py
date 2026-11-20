@@ -6,14 +6,16 @@ another. Clearing the UI's in-flight state must not make unwinding work idle.
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import threading
+from hermes_cli.worker_drain_fence import admit, DrainRefused, lease_scope
 
 _current: ContextVar[tuple | None] = ContextVar("turn_admission_owner", default=None)
 _KEY = "_turn_admission"
 
 
 class TurnAdmission:
-    def __init__(self, reservation):
+    def __init__(self, reservation, drain_lease=None):
         self.reservation = reservation
+        self.drain_lease = drain_lease
         self.lock = threading.RLock()
         self.refs = 1
         self.workers = 0
@@ -29,7 +31,11 @@ class TurnAdmission:
         with self.lock:
             self.refs -= 1
             if self.refs == 0:
-                self.reservation.__exit__(None, None, None)
+                try:
+                    self.reservation.__exit__(None, None, None)
+                finally:
+                    if self.drain_lease is not None:
+                        self.drain_lease.close()
 
 
 def acquire(home=None, *, busy_wait_s=None):
@@ -37,10 +43,22 @@ def acquire(home=None, *, busy_wait_s=None):
     # busy_wait_s=None keeps the fence's default busy-lock retry; 0 is one short try (resume-lock callers).
     reservation = (retirement.reservation(home) if busy_wait_s is None
                    else retirement.reservation(home, busy_wait_s=busy_wait_s))
-    if not reservation.__enter__():
-        reservation.__exit__(None, None, None)
+    try:
+        drain_lease = admit('turn.admission')
+    except DrainRefused:
         return None
-    return TurnAdmission(reservation)
+    try:
+        with lease_scope(drain_lease):
+            if not reservation.__enter__():
+                reservation.__exit__(None, None, None)
+                if drain_lease is not None:
+                    drain_lease.close()
+                return None
+        return TurnAdmission(reservation, drain_lease)
+    except BaseException:
+        if drain_lease is not None:
+            drain_lease.close()
+        raise
 
 
 def owns(session):
@@ -109,7 +127,8 @@ def stage(session, *, inherit=False):
             token.retain()
     context = _current.set((session, token))
     try:
-        yield
+        with lease_scope(token.drain_lease if token is not None else None):
+            yield
     except BaseException:
         with session["history_lock"]:
             if owns(session):
@@ -145,7 +164,8 @@ def retained_callback(session, target, *, settle_on_error=False):
     def run(*args, **kwargs):
         context = _current.set((session, token))
         try:
-            return target(*args, **kwargs)
+            with lease_scope(token.drain_lease if token is not None else None):
+                return target(*args, **kwargs)
         except BaseException:
             if settle_on_error:
                 with session["history_lock"]:
@@ -294,7 +314,8 @@ class PreparedWork:
     def _run(self):
         context = _current.set((self._session, self._token))
         try:
-            self._target()
+            with lease_scope(self._token.drain_lease):
+                self._target()
         finally:
             try:
                 self._finish()

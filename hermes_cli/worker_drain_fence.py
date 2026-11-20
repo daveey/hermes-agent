@@ -27,6 +27,7 @@ import re
 import time
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -173,7 +174,7 @@ def read_latch(root: Path, ident: Identity) -> dict:
         raise DrainRefused('identity-mismatch', 'install binding')
     if latch.get('iid') != ident.iid or latch.get('node_epoch') != ident.node_epoch:
         raise DrainRefused('identity-mismatch', 'latch binding')
-    if latch.get('boot') != ident.boot and latch.get('phase') != 'open':
+    if latch.get('boot') != ident.boot:
         raise DrainRefused('unknown-state', 'latch bound to another boot')
     if latch.get('phase') not in PHASES or not isinstance(latch.get('generation'), int):
         raise DrainRefused('unknown-state', 'latch malformed')
@@ -213,6 +214,8 @@ def apply_request(root: Path, ident: Identity, req: dict, *, now_ms: int | None 
             new, gen, att = 'draining', req['generation'], req['attempt']
         if new is None:
             raise DrainRefused('identity-mismatch', f'illegal {req["op"]} from {phase}')
+        if new == 'sealed' and busy_leases(root):
+            raise DrainRefused('draining', 'live work leases prevent seal')
         receipt = {'phase': new, 'generation': gen, 'attempt': att, 'request_id': req['request_id'], 'hash': digest}
         _write_atomic(d / LATCH_FILE, _latch_doc(ident, new, gen, att,
                                                  {'request_id': req['request_id'], 'hash': digest, 'receipt': receipt}))
@@ -234,12 +237,13 @@ class WorkLease:
         """fds for subprocess pass_fds: the child keeps the same open file description (and flock),
         plus the held parent so deeper hermes descendants stay admitted while draining."""
         fds = [f for f in (self.fd, self.parent.fd if self.parent else None) if f is not None]
-        for f in fds:
-            os.set_inheritable(f, True)
         return tuple(fds)
 
     def child_env(self, env: dict | None = None) -> dict:
-        out = dict(os.environ if env is None else env)
+        if env is None:
+            from tools.environments.local import build_subprocess_env
+            env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
+        out = dict(env)
         anchor = self.parent if self.parent is not None and self.parent.fd is not None else self
         if anchor.fd is not None:
             out[LEASE_FD_ENV] = str(anchor.fd)
@@ -278,7 +282,8 @@ def acquire_lease(root: Path, ident: Identity, purpose: str, *, parent: WorkLeas
         phase = read_latch(root, ident)['phase']
         if phase == 'sealed':
             raise DrainRefused('sealed')
-        if phase == 'draining' and parent is None:
+        if phase == 'draining' and (parent is None or parent.fd is None
+                or _parent_from_fd(root, parent.fd, boot=ident.boot) is None):
             raise DrainRefused('draining')
         ld = d / LEASE_DIR
         name = uuid.uuid4().hex + '.lease'
@@ -302,6 +307,7 @@ def seal_precheck(root: Path, ident: Identity) -> bool:
 LEASE_FD_ENV = 'HERMES_WORKER_DRAIN_LEASE_FD'
 _IMDS = 'http://169.254.169.254'
 _iid_cache: dict = {}
+_authority: ContextVar = ContextVar('worker_drain_authority', default=None)
 
 
 def read_imds_iid(timeout: float = 1.5) -> str:
@@ -339,28 +345,57 @@ def _state_base() -> Path:
 
 
 def _inherited_parent(root: Path):
+    local = _authority.get()
+    if local is not None and local.fd is not None:
+        parent = _parent_from_fd(root, local.fd)
+        if parent is not None:
+            return parent
     raw = os.environ.get(LEASE_FD_ENV)
     if not raw or not raw.isdigit():
         return None
-    fd = int(raw)
+    return _parent_from_fd(root, int(raw))
+
+
+def _parent_from_fd(root: Path, fd: int, *, boot=None):
     try:
         real = Path(os.readlink(f'/proc/self/fd/{fd}'))
         same = os.path.samestat(os.fstat(fd), os.stat(real))
-    except OSError:
+        info = Path(f'/proc/self/fdinfo/{fd}').read_text(encoding='ascii')
+        locked = any(re.search(r'\bFLOCK\s+ADVISORY\s+WRITE\b', line) for line in info.splitlines()
+                     if line.startswith('lock:'))
+        metadata = json.loads(os.pread(fd, 4096, 0))
+        same_boot = metadata.get('boot') == (read_boot_id() if boot is None else boot)
+    except (OSError, ValueError, AttributeError):
         return None
-    if real.parent != _state_root(root) / LEASE_DIR or not same:
+    if real.parent != _state_root(root) / LEASE_DIR or not same or not locked or not same_boot:
         return None
     return WorkLease(fd, real, owned=False)
 
 
-def popen_worker(popen, cmd, *, env, **kwargs):
+@contextmanager
+def lease_scope(lease):
+    """Carry a retained, live lease through synchronous/context-copied work.
+
+    The owner must hold it until the callback finishes. A copied context is not
+    authority after close: admit revalidates the live descriptor/kernel lock.
+    """
+    token = _authority.set(lease)
+    try:
+        yield
+    finally:
+        _authority.reset(token)
+
+
+def popen_worker(popen, cmd, *, env=None, drain_purpose='kanban.worker', **kwargs):
     """Start a detached worker under an admission lease it keeps for life (inherited fd), so its own
     hermes descendants stay admitted while draining. Plain call when not activated."""
-    lease = admit('kanban.worker')
+    lease = admit(drain_purpose)
     if lease is None:
         return popen(cmd, env=env, **kwargs)
     try:
-        return popen(cmd, env=lease.child_env(env), pass_fds=lease.pass_fds(), **kwargs)
+        kwargs['pass_fds'] = tuple(dict.fromkeys((*kwargs.get('pass_fds', ()), *lease.pass_fds())))
+        kwargs['close_fds'] = True
+        return popen(cmd, env=lease.child_env(env), **kwargs)
     finally:
         lease.close()
 
@@ -375,13 +410,32 @@ def fenced(purpose: str):
         def wrapper(*args, **kwargs):
             lease = admit(purpose)
             try:
-                return fn(*args, **kwargs)
+                with lease_scope(lease):
+                    return fn(*args, **kwargs)
             finally:
                 if lease is not None:
                     lease.close()
         wrapper.__drain_fenced__ = purpose  # type: ignore[attr-defined]
         return wrapper
     return deco
+
+
+def admitted_reservation(reserve, *args, **kwargs):
+    """Attach a close-only drain lease to an updater reservation.
+
+    Acquire before the updater account lock, never recursively inside it. The
+    caller owns both lifetimes. Failure/update hold releases the drain lease.
+    """
+    lease = admit('admission.reservation')
+    try:
+        pending = reserve(*args, **kwargs)
+        if pending is not None:
+            pending._worker_drain_lease = lease
+            lease = None
+        return pending
+    finally:
+        if lease is not None:
+            lease.close()
 
 
 def admit(purpose: str, *, activation_path: Path | None = None, imds=None):
@@ -394,7 +448,10 @@ def admit(purpose: str, *, activation_path: Path | None = None, imds=None):
     act = load_activation(ACTIVATION_PATH if activation_path is None else activation_path)
     if act is None:
         return None
-    root = _state_base()
-    ident = current_identity(act, imds=imds)
-    return acquire_lease(root, ident, purpose, parent=_inherited_parent(root))
+    try:
+        root = _state_base()
+        ident = current_identity(act, imds=imds)
+        return acquire_lease(root, ident, purpose, parent=_inherited_parent(root))
+    except OSError as exc:
+        raise DrainRefused('unknown-state', f'admission unavailable: {type(exc).__name__}') from exc
 

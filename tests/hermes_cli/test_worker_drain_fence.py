@@ -70,6 +70,18 @@ def test_generation_rules_and_cancel(root):
     refuses('identity-mismatch', f.apply_request, root, IDENT, req('cancel', 3, 'a3'))  # no cancel after seal
 
 
+def test_closed_parent_cannot_admit_descendant(root):
+    parent = f.acquire_lease(root, IDENT, 'parent')
+    parent.close()
+    f.apply_request(root, IDENT, req('establish', 1))
+    refuses('draining', f.acquire_lease, root, IDENT, 'late', parent=parent)
+
+
+def test_open_latch_from_previous_boot_is_unknown(root):
+    other = f.Identity(IDENT.iid, 'boot-2', IDENT.node_epoch)
+    refuses('unknown-state', f.acquire_lease, root, other, 'late')
+
+
 def test_bad_request_shapes(root):
     refuses('unknown-state', f.apply_request, root, IDENT, req('establish', 1, extra=1))
     refuses('identity-mismatch', f.apply_request, root, IDENT, req('establish', 1, ident=f.Identity(IDENT.iid, 'boot-2', 'epoch-1')))

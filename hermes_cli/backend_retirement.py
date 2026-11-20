@@ -107,6 +107,7 @@ def _reserve(root, busy_wait_s, what):
     Each try keeps reserve's own 50 ms lock cap, so a caller never blocks longer than busy_wait_s + 50 ms.
     A hold returns (None, "held") at once; any other fence error fails closed with its traceback."""
     from hermes_cli import admission_fence
+    from hermes_cli.worker_drain_fence import DrainRefused
 
     started = time.monotonic()
     tries = 0
@@ -115,6 +116,8 @@ def _reserve(root, busy_wait_s, what):
             tries += 1
             try:
                 pending = admission_fence.reserve(root)
+            except DrainRefused as exc:
+                return None, exc.reason
             except admission_fence.AdmissionBusy:
                 waited = time.monotonic() - started
                 if waited >= busy_wait_s:

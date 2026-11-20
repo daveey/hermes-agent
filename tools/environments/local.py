@@ -1266,7 +1266,8 @@ class LocalEnvironment(BaseEnvironment):
         with endpoint as offered:
             if offered is not None:
                 run_env[ENV_KEY] = offered[1]
-            proc = subprocess.Popen(
+            from hermes_cli.worker_drain_fence import popen_worker
+            proc = popen_worker(subprocess.Popen,
                 args, text=True, env=run_env, encoding="utf-8", errors="replace",
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,

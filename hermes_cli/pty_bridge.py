@@ -158,7 +158,26 @@ class PtyBridge:
         # (xterm.js never drops frames, so under the dashboard that repaint was a visible flash on
         # every OS app-switch).
         spawn_env[PTY_HOST_ENV] = PTY_HOST_DASHBOARD
-        proc = ptyprocess.PtyProcess.spawn(list(argv), cwd=cwd, env=spawn_env, dimensions=(rows, cols))  # type: ignore[union-attr]
+        from hermes_cli.worker_drain_fence import admit
+        lease = admit('pty.spawn')
+        try:
+            extra = {}
+            if lease is not None:
+                fds = lease.pass_fds()
+
+                def inherit_lease_fds():
+                    # ptyprocess preserves pass_fds but does not clear CLOEXEC.
+                    # Change flags only in its fork child, never in this threaded host.
+                    for fd in fds:
+                        os.set_inheritable(fd, True)
+
+                extra = {'pass_fds': fds, 'preexec_fn': inherit_lease_fds}
+            child_env = spawn_env if lease is None else lease.child_env(spawn_env)
+            proc = ptyprocess.PtyProcess.spawn(list(argv), cwd=cwd, env=child_env,
+                                               dimensions=(rows, cols), **extra)  # type: ignore[union-attr]
+        finally:
+            if lease is not None:
+                lease.close()
         try:
             return cls(proc)
         except OSError:  # no safe readiness wait for the master (fd_wait): don't leak the child

@@ -114,6 +114,9 @@ class Reservation:
                 finally:
                     os.close(self.fd)
                     self.fd = None
+                    lease = getattr(self, '_worker_drain_lease', None)
+                    if lease is not None:
+                        lease.close()
 
 
 @contextmanager
@@ -168,6 +171,11 @@ def turns_waiting(root):
 
 
 def reserve(home, *, timeout=0.05):
+    from hermes_cli.worker_drain_fence import admitted_reservation
+    return admitted_reservation(_reserve_update, home, timeout=timeout)
+
+
+def _reserve_update(home, *, timeout=0.05):
     import fcntl
 
     # Some callers hold the backend session-map lock. Absorb ordinary short
@@ -191,6 +199,11 @@ def reserve(home, *, timeout=0.05):
 
 
 def extend(home, *, timeout=0.05):
+    from hermes_cli.worker_drain_fence import admitted_reservation
+    return admitted_reservation(_extend_update, home, timeout=timeout)
+
+
+def _extend_update(home, *, timeout=0.05):
     """A reservation taken WITHOUT the hold check, for work already admitted under a live reservation
     the caller still holds (a cron run registered inside its tick's reservation). The updater reads
     reservations after setting the hold, so it sees the caller's or this one: never neither. [daveey]

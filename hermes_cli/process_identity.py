@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Iterator, Optional, Sequence
 
 from utils import atomic_json_write
-from hermes_cli.worker_drain_fence import fenced as drain_fenced
+
 
 logger = logging.getLogger(__name__)
 
@@ -1216,7 +1216,6 @@ def stop_owned_group_survivors(pgid: int, *, proc=None, grace: float = 3.0) -> b
     return release_process_group_once_empty(pgid, proc=proc, timeout=0)
 
 
-@drain_fenced("process_identity.spawn_owned")
 def spawn_owned(argv, *, purpose: str, **popen_kwargs) -> subprocess.Popen:
     """Start a long-lived child that dies with this process: the one way to own a child.
 
@@ -1228,7 +1227,9 @@ def spawn_owned(argv, *, purpose: str, **popen_kwargs) -> subprocess.Popen:
     """
     if os.name != "posix":
         return subprocess.Popen(argv, **popen_kwargs)
-    proc = subprocess.Popen(argv, start_new_session=True, **popen_kwargs)
+    from hermes_cli.worker_drain_fence import popen_worker
+    proc = popen_worker(subprocess.Popen, argv, drain_purpose='process_identity.spawn_owned',
+                        start_new_session=True, **popen_kwargs)
     own_process_groups([proc.pid])
     register_child(proc.pid, purpose)
     return proc

@@ -129,6 +129,7 @@ def update_admission():
         from hermes_cli import admission_fence
         from hermes_cli.admission_fence import AdmissionBusy, SUPPORTED
         from hermes_cli.backend_retirement import BUSY_WAIT_S
+        from hermes_cli.worker_drain_fence import DrainRefused, lease_scope
     except ImportError:
         yield True
         return
@@ -145,6 +146,9 @@ def update_admission():
         pending = admission_fence.reserve(root, timeout=BUSY_WAIT_S)
         if pending is not None:
             getattr(pending, "describe", lambda *_: None)("cron_tick")
+    except DrainRefused:
+        yield False  # leave due-time untouched; never inherit updater fail-open
+        return
     except AdmissionBusy:  # before OSError: AdmissionBusy is a TimeoutError, i.e. an OSError
         logger.info("cron dispatch deferred: core update admission lock still busy after %.1fs under %s; "
                     "due jobs fire on a later tick", BUSY_WAIT_S, root)
@@ -166,7 +170,8 @@ def update_admission():
         _update_hold_logged.discard(key)
         logger.info("cron dispatch resumed: core update admission hold released under %s", root)
     try:
-        yield True
+        with lease_scope(getattr(pending, '_worker_drain_lease', None)):
+            yield True
     finally:
         pending.close()
 
