@@ -168,6 +168,8 @@ def _recover_unreachable_compute_host_turn(sid: str, session: dict, inflight_at_
         # A Stop the helper already decided keeps the update-held queue (``outcome``; a kept Stop sends no
         # interrupt frame, so only a later step can have raised) leaves it: there was no turn to recover.
         if not kept_update_held_queue:
+            from tui_gateway.admission_retry import discard_update_queue_marker
+            discard_update_queue_marker(session)
             session["_turn_cancel_requested"] = True
             session["queued_prompt"] = None
             session.pop("queued_prompts", None)

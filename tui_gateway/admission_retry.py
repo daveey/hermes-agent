@@ -101,7 +101,7 @@ def redrive_update_queues(home):
                     or marker.get("writer_pid") != os.getpid() or marker.get("queue_released")):
                 continue
             owned = [(sid, session) for sid, session in sessions
-                     if server._session_lookup_key(session, fallback=sid) == key
+                     if key in {session.get("session_key"), server._session_lookup_key(session, fallback=sid)}
                      and Path(server._session_home(session)).resolve() == home.resolve()]
             with ExitStack() as locks:
                 for _, session in owned:
@@ -114,6 +114,11 @@ def redrive_update_queues(home):
                     elif session.get("queued_prompt") and not (session.get("_closing") or session.get("_finalized")):
                         active = True
                         retry_queued_prompt("__update_queue__", sid, session)
+                    elif session.get("_turn_cancel_requested") and not (session.get("_closing") or session.get("_finalized")):
+                        # This live runtime rejects auto-continue after interruption.
+                        # Keep custody until teardown removes it or makes it unusable;
+                        # otherwise every observer pass offers a replay it cannot run.
+                        active = True
                 if not active:
                     release_update_queue(home, key, marker)
 

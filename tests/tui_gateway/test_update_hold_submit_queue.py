@@ -518,12 +518,20 @@ def test_idle_stop_keeps_it_for_the_next_backend_after_an_update_restart(stoppab
 
 
 @pytest.mark.parametrize("origin", ["delete", "rewind", "send_now", "plugin:hermes-bots"])
-@pytest.mark.parametrize("compute_host", [False, True])
+@pytest.mark.parametrize("compute_host", [False, True, "unreachable"])
 def test_non_stop_gestures_clear_the_held_queue_as_before(stoppable, origin, compute_host, monkeypatch):
     from tui_gateway.turn_marker import read_turn_marker
     held = stoppable
     _submit()
     monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a, **k: compute_host)
+    if compute_host == "unreachable":
+        class Supervisor:
+            def interrupt(self, *a, **k):
+                raise BrokenPipeError("host gone")
+            def has_pending_turn(self, sid):
+                return False
+        held.session["_compute_host_active"] = True
+        monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda: Supervisor())
     _interrupt(origin=origin)
     assert not held.session.get("queued_prompt")
     assert read_turn_marker(held.home, "session-key") is None

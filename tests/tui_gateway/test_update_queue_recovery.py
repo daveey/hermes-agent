@@ -151,7 +151,8 @@ def test_sweep_releases_unusable_owned_queue(tmp_path, monkeypatch, state):
     monkeypatch.setattr(server, "_sessions", {"s": session})
     monkeypatch.setattr(admission_retry, "retry_queued_prompt", lambda *a: pytest.fail("unusable queue rearmed"))
     admission_retry.redrive_update_queues(tmp_path)
-    assert turn_marker.read_turn_marker(tmp_path, "chat")["queue_released"] is True
+    marker = turn_marker.read_turn_marker(tmp_path, "chat")
+    assert marker is not None and marker.get("queue_released") is True
 
 
 @pytest.mark.parametrize("change", [{"reason": "core_update_pause"}, {"writer_pid": -1}, {"queue_released": True}])
@@ -246,27 +247,47 @@ def test_sweep_inventory_includes_session_created_during_marker_read(tmp_path, m
     assert not turn_marker.read_turn_marker(tmp_path, "chat").get("queue_released")
 
 
-@pytest.mark.parametrize("owner_kind", ["queue", "running", "compute", "agent_key"])
+@pytest.mark.parametrize("owner_kind", ["queue", "running", "compute", "agent_key", "marker_key"])
 def test_stale_alias_cannot_release_live_custody(tmp_path, monkeypatch, owner_kind):
     assert turn_marker.record_turn_start(tmp_path, "chat", "pending", reason="update_hold_queue")
     idle = _owned_queue(tmp_path)
     idle.pop("queued_prompt")
     active = _owned_queue(tmp_path)
-    if owner_kind == "running":
-        active["running"] = True
-        active.pop("queued_prompt")
-    elif owner_kind == "compute":
-        active["_compute_host_turn_id"] = "turn"
-        active.pop("queued_prompt")
-    elif owner_kind == "agent_key":
-        active["session_key"] = "previous"
-        active["agent"] = SimpleNamespace(session_id="chat")
+    active.update({
+        "queue": {},
+        "running": {"running": True, "queued_prompt": None},
+        "compute": {"_compute_host_turn_id": "turn", "queued_prompt": None},
+        "agent_key": {"session_key": "previous", "agent": SimpleNamespace(session_id="chat")},
+        "marker_key": {"agent": SimpleNamespace(session_id="new-key")},
+    }[owner_kind])
     monkeypatch.setattr(server, "_sessions", {"idle": idle, "active": active})
     called = []
     monkeypatch.setattr(admission_retry, "retry_queued_prompt", lambda *a: called.append(a))
     admission_retry.redrive_update_queues(tmp_path)
-    assert len(called) == (1 if owner_kind in {"queue", "agent_key"} else 0)
+    assert len(called) == (1 if owner_kind in {"queue", "agent_key", "marker_key"} else 0)
     assert not turn_marker.read_turn_marker(tmp_path, "chat").get("queue_released")
+
+
+@pytest.mark.parametrize("closing", [None, "_closing", "_finalized"])
+def test_cancelled_live_session_retains_custody_until_teardown(tmp_path, monkeypatch, closing):
+    assert turn_marker.record_turn_start(tmp_path, "chat", "pending", reason="update_hold_queue")
+    session = _owned_queue(tmp_path)
+    session.pop("queued_prompt")
+    session["_turn_cancel_requested"] = True
+    if closing:
+        session[closing] = True
+    monkeypatch.setattr(server, "_sessions", {"s": session})
+    monkeypatch.setattr(admission_retry, "retry_queued_prompt", lambda *a: pytest.fail("cancelled queue rearmed"))
+    for _ in range(3):
+        admission_retry.redrive_update_queues(tmp_path)
+        marker = turn_marker.read_turn_marker(tmp_path, "chat")
+        assert bool(marker.get("queue_released")) == bool(closing)
+        pending = startup_resume.pending_resumes(tmp_path, {}, log_skips=False)
+        assert bool(pending) == bool(closing), "a cancelled live runtime cannot execute startup replay"
+    # Once the cancelled runtime is gone, the successor may recover teardown custody.
+    monkeypatch.setattr(server, "_sessions", {})
+    admission_retry.redrive_update_queues(tmp_path)
+    assert [r["session_key"] for r in startup_resume.pending_resumes(tmp_path, {}, log_skips=False)] == ["chat"]
 
 
 @pytest.mark.parametrize("reason", ["update_hold_queue", "core_update_pause", None])
