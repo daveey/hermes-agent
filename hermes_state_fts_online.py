@@ -32,8 +32,9 @@ recovery. Unlinking rather than renaming a damaged index is deliberate: a damage
 later be dropped or drained, and that frees pages that live data may already reuse (the double references).
 
 Used automatically by :meth:`retry_deferred_fts_recovery` once the one-shot rebuild is futile (foreign holders at every
-deferral for ``_FTS_HOLDER_FUTILE_SECONDS``) or failed with a corrupt-image error, and by ``hermes sessions repair-search``.
-Never on a read-only or quarantined handle, nor on the legacy inline (pre-v23) layout.
+deferral for ``_FTS_HOLDER_FUTILE_SECONDS``) or failed with a corrupt-image error, and by
+``hermes sessions repair-search``. Never on a read-only or quarantined handle, nor on the legacy inline (pre-v23)
+layout.
 """
 
 from __future__ import annotations
@@ -198,7 +199,8 @@ def plan_from_check(lines, master, *, limit: Optional[int] = None) -> dict:
             raise OnlineRecoveryRefused(f"integrity_check names a tree outside the search indexes: {line}")
         damaged.add(family)
     if not seen:
-        raise OnlineRecoveryRefused("integrity_check returned nothing: it did not complete (e.g. output over SQLITE_MAX_LENGTH)")
+        raise OnlineRecoveryRefused("integrity_check returned nothing: it did not complete "
+                                    "(e.g. output over SQLITE_MAX_LENGTH)")
     return {"unlink": sorted(damaged), "trash": [f for f in FAMILIES if f not in damaged], "problems": problems,
             "roots": {name: int(rp) for rp, _type, name in master if family_of(name)},
             "trash_roots": {name: int(rp) for rp, _type, name in master if name.startswith(TRASH_PREFIX)}}
@@ -572,8 +574,9 @@ class SessionFtsOnlineRecoveryMixin:
                 if self.get_meta("fts_rebuild_high_water") is not None:
                     self.fts_rebuild_step()
                 elif not self._fts_teardown_trash_step():
-                    # Left: trash no clean plan vouches for (logged at ERROR when first refused; the refusal is remembered). Nothing this
-                    # tick, or a `repair-search --wait`, can do about it until the memo expires.
+                    # Left: trash no clean plan vouches for (logged at ERROR when first refused; the refusal is
+                    # remembered). Nothing this tick, or a `repair-search --wait`, can do about it until the memo
+                    # expires.
                     more = self.get_meta("fts_rebuild_high_water") is not None
                     break
                 self._fts_chunk_rows = self._next_chunk_rows(
