@@ -131,3 +131,40 @@ def test_save_key_refreshes_the_row_narrowed_as_the_picker(managed_home, monkeyp
     resp = server._methods["model.save_key"]("r1", {"slug": "gemini", "api_key": "replacement-" + "value"})
 
     assert resp["result"]["provider"] == {**OFFERED[2], "authenticated": True}, resp
+
+
+@pytest.mark.parametrize("slug", ["custom", ""])
+@pytest.mark.parametrize("routes", [(), (("standard", "anthropic", "anthropic-deep"),),
+                                    (("deep", "openai-codex", "anthropic-deep"),)])
+def test_rederived_provider_rows_drop_exactly_the_ids_the_turn_refuses(monkeypatch, slug, routes):
+    """A row whose slug is ``custom`` / empty is judged on the provider the turn re-derives for it."""
+    from agent.model_routing_managed import ManagedPinRejectedError
+    from hermes_cli.model_options_managed import drop_refused_managed_pins
+    from tui_gateway import server
+
+    cfg = _config()
+    for level, provider, model in routes:
+        cfg["model_routing"]["routes"][level].append(
+            {**cfg["model_routing"]["routes"][level][0], "provider": provider, "model": model})
+    monkeypatch.setattr(server, "_load_cfg", lambda: cfg)  # what the turn reads as its config
+    from hermes_constants import get_hermes_home
+
+    atomic_config_write(get_hermes_home() / "config.yaml", cfg)  # and the runtime resolver's policy
+    ids = ["anthropic-deep", "openai-codex-fast", "gemini-4-argon"]
+    rows = [{"slug": slug, "models": list(ids), "total_models": len(ids)}]
+
+    drop_refused_managed_pins(rows, cfg)
+
+    def turn_refuses(model):
+        try:
+            server._resolve_agent_model_runtime({"model": model, "provider": slug}, None, "s")
+        except ManagedPinRejectedError:
+            return True
+        except Exception:  # credentials/network are not the pin verdict
+            return False
+        return False
+
+    assert rows[0]["models"] == [model for model in ids if not turn_refuses(model)]
+    assert rows[0]["total_models"] == len(rows[0]["models"])
+    if slug == "custom":  # a bare custom pick never matches a subscription route's provider
+        assert rows[0]["models"] == []

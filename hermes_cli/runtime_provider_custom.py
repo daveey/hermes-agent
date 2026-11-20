@@ -446,6 +446,23 @@ def empty_provider_identity(base_url: Optional[str], model: Optional[str]) -> Op
     return _find_custom_identity(lambda entry: _route_key(_entry_url(entry)) == url) if url else None
 
 
+def rederived_override_provider(model: Optional[str], provider: Optional[str], base_url: Optional[str] = None,
+                                *, config_model: str = "") -> Optional[str]:
+    """The provider a turn resolves a dict model override on: the given one, or the entry that heals it.
+
+    A bare ``custom`` provider is recovered through :func:`canonical_custom_identity`; an empty one names
+    no route either, so the entry serving *model* (or owning *base_url*) heals it (#132648), except for
+    the profile's own default model (*config_model*), which the main slot serves. The turn resolves
+    through this before judging the managed pin policy, and the picker / ``session.create`` gate judges
+    through the same function, so the pin they accept is the pin the turn runs."""
+    provider_norm = str(provider or "").strip().lower()
+    if provider_norm == "custom":
+        return _rp().canonical_custom_identity(base_url=base_url or None, model=model or None) or provider
+    if not provider_norm and config_model != model:
+        return empty_provider_identity(base_url, model) or provider
+    return provider
+
+
 def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider: Optional[str] = None,
                               model: Optional[str] = None, requested: Optional[str] = None) -> Optional[str]:
     """Recover the durable menu identity for a bare custom provider. Match a configured

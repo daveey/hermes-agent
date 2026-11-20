@@ -125,3 +125,68 @@ def test_create_accepts_exactly_what_the_picker_offers(_create, tmp_path):
         for model in row["models"]:
             response, _ = _create({"model": model, "provider": row["slug"]})
             assert ("error" not in response) is (model in kept["models"]), (row["slug"], model, response)
+
+
+# --- bare ``custom`` / empty providers: the turn re-derives the provider before judging the pin ---------
+
+
+def _write_routes(home, extra_routes=()):
+    """The stock policy plus ``extra_routes`` (level, provider, model) subscription routes."""
+    cfg = policy()
+    cfg["model"] = {"default": "anthropic-deep", "provider": "anthropic"}
+    cfg["model_routing"]["enforce_subscription_only"] = True
+    for level, provider, model in extra_routes:
+        cfg["model_routing"]["routes"][level].append(
+            {**cfg["model_routing"]["routes"][level][0], "provider": provider, "model": model})
+    atomic_config_write(home / "config.yaml", cfg)
+
+
+@pytest.mark.parametrize("routes, params", [
+    pytest.param((), {"model": "anthropic-deep", "provider": "custom"}, id="custom-on-stock-registry"),
+    pytest.param((("standard", "anthropic", "anthropic-deep"),), {"model": "anthropic-deep"},
+                 id="two-levels-no-provider"),
+    pytest.param((("deep", "openai-codex", "anthropic-deep"),), {"model": "anthropic-deep"},
+                 id="two-providers-no-provider"),
+])
+def test_pin_the_turn_rejects_after_rederiving_the_provider_is_refused(_create, tmp_path, routes, params):
+    _write_routes(tmp_path, routes)
+
+    response, sessions = _create(params)
+
+    assert response["error"]["code"] == -32602, response
+    assert sessions == {}
+
+
+def _turn_rejects(override):
+    """True when the agent build's own resolver raises the policy's refusal for the stored override."""
+    from agent.model_routing_managed import ManagedPinRejectedError
+    from tui_gateway import server  # the resolver runs bound to server's namespace (method_ctx.bind_module)
+
+    try:
+        server._resolve_agent_model_runtime(override, None, "agreement-session")
+    except ManagedPinRejectedError:
+        return True
+    except Exception:  # any other failure (credentials, network) is not the pin verdict
+        return False
+    return False
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "auto", "", "custom"])
+@pytest.mark.parametrize("model", ["anthropic-deep", "gemini-4-argon", "ambiguous-pin"])
+def test_gate_refuses_exactly_what_the_turn_refuses_on_the_stored_override(
+        _create, tmp_path, monkeypatch, model, provider):
+    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_cli.model_options_managed import managed_pin_refusal
+    from tui_gateway import server
+    from tui_gateway.methods_session_model_guard import create_overrides
+
+    _write_routes(tmp_path, (("deep", "anthropic", "ambiguous-pin"), ("fast", "anthropic", "ambiguous-pin")))
+    monkeypatch.setattr(server, "_load_cfg", load_user_config_effective)  # the turn reads its config here
+
+    stored, _, _ = create_overrides({"model": model, "provider": provider})
+    response, sessions = _create({"model": model, "provider": provider})
+
+    refused = managed_pin_refusal(stored["model"], stored["provider"]) is not None
+    assert refused is _turn_rejects(stored), (stored, response)
+    assert ("error" in response) is refused
+    assert bool(sessions) is not refused

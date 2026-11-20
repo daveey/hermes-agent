@@ -572,14 +572,13 @@ def _resolve_agent_model_runtime(model_override, provider_override, routing_sess
         override_base_url = model_override.get("base_url")
         resolve_kwargs = {}
         provider_norm = str(requested_provider or "").strip().lower()
-        # An empty provider names no route either; once the main slot targets another model it 404s (#132648).
-        if provider_norm == "custom":
-            from hermes_cli.runtime_provider import canonical_custom_identity
-            if recovered := canonical_custom_identity(base_url=override_base_url or None, model=model or None):
-                requested_provider = recovered
-        elif not provider_norm and _config_model_target()[0] != model:
-            from hermes_cli.runtime_provider_custom import empty_provider_identity
-            requested_provider = empty_provider_identity(override_base_url, model) or requested_provider
+        # A bare ``custom`` or empty provider is re-derived before the pin is judged, by the function the
+        # managed-pin gate shares; an empty one names no route either, and once the main slot targets another
+        # model it 404s (#132648).
+        from hermes_cli.runtime_provider_custom import rederived_override_provider
+        requested_provider = rederived_override_provider(
+            model, requested_provider, override_base_url,
+            config_model="" if provider_norm else _config_model_target()[0])
         if provider_norm == "custom" and override_base_url:
             # Failing identity recovery, still hand base_url to the direct-alias branch so pool/env credentials resolve.
             resolve_kwargs["explicit_base_url"] = override_base_url

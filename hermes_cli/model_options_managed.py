@@ -13,9 +13,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# The agent build re-derives these providers (``empty_provider_identity`` / ``canonical_custom_identity``
-# in ``tui_gateway.agent_factory``), so for them only "no route names this model" is certain.
-_REDERIVED_PROVIDERS = frozenset({"", "custom"})
 # Every per-row list naming model ids; ``total_models`` counts ``models`` (as the aggregator strip does).
 _ID_LISTS = ("models", "featured_models", "unavailable_models", "subscription_overlap_models")
 
@@ -32,18 +29,27 @@ def _policy(config=None):
         return None
 
 
+def _config_model(policy) -> str:
+    """The profile's default model, read as ``agent_factory._config_model_target`` reads it."""
+    cfg_model = policy.get("model")
+    if isinstance(cfg_model, dict):
+        return str(cfg_model.get("default", "") or "").strip()
+    return cfg_model.strip() if isinstance(cfg_model, str) else ""
+
+
 def _refusal(model, provider, policy, allowed):
     from agent.model_routing import is_class_selector
     from agent.model_routing_managed import ManagedPinRejectedError, pin_policy
+    from hermes_cli.runtime_provider_custom import rederived_override_provider
 
     if is_class_selector(model):
         return None  # routed by class, never pinned
     if model not in allowed:  # no route names it, on any provider
         return ManagedPinRejectedError(model, provider, allowed)
-    if str(provider or "").strip().lower() in _REDERIVED_PROVIDERS:
-        return None
+    # The turn judges the pin on the provider it re-derives for a bare ``custom`` / empty one.
+    judged = rederived_override_provider(model, provider, config_model=_config_model(policy))
     try:
-        pin_policy(model, provider, policy)
+        pin_policy(model, judged, policy)
     except ManagedPinRejectedError as exc:
         return exc
     return None
