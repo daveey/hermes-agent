@@ -44,6 +44,8 @@ class Journal:
                 conn.execute("BEGIN IMMEDIATE")
                 for statement in _SCHEMA:
                     conn.execute(statement)
+                if "dispatch" not in {row["name"] for row in conn.execute("PRAGMA table_info(automation_replay_batches)")}:
+                    conn.execute("ALTER TABLE automation_replay_batches ADD COLUMN dispatch TEXT NOT NULL DEFAULT 'pending'")
                 yield conn
 
     def publish(self, owner: str, items: list[dict]) -> None:
@@ -129,6 +131,20 @@ class Journal:
                 "UPDATE automation_replay_batches SET token=NULL,holder=NULL WHERE id=? AND token=? "
                 "AND status='pending'", (batch["id"], batch["token"])).rowcount)
 
+    def admit(self, batch: dict) -> bool:
+        """One durable worker-entry winner, not a promise of external API execution."""
+        with self.transaction() as conn:
+            row = self._owned(conn, batch)
+            if row is None or row["message_row_id"] is None or row["dispatch"] != "pending":
+                return False
+            message = conn.execute("SELECT role,message_uid FROM messages WHERE id=? AND session_id=?",
+                                   (row["message_row_id"], row["target"])).fetchone()
+            if message is None or message["role"] != "user" or message["message_uid"] != row["message_uid"]:
+                raise ValueError("replay transcript identity cannot be verified")
+            return bool(conn.execute("UPDATE automation_replay_batches SET dispatch='admitted' "
+                                     "WHERE id=? AND token=? AND dispatch='pending'",
+                                     (batch["id"], batch["token"])).rowcount)
+
     def settle(self, batch: dict) -> bool:
         with self.transaction() as conn:
             row = self._owned(conn, batch)
@@ -137,6 +153,16 @@ class Journal:
             conn.execute("UPDATE automation_replay_batches SET status='dispatched',token=NULL,holder=NULL WHERE id=?",
                          (batch["id"],))
             conn.execute("UPDATE automation_replay_items SET status='dispatched' WHERE batch=?", (batch["id"],))
+            return True
+
+    def discard(self, batch: dict) -> bool:
+        """Positively undeliverable/rewalled work; never fabricate a transcript receipt."""
+        with self.transaction() as conn:
+            if self._owned(conn, batch) is None:
+                return False
+            conn.execute("UPDATE automation_replay_batches SET status='cancelled',token=NULL,holder=NULL WHERE id=?",
+                         (batch["id"],))
+            conn.execute("UPDATE automation_replay_items SET status='cancelled' WHERE batch=?", (batch["id"],))
             return True
 
     def cancel(self, owner: str, through: float, *, stop: bool = False) -> None:

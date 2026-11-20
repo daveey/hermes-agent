@@ -212,6 +212,9 @@ KEY = "20261119_232638_a67251"
 
 @pytest.fixture
 def wired(journal, monkeypatch):
+    from hermes_state import SessionDB
+    db = SessionDB(journal.path)
+    db.create_session(KEY, source="desktop")
     monkeypatch.setattr("hermes_constants.get_process_hermes_home", lambda: journal.path.parent)
     monkeypatch.setattr(ar, "ENABLED", True)
     monkeypatch.setattr(threading, "Timer", lambda delay, fn: types.SimpleNamespace(
@@ -219,6 +222,21 @@ def wired(journal, monkeypatch):
     ar.reset()
     yield journal
     ar.reset()
+    db.close()
+
+
+def accepted_wake(journal, key, text, kw):
+    from hermes_state import SessionDB
+    db = SessionDB(journal.path)
+    try:
+        delivery = kw["replay_delivery"]
+        session = {"session_key": key}
+        assert delivery.stage(db, session, text, kw["display_kind"], kw["display_metadata"])
+        assert delivery.admit()
+        assert journal.settle(delivery.batch)
+    finally:
+        db.close()
+    return "started"
 
 
 def _arm_mixed(home, now=1000.0):
@@ -248,7 +266,7 @@ def test_successor_replays_handed_off_mixed_delivery_exactly_once_in_exact_profi
 
     def wake(key, text, **kw):
         calls.append((key, text, kw))
-        return "started"
+        return accepted_wake(wired, key, text, kw)
 
     assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 1
     assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 0  # settled: no duplicate
@@ -266,7 +284,9 @@ def test_refused_admission_retains_custody_for_the_next_pass(wired, monkeypatch,
     ar._fire(KEY)
     monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
     verdicts = iter([blocked] * 20 + ["started"])
-    wake = lambda *a, **k: next(verdicts)
+    def wake(key, text, **kw):
+        verdict = next(verdicts)
+        return accepted_wake(wired, key, text, kw) if verdict == "started" else verdict
     for _ in range(20):
         assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 1
     assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 1
@@ -343,7 +363,9 @@ def test_storage_error_after_claim_does_not_strand_the_batch_or_raise(wired, mon
 
     monkeypatch.setattr(Journal, "release", flaky)
     verdicts = iter(["busy", "started"])
-    wake = lambda *a, **k: next(verdicts)
+    def wake(key, text, **kw):
+        verdict = next(verdicts)
+        return accepted_wake(wired, key, text, kw) if verdict == "started" else verdict
     assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 1  # no raise
     assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 1  # own stale claim re-claimed
     assert not wired.owners()

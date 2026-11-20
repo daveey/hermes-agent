@@ -1371,7 +1371,7 @@ def _run_admitted_prompt(
     queued_prompt_generation: int | None = None,
     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
     turn_author: dict | None = None, auto_continue: bool = True,
-    report_ownership_refusal: bool = True, input_origin: str = "") -> bool:
+    report_ownership_refusal: bool = True, input_origin: str = "", replay_delivery=None) -> bool:
     # Every dispatch binds the session's own row (session_key, real source) before the turn writes:
     # the synthesized turns that enter here directly (crash auto-continue, queued-prompt drain,
     # wake-ups) bypass prompt.submit's persist, and a row-less turn is otherwise materialized by
@@ -1557,6 +1557,22 @@ def _run_admitted_prompt(
                     _rearm_carried_pause_watcher(sid, session, st)
         return st.result, goal_followup
     def run():
+        permitted = replay_delivery is None
+        try:
+            if replay_delivery is not None:
+                permitted = replay_delivery.admit()
+        finally:
+            if replay_delivery is not None and not permitted:
+                replay_delivery.cleanup()
+                from tui_gateway.turn_admission import owns
+                with session["history_lock"]:
+                    if owns(session):
+                        session["running"] = False
+                        _clear_inflight_turn(session)
+                        if session.get(SESSION_KEY) is segments:
+                            session.pop(SESSION_KEY)
+        if not permitted:
+            return
         from agent.notification_presentation import notification_turn
         # _prepare_turn_input owns profile binding for the worker. The context
         # here only gates presentation; do not introduce a second runtime scope.
@@ -1571,6 +1587,8 @@ def _run_admitted_prompt(
     # history_lock while they take _sessions_lock (a resume racing this submit deadlocked the backend).
     # [daveey] The notice commit (start_synthesized_turn) marks before _sessions_lock for the same reason.
     work = _prepare_session_work(run, name=f"prompt-turn-{sid}", session=session)
+    if replay_delivery is not None:
+        replay_delivery.bind_work(work)
     spawning = started = False
     try:
         with start_synthesized_turn(session) as commit:

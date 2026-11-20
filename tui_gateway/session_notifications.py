@@ -1683,7 +1683,7 @@ def _readopt_wake_profiles() -> list:
 
 def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None = None,
                        display_metadata: dict | None = None, label: str = "wake", build_timeout: float = 120.0,
-                       profiles: list | None = None) -> str:
+                       profiles: list | None = None, replay_delivery=None) -> str:
     """Run ONE agent turn with ``text`` in chat ``session_key`` from this backend: the chat live here is used as is,
     otherwise it is resumed in-process first (``session.resume``, launch store then each named profile, the same
     path the re-adopted-exit waker uses). For plugins that must close a loop without the user typing (e.g. a chat
@@ -1755,7 +1755,10 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
             logger.info("%s: %s has another live owner; not waking it here", label, key)
             return "refused"
         kwargs = {k: v for k, v in (("display_kind", display_kind), ("display_metadata", display_metadata)) if v}
-        accepted = _notif_submit(rid, sid, session, text, f"{label} dispatch failed", **kwargs)
+        if replay_delivery is not None:
+            accepted = replay_delivery.submit(rid, sid, session, text, display_kind, display_metadata, label)
+        else:
+            accepted = _notif_submit(rid, sid, session, text, f"{label} dispatch failed", **kwargs)
         if accepted is False:
             return "refused"
         logger.info("%s: started a turn in chat %s (live sid %s)", label, key, sid)

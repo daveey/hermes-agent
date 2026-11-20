@@ -704,6 +704,7 @@ def _holder_alive(holder: str) -> bool:
 HANDOFF_FAILURES_MAX = 3  # failed builds/dispatches; ownership refusals retain custody
 _failures: dict[str, int] = {}
 _consume_mu = threading.Lock()
+_deliveries: dict[str, Any] = {}
 
 
 def consume_handoffs(homes: list, wake: Callable[..., str] | None = None, now: float | None = None) -> int:
@@ -721,8 +722,11 @@ def consume_handoffs(homes: list, wake: Callable[..., str] | None = None, now: f
 
 
 def _own_or_alive(holder: str) -> bool:
-    # Inside ``_consume_mu`` a claim held by THIS process is a leftover of an earlier pass that failed to release.
-    return holder != _holder() and _holder_alive(holder)
+    process = holder.split("#", 1)[0]
+    if process != _holder():
+        return _holder_alive(process)
+    delivery = _deliveries.get(holder)
+    return delivery is not None and delivery.alive()
 
 
 def _consume(homes: list, wake: Callable[..., str] | None, now: float | None) -> int:
@@ -740,7 +744,11 @@ def _consume(homes: list, wake: Callable[..., str] | None, now: float | None) ->
         profile = _profile_of(home)
         for owner in owners:
             try:
-                batch = journal.claim(owner, time.time() if now is None else now, _holder(), _own_or_alive)
+                for held, delivery in list(_deliveries.items()):
+                    if not delivery.alive():
+                        _deliveries.pop(held, None)
+                holder = _holder() + "#" + uuid.uuid4().hex
+                batch = journal.claim(owner, time.time() if now is None else now, holder, _own_or_alive)
             except Exception:  # health: allow BLE001 -- retried on the next pass
                 logger.warning("automation-replay: claiming the handed-off replay of %s failed", owner, exc_info=True)
                 continue
@@ -755,6 +763,12 @@ def _consume(homes: list, wake: Callable[..., str] | None, now: float | None) ->
 
 
 def _run_batch(journal, batch: dict, owner: str, profile: str | None, wake) -> None:
+    from tui_gateway.automation_replay_dispatch import Delivery
+    if batch.get("dispatch") == "admitted":
+        journal.settle(batch)
+        return
+    delivery = Delivery(journal, batch)
+    _deliveries[batch["holder"]] = delivery
     try:
         items = [_item_from(d) for d in json.loads(batch["payload"])]
         text, kind, meta = replay_payload(items)
@@ -763,11 +777,18 @@ def _run_batch(journal, batch: dict, owner: str, profile: str | None, wake) -> N
             from tui_gateway import server
             wake = server._wake_session_turn
         verdict = wake(owner, text, display_kind=kind, display_metadata=meta, label="automation-replay",
-                       profiles=[profile])
+                       profiles=[profile], replay_delivery=delivery)
     except Exception:  # health: allow BLE001 -- bounded below
         logger.warning("automation-replay: handed-off replay of %s raised", owner, exc_info=True)
         verdict = "error"
     bid = batch["id"]
+    if verdict == "started":
+        # The worker-entry gate, not return from wake, owns the durable admission.
+        # Retain the exact prepared worker until it finishes; dead work is reclaimable.
+        _failures.pop(bid, None)
+        return
+    _deliveries.pop(batch["holder"], None)
+    delivery.cleanup()
     if verdict in ("busy", "refused"):
         # Refusal is an admission/ownership wait, not a model failure: the retiring
         # predecessor may retain the slot for its entire drain. Never discard custody.
@@ -789,5 +810,4 @@ def _run_batch(journal, batch: dict, owner: str, profile: str | None, wake) -> N
     elif verdict == "missing":
         logger.warning("automation-replay: %s is gone; dropping its handed-off replay", owner)
     _failures.pop(bid, None)
-    journal.commit_message(batch, lambda conn, uid, v=verdict: (0, v))
-    journal.settle(batch)
+    journal.discard(batch)
