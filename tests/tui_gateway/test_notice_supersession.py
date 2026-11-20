@@ -93,6 +93,21 @@ def test_preceding_deferred_notice_is_retried_beneath_superseded_tail(db):
     assert calls == [(CHAT, old)]
 
 
+@pytest.mark.parametrize("only", [None, {CHAT}])
+@pytest.mark.parametrize("settled_tail", [False, True])
+def test_long_deferred_retry_survives_discovery_lookback(db, only, settled_tail):
+    now = time.time()
+    retry_at = now + ng.LOOKBACK_S + 3600
+    old = _notice(db, "A durable close-out awaits quota reset.",
+                  closeout={"state": "deferred", "retry_at": retry_at, "attempts": 1})
+    if settled_tail:
+        _retired_block(db)
+        out, calls = _run(db, now=now)
+        assert calls == [] and out[0]["result"] == "superseded"
+    assert ng.candidates(db, retry_at - 1, only=only) == []
+    assert [c["msg_id"] for c in ng.candidates(db, retry_at + 1, only=only)] == [old]
+
+
 @pytest.mark.parametrize("case", ["ci", "running", "chat", "composite", "remote", "missing", "wrong_kind", "bad_id",
                                   "missing_park", "missing_awaiting", "malformed_park", "missing_event", "missing_board", "old_park"])
 def test_creator_decision_supersession_requires_current_local_proof(db, case):

@@ -165,9 +165,8 @@ def candidates(db: Any, now: float, only: Optional[set[str]] = None) -> list[dic
     from tui_gateway.notice_history import preceding_candidate, settled_notice, whole_row_settled
 
     for row in rows:
-        if row["last_active"] is not None and row["last_active"] < now - LOOKBACK_S and not _deferred_due(
-                _decode(row["display_metadata"]), now):
-            continue
+        # Expire the effective obligation, not a settled physical tail: an older
+        # notice beneath it may hold a durable retry beyond the discovery window.
         row = preceding_candidate(db, row)
         # Cache structure, not age: a notice can become due (or expire) without a commit.
         meta = _decode(row["display_metadata"])
