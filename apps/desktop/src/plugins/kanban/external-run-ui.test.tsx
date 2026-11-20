@@ -1,4 +1,4 @@
-import { cleanup, render } from '@testing-library/react'
+import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ExternalRunBadge } from './external-run-ui'
@@ -98,6 +98,27 @@ describe('ExternalRunBadge', () => {
 })
 
 describe('ExternalRunBadge fake-timer staleness', () => {
+  it('a mounted badge expires without a task update or explicit now', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_000)
+
+    try {
+      const task = { external: gh(), id: 't_mounted', status: 'scheduled' as const }
+      const { container } = render(<ExternalRunBadge task={task} />)
+
+      expect(container.querySelector('[data-visual="running"]')).not.toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(301_000)
+      })
+      expect(container.querySelector('[data-visual="unknown"]')).not.toBeNull()
+      expect(container.querySelector('[data-slot="kanban-external-badge"]')?.getAttribute('aria-label')).toContain(
+        'Status unknown on'
+      )
+    } finally {
+      cleanup()
+      vi.useRealTimers()
+    }
+  })
   it('flips running → unknown after next_due_at', () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_000_000)

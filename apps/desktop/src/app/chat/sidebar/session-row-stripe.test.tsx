@@ -243,6 +243,30 @@ it('external stripe paints a cloud glyph and names the service', () => {
   }
 })
 
+it('a mounted external stripe expires on the client clock with an unchanged session', () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(1_000_000)
+
+  try {
+    const session = row('ext-mounted', { kanban_external_cards: [ghCard()], kanban_parked: 1 })
+
+    const { container } = render(
+      <SessionRowStatusStripe outcomePainted={false} session={session} statusStripe="external" />
+    )
+
+    expect(container.querySelector('[data-external-cloud="solid"]')).not.toBeNull()
+    expect(stripe(container)?.getAttribute('aria-label')).toContain('Running on GitHub Actions')
+    act(() => {
+      vi.advanceTimersByTime(301_000)
+    })
+    expect(container.querySelector('[data-external-cloud="hollow"]')).not.toBeNull()
+    expect(stripe(container)?.getAttribute('aria-label')).toContain('Status unknown on GitHub Actions')
+  } finally {
+    cleanup()
+    vi.useRealTimers()
+  }
+})
+
 it('unknown external uses the hollow cloud', () => {
   const session = row('ext-unk', {
     kanban_external: 1,

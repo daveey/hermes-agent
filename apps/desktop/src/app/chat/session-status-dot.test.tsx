@@ -408,6 +408,12 @@ describe('SessionStatusDot external label', () => {
 
       expect(el).not.toBeNull()
       expect(el?.getAttribute('title')).toContain('Running on GitHub Actions')
+      act(() => {
+        vi.advanceTimersByTime(301_000)
+      })
+      expect(c.querySelector('[data-background-label="external"]')?.getAttribute('title')).toContain(
+        'Status unknown on GitHub Actions'
+      )
     } finally {
       vi.useRealTimers()
     }

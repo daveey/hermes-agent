@@ -10,15 +10,18 @@ import {
   SKY_400
 } from './external-run'
 import type { KanbanTask } from './types'
+import { useExternalRunClock } from './use-external-run-clock'
 
 export function ExternalRunBadge({
-  now = Date.now() / 1000,
+  now: explicitNow,
   task
 }: {
   now?: number
   task: Pick<KanbanTask, 'external' | 'id' | 'status'>
 }) {
   const { t } = useI18n()
+  const nowSeconds = useExternalRunClock(task)
+  const now = explicitNow ?? nowSeconds
 
   if (task.status !== 'scheduled') {
     return null

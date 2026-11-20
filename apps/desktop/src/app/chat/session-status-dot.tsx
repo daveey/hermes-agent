@@ -4,6 +4,7 @@ import { type Translations, useI18n } from '@/i18n'
 import { formatSessionExternalHover } from '@/lib/external-run'
 import { unreadDotOutcomeLabel, unreadDotOutcomeStripe } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
+import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { useBackgroundDotLabel, useSessionDotState } from '@/lib/use-session-dot-state'
 import { cn } from '@/lib/utils'
 import { $sessionColorById, sessionColorFor } from '@/store/session-color'
@@ -180,11 +181,13 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
 
   const variant = sessionDotVariant(dotState, session?.outcome, backgroundLabel)
 
+  const nowSeconds = useExecutionObservationClock(session)
+
   const externalHover =
     backgroundLabel === 'external' || backgroundLabel === 'external_down'
       ? formatSessionExternalHover(
           session?.kanban_external_cards,
-          Date.now() / 1000,
+          nowSeconds,
           (session?.kanban_external ?? 0) + (session?.kanban_external_down ?? 0)
         )
       : null

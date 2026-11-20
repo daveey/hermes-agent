@@ -39,6 +39,7 @@ import { KANBAN_LOCALES } from './i18n'
 import { installOpenTaskHook } from './open-task'
 import { meterCounts, meterTotal, TaskMeter } from './status-meter'
 import { $newTaskLane, useKanban } from './ui'
+import { useExternalRunClock } from './use-external-run-clock'
 
 // Live task pill — a bar of open cards by state (status-meter.tsx) plus their
 // count, one glance at fleet activity from anywhere; clicks through to the board unless a plugin takes the click
@@ -55,12 +56,14 @@ function KanbanCount() {
     queryFn: () => fetchBoard(false)
   })
 
+  const nowSeconds = useExternalRunClock(board)
+
   if (!board) {
     return null
   }
 
   // [daveey] A bar of every open card (running/ready/not ready/blocked), not just in-flight.
-  const counts = meterCounts(board)
+  const counts = meterCounts(board, nowSeconds)
   const total = meterTotal(counts)
 
   if (total === 0) {

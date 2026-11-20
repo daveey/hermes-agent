@@ -131,6 +131,7 @@ function stripeGlyphs(statusStripe: SessionStatusStripe, painted: boolean, outco
 export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }: SessionRowStatusStripeProps) {
   const { t } = useI18n()
   const pausedIds = useStore($pausedQueueSessionIds)
+  const nowSeconds = useExecutionObservationClock(session)
 
   if (!statusStripe) {
     return null
@@ -143,9 +144,9 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
     ? t.sidebar.row.pausedQueue
     : outcomeKind
       ? outcomeTooltip(session.outcome, t.sidebar.row)
-      : sessionExternalStripeTip(session, statusStripe)
+      : sessionExternalStripeTip(session, statusStripe, nowSeconds)
 
-  const unknownCloud = unknownExternalCloud(session, statusStripe)
+  const unknownCloud = unknownExternalCloud(session, statusStripe, nowSeconds)
 
   const { doneWatch, glyph, mainGlyph } = stripeGlyphs(statusStripe, Boolean(outcomeKind), session.outcome)
 

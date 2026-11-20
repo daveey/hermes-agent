@@ -172,7 +172,11 @@ const minuteLabel = (seconds: number): string => {
   return mins === 1 ? '1 min' : `${mins} min`
 }
 
-export function formatExternalRelative(epoch: null | number | undefined, now: number, kind: 'future' | 'past'): string | null {
+export function formatExternalRelative(
+  epoch: null | number | undefined,
+  now: number,
+  kind: 'future' | 'past'
+): string | null {
   if (epoch == null) {
     return null
   }
@@ -183,7 +187,7 @@ export function formatExternalRelative(epoch: null | number | undefined, now: nu
     return `${minuteLabel(delta)} ago`
   }
 
-  return `in ${minuteLabel(delta)}`
+  return delta < 0 ? `overdue by ${minuteLabel(delta)}` : `in ${minuteLabel(delta)}`
 }
 
 const humanHealth = (health: string): string => health.replaceAll('_', ' ')
@@ -219,7 +223,7 @@ const downHover = (
   if (!DOWN_HEALTH.has(String(external.health))) {
     return hoverOf(
       `${service} overdue — no recent check`,
-      [last ? `last checked ${last}` : null, next ? `next check ${next}` : null, url].filter(Boolean).join(' · ')
+      [last ? `last checked ${last}` : null, next, url].filter(Boolean).join(' · ')
     )
   }
 
@@ -247,7 +251,8 @@ export function formatExternalHover(
 
   const service = external.service || 'external service'
   const last = formatExternalRelative(external.observed_at, now, 'past')
-  const next = formatExternalRelative(external.next_due_at, now, 'future')
+  const nextRelative = formatExternalRelative(external.next_due_at, now, 'future')
+  const next = nextRelative?.startsWith('overdue') ? `check ${nextRelative}` : `next check ${nextRelative ?? 'unknown'}`
   const url = external.url?.trim() || ''
 
   if (visual === 'down') {
@@ -257,13 +262,23 @@ export function formatExternalHover(
   if (visual === 'unknown') {
     return hoverOf(
       `Status unknown on ${service} — last check ${last ?? 'unknown'}`,
-      [`next check ${next ?? 'unknown'}`, url].filter(Boolean).join(' · ')
+      [next, url].filter(Boolean).join(' · ')
     )
   }
 
   const verb = external.job === 'running' ? 'Running on' : 'Waiting on'
-  const checks = [last ? `last checked ${last}` : null, next ? `next ${next}` : null].filter(Boolean).join(' · ')
-  const detail = external.job === 'running' && external.reason && !external.reason.includes('in progress') ? external.reason.trim() : ''
+
+  const checks = [
+    last ? `last checked ${last}` : null,
+    nextRelative ? (nextRelative.startsWith('overdue') ? next : `next ${nextRelative}`) : null
+  ]
+    .filter(Boolean)
+    .join(' · ')
+
+  const detail =
+    external.job === 'running' && external.reason && !external.reason.includes('in progress')
+      ? external.reason.trim()
+      : ''
 
   return hoverOf(`${verb} ${service} — ${runningStatus(external)}`, [detail, checks, url].filter(Boolean).join(' · '))
 }

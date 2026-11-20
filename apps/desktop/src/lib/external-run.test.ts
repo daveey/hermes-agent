@@ -79,11 +79,10 @@ describe('formatExternalHover (interface-hover.md)', () => {
   })
 
   it('down', () => {
-    const hover = formatExternalHover(
-      gh({ health: 'unreachable', reason: '2 failed checks (502)' }),
-      now,
-      { taskId: 't_x', visual: 'down' }
-    )
+    const hover = formatExternalHover(gh({ health: 'unreachable', reason: '2 failed checks (502)' }), now, {
+      taskId: 't_x',
+      visual: 'down'
+    })
 
     expect(hover?.line1).toBe('GitHub Actions unreachable — 2 failed checks (502)')
     expect(hover?.line2).toContain('Agent triaging (t_x)')
@@ -101,6 +100,17 @@ describe('formatExternalHover (interface-hover.md)', () => {
     expect(hover?.text).not.toContain('Agent triaging')
     expect(hover?.text).not.toContain("job 'tests'")
     expect(hover?.line1).toMatch(/overdue|no recent check/i)
+  })
+
+  it.each([
+    [1420, 'unknown', '2 min'],
+    [1901, 'down', '10 min']
+  ])('a past-due check at %s is overdue, not future', (now, visual, late) => {
+    const hover = formatExternalHover(gh(), now as number)
+
+    expect(deriveExternalVisual(gh(), now as number)).toBe(visual)
+    expect(hover?.line2).toContain(`check overdue by ${late}`)
+    expect(hover?.line2).not.toContain('next check in')
   })
 
   it('a finished job with health ok is not unknown sky', () => {
