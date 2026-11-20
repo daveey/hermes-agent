@@ -519,10 +519,8 @@ def _completion_note(row: dict) -> Optional[dict]:
     # notices. Card ownership still supplies decision/wait outcomes independently;
     # an incidental recipient resumes classification of its own preceding turn.
     if isinstance(meta, dict) and row.get("display_kind") == _NOTICE_KIND:
-        closeout = meta.get("closeout")
-        if meta.get("outcome_informational") is True or (
-            isinstance(closeout, dict) and closeout.get("state") == "superseded"
-        ):
+        from tui_gateway.notice_history import settled_notice
+        if meta.get("outcome_informational") is True or settled_notice(row):
             return meta
     return meta if isinstance(meta, dict) and meta.get("completion_note") else None
 

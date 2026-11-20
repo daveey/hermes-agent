@@ -8,7 +8,9 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
 
 - a "blocked" notice whose card has moved on since (answered, rescheduled, done, archived) never wakes: it is
   stamped ``closeout.state = "superseded"`` and the chat's outcome is refreshed. Superseded user notices are
-  transparent to outcome derivation and candidate discovery, so an older unanswered notice keeps its custody;
+  transparent to outcome derivation and candidate discovery only with a content-bound whole-row source proof,
+  so an older unanswered notice keeps its custody without hiding mixed batches. A legacy stamp can acquire
+  that proof lazily; an unprovable row remains visible;
 - a creator-decision notice is superseded only with an exact local source-event/render match and proof its
   card left the chat wait (a scheduled card must explicitly name a different producer). Mixed/foreign/unknown
   rows remain unanswered;
@@ -97,7 +99,7 @@ def _reset_refreshed_for_tests() -> None:
     _refreshed.clear()
 
 _CANDIDATES_SQL = """
-SELECT s.id AS sid, m.id AS msg_id, m.role, m.timestamp, m.content, m.display_metadata,
+SELECT s.id AS sid, m.id AS msg_id, m.role, m.timestamp, m.content, m.display_kind, m.display_metadata,
        {last_active} AS last_active
   FROM sessions s
   JOIN messages m ON m.id = (SELECT id FROM messages WHERE session_id = s.id AND active = 1
@@ -111,7 +113,7 @@ SELECT s.id AS sid, m.id AS msg_id, m.role, m.timestamp, m.content, m.display_me
 # ``idx_messages_kanban_notice``) instead of the last message of every session; ``m.id = (...)`` keeps the
 # "a notice is the chat's last active message" test. 5.5x less work on a 1.3M-message store.
 _CANDIDATES_INDEXED_SQL = """
-SELECT s.id AS sid, m.id AS msg_id, m.role, m.timestamp, m.content, m.display_metadata,
+SELECT s.id AS sid, m.id AS msg_id, m.role, m.timestamp, m.content, m.display_kind, m.display_metadata,
        {last_active} AS last_active
   FROM (SELECT session_id, MAX(id) AS nid FROM messages INDEXED BY idx_messages_kanban_notice
          WHERE display_kind = 'kanban_notice' AND active = 1 AND role IN ('user', 'assistant', 'tool')
@@ -160,9 +162,12 @@ def candidates(db: Any, now: float, only: Optional[set[str]] = None) -> list[dic
     else:
         rows = candidate_rows(db, sql)
     out = []
-    from tui_gateway.notice_history import preceding_candidate
+    from tui_gateway.notice_history import preceding_candidate, settled_notice, whole_row_settled
 
     for row in rows:
+        if row["last_active"] is not None and row["last_active"] < now - LOOKBACK_S and not _deferred_due(
+                _decode(row["display_metadata"]), now):
+            continue
         row = preceding_candidate(db, row)
         # Cache structure, not age: a notice can become due (or expire) without a commit.
         meta = _decode(row["display_metadata"])
@@ -174,9 +179,13 @@ def candidates(db: Any, now: float, only: Optional[set[str]] = None) -> list[dic
             continue
         if row["timestamp"] > now - GRACE_S:
             continue
-        if "closeout" not in meta or deferred_due or _legacy_busy(meta):
-            out.append({"sid": str(row["sid"]), "msg_id": int(row["msg_id"]), "content": str(row["content"] or ""),
-                        "meta": meta, "raw_meta": row["display_metadata"]})
+        cand = {"sid": str(row["sid"]), "msg_id": int(row["msg_id"]), "content": str(row["content"] or ""),
+                "meta": meta, "raw_meta": row["display_metadata"]}
+        closeout = meta.get("closeout")
+        reprovable = (isinstance(closeout, dict) and closeout.get("state") == "superseded"
+                      and not settled_notice(row) and whole_row_settled(cand))
+        if "closeout" not in meta or deferred_due or _legacy_busy(meta) or reprovable:
+            out.append(cand)
     return out
 
 
@@ -310,7 +319,12 @@ def superseded(cand: dict) -> bool:
 
 def _supersede(db: Any, cand: dict, now: float) -> str:
     """Stamp the notice ``superseded`` (compare-and-swap like a claim) and refresh the chat's outcome."""
-    meta = {**cand["meta"], "closeout": {"state": "superseded", "at": now, "pid": os.getpid()}}
+    from tui_gateway.notice_history import content_digest, whole_row_settled
+
+    closeout = {"state": "superseded", "at": now, "pid": os.getpid()}
+    if whole_row_settled(cand):
+        closeout["settled_content_sha256"] = content_digest(cand["content"])
+    meta = {**cand["meta"], "closeout": closeout}
     with notice_writer(db) as wdb:
         if wdb._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
                                (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"])) != 1:
