@@ -9,6 +9,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from hermes_cli.kanban_lockguard import connect
 from hermes_cli.kanban_run_machine import add_run_machines
 from hermes_cli.kanban_run_model import add_run_models
 
@@ -82,7 +83,7 @@ def _replica_for(conn: sqlite3.Connection) -> sqlite3.Connection | None:
         path = shadow_path(board_slug_for_path(key))
         if not path.is_file() or Path(key).resolve() == path.resolve():
             return None
-        replica = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        replica = connect(f"file:{path}?mode=ro", uri=True, timeout=5)
         replica.row_factory = sqlite3.Row
         return replica
     except (OSError, TypeError, ValueError, sqlite3.Error):
@@ -235,7 +236,7 @@ def annotate_remote_upstream(cards: list[dict[str, Any]]) -> None:
             path = shadow_path(board)
             if not path.is_file():
                 continue
-            replica = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            replica = connect(f"file:{path}?mode=ro", uri=True, timeout=5)
             replica.row_factory = sqlite3.Row
             _add_blocked_upstream(replica, found)
         except (OSError, TypeError, ValueError, sqlite3.Error):
