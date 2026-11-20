@@ -168,6 +168,32 @@ def test_preflight_reads_persisted_access_labels(conn, monkeypatch, requirement,
     assert unchanged is not None and unchanged.status == "ready"
 
 
+@pytest.mark.parametrize("raw", [
+    "{not json",
+    '["capability:hub-read"',
+    '{"capability:hub-read": 1}',
+    '"capability:hub-read"',
+    "null",
+])
+def test_preflight_malformed_runs_on_keeps_registry_check(conn, monkeypatch, raw):
+    from hermes_cli import kanban_capability_routing as routing
+
+    tid = kb.create_task(conn, title="Check declared access", assignee="default",
+                         requires=["terminal", "hub:read"])
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET placement_policy=NULL, runs_on=? WHERE id=?", (raw, tid))
+    task = kb.get_task(conn, tid)
+    assert task is not None
+    assert not hasattr(task, "runs_on")
+    assert task.placement_policy is None
+    monkeypatch.setattr(routing, "has_replica", lambda: True)
+    result = routing.preflight(conn, tid, self_gw="hub", local={}, remote={})
+    assert result is not None, raw
+    assert result["code"] == "no_capability_holder", result
+    unchanged = kb.get_task(conn, tid)
+    assert unchanged is not None and unchanged.status == "ready"
+
+
 @pytest.mark.parametrize("requirement", ["hub:read", "hub:write", "ssh:mini", "ssh:mbp"])
 def test_preflight_keeps_access_needs_without_sync_schema(tmp_path, monkeypatch, requirement):
     from hermes_cli import kanban_capability_routing as routing
