@@ -28,6 +28,35 @@ KEY = "q8ZpL2vXk9RtYwB4mN7cQ1sD5fH3jK6g"
             ["--aws-secret-access-key", MASK],
         ),
         (["--webhook-secret=Zm9vYmFyYmF6/cXV4cXV1eA=="], [f"--webhook-secret={MASK}"]),
+        # a suffix after the secret word keeps the flag secret (fail closed); short, "/" and hex values too
+        (
+            [
+                "--client-secret-value",
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "--token-b64",
+                "Zm9vYmFy/YmF6cXV4",
+            ],
+            ["--client-secret-value", MASK, "--token-b64", MASK],
+        ),
+        (
+            [
+                "--api-key-value",
+                "hunter2hunter2",
+                "--secret-key-base",
+                "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+            ],
+            ["--api-key-value", MASK, "--secret-key-base", MASK],
+        ),
+        (
+            [
+                "--auth-header",
+                "Bearer.Xy9kq2LmZp4Rt7",
+                "--private-key-pem=abc",
+                "--apikey",
+                "x",
+            ],
+            ["--auth-header", MASK, f"--private-key-pem={MASK}", "--apikey", MASK],
+        ),
         # a numeric value after a secret-named flag is the secret
         (
             ["--webhook-secret", "12345678901234567890", "--signing-key=4242424242"],
@@ -91,6 +120,23 @@ def test_secrets_are_masked(argv, expected):
         ],
         ["--model", "Qwen3-Coder-480B-A35B-Instruct"],
         ["--api-key-timeout", "30"],
+        # settings about a secret, not the secret: deliberate (an id, a name, an env var, a store, a jar path)
+        [
+            "--access-key-id",
+            "deploy-bot",
+            "--secret-name",
+            "prod/db",
+            "--api-key-env",
+            "OPENAI_API_KEY",
+        ],
+        [
+            "--keyring-backend",
+            "macos",
+            "--auth-mode",
+            "oauth",
+            "--cookie-jar",
+            "~/.hermes/cookies.txt",
+        ],
         ["--key-file", "C:\\Users\\x\\key.pem"],
         ["--token-file", "./token.txt"],
     ],

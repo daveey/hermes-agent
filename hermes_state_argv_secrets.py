@@ -14,12 +14,16 @@ import re
 from collections import Counter
 
 MASK = "***"
-# The secret word ends the name: --api-key, --webhook-secret, --aws-secret-access-key, --db-password, --auth-token;
-# not --api-key-timeout, --token-env, --max-tokens or --password-file, whose values are settings or paths.
-_SECRET_FLAG = re.compile(
-    r"^-{1,2}[\w.-]*?(?:key|token|secret|passw(?:or)?d|passwd|pwd|auth|credentials?|cookie|bearer)$",
-    re.IGNORECASE,
-)
+# A flag is secret-named when a part of its name is, or ends with, a secret word (--api-key, --apikey,
+# --client-secret-value, --token-b64, --auth-header) -- fail closed: a new suffix stays secret -- unless its LAST
+# part names a setting about the secret rather than the secret (--api-key-timeout, --token-env, --key-file).
+_SECRET_WORD = re.compile(r"(?:key|token|secret|passw(?:or)?d|passwd|pwd|auth|credentials?|cookie|bearer)$",
+                          re.IGNORECASE)
+_SETTING_SUFFIXES = frozenset({
+    "file", "files", "env", "timeout", "ttl", "name", "names", "id", "ids", "path", "paths", "dir", "url", "uri",
+    "host", "port", "count", "limit", "size", "length", "len", "mode", "type", "kind", "format", "store", "backend",
+    "provider", "browser", "helper", "cmd", "command", "tokens", "keys", "enabled", "required", "only",
+})
 # Flags that LOOK secret-named but carry public, identifying values.
 _PUBLIC_FLAGS = frozenset({"--ssh-session-token-file", "--token-file", "--key-file", "--auth-file",
                            "--keychain", "--monkey", "--keyboard", "--author", "--authority",
@@ -52,7 +56,12 @@ def _looks_like_bare_secret(token: str) -> bool:
 
 
 def _is_secret_flag(token: str) -> bool:
-    return bool(_SECRET_FLAG.match(token)) and token.lower() not in _PUBLIC_FLAGS
+    if not token.startswith("-") or token.lower() in _PUBLIC_FLAGS:
+        return False
+    parts = [part for part in re.split(r"[-_.]", token.lstrip("-")) if part]
+    if not parts or parts[-1].lower() in _SETTING_SUFFIXES:
+        return False
+    return any(_SECRET_WORD.search(part) for part in parts)
 
 
 def _looks_like_path(value: str) -> bool:
