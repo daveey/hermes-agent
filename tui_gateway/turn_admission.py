@@ -10,6 +10,30 @@ from hermes_cli.worker_drain_fence import admit, DrainRefused, lease_scope
 
 _current: ContextVar[tuple | None] = ContextVar("turn_admission_owner", default=None)
 _KEY = "_turn_admission"
+# [daveey] Set when ``_admit_prompt_turn`` admits a turn, popped when that turn settles: while it is set and
+# ``running`` holds, a refused submit on the record is a sibling of a live turn and owns none of its state.
+LIVE_TURN = "_admitted_live_turn"
+_spared: ContextVar[bool] = ContextVar("turn_admission_refusal_spared_live_turn", default=False)
+
+
+def mark_live_turn(session):
+    """Caller holds history_lock: an admitted turn now owns ``running``, the admission ref and ``inflight_turn``."""
+    session[LIVE_TURN] = object()
+
+
+def live_turn_holds(session):
+    """Caller holds history_lock. True while an admitted turn owns this record's running state."""
+    return bool(session.get("running")) and session.get(LIVE_TURN) is not None
+
+
+def note_refusal(*, spared_live_turn):
+    """Record (for this thread's caller of ``_run_prompt_submit``) whether its refusal left a live turn alone."""
+    _spared.set(bool(spared_live_turn))
+
+
+def refusal_spared_live_turn():
+    """True when this thread's last admission refusal found a live turn: the caller releases nothing it shares."""
+    return _spared.get()
 
 
 class TurnAdmission:
@@ -38,11 +62,14 @@ class TurnAdmission:
                         self.drain_lease.close()
 
 
-def acquire(home=None, *, busy_wait_s=None):
+def acquire(home=None, *, busy_wait_s=None, session=None, work=None):
     from hermes_cli.backend_retirement import retirement
+    # [daveey] The reservation file names its holder (hermes-sync's refusal line reads it back).
+    label = {"session": str(session.get("session_key") or "") or None if isinstance(session, dict) else None,
+             "work": work, "thread": threading.current_thread().name}
     # busy_wait_s=None keeps the fence's default busy-lock retry; 0 is one short try (resume-lock callers).
-    reservation = (retirement.reservation(home) if busy_wait_s is None
-                   else retirement.reservation(home, busy_wait_s=busy_wait_s))
+    reservation = (retirement.reservation(home, **label) if busy_wait_s is None
+                   else retirement.reservation(home, busy_wait_s=busy_wait_s, **label))
     try:
         drain_lease = admit('turn.admission')
     except DrainRefused:
@@ -75,6 +102,7 @@ def settle(session):
     """Caller holds history_lock. A stale worker cannot settle a newer turn."""
     if not owns(session):
         return False
+    session.pop(LIVE_TURN, None)
     token = session.pop(_KEY, None)
     if token is not None:
         if session.get("_turn_admission_generation") is token:
@@ -84,11 +112,12 @@ def settle(session):
 
 
 @contextmanager
-def admission(session, *, busy_wait_s=None):
-    token = acquire(session.get("profile_home"), busy_wait_s=busy_wait_s)
+def admission(session, *, busy_wait_s=None, work="turn-claim"):
+    token = acquire(session.get("profile_home"), busy_wait_s=busy_wait_s, session=session, work=work)
     with session["history_lock"]:
         claimed = token is not None and not session.get("running")
         if claimed:
+            session.pop(LIVE_TURN, None)  # nothing runs here: a leftover record must not spare this claim's refusal
             old = session.pop(_KEY, None)
             if old is not None:
                 old.release()
@@ -237,7 +266,8 @@ def prepare_work(target, *, name, session=None, home=None, busy_wait_s=None):
         token = None
     installed = False
     if token is None:
-        token = acquire(home or (session or {}).get("profile_home"), busy_wait_s=busy_wait_s)
+        token = acquire(home or (session or {}).get("profile_home"), busy_wait_s=busy_wait_s, session=session,
+                        work=name)
         if token is not None and session is not None:
             with session["history_lock"]:
                 existing = session.get(_KEY)

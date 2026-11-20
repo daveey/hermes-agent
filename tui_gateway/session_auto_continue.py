@@ -80,8 +80,8 @@ def _retire_turn_marker(session: dict, *keys: str, concluding_turn: frozenset | 
     home = _session_home(session)
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
         if key:
-            if concluding_turn is None:
-                clear_turn_marker(home, key)
+            if concluding_turn is None:  # [daveey] not this turn's identity: only this process's, or a dead writer's
+                clear_turn_marker(home, key, owner_only=True)
             else:
                 clear_turn_marker(home, key, concluding_turn=concluding_turn)
 
@@ -368,7 +368,9 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             _drop_kickoff_marker_inputs(session, marker)
             return
         if accepted is False:
-            _notif_release_claim(session, claim)  # still ours only if admission did not release it
+            from tui_gateway.turn_admission import refusal_spared_live_turn
+            if not refusal_spared_live_turn():  # [daveey] a live turn's ``running`` is not this kickoff's
+                _notif_release_claim(session, claim)  # still ours only if admission did not release it
             _auto_continue_refused(sid, session, session_key, paused, "submit refused at admission", marker)
     if _start_session_work(kickoff, name=f"auto-continue-{sid}", home=session.get("profile_home")) is None:
         session["_auto_continue_scheduled"] = False

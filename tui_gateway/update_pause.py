@@ -162,6 +162,7 @@ def not_resumable_reason(session: dict, marker_key: str) -> str | None:
         return "desktop.auto_continue.resume_on_startup is off"
     marker = read_turn_marker(_home(session), marker_key)
     if marker is None:
+        _warn_live_turn_lost_marker(session, marker_key)
         return "no turn marker"
     if not marker["auto_continue"]:
         return "turn opted out of auto-continue"
@@ -172,6 +173,20 @@ def not_resumable_reason(session: dict, marker_key: str) -> str | None:
     if fresh_s <= UPDATE_MARGIN_S:
         return "auto-continue freshness window is shorter than the update margin"
     return None
+
+
+def _warn_live_turn_lost_marker(session: dict, marker_key: str) -> None:
+    """[daveey] A running turn that recorded this marker should still have it: a turn without one never pauses,
+    so hermes-sync's update waits on it (2026-11-20, 30+ min). Once per live turn, not per poll."""
+    from tui_gateway.turn_admission import LIVE_TURN
+    if not session.get("running") or session.get("_active_turn_marker_key") != marker_key:
+        return
+    stamp = (marker_key, session.get(LIVE_TURN))
+    if session.get("_lost_marker_warned") == stamp:
+        return
+    session["_lost_marker_warned"] = stamp
+    logger.warning("core-update pause: live turn lost its marker: session %s has no turn marker on disk, so it "
+                   "cannot pause for the update", marker_key)
 
 
 def _command_head(command: str, limit: int = 80) -> str:

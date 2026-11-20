@@ -388,6 +388,8 @@ def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwa
     that already took the notice off a durable store put it back. Every caller claimed ``running`` just
     before, so the token read here is its own; nothing else can claim while ``running`` stays True."""
     claim = session.get("_notif_turn_claim")
+    from tui_gateway.turn_admission import note_refusal
+    note_refusal(spared_live_turn=False)  # a stale verdict of this thread's earlier refusal never carries over
     # [daveey] The first ownership refusal of a streak shows its one notice; later probes in the streak are
     # silent (_notif_owner_preflight / the owner-refusal backoff).
     kwargs.setdefault("report_ownership_refusal", not session.get("_notif_owner_refusal_delay"))
@@ -398,7 +400,10 @@ def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwa
         else:
             # A refusing admission already released ``running``, and a user prompt may own it since. A caller
             # that requeues the notice backs off first (_notif_refusal_backoff); the rest return at once.
-            _notif_release_claim(session, claim)
+            # [daveey] A refusal over a live turn on this record leaves its ``running`` and claim alone.
+            from tui_gateway.turn_admission import refusal_spared_live_turn
+            if not refusal_spared_live_turn():
+                _notif_release_claim(session, claim)
         return accepted
     except Exception as exc:
         _notif_log_failure(what, exc)

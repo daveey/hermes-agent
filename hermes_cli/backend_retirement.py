@@ -140,11 +140,12 @@ def _reserve(root, busy_wait_s, what):
 
 
 
-def _describe(pending, purpose, session=None):
+def _describe(pending, purpose, session=None, *, work=None, thread=None):
     """Label a reservation for ``admission_fence state-details``; a test double without the method is fine."""
     describe = getattr(pending, "describe", None)
     if describe is not None:
-        describe(purpose, session)
+        extra = {k: v for k, v in (("work", work), ("thread", thread)) if v is not None}
+        describe(purpose, session, **extra)
 
 
 # [daveey] Background reviews (the post-turn memory/skill review fork) run on a daemon thread with
@@ -311,7 +312,7 @@ class RetirementFence:
                 self.release()
 
     @contextmanager
-    def reservation(self, home=None, *, busy_wait_s=None):
+    def reservation(self, home=None, *, busy_wait_s=None, session=None, work=None, thread=None):
         """Compose process retirement with the cross-process update reservation.
 
         Neither lock is held while acquiring the other, or while callers hold
@@ -319,7 +320,8 @@ class RetirementFence:
         A briefly busy admission.lock is retried for ``busy_wait_s`` (default
         BUSY_WAIT_S; 0 = one 50 ms try, for callers holding the session resume
         lock, also forced by ``single_lock_try()``); the refusal reason is
-        readable afterwards through ``last_refusal()``.
+        readable afterwards through ``last_refusal()``. ``session``/``work``/``thread`` [daveey] name the
+        holder in the reservation file (``admission_fence state-details``).
         """
         from hermes_constants import get_default_hermes_root, get_hermes_home
         from hermes_cli.admission_fence import HOLD_MESSAGE, SUPPORTED
@@ -343,7 +345,7 @@ class RetirementFence:
                 if reason == "held":
                     _log.info(HOLD_MESSAGE)
                 elif pending is not None:
-                    _describe(pending, "turn_admission")
+                    _describe(pending, "turn_admission", session, work=work, thread=thread)
             _refusal.set(reason)
             yield admitted and pending is not None
         finally:

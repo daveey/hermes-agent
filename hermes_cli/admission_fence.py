@@ -88,14 +88,16 @@ class Reservation:
         self.path = path
         self._lock = threading.Lock()
 
-    def describe(self, purpose, session=None):
+    def describe(self, purpose, session=None, work=None, thread=None):
         """[daveey] Record who holds this reservation, for ``state-details`` (t_01a1d521213ff881).
 
         Diagnostic only: the lock, not the body, is the claim, so the v1 count protocol is unchanged and
         an empty or unreadable body (an older core, a write that failed) only reads as an unnamed holder.
         Never raises."""
         body = json.dumps({"purpose": str(purpose), "pid": os.getpid(),
-                           "session": None if session is None else str(session), "created_at": time.time()})
+                           "session": None if session is None else str(session),
+                           "work": None if work is None else str(work),
+                           "thread": None if thread is None else str(thread), "created_at": time.time()})
         with self._lock:
             if self.fd is None:
                 return
@@ -263,7 +265,8 @@ def _state_locked(root, *, details=False):
 
 def _reservation_record(fd, name):
     """One held reservation's owner record (``Reservation.describe``); unnamed fields are None. Never raises."""
-    record = {"id": name, "purpose": None, "pid": None, "session": None, "age_s": None}
+    record = {"id": name, "purpose": None, "pid": None, "session": None, "work": None, "thread": None,
+              "age_s": None}
     created = None
     try:
         body = json.loads(os.pread(fd, 4096, 0).decode("utf-8"))
@@ -272,6 +275,8 @@ def _reservation_record(fd, name):
             record["purpose"] = purpose if isinstance(purpose, str) else None
             record["pid"] = pid if type(pid) is int else None
             record["session"] = session if isinstance(session, str) else None
+            for field in ("work", "thread"):
+                record[field] = body[field] if isinstance(body.get(field), str) else None
             if isinstance(body.get("created_at"), (int, float)):
                 created = float(body["created_at"])
     except (OSError, ValueError):

@@ -137,7 +137,8 @@ def _admit_prompt_turn(
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
-    from tui_gateway.turn_admission import owns
+    from tui_gateway.turn_admission import live_turn_holds, mark_live_turn, note_refusal, owns
+    note_refusal(spared_live_turn=False)
     with session["history_lock"]:
         if not owns(session):
             return None
@@ -153,18 +154,27 @@ def _admit_prompt_turn(
         with session["history_lock"]:
             if not owns(session):
                 return None
-            session["running"] = False
-            staged = session.pop("_submit_user_row", None)
-            if _retain_unadmitted_submit_row(session["history"], staged):
-                session["history_version"] = int(session.get("history_version", 0)) + 1
+            # [daveey] A submit refused while an admitted turn runs on this record owns none of that turn's
+            # state: its running, admission ref, in-flight turn and marker stay the live turn's (2026-11-20).
+            spared = live_turn_holds(session)
+            if not spared:
+                session["running"] = False
+                staged = session.pop("_submit_user_row", None)
+                if _retain_unadmitted_submit_row(session["history"], staged):
+                    session["history_version"] = int(session.get("history_version", 0)) + 1
         reason = getattr(ownership_refusal, "reason", None) or "SESSION_COORDINATION_UNAVAILABLE"
         # [daveey] Read by the notification poller (_notif_after_submit): a synthesized turn refused for
         # ownership backs off instead of re-running every poll (139 refusal cards in 110 s, 2026-10-28).
         session["_turn_owner_refusal"] = reason
-        if report_ownership_refusal:
+        note_refusal(spared_live_turn=spared)
+        if spared:
+            logger.info("Refused submit for session %s left the live turn's state alone",
+                        session.get("session_key") or sid)
+        elif report_ownership_refusal:
+            # [daveey] retire_marker=False: this submit wrote no marker; the one on disk is a live turn's.
             _emit_terminal_turn_error(
                 sid, session, str(ownership_refusal),
-                error_surface={"layer": "gateway", "code": reason, "retryable": False})
+                error_surface={"layer": "gateway", "code": reason, "retryable": False}, retire_marker=False)
         return None
     with session["history_lock"]:
         if not owns(session):
@@ -202,6 +212,7 @@ def _admit_prompt_turn(
         if agent is None:
             session["running"] = False
         else:
+            mark_live_turn(session)
             with contextlib.suppress(Exception):
                 agent.clear_interrupt()
     if agent is None:
@@ -1384,9 +1395,10 @@ def _run_admitted_prompt(
         sid, session, text, image_paths, queued_prompt_generation, display_kind, display_metadata,
         report_ownership_refusal=report_ownership_refusal)
     if admitted is None:
-        from tui_gateway.turn_admission import settle
-        with session["history_lock"]:
-            settle(session)
+        from tui_gateway.turn_admission import refusal_spared_live_turn, settle
+        if not refusal_spared_live_turn():  # never the live turn's admission ref
+            with session["history_lock"]:
+                settle(session)
         return False
     images, agent = admitted
     # [daveey] pre_llm_call's input_origin (tui_gateway/human_input.py): set every turn, so an injected turn

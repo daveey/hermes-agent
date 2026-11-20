@@ -299,10 +299,18 @@ def merge_receipts(home: Path | str, session_key: str, jobs: list, merge, *, cre
     return bool(session_key) and _update(home, session_key, mutate, "journal jobs")
 
 
-def clear_turn_marker(home: Path | str, session_key: str, *, concluding_turn: frozenset | None = None) -> None:
-    """Remove a concluded marker. A late backstop must name its owner; compare and delete under the same lock."""
+def clear_turn_marker(home: Path | str, session_key: str, *, concluding_turn: frozenset | None = None,
+                      owner_only: bool = False) -> None:
+    """Remove a concluded marker. A late backstop must name its owner; compare and delete under the same lock.
+    [daveey] ``owner_only``: delete only a marker this process wrote or whose writer is dead; a live sibling's
+    marker is its running turn's (a refused submit in pid 399307 deleted pid 491642's, 2026-11-20)."""
     def mutate(entries):
         if session_key not in entries:
+            return None
+        entry = entries[session_key]
+        if owner_only and entry.get("writer_pid") != os.getpid() and marker_writer_state(entry) != "dead":
+            logger.info("turn marker for session %s kept: writer pid %s is not this process (%s) nor known dead",
+                        session_key, entry.get("writer_pid"), os.getpid())
             return None
         if concluding_turn is not None:
             from hermes_state_outcome import turn_identity

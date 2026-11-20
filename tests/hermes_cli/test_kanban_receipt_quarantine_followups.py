@@ -227,10 +227,10 @@ def test_refused_quarantine_shape_while_opening_the_replica_exits_1(synced_conn,
     assert "receipt-x not released" in out and "earlier unreleased quarantine shape" in out
 
 
-# --- review of #3828: the item-6 deletion keeps rows another receipt holds and unidentifiable rows ------------
+# --- review of #3828: the item-6 deletion keeps rows another receipt holds and rows naming no known task -------
 
-def test_non_primary_lift_keeps_withheld_rows_of_another_receipt_and_unidentifiable_rows(synced_conn, kanban_home,
-                                                                                         monkeypatch, capsys):
+def test_non_primary_lift_keeps_withheld_rows_of_another_receipt_and_rows_naming_no_known_task(
+        synced_conn, kanban_home, monkeypatch, capsys):
     shadow = synced_conn
     case = _picked_up(shadow, kanban_home)
     other = "t_held_by_receipt_r"

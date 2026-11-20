@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import json
 
-from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
-
 
 def first_seen(seen, uid: str) -> int | None:
     """The first-seen stamp (ms) ``seen`` (the replica) gave ``uid``'s quarantine, or None."""
@@ -29,7 +27,8 @@ def _dropped(conn, freed: set[str], blocked: set[str]) -> list[str]:
     """This file's withheld wires of the freed tasks (none still held by another receipt). Dropping them is safe
     even for a freed task absent from this file: a non-primary file never replays withheld rows (``replay=False``),
     and the replica's certified rows of each freed task it holds are what the lift applies. A row naming a task
-    another receipt still holds, or naming no identifiable task, stays withheld."""
+    another receipt still holds, or naming no known task, stays withheld. ``subjects`` cannot refuse here: a row
+    it refuses was never withheld (``withhold`` calls it uncaught)."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_sync_quarantine as quarantine
     if not freed or not quarantine._exists(conn, "containment_sync_withheld"):
@@ -37,10 +36,7 @@ def _dropped(conn, freed: set[str], blocked: set[str]) -> list[str]:
     out = []
     for (text,) in conn.execute("SELECT wire FROM containment_sync_withheld ORDER BY ord,rowid").fetchall():
         ch = sync.RemoteChange(**json.loads(text))
-        try:
-            names = quarantine.subjects(conn, ch.table, ch.uid, ch.fields)
-        except ContainmentRefused:
-            continue  # unidentifiable: stays withheld
+        names = quarantine.subjects(conn, ch.table, ch.uid, ch.fields)
         if names & freed and not names & blocked:
             out.append(text)
     return out
