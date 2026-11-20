@@ -71,6 +71,24 @@ def test_replica_stamp_precedence_and_ineligible_cards(status):
         assert "blocked_upstream" not in result
 
 
+@pytest.mark.parametrize("row_factory", [None, sqlite3.Row])
+@pytest.mark.parametrize("with_episode", [False, True])
+def test_task_info_supports_caller_row_factory(row_factory, with_episode):
+    from hermes_cli.kanban_session_activity_card_details import _task_info
+
+    with sqlite3.connect(":memory:") as conn:
+        conn.row_factory = row_factory
+        conn.execute("CREATE TABLE tasks(id TEXT, status TEXT)")
+        conn.execute("INSERT INTO tasks VALUES ('parent', 'triage')")
+        if with_episode:
+            conn.execute("ALTER TABLE tasks ADD COLUMN containment_episode TEXT")
+            conn.execute("UPDATE tasks SET containment_episode='episode'")
+        assert _task_info(conn, None, "parent") == {
+            "id": "parent", "status": "triage", "episode": "episode" if with_episode else None,
+        }
+        assert conn.row_factory is row_factory
+
+
 @pytest.mark.parametrize("transport", ["stamped", "graph", "old"])
 def test_replica_session_tasks_preserves_optional_ancestor(tmp_path, monkeypatch, transport):
     path = tmp_path / "replica.db"

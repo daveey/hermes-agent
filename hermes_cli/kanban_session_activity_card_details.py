@@ -108,8 +108,8 @@ def _task_info(conn: sqlite3.Connection, replica: sqlite3.Connection | None, tas
             rows = _query(src, "SELECT id, status FROM tasks WHERE id=?", (task_id,))
         if rows:
             row = rows[0]
-            episode = row["containment_episode"] if "containment_episode" in row.keys() else None
-            return {"id": row["id"], "status": row["status"], "episode": episode}
+            episode = row[2] if len(row) > 2 else None
+            return {"id": row[0], "status": row[1], "episode": episode}
     return None
 
 
