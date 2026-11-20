@@ -26,6 +26,10 @@ export interface SessionRowStatusCopy {
   backgroundWaiting: string
   /** [daveey] Background dot when the chat's open work is running on an external service (CI/deploy). */
   backgroundExternal: string
+  /** [daveey] Background dot when the only open external work is down. */
+  backgroundExternalDown: string
+  kanbanExternalRunning: string
+  kanbanExternalDown: string
   backgroundProcessUnnamed: string
   stopProcess: string
   stoppingProcess: string

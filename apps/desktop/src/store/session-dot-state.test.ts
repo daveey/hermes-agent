@@ -968,6 +968,42 @@ describe('sessionStatusStripe external-run precedence', () => {
 
     expect(backgroundDotLabel(row)).toBe('external')
   })
+
+  it('backgroundDotLabel is external_down for down-only rows', () => {
+    const row = {
+      kanban_active: 1,
+      kanban_external_down: 1,
+      kanban_observed_at: Date.now() / 1000,
+      kanban_parked: 1
+    }
+
+    expect(backgroundDotLabel(row)).toBe('external_down')
+  })
+
+  it('cards without count stamps still count as background work', () => {
+    const now = Date.now() / 1000
+
+    const row = {
+      kanban_external_cards: [
+        {
+          external: {
+            adapter: 'github_run',
+            health: 'ok',
+            job: 'running',
+            next_due_at: now + 300,
+            observed_at: now,
+            reason: "job 'tests'",
+            service: 'GitHub Actions'
+          },
+          task_id: 't_a'
+        }
+      ],
+      kanban_observed_at: now,
+      message_count: 4
+    }
+
+    expect(withRowActivity('idle', row)).toBe('background')
+  })
 })
 
 describe('recordStripeTransition', () => {

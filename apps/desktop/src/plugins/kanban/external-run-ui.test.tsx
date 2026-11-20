@@ -28,7 +28,7 @@ describe('ExternalRunBadge', () => {
     expect(badge?.getAttribute('data-visual')).toBe('running')
     expect(badge?.textContent).toBe('running externally')
     expect(badge?.getAttribute('style')).toContain('rgb(56, 189, 248)')
-    expect(badge?.getAttribute('title')).toContain('Running on GitHub Actions')
+    expect(badge?.getAttribute('aria-label')).toContain('Running on GitHub Actions')
   })
 
   it('queued is Waiting on', () => {
@@ -36,7 +36,7 @@ describe('ExternalRunBadge', () => {
       <ExternalRunBadge now={1000} task={{ external: gh({ job: 'queued' }), id: 't_q', status: 'scheduled' }} />
     )
 
-    expect(container.querySelector('[data-slot="kanban-external-badge"]')?.getAttribute('title')).toContain(
+    expect(container.querySelector('[data-slot="kanban-external-badge"]')?.getAttribute('aria-label')).toContain(
       'Waiting on GitHub Actions'
     )
   })
@@ -49,7 +49,7 @@ describe('ExternalRunBadge', () => {
     const badge = container.querySelector('[data-slot="kanban-external-badge"]')
 
     expect(badge?.getAttribute('data-visual')).toBe('unknown')
-    expect(badge?.getAttribute('title')).toContain('Status unknown on GitHub Actions')
+    expect(badge?.getAttribute('aria-label')).toContain('Status unknown on GitHub Actions')
   })
 
   it('down is red “external down”', () => {
@@ -65,7 +65,21 @@ describe('ExternalRunBadge', () => {
     expect(badge?.getAttribute('data-visual')).toBe('down')
     expect(badge?.textContent).toBe('external down')
     expect(badge?.getAttribute('style')).toContain('239, 68, 68')
-    expect(badge?.getAttribute('title')).toMatch(/unreachable/)
+    expect(badge?.getAttribute('aria-label')).toMatch(/unreachable/)
+  })
+
+  it('stale-derived down hover is overdue, not ok or Agent triaging', () => {
+    const { container } = render(
+      <ExternalRunBadge now={1_901} task={{ external: gh(), id: 't_stale', status: 'scheduled' }} />
+    )
+
+    const badge = container.querySelector('[data-slot="kanban-external-badge"]')
+    const tip = badge?.getAttribute('aria-label') ?? badge?.getAttribute('title') ?? ''
+
+    expect(badge?.getAttribute('data-visual')).toBe('down')
+    expect(tip.toLowerCase()).not.toContain(' ok')
+    expect(tip).not.toContain('Agent triaging')
+    expect(tip).toMatch(/overdue|no recent check/i)
   })
 
   it('missing external on a scheduled card renders nothing (today)', () => {

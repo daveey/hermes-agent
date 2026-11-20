@@ -113,7 +113,9 @@ export const sessionDotVariant = (
         ? r.backgroundUnknown
         : backgroundLabel === 'waiting'
           ? r.backgroundWaiting
-          : r.backgroundExternal
+          : backgroundLabel === 'external_down'
+            ? r.backgroundExternalDown
+            : r.backgroundExternal
 
     return { ...DOT_VARIANTS.background, ariaLabel: label, title: label }
   }
@@ -179,7 +181,13 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
   const variant = sessionDotVariant(dotState, session?.outcome, backgroundLabel)
 
   const externalHover =
-    backgroundLabel === 'external' ? formatSessionExternalHover(session?.kanban_external_cards, Date.now() / 1000) : null
+    backgroundLabel === 'external' || backgroundLabel === 'external_down'
+      ? formatSessionExternalHover(
+          session?.kanban_external_cards,
+          Date.now() / 1000,
+          (session?.kanban_external ?? 0) + (session?.kanban_external_down ?? 0)
+        )
+      : null
 
   const title = externalHover ?? variant.title?.(r)
   const aria = externalHover ?? variant.ariaLabel?.(r)

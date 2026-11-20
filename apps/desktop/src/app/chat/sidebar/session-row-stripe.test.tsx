@@ -255,6 +255,28 @@ it('unknown external uses the hollow cloud', () => {
 
   expect(container.querySelector('[data-external-unknown="true"]')).not.toBeNull()
   expect(container.querySelector('[data-external-cloud="hollow"]')).not.toBeNull()
+  expect(container.querySelector('[data-external-cloud="hollow"]')?.className).toMatch(/text-transparent/)
+})
+
+it('unknown external is hollow from client-derived state without stamps', () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(1_301_000)
+
+  try {
+    const session = row('ext-derived-unk', {
+      kanban_external_cards: [ghCard()],
+      kanban_parked: 1
+    })
+
+    const { container } = render(
+      <SessionRowStatusStripe outcomePainted={false} session={session} statusStripe="external" />
+    )
+
+    expect(container.querySelector('[data-external-cloud="hollow"]')).not.toBeNull()
+    expect(container.querySelector('[data-external-cloud="hollow"]')?.className).toMatch(/text-transparent/)
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 it('external_down stripe is red with a cloud and down hover', () => {

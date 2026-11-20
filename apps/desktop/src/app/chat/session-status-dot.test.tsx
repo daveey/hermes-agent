@@ -428,4 +428,21 @@ describe('SessionStatusDot external label', () => {
     expect(el?.getAttribute('title')).toBe('Running on an external service')
     expect(el?.getAttribute('title')).not.toContain('GitHub')
   })
+
+  it('down-only rows are labelled down, not running on an external service', () => {
+    const c = dot({
+      id: 'ext-down-only',
+      kanban_active: 1,
+      kanban_external_down: 1,
+      kanban_observed_at: Date.now() / 1000,
+      kanban_parked: 1,
+      message_count: 4
+    })
+
+    const el = c.querySelector('[data-background-label="external_down"]')
+
+    expect(el).not.toBeNull()
+    expect(el?.getAttribute('title')).not.toBe('Running on an external service')
+    expect(el?.getAttribute('title')?.toLowerCase()).toMatch(/down|unreachable/)
+  })
 })

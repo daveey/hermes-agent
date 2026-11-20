@@ -532,20 +532,25 @@ type RowActivity = Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanb
   Partial<Pick<SessionInfo, 'message_count' | 'turn_live'>>
 
 /** [daveey] Work the row's own stamps say is still in flight outside a turn: a goal, cards, a background job. */
-const rowHasBackgroundWork = (row: RowActivity): boolean =>
-  row.goal_active === true ||
-  liveKanbanCount(row) > 0 ||
-  row.kanban_unknown === true ||
-  (row.kanban_remote_stale ?? 0) > 0 ||
-  !hasFreshKanbanObservation(row) ||
-  executionHoldsRow(rowExecution(row)) ||
-  (row.kanban_blocked ?? 0) > 0 ||
-  (row.background_active ?? 0) > 0 ||
-  (row.kanban_external ?? 0) > 0 ||
-  (row.kanban_external_down ?? 0) > 0
+const rowHasBackgroundWork = (row: RowActivity, nowSeconds: number = Date.now() / 1000): boolean => {
+  const ext = kanbanExternalStripeCounts(row, nowSeconds)
+
+  return (
+    row.goal_active === true ||
+    liveKanbanCount(row) > 0 ||
+    row.kanban_unknown === true ||
+    (row.kanban_remote_stale ?? 0) > 0 ||
+    !hasFreshKanbanObservation(row) ||
+    executionHoldsRow(rowExecution(row)) ||
+    (row.kanban_blocked ?? 0) > 0 ||
+    (row.background_active ?? 0) > 0 ||
+    ext.external > 0 ||
+    ext.down > 0
+  )
+}
 
 /** [daveey] What a `background` dot's label may claim about its work. */
-export type BackgroundDotLabel = 'external' | 'running' | 'unknown' | 'waiting'
+export type BackgroundDotLabel = 'external' | 'external_down' | 'running' | 'unknown' | 'waiting'
 
 /** [daveey] The words on a `background` dot. The claim itself stays (unknown or parked work must never read as done);
  *  only the label follows the evidence:
@@ -574,7 +579,11 @@ export const backgroundDotLabel = (
 
   const ext = kanbanExternalStripeCounts(row, nowSeconds)
 
-  if (ext.external > 0 || ext.down > 0) {
+  if (ext.down > 0) {
+    return 'external_down'
+  }
+
+  if (ext.external > 0) {
     return 'external'
   }
 

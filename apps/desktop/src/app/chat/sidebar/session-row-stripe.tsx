@@ -165,7 +165,10 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
             card glyph (amber when `stalled`). A finished chat's cron keeps the loop glyph, in the green of `done`.
             [daveey] A finished chat still watching a card adds the eye, so it never reads as "all done". */}
         {glyph && mainGlyph && (
-          <span data-external-cloud={unknownCloud ? 'hollow' : 'solid'}>
+          <span
+            className={unknownCloud ? '[-webkit-text-stroke:0.05em_currentColor] text-transparent' : undefined}
+            data-external-cloud={unknownCloud ? 'hollow' : 'solid'}
+          >
             <Codicon name={mainGlyph} size="0.5625rem" />
           </span>
         )}

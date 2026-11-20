@@ -65,6 +65,9 @@ export const enSessionRowStatus = {
   backgroundUnknown: 'Open work, current status unknown',
   backgroundWaiting: 'Open work, waiting',
   backgroundExternal: 'Running on an external service',
+  backgroundExternalDown: 'An external service is down',
+  kanbanExternalRunning: 'running externally',
+  kanbanExternalDown: 'external down',
   backgroundProcessUnnamed: 'background process',
   stopProcess: 'Stop',
   stoppingProcess: 'Stopping…'

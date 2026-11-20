@@ -54,8 +54,6 @@ export interface KanbanTask {
   remote?: boolean
   read_only?: boolean
   home_gateway?: null | string
-  /** [daveey] wait_info.wait_state for scheduled ci/deploy/external parks. Absent on older backends. */
-  wait_state?: null | string
   /** [daveey] Per-card external watch (interface.md). Absent → today's scheduled grey/yellow. */
   external?: null | {
     adapter?: string

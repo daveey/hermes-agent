@@ -89,6 +89,25 @@ describe('formatExternalHover (interface-hover.md)', () => {
     expect(hover?.line2).toContain('Agent triaging (t_x)')
   })
 
+  it('stale-derived down does not claim health ok or Agent triaging', () => {
+    const ext = gh()
+    const stale = 1_000 + 601
+
+    expect(deriveExternalVisual(ext, stale)).toBe('down')
+
+    const hover = formatExternalHover(ext, stale, { taskId: 't_x' })
+
+    expect(hover?.line1.toLowerCase()).not.toContain(' ok')
+    expect(hover?.text).not.toContain('Agent triaging')
+    expect(hover?.text).not.toContain("job 'tests'")
+    expect(hover?.line1).toMatch(/overdue|no recent check/i)
+  })
+
+  it('a finished job with health ok is not unknown sky', () => {
+    expect(deriveExternalVisual(gh({ job: 'succeeded' }), 1_000)).toBeNull()
+    expect(formatExternalHover(gh({ job: 'failed' }), 1_000)).toBeNull()
+  })
+
   it('missing-field fallback: no tooltip claim', () => {
     expect(formatExternalHover(undefined, now)).toBeNull()
     expect(formatExternalHover(null, now)).toBeNull()
@@ -109,6 +128,19 @@ describe('formatSessionExternalHover (sidebar, max 5 + N more)', () => {
     expect(text).toContain('Card 4')
     expect(text).not.toContain('Card 5')
     expect(text).toMatch(/\+2 more/)
+  })
+
+  it('+N more uses stamped totals when the cards list is capped', () => {
+    const cards: ExternalCard[] = Array.from({ length: 10 }, (_, i) => ({
+      external: gh({ reason: `job '${i}'` }),
+      task_id: `t_${i}`,
+      title: `Card ${i}`
+    }))
+
+    const text = formatSessionExternalHover(cards, 1_060, 15)
+
+    expect(text).toMatch(/\+10 more/)
+    expect(text).not.toMatch(/\+5 more/)
   })
 
   it('missing cards → no tooltip', () => {
@@ -149,6 +181,25 @@ describe('kanbanExternalStripeCounts', () => {
       external: 0,
       unknown: 0
     })
+  })
+
+  it('takes the max of derived cards and stamped counts so a capped list cannot drop red', () => {
+    expect(
+      kanbanExternalStripeCounts(
+        { kanban_external: 3, kanban_external_cards: [{ task_id: 'a' }], kanban_external_down: 2 },
+        1_000
+      )
+    ).toEqual({ down: 2, external: 3, unknown: 0 })
+
+    const ten: ExternalCard[] = Array.from({ length: 10 }, (_, i) => ({
+      external: gh(),
+      task_id: `t_${i}`
+    }))
+
+    expect(
+      kanbanExternalStripeCounts({ kanban_external: 10, kanban_external_cards: ten, kanban_external_down: 2 }, 1_000)
+        .down
+    ).toBe(2)
   })
 })
 
