@@ -409,7 +409,8 @@ describe('SessionStatusDot external label', () => {
       expect(el).not.toBeNull()
       expect(el?.getAttribute('title')).toContain('Running on GitHub Actions')
       act(() => {
-        vi.advanceTimersByTime(301_000)
+        vi.setSystemTime(1_301_000)
+        $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
       })
       expect(c.querySelector('[data-background-label="external"]')?.getAttribute('title')).toContain(
         'Status unknown on GitHub Actions'

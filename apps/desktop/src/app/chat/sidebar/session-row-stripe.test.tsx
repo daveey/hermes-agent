@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $queuedPromptsBySession } from '@/store/composer-queue'
+import { $kanbanObservationTick } from '@/store/kanban-observation'
 import { reconcilePendingSubmissions } from '@/store/pending-submissions'
 import { $sessions, setSessions } from '@/store/session'
 import { resetStripeTransitionLog, setStripeReasonReporter } from '@/store/session-dot-state'
@@ -257,7 +258,8 @@ it('a mounted external stripe expires on the client clock with an unchanged sess
     expect(container.querySelector('[data-external-cloud="solid"]')).not.toBeNull()
     expect(stripe(container)?.getAttribute('aria-label')).toContain('Running on GitHub Actions')
     act(() => {
-      vi.advanceTimersByTime(301_000)
+      vi.setSystemTime(1_301_000)
+      $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
     })
     expect(container.querySelector('[data-external-cloud="hollow"]')).not.toBeNull()
     expect(stripe(container)?.getAttribute('aria-label')).toContain('Status unknown on GitHub Actions')
