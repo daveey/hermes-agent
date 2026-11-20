@@ -119,11 +119,24 @@ def stranded_contained(conn: sqlite3.Connection, *, now: Optional[float] = None)
     return out
 
 
+def _local_creator_links(conn: sqlite3.Connection, tid: str, gateway: str, rows: list[dict]) -> list[dict]:
+    """Match _local_links' persistent creator binding without scanning the whole board."""
+    task = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+    if not task or dict(task).get("created_on") not in (None, "", gateway):
+        return []
+    if not conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='creator_chats_resolved' LIMIT 1",
+                        (tid,)).fetchone():
+        return []
+    # A foreign reconciler can stale-release this row; local reconciliation restores it.
+    return [r for r in rows if r["chat_gateway"] == gateway and r["kind"] == "created"]
+
+
 def _contained_chat_owners(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
     """Owning chats on any gateway, including subscriptions not projected into links yet.
 
-    A stored release wins over a lingering subscription. Notice-only subscriptions and
-    machine/placeholder sessions are not owners. Read failures propagate to the sweep's
+    Stored releases win over lingering remote subscriptions; local resolved creator links
+    persist like _local_links even when a foreign reconciler stale-releases their flag.
+    Notice-only subscriptions and machine/placeholder sessions are not owners. Read failures propagate to the sweep's
     fail-closed boundary rather than becoming evidence of absent ownership. [daveey]
     """
     from hermes_cli.kanban_db_notify import is_machine_session
@@ -138,6 +151,7 @@ def _contained_chat_owners(conn: sqlite3.Connection, ids: list[str]) -> set[str]
         rows = [dict(r) for r in conn.execute("SELECT * FROM task_chat_links WHERE task_id=?", (tid,))] if has_links else []
         known = {(r["chat_gateway"], r["chat_profile"] or "default", r["chat_session"]) for r in rows}
         candidates = [r for r in rows if not r["released"] and r["kind"] in ("created", "shepherd")]
+        candidates.extend(_local_creator_links(conn, tid, gateway, rows))
         # Per-card reads only (no board-wide scan on the dispatcher hot path). Subs count the way
         # _owner_hub_links does: creators, shepherds and origin bindings, not notice-only subs.
         made_in = conn.execute("SELECT session_id FROM tasks WHERE id=?", (tid,)).fetchone()
