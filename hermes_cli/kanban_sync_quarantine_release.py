@@ -20,7 +20,9 @@ c. in ONE apply transaction: appends the ``containment_sync_acceptances`` row (r
 A primary board's live file replays its own partition. Any other live file holds no feed rows: it takes the
 replica's current certified rows of each freed task it holds (the pickup path, ``adopt_receipts``) in that same
 transaction, so its copy is never claimable between the lift and the next repair; the replica must be released
-first. A freed event whose task another receipt still holds stays withheld for that receipt's release.
+first (``kanban_sync_quarantine_release_live``). Its withheld rows of the freed tasks are deleted in that lift, never
+replayed. A freed event whose task another receipt still holds stays withheld for that receipt's release. A primary
+live file quarantines a newly uncertifiable event under the replica's first-seen stamp: one owner card per host.
 """
 from __future__ import annotations
 
@@ -168,11 +170,13 @@ def _select(conn, evidence: _Evidence, board: str, receipt: str, own, partition:
     return changes, replayed, deferred
 
 
-def _quarantine_uncertifiable(conn, evidence: _Evidence, board: str, chain_uids: set[str], changes) -> list[str]:
+def _quarantine_uncertifiable(conn, evidence: _Evidence, board: str, chain_uids: set[str], changes,
+                              seen=None) -> list[str]:
     """Certify each freed protected event outside this receipt's chain; one that no longer certifies is
     quarantined under its own receipt. Its uids, in order."""
     from hermes_cli import kanban_containment_replica as replica
     from hermes_cli import kanban_sync_quarantine as quarantine
+    from hermes_cli.kanban_sync_quarantine_release_live import first_seen
     found = []
     for ch in changes:
         if not quarantine.protected(ch) or ch.uid in chain_uids or _episode(ch) in chain_uids:
@@ -184,27 +188,9 @@ def _quarantine_uncertifiable(conn, evidence: _Evidence, board: str, chain_uids:
         except ContainmentRefused as exc:
             conflict = exc if isinstance(exc, ContainmentConflict) else ContainmentConflict(
                 f"no longer certifiable at release: {exc}", kind="uncertifiable", uid=ch.uid)
-            quarantine.quarantine_change(conn, board, ch, conflict)
+            quarantine.quarantine_change(conn, board, ch, conflict, at=first_seen(seen, ch.uid))
             found.append(ch.uid)
     return found
-
-
-def _replica_rows(conn, source, receipt: str) -> list:
-    """A non-primary live file's catch-up: the replica's current rows of every freed task this file holds."""
-    from hermes_cli import kanban_sync_quarantine as quarantine
-    from hermes_cli.kanban_worker_node import _changes_for
-    freed = sorted(quarantine.tasks(conn, receipt) - quarantine.tasks(conn, without=receipt))
-    present = [t for t in freed if conn.execute("SELECT 1 FROM tasks WHERE id=?", (t,)).fetchone()]
-    if present and source is None:
-        raise ReleaseRefused("no replica to take the freed tasks' certified state from; the live hold stays")
-    out = []
-    for task in present:
-        if quarantine.held(source, task):
-            raise ReleaseRefused(f"the replica still holds {task}: release the receipt there first")
-        card = source.execute("SELECT * FROM tasks WHERE id=?", (task,)).fetchone()
-        if card is not None:
-            out.extend(_changes_for(source, task, card))
-    return out
 
 
 def _commit(conn, evidence: _Evidence, board: str, receipt: str, changes, replayed, deferred, accept,
@@ -249,11 +235,13 @@ def _commit(conn, evidence: _Evidence, board: str, receipt: str, changes, replay
 
 
 def release(conn, hub, board: str, receipt: str, *, reason: str, operator: str, partition: str | None = None,
-            replay: bool = True, source=None, observers: bool = False, now: float | None = None) -> dict | None:
+            replay: bool = True, source=None, observers: bool = False, now: float | None = None,
+            seen=None) -> dict | None:
     """Release ``receipt`` in this file (module docstring). None when this file does not quarantine it; raises
     :class:`ReleaseRefused` (every hold and no acceptance kept) when the evidence is not live or the catch-up is
     refused; an apply-time sqlite3.Error/RuntimeError propagates after the same rollback. ``replay=False`` with
-    ``source`` (the replica) is a non-primary live file."""
+    ``source`` (the replica) is a non-primary live file; ``seen`` (the replica, already released) lends its
+    first-seen stamps to events this file newly quarantines."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_sync_client as ksc
     from hermes_cli import kanban_sync_quarantine as quarantine
@@ -270,12 +258,13 @@ def release(conn, hub, board: str, receipt: str, *, reason: str, operator: str, 
     if replay:
         while True:
             changes, replayed, deferred = _select(conn, evidence, board, receipt, own, partition)
-            found = _quarantine_uncertifiable(conn, evidence, board, {uid for uid, _ in chain}, changes)
+            found = _quarantine_uncertifiable(conn, evidence, board, {uid for uid, _ in chain}, changes, seen)
             if not found:
                 break
             newly += found  # their tasks are held now: select again
     else:
-        changes = _replica_rows(conn, source, receipt)
+        from hermes_cli.kanban_sync_quarantine_release_live import replica_rows
+        changes, replayed = replica_rows(conn, source, receipt, board, ReleaseRefused)
     _commit(conn, evidence, board, receipt, changes, replayed, deferred,
             lambda c: _accept(c, chain, receipt, reason, operator, stamp), None if replay else source, observers)
     log.warning("kanban sync: released quarantine receipt %s on %s by %s (%s): %d row(s) applied, %d deferred, "
@@ -310,7 +299,7 @@ def _release_files(slug, live_path, receipt, reason, ident, hub, done) -> None:
             primary = sync.board_mode(conn) == "primary"
             if result := release(conn, hub, slug, receipt, reason=reason, operator=operator,
                                  partition=ident.gateway if primary else None, replay=primary,
-                                 source=None if primary else replica, observers=primary):
+                                 source=None if primary else replica, observers=primary, seen=replica):
                 done.append(("live", result))
                 if result["quarantined"]:
                     quarantine.notify(conn, slug)
@@ -322,27 +311,28 @@ def _release_files(slug, live_path, receipt, reason, ident, hub, done) -> None:
 
 
 def release_board(slug: str, live_path: Path, receipt: str, reason: str) -> tuple[int, str]:
-    """The CLI's release: (exit code, message). 0 released, 1 no such receipt or an apply-time database/runtime
-    error (holds kept), 2 refused or busy."""
+    """The CLI's release: (exit code, message). 0 released, 1 no such receipt, a refused quarantine table shape
+    or an apply-time database/runtime error (holds kept), 2 refused or busy."""
     from hermes_cli import kanban_sync_client as ksc
     from hermes_cli import kanban_sync_guard as guard
-    from hermes_cli.kanban_sync_quarantine import release_command
+    from hermes_cli.kanban_sync_quarantine import QuarantineSchemaRefused, release_command
+    from hermes_cli.kanban_sync_quarantine_release_live import refused_suffix
     ident = ksc.load_identity()
     hub = ksc.Hub(ident)
     done: list[tuple[str, dict]] = []
-    partial = ""
     try:
         with guard.board_sync_lock(live_path):
             _release_files(slug, live_path, receipt, reason, ident, hub, done)
     except guard.SyncRoundBusy as exc:
         return 2, f"kanban sync: {receipt} not released: a sync round holds board {slug} ({exc}); retry shortly"
     except ReleaseRefused as exc:
-        partial = f" (already released in: {', '.join(name for name, _ in done)}; rerun to finish)" if done else ""
-        return 2, f"kanban sync: {receipt} not released: {exc}{partial}"
+        return 2, f"kanban sync: {receipt} not released: {exc}{refused_suffix(slug, done)}"
+    except QuarantineSchemaRefused as exc:  # e.g. while opening the replica: a clear error, never a traceback
+        return 1, (f"kanban sync: {receipt} not released: a quarantine table has a shape this core does not "
+                   f"know ({exc}){refused_suffix(slug, done)}")
     except (sqlite3.Error, RuntimeError) as exc:
-        partial = f" (already released in: {', '.join(name for name, _ in done)}; rerun to finish)" if done else ""
         return 1, (f"kanban sync: {receipt} not released: the catch-up failed to apply ({type(exc).__name__}: "
-                   f"{exc}); it was rolled back, every hold is kept{partial}")
+                   f"{exc}); it was rolled back, every hold is kept{refused_suffix(slug, done)}")
     if not done:
         return 1, f"kanban sync: no quarantined receipt {receipt} on board {slug}"
     replayed = sum(r["replayed"] for _, r in done)

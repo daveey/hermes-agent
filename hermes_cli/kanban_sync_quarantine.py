@@ -249,8 +249,9 @@ def certified_page(conn, hub, board: str, changes) -> list:
     return withhold(conn, changes)
 
 
-def quarantine_change(conn, board: str, change, exc) -> None:
-    """Journal ``change``'s receipt as quarantined (``exc`` carries ``kind``/``uid``) and hold its task."""
+def quarantine_change(conn, board: str, change, exc, *, at: int | None = None) -> None:
+    """Journal ``change``'s receipt as quarantined (``exc`` carries ``kind``/``uid``) and hold its task. ``at``: the
+    first-seen stamp (ms) another file of this host already gave the receipt, so both share one owner-notice key."""
     from hermes_cli import kanban_containment_replica as replica
     from hermes_cli import kanban_db as kb
     held_tasks = subjects(conn, change.table, change.uid, change.fields)
@@ -264,7 +265,7 @@ def quarantine_change(conn, board: str, change, exc) -> None:
         install(conn)
         inserted = conn.execute("INSERT OR IGNORE INTO containment_sync_quarantine VALUES (?,?,?,?,?,?,?)",
                                 (change.uid, sorted(held_tasks)[0], board, exc.kind, reason, wire(change),
-                                 int(_clock() * 1000))).rowcount
+                                 int(_clock() * 1000) if at is None else int(at))).rowcount
         conn.executemany("INSERT OR IGNORE INTO containment_sync_quarantine_tasks VALUES (?,?,'direct')",
                          [(task, change.uid) for task in held_tasks])
     if inserted:
