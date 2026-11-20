@@ -14,7 +14,7 @@ is busy only when an independent fresh nonblocking flock fails.
 """
 from __future__ import annotations
 
-import fcntl
+import fcntl  # windows-footgun: ok (Linux worker nodes only)
 import hashlib
 import json
 import os
