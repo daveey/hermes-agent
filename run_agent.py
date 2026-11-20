@@ -807,20 +807,28 @@ class AIAgent(
         requeue) releases, every earlier exit releases here. A requeue enqueues before the predecessor
         releases, so a rescheduled review never shows a zero gap."""
         from agent import local_work_agent
+        from hermes_cli.worker_drain_fence import admit, lease_scope
 
-        custody = [local_work_agent.reserve("background_review", "run_agent._spawn_background_review_now")]
+        drain = [admit('background_review')]
+        custody = []
         try:
-            __class__._spawn_background_review_run(  # defining class: stand-in agents drive this method
-                self, messages_snapshot, review_memory, review_skills, focus, task_cfg, _requeue_attempts, explicit,
-                _work=custody)
+            custody.append(local_work_agent.reserve("background_review", "run_agent._spawn_background_review_now"))
+            with lease_scope(drain[0]):
+                __class__._spawn_background_review_run(  # defining class: stand-in agents drive this method
+                    self, messages_snapshot, review_memory, review_skills, focus, task_cfg, _requeue_attempts, explicit,
+                    _work=custody, _drain=drain)
         finally:
             for held in custody:  # the thread took custody (list cleared) or nothing started
                 local_work_agent.release(held)
+            for lease in drain:
+                if lease is not None:
+                    lease.close()
 
     def _spawn_background_review_run(self, messages_snapshot: list[dict], review_memory: bool = False,
                                      review_skills: bool = False, focus: Optional[str] = None,
                                      task_cfg: Optional[dict[str, Any]] = None, _requeue_attempts: int = 0,
-                                     explicit: bool = False, _work: Optional[list] = None) -> None:
+                                     explicit: bool = False, _work: Optional[list] = None,
+                                     _drain: Optional[list] = None) -> None:
         """Spawn the background memory/skill review thread.
 
         ``threading.Thread`` is constructed here so tests patching ``run_agent.threading.Thread`` keep working.
@@ -854,6 +862,7 @@ class AIAgent(
             )
 
             work_held = _work[0] if _work else None
+            drain_held = _drain[0] if _drain else None
 
             def _target_with_requeue() -> None:
                 try:
@@ -872,14 +881,20 @@ class AIAgent(
                         self._maybe_requeue_preempted_review(review_run, requeue)
                 finally:
                     # Outermost: only after the requeue (which holds its own continuation) is done.
-                    if work_held is not None:
-                        work_held.release()
+                    try:
+                        if work_held is not None:
+                            work_held.release()
+                    finally:
+                        if drain_held is not None:
+                            drain_held.close()
 
             # Carry the active profile into the review thread so MEMORY.md / skill review writes land in the
             # right profile.
             threading.Thread(target=propagate_context_to_thread(_target_with_requeue), daemon=True, name="bg-review").start()  # health: allow HX012 -- target already wrapped by propagate_context_to_thread
             if _work:
                 _work.clear()  # started: the thread's finally owns the token
+            if _drain:
+                _drain.clear()  # independent lease outlives the caller's turn lease
         except Exception:
             retirement.end_background_review(hold)
             finish_background_review_run(self, review_run)
