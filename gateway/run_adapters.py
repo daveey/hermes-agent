@@ -484,6 +484,10 @@ class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryRe
         self._exit_reason = reason
         self._shutdown_event.set()
 
+    # Supervised tasks never abandoned: after the rapid-restart budget is spent they respawn with a fresh
+    # budget this many seconds later (_spawn_supervised). kanban_sync_watcher: its death stops every board.
+    _SUPERVISED_SLOW_RETRY_SECS: dict = {"kanban_sync_watcher": 300.0}
+
     @staticmethod
     def _supervised_backoff(attempt: int) -> float:
         """Capped exponential respawn delay (a method so tests can collapse the schedule)."""
@@ -546,6 +550,21 @@ class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryRe
                         on_give_up(name)
                     except Exception:  # pragma: no cover - defensive
                         logger.debug("on_give_up callback for %s raised", name, exc_info=True)
+                slow = self._SUPERVISED_SLOW_RETRY_SECS.get(name)
+                if slow is not None and self._running:
+                    # A watcher whose death stops the whole host (kanban_sync_watcher: no board syncs, the
+                    # dispatcher claims nothing) is never abandoned for good: after the budget is spent it
+                    # respawns with a fresh budget every `slow` seconds (2026-11-20: the sync watcher gave up
+                    # on hub, worker-1 and both Macs and stayed dead until each gateway restarted).
+                    logger.warning("Supervised task %s: slow retry in %ds after giving up", name, int(slow))
+
+                    async def _slow_respawn():
+                        await asyncio.sleep(slow)
+                        if self._running:
+                            self._spawn_supervised(coro_factory, name, restart=restart, _attempt=0,
+                                                   on_spawn=on_spawn, on_give_up=on_give_up)
+
+                    self._retain_background_task(Context().run(lambda: asyncio.create_task(_slow_respawn())))
                 return
             backoff = self._supervised_backoff(effective_attempt)
 

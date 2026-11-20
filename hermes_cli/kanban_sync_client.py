@@ -48,6 +48,8 @@ from hermes_cli import kanban_sync_outbox_age as outbox_age  # oldest pending op
 from hermes_cli.kanban_sync_backlog import BUSY_RETRY_S, PULL_PAGE_BUDGET, Pulled
 from hermes_cli import kanban_sync_timing as sync_timing  # off unless kanban.sync.diagnostics.timing_until arms it
 from hermes_cli import kanban_sync_cpu as sync_cpu
+from hermes_cli import kanban_sync_refusal as refusal  # one board's ContainmentRefused ends only its round
+from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
@@ -1163,8 +1165,17 @@ def sync_all_once(hub: Optional[Hub] = None, *,
     results = []
     for slug, path in board_paths() if boards is None else boards:
         mark = sync_timing.board_start(slug, results)
+        held = refusal.waiting(slug)
+        if held is not None:  # backing off after a containment refusal; the other boards still run
+            results.append(RoundResult(board=slug, mode="?", error=held, skipped=True))
+            sync_timing.board_end(mark, results)
+            continue
         try:
             results.append(sync_board(slug, path, hub, ident.gateway))
+            refusal.cleared(slug)
+        except ContainmentRefused as exc:
+            # One board's refused page must not stop every board's sync (2026-11-20, kanban_sync_refusal).
+            results.append(RoundResult(board=slug, mode="?", error=refusal.refused(slug, exc)))
         except SchemaAhead as exc:
             _log.error("kanban sync: %s not synced: %s", slug, exc)
             results.append(RoundResult(board=slug, mode="?", error=f"SchemaAhead: {exc}"))
