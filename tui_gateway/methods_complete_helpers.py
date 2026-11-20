@@ -128,6 +128,44 @@ def _abs_completion_prefix_exists(path_part: str) -> bool:
         return False
 
 
+def _model_options_handoff_scope(params: dict) -> tuple[str | None, bool]:
+    """Successor ``profile`` query and whether unknown session scope must fail closed.
+
+    Desktop owner-routed ``model.options`` sends ``session_id`` without ``profile``.
+    """
+    explicit = str(params.get("profile") or "").strip()
+    if explicit:
+        return explicit, False
+    sid = str(params.get("session_id") or "").strip()
+    if not sid:
+        return None, False
+    session = _sessions.get(sid)
+    if not isinstance(session, dict):
+        return None, True
+    home = session.get("profile_home")
+    if not home:
+        return None, False
+    from hermes_constants import profile_name_for_home
+    name = profile_name_for_home(home)
+    if not name:
+        return None, True
+    return (None if name == "default" else name), False
+
+
+def _overlay_live_model_options(payload: dict, agent) -> dict:
+    """Keep the live session pick; successor disk/launch config is not the session's model."""
+    if not isinstance(payload, dict) or agent is None:
+        return payload
+    out = dict(payload)
+    provider = str(getattr(agent, "provider", "") or "").strip()
+    model = str(getattr(agent, "model", "") or "").strip()
+    if provider:
+        out["provider"] = provider
+    if model:
+        out["model"] = model
+    return out
+
+
 def _model_picker_context(agent):
     """Layer live session state onto config without losing custom identity."""
     from hermes_cli.inventory import load_picker_context

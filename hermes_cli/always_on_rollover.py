@@ -151,6 +151,22 @@ def successor_pending(port: int, home: Optional[Path] = None) -> bool:
     return port != record["port"] or bool(record["warming"])
 
 
+def model_options_control_path(*, explicit_only: bool = False, include_unconfigured: bool = False,
+                               refresh: bool = False, profile: Optional[str] = None) -> str:
+    """GET path the busy predecessor forwards to the successor (lowercase bools FastAPI accepts)."""
+    query: list[tuple[str, str]] = []
+    if profile:
+        query.append(("profile", str(profile)))
+    if refresh:
+        query.append(("refresh", "true"))
+    if include_unconfigured:
+        query.append(("include_unconfigured", "true"))
+    if explicit_only:
+        query.append(("explicit_only", "true"))
+    path = "/api/model/options"
+    return f"{path}?{urllib.parse.urlencode(query)}" if query else path
+
+
 def handoff_control_read(port: int, path: str, *, get: Optional[Callable] = None,
                          home: Optional[Path] = None,
                          timeout_s: float = HANDOFF_TIMEOUT_S) -> Optional[dict]:
@@ -173,8 +189,11 @@ def handoff_control_read(port: int, path: str, *, get: Optional[Callable] = None
         record = read_active(home)
         if record is None:
             return None
+        successor = record["port"]
+        if successor not in BACKEND_PORTS:
+            return None
         getter = get or _loopback_control_get
-        status, _elapsed, body = getter(record["port"], path, timeout_s)
+        status, _elapsed, body = getter(successor, path, timeout_s)
     except Exception:  # health: allow BLE001 -- a dead successor is not a stale-module bypass
         return None
     return body if status == 200 and isinstance(body, dict) else None
@@ -917,6 +936,7 @@ def stop_all(run: Callable = aod._run) -> None:
 __all__ = [
     "BACKEND_PORTS", "ENV_BACKEND", "PROXY_UNIT", "Proxy", "Roller", "backend_port_for_pid", "bind_listener",
     "cmd_backend", "cmd_proxy", "cmd_roll", "handoff_control_read", "install_units", "is_superseded",
+    "model_options_control_path",
     "pop_backend_port", "read_active", "render_units", "request_roll", "route_always_on_backends",
     "stop_all", "successor_pending", "this_backend_port", "verify_backend_custody", "write_active",
     "write_backend_custody",

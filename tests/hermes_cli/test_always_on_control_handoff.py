@@ -9,6 +9,10 @@ kill the turn. Control-plane reads must hand off to the successor instead.
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
+import types
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import Mock
 
 import pytest
@@ -137,3 +141,199 @@ def test_stale_model_save_key_still_refuses_when_a_successor_serves(home, monkey
     assert resp.get("error", {}).get("code") == 5098, resp
     env = home / ".env"
     assert not env.exists() or "sk-canary" not in env.read_text(encoding="utf-8")
+
+
+def test_pop_backend_port_binds_this_backend_port(home):
+    env = {ro.ENV_BACKEND: "9150"}
+    assert ro.pop_backend_port(env) == 9150
+    assert ro.ENV_BACKEND not in env
+    assert ro.this_backend_port() == 9150
+
+
+def test_model_options_control_path_encodes_lowercase_true_and_profile():
+    assert ro.model_options_control_path() == "/api/model/options"
+    assert ro.model_options_control_path(explicit_only=True) == "/api/model/options?explicit_only=true"
+    path = ro.model_options_control_path(
+        profile="ember", refresh=True, include_unconfigured=True, explicit_only=True)
+    assert path.startswith("/api/model/options?")
+    assert "profile=ember" in path
+    assert "refresh=true" in path
+    assert "include_unconfigured=true" in path
+    assert "explicit_only=true" in path
+    assert "True" not in path
+
+
+def test_handoff_refuses_non_allowlisted_successor_port(home):
+    ro.write_active(80)
+    hits = []
+
+    def get(port, path, timeout):
+        hits.append(port)
+        return 200, 0.0, {"ok": True}
+
+    assert ro.handoff_control_read(9149, "/api/model/options", get=get) is None
+    assert hits == []
+
+
+def _serve(handler_cls):
+    httpd = HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd, httpd.server_address[1]
+
+
+def test_loopback_control_get_sends_session_token_and_parses_dict(home, monkeypatch):
+    seen = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen["path"] = self.path
+            seen["token"] = self.headers.get("X-Hermes-Session-Token")
+            body = json.dumps({"providers": [{"slug": "xai"}], "model": "live"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    httpd, port = _serve(Handler)
+    monkeypatch.setattr(ro.aod, "ensure_credentials", lambda home=None: ("tok-abc", "nonce"))
+    try:
+        status, elapsed, body = ro._loopback_control_get(port, "/api/model/options?explicit_only=true", 2.0)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert status == 200
+    assert elapsed >= 0
+    assert body == {"providers": [{"slug": "xai"}], "model": "live"}
+    assert seen == {"path": "/api/model/options?explicit_only=true", "token": "tok-abc"}
+
+
+def test_loopback_control_get_http_error_none_and_non_dict_json(home, monkeypatch):
+    monkeypatch.setattr(ro.aod, "ensure_credentials", lambda home=None: ("tok-abc", "nonce"))
+
+    class ErrorHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_error(503)
+
+        def log_message(self, format, *args):
+            pass
+
+    httpd, port = _serve(ErrorHandler)
+    try:
+        status, _elapsed, body = ro._loopback_control_get(port, "/api/model/options", 2.0)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert status == 503 and body is None
+
+    class ArrayHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'["not-a-dict"]')
+
+        def log_message(self, format, *args):
+            pass
+
+    httpd, port = _serve(ArrayHandler)
+    try:
+        status, _elapsed, body = ro._loopback_control_get(port, "/api/model/options", 2.0)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert status == 200 and body is None
+
+    status, _elapsed, body = ro._loopback_control_get(1, "/api/model/options", 0.2)
+    assert status is None and body is None
+
+
+def test_stale_dashboard_builds_successor_query(home, monkeypatch):
+    monkeypatch.setattr(code_skew, "detect_code_skew", lambda: ("74e8765b42", "fcda64965f"))
+    monkeypatch.setattr(ro, "this_backend_port", lambda: 9149)
+    calls = []
+
+    def fake(port, path, **_k):
+        calls.append((port, path))
+        return {"providers": [{"slug": "xai", "models": ["grok-4"]}]}
+
+    monkeypatch.setattr(ro, "handoff_control_read", fake)
+    result = asyncio.run(_rt_models.get_model_options(profile="ember", refresh=True, explicit_only=True))
+    assert result["providers"]
+    assert calls == [(9149, ro.model_options_control_path(
+        profile="ember", refresh=True, explicit_only=True))]
+
+
+def test_stale_dashboard_handoff_does_not_block_event_loop(home, monkeypatch):
+    monkeypatch.setattr(code_skew, "detect_code_skew", lambda: ("74e8765b42", "fcda64965f"))
+    monkeypatch.setattr(ro, "this_backend_port", lambda: 9149)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow(*_a, **_k):
+        entered.set()
+        if not release.wait(timeout=2.0):
+            raise TimeoutError("event loop did not progress while successor GET blocked")
+        return {"providers": [{"slug": "xai", "models": ["grok-4"]}]}
+
+    monkeypatch.setattr(ro, "handoff_control_read", slow)
+
+    async def run():
+        ticks = []
+
+        async def ticker():
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while not entered.is_set():
+                if asyncio.get_running_loop().time() > deadline:
+                    break
+                ticks.append("pre")
+                await asyncio.sleep(0)
+            for _ in range(5):
+                ticks.append("mid")
+                await asyncio.sleep(0)
+            release.set()
+
+        result, _ = await asyncio.gather(_rt_models.get_model_options(), ticker())
+        return result, ticks
+
+    result, ticks = asyncio.run(run())
+    assert result == {"providers": [{"slug": "xai", "models": ["grok-4"]}]}
+    assert ticks.count("mid") >= 5
+
+
+def test_stale_model_options_rpc_forwards_session_profile_and_live_model(home, monkeypatch):
+    from tui_gateway import server
+
+    monkeypatch.setattr(code_skew, "detect_code_skew", lambda: ("74e8765b42", "fcda64965f"))
+    monkeypatch.setattr(ro, "this_backend_port", lambda: 9149)
+    calls = []
+
+    def fake(_port, path, **_k):
+        calls.append(path)
+        return {"providers": [{"slug": "xai", "models": ["launch-model"]}],
+                "model": "launch-model", "provider": "xai"}
+
+    monkeypatch.setattr(ro, "handoff_control_read", fake)
+    ember = home / "profiles" / "ember"
+    ember.mkdir(parents=True)
+    agent = types.SimpleNamespace(model="session-model", provider="anthropic")
+    monkeypatch.setitem(server._sessions, "tile-1", {"agent": agent, "profile_home": str(ember)})
+    resp = server._methods["model.options"]("rid", {"session_id": "tile-1", "explicit_only": True})
+    assert calls == [ro.model_options_control_path(profile="ember", explicit_only=True)], calls
+    assert resp.get("result", {}).get("model") == "session-model", resp
+    assert resp.get("result", {}).get("provider") == "anthropic", resp
+    assert resp["result"]["providers"] == [{"slug": "xai", "models": ["launch-model"]}]
+
+
+def test_stale_model_options_rpc_refuses_unknown_session_scope(home, monkeypatch):
+    from tui_gateway import server
+
+    monkeypatch.setattr(code_skew, "detect_code_skew", lambda: ("74e8765b42", "fcda64965f"))
+    monkeypatch.setattr(ro, "this_backend_port", lambda: 9149)
+    calls = []
+    monkeypatch.setattr(ro, "handoff_control_read", lambda *a, **k: calls.append(a) or {"providers": []})
+    resp = server._methods["model.options"]("rid", {"session_id": "missing-tile", "explicit_only": True})
+    assert resp.get("error", {}).get("code") == 5098, resp
+    assert calls == []
