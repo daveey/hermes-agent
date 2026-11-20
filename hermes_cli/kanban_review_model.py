@@ -91,7 +91,11 @@ def implementer_models(conn, task) -> set[str]:
         if pin and not is_class_selector(pin) and not downstream:
             models.add(pin)
         if not downstream and not skilled:
+            from hermes_cli.kanban_review_retry import rehandoff_runs
+            repeats = rehandoff_runs(conn, card.id)
             for row in conn.execute("SELECT id FROM task_runs WHERE task_id=?", (card.id,)).fetchall():
+                if row[0] in repeats:
+                    continue
                 events = conn.execute(
                     "SELECT kind, payload FROM task_events WHERE task_id=? AND run_id=? "
                     "AND kind IN ('model_tier', 'run_route') ORDER BY id DESC", (card.id, row[0])).fetchall()

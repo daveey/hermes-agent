@@ -66,13 +66,16 @@ def load_tier_config() -> dict[str, Any]:
 
 def _prior_failure(conn: sqlite3.Connection, task_id: str, current_run_id: Optional[int]) -> Optional[str]:
     marks = ",".join("?" for _ in FAILED_RUN_OUTCOMES)
-    row = conn.execute(
-        f"SELECT outcome FROM task_runs WHERE task_id = ? AND id IS NOT ? AND outcome IN ({marks}) "
-        "ORDER BY id DESC LIMIT 1",
+    rows = conn.execute(
+        f"SELECT id, outcome, metadata, error FROM task_runs WHERE task_id = ? AND id IS NOT ? AND outcome IN ({marks}) "
+        "ORDER BY id DESC",
         (task_id, current_run_id, *FAILED_RUN_OUTCOMES),
-    ).fetchone()
-    if row is not None:
-        return f"run_{row[0]}"
+    ).fetchall()
+    from hermes_cli.kanban_review_retry import admission_gave_up
+    for row in rows:
+        if row[1] == 'gave_up' and admission_gave_up(conn, task_id, row[0], row[2], row[3]):
+            continue
+        return f"run_{row[1]}"
     marks = ",".join("?" for _ in REWORK_EVENT_KINDS)
     row = conn.execute(
         f"SELECT kind FROM task_events WHERE task_id = ? AND kind IN ({marks}) ORDER BY id DESC LIMIT 1",

@@ -1886,7 +1886,7 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
     row = conn.execute(
         "SELECT payload FROM task_events "
         "WHERE task_id = ? AND kind IN ("
-        "'blocked', 'block_loop_detected', 'dependency_wait', 'gave_up', "
+        "'blocked', 'block_loop_detected', 'dependency_wait', 'gave_up', 'scheduled', "
         "'unblocked', 'changes_requested', 'review_reopened', 'status', 'reclaimed', "
         "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited', 'owner_restart_lost', 'contained', 'containment_released'"
         ") ORDER BY id DESC LIMIT 1", (task_id,),
@@ -3278,7 +3278,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, comment: Optional[tu
             if held or precondition is not None and precondition(conn):
                 return False
             resume_status = (_resume_status_from_events(conn, task_id)
-                             if _task_status(conn, task_id) in ("blocked", "triage") else "ready")
+                             if _task_status(conn, task_id) in ("blocked", "triage", "scheduled") else "ready")
             _reclaim_dangling_run(
                 conn, task_id, statuses=("blocked", "scheduled", "triage"), now=now,
                 note="invariant recovery on unblock",

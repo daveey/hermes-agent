@@ -58,6 +58,12 @@ def schedule_task(
         payload["wake_at"], reason = kdw.apply(record, payload["wake_at"], reason, now=int(_time.time()))
         reason, check_every = kaw.resource_apply(record, reason, check_every)
         payload["reason"] = reason
+        task = _kb.get_task(conn, task_id)
+        source_status = (_kb._retry_status_for_run(conn, task_id) if task and task.status == 'running'
+                         else _kb._resume_status_from_events(conn, task_id))
+        if task and task.status == 'review':
+            source_status = 'review'
+        payload['resume_status'] = source_status
         if watch:
             payload["watch"] = True
         wake_check, check_every = kwc.validate_park(
@@ -74,7 +80,7 @@ def schedule_task(
                    claim_expires= NULL,
                    worker_pid   = NULL
              WHERE id = ?
-               AND status IN ('todo', 'ready', 'running', 'blocked', 'triage')
+               AND status IN ('todo', 'ready', 'running', 'blocked', 'triage', 'review')
         """
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
