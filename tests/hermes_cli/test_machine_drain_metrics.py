@@ -79,6 +79,48 @@ def test_reporter_falls_back_without_discarding_capacity():
     assert sent == [sample, {"cpu_load1": 1, "active_card_runs": 0}]
 
 
+def test_unknown_claiming_drops_only_itself_and_keeps_counters():
+    """An older Board that rejects ``claiming`` must not disable counters or drain."""
+    sent, rejected = [], []
+    cpu = {"cpu_busy_pct": 12.5, "cpu_busy_window_ms": 1000, "cpu_busy_sample_end_ms": 1}
+    counters = {"tokens_io_total": 45, "tokens_cache_total": 310,
+                "sessions_started_total": 3, "sessions_ended_total": 2}
+    sample = {"cpus": 4, "cpu_load1": 1.0, "active_card_runs": 0,
+              "drain_active": 0, "claiming": 1, **cpu, **counters}
+
+    def board(value):
+        sent.append(dict(value))
+        if "claiming" in value:
+            raise HubError(400, "unknown field(s): claiming")
+
+    md.send_compatible(board, sample, lambda: rejected.append(True))
+    assert rejected == []
+    assert len(sent) == 2
+    assert "claiming" not in sent[1]
+    assert "cpu_busy_pct" not in sent[1]
+    assert sent[1]["drain_active"] == 0
+    assert sent[1]["tokens_io_total"] == 45
+
+
+def test_claiming_rejection_still_walks_older_board_generations():
+    """Dropping claiming once must not skip the counter and drain downgrades."""
+    sent, rejected = [], []
+    sample = {"cpus": 4, "drain_active": 0, "claiming": 0,
+              "cpu_busy_pct": 1, "tokens_io_total": 9, "tokens_by_model": {"m": 1}}
+
+    def ancient(value):
+        sent.append(dict(value))
+        if set(value) - {"cpus"}:
+            raise HubError(400, "unknown field(s): " + ",".join(sorted(set(value) - {"cpus"})))
+
+    md.send_compatible(ancient, sample, lambda: rejected.append(True))
+    assert "claiming" not in sent[1] and "cpu_busy_pct" not in sent[1]
+    assert "tokens_by_model" in sent[1]  # claiming drops alone; the older map stays for its own step
+    assert "tokens_by_model" not in sent[2]
+    assert rejected == [True]
+    assert sent[-1] == {"cpus": 4}
+
+
 def test_no_retry_of_other_board_errors():
     sent = []
     def send(value):

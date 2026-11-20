@@ -33,8 +33,9 @@ def collect():
 
 
 # Fields newer Boards accept and older Boards reject (400, atomically). CPU busy fields are never resent: the
-# compatibility retry strips them, so an old CPU sample is never re-stamped as fresh.
-ADDITIVE_FIELDS = ("drain_active", "drain_until_ms", "claiming", "cpu_busy_pct", "cpu_busy_window_ms", "cpu_busy_sample_end_ms") + ADMISSION_FIELDS
+# compatibility retry strips them, so an old CPU sample is never re-stamped as fresh. ``claiming`` is newer than
+# these and has its own downgrade so a Board that predates it does not discard drain, admission or counters.
+ADDITIVE_FIELDS = ("drain_active", "drain_until_ms", "cpu_busy_pct", "cpu_busy_window_ms", "cpu_busy_sample_end_ms") + ADMISSION_FIELDS
 
 
 def send_compatible(send, sample, on_counters_rejected=None):
@@ -46,8 +47,9 @@ def send_compatible(send, sample, on_counters_rejected=None):
     Throughput counters (``machine_throughput_metrics.FIELDS``) are newer still: a Board that predates them answers
     400 "unknown field(s): ...". That answer first drops just the counters (calling ``on_counters_rejected`` so the
     caller stops sending them for a while) and the CPU busy fields, keeping drain fields for a Board that accepts
-    those. The newest ``tokens_by_model`` map is dropped first on a 400, preserving
-    scalar counters for Boards that support them. Older counter/drain fallbacks
+    those. ``tokens_by_model`` is dropped before the scalar counters, preserving
+    those counters for Boards that support the scalars. ``claiming`` is newer than both: a Board that
+    rejects it drops only that field, then the older chain runs. Older counter/drain fallbacks
     remain available if that downgraded request is also rejected."""
     from hermes_cli.kanban_sync_client import HubError
     from hermes_cli.machine_throughput_metrics import FIELDS as COUNTERS
@@ -66,6 +68,12 @@ def send_compatible(send, sample, on_counters_rejected=None):
             from hermes_cli.machine_cpu_metrics import FIELDS as CPU
             return send_compatible(send, {k: v for k, v in sample.items()
                                           if k not in persistent and k not in CPU}, on_counters_rejected)
+        if "claiming" in sample:
+            # Newest field. An older Board rejects it atomically; drop it once and
+            # keep counters, drain and admission for the next generation.
+            from hermes_cli.machine_cpu_metrics import FIELDS as CPU
+            return send_compatible(send, {k: v for k, v in sample.items()
+                                          if k != "claiming" and k not in CPU}, on_counters_rejected)
         if "tokens_by_model" in sample:
             # A scalar-capable Board may predate the model map. Keep its counters
             # enabled, and never restamp the already attempted CPU sample.

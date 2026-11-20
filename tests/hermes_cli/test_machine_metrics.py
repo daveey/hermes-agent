@@ -287,7 +287,7 @@ COUNTERS = {"tokens_io_total": 45, "tokens_cache_total": 310, "sessions_started_
 
 def test_board_without_counters_gets_the_normal_report_and_is_not_asked_again_for_600s():
     sent, now = [], [1000.0]
-    sample = {"cpus": 4, "drain_active": 0, **COUNTERS}
+    sample = {"cpus": 4, "drain_active": 0, "claiming": 1, **COUNTERS}
 
     def old_board(value):
         sent.append(value)
@@ -295,24 +295,27 @@ def test_board_without_counters_gets_the_normal_report_and_is_not_asked_again_fo
             raise ksc.HubError(400, '{"error":"unknown field(s): tokens_io_total, tokens_cache_total"}')
     r = mm.Reporter(old_board, collect_fn=lambda: dict(sample), clock=lambda: now[0])
     assert r.report_due()
-    assert sent == [sample, {"cpus": 4, "drain_active": 0}]  # drain fields survive: only the counters go
+    without_claiming = {k: v for k, v in sample.items() if k != "claiming"}
+    assert sent == [sample, without_claiming, {"cpus": 4, "drain_active": 0}]
     assert r.counters_off_until == now[0] + mm.UNSUPPORTED_RETRY_S
     now[0] += mm.REPORT_EVERY_S
-    assert r.report_due() and sent[2:] == [{"cpus": 4, "drain_active": 0}]  # one request, no failing first try
+    assert r.report_due() and sent[3:] == [{"cpus": 4, "drain_active": 0, "claiming": 1}]
     now[0] = 1000.0 + mm.UNSUPPORTED_RETRY_S
-    assert r.report_due() and len(sent) == 5 and sent[3] == sample  # asks again after the backoff
+    assert r.report_due() and sent[4] == sample  # asks again after the backoff, claiming included
 
 
 def test_counter_retry_drops_cpu_sample_and_still_falls_back_for_pre_drain_boards():
     sent = []
-    sample = {"cpus": 4, "drain_active": 0, **CPU, **COUNTERS}
+    sample = {"cpus": 4, "drain_active": 0, "claiming": 1, **CPU, **COUNTERS}
 
     def ancient(value):
         sent.append(value)
         if set(value) - {"cpus"}:
             raise ksc.HubError(400, "unknown field(s): drain_active")
     md.send_compatible(ancient, sample)
-    assert sent[1] == {"cpus": 4, "drain_active": 0} and sent[2:] == [{"cpus": 4}]
+    assert "claiming" not in sent[1] and "cpu_busy_pct" not in sent[1]
+    assert sent[1]["tokens_io_total"] == COUNTERS["tokens_io_total"]
+    assert sent[2] == {"cpus": 4, "drain_active": 0} and sent[3:] == [{"cpus": 4}]
 
 
 def test_other_400_with_counters_is_not_treated_as_an_old_board():
