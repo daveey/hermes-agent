@@ -70,6 +70,8 @@ def append_remote_listed_cards(out: list[dict[str, Any]], ids: list[str], status
             if wait is not None:
                 row["wait"] = wait
             out.append(row)
+    from hermes_cli.kanban_session_activity_card_details import annotate_remote_upstream
+    annotate_remote_upstream(out)
 
 
 def _read_lean_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -> list[dict[str, Any]]:
