@@ -64,6 +64,7 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
     """Prepare managed switches privately, then publish after the allocation commits."""
     from agent.agent_runtime_helpers import _switch_model_runtime
     from agent.turn_facade_lease import turn_admission_lock
+    from agent.origin_turn_custody import owns_turn
     from agent.model_routing_managed import managed_config, resolve_managed_runtime
     from agent.model_routing_agent import persist_class_metadata
 
@@ -76,7 +77,7 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
     admission = turn_admission_lock(agent)
     if config is None and not temporary:
         with admission:  # swaps the live agent in place: check and mutation exclude admission
-            if getattr(agent, '_active_session_turn_lease_holder', None) is not None:
+            if getattr(agent, '_active_session_turn_lease_holder', None) is not None and not owns_turn(agent):
                 raise TurnAdmittedDuringSwitch('a turn is active; model switch not applied')
             return _switch_model_runtime(agent, model, provider, api_key, base_url, api_mode, capabilities)
     staged = copy(agent)
@@ -109,7 +110,7 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
         staged.context_compressor._session_db = backend.backend
     with turn_admission_lock(agent):
         holder = getattr(agent, '_active_session_turn_lease_holder', None)
-        if holder is not None:
+        if holder is not None and not owns_turn(agent):
             # A turn can win before OR after the snapshot. Neither may see a swapped runtime.
             raise TurnAdmittedDuringSwitch('a turn is active; model switch not applied')
         vars(agent).update(_without_turn_custody(vars(staged)))

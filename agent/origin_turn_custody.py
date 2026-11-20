@@ -27,6 +27,23 @@ def scope(lease):
         _current.reset(token)
 
 
+def owns_turn(agent):
+    """Only the executing turn may deliberately replace its own runtime, never an RPC caller.
+
+    Require both the existing local custody scope and the execution thread: copied context in an
+    auxiliary worker, stale thread IDs and scopes retained after release confer no switch authority.
+    """
+    import threading
+    value = _current.get()
+    if value is None:
+        return False
+    lease, pid, *_ = value
+    return (pid == os.getpid() and lease.agent is agent and lease.is_turn_active()
+            and not lease.stop.is_set()
+            and getattr(agent, '_execution_thread_id', None) == threading.get_ident()
+            and getattr(agent, '_active_session_turn_lease_holder', None) == lease.holder)
+
+
 def origin():
     """Revalidate the exact holder on every capture; a copied context is no lease."""
     from agent.delegation_context import is_delegated_child_process_context

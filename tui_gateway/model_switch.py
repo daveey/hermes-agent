@@ -392,7 +392,7 @@ def _commit_agentless_switch(session: dict, result, override: dict) -> None:
 def _apply_model_switch(
     sid: str, session: dict, raw_input: str, *, confirm_expensive_model: bool = False,
     pin_session_override: bool = True, parsed_flags: Any | None = None,
-    persist_override: bool | None = None, count_switch: bool = True) -> dict:
+    persist_override: bool | None = None, count_switch: bool = True, defer_if_busy: bool = True) -> dict:
     """``count_switch=False``: an internal swap (config adoption, MoA one-shot and its restore), not a
     user's /model pick, so it stays out of the shared-metrics switch count."""
     from hermes_cli.model_switch import parse_model_switch_args
@@ -435,12 +435,16 @@ def _apply_model_switch(
         _commit_recording_composer_profile(
             sid, session, agent, result, current_model, restore_snapshot, records_composer_override)
     except TurnAdmittedDuringSwitch as exc:
+        if not defer_if_busy:
+            # The caller owns a turn-scoped restore lifecycle, which cannot follow a queued pick
+            # into another turn. Refuse without changing either the live runtime or the queue.
+            raise
         # The caller's unlocked running check lost to a turn admission: nothing was published and no
         # session state changed, so queue the pick for the next turn start like a busy-time pick.
-        _stash_pending_model_switch(
+        stashed = _stash_pending_model_switch(
             None, "model", raw_input, session, confirm_expensive_model, parsed_flags,
             pin_session_override=pin_session_override, persist_override=persist_override, count_switch=count_switch)
-        if not session.get("pending_model_switch"):
+        if not stashed.get('result', {}).get('deferred'):
             raise ValueError(f"{exc}; pick {result.new_model} again once the turn ends.") from exc
         return {"value": result.new_model, "warning": "", "confirm_required": False, "deferred": True,
                 "scope": "once" if one_turn else ("global" if persist_global else "session")}
@@ -497,10 +501,12 @@ def _reset_session_model_override(sid: str, session: dict) -> dict:
         agent = session.get("agent")
         if model and agent is not None and (
                 model != getattr(agent, "model", "") or (provider and provider != getattr(agent, "provider", ""))):
-            _apply_model_switch(
+            switched = _apply_model_switch(
                 sid, session, f"{model} --provider {provider}" if provider else model,
                 confirm_expensive_model=True, pin_session_override=False, persist_override=False,
                 count_switch=False)
+            if switched.get('deferred'):
+                return switched
         _persist_live_session_runtime(session)
     _emit_session_info(sid, session)
     shown = model or getattr(agent, "model", "") or t("gateway.shared.unknown_value")

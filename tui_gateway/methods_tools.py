@@ -687,22 +687,21 @@ def _cmd_moa(rid, params, session, name, arg):
         # place: session["model_override"] alone never switches an already-built agent.
         agent = session.get("agent")
         # See #53444.
-        session["moa_one_shot_restore"] = {
+        restore = session.get('moa_one_shot_restore') or {
             "override": session.get("model_override"), "model": getattr(agent, "model", None),
             "provider": getattr(agent, "provider", None)}
         if agent is not None:
-            try:  # persist_override=False: turn-scoped, never persist the MoA provider to config.yaml
-                _apply_model_switch(
-                    params.get("session_id", ""), session, f"{preset} --provider moa",
-                    confirm_expensive_model=False, pin_session_override=True, persist_override=False,
-                    count_switch=False)
-            except Exception:
-                session.pop("moa_one_shot_restore", None)
-                raise
+            # No restore mutation until the swap succeeds: a refused second command must not
+            # overwrite (or clear) the restore belonging to the currently running one-shot.
+            _apply_model_switch(
+                params.get("session_id", ""), session, f"{preset} --provider moa",
+                confirm_expensive_model=False, pin_session_override=True, persist_override=False,
+                count_switch=False, defer_if_busy=False)
         else:  # lazy/fresh session: the override is consumed by the first build
             session["model_override"] = {
                 "provider": "moa", "model": preset, "base_url": "moa://local",
                 "api_key": "moa-virtual-provider", "api_mode": "chat_completions"}
+        session['moa_one_shot_restore'] = restore
         notice = f"MoA one-shot queued with preset {preset}; previous model will be restored after this turn."
         return _ok(rid, {"type": "send", "notice": notice, "message": arg})
     except SessionNotOwned as exc:

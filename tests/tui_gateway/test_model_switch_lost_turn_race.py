@@ -78,3 +78,48 @@ def test_refused_switch_replays_original_intent(idle_session, monkeypatch, optio
     server._apply_pending_model_switch('sid', idle_session)
     assert calls == [('sid', idle_session, TARGET, {'confirm_expensive_model': True, **options})]
     assert 'pending_model_switch' not in idle_session
+
+
+def test_refused_moa_command_does_not_queue_a_permanent_pin(idle_session):
+    response = server._cmd_moa('1', {'session_id': 'sid'}, idle_session, 'moa', 'fixture prompt')
+    assert response['error']['code'] == 5030
+    assert 'moa_one_shot_restore' not in idle_session
+    assert 'pending_model_switch' not in idle_session
+    assert 'model_override' not in idle_session
+    assert idle_session['agent'].model == 'old'
+
+
+def test_user_pick_during_moa_still_defers(idle_session):
+    idle_session['moa_one_shot_restore'] = {'model': 'old'}
+    result = server._apply_model_switch('sid', idle_session, TARGET, confirm_expensive_model=True)
+    assert result['deferred'] is True
+    assert idle_session['pending_model_switch']['raw'] == TARGET
+
+
+def test_refused_second_moa_keeps_the_first_turn_restore(idle_session):
+    restore = {'model': 'previous-model', 'provider': 'anthropic', 'override': None}
+    idle_session['moa_one_shot_restore'] = restore
+    idle_session['agent'].model = 'moa-preset'
+    response = server._cmd_moa('1', {'session_id': 'sid'}, idle_session, 'moa', 'second prompt')
+    assert response['error']['code'] == 5030
+    assert idle_session['moa_one_shot_restore'] is restore
+    assert 'pending_model_switch' not in idle_session
+
+
+def test_deferred_reset_does_not_report_done(idle_session, monkeypatch):
+    idle_session['model_override'] = {'model': 'old', 'provider': 'anthropic'}
+    monkeypatch.setattr(server, '_config_model_target', lambda: (TARGET, 'anthropic'))
+    monkeypatch.setattr(server, '_persist_live_session_runtime', lambda *a: pytest.fail('persisted before replay'))
+    result = server._reset_session_model_override('sid', idle_session)
+    assert idle_session['agent'].model == 'old'
+    assert idle_session['pending_model_switch']['display_model'] == TARGET
+    assert result.get('deferred') is True and result['warning'] == ''
+
+
+def test_stash_warning_does_not_ack_an_older_pick(idle_session, monkeypatch):
+    older = {'raw': 'older-pick', 'confirm_expensive_model': True}
+    idle_session['pending_model_switch'] = older
+    monkeypatch.setattr(server, '_pending_switch_selection_warning', lambda *a: 'costly')
+    with pytest.raises(ValueError, match='pick claude-target again'):
+        server._apply_model_switch('sid', idle_session, TARGET)
+    assert idle_session['pending_model_switch'] is older
