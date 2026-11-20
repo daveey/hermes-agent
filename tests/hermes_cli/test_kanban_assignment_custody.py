@@ -100,6 +100,9 @@ def test_foreign_original_completes_normally_without_materializing_it(foreign):
     lambda e: _duplicate_event(e, ord=max(row['ord'] for row in e['events']) + 1),
     lambda e: _blocked(e).update(ord='fixture-order'),
     lambda e: e['task'].update(model_override=42),
+    lambda e: e['task'].update(provider_override=['x']),
+    lambda e: e['task'].update(provider_override=7),
+    lambda e: e['task'].update(workspace_path=5),
     lambda e: e['task'].update(skills=['']),
     lambda e: e.update(runs={}),
     lambda e: next(row for row in e['events'] if row['kind'] != 'blocked').update(kind=42),
@@ -109,7 +112,8 @@ def test_foreign_original_completes_normally_without_materializing_it(foreign):
         'wrong-uid', 'runs-incomplete', 'wrong-version', 'wrong-board',
         'wrong-event-task', 'deleted-event', 'foreign-repair-block',
         'wrong-echo-task-id', 'non-dict-block', 'non-string-reason', 'duplicate-event-uid',
-        'non-int-order', 'non-string-override', 'invalid-list-element', 'non-list-runs',
+        'non-int-order', 'non-string-override', 'list-provider-override',
+        'int-provider-override', 'int-scratch-workspace-path', 'invalid-list-element', 'non-list-runs',
         'non-string-event-kind', 'duplicate-event-order'])
 def test_foreign_evidence_fails_closed(foreign, mutate):
     conn, _, repair, _, evidence, _ = foreign
