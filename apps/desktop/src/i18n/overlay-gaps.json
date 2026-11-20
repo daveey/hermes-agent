@@ -2368,5 +2368,14 @@
   "profiles.newSessionsDescription": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "profiles.newSessionTargetUnreachable": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "profiles.newSessionTargetUnreachableDetail": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
-  "profiles.createOnThisDevice": ["ar","de","es","fr","ja","ru","zh","zh-hant"]
+  "profiles.createOnThisDevice": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.backgroundUpdate.updating": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.backgroundUpdate.dueIn": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.backgroundUpdate.blocked": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.backgroundUpdate.tooltipBatching": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.backgroundUpdate.tooltipDraining": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.backgroundUpdate.tooltipPastCap": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.backgroundUpdate.tooltipApplying": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.backgroundUpdate.tooltipBlocked": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.backgroundUpdate.waitingOn": ["ar","de","es","fr","ja","ru","zh","zh-hant"]
 }

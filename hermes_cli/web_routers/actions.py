@@ -286,6 +286,15 @@ def _source_release_label(status: dict[str, Any]) -> str:
     return f"{status.get('channel') or 'stable'} release" + (f" v{version}" if version else "")
 
 
+@router.get("/api/hermes/update/progress")
+async def hermes_update_progress():
+    """This host's background core update (hermes-sync): ``{"progress": {...} | null}``. Cheap file reads,
+    polled by Desktop's version pill; see hermes_cli.core_update_progress (unusable records read as null)."""
+    from hermes_cli.core_update_progress import read_progress
+
+    return {"progress": await asyncio.to_thread(read_progress)}
+
+
 @router.get("/api/hermes/update/check")
 async def check_hermes_update(force: bool = False, profile: Optional[str] = None):
     """Report whether a Hermes update is available, without applying it.

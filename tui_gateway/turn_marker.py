@@ -211,6 +211,12 @@ def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attemp
 
     def mutate(entries):
         prior = entries.get(session_key)
+        if (reason == UPDATE_HOLD_QUEUE_REASON and isinstance(prior, dict) and not prior.get("reason")
+                and prior.get("writer_pid") != entry["writer_pid"] and marker_writer_state(prior) != "dead"):
+            # [daveey] A sibling backend on this HERMES_HOME (#94778) is mid-turn on this session: its live-turn
+            # marker is what keeps hermes-sync from updating over that turn, and hermes-sync skips hold-queue
+            # markers as "not running". Never replace it; that backend's own end-of-turn clears it.
+            return None
         if isinstance(prior, dict) and prior.get("reason") == _JOBS_REASON:
             own = {str(j.get("session_id")) for j in entry.get("killed_jobs", ()) if isinstance(j, dict)}
             kept = [j for j in prior.get("killed_jobs") or () if isinstance(j, dict)

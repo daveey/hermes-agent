@@ -20,6 +20,7 @@ import { Badge } from '@/components/ui/badge'
 import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { useI18n } from '@/i18n'
+import { type BackgroundUpdateView, describeBackgroundUpdate } from '@/lib/background-update'
 import { displayPath, pathLeaf } from '@/lib/display-path'
 import { statusBarGatewayHealth } from '@/lib/gateway-health-pill'
 import {
@@ -74,7 +75,9 @@ import { $subagentsBySession, activeSubagentCount, failedSubagentCount } from '@
 import { $gatewayRestarting } from '@/store/system-actions'
 import {
   $backendUpdateApply,
+  $backendUpdateProgress,
   $backendUpdateStatus,
+  $clientUpdateProgress,
   $desktopVersion,
   $updateApply,
   $updateStatus,
@@ -104,25 +107,59 @@ interface StatusbarItemsOptions {
   toggleCommandCenter: () => void
 }
 
+/** [daveey] The thin bar under a version pill while its host updates itself: filling toward the drainer's
+ *  target, or a sweeping sliver when the end is not measurable (installing, or past the target). */
+function UpdateProgressBar({ fraction }: { fraction: null | number }) {
+  return (
+    <span
+      aria-hidden
+      className="pointer-events-none absolute inset-x-0 -bottom-1 h-0.5 overflow-hidden rounded-full bg-primary/20"
+      data-slot="version-update-bar"
+    >
+      {fraction === null ? (
+        <span className="update-bar-sweep block h-full w-1/3 rounded-full bg-primary" />
+      ) : (
+        <span
+          className="block h-full rounded-full bg-primary transition-[width] duration-700"
+          style={{ width: `${Math.round(fraction * 100)}%` }}
+        />
+      )}
+    </span>
+  )
+}
+
 /** The statusbar row for one update target: the client, or the connected backend. */
 function versionItem(
   target: 'backend' | 'client',
   status: ReturnType<typeof resolveVersionStatus>,
   applying: boolean,
   toggleLabel: string,
-  hidden = false
+  hidden = false,
+  background: BackgroundUpdateView | null = null
 ): StatusbarItem {
+  // An apply Desktop started owns the pill; a host's own background update shows only otherwise.
+  const bg = applying ? null : background
+  const busy = applying || Boolean(bg?.busy)
+  const text = bg ? `${status.label} · ${bg.suffix}` : status.label
+
   return {
-    className: status.hasUpdate ? 'text-primary hover:text-primary' : undefined,
+    className: status.hasUpdate || busy ? 'text-primary hover:text-primary' : undefined,
     hidden: status.unknown || hidden,
-    icon: applying ? <Loader2 className="size-3 animate-spin" /> : <Hash className="size-3" />,
+    icon: busy ? <Loader2 className="size-3 animate-spin" /> : <Hash className="size-3" />,
     id: `version-${target}`,
-    label: status.label,
+    label: bg?.bar ? (
+      <span className="relative inline-flex" data-slot="version-update-label">
+        {text}
+        <UpdateProgressBar fraction={bg.bar.fraction} />
+      </span>
+    ) : (
+      text
+    ),
     // Update state is not a preference: hiding it is how a user misses that
     // they are behind. Listed in the menu, but locked on.
     lockedVisible: true,
     onSelect: () => openUpdateOverlayFor(target),
-    title: status.tooltip,
+    title: bg ? [bg.tooltip, status.tooltip].filter(Boolean).join('\n\n') : status.tooltip,
     toggleLabel,
     variant: 'action'
   }
@@ -206,6 +243,8 @@ export function useStatusbarItems({
   const updateApply = useStore($updateApply)
   const backendUpdateStatus = useStore($backendUpdateStatus)
   const backendUpdateApply = useStore($backendUpdateApply)
+  const clientUpdateProgress = useStore($clientUpdateProgress)
+  const backendUpdateProgress = useStore($backendUpdateProgress)
   const desktopVersion = useStore($desktopVersion)
   const connection = useStore($connection)
   const cloudOwnsUpdates = useStore($cloudOwnsUpdates)
@@ -458,9 +497,12 @@ export function useStatusbarItems({
       version: desktopVersion?.appVersion
     })
 
+    const background = describeBackgroundUpdate(clientUpdateProgress, Date.now(), copy.backgroundUpdate)
+
     // A Webapp served by Hermes Cloud: Cloud updates it, so there is no version/update pill to open.
-    return versionItem('client', status, applying, copy.toggleVersion, cloudOwnsUpdates.client)
+    return versionItem('client', status, applying, copy.toggleVersion, cloudOwnsUpdates.client, background)
   }, [
+    clientUpdateProgress,
     cloudOwnsUpdates.client,
     desktopVersion?.appVersion,
     connection?.mode,
@@ -493,8 +535,11 @@ export function useStatusbarItems({
       version: statusSnapshot?.version
     })
 
-    return versionItem('backend', status, applying, copy.toggleBackendVersion)
+    const background = describeBackgroundUpdate(backendUpdateProgress, Date.now(), copy.backgroundUpdate)
+
+    return versionItem('backend', status, applying, copy.toggleBackendVersion, false, background)
   }, [
+    backendUpdateProgress,
     cloudOwnsUpdates.backend,
     connection?.mode,
     statusSnapshot?.version,

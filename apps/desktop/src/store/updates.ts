@@ -17,8 +17,9 @@ import type {
   DesktopVersionInfo,
   HermesConnection
 } from '@/global'
-import { checkHermesUpdate, getActionStatus, updateHermes } from '@/hermes'
+import { checkHermesUpdate, getActionStatus, getHermesUpdateProgress, updateHermes } from '@/hermes'
 import { translateNow } from '@/i18n'
+import { type BackgroundUpdateProgress, mapUpdateProgress } from '@/lib/background-update'
 import { persistString, storedString } from '@/lib/storage'
 import { cloudOwnsUpdates, updateTargetFor } from '@/store/cloud-updates'
 import { $connectionsRegistry, refreshConnectionsRegistry } from '@/store/connections'
@@ -65,6 +66,11 @@ export const $updateStatus = atom<DesktopUpdateStatus | null>(null)
 export const $backendUpdateStatus = atom<DesktopUpdateStatus | null>(null)
 export const $backendUpdateApply = atom<UpdateApplyState>(IDLE)
 export const $backendUpdateChecking = atom<boolean>(false)
+
+// [daveey] Core updates each host runs on its own (hermes-sync), polled from GET /api/hermes/update/progress:
+// the client pill reads this machine's, the backend pill the remote host's. Null = none in progress (or unknown).
+export const $clientUpdateProgress = atom<BackgroundUpdateProgress | null>(null)
+export const $backendUpdateProgress = atom<BackgroundUpdateProgress | null>(null)
 
 export type UpdateTarget = 'client' | 'backend'
 export const $updateOverlayTarget = atom<UpdateTarget>('client')
@@ -1363,6 +1369,57 @@ function ingestProgress(payload: DesktopUpdateProgress): void {
 
 let pollerStarted = false
 let backgroundTimer: ReturnType<typeof setInterval> | null = null
+let progressTimer: ReturnType<typeof setInterval> | null = null
+
+/** [daveey] How often the version pills re-read their host's background update (a few small file reads there). */
+export const UPDATE_PROGRESS_POLL_MS = 10_000
+
+const progressBusy = (p: BackgroundUpdateProgress | null): boolean => p?.state === 'draining' || p?.state === 'applying'
+
+async function pollProgressFor(target: UpdateTarget): Promise<void> {
+  const store = target === 'backend' ? $backendUpdateProgress : $clientUpdateProgress
+
+  if (cloudOwnsUpdates(target) || (target === 'backend' && !isRemoteMode())) {
+    store.set(null)
+
+    return
+  }
+
+  const requestKey = connectionKey($connection.get())
+  let next: BackgroundUpdateProgress | null
+
+  try {
+    // The client pill is this machine: pin the local backend even while a remote one is primary.
+    next = mapUpdateProgress(
+      await getHermesUpdateProgress(target === 'client' ? { connectionId: 'local' } : undefined),
+      Date.now()
+    )
+  } catch {
+    next = null // an older backend without the route, or no local backend: nothing to show
+  }
+
+  if (target === 'backend' && connectionKey($connection.get()) !== requestKey) {
+    return
+  }
+
+  const finished = progressBusy(store.get()) && !progressBusy(next)
+  store.set(next)
+
+  if (finished) {
+    // The swap just landed: refresh the version the pill names instead of waiting for the daily check.
+    void (target === 'backend' ? checkBackendUpdates({ force: true }) : checkUpdates({ force: true }))
+  }
+}
+
+/** One round for both pills; skipped while the window is hidden (the next visible tick catches up). */
+export function pollUpdateProgress(): Promise<void> {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+    return Promise.resolve()
+  }
+
+  return Promise.all([pollProgressFor('client'), pollProgressFor('backend')]).then(() => undefined)
+}
+
 let connectionUnsub: (() => void) | null = null
 let lastConnectionKey: string | undefined
 let versionScopeUnsub: (() => void) | null = null
@@ -1456,12 +1513,19 @@ export function startUpdatePoller(): void {
 
   window.addEventListener('focus', onFocus)
   backgroundTimer = setInterval(runPassiveChecks, BACKGROUND_UPDATE_CHECK_MS)
+  void pollUpdateProgress()
+  progressTimer = setInterval(() => void pollUpdateProgress(), UPDATE_PROGRESS_POLL_MS)
 }
 
 export function stopUpdatePoller(): void {
   if (backgroundTimer !== null) {
     clearInterval(backgroundTimer)
     backgroundTimer = null
+  }
+
+  if (progressTimer !== null) {
+    clearInterval(progressTimer)
+    progressTimer = null
   }
 
   connectionUnsub?.()

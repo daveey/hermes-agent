@@ -1,3 +1,4 @@
+import type { UpdateProgressResponse } from '@/lib/background-update'
 import type {
   ActionResponse,
   ActionStatusResponse,
@@ -164,6 +165,15 @@ export function updateHermes(): Promise<ActionResponse> {
 /** Query the connected backend's own update state. In remote mode this is the
  *  authoritative source for the backend's behind-count + "what's changed",
  *  distinct from the Electron client clone's git state. */
+/** [daveey] The host's own background core update (hermes-sync); `{ progress: null }` when none is owed.
+ *  `scope` pins the host: `{ connectionId: 'local' }` for this machine, omitted for the active backend. */
+export function getHermesUpdateProgress(scope?: ProfileScope): Promise<UpdateProgressResponse> {
+  return hermesApi<UpdateProgressResponse>({
+    ...(scope ? capabilityScoped(scope) : profileScoped()),
+    path: '/api/hermes/update/progress'
+  })
+}
+
 export function checkHermesUpdate(force = false): Promise<BackendUpdateCheckResponse> {
   return hermesApi<BackendUpdateCheckResponse>({
     ...profileScoped(),
