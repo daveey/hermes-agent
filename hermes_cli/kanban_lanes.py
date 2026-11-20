@@ -13,6 +13,8 @@ A card's lane is ``tasks.tenant``. ``kanban.admission.lanes`` in the installatio
             share: 20
             gated: true              # cards filed by other cards or by detectors start held in triage
             admit_per_day: 50
+            cards_per_day: 50        # optional; new cards wait at the gate once today's admissions hit it
+            usd_per_day: 40          # optional; new cards wait at the gate once today's run spend hits it
             match: {creators: [self-heal], key_prefixes: ["ci-main-watch:"], repos: [hermes-agent], self_work: true}
             gate_exempt: ['independent review']   # title regexes that skip the gate under an admitted creator
             never_admit: ['lifecycle guard']      # title regexes the planner may never admit
@@ -76,6 +78,8 @@ class Lane:
     share: float = 0
     gated: bool = False
     admit_per_day: Optional[int] = None
+    cards_per_day: Optional[int] = None
+    usd_per_day: Optional[float] = None
     paused: bool = False
     describe: str = ""
     creators: frozenset = frozenset()
@@ -105,6 +109,7 @@ class Decision:
     gated: bool = False
     cap: Optional[int] = None
     would_gate: bool = False
+    gate_reason: Optional[str] = None
 
     def priority(self, value: int) -> int:
         from hermes_cli.kanban_priority import bounded
@@ -134,7 +139,8 @@ def _lane(name, raw) -> Lane:
     raw = {} if raw is None else raw
     if not isinstance(raw, dict):
         raise ValueError(f"lane {name} must be a mapping")
-    known = {"share", "gated", "admit_per_day", "paused", "describe", "match", "gate_exempt", "never_admit"}
+    known = {"share", "gated", "admit_per_day", "cards_per_day", "usd_per_day", "paused", "describe",
+             "match", "gate_exempt", "never_admit"}
     if unknown := sorted(set(raw) - known):
         raise ValueError(f"lane {name}: unknown key(s) {', '.join(map(str, unknown))}")
     share = raw.get("share", 0)
@@ -143,11 +149,20 @@ def _lane(name, raw) -> Lane:
     per_day = raw.get("admit_per_day")
     if per_day is not None and (type(per_day) is not int or per_day < 0):
         raise ValueError(f"lane {name}: admit_per_day must be a nonnegative integer")
+    cards_per_day = raw.get("cards_per_day")
+    if cards_per_day is not None and (type(cards_per_day) is not int or cards_per_day < 0):
+        raise ValueError(f"lane {name}: cards_per_day must be a nonnegative integer")
+    usd_per_day = raw.get("usd_per_day")
+    if usd_per_day is not None and (type(usd_per_day) not in (int, float) or not math.isfinite(usd_per_day)
+                                    or usd_per_day < 0):
+        raise ValueError(f"lane {name}: usd_per_day must be a finite nonnegative number")
     match = raw.get("match") or {}
     if not isinstance(match, dict) or set(match) - {"creators", "key_prefixes", "repos", "self_work"}:
         raise ValueError(f"lane {name}: match takes creators, key_prefixes, repos, self_work")
     return Lane(
         name=name, share=float(share), gated=raw.get("gated") is True, admit_per_day=per_day,
+        cards_per_day=cards_per_day,
+        usd_per_day=None if usd_per_day is None else float(usd_per_day),
         paused=raw.get("paused") is True, describe=str(raw.get("describe") or ""),
         creators=frozenset(_strings(match.get("creators"), "match.creators")),
         key_prefixes=_strings(match.get("key_prefixes"), "match.key_prefixes"),
@@ -391,11 +406,15 @@ def initial_state(conn, parents, initial_status, triage, tenant, opts) -> tuple[
     if pol is None:
         return status, inherited, Decision()
     lane, source = _classify(conn, pol, tenant, inherited, opts)
-    gated = status in ("ready", "todo") and _gated(conn, pol, lane, opts)
+    startable = status in ("ready", "todo")
+    gated = startable and _gated(conn, pol, lane, opts)
+    limit_reason = _daily_limit_reason(conn, pol, lane, opts) if startable and not pol.shadow else None
+    if limit_reason:
+        gated = True
     if pol.shadow:
         return status, lane, Decision(lane, source, would_gate=gated)
     cap = None if _by_user(opts) else pol.priority_cap
-    return ("triage" if gated else status), lane, Decision(lane, source, gated, cap, gated)
+    return ("triage" if gated else status), lane, Decision(lane, source, gated, cap, gated, limit_reason)
 
 
 def record(conn, task_id: str, decision: Optional[Decision]) -> None:
@@ -410,7 +429,10 @@ def record(conn, task_id: str, decision: Optional[Decision]) -> None:
         _append_event(conn, task_id, UNCLASSIFIED, {"lane": decision.lane})
     if decision.gated:
         conn.execute("UPDATE tasks SET block_kind = ? WHERE id = ?", (GATE_KIND, task_id))
-        _append_event(conn, task_id, GATED, {"lane": decision.lane})
+        payload = {"lane": decision.lane}
+        if decision.gate_reason:
+            payload["reason"] = decision.gate_reason
+        _append_event(conn, task_id, GATED, payload)
 
 
 # ── moves after creation ────────────────────────────────────────────────────
@@ -453,6 +475,48 @@ def admitted_today(conn, lane: str, *, now: Optional[float] = None) -> int:
         "SELECT COUNT(*) FROM task_events e WHERE e.kind = ? AND e.created_at >= ? "
         "AND json_extract(e.payload, '$.lane') = ? AND COALESCE(json_extract(e.payload, '$.budget'), 1) = 1",
         (ADMITTED, day_start(now), lane)).fetchone()[0]
+
+
+def cards_today(conn, lane: str, *, now: Optional[float] = None) -> int:
+    """Distinct cards that passed the lane gate (or never waited) since local midnight, plus budgeted admits."""
+    start = day_start(now)
+    passed = conn.execute(
+        "SELECT COUNT(DISTINCT task_id) FROM task_events WHERE kind = ? AND created_at >= ? "
+        "AND json_extract(payload, '$.lane') = ? AND COALESCE(json_extract(payload, '$.would_gate'), 0) = 0",
+        (ASSIGNED, start, lane)).fetchone()[0]
+    return int(passed) + admitted_today(conn, lane, now=now)
+
+
+def spent_today(conn, pol: Policy, lane: str, *, now: Optional[float] = None) -> float:
+    """Run spend charged to ``lane`` since local midnight (same receipts ``usage`` uses)."""
+    start = day_start(now)
+    total = 0.0
+    for tenant, cost in conn.execute(
+            "SELECT tenant, SUM(cost) FROM ("
+            "SELECT t.tenant AS tenant, MAX(COALESCE(json_extract(e.payload, '$.usage.cost_usd'), 0)) AS cost "
+            "FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.kind = 'worker_result' "
+            "AND e.created_at >= ? AND json_extract(e.payload, '$.usage') IS NOT NULL "
+            "GROUP BY e.task_id, e.run_id) GROUP BY tenant", (start,)):
+        if pol.lane_of(tenant) == lane:
+            total += float(cost or 0)
+    return round(total, 2)
+
+
+def _daily_limit_reason(conn, pol: Policy, lane_name: str, opts: dict) -> Optional[str]:
+    """``limit:usd_per_day`` / ``limit:cards_per_day`` when a new startable card must wait; else None."""
+    from hermes_cli.kanban_admission_score import _alarm_key
+
+    if opts.get("created_by") in RECOVERY_CREATORS or opts.get("admission_class") == "urgent":
+        return None
+    if _alarm_key(opts.get("idempotency_key")):
+        return None
+    lane = pol.lanes[pol.lane_of(lane_name)]
+    now = time.time()
+    if lane.usd_per_day is not None and spent_today(conn, pol, lane.name, now=now) >= lane.usd_per_day:
+        return "limit:usd_per_day"
+    if lane.cards_per_day is not None and cards_today(conn, lane.name, now=now) >= lane.cards_per_day:
+        return "limit:cards_per_day"
+    return None
 
 
 def admit(conn, task_id: str, *, actor: str, reason: str, budget: bool = True) -> bool:

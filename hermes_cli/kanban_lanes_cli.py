@@ -145,8 +145,9 @@ def _pin(args) -> int:
     return 0
 
 
-def set_lane(lane: str, *, share=None, admit_per_day=None, paused=None) -> None:
-    """Change one lane's share, daily admit budget or pause state; raises ValueError.
+def set_lane(lane: str, *, share=None, admit_per_day=None, cards_per_day=None, usd_per_day=None,
+             paused=None) -> None:
+    """Change one lane's share, daily admit/cards/spend budget or pause state; raises ValueError.
 
     Written to the installation-root ``config.yaml``, the file the policy is read from, whatever profile the
     caller runs under: a profile's own config never holds lanes.
@@ -167,12 +168,18 @@ def set_lane(lane: str, *, share=None, admit_per_day=None, paused=None) -> None:
         raise ValueError("share must be a finite nonnegative number")
     if admit_per_day is not None and (type(admit_per_day) is not int or admit_per_day < 0):
         raise ValueError("admit_per_day must be a nonnegative integer")
+    if cards_per_day is not None and (type(cards_per_day) is not int or cards_per_day < 0):
+        raise ValueError("cards_per_day must be a nonnegative integer")
+    if usd_per_day is not None and (type(usd_per_day) not in (int, float) or not math.isfinite(usd_per_day)
+                                    or usd_per_day < 0):
+        raise ValueError("usd_per_day must be a finite nonnegative number")
     if paused is not None and type(paused) is not bool:
         raise ValueError("paused must be true or false")
-    changes = {"share": share, "admit_per_day": admit_per_day, "paused": paused}
+    changes = {"share": share, "admit_per_day": admit_per_day, "cards_per_day": cards_per_day,
+               "usd_per_day": usd_per_day, "paused": paused}
     changes = {key: value for key, value in changes.items() if value is not None}
     if not changes:
-        raise ValueError("nothing to set: give a share, a daily admit budget, pause or resume")
+        raise ValueError("nothing to set: give a share, a daily admit/cards/spend budget, pause or resume")
     path = Path(get_default_hermes_root()) / "config.yaml"
     doc = copy.deepcopy(read_config_doc_readonly(path))
     spec = doc["kanban"]["admission"]["lanes"]
@@ -185,7 +192,24 @@ def set_lane(lane: str, *, share=None, admit_per_day=None, paused=None) -> None:
 
 def _set(args) -> int:
     set_lane(args.lane, share=args.share, admit_per_day=args.admit_per_day,
+             cards_per_day=getattr(args, "cards_per_day", None),
+             usd_per_day=getattr(args, "usd_per_day", None),
              paused=True if args.pause else False if args.resume else None)
+    return 0
+
+
+def _flow(args) -> int:
+    from hermes_cli import kanban_lanes_flow as flow
+
+    with kbc.connect_closing() as conn:
+        replica = _fleet(conn, local=False)
+        try:
+            data = flow.snapshot(replica or conn, window=args.window)
+        finally:
+            if replica is not None:
+                replica.close()
+    if not _json_out(args, data):
+        print(json.dumps(data, indent=2))
     return 0
 
 
@@ -232,8 +256,8 @@ def _explain(args) -> int:
     return 0
 
 
-_ACTIONS = {None: _show, "show": _show, "held": _held, "unclassified": _unclassified, "assign": _assign,
-            "admit": _admit, "pin": _pin, "set": _set, "apply": _apply, "explain": _explain}
+_ACTIONS = {None: _show, "show": _show, "flow": _flow, "held": _held, "unclassified": _unclassified,
+            "assign": _assign, "admit": _admit, "pin": _pin, "set": _set, "apply": _apply, "explain": _explain}
 
 
 def command(args: argparse.Namespace) -> int:

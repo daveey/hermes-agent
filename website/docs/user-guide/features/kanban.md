@@ -1620,6 +1620,8 @@ kanban:
         share: 20
         gated: true              # cards filed by other cards or by detectors start held in triage
         admit_per_day: 50
+        cards_per_day: 50        # optional; new cards wait at the gate after this many admissions today
+        usd_per_day: 40          # optional; new cards wait at the gate after this much run spend today
         match: {creators: [self-heal], key_prefixes: ["ci-main-watch:"], repos: [hermes-agent], self_work: true}
         gate_exempt: ['independent review']
         never_admit: ['lifecycle guard']
@@ -1633,7 +1635,7 @@ kanban:
 - **Priority cap.** `agent_priority_cap` bounds the stored priority of a card the user did not create, at creation. Later edits are not capped, and the planner may set 0 to 1000.
 - **Limits.** Worker nodes order foreign pickup with their own board copy, so lane order is exact only on the board that holds the cards; `paused` applies where `lanes` is configured. A worker that parks on a held follow-up card waits until that card is admitted.
 
-`hermes kanban lanes` (default `show`) prints target against actual share of run-hours over `--hours` (default 6), running, ready, held and open cards per lane; on a synced board it reads the fleet replica unless `--local`. `held` and `unclassified` list cards; `assign <id> <lane>`, `admit <id>`, `pin <id> [--off]` and `set <lane> [--share N] [--admit-per-day N] [--pause|--resume]` (always written to the installation-root config) are the controls; a person's `admit` does not spend the daily budget (an agent's does); `promote` and `unblock` also release a held card and are not budgeted; `explain <id>` says which lane a card is in and why it waits.
+`hermes kanban lanes` (default `show`) prints target against actual share of run-hours over `--hours` (default 6), running, ready, held and open cards per lane; on a synced board it reads the fleet replica unless `--local`. `lanes flow --json [--window 1h|6h|24h|7d]` lists every open card with step, reason and source plus per-lane done/run-hours/cost and today's cap usage. `held` and `unclassified` list cards; `assign <id> <lane>`, `admit <id>`, `pin <id> [--off]` and `set <lane> [--share N] [--admit-per-day N] [--cards-per-day N] [--usd-per-day N] [--pause|--resume]` (always written to the installation-root config) are the controls; a person's `admit` does not spend the daily budget (an agent's does); `promote` and `unblock` also release a held card and are not budgeted; `explain <id>` says which lane a card is in and why it waits. Unset `cards_per_day` / `usd_per_day` means unlimited. Over the cap, new cards wait at the gate with reason `limit:cards_per_day` or `limit:usd_per_day`; both reset at local midnight.
 
 `hermes kanban lanes apply <file|->` applies a planner's JSON action list. Each action is validated on its own and refused with a reason when it breaks a limit: `admit` (at most `admit_per_day` per local day, never a `never_admit` title), `merge` (a held card into an open card of the same lane; it stays held), `reprioritize` (0 to 1000, never a pinned card), `relane` (only a card placed by inheritance or by default, never into or out of a gated lane) and `note`. Every action except `note` needs a one-line `reason`; one plan applies at most 50 actions.
 
