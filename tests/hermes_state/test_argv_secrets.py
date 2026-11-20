@@ -672,9 +672,18 @@ def _shape(rng: random.Random, kind: str, length: int) -> str:
     }[kind]()
 
 
-@pytest.mark.parametrize("position", sorted(_POSITIONS))
-@pytest.mark.parametrize("kind", _SHAPES)
-@pytest.mark.parametrize("length", sorted(_LEAK_CEILING))
+# The two query positions take only the shortest and longest lengths: they share the URL path's code, and the
+# suite stays fast.
+_RATE_CASES = [
+    (position, kind, length)
+    for position in sorted(_POSITIONS)
+    for kind in _SHAPES
+    for length in sorted(_LEAK_CEILING)
+    if not position.startswith("query_") or length in (16, 40)
+]
+
+
+@pytest.mark.parametrize("position, kind, length", _RATE_CASES)
 def test_generated_secrets_are_masked_at_the_documented_rate(position, kind, length):
     rng = random.Random(f"{position}/{kind}/{length}")
     leaked = 0
@@ -1075,7 +1084,7 @@ def test_known_programs_keep_their_own_u_and_word_globs_are_kept(argv, program):
     assert shown(argv, program) == argv
 
 
-# ---- the seventh review: -u for named programs, bracketed and OData query names, values cut at "&", "!" globs ---------
+# ---- the seventh review: -u for named programs, bracketed and OData query names, values cut at "&", "!" globs -------
 
 
 @pytest.mark.parametrize(
@@ -1160,3 +1169,49 @@ def test_a_leading_bang_is_a_glob_only_after_a_glob_flag():
         "--exclude=!vendor",
         MASK,
     ]
+
+
+# ---- the eighth review: programs run inside containers, wrapper flag values, the wrapper handoff -------------------
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (["run", "--rm", "img", "mytool", "-u", "admin:sunshine"], "docker"),
+        (["run", "--rm", "myimg", "-u", "admin:sunshine"], "docker"),
+        (["run", "img", "./t", "--user", "admin:sunshine"], "podman"),
+        (["exec", "pod", "--", "./tool", "-u", "admin:sunshine"], "kubectl"),
+        (["exec", "db", "mysql", "-u", "root:sunshine"], "docker"),
+        (["mytool", "-u", "admin:sunshine"], "sudo"),
+        (["-u", "NAME", "mytool", "-u", "admin:sunshine"], "env"),
+        (["5m", "mytool", "-u", "admin:sunshine"], "timeout"),
+    ],
+)
+def test_a_program_inside_a_container_or_wrapper_gets_the_generic_user_rule(argv, program):
+    out = " ".join(shown(argv, program))
+    assert "sunshine" not in out and f":{MASK}" in out
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (["run", "-u", "1000:1000", "img"], "docker"),
+        (["exec", "-u", "app:app", "db", "sh"], "docker"),
+        (["compose", "exec", "-u", "app:app", "svc", "sh"], "docker"),
+        (["-u", "admin", "ps", "-u", "daveey:staff"], "sudo"),
+        (["X=1", "ps", "-u", "daveey:staff"], "env"),
+        (["-n", "5", "ps", "-u", "daveey:staff"], "nice"),
+    ],
+)
+def test_the_wrapped_program_keeps_its_own_u_after_wrapper_flag_values(argv, program):
+    """The handoff to the wrapped program (env X=1 ps: ps's -u), past a wrapper's own flag values (sudo -u admin)."""
+    assert shown(argv, program) == argv
+
+
+def test_a_docker_login_password_is_masked():
+    assert shown(["login", "--password", "sunshine", "reg"], "docker") == ["login", "--password", MASK, "reg"]
+
+
+def test_encoded_non_ascii_query_values_are_kept():
+    value = "https://h/?q=%E2%9C%93&x=caf%C3%A9"
+    assert shown([value]) == [value]

@@ -10,17 +10,18 @@ env prefixes in shell strings. ``agent.redact`` still runs afterwards for known 
 
 Limits, measured on generated secrets of every common shape (letters and digits, base32/64, urlsafe, hex, symbol
 passwords, single- and mixed-case letters, grouped keys) as a bare argument, in an absolute or relative path, in a
-URL, as a URL query name or value, in a list, inside a spaced env value or a flag value and as a ``NAME=`` value -- a shown
-tail of 8+ characters counts as a leak: the worst shape and position shows about 8.5% of 16-character secrets, 3% of
-24-character, 2% of 32-character and 1.5% of 40-character ones (random letters can read like words); the tests hold
-these under 10%, 5%, 3% and 2%. About 0.15% of this repo's identifiers and 0.1% of its env names are masked. This
-is a rate, not a guarantee, and some secrets look exactly like identifiers and are shown: pronounceable passwords
-(``correcthorse``), all-digit values, UUIDs, strings under 12 characters and a secret shaped like a kebab-case
-``--flag`` right after a secret-named flag (read as the next flag, as switches need), unless a name marks them secret. Short hex (up to 12
-characters) is shown on purpose: it is how commits are abbreviated; longer hex (full commits, digests, container ids)
-is masked with the keys it looks like. ``--pin`` and ``--private`` are not secret names on purpose (switches or
-provider slugs in Hermes and common tools); the query names ``code``, ``session`` and ``hash`` are, so harmless values
-there are masked too.
+URL, as a URL query name or value, in a list, inside a spaced env value or a flag value and as a ``NAME=`` value --
+a shown tail of 8+ characters counts as a leak: the worst shape and position shows about 8.5% of 16-character
+secrets, 3% of 24-character, 2% of 32-character and 1.5% of 40-character ones (random letters can read like words);
+the tests hold these under 10%, 5%, 3% and 2%. About 0.15% of this repo's identifiers and 0.1% of its env names are
+masked. This is a rate, not a guarantee, and some secrets look exactly like identifiers and are shown: pronounceable
+passwords (``correcthorse``), all-digit values, UUIDs, strings under 12 characters and a secret shaped like a
+kebab-case ``--flag`` right after a secret-named flag (read as the next flag, as switches need), unless a name marks
+them secret. Short hex (up to 12 characters) is shown on purpose: it is how commits are abbreviated; longer hex (full
+commits, digests, container ids) is masked with the keys it looks like. Encoded query values are judged decoded;
+non-ASCII characters in them (``%E2%9C%93``) are shown. ``--pin`` and ``--private`` are not secret names on purpose
+(switches or provider slugs in Hermes and common tools); the query names ``code``, ``session`` and ``hash`` are, so
+harmless values there are masked too.
 """
 
 from __future__ import annotations
@@ -94,9 +95,30 @@ _NO_FLAGS = ((), (), ())
 _GENERIC_USER_FLAGS = frozenset({"-u", "--user"})
 _USER_FLAG_PROGRAMS = frozenset({
     "ps", "pgrep", "pkill", "killall", "top", "htop", "lsof", "w", "who", "last", "crontab", "chown", "chgrp",
-    "sudo", "doas", "su", "runuser", "setpriv", "docker", "podman", "nerdctl", "ctr", "crictl", "kubectl", "lxc",
-    "systemd-run", "machinectl", "install", "find",
+    "sudo", "doas", "su", "runuser", "setpriv", "docker", "podman", "nerdctl",
 })
+# Container runners: their own -u/--user (before the image or container) names a user; from the image on, the
+# arguments belong to the program run inside it (docker run --rm img tool -u admin:pw). Positional arguments before
+# the image: the subcommand (compose adds one, the service). A flag's value counted as one ends this early, so a
+# later user:group is masked, never a password shown.
+_CONTAINER_PROGRAMS = frozenset({"docker", "podman", "nerdctl"})
+# A wrapper's own flags that take a value, which is not the wrapped program (sudo -u admin ps …, nice -n 5 cmd).
+_WRAPPER_VALUE_FLAGS = {
+    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D", "-R", "-T"}),
+    "doas": frozenset({"-u", "-C"}),
+    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "ionice": frozenset({"-c", "-n", "-p", "--class", "--classdata"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+    "runuser": frozenset({"-u", "-g", "-G", "--user", "--group"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "xargs": frozenset({"-n", "-I", "-P", "-d", "-L", "-s", "-E", "-a"}),
+    "chroot": frozenset({"--userspec", "--groups"}),
+    "caffeinate": frozenset({"-t", "-w"}),
+    "watch": frozenset({"-n", "-d", "--interval"}),
+    "flock": frozenset({"-w", "-E", "--timeout", "--conflict-exit-code"}),
+}
+_DURATION = re.compile(r"\d+(?:\.\d+)?[smhd]?")  # timeout 5m cmd, sleep-like positional values
 _COOKIE_FLAGS = frozenset({"-b", "--cookie", "cookie"})
 # Flags whose value is a file glob, where a leading "!" negates it (rg --glob=!node_modules, -g '!*.lock').
 _GLOB_FLAGS = frozenset({"-g", "--glob", "--iglob", "--exclude", "--include", "--exclude-dir", "--ignore",
@@ -145,7 +167,8 @@ _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4
 # Ids with a known prefix: Hermes cards/processes/sessions, cloud resources.
 _KNOWN_ID_BODY = (r"(?:t_[0-9a-f]+|proc_[0-9a-f]+|\d{8}_\d{6}_[0-9a-z]+|tail[0-9a-f]{4,10}|"
                   r"(?:i|mi|vol|snap|sg|subnet|vpc|ami|eni|igw|rtb|nat|acl|lt)-[0-9a-f]{8,17})")
-_KNOWN_ID = re.compile(rf"^(?:{_KNOWN_ID_BODY}|v\d+\.\d+\.\d+-(?:0\.)?\d{{14}}-[0-9a-f]{{12}})$")  # + Go pseudo-versions
+# … plus Go pseudo-versions
+_KNOWN_ID = re.compile(rf"^(?:{_KNOWN_ID_BODY}|v\d+\.\d+\.\d+-(?:0\.)?\d{{14}}-[0-9a-f]{{12}})$")
 _KNOWN_ID_INSIDE = re.compile(rf"(?<![0-9A-Za-z]){_KNOWN_ID_BODY}(?![0-9A-Za-z])")
 _PATH_START = re.compile(r"^(?:/|~|\.{1,2}/|\\|[A-Za-z]:[\\/])")
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
@@ -318,8 +341,8 @@ def is_identifier(token: str) -> bool:
     token = _KNOWN_ID_INSIDE.sub("id", token)  # followup:t_01a1ecf2c3d6367b:notify, hermes-kanban-t_…
     if not _NPM_SPEC.match(token):
         # globs (*.example.com, dir/*, gc*) and printf tokens (%r@%h:%p) are not password symbols
-        unglobbed = re.sub(r"(?:(?<=[./:\-*(])|^)\*|\*(?=[./:\-*)]|$)|(?<![A-Za-z0-9])%[A-Za-z](?![A-Za-z0-9])"
-                           , "", token)
+        unglobbed = re.sub(r"(?:(?<=[./:\-*(])|^)\*|\*(?=[./:\-*)]|$)|(?<![A-Za-z0-9])%[A-Za-z](?![A-Za-z0-9])", "",
+                           token)
         if not re.search(r"[^\w.*/-]", unglobbed) and re.search(r"\.[A-Za-z]{1,5}$|/", unglobbed):
             unglobbed = unglobbed.replace("*", "")  # foo*bar.txt, src/*util*/x: a file glob
         if re.search(r"[A-Za-z0-9]", unglobbed) and (
@@ -480,7 +503,7 @@ def _judge_query_value(value: str, *, depth: int) -> str:
     decoded = urllib.parse.unquote(value)
     if decoded == value:
         return _judge(value, secret=False, depth=depth)
-    words = [word for word in re.split(r"[\s+]+", decoded) if word]
+    words = [word for word in re.split(r"[\s+]+", re.sub(r"[^\x00-\x7f]", " ", decoded)) if word]
     shown = [_judge(word, secret=False, depth=depth) for word in words]
     return value if all(MASK not in word for word in shown) else MASK
 
@@ -503,7 +526,7 @@ def _mask_query(query: str, *, depth: int) -> str:
             out.append(MASK if masking else pair)
         elif not well_formed:
             masking = True
-            out.append(f"{MASK}={MASK if value else value}")  # the name is the secret (?Xk9mP2…=1); its value goes too
+            out.append(f"{MASK}={MASK if value else value}")  # the name is the secret (?Xk9mP2…=1), and its value
         elif _is_secret_name(plain) or plain.lower() in _QUERY_SECRETS:
             masking = bool(value)  # a secret value cut at "&" (pass=sun&shine) goes on into the pieces after it
             out.append(f"{name}={MASK if value else value}")
@@ -750,6 +773,8 @@ def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) ->
     flags = _program_flags(program) or _NO_FLAGS
     current = os.path.basename(program or "").lower()  # the program whose flags these are
     wrapper = current in _COMMAND_WRAPPERS
+    wrapper_value = False  # the previous argument was a wrapper's own flag that takes a value (sudo -u admin)
+    container, before_image = current in _CONTAINER_PROGRAMS, 2  # positionals left before the image is passed
     glob_next = False  # the previous argument was a glob flag (rg -g '!node_modules')
     out: list[str] = []
     pending: tuple[str, str] | None = None  # (what the next argument is, the flag that asked for it)
@@ -758,6 +783,7 @@ def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) ->
             out.append(token)
             pending = None
             continue
+        skip_handoff, wrapper_value = wrapper_value, wrapper and token in _WRAPPER_VALUE_FLAGS.get(current, ())
         if glob_next and token.startswith("!"):
             glob_next = False
             out.append("!" + _judge(token[1:], secret=False, depth=_depth))
@@ -767,6 +793,14 @@ def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) ->
             (kind, name), pending = pending, None
             if (shown := _pending_value(token, kind, name, depth=_depth)) is not None:
                 out.append(shown)
+                continue
+        if container and not token.startswith("-") and "=" not in token:
+            before_image -= 1
+            if token == "compose":
+                before_image += 1  # docker compose exec <service> …
+            if before_image <= 0:  # the image or container: from here on the arguments belong to the program inside
+                container, current, wrapper = False, "", True
+                out.append(_judge(token, secret=False, depth=_depth))
                 continue
         if token in _GENERIC_USER_FLAGS and current not in _USER_FLAG_PROGRAMS:
             out.append(token)
@@ -794,7 +828,7 @@ def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) ->
             current = os.path.basename(token).lower()
             out.append(token)
             continue
-        if wrapper and "=" not in token and not token.isdigit():
+        if wrapper and not skip_handoff and "=" not in token and not _DURATION.fullmatch(token):
             # sshpass -p x ssh -p 2222 …: from the wrapped program on, its own flags (here none) apply
             current = os.path.basename(token).lower()
             flags, wrapper = _NO_FLAGS, current in _COMMAND_WRAPPERS
