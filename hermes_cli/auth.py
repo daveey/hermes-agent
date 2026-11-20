@@ -1022,9 +1022,10 @@ def write_credential_pool(
     IDs without a base are new additions. Concurrent disk additions are retained unless
     in *removed_ids*. *status_cleared_ids* skips the status-recency merge for explicit resets."""
     removed = {rid for rid in (removed_ids or ()) if rid}
-    bases = token_bases or {}
     with _auth_store_lock():
         auth_store = _load_auth_store()
+        # A store without a pool section (missing/corrupt, loads empty) is no evidence of peer deletions.
+        bases = (token_bases or {}) if isinstance(auth_store.get("credential_pool"), dict) else {}
         pool = _store_section(auth_store, "credential_pool")
         sanitized = [
             sanitize_borrowed_credential_payload(e, provider_id) if isinstance(e, dict) else e

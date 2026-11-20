@@ -27,6 +27,7 @@ from agent.credential_pool_plugin import apply_plugin_refresh_result, plugin_row
 from agent.credential_persistence import (
     fingerprint_secret_value, is_borrowed_credential_source, sanitize_borrowed_credential_payload)
 import hermes_cli.auth as auth_mod
+from hermes_cli.auth_pool_read_scope import known_pool_pairs
 from hermes_cli.auth_oauth_grants import owned_profile_reads_root_state
 from hermes_cli.auth import (
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
@@ -3013,9 +3014,8 @@ def load_pool(provider: str, *, allowed_auth_types=None) -> CredentialPool:
         for payload in raw_entries
     )
     if raw_needs_auth_normalization:
-        # A profile may be reading this provider from the global-root fallback.
-        # Keep that fallback read-only: only the owning store may rewrite these
-        # rows; loading the default/root profile heals global rows.
+        # A profile may read this provider through the global-root fallback; keep that
+        # read-only: only the owning store may rewrite these rows (the root's load heals them).
         active_pool = _load_auth_store().get("credential_pool")
         active_entries = active_pool.get(provider) if isinstance(active_pool, dict) else None
         changed |= bool(active_entries)
@@ -3050,7 +3050,7 @@ def load_pool(provider: str, *, allowed_auth_types=None) -> CredentialPool:
         changed |= _normalize_pool_priorities(provider, entries)
 
     pool = CredentialPool(provider, entries, allowed_auth_types=allowed_auth_types)
-    pool._persisted_token_pairs = auth_mod._token_pairs_by_id(raw_entries)
+    pool._persisted_token_pairs = known_pool_pairs(provider, raw_entries)
     if changed:
         pool._persist(removed_ids=sorted(disk_ids - {entry.id for entry in entries}))
     # Remember the root's borrowed rows so a later ``add_entry`` in this

@@ -61,3 +61,40 @@ def test_tokenless_known_row_cannot_be_reinserted():
     bases = auth._token_pairs_by_id([row])
     auth.write_credential_pool("openrouter", [], removed_ids=["blank"])
     assert auth.write_credential_pool("openrouter", [row], token_bases=bases) == []
+
+
+def test_profile_fallback_flush_keeps_borrowed_rows(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    root = tmp_path / ".hermes"
+    root.mkdir()
+    prof = root / "profiles" / "coder"
+    prof.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(prof))
+    monkeypatch.setattr(pools, "_seed_from_singletons", lambda *a: (False, set()))
+    monkeypatch.setattr(pools, "_seed_from_env", lambda *a: (False, set()))
+    (root / "auth.json").write_text(json.dumps({"version": 1, "credential_pool": {"openrouter": [
+        {"id": "g1", "label": "g", "auth_type": "api_key", "priority": 0, "source": "manual",
+         "access_token": "fixture-global"}]}}))
+    pool = pools.load_pool("openrouter")
+    assert [e.id for e in pool.entries()] == ["g1"]
+    pool._entries = [replace(e, last_status="exhausted", last_status_at=100, last_error_code=429)
+                     for e in pool.entries()]
+    pool._current_id = "g1"
+    pool._persist()
+    assert [e.id for e in pool.entries()] == ["g1"]
+    assert [r["id"] for r in auth.read_credential_pool("openrouter")] == ["g1"]
+
+
+def test_corrupt_store_flush_self_heals_from_memory(monkeypatch):
+    monkeypatch.setattr(pools, "_seed_from_singletons", lambda *a: (False, set()))
+    monkeypatch.setattr(pools, "_seed_from_env", lambda *a: (False, set()))
+    row = pools.PooledCredential(provider="openrouter", id="row0", label="f", source="manual",
+                                 auth_type="api_key", priority=0, access_token="fixture-0")
+    auth.write_credential_pool("openrouter", [row.to_dict()])
+    pool = pools.load_pool("openrouter")
+    auth._auth_file_path().write_text("{not json")
+    pool._persist()
+    assert [e.id for e in pool.entries()] == ["row0"]
+    assert [r["id"] for r in auth.read_credential_pool("openrouter")] == ["row0"]

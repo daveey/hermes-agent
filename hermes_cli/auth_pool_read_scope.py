@@ -88,3 +88,21 @@ def read_credential_pool(provider_id=None):
     if not (isinstance(rows, list) and rows):
         rows = global_pool.get(provider_id)
     return deepcopy(rows) if isinstance(rows, list) else []
+
+
+def known_pool_pairs(provider_id, rows):
+    """Token-generation bases for the deletion fence, limited to rows of the store written.
+
+    Rows read through the global-root fallback were never in the active store, so a missing
+    one there is an addition, not a peer deletion. Single-use providers write back to the
+    root, so their root-read rows stay known."""
+    from agent.credential_pool import SINGLE_USE_REFRESH_POOL_PROVIDERS, _profile_owns_pool_provider
+    from hermes_cli import auth
+
+    pairs = auth._token_pairs_by_id(rows)
+    if provider_id in SINGLE_USE_REFRESH_POOL_PROVIDERS and not _profile_owns_pool_provider(provider_id):
+        return pairs
+    own = auth._load_auth_store().get("credential_pool")
+    own_rows = own.get(provider_id) if isinstance(own, dict) else None
+    own_ids = set(auth._entry_ids(own_rows)) if isinstance(own_rows, list) else set()
+    return {rid: pair for rid, pair in pairs.items() if rid in own_ids}
