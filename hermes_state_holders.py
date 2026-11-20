@@ -60,9 +60,9 @@ def _read_proc_argv(pid: int) -> Optional[list[str]]:
 def describe_holder_pid(pid: int, *, limit: Optional[int] = 80) -> str:
     """``PID 123 (hermes gateway run)`` for operator-facing holder lists; /proc argv first, psutil elsewhere.
     The command line is cut to *limit* characters for log and error lines; ``None`` keeps all of it
-    (``hermes doctor``, whose holder lists are read by a person deciding what to stop). Secrets in the
-    command line (secret-named flag values, bare random tokens, known key formats, URL credentials) are
-    always redacted."""
+    (``hermes doctor``, whose holder lists are read by a person deciding what to stop). The arguments are
+    always masked first: only what reads as an identifier is shown (``hermes_state_argv_secrets``), then the
+    shared redactor masks known secret formats and URL credentials."""
     argv = _read_proc_argv(pid)
     if argv is None and psutil is not None:
         try:
@@ -78,10 +78,9 @@ def describe_holder_pid(pid: int, *, limit: Optional[int] = 80) -> str:
             argv = [*argv[:at + 1], INLINE_CODE, *argv[at + 2:]]
     if not argv:
         return f"PID {pid} (command line unavailable)"
-    # Redacted before the cut: holder lists are pasted into issues, and a process's argv can carry
-    # `--api-key …` or credentials in a URL (an early secret used to leak its prefix through the cut too).
-    # The argv-specific mask first (secret-named flags and bare random tokens it has no pattern for), then the
-    # shared redactor (known secret formats).
+    # Masked before the cut: holder lists are pasted into issues, and a secret early in argv used to leak its
+    # prefix through the cut. The argv mask fails closed (identifiers shown, the rest masked, values of secret
+    # names always masked); the shared redactor then catches known secret formats and URL credentials.
     from agent.redact import redact_sensitive_text
     from hermes_state_argv_secrets import mask_argv_secrets
     argv = [argv[0], *mask_argv_secrets(argv[1:], program=argv[0])]
