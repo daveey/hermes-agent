@@ -77,6 +77,12 @@ function succeed(reads: ReturnType<typeof capture>) {
   }
 }
 
+function fail(reads: ReturnType<typeof capture>) {
+  for (const read of reads) {
+    sessionsHost.reportWorkSourceRead({ ...read, available: false })
+  }
+}
+
 beforeEach(async () => {
   vi.useFakeTimers()
   vi.stubGlobal('WebSocket', AuthoritySocket)
@@ -154,8 +160,9 @@ it('mounting a previously unread secondary row does not update another row durin
   const second = render(createElement(NewlyMountedRow))
 
   try {
-    expect(first.container.textContent).toBe('true')
-    expect(second.container.textContent).toBe('true')
+    // Unread rows on a live route are no longer vetoed; the point here is no render-phase publication.
+    expect(first.container.textContent).toBe('false')
+    expect(second.container.textContent).toBe('false')
     expect(renderPublications).toEqual([])
     expect(errors.mock.calls.flat().join(' ')).not.toContain('Cannot update a component')
   } finally {
@@ -264,15 +271,17 @@ it.each([
     // Closing one live socket vetoes that route only.
     act(() => remoteDefaultSocket.close())
     expect(mounted.result.current).toEqual([false, true, false])
-    // Replies captured before the close stay rejected after the real reconnect...
+    // After the real reconnect the pre-close reads are another epoch: no evidence, so the undisplayed row falls back
+    // to its stored outcome, and an old FAILED reply cannot veto it...
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000)
     })
-    act(() => succeed(reads[1]))
-    expect(mounted.result.current).toEqual([false, true, false])
-    // ...and only a fresh complete read set on the healthy route recovers green.
-    act(() => succeed(readFor(remoteDefault)))
     expect(mounted.result.current).toEqual([false, false, false])
+    act(() => fail(reads[1]))
+    expect(mounted.result.current).toEqual([false, false, false])
+    // ...while a fresh failed read on that route vetoes it alone.
+    act(() => fail(readFor(remoteDefault)))
+    expect(mounted.result.current).toEqual([false, true, false])
   } finally {
     mounted.unmount()
   }
@@ -292,7 +301,10 @@ it('revokes a mounted secondary owner on close and rejects old replies after rea
       await vi.advanceTimersByTimeAsync(5000)
     })
     expect(AuthoritySocket.instances.at(-1)!.readyState).toBe(AuthoritySocket.OPEN)
-    act(() => succeed(reads))
+    // Pre-close replies are another epoch: an old failure cannot veto the undisplayed row, a fresh one does.
+    act(() => fail(reads))
+    expect(result.current).toBe(false)
+    act(() => fail(capture()))
     expect(result.current).toBe(true)
     act(() => succeed(capture()))
     expect(result.current).toBe(false)

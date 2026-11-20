@@ -198,7 +198,7 @@ const noop = vi.fn()
 
 // Existing chrome tests assume authoritative source reads; establish them through
 // the real SDK/owner/transport seam, not by suppressing the mounted hook.
-function certifyRow(session: SessionInfo): void {
+function certifyRow(session: SessionInfo, reads = true): void {
   const connectionId = session.connection_id || 'local'
   const profile = session.profile || 'default'
   $connectionsRegistry.set({
@@ -217,6 +217,10 @@ function certifyRow(session: SessionInfo): void {
   )
   setPrimaryGatewayConnection({ connectionId })
   setSessionOwnerHint(session.id, { connectionId, profile })
+
+  if (!reads) {
+    return
+  }
 
   for (const source of ['lineage', 'tasks', 'process', 'subagent', 'control'] as const) {
     const token = sessionsHost.beginWorkSourceRead({ connectionId, profile, storedSessionId: session.id, source })
@@ -251,16 +255,38 @@ const renderRow = (
 describe('idle sidebar authoritative source failures', () => {
   afterEach(() => $unavailableWorkSources.set({}))
 
-  it('does not certify a stored done row whose sources were never read', () => {
+  // Process / subagent / control are read only for the open chat, so every other row has no reads at all. Treating
+  // that as unknown painted every chat but the focused one grey, and green only once navigated to.
+  it('paints a stored done row green when its sources were never read (an unfocused chat)', () => {
     const session = makeSession({
       title: 'Unread authority',
       message_count: 2,
       outcome: { kind: 'done', source: 'derived', at: 1000 }
     })
 
+    certifyRow(session, false)
+    const { container } = renderRow(session, { unreadAuthority: true })
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('done')
+  })
+
+  it('holds a stored done row off green while a read of its current authority is pending', () => {
+    const session = makeSession({
+      title: 'Pending authority',
+      message_count: 2,
+      outcome: { kind: 'done', source: 'derived', at: 1000 }
+    })
+
+    certifyRow(session, false)
+    act(() => {
+      sessionsHost.beginWorkSourceRead({
+        connectionId: 'local',
+        profile: 'default',
+        storedSessionId: 's1',
+        source: 'process'
+      })
+    })
     const { container } = renderRow(session, { unreadAuthority: true })
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('waiting')
-    expect(session.outcome?.kind).toBe('done')
   })
 
   it.each(['tasks', 'process', 'subagent'] as const)(

@@ -136,6 +136,7 @@ describe('control authority at the real idle row hook', () => {
   it('revokes completed reads on primary replacement without waiting for another poll', async () => {
     const row = makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local', outcome: DONE })
     setSessions([row])
+    $activeSessionId.set('rt-main') // the displayed chat needs positive proof
     await refreshSessionControl('rt-main')
 
     const reads = (['lineage', 'tasks', 'process', 'subagent'] as const).map(source =>
@@ -164,6 +165,7 @@ describe('control authority at the real idle row hook', () => {
       })
       expect(stripe(result.current)).not.toBe('done')
     } finally {
+      $activeSessionId.set(null)
       unmount()
     }
   })
@@ -191,6 +193,7 @@ describe('control authority at the real idle row hook', () => {
   it('rejects pending SDK runtime proof after a mirror binding changes but preserves durable proofs', () => {
     const row = makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local', outcome: DONE })
     setSessions([row])
+    $activeSessionId.set('rt-main') // the displayed chat needs positive proof
 
     const reads = (['lineage', 'tasks', 'process', 'subagent', 'control'] as const).map(source =>
       sessionsHost.beginWorkSourceRead({ connectionId: 'local', profile: 'default', storedSessionId: row.id, source })
@@ -220,6 +223,7 @@ describe('control authority at the real idle row hook', () => {
       })
       expect(stripe(result.current)).toBe('done')
     } finally {
+      $activeSessionId.set(null)
       unmount()
     }
   })
@@ -297,13 +301,33 @@ describe('control authority at the real idle row hook', () => {
     }
   })
 
-  it('unread required sources cannot certify stored done before the first poll', () => {
+  it('unread required sources cannot certify the displayed chat before the first poll', () => {
+    const row = makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local', outcome: DONE })
+    setSessions([row])
+    $activeSessionId.set('rt-main')
+    const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
+
+    try {
+      expect(stripe(result.current)).not.toBe('done')
+    } finally {
+      $activeSessionId.set(null)
+      unmount()
+    }
+  })
+
+  // Only the displayed chat polls process / subagent / control, so an unread source is no evidence for any other row:
+  // its stored outcome decides. Requiring proof there kept finished chats grey until navigated to.
+  it('an undisplayed row with unread sources keeps its stored done on a live route', () => {
     const row = makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local', outcome: DONE })
     setSessions([row])
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
-      expect(stripe(result.current)).not.toBe('done')
+      expect(stripe(result.current)).toBe('done')
+      act(() => {
+        sessionsHost.beginWorkSourceRead({ connectionId: 'local', profile: 'default', storedSessionId: row.id, source: 'tasks' })
+      })
+      expect(stripe(result.current)).not.toBe('done') // a pending current read still holds it
     } finally {
       unmount()
     }

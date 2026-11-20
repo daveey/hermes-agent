@@ -84,6 +84,37 @@ export function workSourceUnavailable(
   )
 }
 
+/** Whether a read that actually ran for the row's CURRENT authority is pending or failed. Only that evidence holds an
+ *  idle row off green. A source nobody read for this row (process / subagent / control are read only for the open
+ *  chat) or a read from an obsolete epoch is no evidence either way: the row's own backend stamps decide, as for any
+ *  unfocused row. Requiring positive proof instead made every chat except the open one grey, and green only while
+ *  focused. A route with no live authority (socket not open, or not yet tracked) vetoes: nothing it reports is current. */
+export function workSourceVetoed(
+  connectionId: string | undefined,
+  profile: string | undefined,
+  ids: readonly string[],
+  authority: WorkSourceAuthority,
+  observations: Observations = $unavailableWorkSources.get()
+): boolean {
+  if (!connectionId || !profile || authority.durable === null || authority.runtime === null) {
+    return true
+  }
+
+  return ids.some(storedSessionId =>
+    requiredSources.some(source => {
+      const observation = observations[key({ connectionId, profile, storedSessionId, source })]
+
+      if (!observation || observation.available) {
+        return false
+      }
+
+      const expected = source === 'lineage' || source === 'tasks' ? authority.durable : authority.runtime
+
+      return observation.authorityEpoch === undefined || observation.authorityEpoch === expected
+    })
+  )
+}
+
 /** Missing, pending, failed and obsolete reads cannot authorize idle green.
  * Completion itself still comes from the outcome/unfinished-work derivation. */
 export function workSourceAuthorityComplete(

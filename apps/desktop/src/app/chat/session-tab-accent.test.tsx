@@ -209,10 +209,10 @@ describe('session tab underline', () => {
     expect(container.querySelector('[data-session-tab-accent="done"]')).toBeNull()
   })
 
-  it('unread authority still vetoes a stored-done tab with a known owner', () => {
+  it('unread authority does not veto a stored-done tab: only a pending or failed read does', () => {
     $unavailableWorkSources.set({})
     const { container } = render(tab({ ...row, outcome: { kind: 'done', source: 'derived', at: 1000 } }))
-    expect(container.querySelector('[data-session-tab-accent="done"]')).toBeNull()
+    expect(container.querySelector('[data-session-tab-accent="done"]')).not.toBeNull()
   })
 
   it('does not finish an unread stored tab whose row is missing', () => {

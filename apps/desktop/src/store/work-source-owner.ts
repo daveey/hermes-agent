@@ -408,6 +408,23 @@ export function peekWorkSourceAuthorityForSession(
   return { durable: entry.durable, runtime: entry.runtime }
 }
 
+/** Whether the session is on screen (the main pane or a tile) through this owner's route. Only a displayed chat gets
+ *  every work source read, so only it must earn green by positive proof; any other row is judged on its own backend
+ *  stamps plus whatever pending or failed read it has. */
+export function workSourceSessionDisplayed(connectionId: string, profile: string, storedSessionId: string): boolean {
+  const runtimes = tracked.get(scopeKey({ connectionId, profile, routeKey: '' }, storedSessionId))?.runtimes
+
+  if (!runtimes) {
+    return false
+  }
+
+  try {
+    return (JSON.parse(runtimes) as Array<[string, string]>).some(([, roles]) => /[at]/.test(roles))
+  } catch {
+    return true
+  }
+}
+
 /** Test-only: how many times the owner-row candidate index was rebuilt. */
 export function _ownerIndexBuildsForTests(): number {
   return ownerIndexBuilds
