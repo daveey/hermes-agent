@@ -220,6 +220,7 @@ def settle(conn, hub, board, op, receipt):
         _require(proof["link"] == json.loads(receipt["evidence_json"])["link"], "receipt_link_changed")
         with write_txn(conn):
             _require(keys._fresh(started), "evidence_expired")
+            _require(keys._identity_refusal(conn, hub, board) is None, "sync_identity_changed")
             _require(_snapshot(conn, op["row_uid"]) == snap, "local_inputs_changed")
             _require(receipt_for_op(conn, op) == receipt, "receipt_changed")
             conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id=? AND state='rejected'", (op["op_id"],))
