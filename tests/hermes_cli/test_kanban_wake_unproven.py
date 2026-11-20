@@ -161,10 +161,45 @@ def test_configurable_notice_age(parked, monkeypatch):
     assert len(notices(conn, tid)) == 1
 
 
+def test_async_notice_age_uses_dispatcher_scope(parked, monkeypatch):
+    from contextvars import ContextVar
+    from hermes_cli import config
+
+    conn, tid, clock = parked
+    age = ContextVar("notice_age", default=30)
+    token = age.set(2)
+    monkeypatch.setattr(config, "load_config_readonly",
+                        lambda: {"kanban": {"wake_check_notice_hours": age.get()}})
+    monkeypatch.setattr(wc, "_run_probe", lambda *a: (1, "still waiting"))
+    try:
+        for hour in (0, 1, 2):
+            assert tid in wc.run_due_wake_checks(conn, now=clock[0] + hour * HOUR, wait=True)["submitted"]
+        assert len(notices(conn, tid)) == 1
+        assert notices(conn, tid)[0].payload["hours"] == 2
+    finally:
+        wc._shutdown_for_tests()
+        age.reset(token)
+
+
+def test_new_park_preserving_probe_row_resets_upsert(parked):
+    conn, tid, clock = parked
+    for hour in (0, 3, 5):
+        result(parked, hour)
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, "scheduled", {"wake_at": clock[0] + 7 * 24 * HOUR})
+    for hour in (6, 11.5):
+        result(parked, hour)
+    first, checks = conn.execute(
+        "SELECT first_at, checks FROM task_wake_notice_checks WHERE task_id=?", (tid,)).fetchone()
+    assert first == clock[0] + 6 * HOUR
+    assert checks == 2
+    assert not notices(conn, tid)
+
+
 def test_notice_key_is_registered():
     from hermes_cli.config_defaults import DEFAULT_CONFIG
 
-    assert DEFAULT_CONFIG["kanban"]["wake_check_notice_hours"] == 6
+    assert DEFAULT_CONFIG["kanban"]["wake_check_notice_hours"] == unproven.DEFAULT_NOTICE_HOURS
 
 
 def test_passive_listener_does_not_notify(parked, monkeypatch):

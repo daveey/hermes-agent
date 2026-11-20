@@ -77,7 +77,7 @@ def maybe_notice(conn: sqlite3.Connection, task_id: str, cmd: str, out: str, *, 
 
 
 def note_check(conn: sqlite3.Connection, task_id: str, cmd: str, out: str, now: int, *,
-               passive_policy=None) -> bool:
+               passive_policy=None, threshold: Optional[float] = None) -> bool:
     """Count clean not-ready observations within this park, not the longer stale-wake episode.
 
     Local observation state is deliberately separate from the portable same-probe age: re-parking
@@ -103,7 +103,7 @@ def note_check(conn: sqlite3.Connection, task_id: str, cmd: str, out: str, now: 
                  (task_id, park[0], now))
     first, checks = conn.execute("SELECT first_at, checks FROM task_wake_notice_checks WHERE task_id = ?",
                                  (task_id,)).fetchone()
-    return maybe_notice(conn, task_id, cmd, out, now=now, first_at=first, checks=checks)
+    return maybe_notice(conn, task_id, cmd, out, now=now, first_at=first, checks=checks, threshold=threshold)
 
 
 def notice_text(payload: dict) -> str:

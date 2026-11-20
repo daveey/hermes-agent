@@ -820,7 +820,7 @@ def _after_probe(state: dict, claimed_next_at: Optional[int], now: int) -> int:
 
 def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, now: Optional[int], generation: str,
                      purpose: str = "wake", stale_interval: Optional[float] = None, passive_policy=None,
-                     claimed_next_at: Optional[int] = None) -> Any:
+                     claimed_next_at: Optional[int] = None, notice_interval: Optional[float] = None) -> Any:
     key = (db_path, task_id)
     try:
         rc, out = _run_probe(key, cmd, cwd, env)
@@ -855,7 +855,7 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
                 dead_ancestry = detect(cmd, cwd)
             apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation, diagnostics=diag,
                          answered=answered, producer=producer, dead_ancestry=dead_ancestry,
-                         stale_interval=stale_interval, passive_policy=passive_policy,
+                         stale_interval=stale_interval, passive_policy=passive_policy, notice_interval=notice_interval,
                          claimed_next_at=claimed_next_at)
             if rc == 1 and not output_error(out):
                 from hermes_cli import kanban_decision_ask  # [daveey] a chat wait unanswered for 2 h goes to David
@@ -873,7 +873,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                  diagnostics: Optional[dict] = None, answered: Optional[dict] = None,
                  producer: Optional[dict] = None, dead_ancestry: Optional[list[dict]] = None,
                  stale_interval: Optional[float] = None, passive_policy=None,
-                 claimed_next_at: Optional[int] = None) -> Optional[str]:
+                 claimed_next_at: Optional[int] = None, notice_interval: Optional[float] = None) -> Optional[str]:
     """Record one probe result; wake the card on success or a broken probe. Returns the event
     kind appended (``condition_met`` / ``wake_check_broken``) or None. A result for a probe
     that is no longer the card's (re-parked, unblocked) is dropped."""
@@ -932,7 +932,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                     kb.add_comment(conn, task_id, "kanban-dispatcher", stale["note"])
                 return woke
             from hermes_cli import kanban_wake_unproven as unproven  # [daveey] one early passive notice
-            unproven.note_check(conn, task_id, cmd, tail, now, passive_policy=passive_policy)
+            unproven.note_check(conn, task_id, cmd, tail, now, passive_policy=passive_policy, threshold=notice_interval)
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "
                 "next_at = ? WHERE task_id = ?", (now, tail, _after_probe(state, claimed_next_at, now), task_id))
@@ -1063,7 +1063,9 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                 f"JOIN tasks t ON t.id = w.task_id WHERE {_LIVE_ROW} AND w.next_at <= ? ORDER BY w.next_at",
                 (ts,)).fetchall()
         # Resolve policy only for a real probe batch, still on the scoped dispatcher thread.
+        from hermes_cli import kanban_wake_unproven as unproven
         stale_interval = episode.stale_seconds() if due else None
+        notice_interval = unproven.notice_seconds() if due else None
         from hermes_cli import kanban_passive_intake as passive
         passive_policy = passive.snapshot() if due else {}
         for task_id, cmd, every, generation, purpose in due:
@@ -1092,7 +1094,7 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                     continue
             cwd = probe_cwd(task.workspace_path)
             fut = _pool().submit(_probe_and_apply, db_path, task_id, cmd, cwd, _probe_env(task, db_path), now, claim,
-                                 purpose, stale_interval, passive_policy, ts + int(every))
+                                 purpose, stale_interval, passive_policy, ts + int(every), notice_interval)
             with _LOCK:
                 _IN_FLIGHT[key] = fut
             submitted.append(task_id)
