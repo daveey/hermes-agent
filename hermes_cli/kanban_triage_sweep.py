@@ -119,6 +119,44 @@ def stranded_contained(conn: sqlite3.Connection, *, now: Optional[float] = None)
     return out
 
 
+def _contained_chat_owners(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
+    """Owning chats on any gateway, including subscriptions not projected into links yet.
+
+    A stored release wins over a lingering subscription. Notice-only subscriptions and
+    machine/placeholder sessions are not owners. Read failures propagate to the sweep's
+    fail-closed boundary rather than becoming evidence of absent ownership. [daveey]
+    """
+    from hermes_cli.kanban_chat_links import _local_links
+    from hermes_cli.kanban_db_notify import _owning_sub_clause, is_machine_session
+    from hermes_cli.kanban_origin import OriginError, gateway_name, parse_origin
+    from hermes_cli.kanban_placement import is_placeholder_session
+
+    gateway = gateway_name()
+    owned = {r["task_id"] for r in _local_links(conn, gateway).values() if not r.get("released")}
+    has_links = conn.execute("SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone()
+    for tid in ids:
+        rows = [dict(r) for r in conn.execute("SELECT * FROM task_chat_links WHERE task_id=?", (tid,))] if has_links else []
+        known = {(r["chat_gateway"], r["chat_profile"] or "default", r["chat_session"]) for r in rows}
+        candidates = [r for r in rows if not r["released"] and r["kind"] in ("created", "shepherd")]
+        for sub in conn.execute(
+                "SELECT s.chat_id FROM kanban_notify_subs s LEFT JOIN tasks p ON p.id=s.task_id "
+                f"WHERE s.task_id=? AND s.platform='hub' AND {_owning_sub_clause()}", (tid,)):
+            try:
+                origin = parse_origin(sub[0])
+            except OriginError:
+                continue
+            key = (origin.gateway, origin.profile or "default", origin.session)
+            if key not in known:
+                candidates.append({"chat_gateway": origin.gateway, "chat_profile": origin.profile,
+                                   "chat_session": origin.session})
+                known.add(key)
+        for row in candidates:
+            if not is_placeholder_session(row["chat_session"]) and not is_machine_session(
+                    row["chat_gateway"], row["chat_session"], local_gateway=gateway, profile=row["chat_profile"]):
+                owned.add(tid)
+    return owned
+
+
 def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float] = None,
                                 skip: Optional[set] = None) -> list[str]:
     """A stranded contained card with a chat is woken by the owner wake (``wait.agent_owned``); one with NO chat has
@@ -128,8 +166,6 @@ def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float
 
     Retained copies of another gateway's card are skipped. Those copies have no triage authority, and a worker
     must not create a supervisor card for one. [daveey]"""
-    from hermes_cli.kanban_chat_links import _local_links
-    from hermes_cli.kanban_origin import gateway_name
     from hermes_cli.kanban_wake_check import foreign_ids
 
     skipped = foreign_ids(conn) if skip is None else skip
@@ -140,7 +176,7 @@ def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float
     if not stranded:
         return []
     try:
-        linked = {link["task_id"] for link in _local_links(conn, gateway_name()).values() if not link.get("released")}
+        linked = _contained_chat_owners(conn, [card["id"] for card in stranded])
     except Exception:
         logger.warning("kanban: containment strand check could not read chat links", exc_info=True)
         return []
