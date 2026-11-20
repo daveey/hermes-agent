@@ -241,6 +241,13 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if not enabled or age > max_age or marker["attempts"] >= max_attempts:
         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
         return None
+    if marker.get("reason") == UPDATE_HOLD_QUEUE_REASON:
+        from tui_gateway.update_pause import later_turns_since
+        if (later_turns_since(session, session_key, marker.get("started_at"), marker.get("prompt")) or 0) > 0:
+            from hermes_state_outcome import turn_identity
+            clear_turn_marker(home, session_key, concluding_turn=turn_identity(marker=marker))
+            logger.info("update-hold queue for %s superseded by newer user activity; not replayed", session_key)
+            return None
     with session["history_lock"]:
         if (session.get("_auto_continue_scheduled")
                 or (marker.get("reason") == "core_update_pause" and session.get("running"))

@@ -253,11 +253,11 @@ def _live_turn(db: Any, sid: str, concluding: frozenset[str] = frozenset()) -> b
 
 def _live_turn_tokens(db: Any, sid: str) -> Iterator[str]:
     """Identity token of each live-turn evidence, lazily (``_live_turn`` stops at the first foreign one)."""
-    from tui_gateway.turn_marker import marker_writer_state, read_turn_marker
+    from tui_gateway.turn_marker import UPDATE_HOLD_QUEUE_REASON, marker_writer_state, read_turn_marker
 
     home = Path(db.db_path).parent
     marker = read_turn_marker(home, sid)
-    if marker and marker_writer_state(marker) == "alive":
+    if marker and marker.get("reason") != UPDATE_HOLD_QUEUE_REASON and marker_writer_state(marker) == "alive":
         yield marker_identity(marker)
     owner = _guarded("durable turn", sid, lambda: _durable_turn_owner(db, sid), None)
     if owner is not None:

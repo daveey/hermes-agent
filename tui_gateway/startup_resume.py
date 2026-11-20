@@ -193,6 +193,11 @@ def _observe_pauses(handler: Callable, home: Path, cfg: dict, stopped: threading
             from hermes_cli.config import load_config
 
             cfg = load_config()
+            # Old writers still own their in-memory queues after a checkout swap.
+            # Repair them before the code-skew guard defers marker adoption.
+            from tui_gateway.admission_retry import redrive_update_queues
+            for _, profile_home in _homes(home):
+                redrive_update_queues(profile_home)
             if not _settings(cfg)[0] or detect_code_skew() is not None:
                 retry_delay = 30.0
                 continue

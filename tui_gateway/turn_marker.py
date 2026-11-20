@@ -123,6 +123,8 @@ def marker_writer_state(entry: dict) -> str:
     """
     if not isinstance(entry, dict):
         return "unknown"
+    if entry.get("reason") == UPDATE_HOLD_QUEUE_REASON and entry.get("queue_released") is True:
+        return "dead"  # explicit queue-custody handoff, not process death
     pid = entry.get("writer_pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return "unknown"
@@ -172,6 +174,21 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> bool:
     except Exception:
         logger.warning("failed to %s turn marker for %s", what, session_key, exc_info=True)
     return False
+
+
+def release_update_queue(home: Path | str, session_key: str, marker: dict) -> bool:
+    """Release only this process's unchanged idle queue marker for another backend."""
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if (not isinstance(entry, dict) or entry.get("reason") != UPDATE_HOLD_QUEUE_REASON
+                or entry.get("writer_pid") != os.getpid()
+                or entry.get("started_at") != marker.get("started_at")
+                or entry.get("queue_released")):
+            return None
+        entry["queue_released"] = True
+        return entries
+
+    return _update(home, session_key, mutate, "release queued prompt")
 
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
@@ -439,6 +456,7 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
                 "pauses": max(0, int(entry.get("pauses") or 0)),
                 # Writer identity when present: extra keys only, so a marker written by an older build still reads.
                 **{k: entry[k] for k in ("writer_pid", "writer_start_time") if entry.get(k) is not None},
+                **({"queue_released": True} if entry.get("queue_released") is True else {}),
                 **({"reason": str(entry["reason"])} if entry.get("reason") else {}),
                 **({"parked_at": float(entry["parked_at"])} if entry.get("parked_at") else {}),
                 **({"paused_at": float(entry["paused_at"])} if entry.get("paused_at") else {}),

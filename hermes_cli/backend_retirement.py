@@ -237,6 +237,11 @@ class RetirementFence:
         with self._lock:
             return self._active
 
+    def retired(self):
+        """Committed retirement is permanent; prepare alone is reversible."""
+        with self._lock:
+            return self._committed
+
     def retiring(self):
         """A retirement is preparing or holds a live/committed permit: admission is closed or closing."""
         with self._lock:
