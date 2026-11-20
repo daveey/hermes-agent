@@ -110,6 +110,33 @@ def test_preflight_keeps_enrolled_access_with_worker(monkeypatch, policy, expect
     assert observed == expected
 
 
+@pytest.mark.parametrize("runs_on,requires,expected", [
+    (["pool:worker", "capability:hub-read"], ["terminal", "hub:read"], []),
+    ('["pool:worker", "capability:hub-write"]', ["terminal", "hub:write"], []),
+    (["capability:ssh-mini"], ["ssh:mini", "aws:example:read"], ["aws:example:read"]),
+    (["pool:worker"], ["terminal", "hub:read"], ["hub:read"]),
+    (["capability:hub-read"], ["hub:write"], ["hub:write"]),
+    (None, ["hub:read"], ["hub:read"]),
+])
+def test_preflight_drops_access_needs_the_runs_on_label_carries(monkeypatch, runs_on, requires, expected):
+    from types import SimpleNamespace
+    from hermes_cli import kanban_capability_routing as routing
+    from hermes_cli import kanban_db as kb
+    task = SimpleNamespace(id="t_x", requires=requires, runs_on=runs_on, placement_policy=None,
+                           status="ready", body="read", title="read")
+    monkeypatch.setattr(kb, "get_task", lambda *_: task)
+    monkeypatch.setattr(routing, "_previous_routes", lambda *_: False)
+    observed = []
+
+    def route(conn, task_id, needs, **kwargs):
+        observed.extend(needs)
+        return {"warning": "no holder", "code": "no_capability_holder"}
+    monkeypatch.setattr(routing, "route", route)
+    placed = routing.preflight(None, "t_x")
+    assert [n for n in observed if n != "terminal"] == expected
+    assert (placed is None) == (not expected)
+
+
 @pytest.mark.parametrize("requirement,label,body", [
     ("hub:read", "capability:hub-read", "read the log on the hub"),
     ("ssh:mbp", "capability:ssh-mbp", "ssh to the MacBook for a read"),

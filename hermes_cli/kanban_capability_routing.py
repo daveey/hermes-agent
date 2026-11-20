@@ -635,6 +635,28 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
     return {"status": "scheduled", "routes": routes, "wake_check": wake_check, "local": decided["local"]}
 
 
+def _access_labels() -> dict:
+    from hermes_cli.kanban_placement_coordination import ACCESS_LABELS
+    return ACCESS_LABELS
+
+
+def _task_runs_on(conn, task) -> set:
+    """The card's ``runs_on`` labels (empty when unreadable or the board has no such column)."""
+    value = getattr(task, "runs_on", None)
+    if value is None and conn is not None:
+        try:
+            row = conn.execute("SELECT runs_on FROM tasks WHERE id = ?", (task.id,)).fetchone()
+            value = row[0] if row else None
+        except Exception:  # health: allow BLE001 -- no column / unreadable: no labels, registry check stays
+            value = None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = None
+    return {str(v) for v in value} if isinstance(value, (list, tuple)) else set()
+
+
 def preflight(conn, task_id: str, *, board: Optional[str] = None, **lookup) -> Optional[dict]:
     """Placement preflight for a just-created card whose ``requires`` declare gateway needs.
 
@@ -653,6 +675,11 @@ def preflight(conn, task_id: str, *, board: Optional[str] = None, **lookup) -> O
             # worker. Do not create an origin-side owner for its remote access.
             from hermes_cli.kanban_placement_coordination import ACCESS_LABELS
             needs = [need for need in needs if need not in ACCESS_LABELS]
+        elif any(need in _access_labels() for need in needs):
+            # The Board enforces a carried access label at claim time and no gateway advertises these
+            # needs in the registry, so a registry check would warn no_capability_holder falsely.
+            carried = _task_runs_on(conn, task)
+            needs = [need for need in needs if _access_labels().get(need) not in carried]
         if not needs:
             return None
         if task.status != "ready":
