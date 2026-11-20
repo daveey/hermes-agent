@@ -1229,11 +1229,8 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
         spawn_env = bg_command_env(self._spawn_env(env_vars), record_exit_command(log, safe_command) if log else safe_command)
         if session.systemd_unit:
             spawn_env = systemd_user_bus_env(spawn_env)
-        # start_new_session is REQUIRED with systemd-run --scope too: the scope does not
-        # give the worker a new session, so from an interactive TUI the worker would
-        # share the foreground process group and background spawns would stop the whole
-        # session (observed as dead TUIs in state T). Cgroup isolation is unaffected —
-        # the scope attaches to the invoked process, not the spawning session.
+        # start_new_session is REQUIRED even with systemd-run --scope: the scope gives no new session, so
+        # a TUI-spawned worker would share the foreground process group and stop the whole session.
         output = open_output_log(log) if log else subprocess.PIPE
         try:
             proc = self._spawn_job(

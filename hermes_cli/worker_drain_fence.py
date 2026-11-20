@@ -353,6 +353,18 @@ def _inherited_parent(root: Path):
     return WorkLease(fd, real, owned=False)
 
 
+def popen_worker(popen, cmd, *, env, **kwargs):
+    """Start a detached worker under an admission lease it keeps for life (inherited fd), so its own
+    hermes descendants stay admitted while draining. Plain call when not activated."""
+    lease = admit('kanban.worker')
+    if lease is None:
+        return popen(cmd, env=env, **kwargs)
+    try:
+        return popen(cmd, env=lease.child_env(env), pass_fds=lease.pass_fds(), **kwargs)
+    finally:
+        lease.close()
+
+
 def fenced(purpose: str):
     """Decorator: admit before the call, hold the lease for its duration, refuse loudly otherwise.
     A no-op wrapper when the node is not activated."""
