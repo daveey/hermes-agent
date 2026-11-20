@@ -603,8 +603,9 @@ def test_deep_nesting_is_masked_not_a_crash():
 
 # Leak rate allowed per secret length (a random string sometimes reads as a name; the shorter, the likelier): the
 # worst shape and position measured over several seeds, plus about two standard deviations at 400 samples.
-_LEAK_CEILING = {16: 0.10, 24: 0.05, 32: 0.03, 40: 0.025}
+_LEAK_CEILING = {16: 0.10, 24: 0.05, 32: 0.03, 40: 0.02}
 _SHAPES = [
+    "grouped_dot_mixed",
     "alnum",
     "lower_digits",
     "upper_digits",
@@ -623,6 +624,9 @@ _SHAPES = [
 ]
 _POSITIONS = {
     "bare": lambda s: ["worker.py", s],
+    "spaced_env": lambda s: [f"OPTS=--verbose {s} --x"],
+    "flag_value": lambda s: [f"--jvm-arg=-Dregion={s}"],
+    "list": lambda s: [f"--ids=alpha,{s},beta"],
     "relative_path": lambda s: [f"data/{s}.json"],
     "path": lambda s: [f"/srv/data/{s}/file.json"],
     "url": lambda s: [f"https://api.example.com/v1/{s}?page=2"],
@@ -659,6 +663,10 @@ def _shape(rng: random.Random, kind: str, length: int) -> str:
         "grouped_dash": lambda: grouped("-", 4),
         "grouped_underscore": lambda: grouped("_", 4),
         "grouped_dot": lambda: grouped(".", 6),
+        "grouped_dot_mixed": lambda: ".".join(
+            pick(string.ascii_letters + string.digits, 6)
+            for _ in range(max(3, length // 6))
+        ),
     }[kind]()
 
 
@@ -758,7 +766,6 @@ def test_relative_paths_with_grouped_keys_are_masked():
             [f"--password:{MASK}", f"api_key:{MASK}"],
         ),
         (["-pass", "sunshine", "-pw", "sunshine"], ["-pass", MASK, "-pw", MASK]),
-        (["--token", "--correct-horse"], ["--token", MASK]),
     ],
 )
 def test_more_name_shapes_mask_their_values(argv, expected):
@@ -840,3 +847,121 @@ def test_image_digests_are_not_user_and_password():
     assert shown(["python:3.12-slim@sha256:0362a20c0e39"]) == [
         "python:3.12-slim@sha256:0362a20c0e39"
     ]
+
+
+# ---- the fourth review: values that are argv, switches, openssl, digests, quoting, speed -----------------------------
+
+
+@pytest.mark.parametrize(
+    "argv, program, secret",
+    [
+        (["JAVA_TOOL_OPTIONS=-Xmx1g -Dapi.token=sunshine"], "env", "sunshine"),
+        (["-e", "JAVA_TOOL_OPTIONS=-Xmx1g -Dapi.token=sunshine"], "docker", "sunshine"),
+        (["OPTS=--verbose --token sunshine", "run"], "env", "sunshine"),
+        (
+            ["GIT_SSH_COMMAND=sshpass -p sunshine ssh", "git", "fetch"],
+            "env",
+            "sunshine",
+        ),
+        (["CURL_ARGS=-u admin:sunshine", "./x"], "env", "sunshine"),
+        (
+            ["JAVA_OPTS=-Dpassword=hunter2", "--jvm-arg=-Dpassword=hunter2"],
+            "x",
+            "hunter2",
+        ),
+        (["--args", "--token sunshine"], "x", "sunshine"),
+        (["--ids=a,3kjw7/gd4EQ6tyKW"], "x", "gd4EQ6tyKW"),
+        (["https://h/x?q=7%0Nv5^zU^aX2ZRi@FLc0tYI"], "x", "FLc0tYI"),
+    ],
+)
+def test_values_that_are_argv_are_judged_as_argv(argv, program, secret):
+    assert secret not in " ".join(shown(argv, program))
+
+
+def test_a_flag_value_that_is_itself_a_flag_is_not_swallowed():
+    """main's rule, kept: a kebab-case --flag after a secret-named flag is the next flag (that flag was a switch)."""
+    assert shown(["--token", "--verbose", "x"]) == ["--token", "--verbose", "x"]
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (["--ask-become-pass", "-i", "inv", "site.yml"], "ansible-playbook"),
+        (["--ask-vault-pass", "site.yml"], "ansible-playbook"),
+        (["login", "--password-stdin", "-u", "me", "ghcr.io"], "docker"),
+        (
+            [
+                "--token-stdin",
+                "-v",
+                "--keep-secrets",
+                "build",
+                "--ask-password",
+                "--host",
+                "db",
+            ],
+            "x",
+        ),
+        (
+            [
+                "req",
+                "-key",
+                "server.key",
+                "-keyout",
+                "k.pem",
+                "-kdf",
+                "x",
+                "-keyform",
+                "PEM",
+                "-newkey",
+                "rsa:2048",
+            ],
+            "openssl",
+        ),
+        (
+            [
+                "mlx-community/Qwen3-30B-A3B-4bit-DWQ",
+                "v0.0.0-20241119163442-8f3a2c1d9e0b",
+            ],
+            "x",
+        ),
+        (["-Xlog:gc*:file=gc.log"], "java"),
+        (["-o", "ControlPath=/tmp/cm-%r@%h:%p"], "ssh"),
+        (
+            [
+                "Edit(//**/ccd-*h.501)",
+                "openxml",
+                "execvpe",
+                "https://h/x?email=a@b.com",
+            ],
+            "x",
+        ),
+    ],
+)
+def test_switches_and_tool_arguments_the_fourth_review_found_are_kept(argv, program):
+    assert shown(argv, program) == argv
+
+
+def test_a_digest_pinned_image_keeps_its_name():
+    assert shown(["ghcr.io/org/image@sha256:" + "9f2b8c1e" * 8], "docker") == [
+        f"ghcr.io/org/image@{MASK}"
+    ]
+
+
+def test_shell_text_is_shown_as_written():
+    assert shown(["-c", "require('node:http').createServer()"], "node") == [
+        "-c",
+        "require('node:http').createServer()",
+    ]
+    assert shown(["-c", "./run --name 'two words' && echo ok"], "bash") == [
+        "-c",
+        "./run --name 'two words' && echo ok",
+    ]
+
+
+def test_long_paths_are_judged_in_linear_time():
+    import time
+
+    value = "/".join(["Ab1x"] * 25000) + "/" + KEY
+    start = time.monotonic()
+    shown([value])
+    assert time.monotonic() - start < 5

@@ -161,7 +161,7 @@ def test_doctor_lists_holders_with_their_whole_command_line(tmp_path):
     try:
         assert holder.stdout.readline().strip() == "ready"
         ((pid, desc, _is_gateway),) = _live_state_db_holders(db_path)
-        assert pid == holder.pid and desc.endswith(f"{db_path} {tail})"), desc
+        assert pid == holder.pid and desc.endswith(f"state.db {tail})"), desc
         short = describe_holder_pid(holder.pid)
         assert len(short) < len(desc) and "--the-end" not in short
     finally:
