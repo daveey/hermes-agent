@@ -52,6 +52,7 @@ from hermes_cli import kanban_sync_refusal as refusal  # one board's Containment
 from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
+from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
 from hermes_cli.kanban_sync_bounded_probe import DeadlineRequests as _DeadlineRequests, schedstat, watch_written
 from hermes_cli.kanban_sync_repair_window import (  # shared per-board repair-window state, re-exported
@@ -152,22 +153,6 @@ def load_identity(cfg: Optional[dict] = None) -> Identity:
     if not url or not gateway or not key:
         raise SyncUnavailable("kanban sync: hub url, gateway name and key are all required")
     return Identity(url=url, key=key, gateway=gateway)
-
-
-def _peer_closed(conn) -> bool:
-    """True when an idle kept-alive socket is readable (the server sent FIN) or already gone."""
-    import select
-    sock = getattr(conn, "sock", None)
-    if sock is None:
-        return True
-    try:  # poll, not select: select raises for fds >= 1024, which a busy gateway has
-        if not hasattr(select, "poll"):  # Windows: select has no fd ceiling there
-            return bool(select.select([sock], [], [], 0)[0])
-        poller = select.poll()
-        poller.register(sock, select.POLLIN | select.POLLPRI)
-        return bool(poller.poll(0))
-    except (OSError, ValueError):
-        return True
 
 
 CPU_REPORT_BUDGET_S = 2.0
@@ -300,6 +285,8 @@ class Hub(HubRoutesMixin):
         return self._call_kept_alive(parts, method, path, data, timeout, replay_safe=replay_safe)
 
     def _call_urlopen(self, method: str, path: str, data: Optional[bytes], timeout: Optional[float] = None) -> dict:
+        import http.client
+
         timeout = self._remaining(timeout)
         req = urllib.request.Request(self.ident.url + path, data=data, method=method, headers=self._headers())
         # A per-call opener leaves global urllib users alone. Its processor also caps
@@ -316,6 +303,12 @@ class Hub(HubRoutesMixin):
                 if exc.code == 410:
                     raise Resync(text) from exc
                 raise HubError(exc.code, text) from exc
+        except http.client.HTTPException as exc:
+            # urllib does not wrap malformed status lines or truncated bodies,
+            # including failures while reading an HTTPError's response body.
+            error = urllib.error.URLError(exc)
+            note_attempt(error, self.deadline, started, time.monotonic())
+            raise error from exc
         except Exception as exc:  # health: allow BLE001 -- stamps diagnostics, then re-raises the same error
             note_attempt(exc, self.deadline, started, time.monotonic())
             raise

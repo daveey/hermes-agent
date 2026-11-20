@@ -268,6 +268,36 @@ def test_running_original_handoff_waits_then_dispatches_new_profile(board):
     assert resumed.assignee == 'supervisor'
 
 
+@pytest.mark.parametrize('history', [
+    'missing', 'other-repair', 'invalid-json', 'non-object', 'missing-reason', 'null-reason', 'non-string-reason',
+])
+def test_local_repair_requires_matching_authority_history(board, history):
+    from hermes_cli.kanban_assignment_routing import AssignmentRoutingError
+
+    conn, _ = board
+    tid = task_with_drift(board)
+    assert kb.block_task(conn, tid, kind='assignment', reason='Wrong worker')
+    repair_id = payload(conn, tid)['supervisor_task_id']
+    if history == 'missing':
+        conn.execute("DELETE FROM task_events WHERE task_id=? AND kind='blocked'", (tid,))
+    else:
+        raw = {
+            'other-repair': json.dumps({'supervisor_task_id': 't_0000000000000000', 'reason': 'Wrong worker'}),
+            'invalid-json': '{',
+            'non-object': '[]',
+            'missing-reason': json.dumps({'supervisor_task_id': repair_id}),
+            'null-reason': json.dumps({'supervisor_task_id': repair_id, 'reason': None}),
+            'non-string-reason': json.dumps({'supervisor_task_id': repair_id, 'reason': []}),
+        }[history]
+        conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='blocked'", (raw, tid))
+    conn.commit()
+    before = conn.execute('SELECT * FROM tasks ORDER BY id').fetchall()
+    with pytest.raises(AssignmentRoutingError, match='authority history'):
+        kb.complete_task(conn, repair_id, result='Verified')
+    assert conn.execute('SELECT * FROM tasks ORDER BY id').fetchall() == before
+    assert not kb._parents_satisfied(conn, tid)
+
+
 def test_repair_completion_rechecks_policy_drift(board):
     from hermes_cli.kanban_capabilities import CapabilityMismatchError
     conn, home = board

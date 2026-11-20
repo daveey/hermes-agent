@@ -216,10 +216,16 @@ def validate_repair_completion(conn, task_id, *, observation=None):
         except ValueError:
             continue
         if isinstance(data, dict) and data.get('supervisor_task_id') == task_id:
+            if not isinstance(data.get('reason'), str):
+                raise AssignmentRoutingError('Assignment repair has invalid authority history')
             needs = execution_authority_need(original.id, data.get('reason'))
             if needs:
                 raise _authority_error(original.id, needs, data.get('reason'))
             break
+    else:
+        # A local row can arrive before its history. Its assignment alone cannot
+        # establish that completing this repair is authorized.
+        raise AssignmentRoutingError('Assignment repair has no matching authority history')
     validate_assignment(original.assignee, requires=original.requires,
                         workspace_kind=original.workspace_kind,
                         workspace_path=original.workspace_path, skills=original.skills)
