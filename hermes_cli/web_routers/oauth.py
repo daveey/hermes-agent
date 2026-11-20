@@ -7,6 +7,7 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 import asyncio
 import contextlib
 import contextvars
+import json
 import logging
 import os
 import secrets
@@ -330,7 +331,8 @@ def _codex_full_login_worker(session_id: str) -> None:
             return
 
         tokens = _codex_exchange_tokens(httpx, code_resp)
-        from hermes_cli.auth import _save_codex_tokens
+        from hermes_cli.auth import _save_codex_tokens, _utc_now_z
+        from hermes_cli.auth_reauth_target import ReauthConflict, commit_reauth
 
         # The cancellation check and the save are one atomic critical section
         # under the lock cancel_oauth_session() uses; otherwise DELETE could
@@ -341,7 +343,19 @@ def _codex_full_login_worker(session_id: str) -> None:
         with _profile_scope(session_profile), _oauth_sessions_lock:
             if _codex_cancelled(sess, session_id, " before token save"):
                 return
-            _save_codex_tokens(tokens)
+            target = sess.get("reauth_target")
+            if target is None:
+                _save_codex_tokens(tokens)
+            else:
+                # Selected-row recovery: the grant goes into that exact row or nowhere. The
+                # singleton save above would seed a second row for the same account.
+                try:
+                    result = commit_reauth(target, {**tokens, "last_refresh": _utc_now_z()})
+                except ReauthConflict as conflict:
+                    sess.update(status="error", reason="reauth_conflict", error_message=str(conflict))
+                    _log.info("oauth/device: openai-codex recovery refused (session=%s)", session_id)
+                    return
+                sess.update(credential_id=result.credential_id, identity_verified=result.identity_verified)
             sess["status"] = "approved"
         _log.info("oauth/device: openai-codex login completed (session=%s)", session_id)
     except Exception as e:
@@ -499,11 +513,13 @@ async def _start_nous_device_code(profile: Optional[str]) -> dict[str, Any]:
     }
 
 
-async def _start_codex_device_code(profile: Optional[str]) -> dict[str, Any]:
+async def _start_codex_device_code(profile: Optional[str], reauth_target: Any = None) -> dict[str, Any]:
     # The full Codex helper polls inline, so it runs in a worker thread and
     # proxies user_code + verification_url back via the session dict; block
     # briefly until the worker has populated the user_code, OR errored.
-    sid, _ = _new_oauth_session("openai-codex", "device_code", profile=profile)
+    sid, sess = _new_oauth_session("openai-codex", "device_code", profile=profile)
+    if reauth_target is not None:
+        sess["reauth_target"] = reauth_target  # bound before the poller exists; backend-only, never serialized
     _start_poller(_codex_full_login_worker, sid, prefix="oauth-codex")
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -613,12 +629,52 @@ async def _start_profile_device_login(provider_id: str, profile: Optional[str]) 
     )
 
 
-async def _start_device_code_flow(provider_id: str, profile: Optional[str] = None) -> dict[str, Any]:
+async def _start_device_code_flow(
+    provider_id: str, profile: Optional[str] = None, reauth_target: Any = None,
+) -> dict[str, Any]:
     """Hit the provider's device-auth endpoint, spawn its poller, return the display fields."""
+    if reauth_target is not None:
+        body = await _start_codex_device_code(profile, reauth_target)
+        return {**body, "target_bound": True, "credential_id": reauth_target.credential_id}
     starter = _DEVICE_CODE_STARTERS.get(provider_id)
     if starter is None:
         return await _start_profile_device_login(provider_id, profile)
     return await starter(profile)
+
+
+# Providers whose device session can commit into one selected pool row (auth_reauth_target).
+_TARGETED_REAUTH_PROVIDERS = frozenset({"openai-codex"})
+
+
+async def _bind_reauth_target(provider_id: str, request: Request, profile: Optional[str]) -> Any:
+    """The selected pool row a /start body names, bound before any provider call; None for an
+    ordinary login (no body, or a body without ``credential_id``).
+
+    A named target is all-or-nothing: a malformed id, a provider without targeted recovery, or a
+    row that cannot be replaced here is refused. It never degrades to the untargeted login, which
+    would add a second row for the account the user meant to repair.
+    """
+    raw = await request.body()
+    if not raw.strip():
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Malformed sign-in request") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Malformed sign-in request")
+    if "credential_id" not in payload:
+        return None
+    credential_id = payload["credential_id"]
+    if not isinstance(credential_id, str) or not credential_id.strip():
+        raise HTTPException(status_code=400, detail="Malformed recovery target")
+    if provider_id not in _TARGETED_REAUTH_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"{provider_id} does not support selected-account recovery here")
+    from hermes_cli.auth_reauth_target import ReauthConflict, prepare_reauth
+    try:
+        return await scoped_to_thread(profile, lambda: prepare_reauth(provider_id, credential_id))
+    except ReauthConflict as conflict:
+        raise HTTPException(status_code=409, detail=str(conflict)) from None
 
 
 def _claude_code_disconnect_command(platform: str) -> str:
@@ -853,9 +909,13 @@ async def start_oauth_login(provider_id: str, request: Request, profile: Optiona
         raise HTTPException(400, f"{provider_id} uses an external CLI; run `{catalog_entry['cli_command']}` manually")
     if catalog_entry["flow"] != "device_code":
         raise HTTPException(status_code=400, detail="Unsupported flow")
+    reauth_target = await _bind_reauth_target(provider_id, request, profile)
     flow = await _begin_oauth_setup_metric(provider_id, profile)
     try:
-        body = await _start_device_code_flow(provider_id, profile=profile)
+        if reauth_target is None:
+            body = await _start_device_code_flow(provider_id, profile=profile)
+        else:
+            body = await _start_device_code_flow(provider_id, profile=profile, reauth_target=reauth_target)
     except Exception as e:
         await _end_oauth_setup_metric(flow, e)
         if isinstance(e, HTTPException):
@@ -950,6 +1010,10 @@ async def poll_oauth_session(provider_id: str, session_id: str, profile: Optiona
         "handoff": sess.get("handoff"), "handoff_status": sess.get("handoff_status"),
         # Failed Nous sign-ins: can a later attempt succeed, and after how long.
         "retryable": sess.get("retryable"), "retry_after": sess.get("retry_after"),
+        # Selected-row recovery: the pool row the grant was committed into (non-secret id) and
+        # whether the signed-in principal was proven to be that row's. Persistence only: the
+        # caller still has to read account health back.
+        "credential_id": sess.get("credential_id"), "identity_verified": sess.get("identity_verified"),
     }
 
 
