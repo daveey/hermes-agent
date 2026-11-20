@@ -61,14 +61,17 @@ def test_atomic_correction_keeps_original_comment_identity_and_audit(kanban_home
         # Unrelated history must not evict the durable replay identity.
         for _ in range(110):
             kb.add_comment(conn, task_id, "fixture-author", "Unrelated history")
-        changes = conn.total_changes
+        # write_txn clears connection-local wake markers left by add_comment;
+        # those TEMP-table deletes count in total_changes but are not board writes.
+        persisted = list(conn.iterdump())
         assert apply(
             conn, task_id, comment_uid=before["uid"], expected_body=body, expected_comment=comment,
             body_diagnostic="origin chat @session:example", comment_diagnostic="origin chat @session:example",
             reason="The two occurrences reproduce an error; neither is a delivery destination.",
             request_id="fixture-correction-1",
         ) == result
-        assert conn.total_changes == changes
+        assert list(conn.iterdump()) == persisted
+        changes = conn.total_changes
         with pytest.raises(ValueError, match="request_id conflict"):
             apply(
                 conn, task_id, comment_uid=before["uid"], expected_body=body, expected_comment=comment,
