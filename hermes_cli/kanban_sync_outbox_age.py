@@ -180,28 +180,40 @@ def _loop_healthy(slug: str, now: float) -> bool:
         return _LAST_OK.get(slug) is True or (started is not None and now - started >= STALE_S)
 
 
+def _dead_watcher() -> list[str]:
+    """A crashed sync loop files through the hub courier; the 60 s outbox throttle must not delay it."""
+    try:
+        from hermes_cli import kanban_sync_watcher_alert as watcher_alert
+        tid = watcher_alert.check()
+        return [tid] if tid else []
+    except Exception:  # health: allow BLE001 -- an alert must never break the dispatcher tick
+        log.warning("kanban: sync watcher death check failed", exc_info=True)
+        return []
+
+
 def check(*, mono: Callable[[], float] = time.monotonic, file_fn: Optional[Callable[[str, str], Optional[str]]] = None,
           boards: Optional[list[tuple[str, Path]]] = None,
           age: Callable[[Path], Optional[float]] = _age,
           awake_fn: Optional[Callable[[], bool]] = None) -> list[str]:
     """One dispatcher-tick observation (at most every :data:`CHECK_EVERY_S`): the outbox, then each replica's
     freshness (``kanban_sync_replica_age.check``). Returns the card ids filed or commented. Never raises."""
+    filed = _dead_watcher()
     try:
         now = mono()
         if now < _NEXT_CHECK[0]:
-            return []
+            return filed
         _NEXT_CHECK[0] = now + CHECK_EVERY_S
         if boards is None:
             from hermes_cli import kanban_db_sync as sync
             if not sync.sync_enabled():
-                return []
+                return filed
             from hermes_cli import kanban_sync_client as ksc
             boards = ksc.board_paths()
     except Exception:  # health: allow BLE001 -- an alert must never break the dispatcher tick
         log.warning("kanban: sync outbox age check failed", exc_info=True)
-        return []
+        return filed
     awake = replica_age.fully_awake(awake_fn)
-    return _check_outbox(boards, mono, file_fn, age, awake) + replica_age.check(
+    return filed + _check_outbox(boards, mono, file_fn, age, awake) + replica_age.check(
         boards, now=now, awake_fn=lambda: awake)
 
 
