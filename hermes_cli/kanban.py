@@ -31,6 +31,8 @@ from hermes_cli import kanban_swarm as ks
 from hermes_cli import kanban_workflow
 from hermes_cli import kanban_contract_cli as _contract_cli
 from hermes_cli import kanban_foreign_card as _foreign_card
+from hermes_cli import kanban_shadow_view as _shadow_view
+from hermes_cli.kanban_show_print import _print_diagnostics, _print_max_retries, _print_section
 from hermes_cli import kanban_remote_stop as _remote_stop
 from hermes_cli import kanban_review_contract as _review_contract
 from hermes_cli import kanban_spend_budget_cli as _spend_budget_cli
@@ -613,12 +615,15 @@ def _cmd_list(args: argparse.Namespace) -> int:
         # write, so a fenced worker/delegate shell skips it: listing must not fail there. [daveey]
         with contextlib.suppress(PermissionError):
             kb.recompute_ready(conn)
-        tasks = kb.list_tasks(
-            conn, assignee=assignee, status=args.status, tenant=args.tenant, session_id=args.session,
+        filters = dict(
+            assignee=assignee, status=args.status, tenant=args.tenant, session_id=args.session,
             include_archived=args.archived, order_by=getattr(args, "sort", None),
             workflow_template_id=args.workflow_template_id, current_step_key=args.current_step_key,
         )
-    if _json_out(args, [_task_to_dict(t) for t in tasks]):
+        tasks = kb.list_tasks(conn, **filters)
+        remote = _shadow_view.remote_tasks(conn, **filters)  # [daveey] a shadow board's other gateways' cards, read-only
+    if _json_out(args, [_task_to_dict(t) for t in tasks]
+                 + [_shadow_view.mark(_task_to_dict(t), home) for t, home in remote]):
         return 0
     # Passive discoverability: only multi-board users see which board this is.
     try:
@@ -629,48 +634,14 @@ def _cmd_list(args: argparse.Namespace) -> int:
         other_count = len(all_boards) - 1
         print(f"Board: {kb.get_current_board()} ({other_count} other board{'s' if other_count != 1 else ''} — "
               f"`hermes kanban boards list`)\n")
-    if not tasks:
+    if not tasks and not remote:
         print("(no matching tasks)")
         return 0
     for t in tasks:
         print(_fmt_task_line(t))
+    for t, home in remote:
+        print(f"{_fmt_task_line(t)}  [remote:{home}, read-only]")
     return 0
-
-
-def _print_diagnostics(diags, indent: str, *, with_kind: bool) -> None:
-    """Shared human rendering for ``show`` and ``diagnostics`` (suggested actions only)."""
-    sev_marker = {"warning": "⚠", "error": "!!", "critical": "!!!"}
-    for d in diags:
-        head = f"{d.kind}: {d.title}" if with_kind else d.title
-        print(f"{indent}{sev_marker.get(d.severity, '?')} [{d.severity}] {head}")
-        if d.data:
-            bits = [f"{k}={','.join(str(x) for x in v)}" if isinstance(v, list) else f"{k}={v}"
-                    for k, v in d.data.items()]
-            if bits:
-                print(f"{indent}   data: {' | '.join(bits)}")
-        for a in d.actions:
-            if a.suggested:
-                print(f"{indent}   → {a.label}")
-
-
-def _print_section(title: str, lines) -> None:
-    """Blank line, ``title``, then each line (``show`` body sections)."""
-    print()
-    print(title)
-    for line in lines:
-        print(line)
-
-
-def _print_max_retries(task) -> None:
-    """Effective retry threshold (task > config > default); it explains auto-blocks."""
-    if task.max_retries is not None:
-        print(f"  max-retries: {task.max_retries} (task)")
-        return
-    cfg_val = _kanban_config().get("failure_limit")
-    if cfg_val is not None and int(cfg_val) != kb.DEFAULT_FAILURE_LIMIT:
-        print(f"  max-retries: {int(cfg_val)} (config kanban.failure_limit)")
-    else:
-        print(f"  max-retries: {kb.DEFAULT_FAILURE_LIMIT} (default)")
 
 
 def _cmd_wait_check(args: argparse.Namespace) -> int:
@@ -726,8 +697,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
         return rc
     graph = None
     want_json = getattr(args, "json", False)
-    with kbc.connect_closing() as conn:
-        task = kb.get_task(conn, args.task_id)
+    with kbc.connect_closing() as live, contextlib.ExitStack() as _scope:
+        task, conn, remote_home = _shadow_view.open_card(live, _scope, args.task_id)  # [daveey] live, else a shadow replica's
         if not task:
             from hermes_cli.kanban_pickup_stall import not_here_note
             return _err(f"no such task: {args.task_id}{not_here_note(conn, args.task_id)}")
@@ -748,14 +719,14 @@ def _cmd_show(args: argparse.Namespace) -> int:
         queue_reason = kqr.latest(conn, args.task_id)
         # Same ``queue`` as kanban_show and the REST read (kanban-7d720d4ab8): a ready card says where it waits. [daveey]
         from hermes_cli import kanban_queue_position as kqp, kanban_hub_admission_placement as _hub_admission_show
-        details = kqp.detail_fields(conn, task, getattr(args, "board", None))
+        details = _shadow_view.show_details(conn, task, getattr(args, "board", None), remote_home)
         queue = details.get("queue")
         if not want_json:
             graph = kb.task_graph_context(conn, task.id)
 
     if want_json:
         _print_json({
-            "task": _task_to_dict(task), "latest_summary": latest_summary, "parents": parents, "children": children,
+            "task": _shadow_view.mark(_task_to_dict(task), remote_home), "latest_summary": latest_summary, "parents": parents, "children": children,
             **custody,
             "comments": [_obj_dict(c, ("author", "body", "created_at")) for c in comments],
             "events": [_obj_dict(e, ("kind", "payload", "created_at", "run_id")) for e in events],
@@ -772,6 +743,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
     print(f"Task {task.id}: {task.title}")
     field("status", kws.status_text(task.status, wakes))
+    _shadow_view.print_remote(field, remote_home)
     field("assignee", task.assignee or "-")
     kqr.print_field(queue_reason, field)
     field("capacity", details["capacity_note"])

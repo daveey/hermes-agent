@@ -786,6 +786,30 @@ const TERMINAL_ORDER = new Set(['done', 'archived'])
  *  (never a cursor: see knownCursor). A gateway that lacks the board contributes nothing; any
  *  other failure is reported in `gateway_errors`. Throws only when no
  *  gateway answered. */
+// [daveey] A shadow board's replica cards (`remote`) are another gateway's own cards: when that gateway's live read
+// is in the merge its row is the one shown, and two remote copies of one id show once.
+function remoteCardFilter(parts: GatewayBoardPart[]): (task: KanbanTask) => boolean {
+  const liveIds = new Set<string>()
+  const remoteSeen = new Set<string>()
+
+  for (const part of parts) {
+    for (const col of part.board?.columns ?? []) {
+      col.tasks.filter(task => !task.remote).forEach(task => liveIds.add(task.id))
+    }
+  }
+
+  return task => {
+    if (!task.remote) {
+      return true
+    }
+
+    const dropped = liveIds.has(task.id) || remoteSeen.has(task.id)
+    remoteSeen.add(task.id)
+
+    return !dropped
+  }
+}
+
 export function mergeBoards(parts: GatewayBoardPart[]): KanbanBoard {
   const answered = parts.filter(part => part.board)
 
@@ -800,6 +824,8 @@ export function mergeBoards(parts: GatewayBoardPart[]): KanbanBoard {
   const assignees = new Set<string>()
   const gatewayErrors: Record<string, string> = {}
   const hubGateways: Record<string, null | number> = {}
+
+  const keepTask = remoteCardFilter(parts)
 
   for (const part of parts) {
     // A replica-filled part still failed live: keep its error on the board
@@ -818,7 +844,7 @@ export function mergeBoards(parts: GatewayBoardPart[]): KanbanBoard {
 
     for (const col of part.board.columns ?? []) {
       const merged = columns.get(col.name) ?? { name: col.name, tasks: [] }
-      merged.tasks.push(...col.tasks.map(task => ({ ...task, gateway: part.gateway })))
+      merged.tasks.push(...col.tasks.filter(keepTask).map(task => ({ ...task, gateway: part.gateway })))
       columns.set(col.name, merged)
     }
 

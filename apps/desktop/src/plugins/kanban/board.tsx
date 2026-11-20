@@ -158,6 +158,30 @@ function Meta({ children, icon }: { children: ReactNode; icon: string }) {
   )
 }
 
+/** [daveey] A shadow board's card owned by another gateway: a read-only synced copy. */
+function RemoteMarker({ home }: { home?: null | string }) {
+  const k = useKanban()
+
+  return (
+    <Tip label={k.remoteCardTip(home || '?')}>
+      <span className="shrink-0 cursor-help text-(--ui-text-quaternary) italic" data-slot="kanban-card-remote">
+        {k.remoteCard(home || '?')}
+      </span>
+    </Tip>
+  )
+}
+
+/** [daveey] The owner didn't answer: this card is the hermes-hub replica's copy. */
+function HubCopyMarker({ syncedAt }: { syncedAt?: null | number }) {
+  const k = useKanban()
+
+  return (
+    <Tip label={k.fromHubTip(ago(syncedAt) ?? '?')}>
+      <span className="shrink-0 cursor-help text-(--ui-text-quaternary) italic">{k.fromHub}</span>
+    </Tip>
+  )
+}
+
 function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
   const k = useKanban()
   const created = ago(task.created_at)
@@ -253,12 +277,8 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
         <span className="min-w-0 truncate font-mono text-(--ui-text-quaternary)">{shortId(task.id)}</span>
         {/* [daveey] Which gateway owns the card — the sidebar session row's glyph. */}
         {task.gateway && <GatewayDeviceIcon gatewayId={task.gateway} />}
-        {/* [daveey] The owner didn't answer: this is the hermes-hub replica's copy. */}
-        {task.from_hub && (
-          <Tip label={k.fromHubTip(ago(task.hub_synced_at) ?? '?')}>
-            <span className="shrink-0 cursor-help text-(--ui-text-quaternary) italic">{k.fromHub}</span>
-          </Tip>
-        )}
+        {task.remote && <RemoteMarker home={task.home_gateway} />}
+        {task.from_hub && <HubCopyMarker syncedAt={task.hub_synced_at} />}
       </div>
     </div>
   )

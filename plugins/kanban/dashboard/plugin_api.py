@@ -42,9 +42,9 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
 from plugins.kanban.dashboard.board_diagnostics import _attach_diagnostics, _warnings_summary_from_diagnostics
-from plugins.kanban.dashboard import board_read
+from plugins.kanban.dashboard import board_read, board_shadow
 from plugins.kanban.dashboard.board_read import (  # BOARD_COLUMNS: the documented column list
-    BOARD_COLUMNS, diagnostic_inputs as _diagnostic_inputs, diagnostics_from_inputs as _diagnostics_from_inputs)
+    BOARD_COLUMNS, _placeholders, diagnostic_inputs as _diagnostic_inputs, diagnostics_from_inputs as _diagnostics_from_inputs)
 from plugins.kanban.dashboard.plugin_api_human_request import ask_filing_refusal, classify_request
 from plugins.kanban.dashboard.plugin_api_comment_actor import CommentBody, admitted_relay, comment_relay, comment_writer
 from plugins.kanban.dashboard.plugin_api_remote_lease import archive as _archive, lease_refusal, patch_verb, refuse_live_lease
@@ -216,10 +216,6 @@ def _attachment_dict(a: kanban_db.Attachment) -> dict[str, Any]:
         "size": a.size, "uploaded_by": a.uploaded_by, "stored_path": a.stored_path, "created_at": a.created_at}
 
 
-def _placeholders(ids: list) -> str:
-    return ",".join(["?"] * len(ids))
-
-
 def _compute_task_diagnostics(conn: sqlite3.Connection, task_ids: Optional[list[str]] = None) -> dict[str, list[dict]]:
     """``{task_id: [diagnostic_dict, ...]}`` (tasks with none omitted) via three aggregate
     queries (tasks, events, runs) — slurps the board; paginate if profiling shows a hotspot."""
@@ -294,7 +290,10 @@ def _get_board_uncached(tenant, include_archived, board, workflow_template_id, c
         rows = board_rows.incremental(
             (path, tenant, bool(include_archived), workflow_template_id, current_step_key, done_limit),
             path, build, fallback)
-    return board_read.project(rows, include_archived, _diagnostics_from_inputs)
+    payload = board_read.project(rows, include_archived, _diagnostics_from_inputs)
+    return board_shadow.for_board(  # [daveey] a shadow-mode board's other gateways' cards, read-only
+        payload, lambda: _conn(board=board), (tenant, include_archived, workflow_template_id, current_step_key, done_limit),
+        _diagnostic_inputs, _diagnostics_from_inputs)
 
 
 _read_board = coalesced_read(get_board, admission_key=lambda a: (a.get("board") or "").strip().lower(), max_concurrent=2)  # one read per board, at most 2 boards: hub A/B, a cap of 4 made the default board's cold read time out

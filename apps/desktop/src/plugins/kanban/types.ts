@@ -49,6 +49,11 @@ export interface KanbanTask {
   from_hub?: boolean
   /** [daveey] Epoch seconds the replica copy is known current for. */
   hub_synced_at?: null | number
+  /** [daveey] A shadow-mode board's card that another gateway owns, merged in
+   *  read-only from this gateway's replica; `home_gateway` names the owner. */
+  remote?: boolean
+  read_only?: boolean
+  home_gateway?: null | string
 }
 
 export interface KanbanColumn {

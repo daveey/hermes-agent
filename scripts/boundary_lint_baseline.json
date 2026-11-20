@@ -193,6 +193,7 @@
     "plugins/kanban/dashboard/board_rows.py hermes_cli.kanban_task_change": 2,
     "plugins/kanban/dashboard/board_rows.py hermes_cli.loop_accounting": 1,
     "plugins/kanban/dashboard/board_rows.py hermes_state_guard.ensure_kanban_test_isolation": 1,
+    "plugins/kanban/dashboard/board_shadow.py hermes_cli.kanban_shadow_view": 1,
     "plugins/kanban/dashboard/plugin_api.py agent.auxiliary_client.call_llm": 1,
     "plugins/kanban/dashboard/plugin_api.py agent.portal_tags.get_affinity_scope": 1,
     "plugins/kanban/dashboard/plugin_api.py agent.portal_tags.reset_affinity_scope": 1,

@@ -218,6 +218,29 @@ describe('mergeBoards', () => {
     expect(merged.gateway_errors).toBeUndefined()
   })
 
+  it("shows a shadow board's remote copy once, and never over the owner's own live row", () => {
+    const merged = mergeBoards([
+      {
+        board: board({ ready: [task('own', { title: 'hub own' }), task('r1', { home_gateway: 'mini', remote: true })] }),
+        gateway: 'local'
+      },
+      {
+        board: board({ ready: [task('r1', { title: 'mini live' }), task('r2', { home_gateway: 'mini', remote: true })] }),
+        gateway: 'mini'
+      },
+      { board: board({ ready: [task('r2', { home_gateway: 'mini', remote: true })] }), gateway: 'cloud' }
+    ])
+
+    const ready = merged.columns.find(col => col.name === 'ready')!.tasks
+
+    expect(ready.map(t => [t.id, t.gateway, Boolean(t.remote)]).sort()).toEqual([
+      ['own', 'local', false],
+      ['r1', 'mini', false],
+      ['r2', 'mini', true]
+    ])
+    expect(ready.find(t => t.id === 'r1')!.title).toBe('mini live')
+  })
+
   it('skips a gateway without the board silently and reports other failures', () => {
     const merged = mergeBoards([
       { board: board({ ready: [task('a')] }), gateway: 'local' },
