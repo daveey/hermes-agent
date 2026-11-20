@@ -1263,9 +1263,8 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
         st.receipt_committed = True
     if st.receipt_committed:
         _hold_refused_turn(session, st.marker_key, getattr(st, "display_kind", None), _error_surface)
-        # [daveey] Read by update_pause's lost-marker WARNING: from here the turn retires its own marker.
-        session["_turn_concluding_marker_key"] = st.marker_key
-        _retire_turn_marker(session, st.marker_key)
+        # [daveey] concluding_key: update_pause's lost-marker WARNING skips a marker this turn really retires.
+        _retire_turn_marker(session, st.marker_key, concluding_key=st.marker_key)
     return payload, raw, status
 
 
@@ -1554,8 +1553,8 @@ def _run_admitted_prompt(
                     st.error_detail)
                 # Backstop for turns that never reached a terminal frame.
                 if st.receipt_committed:
-                    session["_turn_concluding_marker_key"] = st.marker_key
-                    _retire_turn_marker(session, st.marker_key, concluding_turn=concluding)
+                    _retire_turn_marker(session, st.marker_key, concluding_turn=concluding,
+                                        concluding_key=st.marker_key)
                     with session["history_lock"]:
                         if session.get("_active_turn_marker_key") == st.marker_key:
                             session.pop("_active_turn_marker_key", None)

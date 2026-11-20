@@ -446,3 +446,50 @@ def test_a_pause_poll_during_post_turn_work_does_not_warn(env, monkeypatch, capl
     _finish(live, agent)
     assert polled == [(True, "no turn marker")], polled
     assert not [r for r in caplog.records if "live turn lost its marker" in r.getMessage()]
+
+
+def _lost_marker_warnings(caplog):
+    return [r for r in caplog.records if "live turn lost its marker" in r.getMessage()]
+
+
+def test_the_next_turn_warns_when_a_sibling_deletes_its_marker(env, monkeypatch, caplog):
+    from tui_gateway.turn_marker import clear_turn_marker
+    live, agent = _start_live_turn(env, monkeypatch)  # turn A
+    _finish(live, agent)  # A concluded: it retired its own marker (the concluding stamp)
+    caplog.set_level(logging.INFO)
+    agent_b = LiveAgent()
+    live["agent"] = agent_b
+    with live["history_lock"]:
+        live["running"] = True
+    assert server._run_prompt_submit("rid-b", "ui-live", live, "turn B") is True
+    assert agent_b.entered.wait(WAIT_S)
+    try:
+        assert read_turn_marker(env.home, KEY)["prompt"] == "turn B"
+        clear_turn_marker(env.home, KEY)  # a sibling deletes turn B's live marker
+        assert up.not_resumable_reason(live, KEY) == "no turn marker"
+        assert _lost_marker_warnings(caplog), "turn A's concluding stamp hid turn B's lost marker"
+    finally:
+        _finish(live, agent_b)
+
+
+def test_a_kept_marker_deleted_during_post_turn_work_still_warns(env, monkeypatch, caplog):
+    from tui_gateway.turn_marker import clear_turn_marker
+    polled: list = []
+
+    def after_complete(sid, session, st, raw):  # the turn kept its marker (no retire ran); a sibling deletes it
+        clear_turn_marker(env.home, KEY)
+        polled.append(up.not_resumable_reason(session, KEY))
+
+    def body(agent):
+        agent.release.wait(WAIT_S)
+        # A held refused turn's marker: _retire_turn_marker returns early and keeps it.
+        server._sessions["ui-live"]["_refused_turn_marker_key"] = KEY
+        return {"final_response": "done", "messages": []}
+
+    monkeypatch.setattr(server, "_after_complete_turn", after_complete)
+    monkeypatch.setattr(server, "_schedule_refused_turn_retry", lambda *a, **k: None)
+    caplog.set_level(logging.INFO)
+    live, agent = _start_live_turn(env, monkeypatch, body)
+    _finish(live, agent)
+    assert polled == ["no turn marker"], polled
+    assert _lost_marker_warnings(caplog), "a kept marker deleted by a sibling did not warn"

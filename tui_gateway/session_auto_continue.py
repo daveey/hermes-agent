@@ -67,16 +67,21 @@ def _session_home(session: dict) -> Path:
     return Path(session.get("profile_home") or _hermes_home)
 
 
-def _retire_turn_marker(session: dict, *keys: str, concluding_turn: frozenset | None = None) -> None:
+def _retire_turn_marker(session: dict, *keys: str, concluding_turn: frozenset | None = None,
+                        concluding_key: str = "") -> None:
     """Drop the crash marker right before the terminal frame (not at turn-thread end: post-turn work outlives the
     client's answer, and quitting in that window would leave a marker that re-runs a finished turn). Extra ``keys``
     cover a session_key that compression rotated mid-turn. A turn stopped by backend shutdown keeps its marker
-    (``_stop_turns_before_exit`` flags it) so the next boot auto-continues it like a crash."""
+    (``_stop_turns_before_exit`` flags it) so the next boot auto-continues it like a crash.
+    [daveey] ``concluding_key``: the turn's own marker key, stamped (``_turn_concluding_marker_key``, read by
+    update_pause's lost-marker WARNING) only when the retire really runs, never when a kept marker returns early."""
     if session.get("_exit_keeps_turn_marker") or session.get("_refused_turn_marker_key"):
         return
     # [daveey] A core-update pause keeps its marker: the next backend (or the in-place watcher) continues it.
     if session.get("_update_pause_marker_key") or session.get("_paused_marker_carried"):
         return
+    if concluding_key:  # set before the delete: a pause poll in between must not read a lost marker
+        session["_turn_concluding_marker_key"] = concluding_key
     home = _session_home(session)
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
         if key:
