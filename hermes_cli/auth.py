@@ -1017,12 +1017,10 @@ def write_credential_pool(
 ) -> list[dict[str, Any]]:
     """Persist one provider's credential pool under auth.json.
 
-    Final disk-boundary sanitizer for borrowed credentials (callers may pass raw dicts). Entries on
-    disk but missing from *entries* (added concurrently) are merged back unless in *removed_ids*,
-    so a rotation/exhaustion rewrite never drops a concurrent credential. Entries in
-    *status_cleared_ids* were cleared deliberately (``hermes auth reset``) and skip the
-    recency merge, which would otherwise read their cleared ``last_status_at`` (None ->
-    epoch 0) as a stale snapshot and copy a still-binding cooldown back."""
+    Final disk-boundary sanitizer for borrowed credentials (callers may pass raw dicts).
+    Known IDs in *token_bases* missing on disk were removed; never insert them again.
+    IDs without a base are new additions. Concurrent disk additions are retained unless
+    in *removed_ids*. *status_cleared_ids* skips the status-recency merge for explicit resets."""
     removed = {rid for rid in (removed_ids or ()) if rid}
     bases = token_bases or {}
     with _auth_store_lock():
@@ -1043,7 +1041,8 @@ def write_credential_pool(
                 status_cleared=e.get("id") in status_cleared,
             )
             if isinstance(e, dict) else e
-            for e in sanitized]
+            for e in sanitized
+            if not isinstance(e, dict) or e.get("id") not in bases or e.get("id") in existing_by_id]
         for disk_entry in existing_list:
             disk_id = disk_entry.get("id") if isinstance(disk_entry, dict) else None
             if disk_id and disk_id not in new_ids and disk_id not in removed:

@@ -797,12 +797,9 @@ def _update_root_pool_rows(
     *, status_cleared_ids: Optional[Iterable[str]] = None,
     token_bases: Optional[dict[str, tuple[Any, Any]]] = None,
 ) -> list[dict[str, Any]]:
-    """UPDATE-ONLY merge of *payloads* into the root store's rows for *provider*.
+    """UPDATE-ONLY root merge: borrowers may refresh rows, never add or delete them.
 
-    A borrower may refresh the root's rows (rotation, cooldown state) but
-    never add or delete them — the root owns their lifecycle. In particular a
-    profile's singleton-prune (it has no ``.anthropic_oauth.json`` of its own)
-    must not delete the root grant, so ``removed_ids`` is ignored by callers.
+    Root owns their lifecycle; ignore profile singleton-prune's ``removed_ids``.
     """
     with _auth_store_lock(target_path=global_path):
         store = _load_auth_store(global_path)
@@ -1090,6 +1087,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             if written is None:
                 return
             rows = auth_mod._entry_ids(written)
+            self._entries = [e for e in self._entries if e.id not in self._persisted_token_pairs or e.id in rows]
+            self._current_id = self._current_id if any(e.id == self._current_id for e in self._entries) else None
             self._persisted_token_pairs = auth_mod._token_pairs_by_id(written)
             from agent.credential_pool_model_state import adopt_persisted_row
             for entry in self._entries:
