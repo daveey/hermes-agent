@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 
 import { type Translations, useI18n } from '@/i18n'
+import { formatSessionExternalHover } from '@/lib/external-run'
 import { unreadDotOutcomeLabel, unreadDotOutcomeStripe } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useBackgroundDotLabel, useSessionDotState } from '@/lib/use-session-dot-state'
@@ -108,7 +109,11 @@ export const sessionDotVariant = (
 ): DotVariant => {
   if (state === 'background' && backgroundLabel !== 'running') {
     const label = (r: Translations['sidebar']['row']) =>
-      backgroundLabel === 'unknown' ? r.backgroundUnknown : r.backgroundWaiting
+      backgroundLabel === 'unknown'
+        ? r.backgroundUnknown
+        : backgroundLabel === 'waiting'
+          ? r.backgroundWaiting
+          : r.backgroundExternal
 
     return { ...DOT_VARIANTS.background, ariaLabel: label, title: label }
   }
@@ -173,6 +178,12 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
 
   const variant = sessionDotVariant(dotState, session?.outcome, backgroundLabel)
 
+  const externalHover =
+    backgroundLabel === 'external' ? formatSessionExternalHover(session?.kanban_external_cards, Date.now() / 1000) : null
+
+  const title = externalHover ?? variant.title?.(r)
+  const aria = externalHover ?? variant.ariaLabel?.(r)
+
   return (
     <span className={cn('flex items-center gap-0.5', className)}>
       {branchStem ? (
@@ -187,10 +198,11 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
         <span aria-hidden="true" className={variant.className} style={color ? { backgroundColor: color } : undefined} />
       ) : (
         <span
-          aria-label={variant.ariaLabel?.(r)}
+          aria-label={aria}
           className={variant.className}
+          data-background-label={dotState === 'background' ? backgroundLabel : undefined}
           role={variant.role}
-          title={variant.title?.(r)}
+          title={title}
         />
       )}
     </span>

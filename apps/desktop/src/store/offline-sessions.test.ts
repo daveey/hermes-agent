@@ -468,7 +468,7 @@ describe('mergeOfflineFallback', () => {
         title: 'Chat f07c32'
       })
       expect(row.offline_cached).toBe(false)
-      expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, stalled: 0, waiting: 5 })
+      expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 5 })
 
       // Control: the asleep owner's cached row is the very same row as before (no stamps, still cached).
       const asleepRow = merged.find(r => r.id === 'asleep')!

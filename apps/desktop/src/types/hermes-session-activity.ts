@@ -58,6 +58,27 @@ export interface SessionActivityFields {
    *  triage, continuation exhausted, a park with no named producer) and have waited over 2 h. Painted amber
    *  "stalled", distinct from grey waiting and red needs-you. Absent when zero. */
   kanban_stalled?: number
+  /** [daveey] Parked cards in state external_running OR external_unknown (subset of kanban_parked). Absent → today. */
+  kanban_external?: number
+  /** [daveey] Subset of kanban_external whose last poll is unknown. */
+  kanban_external_unknown?: number
+  /** [daveey] Parked cards in state external_down. Not added to kanban_blocked. */
+  kanban_external_down?: number
+  /** [daveey] Cap 10, newest first: cards behind kanban_external* so the sidebar stripe can name each service. */
+  kanban_external_cards?: {
+    external?: {
+      adapter?: string
+      health: string
+      job: string
+      next_due_at?: null | number
+      observed_at?: null | number
+      reason?: string
+      service: string
+      url?: null | string
+    } | null
+    task_id: string
+    title?: string
+  }[]
   /** [daveey] Finished kanban cards (created or subscribed) whose result this
    *  conversation has not been handed — it was not loaded in any backend when
    *  they completed. Paints the row green (unread) until the gateway's

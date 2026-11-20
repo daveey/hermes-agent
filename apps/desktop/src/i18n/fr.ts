@@ -3740,6 +3740,7 @@ export const frOverrides = {
     row: {
       backgroundUnknown: 'Travail non terminé, statut actuel inconnu',
       backgroundWaiting: 'Travail non terminé, en attente',
+      backgroundExternal: 'S’exécute sur un service externe',
       kanbanUnknown: count => `${count} éléments de travail au statut actuel inconnu : preuves manquantes, expirées ou non vérifiées. Cela ne signifie pas terminé ; aucune nouvelle vérification demandée.`,
       pausedQueue: 'Un message mis en file avant un redémarrage n’a peut-être pas été exécuté : renvoyez-le ou supprimez-le',
       pin: 'Épingler',

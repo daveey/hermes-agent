@@ -4923,6 +4923,7 @@
     "sidebar.row.ageMin",
     "sidebar.row.ageNow",
     "sidebar.row.archive",
+    "sidebar.row.backgroundExternal",
     "sidebar.row.backgroundProcessUnnamed",
     "sidebar.row.backgroundProcesses",
     "sidebar.row.backgroundRunning",

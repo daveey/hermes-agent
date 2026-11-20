@@ -837,7 +837,7 @@ describe('kanban results waiting for an unloaded session ($kanbanUnseenSessionId
 describe('kanbanStripeCounts', () => {
   it('live cards are working: no waiting count, background dot, no stripe', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 3, kanban_parked: 1 }
-    expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, stalled: 0, waiting: 0 })
+    expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
     const state = withRowActivity('idle', row)
     expect(state).toBe('background')
     expect(sessionStatusStripe(state, true, false, 0, false, null, 0, kanbanStripeCounts(row).waiting)).toBeNull()
@@ -846,7 +846,7 @@ describe('kanbanStripeCounts', () => {
   it('parked-only work waits (grey) and does not paint the dot as running', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 2 }
     const counts = kanbanStripeCounts(row)
-    expect(counts).toEqual({ blocked: 0, stalled: 0, waiting: 2 })
+    expect(counts).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 2 })
     const state = withRowActivity('idle', row)
     expect(state).toBe('idle')
     expect(sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('waiting')
@@ -855,7 +855,7 @@ describe('kanbanStripeCounts', () => {
   it('a queue held behind a human ask is stuck (red)', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 1, kanban_parked: 0, kanban_held: 1 }
     const counts = kanbanStripeCounts(row)
-    expect(counts).toEqual({ blocked: 1, stalled: 0, waiting: 0 })
+    expect(counts).toEqual({ blocked: 1, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
     expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('stuck')
   })
 
@@ -868,12 +868,12 @@ describe('kanbanStripeCounts', () => {
 
   it('a backend without kanban_parked keeps the old behaviour (all open cards wait)', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_blocked: 1 }
-    expect(kanbanStripeCounts(row)).toEqual({ blocked: 1, stalled: 0, waiting: 2 })
+    expect(kanbanStripeCounts(row)).toEqual({ blocked: 1, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 2 })
     expect(withRowActivity('idle', row)).toBe('background')
   })
 
   it('no kanban work: zero counts', () => {
-    expect(kanbanStripeCounts({})).toEqual({ blocked: 0, stalled: 0, waiting: 0 })
+    expect(kanbanStripeCounts({})).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
   })
 
   // [daveey] Agent-owned parks that nothing has produced for over 2 h: amber `stalled`, distinct from grey waiting
@@ -881,7 +881,7 @@ describe('kanbanStripeCounts', () => {
   it('parked work with a stalled card paints amber stalled, not grey waiting', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 3, kanban_parked: 3, kanban_stalled: 1 }
     const counts = kanbanStripeCounts(row)
-    expect(counts).toEqual({ blocked: 0, stalled: 1, waiting: 3 })
+    expect(counts).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 1, waiting: 3 })
     const state = withRowActivity('idle', row)
     expect(sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting, counts.stalled)).toBe(
       'stalled'
@@ -895,7 +895,78 @@ describe('kanbanStripeCounts', () => {
       'stuck'
     )
     const live = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 1, kanban_stalled: 1 }
-    expect(kanbanStripeCounts(live)).toEqual({ blocked: 0, stalled: 0, waiting: 0 })
+    expect(kanbanStripeCounts(live)).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
+  })
+
+  it('reads kanban_external / kanban_external_down stamps when cards are absent', () => {
+    const row = {
+      kanban_active: 1,
+      kanban_external: 1,
+      kanban_external_down: 0,
+      kanban_observed_at: Date.now() / 1000,
+      kanban_parked: 1
+    }
+
+    expect(kanbanStripeCounts(row)).toEqual({
+      blocked: 0,
+      external: 1,
+      externalDown: 0,
+      externalUnknown: 0,
+      stalled: 0,
+      waiting: 1
+    })
+  })
+})
+
+// [daveey] ⌘B > live turn > stuck/red (incl external_down) > external > stalled > waiting > done
+describe('sessionStatusStripe external-run precedence', () => {
+  const idle = 'idle' as const
+
+  it('⌘B (userBlocked) beats every kanban colour including external_down', () => {
+    expect(sessionStatusStripe(idle, true, true, 0, false, null, 0, 1, 1, null, false, 1, 1)).toBe('blocked')
+  })
+
+  it('a live working turn has no stripe even with external_down', () => {
+    expect(sessionStatusStripe('working', true, false, 0, false, null, 0, 1, 1, null, false, 1, 1)).toBeNull()
+  })
+
+  it('stuck/red (human kanban block) beats external and external_down', () => {
+    expect(sessionStatusStripe(idle, true, false, 1, false, null, 0, 1, 1, null, false, 1, 1)).toBe('stuck')
+  })
+
+  it('external_down is red at the stuck tier and beats light-blue external, stalled, waiting', () => {
+    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 1, null, false, 1, 1)).toBe('external_down')
+  })
+
+  it('external (sky) beats stalled and waiting', () => {
+    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 1, null, false, 1, 0)).toBe('external')
+  })
+
+  it('stalled still beats waiting when there is no external work', () => {
+    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 1, null, 0, 0)).toBe('stalled')
+  })
+
+  it('waiting when parked with no external/stalled/red', () => {
+    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 0, null, 0, 0)).toBe('waiting')
+  })
+
+  it('done when the chat has turns and nothing is waiting', () => {
+    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 0, 0, null, 0, 0)).toBe('done')
+  })
+
+  it('absent external fields keep today: parked-only is waiting, not external', () => {
+    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 2, 0)).toBe('waiting')
+  })
+
+  it('backgroundDotLabel is external when kanban_external is stamped', () => {
+    const row = {
+      kanban_active: 1,
+      kanban_external: 1,
+      kanban_observed_at: Date.now() / 1000,
+      kanban_parked: 1
+    }
+
+    expect(backgroundDotLabel(row)).toBe('external')
   })
 })
 

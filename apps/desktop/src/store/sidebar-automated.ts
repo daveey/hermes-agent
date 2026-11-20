@@ -65,10 +65,19 @@ export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotS
     counts.waiting,
     // [daveey] No `row.outcome`: an automated row resurfaces only on the signals it always did. An outcome-derived
     // stripe (e.g. `unresolved` → amber) on bot / smoke-test traffic would flood the sidebar with it.
-    counts.stalled
+    counts.stalled,
+    undefined,
+    counts.external,
+    counts.externalDown
   )
 
-  return stripe === 'stuck' || stripe === 'blocked' || stripe === 'attention' || stripe === 'stalled'
+  return (
+    stripe === 'stuck' ||
+    stripe === 'blocked' ||
+    stripe === 'attention' ||
+    stripe === 'stalled' ||
+    stripe === 'external_down'
+  )
 }
 
 export function sessionHiddenAsAutomated(

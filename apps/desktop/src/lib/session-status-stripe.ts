@@ -9,6 +9,12 @@ export const sessionStatusStripeColor = (stripe: null | SessionStatusStripe): st
     case 'stuck':
       return '[--session-status-color:var(--color-red-500)]'
 
+    case 'external_down':
+      return '[--session-status-color:var(--color-red-500)]'
+
+    case 'external':
+      return '[--session-status-color:var(--color-sky-400)] dark:[--session-status-color:var(--color-sky-500)]'
+
     // [daveey] Looks done, but a finished kanban card admits dropped work.
     case 'attention':
       return '[--session-status-color:var(--color-amber-500)]'

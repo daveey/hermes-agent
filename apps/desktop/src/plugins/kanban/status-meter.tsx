@@ -6,16 +6,19 @@
  * done/archived cards are left out.
  */
 
+import { deriveExternalVisual, type ExternalInfo } from './external-run'
 import type { KanbanBoard } from './types'
 
-export type MeterSegment = 'blocked' | 'notReady' | 'ready' | 'running'
+export type MeterSegment = 'blocked' | 'external' | 'externalDown' | 'notReady' | 'ready' | 'running'
 
 export type MeterCounts = Record<MeterSegment, number>
 
-export const METER_ORDER: readonly MeterSegment[] = ['running', 'ready', 'notReady', 'blocked']
+export const METER_ORDER: readonly MeterSegment[] = ['running', 'external', 'ready', 'notReady', 'blocked', 'externalDown']
 
 export const METER_COLORS: Record<MeterSegment, string> = {
   blocked: '#d64545',
+  external: '#38bdf8',
+  externalDown: '#ef4444',
   notReady: '#d4a72c',
   ready: '#2ea043',
   running: '#388bfd'
@@ -31,10 +34,26 @@ const SEGMENT_OF: Record<string, MeterSegment> = {
   triage: 'notReady'
 }
 
-export function meterCounts(board: Pick<KanbanBoard, 'columns'>): MeterCounts {
-  const counts: MeterCounts = { blocked: 0, notReady: 0, ready: 0, running: 0 }
+export function meterCounts(board: Pick<KanbanBoard, 'columns'>, now: number = Date.now() / 1000): MeterCounts {
+  const counts: MeterCounts = { blocked: 0, external: 0, externalDown: 0, notReady: 0, ready: 0, running: 0 }
 
   for (const col of board.columns) {
+    if (col.name === 'scheduled') {
+      for (const task of col.tasks) {
+        const visual = deriveExternalVisual(task.external as ExternalInfo | null | undefined, now)
+
+        if (visual === 'down') {
+          counts.externalDown += 1
+        } else if (visual === 'running' || visual === 'unknown') {
+          counts.external += 1
+        } else {
+          counts.notReady += 1
+        }
+      }
+
+      continue
+    }
+
     const segment = SEGMENT_OF[col.name]
 
     if (segment) {
@@ -45,7 +64,8 @@ export function meterCounts(board: Pick<KanbanBoard, 'columns'>): MeterCounts {
   return counts
 }
 
-export const meterTotal = (c: MeterCounts) => c.blocked + c.notReady + c.ready + c.running
+export const meterTotal = (c: MeterCounts) =>
+  c.blocked + c.external + c.externalDown + c.notReady + c.ready + c.running
 
 export function TaskMeter({ counts }: { counts: MeterCounts }) {
   const total = meterTotal(counts)

@@ -26,6 +26,7 @@
 import { computed } from 'nanostores'
 
 import { summarizeExecutionObservations } from '@/lib/execution-observations'
+import { kanbanExternalStripeCounts } from '@/lib/external-run'
 import { outcomeStripe } from '@/lib/session-outcome'
 import { stableArray, stableRecord } from '@/lib/stable-array'
 import type { SessionBackgroundProcess, SessionInfo } from '@/types/hermes'
@@ -288,7 +289,16 @@ export const showsRunningArc = (state: SessionDotState): boolean =>
 //  [daveey] `stalled` (amber, card glyph) replaces `waiting` when one of those parked cards waits on something only an
 //  agent can end and has for over 2 h (backend `kanban_stalled`): nothing is producing what it waits for. Still not
 //  the user's move (red stays for that), and parked like `waiting` for ⌘] / ⌘[.
-export type SessionStatusStripe = 'attention' | 'blocked' | 'done' | 'periodic' | 'stalled' | 'stuck' | 'waiting'
+export type SessionStatusStripe =
+  | 'attention'
+  | 'blocked'
+  | 'done'
+  | 'external'
+  | 'external_down'
+  | 'periodic'
+  | 'stalled'
+  | 'stuck'
+  | 'waiting'
 
 /** [daveey] Backend `review_wait` stamp: the session's latest reply links an
  *  open PR still needing a code review. `stuck` = the review is on the user
@@ -308,7 +318,8 @@ const parkedStripe = (
   state: SessionDotState,
   reviewWait: null | ReviewWait | undefined,
   kanbanWaiting: number,
-  kanbanStalled: number
+  kanbanStalled: number,
+  kanbanExternal = 0
 ): null | SessionStatusStripe => {
   if (state === 'working') {
     return null
@@ -316,6 +327,11 @@ const parkedStripe = (
 
   if (reviewWait === 'parked') {
     return 'blocked'
+  }
+
+  // [daveey] Light-blue external run beats grey waiting / amber stalled.
+  if (kanbanExternal > 0) {
+    return 'external'
   }
 
   if (kanbanWaiting > 0) {
@@ -338,7 +354,9 @@ const derivedStatusStripe = (
   reviewWait: null | ReviewWait | undefined,
   kanbanAttention: number,
   kanbanWaiting: number,
-  kanbanStalled: number
+  kanbanStalled: number,
+  kanbanExternal = 0,
+  kanbanExternalDown = 0
 ): null | SessionStatusStripe => {
   if (userBlocked) {
     return 'blocked'
@@ -352,8 +370,13 @@ const derivedStatusStripe = (
     return 'stuck'
   }
 
+  // [daveey] external_down is red at the stuck tier (after a live turn / ⌘B / human ask).
+  if (state !== 'working' && kanbanExternalDown > 0) {
+    return 'external_down'
+  }
+
   return (
-    parkedStripe(state, reviewWait, kanbanWaiting ?? 0, kanbanStalled ?? 0) ??
+    parkedStripe(state, reviewWait, kanbanWaiting ?? 0, kanbanStalled ?? 0, kanbanExternal) ??
     settledStripe(state, hasTurns, kanbanAttention ?? 0)
   )
 }
@@ -378,7 +401,9 @@ export const sessionStatusStripe = (
   kanbanWaiting = 0,
   kanbanStalled = 0,
   outcome: null | SessionOutcome | undefined = null,
-  sourceUnavailable = false
+  sourceUnavailable = false,
+  kanbanExternal = 0,
+  kanbanExternalDown = 0
 ): null | SessionStatusStripe => {
   if (outcomePaintsStripe(state, userBlocked)) {
     const fromOutcome = outcomeStripe(outcome)
@@ -400,7 +425,9 @@ export const sessionStatusStripe = (
     reviewWait,
     kanbanAttention,
     kanbanWaiting,
-    kanbanStalled
+    kanbanStalled,
+    kanbanExternal,
+    kanbanExternalDown
   )
 
   if (sourceUnavailable && !userBlocked && !hasOwnLiveTurn(state) && hasTurns && (derived === null || derived === 'done')) {
@@ -411,7 +438,17 @@ export const sessionStatusStripe = (
 }
 
 type KanbanCounts = Pick<SessionInfo, 'kanban_active' | 'kanban_blocked' | 'kanban_held' | 'kanban_parked'> &
-  Partial<Pick<SessionInfo, 'execution_observations' | 'kanban_stalled'>>
+  Partial<
+    Pick<
+      SessionInfo,
+      | 'execution_observations'
+      | 'kanban_external'
+      | 'kanban_external_cards'
+      | 'kanban_external_down'
+      | 'kanban_external_unknown'
+      | 'kanban_stalled'
+    >
+  >
 
 /** [daveey] Open kanban cards someone is actually working (running/ready/review, or a todo about to be promoted).
  *  `kanban_parked` (scheduled, non-human blocks, todo behind an open parent) and `kanban_held` (todo behind a human
@@ -426,22 +463,47 @@ export const liveKanbanCount = (row: KanbanCounts): number =>
  *  behind one (red); `waiting` = parked cards when nothing is live (grey). Live cards give neither, so a chat whose
  *  cards are running reads as working (no stripe) instead of grey like one parked until Thursday. Against a
  *  backend without `kanban_parked` every open card waits, as before. */
-export const kanbanStripeCounts = (row: KanbanCounts, nowSeconds: number = Date.now() / 1000): { blocked: number; stalled: number; waiting: number } => {
+export const kanbanStripeCounts = (
+  row: KanbanCounts,
+  nowSeconds: number = Date.now() / 1000
+): {
+  blocked: number
+  external: number
+  externalDown: number
+  externalUnknown: number
+  stalled: number
+  waiting: number
+} => {
   // Optional execution evidence only adds: asks (even retained by an expired entry) are red, current waits are grey,
   // current running/queued work defers the grey wait exactly like a live card does.
   const exec = rowExecution(row, nowSeconds)
   const blocked = (row.kanban_blocked ?? 0) + (row.kanban_held ?? 0) + (exec ? Math.max(exec.needsUser, exec.outstanding) : 0)
   const execLive = exec?.live ?? 0
   const execWaiting = exec?.waiting ?? 0
+  const ext = kanbanExternalStripeCounts(row, nowSeconds)
 
   if (row.kanban_parked === undefined) {
-    return { blocked, stalled: 0, waiting: execLive > 0 ? 0 : (row.kanban_active ?? 0) + execWaiting }
+    return {
+      blocked,
+      external: ext.external,
+      externalDown: ext.down,
+      externalUnknown: ext.unknown,
+      stalled: 0,
+      waiting: execLive > 0 ? 0 : (row.kanban_active ?? 0) + execWaiting
+    }
   }
 
   const waiting = liveKanbanCount(row) + execLive > 0 ? 0 : row.kanban_parked + execWaiting
 
   // [daveey] Stalled is a subset of parked: only meaningful while the row is waiting at all.
-  return { blocked, stalled: waiting > 0 ? Math.min(row.kanban_stalled ?? 0, waiting) : 0, waiting }
+  return {
+    blocked,
+    external: ext.external,
+    externalDown: ext.down,
+    externalUnknown: ext.unknown,
+    stalled: waiting > 0 ? Math.min(row.kanban_stalled ?? 0, waiting) : 0,
+    waiting
+  }
 }
 
 /** [daveey] Fold the row's OWN backend activity stamps into its resolved state.
@@ -452,7 +514,21 @@ export const kanbanStripeCounts = (row: KanbanCounts, nowSeconds: number = Date.
  *  Same claim (and priority) as the store: it beats idle/unread/draft only. */
 type RowActivity = Pick<SessionInfo, 'background_active' | 'goal_active' | 'kanban_active' | 'kanban_blocked'> &
   Partial<Pick<SessionInfo, 'kanban_held' | 'kanban_parked'>> &
-  Partial<Pick<SessionInfo, 'execution_observations' | 'kanban_observed_at' | 'kanban_remote_stale' | 'kanban_unknown' | 'kanban_unseen' | 'offline_cached'>> &
+  Partial<
+    Pick<
+      SessionInfo,
+      | 'execution_observations'
+      | 'kanban_external'
+      | 'kanban_external_cards'
+      | 'kanban_external_down'
+      | 'kanban_external_unknown'
+      | 'kanban_observed_at'
+      | 'kanban_remote_stale'
+      | 'kanban_unknown'
+      | 'kanban_unseen'
+      | 'offline_cached'
+    >
+  > &
   Partial<Pick<SessionInfo, 'message_count' | 'turn_live'>>
 
 /** [daveey] Work the row's own stamps say is still in flight outside a turn: a goal, cards, a background job. */
@@ -464,10 +540,12 @@ const rowHasBackgroundWork = (row: RowActivity): boolean =>
   !hasFreshKanbanObservation(row) ||
   executionHoldsRow(rowExecution(row)) ||
   (row.kanban_blocked ?? 0) > 0 ||
-  (row.background_active ?? 0) > 0
+  (row.background_active ?? 0) > 0 ||
+  (row.kanban_external ?? 0) > 0 ||
+  (row.kanban_external_down ?? 0) > 0
 
 /** [daveey] What a `background` dot's label may claim about its work. */
-export type BackgroundDotLabel = 'running' | 'unknown' | 'waiting'
+export type BackgroundDotLabel = 'external' | 'running' | 'unknown' | 'waiting'
 
 /** [daveey] The words on a `background` dot. The claim itself stays (unknown or parked work must never read as done);
  *  only the label follows the evidence:
@@ -492,6 +570,12 @@ export const backgroundDotLabel = (
 
   if ((exec?.live ?? 0) > 0) {
     return 'running'
+  }
+
+  const ext = kanbanExternalStripeCounts(row, nowSeconds)
+
+  if (ext.external > 0 || ext.down > 0) {
+    return 'external'
   }
 
   if (rowEvidenceUnknown(row, exec)) {

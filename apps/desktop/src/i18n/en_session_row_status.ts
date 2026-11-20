@@ -64,6 +64,7 @@ export const enSessionRowStatus = {
   backgroundProcesses: count => `${count} background ${count === 1 ? 'process' : 'processes'} running`,
   backgroundUnknown: 'Open work, current status unknown',
   backgroundWaiting: 'Open work, waiting',
+  backgroundExternal: 'Running on an external service',
   backgroundProcessUnnamed: 'background process',
   stopProcess: 'Stop',
   stoppingProcess: 'Stopping…'

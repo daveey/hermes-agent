@@ -152,7 +152,9 @@ export function sessionHasStatusStripe(id: string): boolean {
         session?.kanban_attention ?? 0,
         kanbanStripeCounts(session ?? {}).waiting,
         kanbanStripeCounts(session ?? {}).stalled,
-        session?.outcome
+        session?.outcome,
+        kanbanStripeCounts(session ?? {}).external,
+        kanbanStripeCounts(session ?? {}).externalDown
       )
     )
   )

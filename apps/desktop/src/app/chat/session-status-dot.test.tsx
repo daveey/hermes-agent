@@ -374,3 +374,58 @@ describe('SessionStatusDot waiting label', () => {
     expect(c.querySelector(WAITING)).toBeNull()
   })
 })
+
+describe('SessionStatusDot external label', () => {
+  it('names the service when kanban_external_cards are present', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_000)
+
+    try {
+      const c = dot({
+        id: 'ext-dot',
+        kanban_active: 1,
+        kanban_external: 1,
+        kanban_external_cards: [
+          {
+            external: {
+              adapter: 'github_run',
+              health: 'ok',
+              job: 'running',
+              next_due_at: 1300,
+              observed_at: 1000,
+              reason: "job 'tests', 12 min",
+              service: 'GitHub Actions'
+            },
+            task_id: 't_ext1'
+          }
+        ],
+        kanban_observed_at: 1000,
+        kanban_parked: 1,
+        message_count: 4
+      })
+
+      const el = c.querySelector('[data-background-label="external"]')
+
+      expect(el).not.toBeNull()
+      expect(el?.getAttribute('title')).toContain('Running on GitHub Actions')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('missing cards keep the generic external label, not a service claim', () => {
+    const c = dot({
+      id: 'ext-generic',
+      kanban_active: 1,
+      kanban_external: 1,
+      kanban_observed_at: Date.now() / 1000,
+      kanban_parked: 1,
+      message_count: 4
+    })
+
+    const el = c.querySelector('[data-background-label="external"]')
+
+    expect(el?.getAttribute('title')).toBe('Running on an external service')
+    expect(el?.getAttribute('title')).not.toContain('GitHub')
+  })
+})

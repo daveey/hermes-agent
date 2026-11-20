@@ -38,7 +38,9 @@ export function SessionTabAccent({ children, session, storedSessionId }: Session
         counts.waiting,
         counts.stalled,
         session?.outcome,
-        sourceUnavailable
+        sourceUnavailable,
+        counts.external,
+        counts.externalDown
       )
 
 

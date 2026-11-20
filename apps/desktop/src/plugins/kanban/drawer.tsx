@@ -62,6 +62,7 @@ import {
   userOpenReads
 } from './api'
 import { uploadFiles, useFileDrop } from './attach-drop'
+import { ExternalRunBadge } from './external-run-ui'
 import { ModelOverrideField, overridePatch } from './model-override'
 import {
   type Diagnostic,
@@ -1014,7 +1015,10 @@ export function TaskDrawer({
         <header className="flex flex-col gap-2 px-5 pt-4 pb-3">
           <div className="flex items-center gap-2">
             {task ? (
-              <StatusMenu columns={columns} onMove={move} status={task.status} />
+              <>
+                <StatusMenu columns={columns} onMove={move} status={task.status} />
+                <ExternalRunBadge task={task} />
+              </>
             ) : (
               <span className="font-mono text-sm text-(--ui-text-tertiary)">{shortId(id)}</span>
             )}

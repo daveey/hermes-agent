@@ -3131,6 +3131,7 @@ export const zhOverrides = {
     row: {
       backgroundUnknown: '有未完成的工作，当前状态未知',
       backgroundWaiting: '有未完成的工作，等待中',
+      backgroundExternal: '正在外部服务上运行',
       kanbanUnknown: count => `${count} 项工作的当前状态未知：证据缺失、已过期或未经验证。这不表示已完成；未请求新的检查。`,
       pausedQueue: '重启前排队的消息可能未运行：请重新发送或丢弃',
       pin: '置顶',

@@ -24,6 +24,8 @@ export interface SessionRowStatusCopy {
   backgroundUnknown: string
   /** [daveey] The hollow background dot when its only open work is known waiting (parked, held or a fresh wait). */
   backgroundWaiting: string
+  /** [daveey] Background dot when the chat's open work is running on an external service (CI/deploy). */
+  backgroundExternal: string
   backgroundProcessUnnamed: string
   stopProcess: string
   stoppingProcess: string

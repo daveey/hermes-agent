@@ -2257,6 +2257,7 @@ export const jaOverrides = {
     row: {
       backgroundUnknown: '未完了の作業あり、現在の状態は不明',
       backgroundWaiting: '未完了の作業あり、待機中',
+      backgroundExternal: '外部サービス上で実行中',
       kanbanUnknown: count => `${count} 件の作業の現在の状態が不明です。証拠がない、期限切れ、または未検証です。完了を意味しません。新しい確認は要求されていません。`,
       pausedQueue: '再起動前にキューに入れたメッセージが実行されていない可能性があります：再送信するか破棄してください',
       pin: 'ピン留め',

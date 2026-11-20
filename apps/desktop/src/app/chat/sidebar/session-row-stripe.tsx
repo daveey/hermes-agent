@@ -26,6 +26,8 @@ import {
   setStripeReasonReporter
 } from '@/store/session-dot-state'
 
+import { sessionExternalStripeTip, unknownExternalCloud } from './session-row-stripe-external'
+
 // [daveey] Every red edge (with its reasons) also goes to the session's own gateway, where the agent can read it.
 setStripeReasonReporter((row, stripe, previous, reasons) =>
   reportSessionStripeRemote(
@@ -69,7 +71,9 @@ export function useSessionRowStripe(
         counts.waiting,
         counts.stalled,
         session.outcome,
-        sourceUnavailable
+        sourceUnavailable,
+        counts.external,
+        counts.externalDown
       )
     : null
 
@@ -88,7 +92,7 @@ export function useSessionRowStripe(
 }
 
 /** [daveey] Stripes drawn as a small glyph in the stripe's place: a cron loop, or the card glyph for kanban waits. */
-const GLYPH_STRIPES: ReadonlySet<SessionStatusStripe> = new Set(['periodic', 'stalled', 'waiting'])
+const GLYPH_STRIPES: ReadonlySet<SessionStatusStripe> = new Set(['external', 'external_down', 'periodic', 'stalled', 'waiting'])
 
 interface SessionRowStatusStripeProps {
   session: SessionInfo
@@ -103,7 +107,15 @@ function stripeGlyphs(statusStripe: SessionStatusStripe, painted: boolean, outco
   const doneCron = painted && outcomeHasCrons(outcome)
   const doneWatch = painted && outcomeHasWatches(outcome)
   const listed = GLYPH_STRIPES.has(statusStripe)
-  const mainGlyph = statusStripe === 'periodic' || doneCron ? 'sync' : listed ? 'project' : null
+
+  const mainGlyph =
+    statusStripe === 'periodic' || doneCron
+      ? 'sync'
+      : statusStripe === 'external' || statusStripe === 'external_down'
+        ? 'cloud'
+        : listed
+          ? 'project'
+          : null
 
   return { doneWatch, glyph: listed || doneCron || doneWatch, mainGlyph }
 }
@@ -121,12 +133,13 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
   const outcomeKind = outcomePainted && outcomeStripe(session.outcome) ? session.outcome?.kind : undefined
   const pausedQueue = statusStripe === 'stuck' && stuckOnPausedQueue(session.id, pausedIds, $sessions.get())
 
-  // [daveey] A red painted by this app's own queue names its cause: the backend's status says nothing about it.
   const tipText = pausedQueue
     ? t.sidebar.row.pausedQueue
     : outcomeKind
       ? outcomeTooltip(session.outcome, t.sidebar.row)
-      : null
+      : sessionExternalStripeTip(session, statusStripe)
+
+  const unknownCloud = unknownExternalCloud(session, statusStripe)
 
   const { doneWatch, glyph, mainGlyph } = stripeGlyphs(statusStripe, Boolean(outcomeKind), session.outcome)
 
@@ -142,6 +155,7 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
           tipText ? 'pointer-events-auto' : 'pointer-events-none',
           sessionStatusStripeColor(statusStripe)
         )}
+        data-external-unknown={unknownCloud ? 'true' : undefined}
         data-outcome={outcomeKind}
         data-slot="session-status-stripe"
         data-status-stripe={statusStripe}
@@ -150,7 +164,11 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
         {/* `periodic`: a live cron job, it recurs so it is never "done". `waiting`: open kanban cards hold it — the
             card glyph (amber when `stalled`). A finished chat's cron keeps the loop glyph, in the green of `done`.
             [daveey] A finished chat still watching a card adds the eye, so it never reads as "all done". */}
-        {glyph && mainGlyph && <Codicon name={mainGlyph} size="0.5625rem" />}
+        {glyph && mainGlyph && (
+          <span data-external-cloud={unknownCloud ? 'hollow' : 'solid'}>
+            <Codicon name={mainGlyph} size="0.5625rem" />
+          </span>
+        )}
         {doneWatch && (
           <span className="flex" data-testid="stripe-watch">
             <Codicon name="eye" size="0.5625rem" />

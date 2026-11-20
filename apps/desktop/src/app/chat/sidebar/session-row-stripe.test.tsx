@@ -202,3 +202,116 @@ it('a plain done chat draws no watch glyph', () => {
   expect(container.querySelector('[data-testid="stripe-watch"]')).toBeNull()
   expect(stripe(container)?.getAttribute('aria-label')).toBe('Fix landed.')
 })
+
+const ghCard = (over: Record<string, unknown> = {}) => ({
+  external: {
+    adapter: 'github_run',
+    health: 'ok',
+    job: 'running',
+    next_due_at: 1300,
+    observed_at: 1000,
+    reason: "job 'tests', 12 min",
+    service: 'GitHub Actions',
+    url: 'https://github.com/org/repo/actions/runs/1',
+    ...over
+  },
+  task_id: 't_ext1',
+  title: 'Wait on CI'
+})
+
+it('external stripe paints a cloud glyph and names the service', () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(1_000_000)
+
+  try {
+    const session = row('ext-chat', {
+      kanban_external: 1,
+      kanban_external_cards: [ghCard()],
+      kanban_parked: 1
+    })
+
+    const { container } = render(
+      <SessionRowStatusStripe outcomePainted={false} session={session} statusStripe="external" />
+    )
+
+    expect(container.querySelector('.codicon-cloud')).not.toBeNull()
+    expect(stripe(container)?.getAttribute('data-status-stripe')).toBe('external')
+    expect(stripe(container)?.getAttribute('aria-label')).toContain('Running on GitHub Actions')
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('unknown external uses the hollow cloud', () => {
+  const session = row('ext-unk', {
+    kanban_external: 1,
+    kanban_external_unknown: 1,
+    kanban_parked: 1
+  })
+
+  const { container } = render(
+    <SessionRowStatusStripe outcomePainted={false} session={session} statusStripe="external" />
+  )
+
+  expect(container.querySelector('[data-external-unknown="true"]')).not.toBeNull()
+  expect(container.querySelector('[data-external-cloud="hollow"]')).not.toBeNull()
+})
+
+it('external_down stripe is red with a cloud and down hover', () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(1_000_000)
+
+  try {
+    const session = row('ext-down', {
+      kanban_external_cards: [ghCard({ health: 'unreachable', job: 'unknown', reason: 'host unreachable' })],
+      kanban_external_down: 1
+    })
+
+    const { container } = render(
+      <SessionRowStatusStripe outcomePainted={false} session={session} statusStripe="external_down" />
+    )
+
+    expect(stripe(container)?.getAttribute('data-status-stripe')).toBe('external_down')
+    expect(container.querySelector('.codicon-cloud')).not.toBeNull()
+    expect(stripe(container)?.getAttribute('aria-label')).toMatch(/unreachable|GitHub Actions/)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('sidebar stripe lists each external card then +N more', () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(1_000_000)
+
+  try {
+    const cards = Array.from({ length: 7 }, (_, i) => ({
+      ...ghCard(),
+      task_id: `t_${i}`,
+      title: `Card ${i}`
+    }))
+
+    const session = row('ext-many', { kanban_external: 7, kanban_external_cards: cards })
+
+    const { container } = render(
+      <SessionRowStatusStripe outcomePainted={false} session={session} statusStripe="external" />
+    )
+
+    const label = stripe(container)?.getAttribute('aria-label') ?? ''
+
+    expect(label).toContain('Card 0')
+    expect(label).toContain('Card 4')
+    expect(label).not.toContain('Card 5')
+    expect(label).toContain('+2 more')
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('missing external fields keep today: no Running-on claim on a waiting stripe', () => {
+  const { container } = render(
+    <SessionRowStatusStripe outcomePainted={false} session={row('plain')} statusStripe="waiting" />
+  )
+
+  expect(stripe(container)?.getAttribute('aria-label')).toBeNull()
+  expect(container.querySelector('.codicon-cloud')).toBeNull()
+})

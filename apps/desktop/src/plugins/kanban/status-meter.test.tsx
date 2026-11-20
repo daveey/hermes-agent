@@ -25,7 +25,7 @@ describe('kanban status meter', () => {
       ]
     })
 
-    expect(counts).toEqual({ blocked: 6, notReady: 6, ready: 4, running: 12 })
+    expect(counts).toEqual({ blocked: 6, external: 0, externalDown: 0, notReady: 6, ready: 4, running: 12 })
     expect(meterTotal(counts)).toBe(28)
   })
 
@@ -38,19 +38,60 @@ describe('kanban status meter', () => {
   })
 
   it('draws one coloured segment per non-empty state, widths proportional to the counts', () => {
-    const { container } = render(<TaskMeter counts={{ blocked: 1, notReady: 1, ready: 0, running: 2 }} />)
+    const { container } = render(
+      <TaskMeter counts={{ blocked: 1, external: 0, externalDown: 0, notReady: 1, ready: 0, running: 2 }} />
+    )
+
     const segs = [...container.querySelectorAll<HTMLElement>('[data-segment]')]
 
     expect(segs.map(s => s.dataset.segment)).toEqual(['running', 'notReady', 'blocked'])
     expect(segs.map(s => s.style.width)).toEqual(['50%', '25%', '25%'])
     // jsdom normalises hex to rgb
     expect(segs[0].style.background).toBe('rgb(56, 139, 253)')
-    expect(METER_COLORS).toEqual({ blocked: '#d64545', notReady: '#d4a72c', ready: '#2ea043', running: '#388bfd' })
+    expect(METER_COLORS).toEqual({
+      blocked: '#d64545',
+      external: '#38bdf8',
+      externalDown: '#ef4444',
+      notReady: '#d4a72c',
+      ready: '#2ea043',
+      running: '#388bfd'
+    })
   })
 
   it('tooltip names every segment', () => {
-    expect(en.countTip({ blocked: 4, notReady: 3, ready: 2, running: 1 })).toBe(
+    expect(en.countTip({ blocked: 4, external: 0, externalDown: 0, notReady: 3, ready: 2, running: 1 })).toBe(
       'Kanban — 1 running · 2 ready · 3 not ready · 4 blocked on you'
     )
+  })
+
+  it('scheduled + external is sky; external_down is red, not notReady', () => {
+    const running = {
+      id: 'e1',
+      status: 'scheduled',
+      title: 'CI',
+      external: {
+        adapter: 'github_run',
+        health: 'ok',
+        job: 'running',
+        next_due_at: 2000,
+        observed_at: 1000,
+        service: 'GitHub Actions'
+      }
+    }
+
+    const down = {
+      id: 'e2',
+      status: 'scheduled',
+      title: 'CI down',
+      external: { health: 'unreachable', job: 'unknown', service: 'GitHub Actions' }
+    }
+
+    const counts = meterCounts({ columns: [{ name: 'scheduled', tasks: [running, down] }] }, 1000)
+
+    expect(counts.external).toBe(1)
+    expect(counts.externalDown).toBe(1)
+    expect(counts.notReady).toBe(0)
+    expect(METER_COLORS.external).toBe('#38bdf8')
+    expect(METER_COLORS.externalDown).toBe('#ef4444')
   })
 })

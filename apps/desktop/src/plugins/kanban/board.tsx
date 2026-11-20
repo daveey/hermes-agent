@@ -91,6 +91,7 @@ import {
 import { isFileDrag, uploadFiles, useFileDrop } from './attach-drop'
 import { BoardSwitcher } from './board-switcher'
 import { BoardTaskDrawer } from './board-task-drawer'
+import { ExternalRunBadge } from './external-run-ui'
 import { EMPTY_OVERRIDE, ModelOverrideField, overrideCreateFields, type TaskModelOverride } from './model-override'
 import { $openTaskRequest, type OpenTaskRequest, snapshotOpenTask } from './open-task'
 import { OrchestrationPanel } from './orchestration'
@@ -238,6 +239,7 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
           <span className="shrink-0 cursor-help font-medium text-amber-500">{k.noHeartbeat}</span>
         </Tip>
       )}
+      <ExternalRunBadge task={task} />
       {task.status === 'blocked' && task.block_kind && (
         // #124391: say WHY the card is blocked — the kind arrives on every
         // card payload; without it every blocked card reads identically.
