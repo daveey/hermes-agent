@@ -218,6 +218,34 @@ def test_closed_incident_does_not_respawn_every_tick(replica, local):
     assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
 
 
+def test_second_closed_incident_covers_next_cycle(replica, local):
+    card(replica, "one")
+    [first] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    _close(local, first, NOW)
+    at = NOW + subject.HOME_REPLACE_AFTER_SECONDS
+    _fresh_at(replica, at - 1)
+    assert subject.sweep(local, replica, "hub", now_ms=(at - 1) * 1000) == [first]
+    _fresh_at(replica, at)
+    [second] = subject.sweep(local, replica, "hub", now_ms=at * 1000)
+    assert second != first
+    _close(local, second, at)
+    _fresh_at(replica, at + 60)
+    assert subject.sweep(local, replica, "hub", now_ms=(at + 60) * 1000) == [second]
+    assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("payload", ['["one"]', 'not-json', '{}', '[[]]', '[1]'])
+def test_membership_marker_is_validated(payload):
+    body = "Home-overdue membership v1: " + payload + "\n- ghost (title), todo, 45 minutes overdue"
+    assert subject._listed_ids(body) == ({"one"} if payload == '["one"]' else set())
+
+
+def test_legacy_membership_listing_remains_readable():
+    assert subject._listed_ids(
+        "Home-owned transitions overdue\n- one (title), todo, 45 minutes overdue\n- tests (12 passed)"
+    ) == {"one"}
+
+
 def test_closed_incident_is_replaced_when_membership_changes(replica, local):
     card(replica, "one")
     [first] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
@@ -240,6 +268,22 @@ def test_closed_incident_membership_ignores_checkpoint_bullets(replica, local):
     assert "\n- tests (12 passed)" in (task.body or "")
     _close(local, first, NOW)
     _fresh_at(replica, NOW + 60)
+    assert subject.sweep(local, replica, "hub", now_ms=(NOW + 60) * 1000) == [first]
+    assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("shape", ["checkpoint", "title"])
+def test_closed_membership_is_not_derived_from_prose(replica, local, shape):
+    card(replica, "one")
+    if shape == "checkpoint":
+        replica.execute(
+            "INSERT INTO task_runs VALUES (1, 'one', 'continued', ?, ?)",
+            ("quoted incident:\n- ghost (ghost title), todo, 45 minutes overdue (since x)", NOW),
+        )
+    else:
+        replica.execute("UPDATE tasks SET title=? WHERE id='one'", ("multiline\ntitle",))
+    [first] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    _close(local, first, NOW)
     assert subject.sweep(local, replica, "hub", now_ms=(NOW + 60) * 1000) == [first]
     assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
 
