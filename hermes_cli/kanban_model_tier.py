@@ -466,8 +466,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
         model, provider, reason = resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg)
     except Exception as exc:
         if is_review:
-            from hermes_cli.kanban_review_model import ReviewModelUnavailable
-            raise ReviewModelUnavailable(f"Review model resolution failed: {exc}") from exc
+            from hermes_cli.kanban_review_model import resolution_error
+            raise resolution_error(exc) from exc
         from hermes_cli.kanban_pace_reroute import lose as _lose_pace_offer
         _lose_pace_offer(getattr(task, "id", ""), f"route resolution failed: {type(exc).__name__}")
         logger.warning("kanban model tier: resolve failed for %s (%s)", getattr(task, "id", "?"), exc,

@@ -170,6 +170,20 @@ class ReviewModelUnavailable(ModelRoutingError):
     """No independent reviewer is configured; do not spawn the implementer's model."""
 
 
+class ReviewRouteDeferred(ReviewModelUnavailable):
+    """Independent reviewers exist, but this host must wait for a known deadline."""
+
+    def __init__(self, detail, until):
+        super().__init__(detail)
+        self.until = until
+
+
+def resolution_error(exc):
+    """Preserve deadline-bearing refusals through the tier's contextual error wrapper."""
+    return exc if isinstance(exc, ReviewRouteDeferred) else ReviewModelUnavailable(
+        f"Review model resolution failed: {exc}")
+
+
 def _handoff(conn, task):
     """``(run_id, metadata)`` of the latest review handoff, or ``(None, {})``."""
     # Metadata belongs to the handoff run, not to the Task row. Read only the
@@ -288,6 +302,8 @@ def admission_refusal(conn, task_id, exc):
     A host that cannot place the worker (no restart-safe scope) or an unavailable independent reviewer is
     infrastructure: retried with the budget untouched, until ``deferral_exhausted`` sends the review to a block."""
     from tools.process_registry import RestartSafeScopeUnavailable
+    if isinstance(exc, ReviewRouteDeferred):
+        return True, False, None  # a wall appearing after preflight never exhausts reviewer admission
     if isinstance(exc, ReviewModelUnavailable) and deferral_exhausted(conn, task_id, str(exc)):
         return False, True, {"admission_refusal": "review_model_unavailable", "deferrals": DEFERRAL_LIMIT}
     from hermes_cli.kanban_pace_reroute import OfferLost  # a lapsed pace move: requeue for a fresh judgment
@@ -354,11 +370,21 @@ def resolve_review_model(conn, task, cfg):
     from hermes_cli.kanban_model_tier import infer_provider
     from hermes_cli.kanban_pin_reroute import is_mandatory_pin
     now = time.time()
-    walled = {**pw.active_walls(now=now), **held_pools(cfg.get("llm_pacing"), now)}
+    walls = pw.active_walls(now=now)
+    holds = held_pools(cfg.get("llm_pacing"), now)
+    waits = []
 
     def _unavailable(model, provider):
         norm = pw._norm(provider)
-        return not norm or norm == "auto" or norm in walled or bool(pw.live_quota_wall(norm, model))
+        if not norm or norm == "auto":
+            return True
+        deadlines = [value for value in (walls.get(norm), holds.get(norm), pw.live_quota_wall(norm, model))
+                     if isinstance(value, (int, float)) and value > now]
+        if deadlines:
+            if registry_refusal(model, provider, assignee) is None:
+                waits.append(max(deadlines))  # a route needs ALL its overlapping walls/holds to clear
+            return True
+        return False
 
     # A concrete, independent handoff override is honored unless its pool is held or walled (the fast return
     # used to skip that check and run the reviewer into the hold/wall): then the next independent route takes it.
@@ -397,4 +423,6 @@ def resolve_review_model(conn, task, cfg):
     detail = f"No eligible {levels} review model distinct from {sorted(excluded)!r}"
     if refusal and override:
         detail = f"review_model {override[0]!r} is refused here ({refusal.code}); {detail}"
+    if waits:
+        raise ReviewRouteDeferred(detail, min(waits))
     raise ReviewModelUnavailable(detail)
