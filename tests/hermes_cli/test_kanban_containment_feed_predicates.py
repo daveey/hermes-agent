@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_cli import kanban_containment_replica as replica
+from hermes_cli import kanban_sync_quarantine as quarantine
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_sync_client as client
 from hermes_cli.kanban_db_sync import uuid7
@@ -50,12 +50,13 @@ def test_real_feed_entrypoint_certifies_before_apply(synced_conn, monkeypatch, s
         assert actual_conn is conn and actual_hub is hub and board == "default"
         assert len(page) == 1 and page[0].fields["containment_episode"] == row["containment_episode"]
         calls.append("certify")
+        return page
 
     def apply(*_a, **_k):
         assert calls == ["certify"]
         calls.append("apply")
 
-    monkeypatch.setattr(replica, "certify_page", certify)
+    monkeypatch.setattr(quarantine, "certified_page", certify)
     monkeypatch.setattr(client.sync, "apply_remote_changes", apply)
     monkeypatch.setattr(client, "IMPORT_ORDER", ["tasks"])
     if snapshot:
