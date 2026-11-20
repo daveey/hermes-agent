@@ -7,7 +7,11 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
 ``kanban_notice`` older than ``GRACE_S`` with no live turn, and:
 
 - a "blocked" notice whose card has moved on since (answered, rescheduled, done, archived) never wakes: it is
-  stamped ``closeout.state = "superseded"`` and the chat's outcome is refreshed;
+  stamped ``closeout.state = "superseded"`` and the chat's outcome is refreshed. Superseded user notices are
+  transparent to outcome derivation and candidate discovery, so an older unanswered notice keeps its custody;
+- a creator-decision notice is superseded only with an exact local source-event/render match and proof its
+  card left the chat wait (a scheduled card must explicitly name a different producer). Mixed/foreign/unknown
+  rows remain unanswered;
 - a notice about a card blocked on a human never wakes: its owner's outcome reads ``decision``; an incidental
   recipient with no owning obligation preserves its preceding turn's outcome through an informational marker;
 - otherwise the notice row is claimed (``display_metadata.closeout``, compare-and-swap on the row, so exactly one
@@ -93,7 +97,7 @@ def _reset_refreshed_for_tests() -> None:
     _refreshed.clear()
 
 _CANDIDATES_SQL = """
-SELECT s.id AS sid, m.id AS msg_id, m.timestamp, m.content, m.display_metadata,
+SELECT s.id AS sid, m.id AS msg_id, m.role, m.timestamp, m.content, m.display_metadata,
        {last_active} AS last_active
   FROM sessions s
   JOIN messages m ON m.id = (SELECT id FROM messages WHERE session_id = s.id AND active = 1
@@ -107,7 +111,7 @@ SELECT s.id AS sid, m.id AS msg_id, m.timestamp, m.content, m.display_metadata,
 # ``idx_messages_kanban_notice``) instead of the last message of every session; ``m.id = (...)`` keeps the
 # "a notice is the chat's last active message" test. 5.5x less work on a 1.3M-message store.
 _CANDIDATES_INDEXED_SQL = """
-SELECT s.id AS sid, m.id AS msg_id, m.timestamp, m.content, m.display_metadata,
+SELECT s.id AS sid, m.id AS msg_id, m.role, m.timestamp, m.content, m.display_metadata,
        {last_active} AS last_active
   FROM (SELECT session_id, MAX(id) AS nid FROM messages INDEXED BY idx_messages_kanban_notice
          WHERE display_kind = 'kanban_notice' AND active = 1 AND role IN ('user', 'assistant', 'tool')
@@ -156,7 +160,10 @@ def candidates(db: Any, now: float, only: Optional[set[str]] = None) -> list[dic
     else:
         rows = candidate_rows(db, sql)
     out = []
+    from tui_gateway.notice_history import preceding_candidate
+
     for row in rows:
+        row = preceding_candidate(db, row)
         # Cache structure, not age: a notice can become due (or expire) without a commit.
         meta = _decode(row["display_metadata"])
         deferred_due = _deferred_due(meta, now)
@@ -283,7 +290,10 @@ def superseded(cand: dict) -> bool:
     meta = cand["meta"]
     stale = bool(meta.get("stale"))  # only ever set on blocked notices, by the fan-out
     blocked = sorted(set(_BLOCKED_LINE.findall(cand["content"])))
-    if not blocked or _is_remote(meta):
+    from tui_gateway.notice_history import creator_superseded
+    if not blocked:
+        return stale or (not _is_remote(meta) and creator_superseded(cand))
+    if _is_remote(meta):
         return stale
     keys = [str(k) for k in meta.get("kanban_event_keys") or () if ":" in str(k) and not str(k).startswith("remote:")]
     board = meta.get("board") or (keys[0].rsplit(":", 1)[0] if keys else None)
