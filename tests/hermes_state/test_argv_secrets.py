@@ -67,6 +67,11 @@ KEY = "q8ZpL2vXk9RtYwB4mN7cQ1sD5fH3jK6g"
             ["API_TOKEN=abc123", "Config=" + KEY],
             [f"API_TOKEN={MASK}", f"Config={MASK}"],
         ),
+        # an UPPER_SNAKE env name stays readable; a secret-named one still hides its value
+        (
+            ["HERMES_RELAY_ID_2024=abc", "OPENROUTER_API_KEY_2024=sk12"],
+            ["HERMES_RELAY_ID_2024=abc", f"OPENROUTER_API_KEY_2024={MASK}"],
+        ),
         # plural secret lists are secrets too
         (
             ["--github-tokens", "Qx7Lm2Zp/w", "--bot-tokens=abc"],

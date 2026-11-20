@@ -35,6 +35,8 @@ _TOKEN_CHARS = re.compile(r"^[A-Za-z0-9_+=.~-]+$")
 _HEX = re.compile(r"^[0-9a-fA-F-]+$")
 _HERMES_ID = re.compile(r"^(?:t_[0-9a-f]+|\d{8}_\d{6}_[0-9a-z]+|[a-z]+(?:[-_][a-z]+)+)$")
 _ASSIGNMENT = re.compile(r"^([A-Za-z][A-Za-z0-9_.-]*)=")
+# An environment-style name (HERMES_RELAY_ID_2024, OPENROUTER_API_KEY_2): a name, never a random token.
+_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
 _NUMBER = re.compile(r"^[+-]?\d+(?:\.\d+)?$")
 _PATH_START = re.compile(r"^(?:/|~|\.{1,2}/|\\|[A-Za-z]:[\\/])")
 _MIN_BARE_SECRET = 20
@@ -104,7 +106,8 @@ def mask_argv_secrets(argv: list[str]) -> list[str]:
         name, value = (assignment.group(1), token[assignment.end():]) if assignment else ("", "")
         # ssh -o ServerAliveInterval=15, env-style NAME=value -- not base64 padding (``Zm9v…MA==``: a random "name"
         # followed by "=" or nothing), which is judged as one token below.
-        if assignment and value and not value.startswith("=") and not _looks_like_bare_secret(name):
+        if (assignment and value and not value.startswith("=")
+                and (_ENV_NAME.match(name) or not _looks_like_bare_secret(name))):
             out.append(f"{name}={_mask_value(value, secret_named=_is_secret_flag('--' + name))}")
             continue
         out.append(_mask_value(token, secret_named=False))
