@@ -10,13 +10,13 @@ env prefixes in shell strings. ``agent.redact`` still runs afterwards for known 
 
 Limits, measured on generated secrets of every common shape (letters and digits, base32/64, urlsafe, hex, symbol
 passwords, single- and mixed-case letters, grouped keys) as a bare argument, in an absolute or relative path, in a
-URL, as a URL query name, in a list, inside a spaced env value or a flag value and as a ``NAME=`` value -- a shown
+URL, as a URL query name or value, in a list, inside a spaced env value or a flag value and as a ``NAME=`` value -- a shown
 tail of 8+ characters counts as a leak: the worst shape and position shows about 8.5% of 16-character secrets, 3% of
 24-character, 2% of 32-character and 1.5% of 40-character ones (random letters can read like words); the tests hold
-these under 10%, 5%, 3% and 2%. About 0.15% of this repo's identifiers and 0.1% of its env names are masked. This is a rate, not a
-guarantee, and some secrets look exactly like identifiers and are shown: pronounceable passwords (``correcthorse``),
-all-digit values, UUIDs, strings under 12 characters and a secret shaped like a kebab-case ``--flag`` right after a
-secret-named flag (read as the next flag, as switches need), unless a name marks them secret. Short hex (up to 12
+these under 10%, 5%, 3% and 2%. About 0.15% of this repo's identifiers and 0.1% of its env names are masked. This
+is a rate, not a guarantee, and some secrets look exactly like identifiers and are shown: pronounceable passwords
+(``correcthorse``), all-digit values, UUIDs, strings under 12 characters and a secret shaped like a kebab-case
+``--flag`` right after a secret-named flag (read as the next flag, as switches need), unless a name marks them secret. Short hex (up to 12
 characters) is shown on purpose: it is how commits are abbreviated; longer hex (full commits, digests, container ids)
 is masked with the keys it looks like. ``--pin`` and ``--private`` are not secret names on purpose (switches or
 provider slugs in Hermes and common tools); the query names ``code``, ``session`` and ``hash`` are, so harmless values
@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import urllib.parse
 from itertools import pairwise
 
 MASK = "***"
@@ -87,11 +88,19 @@ _PROGRAM_SECRET_FLAGS = {
     "lftp": ((), (), ("-u", "--user")),
 }
 _NO_FLAGS = ((), (), ())
-# Where no program is known (options passed through env or shell text: CURL_ARGS='-u admin:pw'), a separate -u/--user
-# argument that is user:pass has its password masked; a bare user and a numeric uid:gid stay. Known programs (ps,
-# docker, sudo) keep their own meaning of -u, and -url=…, -upstream=… are other flags.
+# A separate -u/--user argument that is user:pass has its password masked (mytool -u admin:pw, CURL_ARGS='-u …'); a
+# bare user and a numeric uid:gid stay. Programs whose -u/--user names a user or user:group keep it whole (ps -u
+# daveey:staff, docker --user app:app), and -url=…, -upstream=… are other flags.
 _GENERIC_USER_FLAGS = frozenset({"-u", "--user"})
+_USER_FLAG_PROGRAMS = frozenset({
+    "ps", "pgrep", "pkill", "killall", "top", "htop", "lsof", "w", "who", "last", "crontab", "chown", "chgrp",
+    "sudo", "doas", "su", "runuser", "setpriv", "docker", "podman", "nerdctl", "ctr", "crictl", "kubectl", "lxc",
+    "systemd-run", "machinectl", "install", "find",
+})
 _COOKIE_FLAGS = frozenset({"-b", "--cookie", "cookie"})
+# Flags whose value is a file glob, where a leading "!" negates it (rg --glob=!node_modules, -g '!*.lock').
+_GLOB_FLAGS = frozenset({"-g", "--glob", "--iglob", "--exclude", "--include", "--exclude-dir", "--ignore",
+                         "--ignore-glob"})
 # Programs that run a command given as their first positional argument: that program's own flags apply after it.
 _COMMAND_WRAPPERS = frozenset({"sshpass", "sudo", "doas", "env", "nice", "nohup", "timeout", "xargs", "exec", "time",
                                "stdbuf", "ionice", "chroot", "setsid", "runuser", "caffeinate", "watch", "flock"})
@@ -149,7 +158,9 @@ _USERINFO = re.compile(r"^([^:@/\s]+):([^:@/\s]+)@([A-Za-z][A-Za-z0-9-]*(?:\.[A-
 _NOT_USERINFO = frozenset({"mailto", "npm", "github", "gitlab", "bitbucket", "pkg", "jsr", "docker", "oci", "git"})
 _STRUCTURE = re.compile(r"[/?&#=;@]")  # between the components of a path or URL
 _NAME_COLON = re.compile(r"^([A-Za-z_][\w.-]*):(\S+)$")  # name:value, judged by the name
-_QUERY_NAME = re.compile(r"^[\w.\-\[\]]+$")  # a query parameter name: word characters, dots, dashes, brackets
+# A query parameter name, percent-decoded: word characters, dots, dashes and brackets (user[password], whose parts
+# _name_parts splits), with an OData/Graph "$" in front ($select, $top).
+_QUERY_NAME = re.compile(r"^\$?[\w.\-\[\]]+$")
 _IMAGE_DIGEST = re.compile(r"^[\w.-]+@sha\d+:[0-9a-fA-F]+$")  # image@sha256:… (the long hex is still masked)
 # A file that holds a key or credential, named after a secret flag (openssl -key server.key). A secret that looks
 # exactly like such a file name (--password notes.txt) is shown, like other secrets shaped as identifiers.
@@ -308,7 +319,7 @@ def is_identifier(token: str) -> bool:
     if not _NPM_SPEC.match(token):
         # globs (*.example.com, dir/*, gc*) and printf tokens (%r@%h:%p) are not password symbols
         unglobbed = re.sub(r"(?:(?<=[./:\-*(])|^)\*|\*(?=[./:\-*)]|$)|(?<![A-Za-z0-9])%[A-Za-z](?![A-Za-z0-9])"
-                           r"|^!(?=[A-Za-z])", "", token)
+                           , "", token)
         if not re.search(r"[^\w.*/-]", unglobbed) and re.search(r"\.[A-Za-z]{1,5}$|/", unglobbed):
             unglobbed = unglobbed.replace("*", "")  # foo*bar.txt, src/*util*/x: a file glob
         if re.search(r"[A-Za-z0-9]", unglobbed) and (
@@ -322,7 +333,7 @@ def is_identifier(token: str) -> bool:
 # ---- names ----------------------------------------------------------------------------------------------------------
 
 def _name_parts(name: str) -> list[str]:
-    return [part.lower() for part in re.split(r"[-_.]", name.lstrip("-")) if part]
+    return [part.lower() for part in re.split(r"[-_.\[\]]", name.lstrip("-")) if part]  # user[password]
 
 
 def _secret_index(parts: list[str]) -> int:
@@ -461,6 +472,19 @@ def _password_cut_at_question(path: str, query: str) -> bool:
     return bool(re.search(r"[!^$*#%@]", joined)) and not is_identifier(joined.replace("?", "-"))
 
 
+def _judge_query_value(value: str, *, depth: int) -> str:
+    """A query value, percent-decoded when it is encoded ($filter=Price%20gt%2020): shown as written when every
+    decoded word passes, else masked whole (the words of one value are one secret as much as one phrase)."""
+    if "%" not in value:
+        return _judge(value, secret=False, depth=depth)
+    decoded = urllib.parse.unquote(value)
+    if decoded == value:
+        return _judge(value, secret=False, depth=depth)
+    words = [word for word in re.split(r"[\s+]+", decoded) if word]
+    shown = [_judge(word, secret=False, depth=depth) for word in words]
+    return value if all(MASK not in word for word in shown) else MASK
+
+
 def _mask_query(query: str, *, depth: int) -> str:
     """``a=1&token=x``: each name must read as one (a secret used as a name is masked), and each value is judged
     whole under its name (an e-mail with "@" stays one value)."""
@@ -468,7 +492,8 @@ def _mask_query(query: str, *, depth: int) -> str:
     masking = False  # pieces after a masked pair that are not well-formed pairs: the rest of a secret cut at "&"
     for pair in query.split("&"):
         name, eq, value = pair.partition("=")
-        well_formed = bool(eq) and bool(_QUERY_NAME.match(name)) and is_identifier(name)
+        plain = urllib.parse.unquote(name)
+        well_formed = bool(eq) and bool(_QUERY_NAME.match(plain)) and is_identifier(re.sub(r"[$\[\]]", "-", plain))
         if masking and not well_formed:
             out.append(MASK)
             continue
@@ -479,10 +504,13 @@ def _mask_query(query: str, *, depth: int) -> str:
         elif not well_formed:
             masking = True
             out.append(f"{MASK}={MASK if value else value}")  # the name is the secret (?Xk9mP2…=1); its value goes too
-        elif _is_secret_name(name) or name.lower() in _QUERY_SECRETS:
+        elif _is_secret_name(plain) or plain.lower() in _QUERY_SECRETS:
+            masking = bool(value)  # a secret value cut at "&" (pass=sun&shine) goes on into the pieces after it
             out.append(f"{name}={MASK if value else value}")
         else:
-            out.append(f"{name}={_judge(value, secret=False, depth=depth + 1)}")
+            judged = _judge_query_value(value, depth=depth + 1)
+            masking = MASK in judged
+            out.append(f"{name}={judged}")
     return "&".join(out)
 
 
@@ -698,6 +726,8 @@ def _flag(token: str, name: str, depth: int) -> str:
         return f"{head}{sep}{_mask_command(value, depth=depth)}"
     if _is_secret_name(name):
         return f"{head}{sep}{_judge_secret(value, name=name)}"
+    if head in _GLOB_FLAGS and value.startswith("!"):
+        return f"{head}{sep}!{_judge(value[1:], secret=False, depth=depth)}"
     return f"{head}{sep}{_judge(value, secret=False, depth=depth)}"
 
 
@@ -718,7 +748,9 @@ def _pending_value(token: str, kind: str, name: str, *, depth: int) -> str | Non
 def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) -> list[str]:
     """*argv* (without the program) as it may be shown; *program* (argv[0]) selects its own password flags."""
     flags = _program_flags(program) or _NO_FLAGS
-    wrapper = os.path.basename(program or "").lower() in _COMMAND_WRAPPERS
+    current = os.path.basename(program or "").lower()  # the program whose flags these are
+    wrapper = current in _COMMAND_WRAPPERS
+    glob_next = False  # the previous argument was a glob flag (rg -g '!node_modules')
     out: list[str] = []
     pending: tuple[str, str] | None = None  # (what the next argument is, the flag that asked for it)
     for token in argv:
@@ -726,12 +758,17 @@ def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) ->
             out.append(token)
             pending = None
             continue
+        if glob_next and token.startswith("!"):
+            glob_next = False
+            out.append("!" + _judge(token[1:], secret=False, depth=_depth))
+            continue
+        glob_next = token in _GLOB_FLAGS
         if pending is not None:
             (kind, name), pending = pending, None
             if (shown := _pending_value(token, kind, name, depth=_depth)) is not None:
                 out.append(shown)
                 continue
-        if token in _GENERIC_USER_FLAGS and flags is _NO_FLAGS and not program:
+        if token in _GENERIC_USER_FLAGS and current not in _USER_FLAG_PROGRAMS:
             out.append(token)
             pending = ("userpass", token)
             continue
@@ -754,10 +791,12 @@ def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) ->
             continue
         if (wrapped := _program_flags(token)) is not None:
             flags, wrapper = wrapped, False  # sudo mysql …, docker exec db mysql …, env X=1 mysql …
+            current = os.path.basename(token).lower()
             out.append(token)
             continue
         if wrapper and "=" not in token and not token.isdigit():
             # sshpass -p x ssh -p 2222 …: from the wrapped program on, its own flags (here none) apply
-            flags, wrapper = _NO_FLAGS, os.path.basename(token).lower() in _COMMAND_WRAPPERS
+            current = os.path.basename(token).lower()
+            flags, wrapper = _NO_FLAGS, current in _COMMAND_WRAPPERS
         out.append(_judge(token, secret=False, depth=_depth))
     return out

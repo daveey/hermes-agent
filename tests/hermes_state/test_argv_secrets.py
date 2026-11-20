@@ -628,6 +628,7 @@ _POSITIONS = {
     "flag_value": lambda s: [f"--jvm-arg=-Dregion={s}"],
     "list": lambda s: [f"--ids=alpha,{s},beta"],
     "query_name": lambda s: [f"https://api.example.com/v1/items?{s}=1&page=2"],
+    "query_value": lambda s: [f"https://api.example.com/v1/items?q={s}&page=2"],
     "relative_path": lambda s: [f"data/{s}.json"],
     "path": lambda s: [f"/srv/data/{s}/file.json"],
     "url": lambda s: [f"https://api.example.com/v1/{s}?page=2"],
@@ -1072,3 +1073,90 @@ def test_a_password_equal_to_the_user_is_masked(argv, expected):
 )
 def test_known_programs_keep_their_own_u_and_word_globs_are_kept(argv, program):
     assert shown(argv, program) == argv
+
+
+# ---- the seventh review: -u for named programs, bracketed and OData query names, values cut at "&", "!" globs ---------
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (["-u", "admin:sunshine"], "mytool"),
+        (["fetch.sh", "-u", "admin:sunshine"], "bash"),
+        (["x.py", "-u", "admin:sunshine"], "python3"),
+        (["cli.js", "--user", "admin:sunshine"], "node"),
+        (["-c", "./fetch.sh -u admin:sunshine"], "bash"),
+        (["exec", "db", "mysql", "-u", "root:sunshine"], "docker"),
+    ],
+)
+def test_the_generic_user_rule_masks_a_password_for_any_program(argv, program):
+    out = " ".join(shown(argv, program))
+    assert "sunshine" not in out and f":{MASK}" in out
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (["-u", "x.py"], "python3"),
+        (["push", "-u", "origin", "main"], "git"),
+        (["-u", "daveey:staff"], "pgrep"),
+        (["exec", "-u", "app:app", "db", "sh"], "podman"),
+    ],
+)
+def test_programs_whose_u_names_a_user_or_is_a_switch_are_kept(argv, program):
+    assert shown(argv, program) == argv
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("https://h/?token[]=sunshine", f"https://h/?token[]={MASK}"),
+        ("https://h/?auth[token]=sunshine", f"https://h/?auth[token]={MASK}"),
+        ("https://h/?user[password]=sunshine&x=1", f"https://h/?user[password]={MASK}&x=1"),
+        ("https://h/?%70assword=sunshine", f"https://h/?%70assword={MASK}"),
+    ],
+)
+def test_bracketed_and_encoded_secret_query_names_mask_their_value(value, expected):
+    assert shown([value]) == [expected]
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("/cb?pass=sun&shine&x=1", f"/cb?pass={MASK}&{MASK}&x=1"),
+        ("/cb?token=ab&correcthorsebattery", f"/cb?token={MASK}&{MASK}"),
+        (f"https://h/x?q={KEY}&sunshine&page=2", f"https://h/x?q={MASK}&{MASK}&page=2"),
+        (f"https://h/x?{KEY}&sunshine&page=2", f"https://h/x?{MASK}&{MASK}&page=2"),
+        (f"https://h/x?{KEY}=1&sunshine&page=2", f"https://h/x?{MASK}={MASK}&{MASK}&page=2"),
+    ],
+)
+def test_pieces_after_a_masked_query_piece_are_masked_until_a_well_formed_pair(value, expected):
+    """The masking carry in _mask_query: a secret cut at "&" does not show its tail, and the next pair is judged."""
+    assert shown([value]) == [expected]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://graph.microsoft.com/v1.0/me/messages?$select=subject&$top=10",
+        "https://h/Products?$filter=Price%20gt%2020",
+        "https://h/?%24filter=a",
+        "https://h/?q%5B%5D=1",
+        "https://h/?q=hello%20world&next=%2Fa%2Fb",
+    ],
+)
+def test_odata_and_percent_encoded_queries_are_kept(value):
+    assert shown([value]) == [value]
+
+
+def test_an_encoded_secret_query_value_is_masked():
+    assert shown([f"https://h/?q=%21{KEY}"]) == [f"https://h/?q={MASK}"]
+
+
+def test_a_leading_bang_is_a_glob_only_after_a_glob_flag():
+    assert shown(["-g", "!*.lock", "--exclude=!vendor", "!sunshine"], "rg") == [
+        "-g",
+        "!*.lock",
+        "--exclude=!vendor",
+        MASK,
+    ]
