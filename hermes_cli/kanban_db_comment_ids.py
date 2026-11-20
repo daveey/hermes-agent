@@ -141,7 +141,7 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
             "VALUES (?, ?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now, origin),
         )
         cid = int(cur.lastrowid or 0)
-        payload: dict = {"author": author, "len": len(body), "comment_id": cid}
+        payload: dict = {"author": author, "len": len(body.strip()), "comment_id": cid}
         # Sync's insert trigger assigns the portable identity before this read.
         # Unsynced boards have no uid column; retain their local legacy form.
         row = conn.execute("SELECT * FROM task_comments WHERE id = ?", (cid,)).fetchone()

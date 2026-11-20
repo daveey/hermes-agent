@@ -254,12 +254,27 @@ def _comment_rejections(conn: sqlite3.Connection, task_id: str, urls: Iterable[s
 COMMENT_EVENT_SKEW_SECONDS = 120
 
 
-def _comment_rows(conn: sqlite3.Connection, task_id: str) -> dict[int, tuple[str, Optional[int], int]]:
+class _Rows(dict):
+    """id -> (author, created_at epoch, len(body)), plus ``uids``: portable uid -> local row ids."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.uids: dict[str, list[int]] = {}
+
+
+def _comment_rows(conn: sqlite3.Connection, task_id: str) -> _Rows:
     """Local ``task_comments`` rows: id -> (author, created_at epoch, len(body))."""
     from hermes_cli import kanban_db as _kb
 
-    return {r[0]: (r[1], _kb._to_epoch(r[2]), r[3] or 0) for r in conn.execute(
-        "SELECT id, author, created_at, length(body) FROM task_comments WHERE task_id = ?", (task_id,))}
+    has_uid = any(c[1] == "uid" for c in conn.execute("PRAGMA table_info(task_comments)"))
+    out = _Rows()
+    for r in conn.execute(
+            f"SELECT id, author, created_at, length(body){', uid' if has_uid else ''} "
+            "FROM task_comments WHERE task_id = ?", (task_id,)):
+        out[r[0]] = (r[1], _kb._to_epoch(r[2]), r[3] or 0)
+        if has_uid and isinstance(r[4], str) and r[4]:
+            out.uids.setdefault(r[4], []).append(r[0])
+    return out
 
 
 def _row_matches(row: tuple[str, Optional[int], int], at: int, author: str, length: int, *, exact: bool) -> bool:
@@ -280,6 +295,13 @@ def _event_row_id(rows: dict[int, tuple[str, Optional[int], int]], at: Optional[
     same triple and no other row does, so a home board, where ids agree, maps as before.
     Two rows with the event's triple are indistinguishable: None (the caller fails closed).
     """
+    # The portable uid names the row on every host; only a unique local match counts, else the
+    # triple below decides as before (never fail open).
+    uid = data.get("comment_uid")
+    if isinstance(uid, str) and uid:
+        hits = getattr(rows, "uids", {}).get(uid, [])
+        if len(hits) == 1:
+            return hits[0]
     author, length, cid = data.get("author"), data.get("len"), data.get("comment_id")
     if at is None or not isinstance(author, str) or type(length) is not int:
         return None

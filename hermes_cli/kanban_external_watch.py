@@ -367,8 +367,10 @@ def _wake_ref_broken(conn: sqlite3.Connection, task_id: str, rec: dict, derived:
 def _finished_note(rec: dict, derived: dict) -> str:
     res = _result(rec, derived)
     where = f" ({res['url']})" if res.get("url") else ""
-    return (f"Woken: the job on {res['service']} finished: {res['outcome']}{where}. "
-            + ("A failed job is a result for this card, not an outage." if res["outcome"] == "failed" else ""))
+    parts = [f"Woken: the job on {res['service']} finished: {res['outcome']}{where}."]
+    if res["outcome"] == "failed":
+        parts.append("A failed job is a result for this card, not an outage.")
+    return " ".join(parts)
 
 
 def _assert_blocker(conn: sqlite3.Connection, task_id: str, rec: dict, derived: dict) -> Optional[str]:
