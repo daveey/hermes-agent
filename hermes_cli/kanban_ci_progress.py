@@ -684,7 +684,8 @@ _JITTER: dict[tuple[str, str], tuple[Any, float]] = {}  # (db, task) -> (park ev
 
 
 def _record_watch(conn: sqlite3.Connection, task_id: str, watched, wall: float,
-                  rand: Optional[float] = None) -> Optional[str]:
+                  rand: Optional[float] = None, park_id: Optional[int] = None,
+                  ref: Optional[str] = None) -> Optional[str]:
     """[daveey] Write the poll as the card's external-watch record (and wake / assert / clear as it says). A failure
     to record never fails the sweep. Returns the wake event kind or None."""
     from hermes_cli import kanban_external_watch as kew
@@ -694,7 +695,7 @@ def _record_watch(conn: sqlite3.Connection, task_id: str, watched, wall: float,
         declared = ctx["payload"].get("watch") if isinstance(ctx["payload"].get("watch"), dict) else {}
         return kew.apply_poll(conn, task_id, watched.poll, now=wall, adapter=watched.adapter, scope=watched.scope,
                               every=clamp_every(declared.get("every"), DEFAULT_CI_EVERY),
-                              service_name=watched.service_name, rand=rand)
+                              service_name=watched.service_name, rand=rand, park_id=park_id, ref=ref)
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError):
         logger.warning("kanban external watch: could not record the poll of %s", task_id, exc_info=True)
         return None
@@ -786,7 +787,8 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
             if p.state == NOT_STARTING and apply(conn, task_id, ref, p):
                 woken.append(task_id)
                 continue
-            if watched is not None and watched.poll is not None and _record_watch(conn, task_id, watched, wall, rand):
+            if watched is not None and watched.poll is not None and _record_watch(
+                    conn, task_id, watched, wall, rand, park_id, ref):
                 woken.append(task_id)
     except Exception:
         logger.warning("kanban ci run progress sweep failed", exc_info=True)

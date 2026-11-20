@@ -274,15 +274,20 @@ def _result(rec: dict, derived: dict) -> dict:
 
 def apply_poll(conn: sqlite3.Connection, task_id: str, poll: dict, *, now: float, adapter: str, scope: str = "",
                every: Any = None, service_name: Optional[str] = None, rand: Optional[float] = None,
-               cmd: str = "", terminal: Optional[bool] = None) -> Optional[str]:
+               cmd: str = "", terminal: Optional[bool] = None, park_id: Optional[int] = None,
+               ref: Optional[str] = None) -> Optional[str]:
     """Record one poll for a scheduled card and act on it: a finished job wakes the card with ``external_result``
     (``condition_met``; a FAILED job wakes too and is not an outage); a service gone red asserts the shared
-    blocker; an ok poll clears it. Returns the event kind that woke the card, else None. Opens its own write txn."""
+    blocker; an ok poll clears it (a finished job's read included). Returns the event kind that woke the card,
+    else None. Opens its own write txn. ``park_id`` / ``ref`` are the park the caller read the poll for: a card
+    parked again while the read was in flight (another ref, or the same ref anew) drops the poll untouched."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_wake_check as kwc
     with kb.write_txn(conn):
         status = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if status is None or status[0] != "scheduled":
+            return None
+        if not _same_park(conn, task_id, park_id, ref):
             return None
         got = record_poll(conn, task_id, poll, now=now, adapter=adapter, scope=scope, every=every,
                           service_name=service_name, rand=rand)
@@ -290,6 +295,9 @@ def apply_poll(conn: sqlite3.Connection, task_id: str, poll: dict, *, now: float
             return None
         derived, rec = got["derived"], got["rec"]
         finished = poll.get("terminal") if terminal is None else terminal
+        health = derived["health"]
+        if health in ("ok", "degraded") and scope:
+            _clear_blocker(conn, rec)  # before a finished job's wake returns: this may be the scope's last card
         if finished or derived.get("wake"):
             kwc.episode.reset(conn, task_id)
             woke = kwc._wake(conn, task_id, kwc.CONDITION_MET_EVENT, {
@@ -298,16 +306,25 @@ def apply_poll(conn: sqlite3.Connection, task_id: str, poll: dict, *, now: float
             if woke:
                 kb.add_comment(conn, task_id, AUTHOR, _finished_note(rec, derived))
             return woke
-        health = derived["health"]
         if derived["state"] == ks.DOWN and health in SERVICE_HEALTHS and scope and not poll.get("host_only"):
             if _scope_answers(conn, task_id, rec):
                 return _wake_ref_broken(conn, task_id, rec, derived, cmd)
             return _assert_blocker(conn, task_id, rec, derived)
         if derived["state"] == ks.DOWN and health == "probe_broken" and adapter != "shell":
             return _wake_ref_broken(conn, task_id, rec, derived, cmd)
-        if health in ("ok", "degraded") and scope:
-            _clear_blocker(conn, rec)
         return None
+
+
+def _same_park(conn: sqlite3.Connection, task_id: str, park_id: Optional[int], ref: Optional[str]) -> bool:
+    """The card's latest park is still the one a poll was read for. In the caller's write txn."""
+    if park_id is None and ref is None:
+        return True
+    ctx = park_context(conn, task_id)
+    if ctx is None:
+        return False
+    if park_id is not None and ctx["event_id"] != int(park_id):
+        return False
+    return ref is None or str((ctx["awaiting"] or {}).get("ref") or "") == ref
 
 
 def _rand() -> float:
@@ -395,7 +412,16 @@ def _clear_blocker(conn: sqlite3.Connection, rec: dict) -> None:
 
 def note_probe_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out: str, now: float,
                       every: Any) -> Optional[dict]:
-    """A legacy wake-check probe's result as a watch record (``kanban_external_adapters.shell``), for a scheduled
+    """:func:`note_probe` without the retry delay."""
+    return note_probe(conn, task_id, cmd, rc, out, now, every)[0]
+
+
+def note_probe(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out: str, now: float,
+               every: Any) -> tuple[Optional[dict], int]:
+    """Returns ``(external_result, delay)``; ``delay`` is the seconds a rate-limited service asked the probe to
+    stay away (``HERMES_WATCH`` ``retry_after``; 0 = none), which the caller puts into the probe's ``next_at``.
+
+    A legacy wake-check probe's result as a watch record (``kanban_external_adapters.shell``), for a scheduled
     ci/deploy/external park. In the caller's write txn; never raises. Returns the ``external_result`` to carry on
     a wake (exit 0 or a ``HERMES_WATCH`` line with a terminal job), else None. A GitHub run/PR park is also
     recorded by the CI sweep (the richer adapter); the later record wins."""
@@ -403,17 +429,20 @@ def note_probe_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any,
     try:
         ctx = park_context(conn, task_id)
         if ctx is None or (ctx["awaiting"] or {}).get("kind") not in ks.EXTERNAL_KINDS:
-            return None
+            return None, 0
         if (plan(conn, task_id, ctx) or {}).get("adapter") != "shell":
-            return None  # a GitHub run/PR park is recorded by the CI sweep's richer adapter
+            return None, 0  # a GitHub run/PR park is recorded by the CI sweep's richer adapter
         poll = shell.poll(rc, out)
         got = record_poll(conn, task_id, poll, now=now, adapter="shell", scope="", every=every,
                           service_name=poll.get("service_name"), rand=0.5)  # a probe runs every ``every``: no jitter
     except (sqlite3.Error, ValueError, KeyError, TypeError):
         logger.warning("kanban external watch: could not record the probe result of %s", task_id, exc_info=True)
-        return None
-    if got is None or not poll.get("terminal"):
-        return None
+        return None, 0
+    if got is None:
+        return None, 0
+    delay = int(got["rec"].get("retry_after") or 0) if got["rec"].get("service") == "rate_limited" else 0
+    if not poll.get("terminal"):
+        return None, delay
     result = _result(got["rec"], got["derived"])
     result["outcome"] = poll.get("outcome") or result["outcome"]
-    return result
+    return result, delay

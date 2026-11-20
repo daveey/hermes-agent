@@ -807,7 +807,7 @@ def producer_note(hit: dict) -> str:
             "`--from <that status>`. Those statuses count as met, so without it the probe passes at once.")
 
 
-def _after_probe(state: dict, claimed_next_at: Optional[int], now: int) -> int:
+def _after_probe(state: dict, claimed_next_at: Optional[int], now: int, delay: int = 0) -> int:
     """next_at after a probe that did not wake the card. [daveey] The claim parked next_at at its slot
     (``claimed_next_at``). A wait-comment or status expedite that committed while the probe ran moved it earlier
     (due now): that earlier slot is kept, so the next tick re-probes and sees the change instead of this older
@@ -815,7 +815,7 @@ def _after_probe(state: dict, claimed_next_at: Optional[int], now: int) -> int:
     held = state.get("next_at")
     if claimed_next_at is not None and held is not None and int(held) < int(claimed_next_at):
         return int(held)
-    return now + int(state["every"])
+    return now + max(int(state["every"]), int(delay or 0))  # delay: a rate-limited HERMES_WATCH retry_after
 
 
 def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, now: Optional[int], generation: str,
@@ -895,7 +895,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             if rc != 0:
                 kb._append_event(conn, task_id, "wake_episode_reset")
         from hermes_cli import kanban_external_watch as kew  # [daveey] external-run card record + HERMES_WATCH
-        ext_result = kew.note_probe_result(conn, task_id, cmd, rc, out, float(now), state["every"])
+        ext_result, delay = kew.note_probe(conn, task_id, cmd, rc, out, float(now), state["every"])
         if rc == 0 or (ext_result and ext_result.get("outcome") in ("succeeded", "failed", "cancelled")):
             return _wake(conn, task_id, CONDITION_MET_EVENT, {
                 "wake_check": cmd, "output": tail, **({"diagnostics": diagnostics} if diagnostics else {}),
@@ -938,7 +938,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             unproven.note_check(conn, task_id, cmd, tail, now, passive_policy=passive_policy, threshold=notice_interval)
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "
-                "next_at = ? WHERE task_id = ?", (now, tail, _after_probe(state, claimed_next_at, now), task_id))
+                "next_at = ? WHERE task_id = ?", (now, tail, _after_probe(state, claimed_next_at, now, delay), task_id))
             _note_alive(conn, task_id, cmd, now)
             return None
         age = stale_age(rc, out)
@@ -958,7 +958,8 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             # Not broken: the gateway is just offline. Keep any real-failure streak from before as it was.
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, "
-                "next_at = ? WHERE task_id = ?", (now, rc, tail, _after_probe(state, claimed_next_at, now), task_id))
+                "next_at = ? WHERE task_id = ?",
+                (now, rc, tail, _after_probe(state, claimed_next_at, now, delay), task_id))
             _note_alive(conn, task_id, cmd, now)
             return None
         gw = source_unknown(rc, out)
@@ -978,7 +979,8 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             # Same unchanged source state, already escalated: keep any real-failure streak as it was.
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, "
-                "next_at = ? WHERE task_id = ?", (now, rc, tail, _after_probe(state, claimed_next_at, now), task_id))
+                "next_at = ? WHERE task_id = ?",
+                (now, rc, tail, _after_probe(state, claimed_next_at, now, delay), task_id))
             _note_alive(conn, task_id, cmd, now)
             return None
         fails = int(state["fails"] or 0) + 1
@@ -991,7 +993,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
         conn.execute(
             "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, fails = ?, "
             "next_at = ? WHERE task_id = ?",
-            (now, rc_col, tail, fails, _after_probe(state, claimed_next_at, now), task_id))
+            (now, rc_col, tail, fails, _after_probe(state, claimed_next_at, now, delay), task_id))
         _note_alive(conn, task_id, cmd, now)
         return None
 
