@@ -27,9 +27,13 @@ def _stamped(conn, tid, body, *, writer="owner"):
 
 
 @pytest.mark.parametrize("wording", [
-    "Item 7 PR 1 of 2 (producer) published: softmax-universe/daveey-hermes PR #3717 ({pr}).",
-    "PR 1 is up at {pr}; waiting on CI.",
+    "Item 7 part 1 of 2 (producer) published: softmax-universe/daveey-hermes PR #3598 ({pr}).",
+    "Part 1 is up at {pr}; waiting on CI.",
     "Shipped {pr} (head abc123).",
+    "Canonical publication advanced work: PR3598 OPEN at exact head.",
+    "Published PR #3598; CI pending.",
+    "PR 3598 is up.",
+    "published pr#3598 and waiting",
 ])
 def test_trailer_names_this_card_spares_any_owned_wording(kanban_home, github, wording):
     with kbc.connect_closing() as conn:

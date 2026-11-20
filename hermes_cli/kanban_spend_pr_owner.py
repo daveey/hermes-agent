@@ -14,6 +14,9 @@ import sqlite3
 _CORE_PR = re.compile(r"https://github\.com/softmax-universe/daveey-hermes/pull/[1-9][0-9]*")
 _CORE_PR_IN_TEXT = re.compile(r"https://github\.com/softmax-universe/daveey-hermes/pull/[1-9][0-9]*(?![0-9A-Za-z_/])")
 EVENT = "spend_budget_spared"
+_CORE_REPO = "https://github.com/softmax-universe/daveey-hermes"
+# `PR #N`, `PR N`, `PRN`, `pr#N`: discovery only, resolved to this repo and verified by the PR body trailer.
+_PR_NUMBER = re.compile(r"(?<![A-Za-z0-9_])PR[ \t]*#?[ \t]*([1-9][0-9]*)(?![0-9A-Za-z_/])", re.IGNORECASE)
 
 
 def published_prs(conn: sqlite3.Connection, task_id: str) -> set[str]:
@@ -49,6 +52,7 @@ def comment_candidates(conn: sqlite3.Connection, task_id: str) -> set[str]:
         for line in (body or "").splitlines():
             if not line.lstrip().startswith(">"):
                 urls.update(_CORE_PR_IN_TEXT.findall(line))
+                urls.update(f"{_CORE_REPO}/pull/{n}" for n in _PR_NUMBER.findall(line))
     return urls
 
 
@@ -57,13 +61,20 @@ def recognised_prs(conn: sqlite3.Connection, task_id: str) -> set[str]:
     return published_prs(conn, task_id) | comment_candidates(conn, task_id)
 
 
+_MAX_READS = 8  # newest candidates verified per card; a long comment history stays bounded
+
+
+def _number(url: str) -> int:
+    return int(url.rsplit("/", 1)[1])
+
+
 def open_core_pr(conn: sqlite3.Connection, task_id: str) -> str | None:
     from hermes_cli.kanban_db_dispatch_pr_state import pr_card_owners, pr_details
 
     for url in sorted(published_prs(conn, task_id)):
         if pr_details(url) == ("OPEN", "main"):
             return url
-    for url in sorted(comment_candidates(conn, task_id)):
+    for url in sorted(comment_candidates(conn, task_id), key=_number, reverse=True)[:_MAX_READS]:
         if pr_details(url) == ("OPEN", "main") and pr_card_owners(url) == (task_id,):
             return url
     return None
