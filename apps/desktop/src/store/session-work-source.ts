@@ -94,25 +94,35 @@ export function workSourceVetoed(
   profile: string | undefined,
   ids: readonly string[],
   authority: WorkSourceAuthority,
-  observations: Observations = $unavailableWorkSources.get()
+  observations: Observations = $unavailableWorkSources.get(),
+  aliasAuthority: (storedSessionId: string) => WorkSourceAuthority = () => authority
 ): boolean {
   if (!connectionId || !profile || authority.durable === null || authority.runtime === null) {
     return true
   }
 
-  return ids.some(storedSessionId =>
-    requiredSources.some(source => {
+  return ids.some(storedSessionId => {
+    // Epochs are allocated per tracked (owner, stored id): a read recorded under a lineage alias is judged against
+    // that alias's own authority. An untracked alias's epoch read is no evidence (the row's own route is live).
+    const current = aliasAuthority(storedSessionId)
+
+    return requiredSources.some(source => {
       const observation = observations[key({ connectionId, profile, storedSessionId, source })]
 
       if (!observation || observation.available) {
         return false
       }
 
-      const expected = source === 'lineage' || source === 'tasks' ? authority.durable : authority.runtime
+      // Begun while the route had no authority: it cannot be placed in an epoch, so it still holds the row.
+      if (observation.authorityEpoch === undefined) {
+        return true
+      }
 
-      return observation.authorityEpoch === undefined || observation.authorityEpoch === expected
+      const expected = source === 'lineage' || source === 'tasks' ? current.durable : current.runtime
+
+      return expected !== null && observation.authorityEpoch === expected
     })
-  )
+  })
 }
 
 /** Missing, pending, failed and obsolete reads cannot authorize idle green.

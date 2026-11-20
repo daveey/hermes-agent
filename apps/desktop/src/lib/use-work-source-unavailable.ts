@@ -24,13 +24,18 @@ export function useWorkSourceUnavailable(row: SessionInfo | null | undefined): b
   const owner = row ? qualifiedWorkSourceOwner(knownSessionOwner([row], row.id)) : undefined
   const connectionId = owner?.connectionId
   const profile = owner?.profile
-  const storedSessionId = row?.id
+  const ids = row ? lineageAliases(row.id, sessions) : []
+  // Every lineage member is tracked: the runtime on screen and reads may hold any of them (compression rotates the
+  // tip), and only a tracked id gets an authority epoch and runtime roles that republish the revision on change.
+  const trackedIds = ids.join('\u0000')
 
   useEffect(() => {
-    if (connectionId && profile && storedSessionId) {
-      workSourceAuthorityForSession(connectionId, profile, storedSessionId)
+    if (connectionId && profile && trackedIds) {
+      for (const id of trackedIds.split('\u0000')) {
+        workSourceAuthorityForSession(connectionId, profile, id)
+      }
     }
-  }, [connectionId, profile, storedSessionId])
+  }, [connectionId, profile, trackedIds])
 
   if (!row) {
     return false
@@ -41,12 +46,14 @@ export function useWorkSourceUnavailable(row: SessionInfo | null | undefined): b
   }
 
   const authority = peekWorkSourceAuthorityForSession(owner.connectionId, owner.profile, row.id)
-  const ids = lineageAliases(row.id, sessions)
 
-  // The displayed chat gets every source read, so it must earn green by positive proof (a rebind revokes it).
-  if (workSourceSessionDisplayed(owner.connectionId, owner.profile, row.id)) {
+  // The displayed chat gets every source read, so it must earn green by positive proof (a rebind revokes it). Its
+  // runtime may hold any member of the lineage (compression rotates the tip), so any alias on screen counts.
+  if (ids.some(id => workSourceSessionDisplayed(owner.connectionId, owner.profile, id))) {
     return !workSourceAuthorityComplete(owner.connectionId, owner.profile, ids, authority, sources)
   }
 
-  return workSourceVetoed(owner.connectionId, owner.profile, ids, authority, sources)
+  return workSourceVetoed(owner.connectionId, owner.profile, ids, authority, sources, id =>
+    peekWorkSourceAuthorityForSession(owner.connectionId, owner.profile, id)
+  )
 }

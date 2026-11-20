@@ -11,7 +11,7 @@ import { $activeSessionId, _resetSessionOwnerHintsForTests, setSessions } from '
 import { $sessionControlBySession, clearAllSessionControl, refreshSessionControl } from '@/store/session-control'
 import { sessionStatusStripe } from '@/store/session-dot-state'
 import { $sessionTiles, clearAllSessionStates, publishSessionState } from '@/store/session-states'
-import { $unavailableWorkSources } from '@/store/session-work-source'
+import { $unavailableWorkSources, beginWorkSourceRead } from '@/store/session-work-source'
 import { _resetWorkSourceOwnerForTests } from '@/store/work-source-owner'
 import { makeSessionInfo } from '@/test/session-info'
 
@@ -311,6 +311,91 @@ describe('control authority at the real idle row hook', () => {
       expect(stripe(result.current)).not.toBe('done')
     } finally {
       $activeSessionId.set(null)
+      unmount()
+    }
+  })
+
+  // Compression rotates the tip: the runtime on screen (rt-main, bound to `stored-chat`) and the sidebar row (`tip`)
+  // are different members of one lineage. Both rules must follow the lineage, not the row's own id.
+  const aliasRow = () =>
+    makeSessionInfo({
+      id: 'tip',
+      profile: 'default',
+      connection_id: 'local',
+      outcome: DONE,
+      _lineage_root_id: 'stored-chat',
+      _lineage_ids: ['stored-chat', 'tip']
+    } as never)
+
+  it('a chat displayed through a lineage alias still needs positive proof', () => {
+    const row = aliasRow()
+    setSessions([row])
+    $activeSessionId.set('rt-main')
+    const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
+
+    try {
+      expect(stripe(result.current)).not.toBe('done')
+      act(() => {
+        for (const source of ['lineage', 'tasks', 'process', 'subagent', 'control'] as const) {
+          const read = sessionsHost.beginWorkSourceRead({
+            connectionId: 'local',
+            profile: 'default',
+            storedSessionId: row.id,
+            source
+          })
+
+          sessionsHost.reportWorkSourceRead({ ...read, available: true })
+        }
+      })
+      expect(stripe(result.current)).toBe('done') // a complete current read set still earns green
+    } finally {
+      $activeSessionId.set(null)
+      unmount()
+    }
+  })
+
+  it('a failed current read recorded under a lineage alias vetoes an undisplayed row', () => {
+    const row = aliasRow()
+    setSessions([row])
+    const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
+
+    try {
+      expect(stripe(result.current)).toBe('done')
+      act(() => {
+        const read = sessionsHost.beginWorkSourceRead({
+          connectionId: 'local',
+          profile: 'default',
+          storedSessionId: 'stored-chat',
+          source: 'tasks'
+        })
+
+        expect(read.authorityEpoch).not.toBeUndefined()
+        sessionsHost.reportWorkSourceRead({ ...read, available: false })
+      })
+      expect(stripe(result.current)).not.toBe('done')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('a read begun while the route had no authority still holds an undisplayed row once it is live', () => {
+    const row = makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local', outcome: DONE })
+    setSessions([row])
+    const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
+
+    try {
+      expect(stripe(result.current)).toBe('done')
+      act(() => {
+        beginWorkSourceRead({
+          connectionId: 'local',
+          profile: 'default',
+          storedSessionId: row.id,
+          source: 'control',
+          authorityEpoch: undefined
+        })
+      })
+      expect(stripe(result.current)).not.toBe('done')
+    } finally {
       unmount()
     }
   })
