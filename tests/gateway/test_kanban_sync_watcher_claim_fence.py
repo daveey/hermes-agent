@@ -103,6 +103,52 @@ def test_waiting_sync_watcher_fences_claims_until_the_lock_owners_round_opens_th
     assert seen == [([(tid, claims.DEFERRAL)], "ready"), ("running", os.getppid())]
 
 
+def test_failed_lease_acquire_clears_the_claim_hold(kanban_home, monkeypatch):
+    """A lease the watcher will not retry must not leave the claim hold set."""
+    conn = _board(kanban_home, enabled=True)
+    claims.loop_abandoned()
+    runner = watchers.GatewayKanbanWatchersMixin()
+    runner._running = True
+
+    async def no_lease(_lease):
+        return False
+
+    monkeypatch.setattr(runner, "_acquire_kanban_lease", no_lease)
+    try:
+        asyncio.run(runner._kanban_sync_watcher())
+        assert not claims._STATE.expected
+    finally:
+        conn.close()
+
+
+def test_unyielded_sync_return_clears_the_claim_hold(kanban_home, monkeypatch):
+    """A sync loop that ends without yielding the lease will not be respawned, so the hold clears."""
+    conn = _board(kanban_home, enabled=True)
+    claims.loop_abandoned()
+    runner = watchers.GatewayKanbanWatchersMixin()
+    runner._running = True
+
+    class Lease:
+        def should_yield(self):
+            return False
+
+        def release(self):
+            return None
+
+    monkeypatch.setattr(runner, "_kanban_singleton_lease", lambda *_a, **_k: Lease())
+
+    async def hold(_lease):
+        return True
+
+    monkeypatch.setattr(runner, "_acquire_kanban_lease", hold)
+    monkeypatch.setattr(ksc, "run_forever", lambda *_a, **_k: None)
+    try:
+        asyncio.run(runner._kanban_sync_watcher())
+        assert not claims._STATE.expected
+    finally:
+        conn.close()
+
+
 def test_sync_disabled_watcher_leaves_claims_open(kanban_home, monkeypatch):
     """Control: with sync off the watcher returns at once and declares nothing, so the dispatcher claims as before."""
     conn = _board(kanban_home, enabled=False)
