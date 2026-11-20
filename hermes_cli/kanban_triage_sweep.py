@@ -119,17 +119,23 @@ def stranded_contained(conn: sqlite3.Connection, *, now: Optional[float] = None)
     return out
 
 
-def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float] = None) -> list[str]:
+def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float] = None,
+                                skip: Optional[set] = None) -> list[str]:
     """A stranded contained card with a chat is woken by the owner wake (``wait.agent_owned``); one with NO chat has
     no owner, so it gets one board-supervisor card per containment episode (key ``containment-strand:<task>:<episode>``)
     plus a comment on the held card. Writes no event on the held card (its history is containment custody). Returns
-    the supervisor card ids created this call. [daveey]"""
+    the supervisor card ids created this call.
+
+    Retained copies of another gateway's card are skipped. Those copies have no triage authority, and a worker
+    must not create a supervisor card for one. [daveey]"""
     from hermes_cli.kanban_chat_links import _local_links
     from hermes_cli.kanban_origin import gateway_name
+    from hermes_cli.kanban_wake_check import foreign_ids
 
     stranded = stranded_contained(conn, now=now)
     if not stranded:
         return []
+    skipped = foreign_ids(conn) if skip is None else skip
     try:
         linked = {link["task_id"] for link in _local_links(conn, gateway_name()).values() if not link.get("released")}
     except Exception:
@@ -138,7 +144,7 @@ def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float
     created: list[str] = []
     for card in stranded:
         tid, episode = card["id"], card["episode"]
-        if tid in linked:
+        if tid in linked or tid in skipped:
             continue
         key = f"containment-strand:{tid}:{episode}"
         if conn.execute("SELECT 1 FROM tasks WHERE idempotency_key = ?", (key,)).fetchone():
@@ -177,10 +183,6 @@ def sweep_stale_triage(
     in ``TRIAGE_SWEEP_CAP_WINDOW`` it is capped instead (see :func:`_cap`). Cards with an open human
     request, or an open kernel recovery card for their current park, are left alone. Returns swept task ids."""
     now = int(now if now is not None else time.time())
-    try:
-        escalate_stranded_contained(conn, now=now)  # held cards no chat owns: their authority finished
-    except Exception:
-        logger.exception("kanban: containment strand escalation failed")
     cutoff = now - older_than
     swept: list[str] = []
     rows = conn.execute(
@@ -202,6 +204,11 @@ def sweep_stale_triage(
     # arbitrate supervisor creation across gateways, even when neither has synced yet.
     from hermes_cli.kanban_spend_decision import pending as spend_decision_pending, safe_ensure_producer
     copies = foreign_ids(conn)
+    try:
+        # After the foreign-copy fence. A retained worker copy must not create a supervisor card.
+        escalate_stranded_contained(conn, now=now, skip=copies)
+    except Exception:
+        logger.exception("kanban: containment strand escalation failed")
     from hermes_cli.kanban_containment_connections import held as containment_held
     for row in rows:
         if row["id"] in copies or containment_held(conn, row["id"]):

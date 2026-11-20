@@ -67,6 +67,45 @@ def test_only_home_sweeps_or_caps_retained_copy(gws, svc, home_first, capped):
     assert rows["tasks"][target]["status"] == ("triage" if capped else "ready")
 
 
+def test_worker_sweep_does_not_escalate_a_retained_contained_copy(gws):
+    """A worker's retained copy has no triage authority, even when its authority is done."""
+    home, worker, target = _retained_pair(gws)
+    now = int(time.time())
+    finished = now - 45 * 60
+    worker.enter()
+    authority = kb.create_task(worker.conn, title="done authority", assignee="default")
+    worker.conn.execute(
+        "UPDATE tasks SET status='done', completed_at=?, current_run_id=NULL WHERE id=?",
+        (finished, authority),
+    )
+    home_name = home.name
+    payload = {
+        "version": 1,
+        "target": {"gateway": home_name, "board": "default", "task_id": target},
+        "policy": {"version": 1, "authority": {"gateway": home_name, "board": "default", "task_id": authority}},
+        "producer_baseline": None,
+    }
+    with kb.write_txn(worker.conn):
+        kb._append_event(worker.conn, target, "contained", payload)
+        uid = worker.conn.execute(
+            "SELECT uid FROM task_events WHERE task_id=? AND kind='contained' ORDER BY id DESC LIMIT 1",
+            (target,),
+        ).fetchone()[0]
+        worker.conn.execute(
+            "UPDATE tasks SET status='triage', containment_episode=?, current_run_id=NULL WHERE id=?",
+            (uid, target),
+        )
+    created = ts.escalate_stranded_contained(worker.conn, now=now)
+    assert created == []
+    assert worker.conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE created_by='triage-sweep'"
+    ).fetchone()[0] == 0
+    ts.sweep_stale_triage(worker.conn, now=now + ts.TRIAGE_STALE_SECONDS + 1)
+    assert worker.conn.execute(
+        "SELECT COUNT(*) FROM tasks WHERE created_by='triage-sweep'"
+    ).fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_recovery_hold_survives_replica_local_event_ids(gws, legacy):
     home, worker, target = _retained_pair(gws)
