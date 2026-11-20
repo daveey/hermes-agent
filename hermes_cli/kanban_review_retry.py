@@ -34,6 +34,16 @@ def rehandoff_runs(conn, task_id):
     executed = {row[0] for row in conn.execute(
         "SELECT DISTINCT run_id FROM task_events WHERE task_id=? "
         "AND kind IN ('run_route', 'worker_result', 'spawned', 'owner_admitted')", (task_id,))}
+    # A reviewer inspecting the head is not work on the artifact: a verdict between two
+    # identical handoffs leaves the same immutable deliverable under review.
+    reviewing = set()
+    for run_id, kind, raw in conn.execute(
+            "SELECT run_id, kind, payload FROM task_events WHERE task_id=? "
+            "AND kind IN ('model_tier', 'run_route', 'claimed')", (task_id,)):
+        payload = _mapping(raw)
+        if payload.get('lane') == 'review' or (kind == 'claimed' and payload.get('source_status') == 'review'):
+            reviewing.add(run_id)
+    executed -= reviewing
     prior = None
     repeats = set()
     for run_id, outcome, raw in conn.execute(

@@ -75,6 +75,27 @@ def test_intervening_work_retains_next_handoff_author(identity_board):
             authors.ASTRA, authors.GROK, authors.OPUS}
 
 
+def test_verdict_between_identical_handoffs_keeps_original_author(identity_board):
+    """A reviewed head re-handed off unchanged is still the first author's work."""
+    with authors.kbc.connect() as conn:
+        tid = authors._card(conn)
+        handoff(conn, tid, authors.ASTRA, ARTIFACT)
+        rid = authors._run(conn, tid, receipt=authors.GROK, lane='review')
+        conn.execute("UPDATE task_runs SET outcome='changes_requested' WHERE id=?", (rid,))
+        handoff(conn, tid, authors.OPUS, ARTIFACT)
+        assert review.implementer_models(conn, kb.get_task(conn, tid)) == {authors.ASTRA}
+
+
+def test_verdict_then_changed_handoff_still_starts_new_epoch(identity_board):
+    with authors.kbc.connect() as conn:
+        tid = authors._card(conn)
+        handoff(conn, tid, authors.ASTRA, ARTIFACT)
+        rid = authors._run(conn, tid, receipt=authors.GROK, lane='review')
+        conn.execute("UPDATE task_runs SET outcome='changes_requested' WHERE id=?", (rid,))
+        handoff(conn, tid, authors.OPUS, {**ARTIFACT, 'merge_commit': 'c' * 40})
+        assert review.implementer_models(conn, kb.get_task(conn, tid)) == {authors.OPUS}
+
+
 def test_three_refusals_park_and_wake_stay_review(board, monkeypatch):
     from hermes_cli.kanban_db_dispatch import dispatch_once
     monkeypatch.setenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', '0')
