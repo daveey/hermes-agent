@@ -87,6 +87,8 @@ def _kanban_loss_recorder(monkeypatch, policy, started, release, write_s):
         order.append('worker_lost')
     settle = session_worker_reservation.lose_admission_worker
     monkeypatch.setattr(session_kanban, 'record_worker_loss', record)
+    # This loss-order fixture has no dispatcher submitter or per-run cgroup.
+    monkeypatch.setattr('gateway.session_kanban_scope.resolve_run_scope', lambda _: None)
     monkeypatch.setattr(session_worker_reservation, 'lose_admission_worker',
                         lambda *a, **kw: (order.append('settled'), settle(*a, **kw))[1])
     # A real ordinary (scratch) card on a real board, as build_kanban_policy freezes it: the capsule gate
@@ -97,7 +99,11 @@ def _kanban_loss_recorder(monkeypatch, policy, started, release, write_s):
     board = kb.init_db()
     with connect_closing() as conn:
         task_id = kb.create_task(conn, title='lost worker')
-    return dataclasses.replace(policy, kanban_json=json.dumps({'task_id': task_id, 'db': str(board)})), order
+        task = kb.claim_task(conn, task_id)
+        assert task is not None
+    context = {'task_id': task_id, 'db': str(board), 'run_id': task.current_run_id,
+               'claim_lock': task.claim_lock}
+    return dataclasses.replace(policy, kanban_json=json.dumps(context)), order
 
 
 @pytest.mark.platforms("linux")
