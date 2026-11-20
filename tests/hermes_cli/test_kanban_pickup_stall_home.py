@@ -256,6 +256,18 @@ def test_closed_incident_is_replaced_when_membership_changes(replica, local):
     assert second != first
 
 
+def test_closed_incident_is_replaced_when_membership_shrinks(replica, local):
+    card(replica, "one")
+    card(replica, "two")
+    [first] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    _close(local, first, NOW)
+    replica.execute("UPDATE tasks SET status='done' WHERE id='two'")
+    _fresh_at(replica, NOW + 60)
+    [second] = subject.sweep(local, replica, "hub", now_ms=(NOW + 60) * 1000)
+    assert second != first
+    assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 2
+
+
 def test_closed_incident_membership_ignores_checkpoint_bullets(replica, local):
     card(replica, "one")
     replica.execute(

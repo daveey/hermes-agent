@@ -20,8 +20,14 @@ One open incident is reused per home under the authenticated hub alarm prefix
 `pickup-stall:hub:home-overdue-<home>:`. It follows existing pickup-alarm creator,
 assignee and placement rules. Repeated passes comment instead of creating a second
 card; elapsed age and held-home heartbeats alone do not churn subsequent comments.
-A closed incident allows a new incident if the condition persists. Active incidents
-are not automatically archived: an agent may still be verifying transfer custody.
+A closed incident covers unchanged overdue membership for 12 hours after completion;
+then a persisting condition can file a replacement. Any membership change, including
+removing a card, allows a replacement immediately. An archived incident without a
+completion timestamp covers unchanged membership indefinitely. New incident bodies
+start with a detector-owned `Home-overdue membership v1: ` JSON array; legacy bodies
+use the overdue listing instead. Title/checkpoint prose is not membership evidence
+for new incidents. Active incidents are not automatically archived: an agent may
+still be verifying transfer custody.
 
 Every listed row includes its title, overdue age and latest continuation checkpoint.
 Machine-only WIP detection is deliberately conservative: paths or unpublished-work

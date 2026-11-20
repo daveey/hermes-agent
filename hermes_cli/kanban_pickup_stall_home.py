@@ -145,9 +145,9 @@ def _fresh(replica, now: float) -> bool:
     return row is not None and type(row[0]) in (int, float) and -5 <= now - row[0] <= FRESH_SECONDS
 
 
-# Pick: a closed incident keeps covering the same home and same overdue membership for 12 h (the repair
-# completes after a no-op inspect, so the 1 h REPLACE_AFTER_SECONDS floor still minted ~24 cards/day for a
-# silent Mac; 12 h gives <= 2/day). A changed membership files a fresh incident at once.
+# Pick: a closed incident keeps covering the same home and same overdue membership for 12 h.
+# Previously each no-op repair completion allowed another incident on the next tick (~102/day).
+# With unchanged membership, 12 h gives <= 2/day; changed membership files a fresh incident at once.
 # Open incidents always win over a closed sibling. New bodies carry membership on their first
 # line, before all title/checkpoint prose. The listing parser is only for legacy incidents.
 # archive_task leaves completed_at NULL; such incidents cover indefinitely until membership changes.
