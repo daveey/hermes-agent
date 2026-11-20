@@ -39,6 +39,22 @@ def test_nix_timeout_is_a_command_failure(tmp_path):
     assert result.returncode == 124
 
 
+def test_fork_docker_cache_cannot_compete_with_nix():
+    doc = workflow('docker.yml')
+    cache_steps = [s['with'] for job in doc['jobs'].values()
+                   for s in job.get('steps', []) if 'cache-from' in s.get('with', {})]
+    assert len(cache_steps) == 2
+    for settings in cache_steps:
+        # Empty inputs disable both read and write. Reads alone refresh old
+        # buildkit blobs' LRU timestamps and can still evict the Nix archive.
+        for direction in ('cache-from', 'cache-to'):
+            value = settings[direction]
+            assert value.startswith("${{ github.repository != 'softmax-universe/daveey-hermes' && ")
+            assert value.endswith(" || '' }}")
+        assert 'mode=min,' in settings['cache-to']
+    assert doc['permissions'] == {'contents': 'read'}
+
+
 def test_docker_exports_final_layers_only():
     doc = workflow('docker.yml')
     exports = [s['with']['cache-to'] for job in doc['jobs'].values()
