@@ -24,3 +24,23 @@ def test_failopen_revokes_exemption_before_dispatch(monkeypatch, unavailable):
         assert allowed
         events.append('dispatch')
     assert events == ['revoked', 'dispatch']
+
+
+def test_import_failure_revokes_before_legacy_failopen(monkeypatch):
+    import builtins
+
+    events = []
+    real_import = builtins.__import__
+
+    def unavailable(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == 'hermes_cli.admission_fence':
+            raise ImportError('controlled unavailable admission')
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(cap, 'revoke', lambda reason: events.append('revoked'))
+    monkeypatch.setattr(builtins, '__import__', unavailable)
+    with tick.update_admission() as allowed:
+        assert allowed
+        events.append('dispatch')
+    assert events == ['revoked', 'dispatch']
+

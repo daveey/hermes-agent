@@ -1492,43 +1492,10 @@ def _cron_cleanup_timeout_seconds() -> float:
 def _run_cron_cleanup_with_timeout(
     cleanup, *, job_id: str, label: str, timeout_seconds: Optional[float] = None,
 ) -> bool:
-    """Run fallible post-run cleanup without permanently wedging a cron ID."""
+    """Run fallible cleanup with independent custody through any timeout survivor."""
+    from cron.cleanup_timeout import run_cleanup
     timeout = (_cron_cleanup_timeout_seconds() if timeout_seconds is None else float(timeout_seconds))
-    if timeout <= 0:
-        try:
-            cleanup()
-            return True
-        except (Exception, KeyboardInterrupt) as exc:
-            logger.debug("Job '%s': %s failed: %s", job_id, label, exc)
-            return False
-
-    done = threading.Event()
-    error: list[BaseException] = []
-
-    def _runner() -> None:
-        try:
-            cleanup()
-        except BaseException as exc:
-            error.append(exc)
-        finally:
-            done.set()
-
-    # Daemon thread is deliberate: unlike ThreadPoolExecutor workers it is not joined at interpreter
-    # exit if cleanup never returns, so the gateway can still shut down.
-    worker = threading.Thread(
-        target=ctx_bound(_runner), name=f"cron-cleanup-{job_id}", daemon=True)
-    worker.start()
-    if not done.wait(timeout):
-        logger.error(
-            "Job '%s': %s exceeded %.1fs; abandoning cleanup so future runs remain dispatchable",
-            job_id,
-            label,
-            timeout)
-        return False
-    if error:
-        logger.debug("Job '%s': %s failed: %s", job_id, label, error[0])
-        return False
-    return True
+    return run_cleanup(cleanup, job_id=job_id, label=label, timeout=timeout, logger=logger)
 
 
 class _BoundedCronSessionDB:
