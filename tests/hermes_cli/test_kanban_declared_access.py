@@ -137,6 +137,37 @@ def test_preflight_drops_access_needs_the_runs_on_label_carries(monkeypatch, run
     assert (placed is None) == (not expected)
 
 
+@pytest.mark.parametrize("requirement,label", [
+    ("hub:read", "capability:hub-read"),
+    ("hub:write", "capability:hub-write"),
+    ("ssh:mini", "capability:ssh-mini"),
+    ("ssh:mbp", "capability:ssh-mbp"),
+])
+@pytest.mark.parametrize("carried", [False, True])
+def test_preflight_reads_persisted_access_labels(conn, monkeypatch, requirement, label, carried):
+    from hermes_cli import kanban_capability_routing as routing
+
+    tid = kb.create_task(conn, title="Check declared access", assignee="default",
+                         requires=["terminal", requirement])
+    # Exercise the production Task and SQL read, not a mock carrying runs_on.
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET placement_policy=NULL, runs_on=? WHERE id=?",
+                     (json.dumps(["pool:worker", label] if carried else ["pool:worker"]), tid))
+    task = kb.get_task(conn, tid)
+    assert task is not None
+    assert not hasattr(task, "runs_on")
+    assert task.placement_policy is None
+    monkeypatch.setattr(routing, "has_replica", lambda: True)
+    result = routing.preflight(conn, tid, self_gw="hub", local={}, remote={})
+    if carried:
+        assert result is None
+    else:
+        assert result is not None
+        assert result["code"] == "no_capability_holder", result
+    unchanged = kb.get_task(conn, tid)
+    assert unchanged is not None and unchanged.status == "ready"
+
+
 @pytest.mark.parametrize("requirement,label,body", [
     ("hub:read", "capability:hub-read", "read the log on the hub"),
     ("ssh:mbp", "capability:ssh-mbp", "ssh to the MacBook for a read"),

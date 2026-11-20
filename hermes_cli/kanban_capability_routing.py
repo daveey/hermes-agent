@@ -670,16 +670,16 @@ def preflight(conn, task_id: str, *, board: Optional[str] = None, **lookup) -> O
         if task is None:
             return None
         needs = needs_from_requires(task.requires)
+        access_labels = _access_labels()
         if getattr(task, "placement_policy", None) == "worker-first-v1":
             # Enrollment checked the pool; pickup/execution recheck the actual
             # worker. Do not create an origin-side owner for its remote access.
-            from hermes_cli.kanban_placement_coordination import ACCESS_LABELS
-            needs = [need for need in needs if need not in ACCESS_LABELS]
-        elif any(need in _access_labels() for need in needs):
+            needs = [need for need in needs if need not in access_labels]
+        elif any(need in access_labels for need in needs):
             # The Board enforces a carried access label at claim time and no gateway advertises these
             # needs in the registry, so a registry check would warn no_capability_holder falsely.
             carried = _task_runs_on(conn, task)
-            needs = [need for need in needs if _access_labels().get(need) not in carried]
+            needs = [need for need in needs if access_labels.get(need) not in carried]
         if not needs:
             return None
         if task.status != "ready":
