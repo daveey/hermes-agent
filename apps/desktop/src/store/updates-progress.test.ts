@@ -172,13 +172,14 @@ describe('pollUpdateProgress', () => {
     expect(updates.$backendUpdateProgress.get()).toBeNull()
     vi.restoreAllMocks()
 
+    // The new host answers with a quiet, non-busy state the pill shows: seeing it there proves the switch's own
+    // poll has landed, and a non-busy answer is exactly what a leftover dropped flag would turn into a refresh.
+    const batching = { progress: { ...draining.progress, state: 'batching', elapsed_s: -600 } }
+
     progressSpy.mockReset()
-    progressSpy.mockResolvedValue({ progress: null })
+    progressSpy.mockImplementation(async (scope?: { connectionId?: string }) => (scope ? { progress: null } : batching))
     setConnection({ ...remote, baseUrl: 'https://other.example', wsUrl: 'wss://other.example' })
-    // The switch polls the new host itself: wait until that answer has landed.
-    await vi.waitFor(() => expect(progressSpy).toHaveBeenCalledWith(undefined))
-    await updates.pollUpdateProgress()
-    expect(progressSpy.mock.calls.filter(([scope]) => scope === undefined).length).toBeGreaterThanOrEqual(1)
+    await vi.waitFor(() => expect(updates.$backendUpdateProgress.get()).toMatchObject({ state: 'batching' }))
 
     expect(checkHermesUpdateSpy).not.toHaveBeenCalledWith(true)
   })
@@ -211,9 +212,15 @@ describe('pollUpdateProgress', () => {
     )
 
     const first = updates.pollUpdateProgress()
-    await updates.pollUpdateProgress()
-    release(draining)
-    await first
+
+    try {
+      await updates.pollUpdateProgress()
+    } finally {
+      // Always answer the held request, even if an assertion above throws: a request left in flight would keep
+      // this host's poll blocked through afterEach and fail the tests after this one.
+      release(draining)
+      await first
+    }
 
     expect(progressSpy.mock.calls.filter(([scope]) => scope === undefined)).toHaveLength(1)
     expect(updates.$backendUpdateProgress.get()).toMatchObject({ state: 'draining' })
