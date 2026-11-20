@@ -257,7 +257,5 @@ def _sync_repair_local_write_window(request, monkeypatch):
 def _reset_retired_host_loops():
     """A superseded or code-skewed watchdog under test retires this process's host loops; undo it after."""
     yield
-    import sys
-    if (lease := sys.modules.get("hermes_cli.host_loop_lease")) is not None:
-        with lease._RETIRE_MU:
-            lease._RETIRED.clear()
+    from tests._fixtures.host_loop_reset import reset_retired_host_loops
+    reset_retired_host_loops()
