@@ -59,6 +59,7 @@ def append_remote_listed_cards(out: list[dict[str, Any]], ids: list[str], status
     from hermes_cli.kanban_session_activity_release import PENDING_RELEASE_STATUSES
 
     wanted, seen = set(ids), set()
+    remote: list[dict[str, Any]] = []
     for card in _remote_cards(ids, statuses, stale_ok):
         belongs = card["session"] in wanted or card.get("origin_session") in wanted
         listed = (card.get("status") in statuses
@@ -70,8 +71,9 @@ def append_remote_listed_cards(out: list[dict[str, Any]], ids: list[str], status
             if wait is not None:
                 row["wait"] = wait
             out.append(row)
+            remote.append(row)
     from hermes_cli.kanban_session_activity_card_details import annotate_remote_upstream
-    annotate_remote_upstream(out)
+    annotate_remote_upstream(remote)
 
 
 def _read_lean_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -> list[dict[str, Any]]:

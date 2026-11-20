@@ -131,3 +131,38 @@ def test_missing_replica_fails_soft(board, caplog, monkeypatch):
         rows = details(board, [("c", "todo")], [("b", "c")], ["c"])
     assert "blocked_upstream" not in rows["c"]
     assert "upstream" not in rows["c"]
+
+
+def test_stale_replica_does_not_override_local_parent_status(tmp_path, monkeypatch):
+    """Local details win: a done local parent is not rewritten from a lagging blocked replica."""
+    from hermes_cli import kanban_db_sync, kanban_session_activity as ksa, kanban_sync_client
+    from hermes_cli.kanban_session_outcome_tasks import append_remote_listed_cards
+
+    local_path = tmp_path / "local.db"
+    replica_path = tmp_path / "replica.db"
+    local = sqlite3.connect(local_path)
+    local.row_factory = sqlite3.Row
+    local.executescript(SCHEMA)
+    local.executemany("INSERT INTO tasks (id, status) VALUES (?, ?)", [("p", "done"), ("lc", "todo")])
+    local.execute("INSERT INTO task_links VALUES (?, ?)", ("p", "lc"))
+    local.commit()
+    with sqlite3.connect(replica_path) as replica:
+        replica.executescript(SCHEMA)
+        replica.executemany("INSERT INTO tasks (id, status) VALUES (?, ?)",
+                            [("p", "blocked"), ("lc", "todo")])
+        replica.execute("INSERT INTO task_links VALUES (?, ?)", ("p", "lc"))
+    monkeypatch.setattr(kanban_sync_client, "shadow_path", lambda board: replica_path)
+    monkeypatch.setattr(kanban_db_sync, "_db_key", lambda conn: str(local_path))
+    monkeypatch.setattr(kanban_db_sync, "board_slug_for_path", lambda key: "default")
+    found = {"lc": {"id": "lc", "status": "todo", "board": "default"}}
+    _add_card_details(local, found)
+    assert "blocked_upstream" not in found["lc"]
+    monkeypatch.setattr(ksa, "_remote_cards", lambda *a, **k: [{
+        "key": "hub/default/default/remote", "id": "remote", "board": "default",
+        "session": "s1", "status": "todo",
+    }])
+    out = [found["lc"]]
+    append_remote_listed_cards(out, ["s1"], ksa.LISTED_STATUSES, False)
+    local_row = next(row for row in out if row["id"] == "lc")
+    assert "blocked_upstream" not in local_row
+    local.close()
