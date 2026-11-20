@@ -182,10 +182,9 @@ def _completion_receipt_schema() -> dict[str, Any]:
 
 _ENDING_SOURCE_PATH = {
     "source_path": _prop("string", (
-        "Optional absolute path to this scratch task's ONE owned linked worktree in a configured clone. "
-        "The dispatcher-bound worker may explicitly attach it for the first time during this ending, "
-        "before artifact staging and source publication. Omit to preserve the existing source; "
-        "never selects an unrelated tree or changes an already attached source identity."
+        "Optional absolute path to this scratch task's owned linked worktree in a configured clone. "
+        "Only its dispatcher-bound worker may first attach at ending, before artifacts/publication. "
+        "Omit to keep source; attached identity is immutable."
     )),
 }
 
@@ -193,20 +192,11 @@ _ENDING_SOURCE_PATH = {
 KANBAN_COMPLETE_SCHEMA = _schema(
     "kanban_complete",
     (
-        "Mark your current task done with a structured handoff for others. Prefer ``summary`` for a "
-        "human-readable 1-3 sentence description of what you did; put "
-        "machine-readable facts in ``metadata`` (changed_files, "
-        "tests_run, decisions, findings, etc). At least one of "
-        "``summary`` or ``result`` is required. If you created new "
-        "tasks via ``kanban_create`` during this run, list their ids "
-        "in ``created_cards`` — the kernel verifies them so phantom "
-        "references are caught before they leak into downstream "
-        "automation. If you produced deliverable files (charts, PDFs, "
-        "spreadsheets, generated images), list their absolute paths "
-        "in ``artifacts`` — the gateway notifier will upload them as "
-        "native attachments to the human who subscribed to the task, "
-        "so the deliverable lands in their chat alongside the summary "
-        "instead of being a path they have to fetch by hand. PR contracts and metadata.published_pr "
+        "Mark your task done. Provide a 1-3 sentence summary and structured metadata "
+        "(changed_files, tests_run, decisions, findings). At least summary or result is required. "
+        "List every task created this run in created_cards; the kernel verifies each ID. "
+        "List absolute deliverable file paths in artifacts for native upload to the subscriber's chat. "
+        "PR contracts and metadata.published_pr "
         "require a landing disposition: MERGED or CLOSED, or for OPEN an open same-board card "
         "bound to the exact PR in metadata.landing_owner, or metadata.pr_left_open={\"reason\": "
         "\"<nonblank reason>\"}. OPEN/MERGED still require exact-head required CI; contract_waiver "
