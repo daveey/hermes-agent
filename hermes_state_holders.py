@@ -61,7 +61,8 @@ def describe_holder_pid(pid: int, *, limit: Optional[int] = 80) -> str:
     """``PID 123 (hermes gateway run)`` for operator-facing holder lists; /proc argv first, psutil elsewhere.
     The command line is cut to *limit* characters for log and error lines; ``None`` keeps all of it
     (``hermes doctor``, whose holder lists are read by a person deciding what to stop). Secrets in the
-    command line (``--api-key`` values, URL credentials) are always redacted."""
+    command line (secret-named flag values, bare random tokens, known key formats, URL credentials) are
+    always redacted."""
     argv = _read_proc_argv(pid)
     if argv is None and psutil is not None:
         try:
@@ -78,7 +79,11 @@ def describe_holder_pid(pid: int, *, limit: Optional[int] = 80) -> str:
         return f"PID {pid} (command line unavailable)"
     # Redacted before the cut: holder lists are pasted into issues, and a process's argv can carry
     # `--api-key …` or credentials in a URL (an early secret used to leak its prefix through the cut too).
+    # The argv-specific mask first (secret-named flags and bare random tokens it has no pattern for), then the
+    # shared redactor (known secret formats).
     from agent.redact import redact_sensitive_text
+    from hermes_state_argv_secrets import mask_argv_secrets
+    argv = [argv[0], *mask_argv_secrets(argv[1:])]
     who = redact_sensitive_text(" ".join(" ".join([os.path.basename(argv[0]), *argv[1:]]).split()),
                                 force=True, redact_url_credentials=True)
     return f"PID {pid} ({who[:limit]})"

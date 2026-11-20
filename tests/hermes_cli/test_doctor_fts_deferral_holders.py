@@ -171,7 +171,7 @@ def test_doctor_lists_holders_with_their_whole_command_line(tmp_path):
 
 @pytest.mark.platforms("linux", "macos")
 def test_holder_descriptions_never_show_secrets_from_argv(tmp_path):
-    """Doctor output is pasted into issues: an API key or URL credentials in a holder's argv are redacted,
+    """Doctor output is pasted into issues: API keys, URL credentials, secret-flag values and bare tokens in argv are redacted,
     whole or cut."""
     from hermes_state_holders import describe_holder_pid
 
@@ -185,6 +185,9 @@ def test_holder_descriptions_never_show_secrets_from_argv(tmp_path):
             "http://alice:hunter2pw@10.0.0.1:8000/v1",
             "--api-key",
             key,
+            "--webhook-secret",
+            "Zx9Lk2PqRt7VbNm4Wc8Ys1Df",
+            "q8ZpL2vXk9RtYwB4mN7cQ1sD5fH3jK6g",
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -199,6 +202,8 @@ def test_holder_descriptions_never_show_secrets_from_argv(tmp_path):
             assert (
                 key[:16] not in desc and "hunter2pw" not in desc and "alice" not in desc
             ), desc
+            # unknown secret-named flag and a bare random token: masked whole, not head/tail
+            assert "Zx9Lk2" not in desc and "q8ZpL2" not in desc, desc
         assert "10.0.0.1:8000/v1" in describe_holder_pid(proc.pid, limit=None)
     finally:
         proc.stdin.close()
