@@ -261,7 +261,7 @@ export const en: KanbanMessages = {
   openBoard: 'Kanban: Open board',
   newTaskCommand: 'Kanban: New task',
   countTip: c =>
-    `Kanban — ${c.running} running · ${c.ready} ready · ${c.notReady} not ready · ${c.blocked} blocked on you`,
+    `Kanban — ${c.running} running · ${c.ready} ready · ${c.notReady} not ready · ${c.blocked} blocked on you · ${c.external} external · ${c.externalDown} external down`,
   col: {
     triage: { label: 'Triage', help: 'Raw ideas — a specifier fleshes out the spec.' },
     todo: { label: 'Todo', help: 'Waiting on dependencies, or unassigned.' },
@@ -513,7 +513,7 @@ const ja: KanbanMessages = {
   openBoard: 'カンバン: ボードを開く',
   newTaskCommand: 'カンバン: 新しいタスク',
   countTip: c =>
-    `カンバン — 実行中 ${c.running}、待機 ${c.ready}、未準備 ${c.notReady}、あなた待ち ${c.blocked}`,
+    `カンバン — 実行中 ${c.running}、待機 ${c.ready}、未準備 ${c.notReady}、あなた待ち ${c.blocked}、外部実行 ${c.external}、外部障害 ${c.externalDown}`,
   col: {
     triage: { label: 'トリアージ', help: '生のアイデア — スペシファイアが仕様に整えます。' },
     todo: { label: 'Todo', help: '依存関係の待ち、または未割り当て。' },
@@ -747,7 +747,8 @@ const ja: KanbanMessages = {
     completedTitle: 'タスク完了',
     blockedTitle: 'タスクがブロック中 — 入力が必要です',
     pausedTitle: 'タスクを一時停止',
-    pausedBody: 'エージェントはあなたへの手順を示さずにこのタスクを一時停止しました。不明な場合はチャットで尋ねてください。',
+    pausedBody:
+      'エージェントはあなたへの手順を示さずにこのタスクを一時停止しました。不明な場合はチャットで尋ねてください。',
     whyYou: why => `あなたが必要な理由: ${why}`,
     blockLoopTitle: 'タスクをトリアージへ移動 — 判断が必要です',
     gaveUpTitle: 'タスクが停止しました',
@@ -763,7 +764,8 @@ const zh: KanbanMessages = {
   nav: '看板',
   openBoard: '看板：打开面板',
   newTaskCommand: '看板：新建任务',
-  countTip: c => `看板 — 运行中 ${c.running}、就绪 ${c.ready}、未就绪 ${c.notReady}、等你处理 ${c.blocked}`,
+  countTip: c =>
+    `看板 — 运行中 ${c.running}、就绪 ${c.ready}、未就绪 ${c.notReady}、等你处理 ${c.blocked}、外部运行 ${c.external}、外部故障 ${c.externalDown}`,
   col: {
     triage: { label: '分诊', help: '原始想法 — 由细化代理整理出规格。' },
     todo: { label: '待办', help: '等待依赖，或未分配。' },
@@ -1010,7 +1012,8 @@ const zhHant: KanbanMessages = {
   nav: '看板',
   openBoard: '看板：開啟面板',
   newTaskCommand: '看板：新增任務',
-  countTip: c => `看板 — 執行中 ${c.running}、就緒 ${c.ready}、未就緒 ${c.notReady}、等你處理 ${c.blocked}`,
+  countTip: c =>
+    `看板 — 執行中 ${c.running}、就緒 ${c.ready}、未就緒 ${c.notReady}、等你處理 ${c.blocked}、外部執行 ${c.external}、外部故障 ${c.externalDown}`,
   col: {
     triage: { label: '分類', help: '原始想法 — 由細化代理整理出規格。' },
     todo: { label: '待辦', help: '等待相依項目，或未指派。' },

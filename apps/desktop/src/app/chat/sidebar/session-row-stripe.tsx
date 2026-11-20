@@ -92,7 +92,13 @@ export function useSessionRowStripe(
 }
 
 /** [daveey] Stripes drawn as a small glyph in the stripe's place: a cron loop, or the card glyph for kanban waits. */
-const GLYPH_STRIPES: ReadonlySet<SessionStatusStripe> = new Set(['external', 'external_down', 'periodic', 'stalled', 'waiting'])
+const GLYPH_STRIPES: ReadonlySet<SessionStatusStripe> = new Set([
+  'external',
+  'external_down',
+  'periodic',
+  'stalled',
+  'waiting'
+])
 
 interface SessionRowStatusStripeProps {
   session: SessionInfo
@@ -166,7 +172,11 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
             [daveey] A finished chat still watching a card adds the eye, so it never reads as "all done". */}
         {glyph && mainGlyph && (
           <span
-            className={unknownCloud ? '[-webkit-text-stroke:0.05em_currentColor] text-transparent' : undefined}
+            className={
+              unknownCloud
+                ? '[-webkit-text-stroke:0.05em_currentColor] [-webkit-text-fill-color:transparent]'
+                : undefined
+            }
             data-external-cloud={unknownCloud ? 'hollow' : 'solid'}
           >
             <Codicon name={mainGlyph} size="0.5625rem" />

@@ -1,3 +1,4 @@
+import { compile } from '@tailwindcss/node'
 import { act, cleanup, render, renderHook } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 
@@ -255,10 +256,9 @@ it('unknown external uses the hollow cloud', () => {
 
   expect(container.querySelector('[data-external-unknown="true"]')).not.toBeNull()
   expect(container.querySelector('[data-external-cloud="hollow"]')).not.toBeNull()
-  expect(container.querySelector('[data-external-cloud="hollow"]')?.className).toMatch(/text-transparent/)
 })
 
-it('unknown external is hollow from client-derived state without stamps', () => {
+it('unknown external is hollow from client-derived state without stamps', async () => {
   vi.useFakeTimers()
   vi.setSystemTime(1_301_000)
 
@@ -268,12 +268,45 @@ it('unknown external is hollow from client-derived state without stamps', () => 
       kanban_parked: 1
     })
 
+    const solidSession = row('ext-solid', {
+      kanban_external_cards: [ghCard({ next_due_at: 2000, observed_at: 1301 })],
+      kanban_parked: 1
+    })
+
     const { container } = render(
-      <SessionRowStatusStripe outcomePainted={false} session={session} statusStripe="external" />
+      <>
+        <SessionRowStatusStripe outcomePainted={false} session={session} statusStripe="external" />
+        <SessionRowStatusStripe outcomePainted={false} session={solidSession} statusStripe="external" />
+      </>
     )
 
-    expect(container.querySelector('[data-external-cloud="hollow"]')).not.toBeNull()
-    expect(container.querySelector('[data-external-cloud="hollow"]')?.className).toMatch(/text-transparent/)
+    // jsdom does not resolve custom-property colours; supply the stripe's resolved sky colour.
+    container.querySelectorAll<HTMLElement>('[data-slot="session-status-stripe"]').forEach(el => {
+      el.style.color = 'rgb(56, 189, 248)'
+    })
+    const cloud = container.querySelector<HTMLElement>('[data-external-cloud="hollow"]')!
+
+    const { build } = await compile('@tailwind utilities;', {
+      base: new URL('.', import.meta.url).pathname,
+      onDependency() {}
+    })
+
+    const stylesheet = window.document.createElement('style')
+    stylesheet.textContent = build([...container.querySelectorAll('[class]')].flatMap(el => [...el.classList]))
+    window.document.head.append(stylesheet)
+
+    try {
+      const solid = container.querySelector<HTMLElement>('[data-external-cloud="solid"]')!
+      const solidStyle = getComputedStyle(solid)
+      const style = getComputedStyle(cloud)
+      // Require an opaque colour, not merely a hollow marker or a stroke utility.
+      expect(solidStyle.color).toBe('rgb(56, 189, 248)')
+      expect(style.getPropertyValue('-webkit-text-stroke-color')).toBe(solidStyle.color)
+      expect(style.getPropertyValue('-webkit-text-fill-color')).toBe('rgba(0, 0, 0, 0)')
+      expect(solidStyle.getPropertyValue('-webkit-text-fill-color')).toBe(solidStyle.color)
+    } finally {
+      stylesheet.remove()
+    }
   } finally {
     vi.useRealTimers()
   }

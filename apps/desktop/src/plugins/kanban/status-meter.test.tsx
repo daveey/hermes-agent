@@ -60,7 +60,7 @@ describe('kanban status meter', () => {
 
   it('tooltip names every segment', () => {
     expect(en.countTip({ blocked: 4, external: 0, externalDown: 0, notReady: 3, ready: 2, running: 1 })).toBe(
-      'Kanban — 1 running · 2 ready · 3 not ready · 4 blocked on you'
+      'Kanban — 1 running · 2 ready · 3 not ready · 4 blocked on you · 0 external · 0 external down'
     )
   })
 
@@ -90,6 +90,8 @@ describe('kanban status meter', () => {
 
     expect(counts.external).toBe(1)
     expect(counts.externalDown).toBe(1)
+    expect(en.countTip(counts)).toContain('1 external ·')
+    expect(en.countTip(counts)).toContain('1 external down')
     expect(counts.notReady).toBe(0)
     expect(METER_COLORS.external).toBe('#38bdf8')
     expect(METER_COLORS.externalDown).toBe('#ef4444')
