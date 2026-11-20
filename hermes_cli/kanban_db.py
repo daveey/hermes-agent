@@ -2450,6 +2450,8 @@ def complete_task(
     """
     from hermes_cli.kanban_review_required import require_review
     from hermes_cli.kanban_containment_authority import require_acknowledgement
+    from hermes_cli.kanban_assignment_routing import validate_repair_completion
+    from hermes_cli.kanban_assignment_original import prepare as prepare_repair
     if not placement_settled:  # a settling placement stub cannot resume/retain; gating it would park forever
         require_acknowledgement(conn, task_id, metadata)
     require_review(conn, task_id, expected_run_id, placement_settled=placement_settled)
@@ -2469,7 +2471,7 @@ def complete_task(
     if acceptance is False:
         return False
     from hermes_cli.kanban_metadata_files import discard_on_error
-    staged: list[Path] = []
+    staged, repair_observation = [], prepare_repair(conn, task_id)
     with _prestaged(conn, task_id, metadata), discard_on_error(staged), write_txn(conn):
         if not placement_settled:
             require_acknowledgement(conn, task_id, metadata)
@@ -2477,8 +2479,7 @@ def complete_task(
         if not _parents_satisfied(conn, task_id):
             return False
         receipt_admission.recheck(conn, task_id, receipt_owners)
-        from hermes_cli.kanban_assignment_routing import validate_repair_completion
-        validate_repair_completion(conn, task_id)
+        validate_repair_completion(conn, task_id, observation=repair_observation)
         from hermes_cli.kanban_goal_receipt import record as record_goal
         goal_event_id = record_goal(conn, task_id, goal_verification, (summary or result or '').strip())
         acceptance_event_id = record_acceptance(conn, task_id, acceptance) if acceptance is not None else None
@@ -2526,8 +2527,7 @@ def complete_task(
                 synth_summary = _REVIEW_APPROVED_NOTE
                 synth_metadata = {"source_status": "review", "approval": "manual"}
             run_id = _synthesize_ended_run(
-                conn, task_id, outcome="completed", summary=synth_summary, metadata=synth_metadata,
-            )
+                conn, task_id, outcome="completed", summary=synth_summary, metadata=synth_metadata)
         event_summary = handoff_summary
         if prior_status == "review" and not event_summary:
             event_summary = _REVIEW_APPROVED_NOTE

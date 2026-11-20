@@ -187,21 +187,30 @@ NO_SECOND_PROFILE_ROUTES = (
 )
 
 
-def validate_repair_completion(conn, task_id):
+def validate_repair_completion(conn, task_id, *, observation=None):
     """A completed repair must not release an invalid assignment after policy drift."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_assignment_original import repair_key, resolve
 
-    row = conn.execute('SELECT idempotency_key FROM tasks WHERE id=?', (task_id,)).fetchone()
-    key = row[0] if row else None
-    if not key or not key.startswith(_SUPERVISOR_PREFIX):
+    key = repair_key(conn, task_id)
+    if key is None:
+        if observation is not None:
+            raise AssignmentRoutingError('Assignment repair key changed during validation; retry')
         return
     original = kb.get_task(conn, key.removeprefix(_SUPERVISOR_PREFIX))
-    if original is None or original.assignee is None:
+    if observation is not None and original is not None:
+        raise AssignmentRoutingError('Assignment repair original custody changed during validation; retry')
+    if original is None:
+        original, payloads = resolve(conn, task_id, key, observation)
+    else:
+        payloads = tuple(row[0] for row in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' ORDER BY id DESC",
+            (original.id,)).fetchall())
+    if original.assignee is None:
         raise AssignmentRoutingError('Assignment repair has no assigned original task')
     # A verified profile is not a recovery when the original asked for authority no profile has.
     import json
-    for (raw,) in conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' "
-                               "ORDER BY id DESC", (original.id,)).fetchall():
+    for raw in payloads:
         try:
             data = json.loads(raw) if raw else {}
         except ValueError:
