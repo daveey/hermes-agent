@@ -83,6 +83,7 @@ class _Item:
     attempt: int = 0  # replays this delivery already had (a wall-refused replay re-armed: ``rewall_due``)
     id: str = field(default_factory=lambda: uuid.uuid4().hex)  # stable identity across a retirement handoff
     source_batch: str | None = None  # only a rewall of this exact durable wake transfers custody
+    row_at: float = 0.0  # when this delivery's latest replay row entered the transcript (0: its failure row, failed_at)
 
 
 @dataclass
@@ -359,7 +360,7 @@ def _cancel_timer(entry: _Entry) -> None:
 def schedule(session_key: str, *, text: str, display_kind: str, display_metadata: dict | None, due: float,
              cause: str, persisted: bool, now: float | None = None,
              fire: Callable[[str], None] | None = None, attempt: int = 0, failed_at: float | None = None,
-             profile_home: Any = None, source_batch: str | None = None) -> bool:
+             profile_home: Any = None, source_batch: str | None = None, row_at: float = 0.0) -> bool:
     """Arm (or join) this chat's one pending replay. True when it is pending after the call. ``attempt`` is the
     replays the delivery already had (a wall-refused replay re-armed), ``failed_at`` its first failure."""
     key = str(session_key or "")
@@ -369,6 +370,7 @@ def schedule(session_key: str, *, text: str, display_kind: str, display_metadata
     item = _Item(text, display_kind, dict(display_metadata or {}), persisted, cause,
                  now if failed_at is None else failed_at, attempt)
     item.source_batch = source_batch
+    item.row_at = row_at
     fire = fire or _fire
     home = _home_of(profile_home)
     slot = (home, key)
@@ -516,14 +518,15 @@ def schedule_for_turn(session: dict, st: Any) -> None:
         logger.warning("automation-replay: %s in %s", plan.line, key)
         return
     text, meta = getattr(st, "automation_text", ""), getattr(st, "display_metadata", None)
-    attempt, failed_at, source_batch = 0, None, None
+    attempt, failed_at, source_batch, row_at = 0, None, None, 0.0
     if is_replay(meta):  # a wall refused the replay (``rewall_due``): re-arm the deliveries it wrapped
         marker = meta.get(REPLAY_METADATA_KEY) if isinstance(meta, dict) else None
         source_batch = marker.get("batch_id") if isinstance(marker, dict) else None
         text, meta, failed_at, attempt = _unwrap_replay(text, meta, time.time())
+        row_at = time.time()  # the replay row that just failed is in the transcript now
     schedule(key, text=text, display_kind=st.display_kind, display_metadata=meta, due=plan.due, cause=plan.cause,
              persisted=True, attempt=attempt, failed_at=failed_at,
-             profile_home=session.get("profile_home"), source_batch=source_batch)
+             profile_home=session.get("profile_home"), source_batch=source_batch, row_at=row_at)
 
 
 def _fire(key: str, *, profile_home: Any = None, expected_timer=None) -> None:
@@ -585,13 +588,14 @@ def _item_dict(item: _Item, due: float) -> dict:
     return {"id": item.id, "text": item.text, "display_kind": item.display_kind,
             "display_metadata": item.display_metadata, "persisted": item.persisted, "cause": item.cause,
             "failed_at": item.failed_at, "attempt": item.attempt, "due": due, "created_at": item.failed_at,
-            "source_batch": item.source_batch}
+            "source_batch": item.source_batch, "row_at": item.row_at}
 
 
 def _item_from(data: dict) -> _Item:
     return _Item(data["text"], data["display_kind"], dict(data.get("display_metadata") or {}),
                  bool(data["persisted"]), data.get("cause") or "", float(data["failed_at"]),
-                 int(data.get("attempt") or 0), str(data["id"]), data.get("source_batch"))
+                 int(data.get("attempt") or 0), str(data["id"]), data.get("source_batch"),
+                 float(data.get("row_at") or 0.0))
 
 
 def handoff(key: str, *, profile_home: Any = None) -> bool:

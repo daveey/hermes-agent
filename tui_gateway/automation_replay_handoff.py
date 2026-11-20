@@ -63,12 +63,12 @@ class Journal:
             fence = conn.execute("SELECT * FROM automation_replay_fences WHERE owner=?", (owner,)).fetchone()
             for item in items:
                 created = item["created_at"]
-                # A re-walled replay (source_batch) keeps the first failure's created_at, so a success that landed
-                # between that failure and the replay says nothing about this attempt: only Stop fences it.
+                # A persisted item is carried by a success whose context started after its latest row entered the
+                # transcript: the failure row, or for a re-walled replay the replay row (row_at), never the first
+                # failure's created_at (a success between the two says nothing about the replay).
+                row_at = float(item.get("row_at") or 0.0) or created
                 covered = fence and (created <= fence["stopped_at"] or
-                                     (item["persisted"] and not item.get("source_batch")
-                                      and not int(item.get("attempt") or 0)
-                                      and created <= fence["carried_through"]))
+                                     (item["persisted"] and row_at <= fence["carried_through"]))
                 payload = json.dumps(item, separators=(",", ":"))
                 terminal = conn.execute("SELECT owner,payload_sha256 FROM automation_replay_tombstones WHERE id=?",
                                         (item["id"],)).fetchone()
