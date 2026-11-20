@@ -117,8 +117,13 @@ def test_a_status_change_during_the_probe_is_not_lost_either(board, monkeypatch)
     pytest.param((1, "not yet"), id="not-yet"),
     pytest.param((2, "boom"), id="broken-once"),
     pytest.param((3, "stale_age=60s gateway=g1"), id="offline-gateway"),
+    pytest.param((3, "source_state=unknown gateway=g1"), id="scope-unknown-already-escalated"),
 ])
 def test_every_non_waking_result_branch_keeps_the_expedite(board, wake_probes, monkeypatch, result):
+    from hermes_cli import kanban_offline_backoff
+
+    # scope-unknown: an escalation under 24 h old holds the probe parked (the write this PR changed).
+    monkeypatch.setattr(kanban_offline_backoff, "recently_escalated", lambda *a, **k: True)
     tid, t0 = _park(board, wake_probes)
     with kb.write_txn(board):
         board.execute("UPDATE task_wake_checks SET next_at = ? WHERE task_id = ?", (t0, tid))
@@ -130,13 +135,39 @@ def test_every_non_waking_result_branch_keeps_the_expedite(board, wake_probes, m
     assert _next_at(board, tid) <= wall + 5
 
 
-def test_no_expedite_keeps_the_ordinary_cadence_on_every_branch(board, wake_probes, monkeypatch):
+def test_no_expedite_keeps_the_ordinary_cadence_through_the_tick(board, wake_probes, monkeypatch):
     tid, t0 = _park(board, wake_probes)
     with kb.write_txn(board):
         board.execute("UPDATE task_wake_checks SET next_at = ? WHERE task_id = ?", (t0, tid))
     monkeypatch.setattr(kwc, "_run_probe", lambda key, cmd, cwd, env: (1, "not yet"))
     _tick(board, t0 + 600)
     assert _next_at(board, tid) == t0 + 600 + EVERY
+
+
+@pytest.mark.parametrize("result", [
+    pytest.param((1, "not yet"), id="not-yet"),
+    pytest.param((2, "boom"), id="broken-once"),
+    pytest.param((3, "stale_age=60s gateway=g1"), id="offline-gateway"),
+    pytest.param((3, "source_state=unknown gateway=g1"), id="scope-unknown-already-escalated"),
+])
+def test_no_expedite_keeps_exactly_now_plus_every_when_the_probe_ran_long(board, wake_probes, monkeypatch, result):
+    """The apply's clock is later than the claim's (the probe took 37 s). Unexpedited, next_at stays exactly
+    now + every: neither the claim's slot (always-keep), nor min(slot, now + every), nor a <= comparison."""
+    from hermes_cli import kanban_offline_backoff
+
+    monkeypatch.setattr(kanban_offline_backoff, "recently_escalated", lambda *a, **k: True)
+    tid, t0 = _park(board, wake_probes)
+    ts = t0 + 600
+    claimed = ts + EVERY
+    with kb.write_txn(board):
+        board.execute("UPDATE task_wake_checks SET next_at = ? WHERE task_id = ?", (claimed, tid))
+    state = kwc.get_state(board, tid)
+    assert state is not None
+    rc, out = result
+    kwc.apply_result(board, tid, state["cmd"], rc, out, now=ts + 37, generation=state["generation"],
+                     claimed_next_at=claimed)
+    assert _status(board, tid) == "scheduled"
+    assert _next_at(board, tid) == ts + 37 + EVERY
 
 
 def test_a_repark_during_the_probe_drops_the_old_result_and_keeps_the_new_park(board, wake_probes, monkeypatch):
