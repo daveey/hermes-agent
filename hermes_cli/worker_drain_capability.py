@@ -84,7 +84,8 @@ def create_capability(ident, manifest, *, entry=None) -> int:
     if entry[0] != os.getpid():
         raise CaptureRefused('cannot attest another process')
     contract = verified_contract(manifest)
-    if Path(contract['core_root']).resolve() != Path(__file__).resolve().parents[1]:
+    from hermes_cli._startup_fast import project_root_str
+    if Path(contract['core_root']).resolve() != Path(project_root_str()).resolve():
         raise CaptureRefused('running core is not the reviewed installed runtime')
     payload = _payload(ident, entry, contract)
     fd = os.memfd_create(NAME, os.MFD_ALLOW_SEALING | os.MFD_CLOEXEC)
