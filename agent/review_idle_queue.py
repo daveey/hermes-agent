@@ -70,6 +70,20 @@ class _PendingReview:
     # of the agent's review spawn. ``kwargs["task_cfg"]`` still drives the age-out.
     dispatch: Optional[Callable[[], None]] = None
     work: Any = None  # dispatch custody, reserved atomically with the pop (never held while merely queued)
+    drain: Any = None  # independent custody from enqueue through dispatch/cleanup
+
+    def close_drain(self) -> None:
+        if self.drain is not None:
+            self.drain.close()
+            self.drain = None
+
+    def finish(self) -> None:
+        try:
+            work, self.work = self.work, None
+            if work is not None:
+                work.release()
+        finally:
+            self.close_drain()
 
 
 class ReviewIdleQueue:
@@ -103,12 +117,26 @@ class ReviewIdleQueue:
                 dispatch: Optional[Callable[[], None]] = None) -> None:
         """Add (or replace — newest snapshot wins) a session's pending review, keeping the ORIGINAL
         enqueue time on coalesce so a busy session cannot push its age-out forever."""
-        with self._lock:
-            existing = self._pending.get(session_key)
-            enqueued_at = existing.enqueued_at if existing is not None else self._now()
-            self._pending[session_key] = _PendingReview(
-                agent, session_key, kwargs, enqueued_at, contextvars.copy_context(), dispatch)
-        self._ensure_thread()
+        from hermes_cli.worker_drain_fence import admit
+
+        lease = admit('background_review.queued')
+        item = _PendingReview(agent, session_key, kwargs, self._now(),
+                              contextvars.copy_context(), dispatch, drain=lease)
+        try:
+            with self._lock:
+                existing = self._pending.get(session_key)
+                if existing is not None:
+                    item.enqueued_at = existing.enqueued_at
+                self._pending[session_key] = item
+                if existing is not None:
+                    existing.close_drain()  # successor already owns independent custody
+            self._ensure_thread()
+        except BaseException:
+            with self._lock:
+                if self._pending.get(session_key) is item:
+                    del self._pending[session_key]
+                    item.close_drain()
+            raise
         self._wake.set()
         logger.info("Background review deferred (session=%s, queued=%d)", session_key[-12:], len(self._pending))
 
@@ -123,6 +151,7 @@ class ReviewIdleQueue:
             item = self._pending.get(session_key)
             if item is not None and item.dispatch is dispatch:
                 del self._pending[session_key]
+                item.close_drain()
 
     def _ensure_thread(self) -> None:
         with self._lock:
@@ -165,13 +194,14 @@ class ReviewIdleQueue:
                 if not self._pending:
                     return None
                 candidate = min(self._pending.values(), key=lambda p: p.enqueued_at)
-            item = self._pending.pop(candidate.session_key, None)
+            item = self._pending.get(candidate.session_key)
             if item is not None:
                 # Reserve in the same critical section as the pop: a selected item is never untracked, while
                 # an empty/not-yet-idle poll (returned None above) reserves nothing.
                 from agent import local_work_agent
                 item.work = item.context.run(
                     local_work_agent.reserve, "background_review", "agent.review_idle_queue._dispatch")
+                del self._pending[candidate.session_key]
             return item
 
     def _run(self) -> None:
@@ -191,13 +221,21 @@ class ReviewIdleQueue:
             except Exception:
                 logger.warning("Deferred review dispatch failed", exc_info=True)
             finally:
-                if item is not None and item.work is not None:
-                    # After _spawn_background_review_now reserved its own token (or failed).
-                    item.work.release()
+                if item is not None:
+                    item.finish()  # also covers failure to enter the saved context
             if item is None:
                 time.sleep(_POLL_INTERVAL_S)
 
     def _dispatch(self, item: _PendingReview) -> None:
+        from hermes_cli.worker_drain_fence import lease_scope
+
+        try:
+            with lease_scope(item.drain):
+                self._dispatch_held(item)
+        finally:
+            item.finish()
+
+    def _dispatch_held(self, item: _PendingReview) -> None:
         if item.dispatch is not None:
             item.dispatch()
             return

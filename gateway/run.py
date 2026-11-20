@@ -4163,19 +4163,28 @@ def _run_planned_stop_watcher(
 def _housekeeping_chore(label: str, fn, *args, **kwargs) -> None:
     """Run one housekeeping chore; failures log at debug (a persistent failure such as a broken
     import after a partial update would otherwise warn every tick forever) and never stop the loop."""
+    from hermes_cli.worker_drain_fence import admit, lease_scope
+
+    lease = None
     try:
-        fn(*args, **kwargs)
+        lease = admit('gateway.housekeeping')
+        with lease_scope(lease):
+            fn(*args, **kwargs)
     except Exception as exc:
         logger.debug("%s error: %s", label, exc)
+    finally:
+        if lease is not None:
+            lease.close()
 
 
 def _housekeeping_channel_directory(adapters, loop) -> None:
     from gateway.channel_directory import build_channel_directory
+    from gateway.run_drain_work import schedule_chore
     if loop is not None:
         # build_channel_directory is async (Slack web calls) and this is a background thread:
         # schedule onto the gateway loop and wait briefly so refresh failures still log.
-        fut = safe_schedule_threadsafe(
-            build_channel_directory(adapters), loop, logger=logger,
+        fut = schedule_chore(
+            lambda: build_channel_directory(adapters), loop, logger=logger,
             log_message="Channel directory refresh scheduling error")
         if fut is not None:
             fut.result(timeout=30)
