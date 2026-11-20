@@ -10,7 +10,7 @@ guessed a quota wall and parked the card. The tick logs had rotated, so the real
   ONE ``dispatch_skipped {reason, detail, until?}`` event per (card, reason, detail) per ready episode for every
   row the tick passed over: ``skipped_ineligible``, ``capsule_refused``, ``no_progress_held``,
   ``per_profile_capped``, ``claim_deferred`` (Board lease refusals and this host's admission-gate refusals, told
-  apart by the deferral's ``origin``), ``owner_down``, ``pinned_quota_wall`` and ``llm_paced``.
+  apart by the deferral's ``origin``), ``owner_down``, ``pinned_quota_wall``, ``llm_paced`` and ``review_provider_wall``.
   A (reason, detail) the episode already holds adds nothing, unless the newest row is a timed hold (``until``)
   it replaces (:func:`_supersedes_timed`); a new one appends. At most :data:`MAX_PER_EPISODE` per
   episode, so two dispatchers that disagree cannot grow a card's history without bound.
@@ -92,8 +92,9 @@ def _anchor(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def _key(reason: Any, detail: Any, until: Any) -> tuple[Any, Any, Any]:
-    # A moved reset is news for a quota hold (the notice names it); other reasons key on reason + detail.
-    return (reason, detail, until if reason == PINNED_QUOTA_WALL else None)
+    # A moved reset is news for a timed wall (the notice names it); other reasons key on reason + detail.
+    from hermes_cli.kanban_review_admission import REASON as REVIEW_WALL
+    return (reason, detail, until if reason in (PINNED_QUOTA_WALL, REVIEW_WALL) else None)
 
 
 def _skip_key(skip: dict[str, Any]) -> tuple[Any, Any, Any]:
@@ -231,6 +232,10 @@ def _tick_skips(result: Any) -> list[tuple[str, str, Any, Optional[float], dict[
     from hermes_cli.kanban_start_gate import SKIP_REASON, word  # a plugin held the start (kanban_start_gate)
     out += [(tid, SKIP_REASON, word(reason), None, {}) for tid, reason in getattr(result, "respawn_guarded", ())
             if word(reason)]
+    from hermes_cli.kanban_review_admission import REASON as REVIEW_WALL
+    out += [(tid, REVIEW_WALL, None, pair[1], {})
+            for tid, pair in getattr(result, "clock_held", {}).items()
+            if isinstance(pair, tuple) and len(pair) == 2 and pair[0] == REVIEW_WALL]
     return out
 
 
@@ -306,6 +311,7 @@ def _stamp(epoch: Any, now: Optional[float] = None) -> str:
 _WORDS = {
     PINNED_QUOTA_WALL: "held: pinned model {detail} quota-walled",
     LLM_PACED: "held: LLM quota pacing ({detail} pool)",
+    "review_provider_wall": "held: independent review routes walled on this host",
     "start_gate": "held: a plugin start gate holds card starts ({detail})",
     "per_profile_capped": "skipped: assignee {detail} is at its per-profile worker cap",
     "skipped_ineligible": "skipped: this machine cannot lease it ({detail})",
@@ -370,6 +376,9 @@ def advice(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
     if skip.get("reason") == PINNED_QUOTA_WALL:
         return ("it starts on its own when that wall resets. Re-pin it (`hermes kanban set-model <id> ...`) only if it "
                 "cannot wait; priority changes do not clear a quota wall. Do not run its work outside the dispatcher")
+    if skip.get("reason") == "review_provider_wall":
+        return ("it starts on its own when an independent reviewer is available on this host; priority changes do not "
+                "clear a reviewer wall. Do not run its work outside the dispatcher")
     return ("resolve that dispatcher skip reason; priority changes do not clear it. "
             "Do not run its work outside the dispatcher")
 

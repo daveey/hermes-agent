@@ -24,7 +24,7 @@ def hold(conn, task_id, result, *, lane, dry_run):
             return False
         review.resolve_review_model(conn, task, load_tier_config())
     except review.ReviewRouteDeferred as exc:
-        payload = {"reason": REASON, "until": exc.until}
+        payload = {"reason": REASON, "until": int(exc.until)}
     except review.ReviewModelUnavailable:
         return False
     except Exception:
@@ -38,8 +38,25 @@ def hold(conn, task_id, result, *, lane, dry_run):
     result.respawn_guarded.append((task_id, REASON))
     if not dry_run:
         with kb.write_txn(conn):
-            row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=? "
-                               "ORDER BY id DESC LIMIT 1", (task_id, EVENT)).fetchone()
-            if row is None or kb._json_dict(row[0]) != payload:
+            seen = [kb._json_dict(r[0]) for r in conn.execute(
+                "SELECT payload FROM task_events WHERE task_id=? AND kind=?", (task_id, EVENT))]
+            if payload not in seen:
                 kb._append_event(conn, task_id, EVENT, payload)
     return True
+
+
+def pickup_hold(replica, card):
+    """Read-only twin of :func:`hold`: the wall's ``until`` when this machine's dispatcher would defer
+    ``card``, else None. Records nothing; any fault returns None (fail open)."""
+    try:
+        from types import SimpleNamespace
+        result = SimpleNamespace(clock_held={}, respawn_guarded=[])
+        if not hold(replica, card["id"], result, lane=card["status"], dry_run=True):
+            return None
+        held = result.clock_held.get(card["id"])
+        return None if not held else held[1]
+    except Exception:  # health: allow BLE001 -- a hold prediction must never stop a pickup
+        logging.getLogger(__name__).warning(
+            "kanban review admission: pickup hold check failed for %s; copying ungoverned",
+            card["id"] if card is not None else None, exc_info=True)
+        return None

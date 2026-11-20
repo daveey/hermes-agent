@@ -630,6 +630,8 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         if reason is None:
             reason = _quota_held(replica, card)
         if reason is None:
+            reason = _review_walled(replica, card)
+        if reason is None:
             reason = _paced(conn, replica, card)
         hold = kph.board_hold(replica, card) if reason is None else None
         if hold is not None:
@@ -647,6 +649,23 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         elif reason[0] and card["id"] in mine:
             skips[card["id"]] = reason
     return picked, skips
+
+
+def _review_walled(replica: sqlite3.Connection, card: sqlite3.Row) -> Optional[tuple[str, Optional[str]]]:
+    """[daveey] ``(\"quota_hold\", detail)`` when local dispatch would defer this review on a host-local
+    reviewer wall (``kanban_review_admission.pickup_hold``). Judged before the copy: a walled review
+    would only be copied, held, evicted and copied again each tick, while taking the pickup budget."""
+    from hermes_cli.kanban_review_admission import REASON, pickup_hold
+    try:
+        until = pickup_hold(replica, card)
+    except Exception:  # health: allow BLE001 -- a hold prediction must never stop a pickup
+        _log.warning("kanban worker node: review wall check for %s failed", card["id"], exc_info=True)
+        return None
+    if until is None:
+        return None
+    from datetime import UTC, datetime
+    when = f" until {datetime.fromtimestamp(until, UTC):%Y-%m-%dT%H:%M:%SZ}"
+    return "quota_hold", f"{REASON}{when} (local dispatch would hold it)"
 
 
 def _paced(conn: sqlite3.Connection, replica: sqlite3.Connection, card: sqlite3.Row,

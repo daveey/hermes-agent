@@ -139,3 +139,69 @@ def test_preclaim_resolver_error_does_not_abort_dispatch(
                             (tid,)).fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='review_route_deferred'",
                             (tid,)).fetchone()[0] == 0
+
+
+def _review_routes(monkeypatch, *, walls_fn):
+    from hermes_cli import kanban_review_admission as admission
+
+    monkeypatch.setattr(tier, "load_tier_config", lambda: {"enabled": True})
+    monkeypatch.setattr(review, "implementer_models", lambda *_a: {"author-model"})
+    monkeypatch.setattr(review, "independent_routes", lambda *_a, **_kw: iter([
+        ("claude-opus-5-5", "anthropic")]))
+    monkeypatch.setattr(review, "registry_refusal", lambda *_a: None)
+    monkeypatch.setattr(walls, "active_walls", walls_fn)
+    monkeypatch.setattr(walls, "live_quota_wall", lambda *_a: None)
+    monkeypatch.setattr(pacing, "held_pools", lambda *_a: {})
+    return admission
+
+
+def test_two_hosts_with_different_deadlines_append_one_event_each(board, monkeypatch):
+    untils = [RESET, RESET + 60]
+    host = [untils[0]]
+    admission = _review_routes(monkeypatch, walls_fn=lambda **_kw: {"anthropic": host[0]})
+    monkeypatch.setattr(kb.time, "time", lambda: START)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="Build", assignee="a")
+        for _ in range(12):
+            for until in untils:
+                host[0] = until
+                admission.hold(conn, tid, dispatch.DispatchResult(), lane="review", dry_run=False)
+        payloads = [kb._json_dict(r[0]) for r in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind=?", (tid, admission.EVENT))]
+        assert payloads == [{"reason": admission.REASON, "until": until} for until in untils]
+
+
+def test_one_host_deferral_stays_one_event_across_cycles(board, monkeypatch):
+    admission = _review_routes(monkeypatch, walls_fn=lambda **_kw: {"anthropic": RESET})
+    monkeypatch.setattr(kb.time, "time", lambda: START)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="Build", assignee="a")
+        for _ in range(12):
+            admission.hold(conn, tid, dispatch.DispatchResult(), lane="review", dry_run=False)
+        assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind=?",
+                            (tid, admission.EVENT)).fetchone()[0] == 1
+
+
+def test_review_wall_hold_records_a_dispatch_skip(board, monkeypatch, all_assignees_spawnable):
+    from hermes_cli import kanban_dispatch_skip as skips
+    from hermes_cli import kanban_queue_position as qp
+
+    monkeypatch.setattr(kb.time, "time", lambda: START)
+    monkeypatch.setattr(tier, "load_tier_config", lambda: {"enabled": True})
+    monkeypatch.setattr(review, "implementer_models", lambda *_a: {"gpt-6.1-sol"})
+    monkeypatch.setattr(review, "independent_routes", lambda *_a, **_kw: iter([
+        ("claude-opus-5-5", "anthropic")]))
+    monkeypatch.setattr(review, "registry_refusal", lambda *_a: None)
+    monkeypatch.setattr(walls, "active_walls", lambda **_kw: {"anthropic": RESET})
+    monkeypatch.setattr(walls, "live_quota_wall", lambda *_a: None)
+    monkeypatch.setattr(pacing, "held_pools", lambda *_a: {})
+    monkeypatch.setattr(qp, "_running_and_limit", lambda *_a: (0, 7))
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="Independent exact-head review", assignee="a")
+        res = dispatch.dispatch_once(conn, spawn_fn=lambda task, _ws: None)
+        assert skips._tick_skips(res)
+        skip = skips.latest(conn, tid)
+        assert skip is not None and skip["reason"] == "review_provider_wall" and skip["until"] == RESET
+        place = qp.position(conn, kb.get_task(conn, tid))
+        assert skips.notice_fields(place, 31 * 60) == {
+            "dispatch_skip": {"reason": "review_provider_wall", "until": RESET}}
