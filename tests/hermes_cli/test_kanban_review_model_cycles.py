@@ -120,6 +120,8 @@ def test_real_reviewer_lifecycle_only_verdict_releases_authors(board, how):
             else:
                 assert kb.block_task(conn, tid, reason="wall", kind="transient", clock_only=True)
             assert kb.unblock_task(conn, tid)
+            # Main resumes the review phase after a parked review; model the later re-open to ready.
+            conn.execute("UPDATE tasks SET status='ready', current_run_id=NULL WHERE id=?", (tid,))
         implement(MODELS[2])
         authors = review.implementer_models(conn, kb.get_task(conn, tid))
         assert authors == ({MODELS[2]} if how == "verdict" else {MODELS[0], MODELS[2]})
