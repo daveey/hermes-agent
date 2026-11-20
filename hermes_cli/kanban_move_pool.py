@@ -306,9 +306,9 @@ def tree_state(trees: Iterable[str], *, budget: float = STATE_BUDGET_S,
         try:
             if _worktree_is_dirty(tree, tree, timeout=10, budget=timeouts):
                 from hermes_cli.kanban_checkout_deletions import published_checkout_deletions
-                if published_checkout_deletions(tree, timeouts):
-                    continue
-                return f"{_DIRTY}{tree}"
+                if not published_checkout_deletions(tree, timeouts):
+                    return f"{_DIRTY}{tree}"
+                # A local-branch upstream is not remote publication; retain the unpushed check below.
             if _commit_less(tree, timeouts):
                 continue
             if (_worktree_has_unpushed_commits(tree, timeout=10, budget=timeouts)
