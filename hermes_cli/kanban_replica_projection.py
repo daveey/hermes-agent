@@ -70,6 +70,7 @@ def card_rows(tkey: tuple, t: dict[str, Any], *, sids, closed: bool, synced, sta
     for sid in sids:
         out.append(((sid, ref), {
             **historical,
+            **({"blocked_upstream": t["blocked_upstream"]} if t.get("blocked_upstream") else {}),
             **{f: t.get(f) for f in _REMOTE_FIELDS},
             "id": tid, "board": board, "gateway": gw, "key": ref, "session": sid,
             "via": "shepherd", "root": ref, "remote": True,

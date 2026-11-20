@@ -31,6 +31,7 @@ from typing import Any, Iterable, Optional
 
 from hermes_cli import kanban_chat_links_released as _released
 from hermes_cli.kanban_replica_execution import read_runs, run_evidence
+from hermes_cli.kanban_replica_upstream import fields as upstream_fields
 from hermes_cli.kanban_run_machine import placement_select, run_machine
 from hermes_cli.kanban_session_activity_release import (DONE_PENDING_RELEASE, TERMINAL_STATUSES, UNKNOWN,
                                                        unreleased_obligation)
@@ -569,14 +570,16 @@ def replica_link_rows(conn: sqlite3.Connection, path: Path, gateway: str, profil
 
 
 def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) -> list[dict[str, Any]]:
-    return [dict(r) for r in conn.execute(
+    from hermes_cli.kanban_replica_upstream import enrich, optional_select
+    rows = [dict(r) for r in conn.execute(
         "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
         f"t.priority, t.block_kind, t.human_request, t.created_on, {placement_select(conn, 't')}, "
-        "l.chat_session, l.chat_profile, l.kind "
+        f"l.chat_session, l.chat_profile, l.kind {optional_select(conn)} "
         "FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id "
         "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
         "AND (t.id IS NULL OR (t.created_on IS NOT NULL AND t.created_on != ?))",
         (gateway, profile, gateway)).fetchall()]
+    return enrich(conn, rows)
 
 
 def _ledger_owners(stale_ok: bool = False) -> dict[tuple[str, str], list[tuple[str, str, str, bool]]]:
@@ -833,6 +836,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                 "released": False, "reported_status": status, "synced_at": pulled, "stale": stale,
                 "source": "replica",
             }
+            out[pair].update(upstream_fields(r))
             if machine := run_machine(r):
                 out[pair]["run_machine"] = machine
             # Executor-stamped liveness of the current run (kanban_replica_execution), never the pull clock.

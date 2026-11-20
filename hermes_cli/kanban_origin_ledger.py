@@ -246,6 +246,8 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
         receipt_epoch=lambda: _receipt_epoch(conn))
     payload = {k: v for k, v in task.items()
                if k not in ('origin_observation', 'withdrawal_notice', 'withdrawal_recipients')}
+    from hermes_cli.kanban_session_activity_card_details import _add_blocked_upstream
+    _add_blocked_upstream(conn, {task['id']: payload})
     from hermes_cli.kanban_withdrawal_notice import publish
     withdrawal = publish(conn, task)
     if withdrawal is not None:
@@ -656,7 +658,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     'legacy_aliases': aliases_for_projection(alias_receipts.get(structure.digest(raw, binding), []), binding),
                     # [daveey] Bounded run fields for what the card waits on (kanban_wait_info, display only).
                     'park': _park_of(task),
-                    **{k: task[k] for k in ('awaiting', 'wake_check', 'human_request') if task.get(k)},
+                    **{k: task[k] for k in ('awaiting', 'wake_check', 'human_request', 'blocked_upstream') if task.get(k)},
                 })
         return result
     finally:
