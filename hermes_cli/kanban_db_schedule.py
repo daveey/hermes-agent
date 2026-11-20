@@ -59,7 +59,10 @@ def schedule_task(
         reason, check_every = kaw.resource_apply(record, reason, check_every)
         payload["reason"] = reason
         task = _kb.get_task(conn, task_id)
-        source_status = (_kb._retry_status_for_run(conn, task_id) if task and task.status == 'running'
+        # Current ready is authoritative: a reopened/swept card is new implementation,
+        # even if an older park or failure still records a review phase.
+        source_status = ('ready' if task and task.status == 'ready' else
+                         _kb._retry_status_for_run(conn, task_id) if task and task.status == 'running'
                          else _kb._resume_status_from_events(conn, task_id))
         if source_status == 'review':
             payload['resume_status'] = source_status

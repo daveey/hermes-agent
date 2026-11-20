@@ -200,6 +200,46 @@ def test_review_continuation_uses_its_own_park_phase(board, wake):
     assert kb.get_task(conn, tid).status == 'review'
 
 
+@pytest.mark.parametrize('wake', ['unblock', 'timer'])
+@pytest.mark.parametrize('exit_path', ['sweep', 'reopen_continuation', 'reopen_refusal'])
+def test_ready_park_does_not_reuse_old_review_phase(board, monkeypatch, exit_path, wake):
+    from hermes_cli.kanban_db_dispatch import dispatch_once, sweep_stale_triage
+    from hermes_cli.kanban_db_operator import reopen_done_task
+    from hermes_cli.kanban_continuation import continue_task, wake_due_continuations
+    monkeypatch.setenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', '0')
+    conn, _ = board
+    tid = managed._hand_off_for_review(conn, {'review_model': managed.FABLE})
+    if exit_path == 'reopen_continuation':
+        assert kb.claim_review_task(conn, tid, claimer=kb._claimer_id())
+        result = continue_task(conn, tid, checkpoint='Review remains', resume_after_seconds=60,
+                               clock_only=True, awaiting={'kind': 'clock', 'why': 'cooldown'})
+        assert result['ok']
+        assert wake_due_continuations(conn, now=result['wake_at']) == [tid]
+    else:
+        managed._receipts(conn, tid, route=('class:deep', None))
+        for _ in range(3):
+            dispatch_once(conn, spawn_fn=lambda *a: pytest.fail('unavailable reviewer spawned'), max_spawn=1)
+        assert kb.get_task(conn, tid).status == 'triage'
+        if exit_path == 'sweep':
+            latest = max(event.created_at for event in kb.list_events(conn, tid))
+            assert tid in sweep_stale_triage(conn, now=latest + 3601)
+        else:
+            assert kb.unblock_task(conn, tid)
+    if exit_path != 'sweep':
+        assert kb.get_task(conn, tid).status == 'review'
+        assert kb.claim_review_task(conn, tid, claimer=kb._claimer_id())
+        assert kb.complete_task(conn, tid, summary='Approved')
+        assert reopen_done_task(conn, tid, reason='Additional implementation', actor='operator') == 'ready'
+    assert kb.get_task(conn, tid).status == 'ready'
+    assert kb.schedule_task(conn, tid, clock_only=True, awaiting={'kind': 'clock', 'why': 'cooldown'})
+    if wake == 'unblock':
+        assert kb.unblock_task(conn, tid)
+    else:
+        payload = [event.payload for event in kb.list_events(conn, tid) if event.kind == 'scheduled'][-1]
+        assert wake_due_continuations(conn, now=payload['wake_at']) == [tid]
+    assert kb.get_task(conn, tid).status == 'ready'
+
+
 @pytest.mark.parametrize('meta,error,expected', [
     ({'retry_status': 'review', 'trigger_outcome': 'spawn_failed'}, 'Review model resolution failed: no peer', True),
     ({'retry_status': 'ready', 'trigger_outcome': 'spawn_failed'}, 'Review model resolution failed: no peer', False),
