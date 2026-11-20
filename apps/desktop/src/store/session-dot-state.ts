@@ -870,7 +870,7 @@ const STRIPE_TRANSITION_WINDOW_MS = 60_000
 
 interface StripeTraceEntry {
   stripe: null | SessionStatusStripe
-  /** The red reasons last logged (`stuckReasons` joined); empty unless `stuck`. */
+  /** Last reported cause: stuck reasons, or `needs_you:N` when a non-red stripe still has an ask. */
   reasonsKey: string
   emitted: number[]
   suppressed: number
@@ -1127,8 +1127,10 @@ export function recordStripeTransition(
     const key = `${row.connection_id ?? ''}\u0000${row.profile ?? ''}\u0000${row.id}`
     const entry = stripeTrace.get(key)
     const reasons = stripe === 'stuck' ? stuckReasons(row, dotState, now / 1000) : []
-    const reasonsKey = reasons.join('|')
     const violation = stripeInvariantViolation(row, stripe, now / 1000, live)
+    // [daveey] Violation is part of the change key, same as a red row's reasons: an ask that
+    // opens while the stripe stays non-red is still reported.
+    const reasonsKey = [...reasons, ...(violation ? [violation] : [])].join('|')
 
     if (!entry) {
       stripeTrace.set(key, { emitted: [], reasonsKey, stripe, suppressed: 0 })
@@ -1144,8 +1146,8 @@ export function recordStripeTransition(
       return
     }
 
-    // A red row whose cause changed (the prompt answered but a card blocked) is a new red: log and report it.
-    if (entry.stripe === stripe && (stripe !== 'stuck' || entry.reasonsKey === reasonsKey)) {
+    // A red row whose cause changed, or a non-red row whose ask count changed, is a new report.
+    if (entry.stripe === stripe && entry.reasonsKey === reasonsKey) {
       return
     }
 

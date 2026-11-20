@@ -62,3 +62,18 @@ def test_reason_uses_frozen_count_snapshot_and_clears_retired_reason(monkeypatch
     ksa.annotate_kanban_activity([row])
     assert row["kanban_unknown"]
     assert "kanban_blocked_on" not in row
+
+
+def test_failed_read_drops_needs_you(monkeypatch):
+    """A failed annotation read is unknown, so a carried ask must not stay on the row."""
+    monkeypatch.setattr(ksa, "_annotation_snapshot", lambda: None)
+    row = {
+        "id": "s1",
+        "needs_you": [{"kind": "card", "ref": "default/t1", "question": ""}],
+        "kanban_blocked": 1,
+        "kanban_blocked_on": ["default/t1"],
+    }
+    ksa.annotate_kanban_activity([row])
+    assert row["kanban_unknown"]
+    assert "needs_you" not in row
+    assert "kanban_blocked" not in row

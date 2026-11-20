@@ -1304,4 +1304,23 @@ describe('open human ask invariant (blocked > 0 && !parked => stuck)', () => {
     expect(report.mock.calls.flatMap((call: unknown[]) => call[3] as string[])).not.toContain('needs_you:1')
     setStripeReasonReporter(null)
   })
+
+  // [daveey] An ask that opens while the stripe stays non-red is still a violation report.
+  // The original incident shape, if a caller bypasses the invariant that would have painted red.
+  it('reports an ask that opens while the stripe stays non-red', () => {
+    const report = vi.fn()
+    setStripeReasonReporter(report)
+    resetStripeTransitionLog()
+
+    recordStripeTransition({ id: 'late' } as never, 'done', 'idle', 1_000, true)
+    expect(report).not.toHaveBeenCalled()
+
+    recordStripeTransition({ id: 'late', kanban_blocked: 1 } as never, 'done', 'idle', 2_000, true)
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(report.mock.calls[0].slice(1)).toEqual(['done', 'done', ['needs_you:1']])
+
+    recordStripeTransition({ id: 'late', kanban_blocked: 1 } as never, 'done', 'idle', 3_000, true)
+    expect(report).toHaveBeenCalledTimes(1)
+    setStripeReasonReporter(null)
+  })
 })
