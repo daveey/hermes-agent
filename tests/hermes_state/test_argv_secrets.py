@@ -627,6 +627,7 @@ _POSITIONS = {
     "spaced_env": lambda s: [f"OPTS=--verbose {s} --x"],
     "flag_value": lambda s: [f"--jvm-arg=-Dregion={s}"],
     "list": lambda s: [f"--ids=alpha,{s},beta"],
+    "query_name": lambda s: [f"https://api.example.com/v1/items?{s}=1&page=2"],
     "relative_path": lambda s: [f"data/{s}.json"],
     "path": lambda s: [f"/srv/data/{s}/file.json"],
     "url": lambda s: [f"https://api.example.com/v1/{s}?page=2"],
@@ -653,7 +654,7 @@ def _shape(rng: random.Random, kind: str, length: int) -> str:
         "lower_base32": lambda: pick(string.ascii_lowercase + "234567"),
         "hex": lambda: pick("0123456789abcdef"),
         "mixed_letters": lambda: pick(string.ascii_letters),
-        "symbols": lambda: pick(string.ascii_letters + string.digits + "!@#$%^&*"),
+        "symbols": lambda: pick(string.ascii_letters + string.digits + "!@#$%^&*?"),
         "base64": lambda: base64.b64encode(rng.randbytes(length)).decode()[:length],
         "urlsafe": lambda: base64.urlsafe_b64encode(rng.randbytes(length)).decode()[
             :length
@@ -1028,3 +1029,46 @@ def test_the_generic_user_rule_masks_a_password():
         f"CURL_ARGS=-u admin:{MASK}",
         "./x",
     ]
+
+
+# ---- the sixth review: query names, "?" inside a path secret, the generic -u rule, globs -----------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        f"https://h/x?{KEY}=1",
+        f"/x?{KEY}=1",
+        "https://h/x?lhqHg!a#^PU!9FP^$DCXWVy$q=1",
+    ],
+)
+def test_a_secret_used_as_a_query_name_is_masked(value):
+    assert KEY not in shown([value])[0] and "DCXWVy" not in shown([value])[0]
+
+
+def test_a_question_mark_inside_a_path_secret_does_not_start_a_query():
+    """_password_cut_at_question: a path piece with password symbols goes on past the "?"."""
+    out = shown(["/srv/Xk9#mP2q?L7vN&4aB3cZ8w/x"])[0]
+    assert "4aB3cZ8w" not in out and "L7vN" not in out and out.endswith("/x")
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["-u", "admin:admin", "https://x"], ["-u", f"admin:{MASK}", "https://x"]),
+        (["--user", "postgres:postgres"], ["--user", f"postgres:{MASK}"]),
+    ],
+)
+def test_a_password_equal_to_the_user_is_masked(argv, expected):
+    assert shown(argv, "curl") == expected
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (["-u", "daveey:staff"], "ps"),
+        (["foo*bar.txt", "--glob=!node_modules"], "rg"),
+    ],
+)
+def test_known_programs_keep_their_own_u_and_word_globs_are_kept(argv, program):
+    assert shown(argv, program) == argv
