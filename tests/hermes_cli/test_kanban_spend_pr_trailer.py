@@ -113,3 +113,46 @@ def test_below_budget_trailer_reads_nothing(kanban_home, github):
         _stamped(conn, tid, f"See {PR}")
         assert spend.hold(conn, tid) is None
         assert github[1] == []
+
+
+def _per_pr_gh(monkeypatch, github, bodies):
+    """gh stub answering per PR number: (state, body)."""
+    import json as _json
+    from types import SimpleNamespace
+
+    def read(argv, **kwargs):
+        github[1].append(argv)
+        number = int(next(a for a in argv if a.rsplit("/", 1)[-1].isdigit()).rsplit("/", 1)[-1])
+        state, body = bodies[number]
+        data = {"state": state, "baseRefName": "main", "body": body, "comments": []}
+        return SimpleNamespace(returncode=0, stdout=_json.dumps(data), stderr="")
+
+    monkeypatch.setattr(base.prs.subprocess, "run", read)
+
+
+def test_read_cap_bounds_uncached_reads_and_fails_closed(kanban_home, github, monkeypatch):
+    with kbc.connect_closing() as conn:
+        tid = owner(conn, key="reviewed_pr", url="https://github.com/softmax-universe/daveey-hermes/pull/3598")
+        newer = list(range(3600, 3609))  # 9 newer candidates, all merged
+        bodies = {n: ("MERGED", "") for n in newer}
+        bodies[3598] = ("OPEN", f"Hermes-Card: {tid}")
+        _per_pr_gh(monkeypatch, github, bodies)
+        _stamped(conn, tid, "Own PR #3598 and " + " ".join(f"PR #{n}" for n in newer))
+        assert spend.hold(conn, tid) == "triage"  # own PR never reached within 8 uncached reads
+        assert len(github[1]) == 8
+
+
+def test_cached_candidates_do_not_consume_the_read_cap(kanban_home, github, monkeypatch):
+    from hermes_cli import kanban_db_dispatch_pr_state as prs
+    with kbc.connect_closing() as conn:
+        tid = owner(conn, key="reviewed_pr", url="https://github.com/softmax-universe/daveey-hermes/pull/3598")
+        newer = list(range(3600, 3609))
+        bodies = {n: ("MERGED", "") for n in newer}
+        bodies[3598] = ("OPEN", f"Hermes-Card: {tid}")
+        _per_pr_gh(monkeypatch, github, bodies)
+        for n in newer:
+            prs.pr_details(f"https://github.com/softmax-universe/daveey-hermes/pull/{n}")
+        github[1].clear()
+        _stamped(conn, tid, "Own PR #3598 and " + " ".join(f"PR #{n}" for n in newer))
+        assert spend.hold(conn, tid) is None  # merged candidates were free; own PR verified
+        assert len(github[1]) == 1

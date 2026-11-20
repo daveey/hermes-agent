@@ -61,11 +61,20 @@ def recognised_prs(conn: sqlite3.Connection, task_id: str) -> set[str]:
     return published_prs(conn, task_id) | comment_candidates(conn, task_id)
 
 
-_MAX_READS = 8  # newest candidates verified per card; a long comment history stays bounded
+_MAX_CANDIDATES = 20  # most recently named PRs considered per card
+_MAX_READS = 8  # uncached GitHub reads per card; cached (e.g. merged) candidates are free
 
 
 def _number(url: str) -> int:
     return int(url.rsplit("/", 1)[1])
+
+
+def _cached(url: str) -> bool:
+    import time
+    from hermes_cli.kanban_db_dispatch_pr_state import OPEN_TTL_SECONDS, _details, norm_pr
+
+    hit = _details.get(norm_pr(url))
+    return hit is not None and time.monotonic() - hit[2] < OPEN_TTL_SECONDS
 
 
 def open_core_pr(conn: sqlite3.Connection, task_id: str) -> str | None:
@@ -74,7 +83,12 @@ def open_core_pr(conn: sqlite3.Connection, task_id: str) -> str | None:
     for url in sorted(published_prs(conn, task_id)):
         if pr_details(url) == ("OPEN", "main"):
             return url
-    for url in sorted(comment_candidates(conn, task_id), key=_number, reverse=True)[:_MAX_READS]:
+    reads = 0
+    for url in sorted(comment_candidates(conn, task_id), key=_number, reverse=True)[:_MAX_CANDIDATES]:
+        if not _cached(url):
+            if reads >= _MAX_READS:
+                continue  # fail closed on the rest; cached candidates are still checked
+            reads += 1
         if pr_details(url) == ("OPEN", "main") and pr_card_owners(url) == (task_id,):
             return url
     return None
