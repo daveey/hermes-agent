@@ -21,10 +21,14 @@ _SECRET_FLAG = re.compile(
 )
 # Flags that LOOK secret-named but carry public, identifying values.
 _PUBLIC_FLAGS = frozenset({"--ssh-session-token-file", "--token-file", "--key-file", "--auth-file",
-                           "--keychain", "--monkey", "--keyboard", "--author", "--authority"})
+                           "--keychain", "--monkey", "--keyboard", "--author", "--authority",
+                           "--max-tokens", "--min-tokens", "--cache-read-tokens", "--token-env",
+                           "--idempotency-key", "--step-key", "--passkey-browser"})
 _TOKEN_CHARS = re.compile(r"^[A-Za-z0-9_+=.~-]+$")
 _HEX = re.compile(r"^[0-9a-fA-F-]+$")
-_HERMES_ID = re.compile(r"^(?:t_[0-9a-f]+|\d{8}_\d{6}_[0-9a-z]+|[a-z]+(?:[-_][a-z0-9]+)+)$")
+_HERMES_ID = re.compile(r"^(?:t_[0-9a-f]+|\d{8}_\d{6}_[0-9a-z]+|[a-z]+(?:[-_][a-z]+)+)$")
+_NUMBER = re.compile(r"^[+-]?\d+(?:\.\d+)?$")
+_PATH_START = re.compile(r"^(?:/|~|\.{1,2}/|\\|[A-Za-z]:[\\/])")
 _MIN_BARE_SECRET = 20
 _MIN_ENTROPY_BITS = 3.5
 
@@ -36,8 +40,9 @@ def _looks_like_bare_secret(token: str) -> bool:
         return False
     if _HEX.match(token) or _HERMES_ID.match(token):
         return False
-    if any(len(part) >= 5 and part.isalpha() and part.islower() for part in re.split(r"[-_.]", token)):
-        return False  # a separated plain word (``…-production``, ``…_session``): an identifier, not random
+    if any(len(part) >= 5 and part.isalpha() and (part.islower() or part.istitle())
+           for part in re.split(r"[-_.]", token)):
+        return False  # a separated plain word (``…-production``, ``Qwen3-Coder-…``): an identifier, not random
     if not (re.search(r"[A-Za-z]", token) and re.search(r"\d", token)):
         return False
     counts = Counter(token)
@@ -50,12 +55,13 @@ def _is_secret_flag(token: str) -> bool:
 
 
 def _looks_like_path(value: str) -> bool:
-    """A file path names where a secret lives, not the secret: keep it (``--password-file /x/y.pass``)."""
-    return "/" in value or "\\" in value or value.startswith(("~", "."))
+    """A file path names where a secret lives, not the secret: keep it (``--password-file /x/y.pass``). Judged by
+    how it starts: base64 secrets contain ``/`` too (``wJalrXUtnFEMI/K7MDENG/…``)."""
+    return bool(_PATH_START.match(value))
 
 
 def _mask_value(value: str, *, secret_named: bool) -> str:
-    if not value or _looks_like_path(value):
+    if not value or _looks_like_path(value) or _NUMBER.match(value):
         return value
     return MASK if secret_named or _looks_like_bare_secret(value) else value
 

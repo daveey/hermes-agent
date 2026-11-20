@@ -22,6 +22,14 @@ KEY = "q8ZpL2vXk9RtYwB4mN7cQ1sD5fH3jK6g"
         (["tool.py", "--signing-key=hunter2"], ["tool.py", f"--signing-key={MASK}"]),
         (["tool.py", "--auth", "abc"], ["tool.py", "--auth", MASK]),
         (["tool.py", "--DB-PASSWORD", "pw"], ["tool.py", "--DB-PASSWORD", MASK]),
+        # base64 secrets contain "/": still masked after a secret-named flag (only a path's START keeps it)
+        (
+            ["--aws-secret-access-key", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"],
+            ["--aws-secret-access-key", MASK],
+        ),
+        (["--webhook-secret=Zm9vYmFyYmF6/cXV4cXV1eA=="], [f"--webhook-secret={MASK}"]),
+        # a lowercase prefixed random token is not a Hermes id
+        (["abc-9f8e7d6c5b4a39281706f5e4z"], [MASK]),
         # a bare token as a --flag=value value
         (["tool.py", f"--config={KEY}"], ["tool.py", f"--config={MASK}"]),
     ],
@@ -59,6 +67,27 @@ def test_secrets_are_masked(argv, expected):
         ],
         ["/home/ubuntu/.local/share/hermes-mail/hermes_hub.py", "_runtime-serve"],
         ["--author", "daveey", "--keyboard", "us"],
+        [
+            "--max-tokens",
+            "4096",
+            "--min-tokens=16",
+            "--cache-read-tokens",
+            "2048",
+            "--token-env",
+            "OPENAI_API_KEY",
+        ],
+        [
+            "--idempotency-key",
+            "followup:t_01a1ecf2c3d6367b:notify",
+            "--step-key",
+            "build",
+            "--passkey-browser",
+            "chrome",
+        ],
+        ["--model", "Qwen3-Coder-480B-A35B-Instruct"],
+        ["--api-key-timeout", "30"],
+        ["--key-file", "C:\\Users\\x\\key.pem"],
+        ["--token-file", "./token.txt"],
     ],
 )
 def test_identifiers_are_kept(argv):
