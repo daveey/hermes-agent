@@ -147,3 +147,14 @@ def test_producer_release_still_works_with_done_authority(board):
     result = lifecycle.resume_local(board, target=target, episode=episode, actor_task=actor,
                                     actor_run_uid=local.run_uid(board, actor), kind="producer")
     assert result["status"] == "ready"
+
+
+def test_placement_settle_is_not_gated_by_open_episodes(board):
+    relay, _, authority, target, spec = local.setup(board)
+    local.contain(board, relay, target, spec)
+    assert kb.complete_task(board, authority, summary="remote settled", placement_settled=True)
+
+
+def test_context_has_no_blank_line_without_episodes(board):
+    relay = local.setup(board)[0]
+    assert "\n\n\n" not in kb.build_worker_context(board, relay)
