@@ -14,7 +14,10 @@ MODELS = [helpers.OPUS, helpers.FABLE, helpers.SONNET, "claude-review-four"]
 
 
 def run(conn, tid, model, lane="ready"):
-    return provenance._run(conn, tid, model=model, receipt=model, lane=lane)
+    rid = provenance._run(conn, tid, model=model, receipt=model, lane=lane)
+    if lane == "review":
+        conn.execute("UPDATE task_runs SET outcome='changes_requested' WHERE id=?", (rid,))
+    return rid
 
 
 def test_fifth_review_reuses_older_models_not_current_author(board):
@@ -49,19 +52,31 @@ def test_current_epoch_excludes_all_authors_even_across_review_retries(board, cu
         assert model not in authors
 
 
-@pytest.mark.parametrize("started", [False, True])
-def test_refused_spawn_is_not_a_review_boundary(board, started):
+@pytest.mark.parametrize("outcome", ["spawn_failed", "scheduled", "crashed"])
+def test_refused_spawn_is_not_a_review_boundary(board, outcome):
     with kbc.connect() as conn:
         task = kb.get_task(conn, kb.create_task(conn, title="epoch fixture", assignee="default"))
         run(conn, task.id, MODELS[0])
         review_id = run(conn, task.id, MODELS[1], "review")
         conn.execute("DELETE FROM task_events WHERE task_id=? AND run_id=? AND kind='worker_result'",
                      (task.id, review_id))
-        if started:
+        conn.execute("UPDATE task_runs SET outcome=? WHERE id=?", (outcome, review_id))
+        if outcome != "spawn_failed":
             kb._append_event(conn, task.id, "spawned", {"pid": 123}, run_id=review_id)
         run(conn, task.id, MODELS[2])
-        expected = {MODELS[2]} if started else {MODELS[0], MODELS[2]}
-        assert review.implementer_models(conn, kb.get_task(conn, task.id)) == expected
+        assert review.implementer_models(conn, kb.get_task(conn, task.id)) == {MODELS[0], MODELS[2]}
+
+
+@pytest.mark.parametrize("pin", [None, MODELS[0]])
+def test_missing_receipt_in_mixed_epoch_retains_earlier_authors(board, pin):
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, kb.create_task(conn, title="mixed epoch", assignee="default",
+                                              model_override=pin, provider_override="anthropic" if pin else None))
+        run(conn, task.id, MODELS[0])
+        run(conn, task.id, MODELS[1], "review")
+        run(conn, task.id, None)
+        run(conn, task.id, MODELS[2])
+        assert review.implementer_models(conn, kb.get_task(conn, task.id)) == {MODELS[0], MODELS[2]}
 
 
 def test_missing_current_receipt_keeps_previous_author_evidence(board):
@@ -72,6 +87,44 @@ def test_missing_current_receipt_keeps_previous_author_evidence(board):
         unknown = run(conn, task.id, None)
         conn.execute("UPDATE task_runs SET outcome='review_requested' WHERE id=?", (unknown,))
         assert review.implementer_models(conn, kb.get_task(conn, task.id)) == {MODELS[0]}
+
+
+@pytest.mark.parametrize("how", ["schedule", "block", "crash", "verdict"])
+def test_real_reviewer_lifecycle_only_verdict_releases_authors(board, how):
+    cfg = helpers.config(board, strong=MODELS[0], routes=MODELS)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="lifecycle epoch", assignee="default")
+
+        def implement(model):
+            claimed = kb.claim_task(conn, tid, claimer=kb._claimer_id())
+            assert claimed is not None
+            kb._append_event(conn, tid, "run_route", {"model": model, "lane": "ready"},
+                             run_id=claimed.current_run_id)
+            assert kb.request_review(conn, tid)
+
+        implement(MODELS[0])
+        claimed = kb.claim_review_task(conn, tid, claimer=kb._claimer_id())
+        assert claimed is not None
+        rid = claimed.current_run_id
+        kb._append_event(conn, tid, "model_tier", {"model": MODELS[1], "lane": "review"}, run_id=rid)
+        kb._append_event(conn, tid, "spawned", {"pid": 123}, run_id=rid)
+        if how == "verdict":
+            assert kb.request_changes(conn, tid, reason="rework")[0]
+        elif how == "crash":
+            provenance._end_run(conn, rid)
+            conn.execute("UPDATE tasks SET status='ready', claim_lock=NULL, current_run_id=NULL WHERE id=?", (tid,))
+        else:
+            if how == "schedule":
+                from hermes_cli.kanban_db_schedule import schedule_task
+                assert schedule_task(conn, tid, reason="CI", clock_only=True)
+            else:
+                assert kb.block_task(conn, tid, reason="wall", kind="transient", clock_only=True)
+            assert kb.unblock_task(conn, tid)
+        implement(MODELS[2])
+        authors = review.implementer_models(conn, kb.get_task(conn, tid))
+        assert authors == ({MODELS[2]} if how == "verdict" else {MODELS[0], MODELS[2]})
+        model, _, _ = tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane="review", cfg=cfg)
+        assert model not in authors
 
 
 def test_provider_wall_does_not_become_structural_exhaustion(board, monkeypatch):

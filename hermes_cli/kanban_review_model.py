@@ -125,15 +125,18 @@ def _current_authors(conn, task_id):
     from hermes_cli.kanban_review_retry import rehandoff_runs
     repeats = rehandoff_runs(conn, task_id)
     models = set()
-    for row in conn.execute("SELECT id FROM task_runs WHERE task_id=? ORDER BY id DESC",
+    unknown_author = False
+    for row in conn.execute("SELECT id, outcome FROM task_runs WHERE task_id=? ORDER BY id DESC",
                             (task_id,)).fetchall():
         events = conn.execute("SELECT kind, payload FROM task_events WHERE task_id=? AND run_id=? "
                               "ORDER BY id DESC", (task_id, row[0])).fetchall()
         reviewing = any(event[0] in ("model_tier", "run_route") and
                         _payload(event[1]).get("lane") == "review" for event in events)
         if reviewing:
-            ran = any(event[0] in ("worker_result", "spawned") for event in events)
-            if ran and models:
+            # Launch/result receipts prove execution, not that anyone judged the
+            # head. Parked and crashed reviewers must not release its authors.
+            verdict = row[1] in ("changes_requested", "completed")
+            if verdict and models and not unknown_author:
                 return models, True
             continue
         if row[0] in repeats:
@@ -142,6 +145,10 @@ def _current_authors(conn, task_id):
                  or _run_model(conn, task_id, row[0], "run_route", "model"))
         if model:
             models.add(model)
+        else:
+            # An unknown author anywhere in this epoch retains earlier evidence
+            # and the concrete pin, even alongside known current authors.
+            unknown_author = True
     return models, False
 
 
