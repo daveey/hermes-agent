@@ -44,8 +44,11 @@ class Journal:
                 conn.execute("BEGIN IMMEDIATE")
                 for statement in _SCHEMA:
                     conn.execute(statement)
-                if "dispatch" not in {row["name"] for row in conn.execute("PRAGMA table_info(automation_replay_batches)")}:
+                columns = {row["name"] for row in conn.execute("PRAGMA table_info(automation_replay_batches)")}
+                if "dispatch" not in columns:
                     conn.execute("ALTER TABLE automation_replay_batches ADD COLUMN dispatch TEXT NOT NULL DEFAULT 'pending'")
+                if "failures" not in columns:
+                    conn.execute("ALTER TABLE automation_replay_batches ADD COLUMN failures INTEGER NOT NULL DEFAULT 0")
                 yield conn
 
     def publish(self, owner: str, items: list[dict]) -> None:
@@ -130,6 +133,17 @@ class Journal:
             return bool(conn.execute(
                 "UPDATE automation_replay_batches SET token=NULL,holder=NULL WHERE id=? AND token=? "
                 "AND status='pending'", (batch["id"], batch["token"])).rowcount)
+
+    def record_failure(self, batch: dict) -> int | None:
+        """Charge an observed build/dispatch failure, never an ownership/storage refusal."""
+        with self.transaction() as conn:
+            row = self._owned(conn, batch)
+            if row is None:
+                return None
+            failures = row["failures"] + 1
+            conn.execute("UPDATE automation_replay_batches SET failures=? WHERE id=? AND token=?",
+                         (failures, batch["id"], batch["token"]))
+            return failures
 
     def admit(self, batch: dict) -> bool:
         """One durable worker-entry winner, not a promise of external API execution."""

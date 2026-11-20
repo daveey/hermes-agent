@@ -100,8 +100,29 @@ def test_wrong_profile_store_cannot_write_replay(store, tmp_path):
         other.close()
 
 
-@pytest.mark.parametrize("stop", [False, True])
-def test_real_wake_worker_entry_and_live_pending_claim(store, turn_env, monkeypatch, stop):
+def test_real_dispatch_storage_refusal_releases_claim_without_failure_charge(store, monkeypatch):
+    from tui_gateway import server, automation_replay as ar
+    db, journal, batch = store
+    session = {"session_key": "chat", "history_lock": threading.RLock()}
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _: True)
+    monkeypatch.setattr(server, "_session_db", lambda _: nullcontext(db))
+    monkeypatch.setattr(server, "_notif_release_claim", lambda *a: None)
+    monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError("locked")
+    monkeypatch.setattr(journal, "commit_message", unavailable)
+    def wake(owner, text, **kw):
+        accepted = kw["replay_delivery"].submit("rid", "sid", session, text,
+                                             kw["display_kind"], kw["display_metadata"], "test")
+        return "started" if accepted else "refused"
+    ar._run_batch(journal, batch, "chat", None, wake)
+    recovered = journal.claim("chat", 100, "successor", lambda _: True)
+    assert recovered is not None and recovered["failures"] == 0
+
+
+@pytest.mark.parametrize("stop", [False, True, "retire"])
+@pytest.mark.parametrize("local", [False, True])
+def test_real_wake_worker_entry_and_live_pending_claim(store, turn_env, monkeypatch, stop, local):
     from tui_gateway import server, automation_replay as ar
     from tui_gateway import wake_profiles
     from agent import memory_provider
@@ -130,24 +151,45 @@ def test_real_wake_worker_entry_and_live_pending_claim(store, turn_env, monkeypa
             target()
         return original_spawn(wait_then_run, **kwargs)
     monkeypatch.setattr(memory_provider, "spawn_context_thread", delayed)
-    journal.release(batch)
+    if local:
+        journal.discard(batch)
+        monkeypatch.setattr(ar, "ENABLED", True)
+        monkeypatch.setattr("hermes_constants.get_process_hermes_home", lambda: journal.path.parent)
+        monkeypatch.setattr(threading, "Timer", lambda *a: SimpleNamespace(
+            daemon=False, start=lambda: None, cancel=lambda: None))
+        ar.schedule("chat", text="report", display_kind="process_complete", display_metadata={},
+                    due=100, cause="quota", persisted=False, now=50, profile_home=journal.path.parent)
+    else:
+        journal.release(batch)
     try:
-        assert ar.consume_handoffs([journal.path.parent], now=100) == 1
+        if local:
+            ar._fire("chat", profile_home=journal.path.parent)
+        else:
+            assert ar.consume_handoffs([journal.path.parent], now=100) == 1
         assert entered.wait(10)
+        if local:
+            assert ar.pending("chat", profile_home=journal.path.parent)
         # Wake returned, but the actual PreparedWork has not entered its body.
         assert ar.consume_handoffs([journal.path.parent], now=100) == 0
-        if stop:
+        if stop == "retire":
+            monkeypatch.setattr(ar, "stale_code_reason", lambda: "superseded")
+            ar.handoff_all()
+        elif stop:
             ar.cancel_durable(journal.path.parent, ("chat",), 1e20, stop=True)
         release.set()
         session["_run_thread"].join(10)
         assert not session["_run_thread"].is_alive()
         assert completed.is_set() is (not stop)
-        assert len(db.get_messages("chat")) >= 1
+        # The fake agent does not flush ordinary local messages. Durable staging is real.
+        assert len(db.get_messages("chat")) == (0 if local else 1)
         assert not session["running"]
         if not stop:
             # Worker admission is permanent even without relying on its assistant rows.
             ar.consume_handoffs([journal.path.parent], now=100)
-        assert journal.owners() == []
+        assert journal.owners() == (["chat"] if stop == "retire" else [])
+        if stop == "retire":
+            # The predecessor is still alive; refusing its worker must release custody now.
+            assert journal.claim("chat", 1e20, "successor", lambda _: True) is not None
         assert "_submit_user_row" not in session
         assert "inflight_turn" not in session or session["inflight_turn"] is None
     finally:
@@ -156,3 +198,4 @@ def test_real_wake_worker_entry_and_live_pending_claim(store, turn_env, monkeypa
             session["_run_thread"].join(10)
         with server._sessions_lock:
             server._sessions.pop(sid, None)
+        ar.reset()

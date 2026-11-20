@@ -186,12 +186,12 @@ def _closing_agent(results, lines):
 def _wake_into(session, calls, monkeypatch):
     """``_wake_session_turn`` stand-in: records the replay and runs it as a turn in ``session``."""
     def wake(key, text, *, display_kind=None, display_metadata=None, label="wake", build_timeout=120.0,
-             profiles=None):
+             profiles=None, replay_delivery=None):
         calls.append({"key": key, "text": text, "display_kind": display_kind, "meta": display_metadata,
                       "label": label})
         session["running"] = True
         server._run_prompt_submit("rid", "sid", session, text, display_kind=display_kind,
-                                  display_metadata=display_metadata)
+                                  display_metadata=display_metadata, replay_delivery=replay_delivery)
         return "started"
     monkeypatch.setattr(server, "_wake_session_turn", wake)
 

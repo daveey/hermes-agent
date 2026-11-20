@@ -1,5 +1,6 @@
 """Atomic transcript custody and worker-entry fencing for retired automation."""
 from pathlib import Path
+import sqlite3
 
 
 class Delivery:
@@ -57,7 +58,7 @@ class Delivery:
         claim = session.get("_notif_turn_claim")
         try:
             if server._ensure_session_db_row(session) is False:
-                raise RuntimeError("replay session store unavailable")
+                return False
             with server._session_db(session) as db:
                 text = self.stage(db, session, text, kind, metadata)
             if text is None:
@@ -67,12 +68,19 @@ class Delivery:
                                              display_metadata=self.staged.get("display_metadata"),
                                              replay_delivery=self)
             return accepted
+        except sqlite3.Error:
+            # Storage is not a failed model/build attempt; keep the durable budget intact.
+            return False
         finally:
             if not accepted:
                 self.cleanup()
                 server._notif_release_claim(session, claim)
 
     def admit(self):
+        from tui_gateway.automation_replay import stale_code_reason
+        if stale_code_reason():
+            self.journal.release(self.batch)
+            return False
         return self.journal.admit(self.batch)
 
     def cleanup(self):

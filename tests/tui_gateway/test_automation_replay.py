@@ -69,7 +69,11 @@ def test_one_timer_per_chat_and_a_later_reset_rearms(timers):
 def test_cancelled_timer_cannot_consume_replacement(timers, monkeypatch):
     from tui_gateway import server
     wakes = []
-    monkeypatch.setattr(server, "_wake_session_turn", lambda *a, **kw: wakes.append(a) or "started")
+    def wake(*args, **kwargs):
+        wakes.append(args)
+        assert kwargs["replay_delivery"].admit()
+        return "started"
+    monkeypatch.setattr(server, "_wake_session_turn", wake)
     ar.schedule("k", text="old", display_kind="kanban_notice", display_metadata={}, due=NOW + 60,
                 cause="c", persisted=True, now=NOW)
     old_fire = timers[-1][1]
