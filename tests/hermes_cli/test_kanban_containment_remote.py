@@ -114,6 +114,26 @@ def test_public_synced_self_stop_then_authority_resume_preserves_edges(board, mo
     assert hub.closed == 2
 
 
+def test_resume_succeeds_when_hub_evidence_head_advances(board, monkeypatch):
+    target, authority, session, hub = setup(board, monkeypatch)
+    head = [1000]
+    original = hub.row_evidence
+
+    def moving(slug, table, uid):
+        data = original(slug, table, uid)
+        head[0] += 7
+        data["head"] = head[0]
+        return data
+    hub.row_evidence = moving
+    with scoped_current_session_id(session):
+        stopped = service.contain(board, authority=authority, summary="Fixture handoff")
+    adopt(board, monkeypatch, authority, session)
+    with scoped_current_session_id(session):
+        resumed = service.resume(board, task_id=target, episode=stopped["episode"])
+    assert resumed["status"] == "ready"
+    assert head[0] > 1007
+
+
 def test_unknown_transport_reuses_committed_request_and_rejects_changed_policy(board, monkeypatch):
     target, authority, session, hub = setup(board, monkeypatch)
     hub.drop_reply = True

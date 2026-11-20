@@ -161,6 +161,39 @@ def test_receipt_cache_immutable_and_foreign_board_not_authority(synced_conn):
         replica.remember(conn, proof, board="fixture", task=target, uid=stop["event_uid"])
 
 
+def test_receipt_cache_ignores_volatile_evidence_head(synced_conn):
+    conn = synced_conn
+    target, _, stop, _, hub = scenario(conn)
+    proof = hub.events[stop["event_uid"]]
+    proof["head"] = 100
+    replica.remember(conn, proof, board="fixture", task=target, uid=stop["event_uid"])
+    moved = copy.deepcopy(proof)
+    moved["head"] = 200
+    moved["transport_noise"] = "x"
+    replica.remember(conn, moved, board="fixture", task=target, uid=stop["event_uid"])
+    stored = conn.execute("SELECT evidence FROM containment_canonical_receipts").fetchall()
+    assert len(stored) == 1 and json.loads(stored[0][0])["head"] == 100
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda e: e["row"].update(payload=e["row"]["payload"] + " "),
+    lambda e: e["row"].update(origin_gateway="foreign"),
+    lambda e: e["containment_v1"].update(request="changed"),
+    lambda e: e["row"].update(created_at=12345),
+], ids=["payload", "origin", "proof", "row"])
+def test_receipt_cache_still_refuses_certified_changes_with_head(synced_conn, mutate):
+    conn = synced_conn
+    target, _, stop, _, hub = scenario(conn)
+    proof = hub.events[stop["event_uid"]]
+    proof["head"] = 100
+    replica.remember(conn, proof, board="fixture", task=target, uid=stop["event_uid"])
+    altered = copy.deepcopy(proof)
+    altered["head"] = 200
+    mutate(altered)
+    with pytest.raises(ContainmentRefused):
+        replica.remember(conn, altered, board="fixture", task=target, uid=stop["event_uid"])
+
+
 def _released_unheld(conn):
     target, child, stop, release, hub = scenario(conn)
     marker = sync.RemoteChange(1, "tasks", target, "upsert",

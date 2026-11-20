@@ -60,7 +60,10 @@ def remember(conn: sqlite3.Connection, evidence: dict, *, board: str, task: str,
         prior = conn.execute("SELECT uid,board,task_id,kind,payload,origin,evidence FROM containment_canonical_receipts "
                              "WHERE uid=?", (uid,)).fetchone()
         if prior is not None:
-            if tuple(prior) != values:
+            # Identity is the certified fields only; volatile transport keys of the
+            # evidence response (feed `head` etc.) are ignored. The first stored
+            # evidence is kept: the cache is append-only.
+            if tuple(prior)[:6] != values[:6] or _certified(prior[6]) != _certified(raw):
                 raise ContainmentRefused("canonical receipt identity changed")
             return
         token = _CACHE.set(id(conn))
@@ -68,6 +71,11 @@ def remember(conn: sqlite3.Connection, evidence: dict, *, board: str, task: str,
             conn.execute("INSERT INTO containment_canonical_receipts VALUES (?,?,?,?,?,?,?)", values)
         finally:
             _CACHE.reset(token)
+
+
+def _certified(raw: str) -> tuple:
+    data = json.loads(raw)
+    return tuple(json.dumps(data.get(k), sort_keys=True) for k in ("row", "containment_v1"))
 
 
 def _cached(conn: sqlite3.Connection, uid: str) -> dict | None:
