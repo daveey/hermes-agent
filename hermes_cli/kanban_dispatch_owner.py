@@ -5,6 +5,7 @@ from hermes_cli import kanban_lockguard as _kanban_lockguard
 import json
 import os
 from pathlib import Path
+import logging
 import sqlite3
 import tempfile
 
@@ -140,8 +141,13 @@ def run_owned_tick(conn, tick, dispatcher_id, board, dry_run):
             return DispatchResult(skipped_owned=True, ownership_error=str(exc))
         if owner is not None and dispatcher_id != owner:
             return DispatchResult(skipped_owned=True, dispatch_owner=owner)
-        from hermes_cli.kanban_ratio_routing import begin_tick
-        begin_tick(conn)  # ratio routing re-reads this board's start counts once per tick
+        from hermes_cli import kanban_ratio_routing as ratio
+        try:
+            ratio.begin_tick(conn)  # ratio routing re-reads this board's start counts once per tick
+        except Exception:  # health: allow BLE001 -- a memo fault must not stop the tick; ratio routing fails open
+            ratio.off_this_tick()
+            logging.getLogger(__name__).warning("kanban dispatch: ratio routing tick start failed; default cards keep "
+                                                "today's route this tick", exc_info=True)
         result = tick()
         result.dispatch_owner = owner
         kbc._maybe_checkpoint_wal(conn, db_path)

@@ -16,8 +16,8 @@ Rule (:func:`pick`), applied by ``kanban_model_tier.resolve_dispatch_tier`` to a
    base (under a class default, the ``class:<level>``/``auto`` selector itself).
 2. **Eligible pools.** Governed (``kanban.llm_pacing.providers``), with a ``v2`` entry whose ``ratio`` is above 0, not
    ``at_reserve`` and with a known ``rate_tokens_per_s``; the provider enabled; serving on this host's live pool
-   (``live_pool_serving``: a credential here, no quota wall for the model); no provider wall
-   (``active_walls``/``live_quota_wall``).
+   (``live_pool_serving``: a credential here and no live quota wall for the model, one pool load); no provider wall
+   (``active_walls``). Each pool's own ``v2`` reading must be fresh too (:func:`fresh_v2`).
 3. **Choice by deficit.** Targets are the eligible pools' ratios renormalized to 1. The share is each eligible pool's
    part of this host+board's default-tier starts over the last :data:`SHARE_WINDOW_SECONDS` (``run_route`` receipts
    whose ``tier_reason`` starts with ``default`` and whose run this host claimed; a receipt with no provider counts
@@ -67,6 +67,7 @@ class _Memo:
 
 _LOCK = threading.Lock()
 _MEMOS: dict[str, _Memo] = {}
+_OFF = threading.Event()  # set when a tick could not start its memo: picks fail open until a tick starts cleanly
 _WARNED: dict[str, float] = {}
 
 
@@ -99,12 +100,22 @@ def begin_tick(conn: sqlite3.Connection) -> None:
     key = _key(conn)
     with _LOCK:
         _MEMOS.pop(key, None)
+    _OFF.clear()
+
+
+def off_this_tick() -> None:
+    """:func:`begin_tick` failed: no pick may trust a memo it could not reset, so ratio routing fails open (every
+    board in this process) until the next tick starts cleanly."""
+    with _LOCK:
+        _MEMOS.clear()
+    _OFF.set()
 
 
 def _first_event_id_since(conn: sqlite3.Connection, since: float) -> Optional[int]:
     """The smallest event id whose row (or the first row after it) was created at or after ``since``: a binary search
-    on the primary key, about log2(events) seeks. Ids grow with ``created_at`` (a replica's synced row may carry an
-    older stamp; the scan filters ``created_at`` again)."""
+    on the primary key, about log2(events) seeks. It assumes ids grow with ``created_at``. Where they do not (a
+    replica's synced row may carry an older stamp), the bound may land late and skip in-window rows below it; those
+    rows are not refiltered or counted. The scan's own ``created_at`` filter only drops old rows above the bound."""
     # Two statements: SQLite answers a lone MIN or MAX of the rowid from the b-tree edge, both together by a full scan.
     hi = conn.execute("SELECT MAX(id) FROM task_events").fetchone()[0]
     if hi is None:
@@ -207,16 +218,30 @@ def _warn(key: str, message: str, *args: Any) -> None:
         logger.debug(message, *args, exc_info=True)
 
 
+def _fresh(stamp: Any, now: float) -> bool:
+    value = _number(stamp)
+    return value is not None and 0 <= now - value <= STALE_SECONDS
+
+
 def fresh_v2(now: float) -> Optional[dict]:
-    """This home's fresh ``v2`` document (with this process's newer pools laid over it), else None."""
+    """This home's fresh ``v2`` document (with this process's newer pools laid over it), else None. Only its pools
+    read within :data:`STALE_SECONDS` are kept: ``assemble_v2`` carries every other pool's last entry forward, so a
+    fresh ``computed_at`` says nothing about a pool this home stopped reading. A pool's age is its own ``read_at``
+    (as ``reserve_hold`` judges it), else its legacy provider block's ``read_at``."""
     from hermes_cli.kanban_llm_pacing_dispatch import _hold_state
-    v2 = _hold_state().get("v2")
-    if not isinstance(v2, dict) or not isinstance(v2.get("pools"), dict):
+    state = _hold_state()
+    v2 = state.get("v2")
+    if not isinstance(v2, dict) or not isinstance(v2.get("pools"), dict) or not _fresh(v2.get("computed_at"), now):
         return None
-    computed = _number(v2.get("computed_at"))
-    if computed is None or not 0 <= now - computed <= STALE_SECONDS:
-        return None
-    return v2
+
+    def read_at(provider: str, pool: dict) -> Any:
+        if "read_at" in pool:
+            return pool["read_at"]
+        legacy = state.get(provider)
+        return legacy.get("read_at") if isinstance(legacy, dict) else None
+
+    pools = {p: v for p, v in v2["pools"].items() if isinstance(v, dict) and _fresh(read_at(p, v), now)}
+    return {**v2, "pools": pools}
 
 
 def _pool_routes(task: Any, default_model: str) -> list[tuple[str, list[str]]]:
@@ -264,7 +289,9 @@ def _eligible(pool: str, model: str, entry: Any, walled: dict[str, float]) -> Op
     ratio = _number(entry.get("ratio"))
     if ratio is None or ratio <= 0 or _number(entry.get("rate_tokens_per_s")) is None:
         return None
-    if pool in walled or not pw.live_pool_serving(pool, model) or pw.live_quota_wall(pool, model):
+    # ``live_pool_serving`` is the one credential-pool load per pool and pick: it is False on a quota wall for
+    # ``model`` (``quota_unavailable``, the evidence ``live_quota_wall`` reads) as well as with no live credential.
+    if pool in walled or not pw.live_pool_serving(pool, model):
         return None
     return ratio
 
@@ -325,7 +352,7 @@ def pick(conn: sqlite3.Connection, task: Any, base: tuple, *, lane: str,
     """``(model, pool)`` for an unpinned default ``base`` route (module rule), else None (keep ``base``). Never raises:
     a fault keeps today's route (logged)."""
     try:
-        if base[2] != "default" or not enabled(cfg):
+        if base[2] != "default" or _OFF.is_set() or not enabled(cfg):
             return None
         if str(getattr(task, "model_override", None) or "").strip() or \
                 str(getattr(task, "provider_override", None) or "").strip():

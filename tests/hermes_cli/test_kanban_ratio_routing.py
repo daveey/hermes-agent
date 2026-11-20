@@ -9,6 +9,8 @@ import collections
 import json
 import logging
 import sqlite3
+import threading
+import types
 
 import pytest
 
@@ -30,6 +32,7 @@ HUB_CFG = {'default_model': ASTRA[0], 'default_provider': ASTRA[1], 'strong_mode
            'default_model_keep_patterns': ['security']}
 TARGETS = {'anthropic': 0.5, 'openai-codex': 0.3, 'xai-oauth': 0.2}
 UNSERVED: set = set()  # providers this host holds no live credential for, per test
+REAL_SERVING = walls.live_pool_serving  # the hub fixture stubs it; the live-wall cases read a fake pool through it
 
 
 @pytest.fixture
@@ -42,6 +45,7 @@ def hub(board, monkeypatch):
     monkeypatch.setattr(lpd, '_V2_MEMO', {})
     monkeypatch.setattr(ratio, '_MEMOS', {})
     monkeypatch.setattr(ratio, '_WARNED', {})
+    monkeypatch.setattr(ratio, '_OFF', threading.Event())
     config, _ = routing(monkeypatch)
     std = config['model_routing']['routes']['standard']
     config['model_routing']['routes'] = {'deep': [dict(std[0], model=m, provider=p) for m, p in (FABLE, OPUS, ASTRA, GROK)]}
@@ -131,8 +135,7 @@ def test_an_ineligible_pool_is_never_picked(hub, monkeypatch, why):
         lpd.state_path().write_text(json.dumps(state))
     walls_by_case = {
         'walled': lambda: monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'anthropic': clock[0] + 3600.0}),
-        'live_wall': lambda: monkeypatch.setattr(walls, 'live_quota_wall',
-                                                 lambda p, m: clock[0] + 3600.0 if p == 'anthropic' else None),
+        'live_wall': lambda: _live_pools(monkeypatch, walled={'anthropic': clock[0] + 3600.0}),
         'disabled': lambda: hub['config']['providers'].update({'anthropic': {'enabled': False}}),
         'no_credential': lambda: UNSERVED.add('anthropic'),
         'ungoverned': lambda: hub['cfg'].update({'llm_pacing': {'providers': ['openai-codex', 'xai-oauth']}}),
@@ -145,6 +148,107 @@ def test_an_ineligible_pool_is_never_picked(hub, monkeypatch, why):
             route = tier.resolve_dispatch_tier(conn, task, lane='ready')
             assert route == (*ASTRA, 'default+ratio:openai-codex')
             ratio.note_start(conn, route[1], route[2])
+
+
+class _Pool:
+    """A provider's OAuth credential pool: every entry live; quota walls come from ``quota_unavailable``."""
+
+    def __init__(self, provider):
+        self.provider = provider
+
+    def has_available(self, model=None):
+        return True
+
+
+def _live_pools(monkeypatch, walled=None):
+    """The real ``live_pool_serving`` over fake credential pools; returns the providers whose pool was loaded."""
+    loads = []
+    walled = walled or {}
+
+    def load(provider):
+        loads.append(provider)
+        return _Pool(provider)
+    monkeypatch.setattr(walls, 'live_pool_serving', REAL_SERVING)
+    monkeypatch.setattr(walls, '_oauth_pool', load)
+    monkeypatch.setattr('agent.model_routing_unavailable.quota_unavailable', lambda pool, model: (
+        types.SimpleNamespace(resets_at=walled[pool.provider]) if pool.provider in walled else None))
+    return loads
+
+
+def test_a_pick_loads_each_candidate_credential_pool_once(hub, monkeypatch):
+    loads = _live_pools(monkeypatch)
+    _budget(hub['clock'])
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, kb.create_task(conn, title='d', assignee='a'))
+        assert ratio.pick(conn, task, (*ASTRA, 'default'), lane='ready', cfg=hub['cfg']) == (FABLE[0], 'anthropic')
+    assert sorted(loads) == sorted(TARGETS)
+
+
+@pytest.mark.parametrize('where', ['pool', 'legacy'])
+def test_a_pool_whose_own_reading_is_stale_is_never_picked(hub, where):
+    """``assemble_v2`` carries a pool this home stopped reading forward under a fresh ``computed_at``: the pool's own
+    ``read_at`` (else its legacy provider block's) must be within 20 minutes too."""
+    clock = hub['clock']
+    _budget(clock, {'anthropic': 0.9, 'openai-codex': 0.1})
+    state = json.loads(lpd.state_path().read_text())
+    pool = state['v2']['pools']['anthropic']
+    if where == 'legacy':
+        del pool['read_at']
+        state['anthropic']['read_at'] = clock[0] - ratio.STALE_SECONDS - 1
+    else:
+        pool['read_at'] = clock[0] - ratio.STALE_SECONDS - 1
+    lpd.state_path().write_text(json.dumps(state))
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title='d', assignee='a')
+        assert _route(conn, tid) == (*ASTRA, 'default+ratio:openai-codex')
+        state['anthropic']['read_at'] = pool['read_at'] = clock[0] - ratio.STALE_SECONDS + 1  # just inside: eligible
+        lpd.state_path().write_text(json.dumps(state))
+        ratio.begin_tick(conn)
+        assert _route(conn, tid) == (*FABLE, 'default+ratio:anthropic')
+
+
+def test_a_tick_whose_ratio_memo_cannot_start_fails_open_and_still_runs(hub, monkeypatch, caplog,
+                                                                       all_assignees_spawnable):
+    """``begin_tick`` raising (``_key``'s PRAGMA) is logged with its traceback; that tick's default cards keep today's
+    route, and the next clean tick routes by ratio again."""
+    _budget(hub['clock'])
+    real_key, calls = ratio._key, []
+
+    def key(conn):
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError('disk I/O error')
+        return real_key(conn)
+    monkeypatch.setattr(ratio, '_key', key)
+    with kbc.connect() as conn, caplog.at_level(logging.WARNING):
+        first = kb.create_task(conn, title='one', assignee='a')
+        assert pin_tests._tick(conn) == [ASTRA]
+        assert pin_tests._events(conn, first, 'run_route')[-1]['tier_reason'] == 'default'
+        failed = [r for r in caplog.records if 'ratio routing tick start failed' in r.getMessage()]
+        assert failed and failed[0].exc_info is not None
+        kb.create_task(conn, title='two', assignee='a')
+        assert pin_tests._tick(conn) == [FABLE]
+
+
+def test_record_run_route_never_raises_when_the_ratio_memo_key_fails(hub, monkeypatch, caplog,
+                                                                     all_assignees_spawnable):
+    """``_key`` failing everywhere: picks, the receipt block and the start count all fail open; the card still runs
+    and its ``run_route`` receipt is written."""
+    _budget(hub['clock'])
+
+    def key(_conn):
+        raise sqlite3.OperationalError('disk I/O error')
+    monkeypatch.setattr(ratio, '_key', key)
+    with kbc.connect() as conn, caplog.at_level(logging.WARNING):
+        tid = kb.create_task(conn, title='d', assignee='a')
+        assert pin_tests._tick(conn) == [ASTRA]
+        assert pin_tests._events(conn, tid, 'run_route')[-1]['tier_reason'] == 'default'
+        task = kb.get_task(conn, tid)
+        task.current_run_id = conn.execute('SELECT MAX(id) FROM task_runs').fetchone()[0]
+        tier.record_run_route(conn, task, lane='ready', reason='default+ratio:anthropic')  # receipt + count: no raise
+    assert all(r.exc_info is not None for r in caplog.records
+               if r.levelno >= logging.WARNING and 'ratio' in r.getMessage())
+    assert any('ratio' in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
 
 
 def _corrupt(clock, case):

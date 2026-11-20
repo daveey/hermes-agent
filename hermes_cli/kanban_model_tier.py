@@ -281,10 +281,8 @@ def record_run_route(conn: sqlite3.Connection, task: Any, *, lane: str, reason: 
         logger.debug("kanban model tier: route resolve failed for %s (%s)", getattr(task, "id", "?"), exc,
                      exc_info=True)
         model, provider, source = None, None, "unknown"
-    from hermes_cli import kanban_ratio_routing as ratio
     payload = {"model": model, "provider": provider, "lane": lane, "source": source, "tier_reason": reason}
-    picked = ratio.receipt(conn, task.id, reason)
-    if picked:
+    if picked := _ratio_receipt(conn, task, reason):
         payload["ratio"] = picked
     try:
         from hermes_cli import kanban_db as _kb
@@ -294,7 +292,23 @@ def record_run_route(conn: sqlite3.Connection, task: Any, *, lane: str, reason: 
         logger.debug("kanban model tier: route receipt failed for %s (%s)", getattr(task, "id", "?"), exc,
                      exc_info=True)
         return
-    ratio.note_start(conn, provider, reason)  # the next card in this tick sees this start in its pool's share
+    try:
+        from hermes_cli.kanban_ratio_routing import note_start
+        note_start(conn, provider, reason)  # the next card in this tick sees this start in its pool's share
+    except Exception as exc:  # a missed count only skews this tick's shares; the next tick re-reads the receipts
+        logger.warning("kanban model tier: ratio start count failed for %s (%s)", getattr(task, "id", "?"), exc,
+                       exc_info=True)
+
+
+def _ratio_receipt(conn: sqlite3.Connection, task: Any, reason: str) -> Optional[dict[str, Any]]:
+    """The ratio pick's receipt block (``kanban_ratio_routing.receipt``); a fault only drops the detail (logged)."""
+    try:
+        from hermes_cli.kanban_ratio_routing import receipt
+        return receipt(conn, task.id, reason)
+    except Exception as exc:  # the tier_reason already names the pick; the detail is optional
+        logger.warning("kanban model tier: ratio receipt failed for %s (%s)", getattr(task, "id", "?"), exc,
+                       exc_info=True)
+        return None
 
 
 def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
@@ -496,8 +510,7 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
             payload = {"reason": reason, "model": model or _str(getattr(task, "model_override", None)) or None,
                        "provider": provider or _str(getattr(task, "provider_override", None)) or None,
                        "lane": lane}
-            from hermes_cli.kanban_ratio_routing import receipt as _ratio_receipt
-            if picked := _ratio_receipt(conn, task.id, reason):
+            if picked := _ratio_receipt(conn, task, reason):
                 payload["ratio"] = picked
             if is_review:
                 payload["implementer_model"] = implementer_model
