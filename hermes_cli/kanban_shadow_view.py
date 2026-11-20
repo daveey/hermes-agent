@@ -123,7 +123,7 @@ def ordered(tasks: list[tuple[Any, Optional[str]]], order_by: Optional[str]) -> 
         return tasks
     from hermes_cli import kanban_db as kb
     expression = kb.VALID_SORT_ORDERS[order_by.strip().lower()]
-    with sqlite3.connect(":memory:") as order:
+    with sqlite3.connect(":memory:") as order:  # noqa: kanban-lockguard -- sort scratch, not a board
         order.execute("CREATE TABLE cards (position INTEGER, id TEXT, created_at INTEGER, priority INTEGER, "
                       "status TEXT, assignee TEXT, title TEXT, started_at INTEGER, completed_at INTEGER)")
         order.executemany("INSERT INTO cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
