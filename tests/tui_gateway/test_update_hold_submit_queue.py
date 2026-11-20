@@ -518,10 +518,12 @@ def test_idle_stop_keeps_it_for_the_next_backend_after_an_update_restart(stoppab
 
 
 @pytest.mark.parametrize("origin", ["delete", "rewind", "send_now", "plugin:hermes-bots"])
-def test_non_stop_gestures_clear_the_held_queue_as_before(stoppable, origin):
+@pytest.mark.parametrize("compute_host", [False, True])
+def test_non_stop_gestures_clear_the_held_queue_as_before(stoppable, origin, compute_host, monkeypatch):
     from tui_gateway.turn_marker import read_turn_marker
     held = stoppable
     _submit()
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a, **k: compute_host)
     _interrupt(origin=origin)
     assert not held.session.get("queued_prompt")
     assert read_turn_marker(held.home, "session-key") is None
@@ -554,6 +556,8 @@ def test_non_user_teardown_clears_the_held_queue_even_if_asked_to_keep(held, mon
     _submit()
     server._interrupt_session_turn("sid", held.session, reason=reason, keep_update_held_queue=True)
     assert not held.session.get("queued_prompt")
+    from tui_gateway.turn_marker import read_turn_marker
+    assert read_turn_marker(held.home, "session-key")["reason"] == "update_hold_queue"
 
 
 def test_orphan_reap_with_keep_still_clears(held, monkeypatch):

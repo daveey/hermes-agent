@@ -88,25 +88,45 @@ def redrive_update_queues(home):
         UPDATE_HOLD_QUEUE_REASON, _load, _marker_path, release_update_queue,
     )
 
+    # Inventory markers first: session.create does not take the resume lock. A
+    # queue created during the disk read must appear in the later session snapshot.
+    from contextlib import ExitStack
     home = Path(home)
     with server._session_resume_lock:
+        markers = _load(_marker_path(home))
         with server._sessions_lock:
             sessions = list(server._sessions.items())
-        for key, marker in _load(_marker_path(home)).items():
+        for key, marker in markers.items():
             if (marker.get("reason") != UPDATE_HOLD_QUEUE_REASON
                     or marker.get("writer_pid") != os.getpid() or marker.get("queue_released")):
                 continue
             owned = [(sid, session) for sid, session in sessions
-                     if session.get("session_key") == key and Path(server._session_home(session)) == home]
-            if not owned:
-                release_update_queue(home, key, marker)
-                continue
-            for sid, session in owned:
-                with session["history_lock"]:
-                    if session.get("running"):
-                        continue  # head already claimed, marker not yet restamped
-                    if session.get("queued_prompt") and not (session.get("_closing") or session.get("_finalized")):
+                     if server._session_lookup_key(session, fallback=sid) == key
+                     and Path(server._session_home(session)).resolve() == home.resolve()]
+            with ExitStack() as locks:
+                for _, session in owned:
+                    locks.enter_context(session["history_lock"])
+                # One stale alias must not release another alias's live custody.
+                active = False
+                for sid, session in owned:
+                    if session.get("running") or session.get("_compute_host_turn_id"):
+                        active = True  # claimed head can precede marker restamping
+                    elif session.get("queued_prompt") and not (session.get("_closing") or session.get("_finalized")):
+                        active = True
                         retry_queued_prompt("__update_queue__", sid, session)
-                    else:
-                        release_update_queue(home, key, marker)
+                if not active:
+                    release_update_queue(home, key, marker)
+
+
+def discard_update_queue_marker(session):
+    """Explicit queue cancellation must not become an orphan replay. Caller holds history_lock."""
+    from tui_gateway import server
+    from tui_gateway.turn_marker import UPDATE_HOLD_QUEUE_REASON, clear_turn_marker, read_turn_marker
+    from hermes_state_outcome import turn_identity
+    import os
+    home, key = server._session_home(session), session.get("session_key")
+    marker = read_turn_marker(home, key) if key else None
+    if (marker and marker.get("reason") == UPDATE_HOLD_QUEUE_REASON
+            and marker.get("writer_pid") == os.getpid()):
+        clear_turn_marker(home, key, concluding_turn=turn_identity(marker=marker))
 

@@ -975,6 +975,9 @@ def _interrupt_session_turn(
         _cancel_background_review_on_stop(session)
         return use_compute_host
     with session["history_lock"]:
+        if reason == "user_stop":
+            from tui_gateway.admission_retry import discard_update_queue_marker
+            discard_update_queue_marker(session)
         session["_turn_cancel_requested"] = True
         session["queued_prompt"] = None
         session.pop("queued_prompts", None)
