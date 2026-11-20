@@ -44,7 +44,8 @@ def test_cli_worker_cannot_open_request(correction_case, monkeypatch, capsys):
     assert list(conn.iterdump()) == before
 
 
-@pytest.mark.parametrize("raw", [b"not json", b"\xff", b"x" * 200001], ids=["json", "utf8", "size"])
+@pytest.mark.parametrize("raw", [b"not json", b"\xff", b"x" * 200001, b"[" * 150000],
+                         ids=["json", "utf8", "size", "deep-nesting"])
 def test_cli_bad_file_bytes(correction_case, tmp_path, capsys, raw):
     conn, tid, _ = correction_case
     path = tmp_path / "bad-bytes.json"

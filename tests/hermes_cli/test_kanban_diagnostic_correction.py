@@ -139,6 +139,8 @@ def test_stale_compare_preserves_both_fields_and_history(kanban_home, stale):
     ("No error here", "origin chat @session:example", "missing or ambiguous"),
     ("x x", "x", "missing or ambiguous"),
     ("Acceptance: x", "x", "acceptance"),
+    ("ß" * 40 + "\nAcceptance: deliver error now", "error", "acceptance"),
+    ("ß" * 20 + "\nAcceptance: deliver", "Acceptance", "acceptance"),
     ("x", "", "nonempty single-line"),
     ('a"b', 'a"b', "nonempty single-line"),
     ("a\nb", "a\nb", "nonempty single-line"),

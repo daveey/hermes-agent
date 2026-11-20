@@ -25,8 +25,11 @@ operator review; no text heuristic can establish their meaning.
 
 The task must be inactive and open. A synced board must be primary on the card's
 owning gateway. The comment must have an existing portable UID and belong to that
-exact task. Run on an existing initialized board; this command does not initialize
-or migrate one. There is no force or caller-supplied authority flag.
+exact task. Run on an existing initialized board with the sync schema. The command
+skips explicit board initialization, but opening its connection still runs normal
+schema setup and may create a missing database. A board without the sync schema
+is refused with a SQLite error (for example, `no such column: uid`); this is not a
+read-only missing-board probe. There is no force or caller-supplied authority flag.
 
 ## Request
 

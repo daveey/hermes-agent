@@ -211,7 +211,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         board_scope = kb.scoped_current_board(normed)
 
     with board_scope:
-        # Maintenance commands must not auto-initialize/migrate before validation.
+        # Maintenance handlers skip init_db; their connections still run schema setup.
         if handler := {"repair": _cmd_repair, "recover": _cmd_recover,
                        "correct-diagnostics": _cmd_correct_diagnostics}.get(action):
             return handler(args)

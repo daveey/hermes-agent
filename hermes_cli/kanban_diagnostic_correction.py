@@ -5,6 +5,7 @@ Quotation planning is pure. It grants no authority to mutate a card or comment.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 
 
@@ -29,7 +30,7 @@ def command(args) -> int:
         request = json.loads(raw.decode("utf-8"))
         if not isinstance(request, dict) or set(request) != keys:
             raise ValueError("expected exactly: " + ", ".join(sorted(keys)))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         print(f"kanban: invalid correction request: {exc}", file=sys.stderr)
         return 2
     try:
@@ -126,7 +127,7 @@ def quote_diagnostic(original: str, diagnostic: str) -> str:
     if original.count(diagnostic) != 1:
         raise ValueError("diagnostic occurrence is missing or ambiguous")
     start = original.index(diagnostic)
-    acceptance = original.casefold().find("acceptance:")
-    if acceptance >= 0 and start + len(diagnostic) > acceptance:
+    acceptance = re.search(r"acceptance:", original, re.IGNORECASE)
+    if acceptance is not None and start + len(diagnostic) > acceptance.start():
         raise ValueError("diagnostic overlaps acceptance text")
     return original[:start] + f'"{diagnostic}"' + original[start + len(diagnostic):]
