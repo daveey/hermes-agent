@@ -47,6 +47,7 @@ def test_walled_review_not_claimed_and_unwalled_host_claims(
             res = dispatch.dispatch_once(conn, spawn_fn=lambda task, _ws: seen.append(task.id))
             assert seen == []
             assert res.clock_held[tid] == ("review_provider_wall", RESET)
+            assert res.respawn_guarded == [(tid, "review_provider_wall")]
             task = kb.get_task(conn, tid)
             assert task.status == lane and not task.claim_lock
             assert task.consecutive_failures == 0
