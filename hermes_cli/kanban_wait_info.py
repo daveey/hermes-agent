@@ -27,6 +27,9 @@ from typing import Any, Optional
 
 
 STALL_AFTER_S = 2 * 3600
+# A contained card whose authority finished is stranded once this long has passed (a reopen-and-release attempt
+# right after the authority completes is recovery, not a strand).
+CONTAINED_STRAND_AFTER_S = 30 * 60
 
 # Producers that change the awaited condition without an agent acting (a card that runs, a CI run, a deploy, a
 # vendor/ticket, the clock, an internal resource gate whose own probe resumes the card once its reading drops).
@@ -143,6 +146,34 @@ def premise_key(kind: str, status: str, reason: Any = "", awaiting: Optional[dic
     text = "" if (reason_code or awaiting) else _norm(reason)
     basis = json.dumps([structured, text], sort_keys=True)
     return f"{kind}:{hashlib.sha1(basis.encode()).hexdigest()[:12]}"
+
+
+def describe_contained(info: dict[str, Any], *, now: Optional[float] = None) -> dict[str, Any]:
+    """Wait info for a held card from its ``contained`` episode (``kanban_contained_wait.read``). The wait object
+    carries ``contained: {episode, authority: {id, status}, producer: {id, status} | None}`` (unknown status counts as
+    open). Authority open: waits on its release. Authority done/archived with the producer still open: waits on the
+    producer. Authority finished for CONTAINED_STRAND_AFTER_S and no open producer: agent-owned and stalled at once,
+    dated from the authority's completion, premise (contained, episode, authority status, authority completion)."""
+    now = time.time() if now is None else now
+    authority, producer = info["authority"], info.get("producer")
+    done_at = epoch_s(authority.get("at"))
+    shown = {"episode": info["episode"], "authority": {"id": authority["id"], "status": authority["status"]},
+             "producer": {"id": producer["id"], "status": producer["status"]} if producer else None}
+    base = {"wait_state": "waiting", "waiting_since": done_at, "agent_owned": False, "agent_owned_certain": True,
+            "premise": None, "contained": shown}
+    if authority["status"] not in ("done", "archived"):
+        return {**base, "waiting_on": f"release by card {authority['id']} ({authority['status']})"}
+    if producer and producer["status"] not in ("done", "archived") and not producer.get("released"):
+        return {**base, "waiting_on": f"producer card {producer['id']} ({producer['status']}), then its release"}
+    if done_at is None or now - done_at < CONTAINED_STRAND_AFTER_S:
+        return {**base, "waiting_on": f"release by card {authority['id']} ({authority['status']})"}
+    key = json.dumps(["contained", info["episode"], authority["status"], done_at])
+    exits = ("reopen it and resume the episode, or resume as producer after a new completed producer run"
+             if authority["status"] == "done" and not producer else
+             "no supported exit exists" if not producer else "resume as producer after a new completed run")
+    return {**base, "wait_state": "stalled", "agent_owned": True,
+            "waiting_on": f"an agent to release it: authority {authority['id']} is {authority['status']} ({exits})",
+            "premise": f"contained:{hashlib.sha1(key.encode()).hexdigest()[:12]}"}
 
 
 def describe(status: Any, *, block_kind: Any = None, human: bool = False, park: Any = None,
@@ -266,6 +297,9 @@ def describe_replica(card: dict[str, Any], *, now: Optional[float] = None) -> Op
     if status == "triage":
         outcome = "gave_up" if outcome in _FAILED_RUN_OUTCOMES else (
             "block_loop_detected" if outcome == "blocked" else outcome)
+    contained = card.get("contained") if status == "triage" else None
+    if isinstance(contained, dict):
+        return describe_contained(contained, now=now)
     return describe(status, block_kind=card.get("block_kind"), human=human,
                     park={"wake_check": card.get("wake_check"), "reason": park.get("reason") or "",
                           "wake_at": park.get("wake_at"), "unknown_producer": not published},

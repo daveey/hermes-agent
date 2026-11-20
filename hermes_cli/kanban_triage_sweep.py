@@ -102,6 +102,71 @@ def _cap(conn: sqlite3.Connection, row, now: int) -> str:
     return sup_id
 
 
+def stranded_contained(conn: sqlite3.Connection, *, now: Optional[float] = None) -> list[dict]:
+    """Held triage cards whose authority finished 30+ min ago with nobody left to release them, from the
+    ``kanban_wait_info.describe_contained`` judgment: ``[{id, title, tenant, episode, wait}]``. Read-only."""
+    from hermes_cli import kanban_contained_wait, kanban_wait_info as kwi
+    try:
+        ids = [r[0] for r in conn.execute("SELECT id FROM tasks WHERE status = 'triage' AND containment_episode IS NOT NULL")]
+    except sqlite3.Error:
+        return []
+    out = []
+    for tid, info in kanban_contained_wait.read(conn, ids).items():
+        wait = kwi.describe_contained(info, now=now)
+        if wait["agent_owned"]:
+            row = conn.execute("SELECT title, tenant FROM tasks WHERE id = ?", (tid,)).fetchone()
+            out.append({"id": tid, "title": row[0], "tenant": row[1], "episode": info["episode"], "wait": wait})
+    return out
+
+
+def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float] = None) -> list[str]:
+    """A stranded contained card with a chat is woken by the owner wake (``wait.agent_owned``); one with NO chat has
+    no owner, so it gets one board-supervisor card per containment episode (key ``containment-strand:<task>:<episode>``)
+    plus a comment on the held card. Writes no event on the held card (its history is containment custody). Returns
+    the supervisor card ids created this call. [daveey]"""
+    from hermes_cli.kanban_chat_links import _local_links
+    from hermes_cli.kanban_origin import gateway_name
+
+    stranded = stranded_contained(conn, now=now)
+    if not stranded:
+        return []
+    try:
+        linked = {link["task_id"] for link in _local_links(conn, gateway_name()).values() if not link.get("released")}
+    except Exception:
+        logger.warning("kanban: containment strand check could not read chat links", exc_info=True)
+        return []
+    created: list[str] = []
+    for card in stranded:
+        tid, episode = card["id"], card["episode"]
+        if tid in linked:
+            continue
+        key = f"containment-strand:{tid}:{episode}"
+        if conn.execute("SELECT 1 FROM tasks WHERE idempotency_key = ?", (key,)).fetchone():
+            continue
+        wait, shown = card["wait"], card["wait"]["contained"]
+        body = (
+            f"Card {tid} ({card['title']!r}) is held by containment episode {episode} and no chat owns it. Its "
+            f"authority card {shown['authority']['id']} is {shown['authority']['status']}, so nothing will release it: "
+            f"{wait['waiting_on']}.\n\nThe held card cannot be archived, promoted, completed, unblocked or unlinked. "
+            "The exits are `kanban_resume_contained(task_id, episode, kind='authority')` from a live run of the "
+            f"authority (reopen {shown['authority']['id']} first if it is done), or `kind='producer'` once the producer "
+            "has a new completed run. If the hold is deliberate (a spend or decision hold), say so on this card and "
+            f"close it. Record what you did as a comment on {tid}."
+        )
+        try:
+            sup_id = _kb.create_task(
+                conn, title=f"Contained card stranded: {card['title']}"[:200], body=body,
+                assignee=_supervisor_profile(), created_by="triage-sweep", workspace_kind="scratch",
+                idempotency_key=key, tenant=card["tenant"])
+            _kb.add_comment(conn, tid, "triage-sweep",
+                            f"Containment episode {episode} is stranded (authority {shown['authority']['id']} is "
+                            f"{shown['authority']['status']}) and no chat owns this card. Supervisor card {sup_id} owns it.")
+            created.append(sup_id)
+        except Exception:
+            logger.exception("kanban: containment strand escalation failed for %s", tid)
+    return created
+
+
 def sweep_stale_triage(
     conn: sqlite3.Connection, *, default_assignee: Optional[str] = None,
     older_than: int = TRIAGE_STALE_SECONDS, now: Optional[int] = None,
@@ -112,6 +177,10 @@ def sweep_stale_triage(
     in ``TRIAGE_SWEEP_CAP_WINDOW`` it is capped instead (see :func:`_cap`). Cards with an open human
     request, or an open kernel recovery card for their current park, are left alone. Returns swept task ids."""
     now = int(now if now is not None else time.time())
+    try:
+        escalate_stranded_contained(conn, now=now)  # held cards no chat owns: their authority finished
+    except Exception:
+        logger.exception("kanban: containment strand escalation failed")
     cutoff = now - older_than
     swept: list[str] = []
     rows = conn.execute(

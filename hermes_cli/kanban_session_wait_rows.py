@@ -8,6 +8,7 @@ composes both. [daveey]
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from typing import Any, Iterable
 
@@ -67,7 +68,21 @@ def _local_wait_rows(conn: sqlite3.Connection, task_ids: Iterable[str]) -> tuple
                 events[str(tid)] = (kind, payload, at)
         except sqlite3.Error:  # board predates task_events
             break
+    _overlay_contained(conn, parked, events)
     return parked, events
+
+
+def _overlay_contained(conn: sqlite3.Connection, parked: dict[str, tuple], events: dict[str, tuple]) -> None:
+    """A held triage card is described from its ``contained`` episode, not from an older park event. [daveey]"""
+    triage = [t for t, row in parked.items() if row[0] == "triage"]
+    if not triage:
+        return
+    try:
+        from hermes_cli import kanban_contained_wait
+        for tid, info in kanban_contained_wait.read(conn, triage).items():
+            events[tid] = ("contained", {"contained": info}, info.get("contained_at"))
+    except Exception:  # display-only: the card keeps its ordinary triage description
+        logging.getLogger(__name__).debug("contained wait read failed", exc_info=True)
 
 
 def _describe_waits(parked: dict[str, tuple], events: dict[str, tuple], now: float | None = None,
@@ -77,6 +92,9 @@ def _describe_waits(parked: dict[str, tuple], events: dict[str, tuple], now: flo
     out: dict[str, dict[str, Any]] = {}
     for tid, (status, kind, request, awaiting) in parked.items():
         ev_kind, payload, at = events.get(tid, (None, None, None))
+        if ev_kind == "contained" and isinstance(payload, dict) and status == "triage":
+            out[tid] = kwi.describe_contained(payload["contained"], now=now)
+            continue
         try:
             human = _stored_needs_human(request, kind)
         except Exception:
