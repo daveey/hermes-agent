@@ -120,7 +120,9 @@ def latest_run_skipping_requeues(conn: sqlite3.Connection, task_id: str):
     """Latest run, passing over core-update requeues and attested unused grants.
 
     Any run that started, failed or lacks the unused-grant receipt still counts."""
-    rows = conn.execute("SELECT * FROM task_runs WHERE task_id = ? ORDER BY id DESC", (task_id,))
+    # Chronological, not by local id: replica run ids are not time-ordered.
+    rows = conn.execute("SELECT * FROM task_runs WHERE task_id = ? ORDER BY COALESCE(started_at, 0) DESC, id DESC",
+                        (task_id,))
     return next((run for run in rows if not _skipped(conn, run)), None)
 
 

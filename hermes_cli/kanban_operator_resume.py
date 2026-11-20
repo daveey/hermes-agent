@@ -33,8 +33,9 @@ def worker_lineage() -> str | None:
 
 
 def _latest_run(conn, task_id):
-    return conn.execute("SELECT * FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-                        (task_id,)).fetchone()
+    # Chronological, not by local id: replica run ids are not time-ordered.
+    return conn.execute("SELECT * FROM task_runs WHERE task_id = ? "
+                        "ORDER BY COALESCE(started_at, 0) DESC, id DESC LIMIT 1", (task_id,)).fetchone()
 
 
 def _identity(run):
@@ -95,7 +96,8 @@ def _still_current(conn, task_id, after) -> bool:
     from hermes_cli.kanban_core_update_requeue import _skipped
     from hermes_cli.kanban_dependency_review import _checkpoint_matches_run
 
-    for run in conn.execute("SELECT * FROM task_runs WHERE task_id = ? ORDER BY id DESC", (task_id,)):
+    for run in conn.execute("SELECT * FROM task_runs WHERE task_id = ? "
+                            "ORDER BY COALESCE(started_at, 0) DESC, id DESC", (task_id,)):
         if isinstance(after, dict) and _checkpoint_matches_run(after, run):
             return True
         if not _skipped(conn, run):

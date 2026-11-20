@@ -80,3 +80,30 @@ def test_crash_or_other_reclaim_spends_the_receipt(kanban_home, clock, reason, c
     tid = _resumed(clock)
     _run(clock, tid, reason, crashed=crashed)
     assert _guard(tid) == "active_pr"
+
+
+def _older_run_with_higher_id(tid, outcome="blocked"):
+    """A replica row: id above the checkpoint run's, but started before it."""
+    with kbc.connect_closing() as conn:
+        first = conn.execute("SELECT * FROM task_runs WHERE task_id=? ORDER BY id LIMIT 1", (tid,)).fetchone()
+        cols = [c for c in first.keys() if c != "id"]
+        row = {c: first[c] for c in cols}
+        row.update(started_at=first["started_at"] - 100, ended_at=first["started_at"] - 50, outcome=outcome)
+        if "uid" in row:
+            row["uid"] = "01a1f925-0000-7000-8000-000000000001"
+        with kb.write_txn(conn):
+            conn.execute(f"INSERT INTO task_runs ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                         [row[c] for c in cols])
+
+
+def test_receipt_survives_replica_run_ids_that_are_not_chronological(kanban_home, clock):
+    tid = _resumed(clock)
+    _run(clock, tid, CORE_UPDATE_REQUEUE_REASON)  # a pause after the checkpoint run
+    _older_run_with_higher_id(tid)  # replica: older real run, highest id
+    with kbc.connect_closing() as conn:
+        by_id = conn.execute("SELECT outcome FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+                             (tid,)).fetchone()
+        assert by_id["outcome"] == "blocked"  # the pre-fix walk would stop here
+    assert _guard(tid) is None
+    _run(clock, tid, "worker crashed")  # a genuinely newer run still spends it
+    assert _guard(tid) == "active_pr"
