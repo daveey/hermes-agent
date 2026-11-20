@@ -61,6 +61,7 @@ def _make_agent(current_provider, current_model, current_pool):
     agent._fallback_chain = []
     agent._fallback_model = None
     agent._credential_pool = current_pool
+    agent._active_session_turn_lease_holder = None  # idle; MagicMock otherwise invents a live holder
     # Real-ish instance methods that switch_model calls
     agent._anthropic_prompt_cache_policy = MagicMock(return_value=(False, False))
     agent._ensure_lmstudio_runtime_loaded = MagicMock()

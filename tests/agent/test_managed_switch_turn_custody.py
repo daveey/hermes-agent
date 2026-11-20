@@ -177,6 +177,19 @@ def test_turn_admitted_during_switch_keeps_its_runtime(live):
     try:
         # The turn already runs on `before`; its next API call must not find another model/client.
         assert runtime_of(agent) == before, f'swapped under the turn: {runtime_of(agent)[:3]}'
+        # Exercise the real provider dispatch for the next request, with only network I/O stubbed.
+        from agent.chat_completion_helpers import _dispatch_nonstreaming_api_request
+        calls = []
+
+        def make_client(_reason, **_kwargs):
+            calls.append(runtime_of(agent))
+            return agent._anthropic_client
+
+        with patch.object(agent, '_anthropic_messages_create', return_value='fixture response') as create:
+            response = _dispatch_nonstreaming_api_request(agent, {'model': agent.model}, make_client=make_client)
+        assert response == 'fixture response'
+        assert calls == [before]
+        assert create.call_args.args[0]['model'] == before[0]
     finally:
         lease.release()
 

@@ -437,7 +437,9 @@ def _apply_model_switch(
     except TurnAdmittedDuringSwitch as exc:
         # The caller's unlocked running check lost to a turn admission: nothing was published and no
         # session state changed, so queue the pick for the next turn start like a busy-time pick.
-        _stash_pending_model_switch(None, "model", raw_input, session, confirm_expensive_model, parsed_flags)
+        _stash_pending_model_switch(
+            None, "model", raw_input, session, confirm_expensive_model, parsed_flags,
+            pin_session_override=pin_session_override, persist_override=persist_override, count_switch=count_switch)
         if not session.get("pending_model_switch"):
             raise ValueError(f"{exc}; pick {result.new_model} again once the turn ends.") from exc
         return {"value": result.new_model, "warning": "", "confirm_required": False, "deferred": True,

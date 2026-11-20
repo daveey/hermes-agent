@@ -117,7 +117,8 @@ def _cfgset_model_ok(rid, key, value, warning="", confirm_message="", scope="ses
                confirm_message=confirm_message, scope=scope, **extra)
 
 
-def _stash_pending_model_switch(rid, key, value, session, confirmed, parsed):
+def _stash_pending_model_switch(rid, key, value, session, confirmed, parsed, *,
+                                pin_session_override=True, persist_override=None, count_switch=True):
     """No live swap while a turn streams (agent.switch_model() mutates fields the worker thread
     reads every iteration): stash the pick for the NEXT turn start. Selection guards run HERE (the
     only moment a confirm round-trip is possible; an unconfirmed stashed pick is dropped at turn
@@ -127,8 +128,9 @@ def _stash_pending_model_switch(rid, key, value, session, confirmed, parsed):
     # resolve_persist_behavior, not --global alone: persist_switch_by_default counts. Only the keys it
     # always writes: a conditional clear depends on the route resolved at turn start, where
     # _apply_model_switch checks the exact plan before anything is switched or saved.
-    if not getattr(parsed, "is_reset", False) and resolve_persist_behavior(
-            parsed.is_global, parsed.is_session, is_once=parsed.is_once, explicit_provider=parsed.explicit_provider):
+    persists = persist_override if persist_override is not None else resolve_persist_behavior(
+        parsed.is_global, parsed.is_session, is_once=parsed.is_once, explicit_provider=parsed.explicit_provider)
+    if not getattr(parsed, "is_reset", False) and persists:
         _refuse_managed_model_pick(getattr(parsed, "reasoning_effort", ""))
     try:
         pending_model = parsed.model_input
@@ -150,7 +152,9 @@ def _stash_pending_model_switch(rid, key, value, session, confirmed, parsed):
     # display_*: _session_info shows the user's pick while pending, not the live old model.
     session["pending_model_switch"] = {
         "raw": value, "confirm_expensive_model": confirmed,
-        "display_model": pending_model, "display_provider": pending_provider}
+        "display_model": pending_model, "display_provider": pending_provider,
+        "pin_session_override": pin_session_override, "persist_override": persist_override,
+        "count_switch": count_switch}
     return _cfgset_model_ok(rid, key, pending_model, deferred=True)
 
 

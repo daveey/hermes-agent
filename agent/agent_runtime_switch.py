@@ -22,8 +22,7 @@ class _DeferredSessionWrites:
 
 
 class TurnAdmittedDuringSwitch(RuntimeError):
-    """A turn was admitted on the agent after the switch's snapshot; nothing was published.
-    Callers stash the pick for the next turn start (``_stash_pending_model_switch``)."""
+    """A turn holds the runtime; nothing was published. Callers may queue the request."""
 
 
 def _stage_compressor(compressor):
@@ -76,9 +75,10 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
     temporary = isinstance(getattr(agent, '_one_turn_runtime', None), dict)
     admission = turn_admission_lock(agent)
     if config is None and not temporary:
-        with admission:  # swaps the live agent in place: no turn may be admitted meanwhile
+        with admission:  # swaps the live agent in place: check and mutation exclude admission
+            if getattr(agent, '_active_session_turn_lease_holder', None) is not None:
+                raise TurnAdmittedDuringSwitch('a turn is active; model switch not applied')
             return _switch_model_runtime(agent, model, provider, api_key, base_url, api_mode, capabilities)
-    base_holder = getattr(agent, '_active_session_turn_lease_holder', None)
     staged = copy(agent)
     # Switch helpers mutate these containers in place. Never expose partial work
     # or clear live provenance while constructing a replacement.
@@ -109,7 +109,8 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
         staged.context_compressor._session_db = backend.backend
     with turn_admission_lock(agent):
         holder = getattr(agent, '_active_session_turn_lease_holder', None)
-        if holder is not None and holder != base_holder:
+        if holder is not None:
+            # A turn can win before OR after the snapshot. Neither may see a swapped runtime.
             raise TurnAdmittedDuringSwitch('a turn is active; model switch not applied')
         vars(agent).update(_without_turn_custody(vars(staged)))
     persist_class_metadata(agent)

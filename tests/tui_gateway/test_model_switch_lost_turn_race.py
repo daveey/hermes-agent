@@ -57,3 +57,24 @@ def test_slash_mirror_queues_the_pick(idle_session):
     assert "next turn" in note
     assert idle_session["pending_model_switch"]["raw"] == TARGET
     assert "model_override" not in idle_session
+
+
+@pytest.mark.parametrize('options', [
+    {'pin_session_override': False, 'persist_override': False, 'count_switch': False},
+    {'pin_session_override': True, 'persist_override': None, 'count_switch': True},
+])
+def test_refused_switch_replays_original_intent(idle_session, monkeypatch, options):
+    result = server._apply_model_switch('sid', idle_session, TARGET, confirm_expensive_model=True, **options)
+    assert result['deferred'] is True
+    pending = idle_session['pending_model_switch']
+    assert {key: pending[key] for key in options} == options
+    calls = []
+
+    def applied(sid, session, raw, **kwargs):
+        calls.append((sid, session, raw, kwargs))
+        return {'confirm_required': False}
+
+    monkeypatch.setattr(server, '_apply_model_switch', applied)
+    server._apply_pending_model_switch('sid', idle_session)
+    assert calls == [('sid', idle_session, TARGET, {'confirm_expensive_model': True, **options})]
+    assert 'pending_model_switch' not in idle_session

@@ -71,9 +71,8 @@ def _retry_lease_release(db, session_id: str, holder: str, give_up_at: float) ->
 
 
 def turn_admission_lock(agent):
-    """The lock around publishing a turn's admission on the agent. A runtime switch holds it to check
-    that no turn was admitted since its snapshot and to publish, so a turn is admitted either before
-    that check (the switch refuses) or after the publish (it starts on the new runtime)."""
+    """Serialize turn admission with runtime publication. A switch refuses any active holder under
+    this lock, so admission is either before the check (no swap) or after the publish (new runtime)."""
     return agent.__dict__.setdefault("_turn_admission_lock", threading.RLock())
 
 

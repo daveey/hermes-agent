@@ -215,7 +215,10 @@ def _apply_pending_model_switch(sid: str, session: dict) -> None:
         return
     model = pending.get("display_model") or pending["raw"]
     try:
-        result = _apply_model_switch(sid, session, pending["raw"], confirm_expensive_model=bool(pending.get("confirm_expensive_model")))
+        result = _apply_model_switch(
+            sid, session, pending["raw"], confirm_expensive_model=bool(pending.get("confirm_expensive_model")),
+            pin_session_override=pending.get("pin_session_override", True),
+            persist_override=pending.get("persist_override"), count_switch=pending.get("count_switch", True))
         # Honour the expensive-model confirm: drop the switch rather than spend on a model the user
         # never confirmed.
         if not result.get("confirm_required"):
