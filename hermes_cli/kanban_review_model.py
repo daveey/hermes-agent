@@ -481,8 +481,13 @@ def resolve_review_model(conn, task, cfg):
     detail = f"No eligible {levels} review model distinct from {sorted(excluded)!r}"
     if refusal and override:
         detail = f"review_model {override[0]!r} is refused here ({refusal.code}); {detail}"
+    _raise_no_route(detail, waits, independent_candidate or override_moved)
+
+
+def _raise_no_route(detail, waits, had_candidate):
+    """Typed refusal: a deadline defers, a structurally empty set exhausts, anything else retries."""
     if waits:
         raise ReviewRouteDeferred(detail, min(waits))
-    if not independent_candidate and not override_moved:
+    if not had_candidate:
         raise ReviewModelsExhausted(f"{detail}; infrastructure blocker: configure an independent reviewer")
     raise ReviewModelUnavailable(detail)
