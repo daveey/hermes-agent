@@ -438,3 +438,28 @@ def test_rpc_matching_provider_overlays_live_model_only(home, monkeypatch):
     assert resp["result"]["model"] == "live-model"
     assert resp["result"]["provider"] == "xai"
     assert resp["result"]["providers"] == payload["providers"]
+
+
+@pytest.mark.parametrize("port", [0, 80, 9200])
+def test_non_always_on_predecessor_never_reads_active_catalog(home, port):
+    ro.write_active(9148)
+    calls = []
+
+    def get(*args):
+        calls.append(args)
+        return 200, 0.0, {"providers": []}
+
+    assert ro.handoff_control_read(port, "/api/model/options", get=get) is None
+    assert calls == []
+
+
+@pytest.mark.parametrize("agent", [types.SimpleNamespace(model="live-model", provider=""),
+                                  types.SimpleNamespace(model="live-model")], ids=["empty", "missing"])
+def test_rpc_empty_live_provider_preserves_successor_rows_and_overlays_model(home, monkeypatch, agent):
+    payload = {"provider": "xai", "model": "disk-model",
+               "providers": [{"slug": "xai", "is_current": True, "models": ["disk-model"]}]}
+    resp, calls = _rpc(home, monkeypatch, {"session_id": "empty-provider"},
+                       {"empty-provider": {"agent": agent}}, payload)
+    assert calls == [ro.model_options_control_path()]
+    assert resp["result"] == {**payload, "model": "live-model"}
+    assert payload["model"] == "disk-model", "overlay must not mutate the successor payload"
