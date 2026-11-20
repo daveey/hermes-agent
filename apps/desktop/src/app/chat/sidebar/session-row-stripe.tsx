@@ -85,8 +85,8 @@ export function useSessionRowStripe(
   const promptInputsKey = useStore(dotState === 'needs-input' ? $stuckPromptInputsKey : NO_PROMPT_INPUTS)
 
   useEffect(() => {
-    recordStripeTransition(session, statusStripe, dotState)
-  }, [session, statusStripe, dotState, promptInputsKey])
+    recordStripeTransition(session, statusStripe, dotState, Date.now(), live)
+  }, [session, statusStripe, dotState, promptInputsKey, live])
 
   // Only explain the stripe with the outcome when it actually painted it: open asks and unfinished work override it.
   const outcomePainted =

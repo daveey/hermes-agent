@@ -1,14 +1,19 @@
 import type { SessionInfo } from '@/types/hermes'
 
+/** [daveey] The task-evidence fields one snapshot stamps together. `needs_you` is built from the same snapshot as
+ *  `kanban_blocked` and is omitted when empty, so it is replaced (or cleared) with the counts: a carried stale copy is
+ *  authoritative for the stripe and would keep the row red after its card unblocked or was archived. */
+export const isKanbanEvidenceKey = (key: string): boolean => key.startsWith('kanban_') || key === 'needs_you'
+
 export function withKanbanEvidence(row: SessionInfo, fresh: SessionInfo): SessionInfo {
   const next = { ...row }
 
   for (const key of Object.keys(next)) {
-    if (key.startsWith('kanban_')) { delete (next as unknown as Record<string, unknown>)[key] }
+    if (isKanbanEvidenceKey(key)) { delete (next as unknown as Record<string, unknown>)[key] }
   }
 
   for (const [key, value] of Object.entries(fresh)) {
-    if (key.startsWith('kanban_')) { (next as unknown as Record<string, unknown>)[key] = value }
+    if (isKanbanEvidenceKey(key)) { (next as unknown as Record<string, unknown>)[key] = value }
   }
 
   return next

@@ -38,6 +38,7 @@ import {
   setStripeReasonReporter,
   showsRunningArc,
   STRIPE_TRANSITION_LOG_CAP_PER_MIN,
+  type StripeTraceRow,
   stuckReasons,
   takeSessionListRefreshReason,
   unreadSessionCount,
@@ -1283,6 +1284,24 @@ describe('open human ask invariant (blocked > 0 && !parked => stuck)', () => {
 
     recordStripeTransition({ id: 'ok', kanban_blocked: 2 } as never, 'stuck', 'idle', 1_000)
     expect(report.mock.calls[1][3]).not.toContain('needs_you:2')
+    setStripeReasonReporter(null)
+  })
+
+  // [daveey] Archived and offline-cached rows draw no stripe (null because not live): not a violation.
+  const nonLiveRows: [string, StripeTraceRow, boolean][] = [
+    ['not live', { id: 'arch-a', kanban_blocked: 1 }, false],
+    ['archived', { archived: true, id: 'arch-b', kanban_blocked: 1 }, true],
+    ['offline cached', { id: 'arch-c', kanban_blocked: 1, offline_cached: true }, true]
+  ]
+
+  it.each(nonLiveRows)('reports no invariant violation for a %s row', (_name, row, live) => {
+    const report = vi.fn()
+    setStripeReasonReporter(report)
+    resetStripeTransitionLog()
+
+    recordStripeTransition(row, null, 'idle', 1_000, live)
+    recordStripeTransition(row, 'done', 'idle', 2_000, live)
+    expect(report.mock.calls.flatMap((call: unknown[]) => call[3] as string[])).not.toContain('needs_you:1')
     setStripeReasonReporter(null)
   })
 })

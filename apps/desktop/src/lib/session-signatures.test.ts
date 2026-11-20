@@ -57,6 +57,7 @@ describe('sameCronSignature', () => {
     ['kanban_active', 2, 1],
     ['kanban_blocked', 1, undefined],
     ['kanban_blocked_on', ['remote/default/t_one'], ['remote/default/t_two']],
+    ['needs_you', [{ kind: 'card', question: '', ref: 'default/t_one' }], undefined],
     ['kanban_unseen', 1, undefined],
     ['goal_active', true, undefined],
     ['cron_active', true, undefined],

@@ -889,6 +889,7 @@ export type StripeTraceRow = Pick<SessionInfo, 'id'> &
   Partial<
     Pick<
       SessionInfo,
+      | 'archived'
       | 'background_active'
       | 'connection_id'
       | 'cron_active'
@@ -903,6 +904,7 @@ export type StripeTraceRow = Pick<SessionInfo, 'id'> &
       | 'kanban_stalled'
       | 'kanban_waiting_on'
       | 'muted'
+      | 'needs_you'
       | 'offline_cached'
       | 'outcome'
       | 'offline_synced_at'
@@ -1033,9 +1035,15 @@ export const setStripeReasonReporter = (reporter: null | StripeReasonReporter): 
 
 /** [daveey] The reason string a non-red stripe reports while the row has an open human ask and is not ⌘B-parked (the
  *  backend logs `stripe-invariant-violation <sid>` for it). `stripe` is already the result of `sessionStatusStripe`,
- *  so this fires only when some caller bypassed the invariant. */
-function stripeInvariantViolation(row: StripeTraceRow, stripe: null | SessionStatusStripe, nowSeconds: number): null | string {
-  if (stripe === 'stuck' || stripe === 'blocked') {
+ *  so this fires only when some caller bypassed the invariant. The invariant governs live rows only: an archived or
+ *  offline-cached row has no stripe at all (null), which is not a violation. */
+function stripeInvariantViolation(
+  row: StripeTraceRow,
+  stripe: null | SessionStatusStripe,
+  nowSeconds: number,
+  live: boolean
+): null | string {
+  if (!live || row.archived || row.offline_cached || stripe === 'stuck' || stripe === 'blocked') {
     return null
   }
 
@@ -1112,14 +1120,15 @@ export function recordStripeTransition(
   row: StripeTraceRow,
   stripe: null | SessionStatusStripe,
   dotState: SessionDotState,
-  now: number = Date.now()
+  now: number = Date.now(),
+  live = true
 ): void {
   try {
     const key = `${row.connection_id ?? ''}\u0000${row.profile ?? ''}\u0000${row.id}`
     const entry = stripeTrace.get(key)
     const reasons = stripe === 'stuck' ? stuckReasons(row, dotState, now / 1000) : []
     const reasonsKey = reasons.join('|')
-    const violation = stripeInvariantViolation(row, stripe, now / 1000)
+    const violation = stripeInvariantViolation(row, stripe, now / 1000, live)
 
     if (!entry) {
       stripeTrace.set(key, { emitted: [], reasonsKey, stripe, suppressed: 0 })

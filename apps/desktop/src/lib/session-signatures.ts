@@ -59,8 +59,10 @@ export function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
       // or a background job exiting moves only these, and they drive the
       // sidebar badge and the done/working stripe. [daveey]
       session.kanban_active === other.kanban_active &&
-      JSON.stringify([session.kanban_blocked, session.kanban_blocked_on]) ===
-        JSON.stringify([other.kanban_blocked, other.kanban_blocked_on]) &&
+      // `needs_you` drives the red stripe on its own (authoritative when stamped), so its arrival or removal
+      // must publish even when the counts did not move.
+      JSON.stringify([session.kanban_blocked, session.kanban_blocked_on, session.needs_you]) ===
+        JSON.stringify([other.kanban_blocked, other.kanban_blocked_on, other.needs_you]) &&
       session.kanban_unseen === other.kanban_unseen &&
       session.kanban_attention === other.kanban_attention &&
       // Evidence can become unknown, stale, or fresh without a count change.
