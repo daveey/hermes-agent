@@ -83,6 +83,7 @@ def test_crash_at_five_minutes_opens_one_hub_card_through_the_courier_only(home,
                       "--body", body, "--assignee", "default", "--origin-session", "", "--id", KEY,
                       "--option", f'idempotency_key="{KEY}"', "--option", "priority=900"]
     assert "ContainmentRefused" in body and "0362a20c0e" in body and "a99783a19e" in body
+    assert "has not completed a round for 5 min" in body and "stopped restarting" not in body
     # The local default-board outbox path (kanban_db.create_task) is not used.
     assert local == []
 
@@ -103,6 +104,11 @@ def test_no_card_while_a_sync_loop_is_running(home):
     assert hub.calls == [] and "first_seen_dead" not in alert._read_state()
     claims.loop_stopped()
     assert _check(hub, SINCE + 900) == KEY
+
+
+def test_loop_running_here_follows_the_loop_lifecycle(home):
+    assert [claims.loop_running_here(), claims.loop_started(), claims.loop_running_here(), claims.loop_stopped(),
+            claims.loop_running_here()] == [False, None, True, None, False]
 
 
 def test_no_card_while_another_process_holds_the_sync_lock(home, monkeypatch):

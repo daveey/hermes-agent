@@ -73,6 +73,12 @@ def loop_started() -> None:
     _write()
 
 
+def loop_running_here() -> bool:
+    """This process's sync loop is running now (between :func:`loop_started` and :func:`loop_stopped`)."""
+    with _STATE.lock:
+        return _STATE.loop
+
+
 def loop_stopped() -> None:
     """Release local readiness when a sync tenure ends, including normal return and crashes."""
     with _STATE.lock:

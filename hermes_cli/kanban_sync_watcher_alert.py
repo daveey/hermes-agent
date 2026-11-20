@@ -71,11 +71,12 @@ def incident_key(host: str, since: float) -> str:
     return f"{KEY_PREFIX}:{host}:{int(since)}"
 
 
-def _body(host: str, why: str, since: float, info: dict) -> str:
+def _body(host: str, why: str, since: float, info: dict, now: float) -> str:
     when = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(since))
+    minutes = max(0, int((now - since) // 60))
     return "\n".join([
-        f"The Kanban sync watcher on **{host}** has been down since {when} ({why}). The gateway supervisor "
-        "stopped restarting it, so this host neither pushes nor pulls; dispatch stays on "
+        f"The Kanban sync loop on **{host}** crashed at {when} ({why}) and has not completed a round for "
+        f"{minutes} min, so this host neither pushes nor pulls; dispatch stays on "
         "`claim_deferred(sync_first_round)`. The replica-stale alarm files through the local outbox, which "
         "cannot reach the Board while sync is dead — this card is the courier path that still can.",
         "",
@@ -84,7 +85,7 @@ def _body(host: str, why: str, since: float, info: dict) -> str:
         f"- origin/main: `{info.get('origin_main_sha') or 'unknown'}`",
         "",
         "Do: 1) `hermes kanban sync status` on that host; 2) recover with a core that includes the crash fix "
-        "(or restart the gateway once the cause is gone); 3) done when status shows `running: yes` and the "
+        "(the supervisor retries the loop, or restart the gateway once the cause is gone); 3) done when status shows `running: yes` and the "
         "dispatcher has spawned a card. Precedent: t_01a1f772bf13a473.",
     ])
 
@@ -178,7 +179,7 @@ def _report(host, why, since, runner, hub_cli, info, now) -> Optional[str]:
         return rid
     rid = key
     title = f"Kanban sync watcher dead on {host} for 5+ min"
-    argv = [hub_cli, "create-task", HUB, title, "--body", _body(host, why, since, info), "--assignee", "default",
+    argv = [hub_cli, "create-task", HUB, title, "--body", _body(host, why, since, info, now), "--assignee", "default",
             "--origin-session", "", "--id", rid, "--option", f"idempotency_key={json.dumps(key)}",
             "--option", "priority=900"]
     rc, out, err = runner(argv)
@@ -203,10 +204,9 @@ def check(*, now: Optional[float] = None, runner: Optional[Callable[[list[str]],
 def loop_running() -> bool:
     """A sync loop runs now: this process's (the dispatcher and the sync watcher share the gateway process),
     or another live process holds the host ``.sync.lock``. A crashed loop releases that lock."""
-    from hermes_cli import kanban_sync_claims as claims
-    with claims._STATE.lock:
-        if claims._STATE.loop:
-            return True
+    from hermes_cli.kanban_sync_claims import loop_running_here
+    if loop_running_here():
+        return True
     try:
         from gateway.kanban_singleton import holder_info
         from hermes_cli import kanban_db as kb
