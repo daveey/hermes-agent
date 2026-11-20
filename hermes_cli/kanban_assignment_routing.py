@@ -204,7 +204,7 @@ def validate_repair_completion(conn, task_id, *, observation=None):
         original, payloads = resolve(conn, task_id, key, observation)
     else:
         payloads = tuple(row[0] for row in conn.execute(
-            "SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' ORDER BY id DESC",
+            "SELECT payload FROM task_events WHERE task_id=? AND kind IN ('blocked','block_loop_detected') ORDER BY id DESC",
             (original.id,)).fetchall())
     if original.assignee is None:
         raise AssignmentRoutingError('Assignment repair has no assigned original task')
@@ -216,11 +216,14 @@ def validate_repair_completion(conn, task_id, *, observation=None):
         except ValueError:
             continue
         if isinstance(data, dict) and data.get('supervisor_task_id') == task_id:
-            if not isinstance(data.get('reason'), str):
+            reason = data.get('reason')
+            # A reasonless block (CLI/dashboard default) is a supported producer
+            # and asks for no authority; only a non-string reason is malformed.
+            if reason is not None and not isinstance(reason, str):
                 raise AssignmentRoutingError('Assignment repair has invalid authority history')
-            needs = execution_authority_need(original.id, data.get('reason'))
+            needs = execution_authority_need(original.id, reason)
             if needs:
-                raise _authority_error(original.id, needs, data.get('reason'))
+                raise _authority_error(original.id, needs, reason)
             break
     else:
         # A local row can arrive before its history. Its assignment alone cannot

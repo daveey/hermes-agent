@@ -269,7 +269,7 @@ def test_running_original_handoff_waits_then_dispatches_new_profile(board):
 
 
 @pytest.mark.parametrize('history', [
-    'missing', 'other-repair', 'invalid-json', 'non-object', 'missing-reason', 'null-reason', 'non-string-reason',
+    'missing', 'other-repair', 'invalid-json', 'non-object', 'non-string-reason',
 ])
 def test_local_repair_requires_matching_authority_history(board, history):
     from hermes_cli.kanban_assignment_routing import AssignmentRoutingError
@@ -296,6 +296,21 @@ def test_local_repair_requires_matching_authority_history(board, history):
         kb.complete_task(conn, repair_id, result='Verified')
     assert conn.execute('SELECT * FROM tasks ORDER BY id').fetchall() == before
     assert not kb._parents_satisfied(conn, tid)
+
+
+@pytest.mark.parametrize('payload_kind', ['null-reason', 'missing-reason'])
+def test_reasonless_assignment_block_repair_still_completes(board, payload_kind):
+    conn, _ = board
+    tid = task_with_drift(board)
+    assert kb.block_task(conn, tid, kind='assignment', reason=None)
+    repair_id = payload(conn, tid)['supervisor_task_id']
+    if payload_kind == 'missing-reason':
+        conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='blocked'",
+                     (json.dumps({'supervisor_task_id': repair_id}), tid))
+        conn.commit()
+    assert kb.complete_task(conn, repair_id, result='Verified')
+    kb.recompute_ready(conn)
+    assert kb.get_task(conn, tid).status == 'ready'
 
 
 def test_repair_completion_rechecks_policy_drift(board):
