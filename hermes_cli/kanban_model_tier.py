@@ -300,6 +300,12 @@ def record_run_route(conn: sqlite3.Connection, task: Any, *, lane: str, reason: 
                        exc_info=True)
 
 
+def _ratio_block(conn: sqlite3.Connection, task: Any, reason: str) -> dict[str, Any]:
+    """``{"ratio": <receipt>}`` for a ratio pick, else ``{}``: the optional detail a ``model_tier`` event carries."""
+    picked = _ratio_receipt(conn, task, reason)
+    return {"ratio": picked} if picked else {}
+
+
 def _ratio_receipt(conn: sqlite3.Connection, task: Any, reason: str) -> Optional[dict[str, Any]]:
     """The ratio pick's receipt block (``kanban_ratio_routing.receipt``); a fault only drops the detail (logged)."""
     try:
@@ -510,8 +516,7 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
             payload = {"reason": reason, "model": model or _str(getattr(task, "model_override", None)) or None,
                        "provider": provider or _str(getattr(task, "provider_override", None)) or None,
                        "lane": lane}
-            if picked := _ratio_receipt(conn, task, reason):
-                payload["ratio"] = picked
+            payload.update(_ratio_block(conn, task, reason))
             if is_review:
                 payload["implementer_model"] = implementer_model
                 payload["implementer_models"] = sorted(excluded)
