@@ -14,16 +14,17 @@ START = 1_800_000_000
 RESET = START + 7200
 
 
+@pytest.mark.parametrize("route_level", ["deep", "standard"])
 @pytest.mark.parametrize("source", ["wall", "hold", "live", "overlap"])
 @pytest.mark.parametrize("lane", ["review", "ready"])
 def test_walled_review_not_claimed_and_unwalled_host_claims(
-        board, monkeypatch, all_assignees_spawnable, source, lane):
+        board, monkeypatch, all_assignees_spawnable, source, lane, route_level):
     clock = [START]
     monkeypatch.setattr(kb.time, "time", lambda: clock[0])
     monkeypatch.setattr(tier, "load_tier_config", lambda: {"enabled": True})
     monkeypatch.setattr(review, "implementer_models", lambda *_a: {"gpt-6-astra", "gpt-6.1-sol"})
-    monkeypatch.setattr(review, "independent_routes", lambda *_a: iter([
-        ("claude-fable-5-2", "anthropic"), ("claude-opus-5-5", "anthropic")]))
+    monkeypatch.setattr(review, "independent_routes", lambda *_a, level="deep": iter([
+        ("claude-fable-5-2", "anthropic"), ("claude-opus-5-5", "anthropic")] if level == route_level else []))
     monkeypatch.setattr(review, "registry_refusal", lambda *_a: None)
     blocked = [True]
     monkeypatch.setattr(walls, "active_walls", lambda **_kw: (
@@ -60,7 +61,7 @@ def test_walled_review_not_claimed_and_unwalled_host_claims(
         assert seen == [tid]
 
 
-@pytest.mark.parametrize("case", ["alternate", "expiry", "dry_run", "structural", "registry", "race", "earliest"])
+@pytest.mark.parametrize("case", ["alternate", "standard", "expiry", "dry_run", "structural", "registry", "race", "earliest"])
 def test_review_wait_boundaries(board, monkeypatch, case):
     from hermes_cli import kanban_review_admission as admission
 
@@ -72,7 +73,8 @@ def test_review_wait_boundaries(board, monkeypatch, case):
         routes.append(("gpt-6.1-sol", "openai-codex"))
     if case == "structural":
         routes = []
-    monkeypatch.setattr(review, "independent_routes", lambda *_a: iter(routes))
+    monkeypatch.setattr(review, "independent_routes", lambda *_a, level="deep": iter(
+        routes if level == "deep" else [("gpt-6.1-sol", "openai-codex")] if case == "standard" else []))
     monkeypatch.setattr(review, "registry_refusal", lambda *_a: "refused" if case == "registry" else None)
     walled = {"anthropic": START - 1 if case == "expiry" else RESET}
     if case == "earliest":
