@@ -106,8 +106,10 @@ def test_malformed_switch_does_not_unfreeze(board, settings, bad):
 
 
 def test_oldest_open_guard_owner_receives(board, settings):
-    older, newer = seed(board), seed(board)
-    board.execute('UPDATE tasks SET created_at=100 WHERE id=?', (older,))
-    board.execute('UPDATE tasks SET created_at=200 WHERE id=?', (newer,))
+    owners = [seed(board) for _ in range(3)]
+    # Neither insertion order nor lexical task-id order may select the oldest.
+    oldest = next(tid for tid in owners if tid != owners[0] and tid != min(owners))
+    for tid in owners:
+        board.execute('UPDATE tasks SET created_at=? WHERE id=?', (100 if tid == oldest else 200, tid))
     board.commit()
-    assert admit(board)['task_id'] == older
+    assert admit(board)['task_id'] == oldest
