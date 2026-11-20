@@ -61,8 +61,10 @@ def _looks_like_path(value: str) -> bool:
 
 
 def _mask_value(value: str, *, secret_named: bool) -> str:
-    if not value or _looks_like_path(value) or _NUMBER.match(value):
+    if not value or _looks_like_path(value):
         return value
+    if _NUMBER.match(value) and not secret_named:
+        return value  # a count or id; after a secret-named flag a number is the secret (PINs, numeric keys)
     return MASK if secret_named or _looks_like_bare_secret(value) else value
 
 

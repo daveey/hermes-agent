@@ -28,6 +28,11 @@ KEY = "q8ZpL2vXk9RtYwB4mN7cQ1sD5fH3jK6g"
             ["--aws-secret-access-key", MASK],
         ),
         (["--webhook-secret=Zm9vYmFyYmF6/cXV4cXV1eA=="], [f"--webhook-secret={MASK}"]),
+        # a numeric value after a secret-named flag is the secret
+        (
+            ["--webhook-secret", "12345678901234567890", "--signing-key=4242424242"],
+            ["--webhook-secret", MASK, f"--signing-key={MASK}"],
+        ),
         # a lowercase prefixed random token is not a Hermes id
         (["abc-9f8e7d6c5b4a39281706f5e4z"], [MASK]),
         # a bare token as a --flag=value value
