@@ -85,8 +85,8 @@ def _admit_locked(conn, pol, action, row, state) -> Optional[str]:
     used = state["used"].setdefault(lane.name, lanes.admitted_today(conn, lane.name, now=state["now"]))
     if lane.admit_per_day is not None and used >= lane.admit_per_day:
         return f"lane {lane.name} admit budget spent ({used}/{lane.admit_per_day} today)"
-    from hermes_cli.kanban_lane_daily_limits import reason
-    why = reason(conn, pol, lane.name, dict(row), now=state["now"])
+    from hermes_cli.kanban_lane_daily_limits import reason, row_opts
+    why = reason(conn, pol, lane.name, row_opts(conn, row), now=state["now"])
     if why:
         return why
     lanes.admit(conn, row["id"], actor=state["actor"], reason=action["reason"])

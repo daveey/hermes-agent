@@ -94,3 +94,22 @@ def test_expired_limit_on_ordinary_gated_lane_reports_gate(conn, configured):
     assert card(conn, tid)["reason"] == "limit:cards_per_day"
     configured()
     assert card(conn, tid)["reason"] == "gate"
+
+
+@pytest.mark.parametrize("kind", ["review_reopened", "reopened"])
+def test_reopened_card_is_not_still_in_review(conn, configured, kind):
+    tid = base._ready_in(conn, "babybear", "rework")
+    kb._append_event(conn, tid, "review_requested", {})
+    kb._append_event(conn, tid, kind, {})
+    conn.commit()
+    assert card(conn, tid)["step"] == "ready"
+
+
+def test_real_reopen_review_task_leaves_review(conn, configured):
+    tid = base._ready_in(conn, "babybear", "real reopen")
+    conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
+    kb._append_event(conn, tid, "review_requested", {})
+    conn.commit()
+    assert card(conn, tid)["step"] == "review"
+    assert kb.reopen_review_task(conn, tid)
+    assert card(conn, tid)["step"] == "ready"

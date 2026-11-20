@@ -43,6 +43,16 @@ def reason(conn, pol, lane_name, opts, *, now=None):
     return None
 
 
+def row_opts(conn, row):
+    """A stored card as creation options, including the creator fields the exemptions read."""
+    opts = dict(row)
+    created = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='created' ORDER BY id LIMIT 1", (row["id"],)).fetchone()
+    if created:
+        opts["creator_task_id"] = json.loads(created[0] or "{}").get("creator_task_id")
+    return opts
+
+
 def release_due(conn, *, foreign=()):
     """Inside readiness's write txn: release only daily-limit parks, oldest first.
 
@@ -66,11 +76,7 @@ def release_due(conn, *, foreign=()):
         if event is None or json.loads(event[0] or "{}").get("reason") not in (
                 "limit:cards_per_day", "limit:usd_per_day"):
             continue
-        opts = dict(row)
-        created = conn.execute(
-            "SELECT payload FROM task_events WHERE task_id=? AND kind='created' ORDER BY id LIMIT 1", (tid,)).fetchone()
-        if created:
-            opts["creator_task_id"] = json.loads(created[0] or "{}").get("creator_task_id")
+        opts = row_opts(conn, row)
         if lanes._gated(conn, pol, row["tenant"], opts) or reason(conn, pol, row["tenant"], opts):
             continue
         count += lanes.admit(conn, tid, actor="lane-limit-reset", reason="daily lane capacity available")

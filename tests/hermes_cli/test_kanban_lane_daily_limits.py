@@ -123,3 +123,19 @@ def test_legacy_admission_event_counted_without_inventing_relanes(conn, configur
     assert lanes.cards_today(conn, "babybear") == 1
     lanes.assign(conn, tid, "other", source="user", reason="move")
     assert lanes.cards_today(conn, "other") == 0
+
+
+@pytest.mark.parametrize("cap", ["cards_per_day", "usd_per_day"])
+def test_planner_admission_honours_gate_exempt_creator(conn, configured, cap):
+    parent = base._hermes_parent(conn)
+    limits(configured, "hermes", **{cap: 0})
+    conn.execute("UPDATE tasks SET status='triage', block_kind=? WHERE id=?", (lanes.GATE_KIND, parent))
+    conn.commit()
+    review = kb.create_task(conn, title="Independent review", assignee="default", creator_task_id=parent,
+                            created_by="self-heal")
+    assert base._task(conn, review)["status"] == "triage"
+    conn.execute("UPDATE tasks SET status='ready', block_kind=NULL WHERE id=?", (parent,))
+    conn.commit()
+    result = plan.apply(conn, [{"action": "admit", "card": review, "reason": "finish admitted work"}])
+    assert result["applied"], result
+    assert base._task(conn, review)["status"] == "ready"

@@ -18,6 +18,7 @@ LANDING_UNCLASSIFIED = "landing_unclassified"
 LIMIT_CARDS = "limit:cards_per_day"
 LIMIT_USD = "limit:usd_per_day"
 _LANDING_STEPS = {"review", "ci", "merge", "deploy", "test"}
+_REVIEW_ENDED = ("changes_requested", "review_reopened", "reopened")
 _USER = lanes.USER_CREATORS
 _OPEN = ("triage", "todo", "scheduled", "ready", "running", "blocked", "review")
 
@@ -34,7 +35,7 @@ def _payload(event: dict) -> dict:
 
 def _review_active(events) -> bool:
     for event in reversed(events or ()):
-        if event.get("kind") in ("review_requested", "changes_requested", "review_changes_requested"):
+        if event.get("kind") in _REVIEW_ENDED + ("review_requested",):
             return event.get("kind") == "review_requested"
     return False
 
@@ -246,8 +247,8 @@ def _card_from_row(conn, task, now: float, reader=None, pol=None) -> dict:
     held = conn.execute(f"SELECT 1 FROM tasks WHERE id=? AND {lanes.HELD}", (task["id"],)).fetchone() is not None
     gate_reason = _gate_reason(events) if held else None
     if gate_reason and pol is not None:
-        from hermes_cli.kanban_lane_daily_limits import reason
-        gate_reason = reason(conn, pol, task["tenant"], dict(task), now=now)
+        from hermes_cli.kanban_lane_daily_limits import reason, row_opts
+        gate_reason = reason(conn, pol, task["tenant"], row_opts(conn, task), now=now)
     creator = next((_payload(dict(e)).get("creator_task_id") for e in events if e["kind"] == "created"), None)
     human = _json_obj(task["human_request"] if "human_request" in task.keys() else None)
     age = max(0.0, (now - float(task["created_at"] or now)) / 3600.0)
@@ -266,6 +267,14 @@ def _card_from_row(conn, task, now: float, reader=None, pol=None) -> dict:
     }
 
 
+def _pr_urls(conn, rows) -> list:
+    out = []
+    for task in rows:
+        events = _events(conn, task["id"])
+        out.append((_pr_snapshot(task, events, _awaiting(task, events)) or {}).get("url"))
+    return out
+
+
 def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None) -> dict:
     """Cards still open, plus per-lane window throughput and today's cap usage."""
     if window not in WINDOWS:
@@ -280,6 +289,7 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None)
         f"SELECT * FROM tasks WHERE status IN {_OPEN} ORDER BY created_at, id").fetchall()
     from hermes_cli.kanban_lanes_flow_pr import Reader
     reader = Reader()
+    reader.prefetch(_pr_urls(conn, rows))
     cards = []
     for row in rows:
         card = _card_from_row(conn, row, now, reader, pol)

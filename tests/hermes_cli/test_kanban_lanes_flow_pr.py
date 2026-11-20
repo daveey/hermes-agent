@@ -1,5 +1,6 @@
 """Exercise the actual read-only gh subprocess boundary without network."""
 import sys
+import time
 
 import pytest
 
@@ -60,6 +61,47 @@ def test_changed_head_or_review_during_checks_is_unknown(monkeypatch, change):
         last.pop("headRefOid")
     else:
         last[change] = "different"
-    answers = iter([first, [{"bucket": "pass"}], last])
-    monkeypatch.setattr(Reader, "_read", lambda self, argv: next(answers))
+    views = iter([first, last])
+
+    def read(self, argv):
+        return [{"bucket": "pass"}] if "checks" in argv else next(views)
+    monkeypatch.setattr(Reader, "_read", read)
     assert Reader().get("https://github.com/example/repo/pull/1") == {}
+
+
+def _review(login, state, oid, bot=False):
+    return {"author": {"login": login, "is_bot": bot}, "state": state, "commit": {"oid": oid}}
+
+
+@pytest.mark.parametrize("reviews,approved", [
+    ([_review("rev", "APPROVED", "a" * 40)], True),
+    ([_review("rev", "APPROVED", "b" * 40)], False),                          # older head
+    ([_review("rev", "APPROVED", "a" * 40), _review("rev", "CHANGES_REQUESTED", "a" * 40)], False),
+    ([_review("rev", "CHANGES_REQUESTED", "a" * 40), _review("rev", "APPROVED", "a" * 40)], True),
+    ([_review("rev", "APPROVED", "a" * 40), _review("other", "CHANGES_REQUESTED", "a" * 40)], False),
+    ([_review("author", "APPROVED", "a" * 40)], False),                       # self-approval
+    ([_review("ci[bot]", "APPROVED", "a" * 40, bot=True)], False),
+    ([], False),
+])
+def test_empty_review_decision_still_reaches_merge_via_independent_approval(monkeypatch, reviews, approved):
+    view = {"state": "OPEN", "headRefOid": "a" * 40, "reviewDecision": "", "author": {"login": "author"},
+            "reviews": reviews}
+    monkeypatch.setattr(Reader, "_read", lambda self, argv: [{"bucket": "pass"}] if "checks" in argv else view)
+    assert Reader().get("https://github.com/example/repo/pull/1")["approved"] is approved
+
+
+def test_slow_brokered_gh_fits_budget_across_many_prs(tmp_path, monkeypatch):
+    """Every gh call takes ~1.2 s (fleet: 3-4.5 s); six PRs read serially would need ~21 s."""
+    script = tmp_path / "slow_gh.py"
+    view = {"state": "OPEN", "reviewDecision": "", "headRefOid": "a" * 40, "author": {"login": "x"},
+            "reviews": [_review("rev", "APPROVED", "a" * 40)]}
+    script.write_text("import json,sys,time\ntime.sleep(1.2)\n"
+                      f"print(json.dumps({view!r} if 'view' in sys.argv else [{{'bucket': 'pass'}}]))\n")
+    monkeypatch.setattr(shared, "_gh_argv", lambda: [sys.executable, str(script)])
+    urls = [f"https://github.com/example/repo/pull/{n}" for n in range(6)]
+    reader = Reader(budget=10)
+    start = time.monotonic()
+    reader.prefetch(urls)
+    assert time.monotonic() - start < 9
+    for url in urls:
+        assert reader.get(url) == {"merged": False, "approved": True, "checks": "green"}
