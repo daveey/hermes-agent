@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -32,6 +33,10 @@ _MAX_PROMPT_CHARS = 64_000
 # Desktop reconnect. One hour covers that with margin; an older one is dropped (the row stays "not sent").
 UPDATE_HOLD_QUEUE_REASON = "update_hold_queue"
 UPDATE_HOLD_QUEUE_MAX_AGE_S = 3600.0
+
+# Finite absolute epoch before which this logical turn must not call its provider again (an API-error retry
+# wait: a Retry-After the credential pool never benched). Written once per wait, never a duration.
+PROVIDER_RETRY_FIELD = "provider_retry_not_before"
 
 _lock = threading.Lock()
 _file_lock_holder = threading.local()
@@ -71,6 +76,14 @@ def auto_continue_bounds(config: Any) -> tuple[bool, float, int]:
         attempts = AUTO_CONTINUE_MAX_ATTEMPTS_DEFAULT
     return (is_truthy_value(cfg.get("enabled"), default=True), max(0.0, minutes) * 60.0,
             attempts if attempts >= 0 else AUTO_CONTINUE_MAX_ATTEMPTS_DEFAULT)
+
+
+def finite_deadline(value: Any) -> float | None:
+    """``value`` as a finite positive epoch, else None (junk, bool, NaN/inf)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and value > 0 else None
 
 
 def _started_at(entry: dict) -> float:
@@ -194,7 +207,8 @@ def release_update_queue(home: Path | str, session_key: str, marker: dict) -> bo
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0,
                       auto_continue: bool = True, notification_category: str | None = None,
                       pauses: int = 0, killed_jobs: list | None = None, until_tool: bool = False,
-                      reason: str | None = None, carried_job_ids=()) -> bool:
+                      reason: str | None = None, carried_job_ids=(),
+                      provider_retry_not_before: float | None = None) -> bool:
     """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
     this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume.
     ``pauses`` = core-update pauses this logical turn already took (``mark_turn_paused``), counted apart
@@ -222,6 +236,9 @@ def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attemp
         entry["notification_category"] = notification_category
     if reason:
         entry["reason"] = str(reason)
+    # Only a logical continuation passes this; a fresh user turn's entry never carries a wait.
+    if (retry_deadline := finite_deadline(provider_retry_not_before)) is not None:
+        entry[PROVIDER_RETRY_FIELD] = retry_deadline
     # Identity only — never the prompt: this log is read on crash triage and must not carry turn content.
     logger.debug("turn marker recorded for session %s by writer pid %s", session_key, entry["writer_pid"])
     carried = {str(i) for i in carried_job_ids or ()}
@@ -359,6 +376,58 @@ def mark_turn_paused(home: Path | str, session_key: str, reason: str,
     return False
 
 
+def _is_own_generation(entry: Any, generation: Any) -> bool:
+    """``entry`` is the marker THIS process's turn wrote: same ``started_at`` and writer identity as the one
+    captured when the turn recorded it. A carried, successor or foreign-writer marker never matches."""
+    if not isinstance(entry, dict) or not isinstance(generation, dict):
+        return False
+    started = generation.get("started_at")
+    if not started or entry.get("started_at") != started:
+        return False
+    me = _writer_identity()
+    if entry.get("writer_pid") != me["writer_pid"] or generation.get("writer_pid") != me["writer_pid"]:
+        return False
+    return entry.get("writer_start_time") == me.get("writer_start_time") == generation.get("writer_start_time")
+
+
+def stamp_provider_retry_deadline(home: Path | str, session_key: str, deadline: float, generation: dict | None) -> bool:
+    """[daveey] Durably record this turn's absolute retry deadline on its OWN marker. Fails closed (False) for an
+    empty key, a missing/carried/successor/foreign marker, a different still-active deadline (first write wins)
+    and any write or readback mismatch; the caller then keeps the ordinary in-process wait and never yields.
+    True only after the projected marker reads back the exact deadline under the same generation."""
+    want = finite_deadline(deadline)
+    if not session_key or want is None or not generation:
+        return False
+
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if not _is_own_generation(entry, generation):
+            return None
+        current = finite_deadline(entry.get(PROVIDER_RETRY_FIELD))
+        if current is not None and current > time.time() and current != want:
+            return None
+        entry[PROVIDER_RETRY_FIELD] = want
+        return entries
+
+    if not _update(home, session_key, mutate, "stamp retry deadline"):
+        return False
+    back = read_turn_marker(home, session_key)
+    return bool(back) and back.get(PROVIDER_RETRY_FIELD) == want and back.get("started_at") == generation["started_at"] \
+        and back.get("writer_pid") == generation.get("writer_pid")
+
+
+def clear_provider_retry_deadline(home: Path | str, session_key: str, deadline: float, generation: dict | None) -> bool:
+    """Best-effort: drop ``deadline`` from this turn's own marker once served (only that exact value)."""
+    def mutate(entries):
+        entry = entries.get(session_key)
+        if not _is_own_generation(entry, generation) or entry.get(PROVIDER_RETRY_FIELD) != deadline:
+            return None
+        entry.pop(PROVIDER_RETRY_FIELD, None)
+        return entries
+
+    return bool(session_key) and _update(home, session_key, mutate, "clear retry deadline")
+
+
 def clear_carried_turn_paused(home: Path | str, session_key: str) -> bool:
     """[daveey] Take back a write-ahead ``carried_turn_paused`` stamp whose carried pause did not stand (the job
     stop failed, or a user Stop won), so the continuation does not name a notification turn that ran to completion
@@ -470,6 +539,7 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
                 **({"paused_at": float(entry["paused_at"])} if entry.get("paused_at") else {}),
                 **({"until_tool": True} if entry.get("until_tool") else {}),
                 **({"carried_turn_paused": True} if entry.get("carried_turn_paused") else {}),
+                **({PROVIDER_RETRY_FIELD: d} if (d := finite_deadline(entry.get(PROVIDER_RETRY_FIELD))) else {}),
                 **({"notification_category": "diagnostic"}
                    if entry.get("notification_category") == "diagnostic" else {}),
                 **({"killed_jobs": killed} if killed else {})}

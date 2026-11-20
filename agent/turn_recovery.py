@@ -1398,20 +1398,23 @@ def interruptible_backoff_sleep(
     agent: Any, wait_time: float, _retry: Optional[TurnRetryState], *,
     messages: list[dict[str, Any]], conversation_history: Any, api_call_count: int,
     abort_message: str, interrupt_text: str, activity_label: str,
+    deadline: Optional[float] = None, update_yield: bool = False,
 ) -> Optional[dict[str, Any]]:
-    """Sleep ``wait_time`` in 200 ms slices so interrupts are honoured promptly, touching
+    """``deadline`` (absolute epoch) replaces ``now + wait_time``; ``update_yield`` is the explicit opt-in (only the
+    API-error wait, after its deadline is durable) to yield to a core-update pause instead of treating its cancel as
+    a Stop. Sleep ``wait_time`` in 200 ms slices so interrupts are honoured promptly, touching
     activity every ~30 s so the gateway's inactivity monitor knows we are alive.
 
     On interrupt with ``_retry`` given and a redirect pending: preserve the redirect, arm
     ``_retry.restart_with_redirected_messages`` and return ``None`` (caller rebuilds the
     turn). Otherwise return the ``interrupted`` result dict. ``None`` when the wait completed."""
-    sleep_end = time.time() + wait_time
+    sleep_end = deadline if deadline is not None else time.time() + wait_time
     _touch_counter = 0
     while time.time() < sleep_end:
         if agent._interrupt_requested:
             # Preserve the update-owned cancel for begin_iteration's boundary pause;
             # generic interrupt handling would clear it and append a terminal Stop row.
-            if _retry is not None and update_pause_cancel.model_yield_requested(agent):
+            if update_yield and _retry is not None and update_pause_cancel.model_yield_requested(agent):
                 yield_to_update_pause(_retry)
                 return None
             if _retry is not None and agent.clear_interrupt(preserve_redirect=True):

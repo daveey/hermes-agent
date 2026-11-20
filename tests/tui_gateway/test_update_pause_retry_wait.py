@@ -8,7 +8,7 @@ import httpx
 import pytest
 from openai import RateLimitError
 
-from agent import turn_api_error, update_pause_cancel
+from agent import provider_retry_deadline, turn_api_error, update_pause_cancel
 from hermes_cli import admission_fence as af
 from tui_gateway import update_pause as up
 from tui_gateway.turn_marker import read_turn_marker, record_turn_start
@@ -29,6 +29,8 @@ def test_api_error_backoff_pause_custody(home, tmp_path, monkeypatch, mode):
     record_turn_start(home, "session-key", "run the quick job")
     session = {"agent": agent, "session_key": "session-key", "profile_home": str(home),
                "history_lock": threading.Lock()}
+    stamp, clear = up.provider_retry_hooks(session, "session-key", read_turn_marker(home, "session-key"))
+    provider_retry_deadline.install(agent, stamp=stamp, clear=clear, restored=None)
     entered = threading.Event()
     issued = threading.Event()
     calls = []

@@ -111,7 +111,8 @@ def _hold_refused_turn(session: dict, marker_key: str, display_kind, error_surfa
     prompt, earlier = marker["prompt"], session.pop("_refused_turn_earlier", None)
     if earlier:
         prompt = f"{earlier}\n\n{prompt}"
-        record_turn_start(home, marker_key, prompt, attempts=attempts)
+        record_turn_start(home, marker_key, prompt, attempts=attempts,
+                          provider_retry_not_before=marker.get("provider_retry_not_before"))
     delay = _REFUSED_RETRY_DELAYS_S[attempts]
     session.update(_refused_turn_marker_key=marker_key, _refused_turn_prompt=prompt, _refused_turn_delay=delay,
                    _auto_continue_retry_after=time.monotonic() + delay - 1.0)
@@ -348,6 +349,11 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             # nested notes). Set here, not at schedule time, so a bail above leaves nothing for a racing user turn.
             session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
             session["_auto_continue_pauses"] = pauses
+            # [daveey] The logical turn's absolute provider-retry epoch rides the continuation (never a user turn).
+            if marker.get("provider_retry_not_before"):
+                session["_auto_continue_provider_retry_not_before"] = marker["provider_retry_not_before"]
+            else:
+                session.pop("_auto_continue_provider_retry_not_before", None)
             session["_auto_continue_killed_jobs"] = marker.get("killed_jobs", [])
             # [daveey] A continued at-most-once turn keeps the contract: off again at its first tool.
             session["_marker_until_tool"] = bool(marker.get("until_tool"))
@@ -466,7 +472,7 @@ def _owner_forward_transient(exc: BaseException) -> bool:
 
 
 _KICKOFF_MARKER_INPUTS = ("_auto_continue_attempt", "_auto_continue_prompt", "_auto_continue_pauses",
-                          "_auto_continue_killed_jobs")
+                          "_auto_continue_killed_jobs", "_auto_continue_provider_retry_not_before")
 # Re-arms of the pause watcher for one pause whose continuation keeps being refused: each re-arm is a fresh
 # watcher with a fresh budget, so a refusal that persists would otherwise loop every ~10-15 s.
 REFUSED_REARM_MAX = 6

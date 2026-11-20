@@ -92,6 +92,15 @@ def perform_api_call(
         nonlocal thinking_spinner
         thinking_spinner = stop_thinking_spinner(agent, thinking_spinner)
 
+    # [daveey] A resumed turn serves its original provider-retry epoch here, before middleware/SDK, in this
+    # execution thread (never in scheduling/activation). A Stop raises into the provider path's own handling.
+    from agent import provider_retry_deadline
+    _restored = provider_retry_deadline.wait_restored(agent, _retry, messages, api_call_count)
+    if _restored != "done":
+        if _restored == "yield":
+            yield_to_update_pause(_retry)
+        return _verdict("break")
+
     _use_streaming = _should_stream(agent)
 
     def _perform_api_call(next_api_kwargs):

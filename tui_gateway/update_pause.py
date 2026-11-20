@@ -143,6 +143,19 @@ def _home(session: dict) -> Path:
     return Path(session.get("profile_home") or server._hermes_home)
 
 
+def provider_retry_hooks(session: dict, marker_key: str, own_marker: dict | None):
+    """[daveey] ``(stamp, clear)`` callbacks for this turn's provider-retry deadline, bound to THIS turn's own marker
+    key and generation (never ``effective_pause_key``, never a carried/successor marker). ``(None, None)`` when this
+    turn wrote no marker of its own: its waits then stay ordinary and never yield to a pause."""
+    if not marker_key or not own_marker or not own_marker.get("started_at"):
+        return None, None
+    from tui_gateway import turn_marker
+    generation = {k: own_marker[k] for k in ("started_at", "writer_pid", "writer_start_time") if k in own_marker}
+    home = _home(session)
+    return (lambda deadline: turn_marker.stamp_provider_retry_deadline(home, marker_key, deadline, generation),
+            lambda deadline: turn_marker.clear_provider_retry_deadline(home, marker_key, deadline, generation))
+
+
 def _root(session: dict) -> Path:
     from hermes_constants import get_default_hermes_root
     return get_default_hermes_root(home=_home(session))

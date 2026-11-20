@@ -277,6 +277,7 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
     marker_key = str(session.get("session_key") or "")
     marker_attempt = int(session.pop("_auto_continue_attempt", 0) or 0)
     marker_pauses = int(session.pop("_auto_continue_pauses", 0) or 0)
+    retry_not_before = session.pop("_auto_continue_provider_retry_not_before", None)  # a continuation's wait only
     killed_jobs = session.pop("_auto_continue_killed_jobs", None)
     marker_text = session.pop("_auto_continue_prompt", None) or text
     session.pop("_refused_turn_marker_key", None)
@@ -312,6 +313,7 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
                           **({"until_tool": True} if until_tool and auto_continue else {}),
                           **({"killed_jobs": killed_jobs} if killed_jobs else {}),
                           **({"pauses": marker_pauses} if marker_pauses else {}),
+                          **({"provider_retry_not_before": retry_not_before} if retry_not_before else {}),
                           **({"notification_category": "diagnostic"}
                              if notification_category == "diagnostic" else {}))
         with session["history_lock"]:
@@ -702,6 +704,7 @@ class _TurnRun:
     # [daveey] The marker this turn recorded, read back at once: its identity is the only marker evidence the
     # turn-end outcome refresh may discount (tui_gateway/turn_outcome.concluding_turn_identity).
     own_marker: Any = None
+    provider_retry_not_before: float | None = None  # selected kickoff epoch survives own-marker read failure
     display_kind: Any = None
     receipt_attempted: bool = False
     # [daveey] An automation turn (kanban_notice, process_complete): its display metadata and the one replay plan
@@ -1055,6 +1058,18 @@ def _invoke_agent(
     notice_secured = (display_kind == "kanban_notice" and session.pop("_first_request_prompt_secured", False)
                       and st.own_marker is not None and st.own_marker.get("prompt") == text)
     agent.update_pause_first_request = bool(st.marker_key) and (display_kind == "auto_continue" or bool(notice_secured))
+    # [daveey] Provider-retry deadline custody for THIS turn's own marker only (empty key = carried notice: none).
+    from agent import provider_retry_deadline
+    from tui_gateway.update_pause import provider_retry_hooks
+    _retry_stamp, _retry_clear = provider_retry_hooks(session, st.marker_key, st.own_marker)
+    provider_retry_deadline.install(
+        agent, stamp=_retry_stamp, clear=_retry_clear,
+        restored=((st.own_marker or {}).get("provider_retry_not_before") or st.provider_retry_not_before)
+        if st.marker_key else None)
+    if st.provider_retry_not_before is not None and not _retry_stamp:
+        # Failed own-marker readback: serve the epoch, but cannot park it safely.
+        agent.step_boundary_pause = None
+        pause_key = ""
     _mid_tool_stop = None
     if pause_key:
         install_clarify_pause_provider()  # a blocked clarify is withdrawn so the pause can land
@@ -1075,6 +1090,7 @@ def _invoke_agent(
     finally:
         agent.step_boundary_pause = None
         agent.update_pause_first_request = False
+        provider_retry_deadline.reset(agent)
         if _mid_tool_stop is not None:
             _mid_tool_stop()
         # Stop AND join before anything emits: a tick surviving past message.complete would
@@ -1453,6 +1469,7 @@ def _run_admitted_prompt(
         st = _TurnRun(
             session["agent"], session.pop("one_turn_model_restore", None), terminal_callback,
             receipt_committed=terminal_callback is None)
+        st.provider_retry_not_before = session.get("_auto_continue_provider_retry_not_before")
         st.marker_key = _record_turn_marker(session, text, auto_continue=auto_continue and terminal_callback is None,
             notification_category=(display_metadata or {}).get("notification_category"))
         from tui_gateway.turn_outcome import own_turn_marker

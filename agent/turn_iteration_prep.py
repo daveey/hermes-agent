@@ -442,6 +442,14 @@ def begin_iteration(
         _turn_exit_reason = f"paused_for_update({_pause})"
         return _verdict("break")
 
+    from agent.provider_retry_deadline import before_provider_work
+    if (retry_result := before_provider_work(agent, messages, conversation_history, api_call_count)) is not None:
+        interrupted = True
+        _turn_exit_reason = retry_result["turn_exit_reason"]
+        if retry_result.get("paused_for_update"):
+            agent._step_boundary_paused = retry_result["paused_for_update"]
+        return _verdict("break")
+
     # Aggregate input budget for detached auxiliary forks bounds the whole review, not
     # each request; checked between iterations so the crossing request's writes landed.
     if _review_input_budget_exhausted(agent):

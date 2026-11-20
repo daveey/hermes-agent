@@ -254,7 +254,8 @@ def pause_before_turn(agent: Any, conversation_history: Any) -> dict | None:
         reason = _ask(gate) if callable(gate) else None
         unstarted = bool(reason)
     if not reason:
-        return None
+        from agent.provider_retry_deadline import before_provider_work
+        return before_provider_work(agent, list(conversation_history or ()), conversation_history, 0)
     return {"final_response": "", "messages": list(conversation_history or []), "api_calls": 0,
             "completed": False, "interrupted": True, "paused_for_update": reason,
             "turn_exit_reason": f"paused_for_update({reason})", **({UNSTARTED_KEY: True} if unstarted else {})}

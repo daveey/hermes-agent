@@ -16,7 +16,7 @@ import time
 from typing import Any, Dict, Optional
 
 from agent.api_error_summary import is_provider_stream_parse_error
-from agent import update_pause_cancel
+from agent import provider_retry_deadline, update_pause_cancel
 from agent.turn_api_call import yield_to_update_pause
 from agent.error_classifier import CODEX_BARE_400_MARKER, RETRYABLE_CLIENT_REASONS, FailoverReason, classify_api_error
 from agent.turn_offline_wait import wait_out_offline
@@ -487,14 +487,24 @@ def settle_unrecovered_error(
     # must survive backoff, not die as "Operation interrupted".
     # The failed request's context has exited, but its retry wait is still at the same
     # boundary. Keep it visible to the update watcher without broadening eligibility.
-    with update_pause_cancel.model_request_in_flight(agent, messages, api_call_count=api_call_count):
-        _interrupted = interruptible_backoff_sleep(
-            agent, wait_time, _retry, messages=messages, conversation_history=conversation_history,
-            api_call_count=api_call_count,
-            abort_message="Interrupt detected during retry wait, aborting.",
-            interrupt_text=f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",
-            activity_label=f"error retry backoff ({retry_count}/{max_retries})",
-        )
+    # [daveey] Only with a durable, absolute deadline: a pause + restart must not shorten a Retry-After the
+    # process-local sleep alone would lose. Stamp failure keeps the ordinary wait and never yields.
+    _deadline = time.time() + wait_time
+    _durable = update_pause_cancel.model_request_can_yield(
+        messages, api_call_count=api_call_count, first_request_ok=update_pause_cancel.first_request_can_pause(agent),
+    ) and provider_retry_deadline.stamp(agent, _deadline)
+    _sleep_kwargs = dict(
+        messages=messages, conversation_history=conversation_history, api_call_count=api_call_count,
+        abort_message="Interrupt detected during retry wait, aborting.",
+        interrupt_text=f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",
+        activity_label=f"error retry backoff ({retry_count}/{max_retries})",
+    )
+    if _durable:
+        with update_pause_cancel.model_request_in_flight(agent, messages, api_call_count=api_call_count):
+            _interrupted = interruptible_backoff_sleep(
+                agent, wait_time, _retry, deadline=_deadline, update_yield=True, **_sleep_kwargs)
+    else:
+        _interrupted = interruptible_backoff_sleep(agent, wait_time, _retry, **_sleep_kwargs)
     if _interrupted is not None:
         return _verdict("return", _interrupted)
     if _retry.restart_with_redirected_messages:
