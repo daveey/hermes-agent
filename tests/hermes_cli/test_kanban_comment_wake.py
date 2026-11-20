@@ -21,6 +21,7 @@ import pytest
 from hermes_cli import kanban_awaited_card_wake as acw
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_local_status_wake as lsw
 from hermes_cli import kanban_wake_check as kwc
@@ -99,6 +100,20 @@ def _park(live, probes, *, wake_check=None):
     with kb.write_txn(live):
         live.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
     assert kb.claim_task(live, tid, claimer="worker") is not None
+    # A creator-comment park now requires a wakeable creator, not an unseen wait.
+    # Keep the real park/probe path: this suite tests answer-to-probe latency.
+    from hermes_constants import get_hermes_home
+    from hermes_state import SessionDB
+
+    chat_id = "20261120_000000_a1b2c3"
+    sessions = SessionDB(get_hermes_home() / "state.db")
+    try:
+        if sessions.get_session(chat_id) is None:
+            sessions.create_session(chat_id, source="desktop")
+    finally:
+        sessions.close()
+    kbn.add_notify_sub(live, task_id=tid, platform="tui", chat_id=chat_id,
+                      notifier_profile="default", delivery_metadata={"reason": "origin"})
     asked = kb.add_comment(live, tid, "default", "Question for the orchestrator: triage or clock?")
     cmd = wake_check or f"hermes kanban wait-comment {tid} --after-id {asked} --skip-system"
     assert kb.schedule_task(live, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on the chat's answer",
