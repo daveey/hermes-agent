@@ -260,9 +260,26 @@ def _reserved_key(args: argparse.Namespace) -> int:
         report.get("action") == "preview" and report.get("eligible")) else 1
 
 
+def _dependency_delete(args: argparse.Namespace) -> int:
+    """Preview/apply audited abandonment of one refused historical link delete."""
+    from hermes_cli import kanban_sync_dependency_delete as recovery
+    slug = _board(args)
+    hub = ksc.Hub(ksc.load_identity())
+    conn = kbc.connect(_path(slug))
+    try:
+        if args.apply:
+            report = recovery.apply(conn, hub, slug, args.row_uid, args.expect, args.reason)
+        else:
+            report = recovery.plan(conn, hub, slug, args.row_uid, args.reason)
+    finally:
+        conn.close()
+    _print(report, args.json)
+    return 0 if report.get("eligible") or report.get("action") == "applied" else 1
+
+
 _ACTIONS = {"status": _status, "attach": _attach, "import": _import, "diff": _diff, "run": _run,
             "links": _links, "links-diff": _links_diff, "reconcile": _reconcile, "machine-links": _machine_links,
-            "refill-history": _refill_history, "reserved-key": _reserved_key}
+            "refill-history": _refill_history, "reserved-key": _reserved_key, "dependency-delete": _dependency_delete}
 
 
 def cmd_sync(args: argparse.Namespace) -> int:

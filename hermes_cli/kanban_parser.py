@@ -806,6 +806,11 @@ _SPECS = [
                                                    help="Cards to refill (default: every open copied card)")],
              help="Refill events an older pickup cut off local copies of other gateways' cards, from the replica "
                   "(by uid; never invents rows; safe on running cards)"),
+        _cmd("dependency-delete", [_json_flag(), _arg("row_uid", metavar="PARENT>CHILD"),
+                                   _arg("--reason", required=True, metavar="TEXT"),
+                                   _arg("--apply", action="store_true"),
+                                   _arg("--expect", metavar="TOKEN", default=None)],
+             help="Abandon containment-refused historical deletes in favor of the live canonical link (audited preview by default)"),
         _cmd("reserved-key", [_json_flag(), _arg("task_id", metavar="TASK_ID"),
                               _arg("--new-key", required=True, metavar="KEY",
                                    help="Replacement idempotency key (non-empty, not pickup-stall:/worker-resources-unknown:)"),

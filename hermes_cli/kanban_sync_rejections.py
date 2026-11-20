@@ -142,8 +142,13 @@ def resolve_rejections(conn: sqlite3.Connection, hub, board: str) -> list[dict]:
     """
     from hermes_cli.kanban_sync_client import HubError, SyncUnavailable
     ops = [dict(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox WHERE state='rejected' ORDER BY op_id")]
+    from hermes_cli import kanban_sync_dependency_delete as dependency_delete
     reports = []
     for op in ops:
+        receipt = dependency_delete.receipt_for_op(conn, op)
+        if receipt is not None:
+            reports.append(dependency_delete.settle(conn, hub, board, op, receipt))
+            continue
         report = {"op_id": op["op_id"], "table": op["table_name"], "row_uid": op["row_uid"],
                   "fields": sorted(json.loads(op["fields"])), "classification": "unresolved", "action": "retained"}
         reports.append(report)
