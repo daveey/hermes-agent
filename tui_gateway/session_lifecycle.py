@@ -45,6 +45,9 @@ def _notify_session_boundary(event_type: str, session_id: str | None, platform: 
 
 _SESSION_OWNERSHIP_UNAVAILABLE = "Hermes could not safely reserve this session. Try again."
 _AUTOMATIC_SESSION_END_REASONS = frozenset({"ws_orphan_reap", "ws_disconnect", "idle_timeout", "lru_evict", "tui_shutdown"})
+# In-memory automatic ends skip the DB orphan sweep (that sweep refreshes). tui_shutdown is too
+# many rows for a blocking judge; tui_close already ran turn_end on the last prompt.
+_OUTCOME_REFRESH_END_REASONS = frozenset({"ws_orphan_reap", "ws_disconnect", "idle_timeout", "lru_evict"})
 
 
 def _lease_metadata(live_session_id: str) -> dict:
@@ -801,6 +804,9 @@ def _teardown_popped_session(session: dict | None, *, end_reason: str = "tui_clo
         # finally: a raising finalize (callers log and move on) must still free the ring.
         from tui_gateway.event_replay import forget_session
         forget_session(session.get("_sid") or "")
+        if end_reason in _OUTCOME_REFRESH_END_REASONS:
+            from tui_gateway.turn_outcome import refresh_closed_session_outcome
+            refresh_closed_session_outcome(session)
     return True
 
 

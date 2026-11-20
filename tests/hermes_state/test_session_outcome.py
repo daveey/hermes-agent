@@ -526,6 +526,20 @@ def test_a_real_reply_after_the_failure_clears_it(db, board):
     assert so.derive_outcome("chat", db=db)["kind"] == "waiting"
 
 
+def test_turn_end_clears_stored_turn_failed_after_a_later_good_reply(db, board):
+    """Stored ``turn_failed`` (the auditor's row) must not survive a later good assistant
+    reply once turn_end refresh runs — no manual ``--refresh``."""
+    add_card(board, "t_run", "chat", "scheduled")
+    say(db, "user", "archive my receipts")
+    failed_turn(db)
+    assert so.refresh_outcome("chat", "turn_end", db=db)["reason"] == "turn_failed"
+    assert so.get_outcome("chat", db=db)["reason"] == "turn_failed"
+    say(db, "assistant", SUMMARY)
+    out = so.refresh_outcome("chat", "turn_end", db=db)
+    assert out["kind"] == "waiting"
+    assert so.get_outcome("chat", db=db)["kind"] == "waiting"
+
+
 def test_interrupted_automation_delivery_does_not_paint_a_waiting_chat(db, board):
     from agent.turn_failure_copy import AUTOMATION_INTERRUPTED_NOTICE
     add_card(board, "t_run", "chat", "scheduled")

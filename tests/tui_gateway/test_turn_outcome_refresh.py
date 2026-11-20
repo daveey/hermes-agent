@@ -82,7 +82,7 @@ def turn_env(monkeypatch, tmp_path, db):
         monkeypatch.setattr(server, name, stub)
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     yield monkeypatch
-    for sid in [s for s in server._sessions if s.startswith("ui-outcome-")]:
+    for sid in [s for s in server._sessions if s.startswith(("ui-outcome-", "ui-retry"))]:
         server._sessions.pop(sid, None)
 
 
@@ -100,6 +100,75 @@ def test_every_turn_conclusion_refreshes_the_stored_outcome(turn_env, db, reply,
     stored = so.get_outcome("row-o", db=db)
     assert stored is not None, "the turn end must store an outcome"
     assert (stored["kind"], stored.get("reason")) == (kind, reason)
+
+
+def test_a_later_good_reply_clears_stored_turn_failed_without_manual_refresh(turn_env, db):
+    """Hub chats 20261120_041627_3ea0c6 / d40002 / 2e950a: a failed-turn row then a later
+    successful TUI reply must not leave ``unresolved{turn_failed}`` until ``hermes sessions
+    outcome --refresh``. The second ``_run_prompt_submit`` finally is the turn_end refresh."""
+    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE
+
+    db.create_session("row-retry", source="desktop")
+    db.append_message("row-retry", role="user", content="archive my receipts")
+    db.append_message(
+        "row-retry", role="assistant", content=FAILED_TURN_NOTICE, display_kind=FAILED_TURN_DISPLAY_KIND,
+    )
+    # The fixture's ImmediateThread cannot run ``Thread(target=fn, args=...)`` workers the
+    # kanban-card reader starts; an unread board must not decide this test.
+    turn_env.setattr(so, "_live_work", lambda db, sid, ids: ([], [], False))
+    assert so.refresh_outcome("row-retry", "turn_end", db=db)["reason"] == "turn_failed"
+    assert so.get_outcome("row-retry", db=db)["reason"] == "turn_failed"
+
+    agent = _Agent("row-retry", db, SUMMARY)
+    session = server._sessions["ui-retry"] = _session(agent)
+    assert server._run_prompt_submit("rid", "ui-retry", session, "try again") is True
+
+    stored = so.get_outcome("row-retry", db=db)
+    assert stored is not None, "the successful turn end must store an outcome"
+    assert stored["kind"] == "done", stored
+
+
+def test_closed_session_refresh_clears_stored_turn_failed_after_a_later_good_reply(monkeypatch, db):
+    """Hub 3ea0c6: later complete turn, then ws_orphan_reap, stored still turn_failed until
+    ``hermes sessions outcome --refresh``. In-memory reap must refresh without that CLI."""
+    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE
+    from tui_gateway.turn_outcome import concluding_turn_identity, refresh_closed_session_outcome
+
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(so, "_live_work", lambda db, sid, ids: ([], [], False))
+    db.create_session("reaped-retry", source="desktop")
+    db.append_message("reaped-retry", role="user", content="archive my receipts")
+    db.append_message(
+        "reaped-retry", role="assistant", content=FAILED_TURN_NOTICE, display_kind=FAILED_TURN_DISPLAY_KIND,
+    )
+    assert so.refresh_outcome("reaped-retry", "turn_end", db=db)["reason"] == "turn_failed"
+    db.append_message("reaped-retry", role="assistant", content=SUMMARY)
+    assert so.get_outcome("reaped-retry", db=db)["reason"] == "turn_failed"
+
+    only_active = type("A", (), {"_active_session_turn_lease_holder": "lease-1"})()
+    assert "lease:lease-1" in concluding_turn_identity(only_active)
+
+    refresh_closed_session_outcome({"session_key": "reaped-retry"})
+    stored = so.get_outcome("reaped-retry", db=db)
+    assert stored is not None and stored["kind"] == "done", stored
+
+
+def test_ws_orphan_teardown_refreshes_closed_session_outcome(monkeypatch):
+    from tui_gateway import turn_outcome as to
+
+    seen: list[str] = []
+    monkeypatch.setattr(to, "refresh_closed_session_outcome", lambda s: seen.append(s.get("session_key") or ""))
+    monkeypatch.setattr(server, "_teardown_session", lambda *a, **k: None)
+    monkeypatch.setattr("tui_gateway.detached_turn_cleanup.cancel", lambda s: None)
+    monkeypatch.setattr("tui_gateway.event_replay.forget_session", lambda s: None)
+    session = {"session_key": "reaped-retry", "history_lock": threading.Lock(), "_sid": "ui-reap"}
+    assert server._teardown_popped_session(session, end_reason="ws_orphan_reap") is True
+    assert seen == ["reaped-retry"]
+    seen.clear()
+    assert server._teardown_popped_session(session, end_reason="tui_close") is True
+    assert seen == []
+    assert server._teardown_popped_session(session, end_reason="tui_shutdown") is True
+    assert seen == []
 
 
 def test_refresh_uses_server_bound_session_db(monkeypatch, db, caplog):

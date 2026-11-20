@@ -39,7 +39,9 @@ def concluding_turn_identity(agent=None, marker: Optional[dict] = None) -> froze
     try:
         from hermes_state_outcome import turn_identity
 
-        holder = getattr(agent, "_last_session_turn_lease_holder", None)
+        # ``_last`` is kept after release; ``_active`` is the holder if refresh runs before the attr is copied.
+        holder = (getattr(agent, "_last_session_turn_lease_holder", None)
+                  or getattr(agent, "_active_session_turn_lease_holder", None))
         return turn_identity(marker=marker if isinstance(marker, dict) else None,
                              lease_holder=holder if isinstance(holder, str) else None)
     except Exception:  # health: allow BLE001 -- best-effort; nothing named discounts nothing
@@ -66,3 +68,24 @@ def refresh_turn_outcome(session: dict, agent=None, concluding_turn: Optional[fr
                 refresh_outcome(sid, "turn_end", db=db, concluding_turn=concluding_turn or frozenset())
     except Exception:  # health: allow BLE001 -- the turn already concluded; a failed refresh is logged
         logger.warning("turn-end outcome refresh failed for %s", sid, exc_info=True)
+
+
+def refresh_closed_session_outcome(session: dict) -> None:
+    """In-memory close/reap has no DB orphan sweep. Refresh so a later good reply is stored.
+
+    Hub chats 20261120_041627_3ea0c6 / d40002 / 2e950a: ``ws_orphan_reap`` tore down the live
+    session after a later complete turn; without this, stored ``unresolved{turn_failed}`` from
+    the earlier failed_turn row survived until a manual ``hermes sessions outcome --refresh``.
+    """
+    sid = turn_sid(session, session.get("agent"))
+    if not sid:
+        return
+    try:
+        from hermes_state_outcome import refresh_outcomes_quietly
+        from tui_gateway import server  # split helpers only work rebound onto server globals (bind_module)
+
+        with server._session_profile_runtime_scope(session), server._session_db(session) as db:
+            if db is not None:
+                refresh_outcomes_quietly([sid], "reap", db=db)
+    except Exception:  # health: allow BLE001 -- the session is already closed; a failed refresh is logged
+        logger.warning("closed-session outcome refresh failed for %s", sid, exc_info=True)
