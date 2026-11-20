@@ -270,3 +270,18 @@ def test_foreign_endpoint_work_and_lease_races_refuse_old_preview(foreign, monke
     assert result["action"] == "refused", result
     assert rows(live, "kanban_sync_tombstones")
     assert len(rows(live, "kanban_sync_outbox")) >= 3
+
+
+def test_foreign_replica_snapshot_is_bound_into_preview_token(foreign):
+    live, hub, svc, uid, _parent, _ = foreign
+    p = r.plan(live, hub, BOARD, uid, REASON)
+    assert p["eligible"], p
+    svc._put(svc.board(BOARD), "tasks", "t_unrelated", {"status": "done", "title": "unrelated", "created_by": "fixture", "created_at": 0, "created_on": FOREIGN}, FOREIGN,
+             None, "9999999999999-0002-worker-1")
+    before = protected(live)
+    result = r.apply(live, hub, BOARD, uid, p["token"], REASON)
+    assert result["action"] == "refused" and result["reason"] == "preview_token_changed", result
+    assert protected(live) == before
+    assert len(rows(live, "kanban_sync_outbox")) == 3
+    fresh = r.plan(live, hub, BOARD, uid, REASON)
+    assert fresh["eligible"] and fresh["token"] != p["token"]
