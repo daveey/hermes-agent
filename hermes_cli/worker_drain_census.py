@@ -114,9 +114,18 @@ def baseline_is_live(base: Baseline) -> bool:
 
 
 def process_identity(proc_root: str, pid: str) -> tuple:
-    fields = _read(f'{proc_root}/{pid}/stat').rsplit(')', 1)[1].split()
-    return (int(pid), int(fields[19]), os.stat(f'{proc_root}/{pid}').st_uid,
-            _read_cgroup(proc_root, pid), os.readlink(f'{proc_root}/{pid}/exe'))
+    def sample():
+        fields = _read(f'{proc_root}/{pid}/stat').rsplit(')', 1)[1].split()
+        return (int(pid), int(fields[19]), os.stat(f'{proc_root}/{pid}').st_uid,
+                _read_cgroup(proc_root, pid), os.readlink(f'{proc_root}/{pid}/exe'))
+
+    # procfs is not a transactional snapshot. Reject a restart, exec, uid or
+    # cgroup transition observed while assembling the identity, never mix it
+    # with an older trusted tuple. CPU/state fields may change normally.
+    before = sample()
+    if before != sample():
+        raise ValueError('process changed during identity read')
+    return before
 
 
 def _entry_identity(e: dict) -> tuple:

@@ -37,9 +37,13 @@ def load_manifest(path) -> dict:
             raise ValueError('manifest shape')
         names = set()
         for unit in doc['units']:
+            digest_keys = ('package_sha256', 'exe_sha256') if unit['kind'] == 'init' else ('fragment_sha256', 'exe_sha256')
             if (not UNIT_RE.fullmatch(unit['name']) or unit['name'] in names
                     or unit['kind'] not in ('infrastructure', 'hermes', 'init')
-                    or any(not re.fullmatch('[0-9a-f]{64}', unit[k]) for k in ('fragment_sha256', 'exe_sha256'))):
+                    or any(not re.fullmatch('[0-9a-f]{64}', unit[k]) for k in digest_keys)
+                    or (unit['kind'] == 'init' and (unit['name'] != 'init.scope'
+                        or 'user' in unit or not Path(unit['package_path']).is_absolute()
+                        or '..' in Path(unit['package_path']).parts))):
                 raise ValueError('unit shape')
             names.add(unit['name'])
         return doc
@@ -66,11 +70,18 @@ def unit_state(unit: dict) -> dict:
 
 def _unit_entry(unit, state, proc_root, ident, manifest):
     try:
-        pid = '1' if unit['kind'] == 'init' and unit['name'] == 'init.scope' else state['MainPID']
+        if unit['kind'] == 'init':
+            if unit['name'] != 'init.scope' or not Path(unit['package_path']).is_absolute():
+                raise ValueError('invalid init declaration')
+            pid = '1'
+            if file_digest(unit['package_path']) != unit['package_sha256']:
+                raise ValueError('init package changed')
+        else:
+            pid = state['MainPID']
+            if file_digest(state['FragmentPath']) != unit['fragment_sha256']:
+                raise ValueError('unit package changed')
         if not pid.isdigit() or int(pid) <= 0:
             raise ValueError('no live MainPID')
-        if file_digest(state['FragmentPath']) != unit['fragment_sha256']:
-            raise ValueError('unit package changed')
         entry = census.process_identity(proc_root, pid)
         if entry[3] != state['ControlGroup'] or not entry[3]:
             raise ValueError('unit cgroup mismatch')

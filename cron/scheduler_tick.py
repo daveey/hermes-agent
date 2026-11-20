@@ -125,15 +125,20 @@ def update_admission():
     (unwritable root) fails open: cron must not stop because the fence file is unavailable, and the drainer
     reads such a root as busy anyway.
     """
+    # Preserve the updater's legacy availability policy, but never retain a
+    # host-process exemption when it cannot prove lease coverage.
+    from hermes_cli.worker_drain_capability import revoke
     try:
         from hermes_cli import admission_fence
         from hermes_cli.admission_fence import AdmissionBusy, SUPPORTED
         from hermes_cli.backend_retirement import BUSY_WAIT_S
         from hermes_cli.worker_drain_fence import DrainRefused, lease_scope
     except ImportError:
+        revoke('cron admission import unavailable')
         yield True
         return
     if not SUPPORTED:
+        revoke('cron admission unsupported')
         yield True
         return
     from cron import scheduler as _sched
@@ -155,6 +160,7 @@ def update_admission():
         yield False
         return
     except (OSError, TimeoutError) as exc:
+        revoke('cron admission unavailable')
         logger.debug("Cron update admission unavailable (%s); dispatching", exc)
         yield True
         return
