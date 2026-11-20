@@ -29,6 +29,7 @@ from tools.process_registry_bg_shell import arm_start_gate, bg_command_env, bg_l
 from tools.environments.sandbox_scope import hosted_scope, producer_fields
 from tools.environments.local import _append_dropped_path_entries, _resolve_safe_cwd, _sanitize_subprocess_env, _terminal_env, process_cwd, routed_terminal_base
 from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli.worker_drain_fence import fenced as drain_fenced
 from dataclasses import MISSING, dataclass, field
 from typing import Any, Dict, List, Literal, NamedTuple, Optional
 from hermes_cli.config import get_hermes_home
@@ -1185,6 +1186,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
         self._track_started(session, self._pty_reader_loop, f"proc-pty-reader-{session.id}")
         return session
 
+    @drain_fenced("process_registry.spawn_local")
     def spawn_local(
         self, command: str, cwd: str | None = None, task_id: str = "", session_key: str = "",
         env_vars: dict | None = None, use_pty: bool = False, owner_task_id: str = "",
@@ -1279,6 +1281,7 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             raise
         return session
 
+    @drain_fenced("process_registry.spawn_via_env")
     def spawn_via_env(
         self, env: Any, command: str, cwd: str | None = None, task_id: str = "", session_key: str = "",
         timeout: int = 10, owner_task_id: str = "", persist_on_release: bool = False) -> ProcessSession:

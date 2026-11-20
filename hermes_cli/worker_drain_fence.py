@@ -14,7 +14,12 @@ is busy only when an independent fresh nonblocking flock fails.
 """
 from __future__ import annotations
 
-import fcntl  # windows-footgun: ok (Linux worker nodes only)
+import importlib
+import os
+from typing import Any
+
+# Linux worker nodes only; on Windows enforcement can never be activated.
+fcntl: Any = importlib.import_module('fcntl') if os.name == 'posix' else None
 import hashlib
 import json
 import os
@@ -217,13 +222,28 @@ def apply_request(root: Path, ident: Identity, req: dict, *, now_ms: int | None 
 class WorkLease:
     """A flocked close-only lease file. Closing never unlinks or unlocks."""
 
-    def __init__(self, fd: int, path: Path):
-        self.fd, self.path = fd, path
+    def __init__(self, fd: int, path: Path, owned: bool = True, parent: WorkLease | None = None):
+        self.fd, self.path, self.owned, self.parent = fd, path, owned, parent
 
     def close(self) -> None:
-        if self.fd is not None:
+        if self.fd is not None and self.owned:
             os.close(self.fd)
-            self.fd = None
+        self.fd = None
+
+    def pass_fds(self) -> tuple:
+        """fds for subprocess pass_fds: the child keeps the same open file description (and flock),
+        plus the held parent so deeper hermes descendants stay admitted while draining."""
+        fds = [f for f in (self.fd, self.parent.fd if self.parent else None) if f is not None]
+        for f in fds:
+            os.set_inheritable(f, True)
+        return tuple(fds)
+
+    def child_env(self, env: dict | None = None) -> dict:
+        out = dict(os.environ if env is None else env)
+        anchor = self.parent if self.parent is not None and self.parent.fd is not None else self
+        if anchor.fd is not None:
+            out[LEASE_FD_ENV] = str(anchor.fd)
+        return out
 
 
 def lease_busy(path: Path) -> bool:
@@ -266,7 +286,7 @@ def acquire_lease(root: Path, ident: Identity, purpose: str, *, parent: WorkLeas
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         os.write(fd, _canon({'version': 1, 'boot': ident.boot, 'pid': os.getpid(), 'purpose': purpose}))
         os.fsync(fd)
-        return WorkLease(fd, ld / name)
+        return WorkLease(fd, ld / name, parent=parent)
 
 
 def seal_precheck(root: Path, ident: Identity) -> bool:
@@ -274,3 +294,95 @@ def seal_precheck(root: Path, ident: Identity) -> bool:
     with account_lock(root):
         read_latch(root, ident)
         return busy_leases(root) == 0
+
+
+# ---------------------------------------------------------------------------
+# Activation-gated hook API used by every admission/spawn seam.
+# ---------------------------------------------------------------------------
+LEASE_FD_ENV = 'HERMES_WORKER_DRAIN_LEASE_FD'
+_IMDS = 'http://169.254.169.254'
+_iid_cache: dict = {}
+
+
+def read_imds_iid(timeout: float = 1.5) -> str:
+    """Instance id from IMDSv2; any failure is unknown-state (never guessed)."""
+    import urllib.request
+    try:
+        tok = urllib.request.urlopen(urllib.request.Request(
+            _IMDS + '/latest/api/token', method='PUT',
+            headers={'X-aws-ec2-metadata-token-ttl-seconds': '60'}), timeout=timeout).read().decode()
+        iid = urllib.request.urlopen(urllib.request.Request(
+            _IMDS + '/latest/meta-data/instance-id',
+            headers={'X-aws-ec2-metadata-token': tok}), timeout=timeout).read().decode().strip()
+    except Exception as exc:  # any transport failure holds
+        raise DrainRefused('unknown-state', f'imds unavailable: {type(exc).__name__}') from exc
+    if not IID_RE.match(iid):
+        raise DrainRefused('unknown-state', 'imds iid malformed')
+    return iid
+
+
+def current_identity(act: dict, *, imds=None) -> Identity:
+    boot = read_boot_id()
+    iid = _iid_cache.get(boot)
+    if iid is None:
+        iid = (imds or read_imds_iid)()
+        _iid_cache.clear()
+        _iid_cache[boot] = iid
+    if iid != act['iid']:
+        raise DrainRefused('identity-mismatch', 'activation bound to another instance')
+    return Identity(iid=iid, boot=boot, node_epoch=act['node_epoch'])
+
+
+def _state_base() -> Path:
+    from hermes_cli.worker_compute_capacity import policy_root
+    return policy_root()
+
+
+def _inherited_parent(root: Path):
+    raw = os.environ.get(LEASE_FD_ENV)
+    if not raw or not raw.isdigit():
+        return None
+    fd = int(raw)
+    try:
+        real = Path(os.readlink(f'/proc/self/fd/{fd}'))
+        same = os.path.samestat(os.fstat(fd), os.stat(real))
+    except OSError:
+        return None
+    if real.parent != _state_root(root) / LEASE_DIR or not same:
+        return None
+    return WorkLease(fd, real, owned=False)
+
+
+def fenced(purpose: str):
+    """Decorator: admit before the call, hold the lease for its duration, refuse loudly otherwise.
+    A no-op wrapper when the node is not activated."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            lease = admit(purpose)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                if lease is not None:
+                    lease.close()
+        wrapper.__drain_fenced__ = purpose  # type: ignore[attr-defined]
+        return wrapper
+    return deco
+
+
+def admit(purpose: str, *, activation_path: Path | None = None, imds=None):
+    """Gate one admission/spawn. None when enforcement is not activated (full no-op).
+
+    Raises DrainRefused when latched, sealed, or state is unknown. The returned lease keeps the
+    node non-idle while held; for detached children pass ``lease.pass_fds()`` and
+    ``lease.child_env()`` to the spawn so the flock outlives this process, then ``close()``.
+    """
+    act = load_activation(ACTIVATION_PATH if activation_path is None else activation_path)
+    if act is None:
+        return None
+    root = _state_base()
+    ident = current_identity(act, imds=imds)
+    return acquire_lease(root, ident, purpose, parent=_inherited_parent(root))
+

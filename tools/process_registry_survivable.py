@@ -30,6 +30,8 @@ from contextlib import ExitStack, suppress
 from pathlib import Path
 from typing import Any, Optional
 
+from hermes_cli.worker_drain_fence import fenced as drain_fenced
+
 logger = logging.getLogger("tools.process_registry")
 
 CONFIG_KEY = "update_survivable_processes"
@@ -145,6 +147,7 @@ class SurvivableForeground:
         self.session = None
         self.converted = False
 
+    @drain_fenced("process_registry.survivable_spawn")
     def spawn(self, args: list[str], run_env: dict, cwd: str, stdin_data: Optional[str],
               markers: tuple = ()) -> Optional[subprocess.Popen]:
         """Start ``args`` (``[bash, ..., "-c", script]``) in its own scope, held in the registry; None when

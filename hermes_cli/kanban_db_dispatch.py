@@ -2676,6 +2676,17 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, o
 def _popen_worker(task: Task, board: Optional[str], cmd, workspace: str, env, observation):
     """Open the worker log and start the detached child; a raise means no child exists."""
     log_f = _open_worker_log(task, board)
+    from hermes_cli import worker_drain_fence as _drain
+    try:
+        lease = _drain.admit("kanban.worker")  # refused/unknown => no child exists
+    except BaseException:
+        log_f.close()
+        raise
+    # An activated node's worker keeps the lease (inherited fd) for its whole life so its own
+    # descendants stay admitted while draining; the census sees it as busy until the worker exits.
+    fence_kw = {"pass_fds": lease.pass_fds()} if lease is not None else {}
+    if lease is not None:
+        env = lease.child_env(env)
     try:
         proc = (observation or subprocess.Popen)(
             cmd,
@@ -2686,6 +2697,7 @@ def _popen_worker(task: Task, board: Optional[str], cmd, workspace: str, env, ob
             env=env,
             start_new_session=True,  # detached-spawn: ok — restart-safe kanban worker, must survive the dispatcher
             creationflags=subprocess.CREATE_NO_WINDOW if _kb._IS_WINDOWS else 0,
+            **fence_kw,
         )
     except FileNotFoundError:
         log_f.close()
@@ -2696,6 +2708,9 @@ def _popen_worker(task: Task, board: Optional[str], cmd, workspace: str, env, ob
     except BaseException:
         log_f.close()
         raise
+    finally:
+        if lease is not None:
+            lease.close()
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
     return proc

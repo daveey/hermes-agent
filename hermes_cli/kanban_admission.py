@@ -381,6 +381,25 @@ def _bind_echo(conn, task_id, gate):
 
 @contextlib.contextmanager
 def claim_transaction(conn, *, task_id=None, gate=None):
+    """Worker-drain admission (a latched, sealed or unknown node defers the claim, CPU policy on or
+    off), then the real claim transaction. The lease spans COMMIT so the census sees a claim in flight."""
+    from hermes_cli import worker_drain_fence as drain_fence
+    try:
+        lease = drain_fence.admit("kanban.claim")
+    except drain_fence.DrainRefused as exc:
+        logging.getLogger(__name__).warning("kanban claim deferred: %s", exc)
+        yield False
+        return
+    try:
+        with _claim_transaction(conn, task_id=task_id, gate=gate) as admitted:
+            yield admitted
+    finally:
+        if lease is not None:
+            lease.close()
+
+
+@contextlib.contextmanager
+def _claim_transaction(conn, *, task_id=None, gate=None):
     """Fence check, the hub CPU/cap gate and real SQL commit share admission.lock (never a savepoint).
 
     Board storage may be overridden independently of the installation. Use the
