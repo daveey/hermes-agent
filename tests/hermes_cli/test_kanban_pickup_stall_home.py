@@ -228,6 +228,50 @@ def test_closed_incident_is_replaced_when_membership_changes(replica, local):
     assert second != first
 
 
+def test_closed_incident_membership_ignores_checkpoint_bullets(replica, local):
+    card(replica, "one")
+    replica.execute(
+        "INSERT INTO task_runs VALUES (1, 'one', 'continued', ?, ?)",
+        ("status:\n- tests (12 passed)", NOW),
+    )
+    [first] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    task = kb.get_task(local, first)
+    assert task is not None
+    assert "\n- tests (12 passed)" in (task.body or "")
+    _close(local, first, NOW)
+    _fresh_at(replica, NOW + 60)
+    assert subject.sweep(local, replica, "hub", now_ms=(NOW + 60) * 1000) == [first]
+    assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+
+def test_open_incident_observed_even_when_closed_sibling_matches(replica, local):
+    card(replica, "one")
+    [open_id] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    body, key = local.execute("SELECT body, idempotency_key FROM tasks WHERE id=?", (open_id,)).fetchone()
+    local.execute(
+        "INSERT INTO tasks (id, title, body, status, created_by, created_at, completed_at, "
+        "workspace_kind, idempotency_key) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("closed-sib", "closed", body, "done", kps.DETECTOR, NOW, NOW + 1, "scratch", key + "z"),
+    )
+    local.commit()
+    _fresh_at(replica, NOW + 60)
+    assert subject.sweep(local, replica, "hub", now_ms=(NOW + 60) * 1000) == [open_id]
+    assert len(kb.list_comments(local, open_id)) == 1
+
+
+def test_archived_without_completed_at_still_covers(replica, local):
+    card(replica, "one")
+    [first] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    local.execute(
+        "UPDATE tasks SET status='archived', completed_at=NULL, created_at=? WHERE id=?",
+        (NOW - subject.HOME_REPLACE_AFTER_SECONDS - 10, first),
+    )
+    local.commit()
+    _fresh_at(replica, NOW)
+    assert subject.sweep(local, replica, "hub", now_ms=NOW * 1000) == [first]
+    assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+
 def test_legacy_backstop_and_current_park(replica):
     from hermes_cli.kanban_timed_park import implied_wake
     card(replica, wake={})

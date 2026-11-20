@@ -147,20 +147,31 @@ def _fresh(replica, now: float) -> bool:
 # Pick: a closed incident keeps covering the same home and same overdue membership for 12 h (the repair
 # completes after a no-op inspect, so the 1 h REPLACE_AFTER_SECONDS floor still minted ~24 cards/day for a
 # silent Mac; 12 h gives <= 2/day). A changed membership files a fresh incident at once.
+# Open incidents always win over a closed sibling. Membership is the listing line we write
+# (`- <id> (<title>), <status>, N minutes overdue`), not every `- token (` in checkpoint prose.
+# archive_task leaves completed_at NULL; do not start the 12 h clock at created_at.
 HOME_REPLACE_AFTER_SECONDS = 12 * 3600
-_LISTED = re.compile(r"^- (\S+) \(", re.MULTILINE)
+_LISTED = re.compile(
+    r"^- (\S+) \(.*\), (?:scheduled|todo), \d+ minutes overdue", re.MULTILINE)
+
+
+def _listed_ids(body: str) -> set[str]:
+    return set(_LISTED.findall(body or ""))
 
 
 def _recently_closed(conn, key: str, card_ids: list[str], now_ms: int) -> str | None:
     from hermes_cli import kanban_pickup_stall as kps
     row = conn.execute(
-        "SELECT id, body, COALESCE(completed_at, created_at) AS closed FROM tasks WHERE created_by = ? "
+        "SELECT id, body, completed_at FROM tasks WHERE created_by = ? "
         "AND idempotency_key >= ? AND idempotency_key < ? AND status IN ('done', 'archived') "
         "ORDER BY COALESCE(completed_at, created_at) DESC, id LIMIT 1", (kps.DETECTOR, key, key + "\U0010ffff")
     ).fetchone()
-    if row is None or now_ms / 1000 - row["closed"] >= HOME_REPLACE_AFTER_SECONDS:
+    if row is None:
         return None
-    return row["id"] if set(_LISTED.findall(row["body"] or "")) == set(card_ids) else None
+    closed = row["completed_at"]
+    if closed is not None and now_ms / 1000 - closed >= HOME_REPLACE_AFTER_SECONDS:
+        return None
+    return row["id"] if _listed_ids(row["body"] or "") == set(card_ids) else None
 
 
 def sweep(conn, replica, own: str, *, now_ms: int) -> list[str]:
@@ -185,12 +196,13 @@ def sweep(conn, replica, own: str, *, now_ms: int) -> list[str]:
                 "last parent completed; a scheduled clock uses its current wake/backstop.\n\n" + listed
                 + "\n\n" + HOWTO)
         key = f"{kps.KEY_PREFIX}{own}:home-overdue-{home}:"
-        recent = _recently_closed(conn, key, [c["id"] for c in cards], now_ms)
-        if recent is not None:
-            ids.append(recent)  # silence: the same overdue set was just repaired, do not mint another worker
-            continue
+        if not kps._covering_repair(conn, key, now_ms):
+            recent = _recently_closed(conn, key, [c["id"] for c in cards], now_ms)
+            if recent is not None:
+                ids.append(recent)  # silence: same overdue set was just repaired
+                continue
         ids.append(kps._create(
-            conn, key=f"{kps.KEY_PREFIX}{own}:home-overdue-{home}:",
+            conn, key=key,
             title=f"Home transitions overdue on {home} ({len(cards)} cards)", body=body,
             tenant=cards[0]["tenant"], own=own, now_ms=now_ms, howto=HOWTO))
     return ids
