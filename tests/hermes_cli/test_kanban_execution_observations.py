@@ -96,7 +96,11 @@ def test_invalid_or_future_source_clocks_remain_unknown(clock):
     assert observations.card(row, gateway="g", profile="p", now=920)["state"] == "unknown"
 
 
-def test_task_queries_remain_constant_for_many_rows(board, monkeypatch):
+@pytest.mark.parametrize("with_links", [False, True])
+def test_task_queries_remain_constant_for_many_rows(board, monkeypatch, with_links):
+    if with_links:
+        with sqlite3.connect(board) as conn:
+            conn.execute("CREATE TABLE task_links (parent_id TEXT, child_id TEXT)")
     original = activity.cached_ro
     statements = []
 

@@ -123,6 +123,24 @@ def _parent_ids(conn: sqlite3.Connection, replica: sqlite3.Connection | None, ch
         (child,), required=src is conn)]
 
 
+def _root_parents(conn: sqlite3.Connection, replica: sqlite3.Connection | None,
+                  ids: list[str]) -> dict[str, list[str]]:
+    """Batch the first graph layer; local empty edge sets must beat stale shadow links."""
+    ph = ",".join("?" for _ in ids)
+    local = {row[0] for row in _query(conn, f"SELECT id FROM tasks WHERE id IN ({ph})", tuple(ids), required=True)}
+    out: dict[str, list[str]] = {task_id: [] for task_id in ids}
+    local_children = local if replica is not None else set(ids)
+    for src, children in ((conn, local_children), (replica, set(ids) - local)):
+        if src is None or not children:
+            continue
+        args = tuple(sorted(children))
+        marks = ",".join("?" for _ in args)
+        for row in _query(src, f"SELECT child_id, parent_id FROM task_links WHERE child_id IN ({marks}) "
+                          "ORDER BY parent_id", args, required=src is conn):
+            out[row[0]].append(row[1])
+    return out
+
+
 def _authority(conn: sqlite3.Connection, replica: sqlite3.Connection | None,
                task_id: str, episode: str) -> dict[str, str]:
     auth_id = ""
@@ -159,14 +177,17 @@ def _blocked_payload(conn: sqlite3.Connection, replica: sqlite3.Connection | Non
 
 
 def _walk(conn: sqlite3.Connection, task_id: str,
-          replica: sqlite3.Connection | None) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+          replica: sqlite3.Connection | None, *,
+          root_parents: dict[str, list[str]] | None = None) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
     seen = {task_id}
     frontier = {task_id}
     nearest_open: dict[str, str] | None = None
     for _ in range(20):
         parents: dict[str, dict[str, Any]] = {}
         for child in sorted(frontier):
-            for parent in _parent_ids(conn, replica, child):
+            parent_ids = (root_parents[child] if root_parents is not None and child in root_parents
+                          else _parent_ids(conn, replica, child))
+            for parent in parent_ids:
                 if parent in seen or parent in parents:
                     continue
                 info = _task_info(conn, replica, parent)
@@ -187,15 +208,22 @@ def _walk(conn: sqlite3.Connection, task_id: str,
 
 def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]) -> None:
     """Optional presentation evidence; old schemas remain readable. Replica fills foreign parents."""
+    if not found:
+        return
     replica = _replica_for(conn)
     try:
+        try:
+            root_parents = _root_parents(conn, replica, list(found))
+        except sqlite3.Error:
+            logging.getLogger(__name__).debug("Could not read blocked upstream roots", exc_info=True)
+            root_parents = {task_id: [] for task_id in found}
         for task_id, card in found.items():
             card.pop("blocked_upstream", None)
             card.pop("upstream", None)
             if card.get("status") in {"done", "archived", "blocked", "triage"}:
                 continue
             try:
-                blocked, upstream = _walk(conn, task_id, replica)
+                blocked, upstream = _walk(conn, task_id, replica, root_parents=root_parents)
             except sqlite3.Error:
                 logging.getLogger(__name__).debug("Could not read blocked upstream for %s", task_id, exc_info=True)
                 continue
