@@ -70,6 +70,13 @@ def _held(conn, row) -> bool:
 
 
 def _admit(conn, pol, action, row, state) -> Optional[str]:
+    from hermes_cli import kanban_db as kb
+
+    with kb.write_txn(conn, allow_nested=True):
+        return _admit_locked(conn, pol, action, row, state)
+
+
+def _admit_locked(conn, pol, action, row, state) -> Optional[str]:
     if not _held(conn, row):
         return "card is not held at a lane gate"
     lane = pol.lanes[pol.lane_of(row["tenant"])]
@@ -78,6 +85,10 @@ def _admit(conn, pol, action, row, state) -> Optional[str]:
     used = state["used"].setdefault(lane.name, lanes.admitted_today(conn, lane.name, now=state["now"]))
     if lane.admit_per_day is not None and used >= lane.admit_per_day:
         return f"lane {lane.name} admit budget spent ({used}/{lane.admit_per_day} today)"
+    from hermes_cli.kanban_lane_daily_limits import reason
+    why = reason(conn, pol, lane.name, dict(row), now=state["now"])
+    if why:
+        return why
     lanes.admit(conn, row["id"], actor=state["actor"], reason=action["reason"])
     state["used"][lane.name] = used + 1
     return None

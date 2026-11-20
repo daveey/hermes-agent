@@ -110,6 +110,7 @@ class Decision:
     cap: Optional[int] = None
     would_gate: bool = False
     gate_reason: Optional[str] = None
+    admitted: bool = False
 
     def priority(self, value: int) -> int:
         from hermes_cli.kanban_priority import bounded
@@ -412,9 +413,9 @@ def initial_state(conn, parents, initial_status, triage, tenant, opts) -> tuple[
     if limit_reason:
         gated = True
     if pol.shadow:
-        return status, lane, Decision(lane, source, would_gate=gated)
+        return status, lane, Decision(lane, source, would_gate=gated, admitted=startable)
     cap = None if _by_user(opts) else pol.priority_cap
-    return ("triage" if gated else status), lane, Decision(lane, source, gated, cap, gated, limit_reason)
+    return ("triage" if gated else status), lane, Decision(lane, source, gated, cap, gated, limit_reason, startable and not gated)
 
 
 def record(conn, task_id: str, decision: Optional[Decision]) -> None:
@@ -424,7 +425,7 @@ def record(conn, task_id: str, decision: Optional[Decision]) -> None:
     from hermes_cli.kanban_db import _append_event
 
     _append_event(conn, task_id, ASSIGNED, {"lane": decision.lane, "source": decision.source,
-                                            "would_gate": decision.would_gate})
+                                            "would_gate": decision.would_gate, "admitted": decision.admitted})
     if decision.source == "unclassified":
         _append_event(conn, task_id, UNCLASSIFIED, {"lane": decision.lane})
     if decision.gated:
@@ -478,13 +479,10 @@ def admitted_today(conn, lane: str, *, now: Optional[float] = None) -> int:
 
 
 def cards_today(conn, lane: str, *, now: Optional[float] = None) -> int:
-    """Distinct cards that passed the lane gate (or never waited) since local midnight, plus budgeted admits."""
-    start = day_start(now)
-    passed = conn.execute(
-        "SELECT COUNT(DISTINCT task_id) FROM task_events WHERE kind = ? AND created_at >= ? "
-        "AND json_extract(payload, '$.lane') = ? AND COALESCE(json_extract(payload, '$.would_gate'), 0) = 0",
-        (ASSIGNED, start, lane)).fetchone()[0]
-    return int(passed) + admitted_today(conn, lane, now=now)
+    """Actual admissions since local midnight, including manual budget-exempt releases."""
+    from hermes_cli.kanban_lane_daily_limits import cards_today as count
+
+    return count(conn, lane, now=now)
 
 
 def spent_today(conn, pol: Policy, lane: str, *, now: Optional[float] = None) -> float:
@@ -504,19 +502,9 @@ def spent_today(conn, pol: Policy, lane: str, *, now: Optional[float] = None) ->
 
 def _daily_limit_reason(conn, pol: Policy, lane_name: str, opts: dict) -> Optional[str]:
     """``limit:usd_per_day`` / ``limit:cards_per_day`` when a new startable card must wait; else None."""
-    from hermes_cli.kanban_admission_score import _alarm_key
+    from hermes_cli.kanban_lane_daily_limits import reason
 
-    if opts.get("created_by") in RECOVERY_CREATORS or opts.get("admission_class") == "urgent":
-        return None
-    if _alarm_key(opts.get("idempotency_key")):
-        return None
-    lane = pol.lanes[pol.lane_of(lane_name)]
-    now = time.time()
-    if lane.usd_per_day is not None and spent_today(conn, pol, lane.name, now=now) >= lane.usd_per_day:
-        return "limit:usd_per_day"
-    if lane.cards_per_day is not None and cards_today(conn, lane.name, now=now) >= lane.cards_per_day:
-        return "limit:cards_per_day"
-    return None
+    return reason(conn, pol, lane_name, opts)
 
 
 def admit(conn, task_id: str, *, actor: str, reason: str, budget: bool = True) -> bool:

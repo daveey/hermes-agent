@@ -1875,13 +1875,9 @@ def _synthesize_ended_run(
 def _latest_event(
     conn: sqlite3.Connection, task_id: str, kind: str, run_id: Optional[int] = None,
 ) -> Optional[sqlite3.Row]:
-    """Newest ``task_events`` row of ``kind`` (optionally scoped to one run)."""
-    sql = "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?"
-    params: tuple[Any, ...] = (task_id, kind)
-    if run_id is not None:
-        sql += " AND run_id = ?"
-        params = (*params, int(run_id))
-    return conn.execute(sql + " ORDER BY id DESC LIMIT 1", params).fetchone()
+    from hermes_cli.kanban_db_events import latest_event
+
+    return latest_event(conn, task_id, kind, run_id)
 
 
 def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
@@ -1920,6 +1916,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
     releases = kanban_review_release.prepare(conn, failure_limit)
     with write_txn(conn):
         copies, fresh = foreign_ids(conn), {}  # fresh: the mirror-freshness verdict, read once per pass
+        from hermes_cli.kanban_lane_daily_limits import release_due
+        promoted += release_due(conn, foreign=copies)
         todo_rows = conn.execute(
             "SELECT id, status, consecutive_failures, max_retries "
             "FROM tasks WHERE status IN ('todo', 'blocked') OR ("

@@ -32,10 +32,17 @@ def _payload(event: dict) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
+def _review_active(events) -> bool:
+    for event in reversed(events or ()):
+        if event.get("kind") in ("review_requested", "changes_requested", "review_changes_requested"):
+            return event.get("kind") == "review_requested"
+    return False
+
+
 def _landing_evidence(card: dict) -> bool:
     if card.get("status") == "review":
         return True
-    if any(e.get("kind") == "review_requested" for e in card.get("events") or ()):
+    if _review_active(card.get("events")):
         return True
     pr = card.get("pr")
     if isinstance(pr, dict) and pr:
@@ -49,8 +56,7 @@ def _landing_step(card: dict) -> str:
     pr = pr or {}
     awaited = card.get("awaiting") if isinstance(card.get("awaiting"), dict) else {}
     awaited = awaited or {}
-    review_event = card.get("status") == "review" or any(
-        e.get("kind") == "review_requested" for e in card.get("events") or ())
+    review_event = card.get("status") == "review" or _review_active(card.get("events"))
     checks = pr.get("checks")
     if checks is None and awaited.get("kind") == "ci":
         checks = "pending"
@@ -63,7 +69,7 @@ def _landing_step(card: dict) -> str:
     approved = pr.get("approved")
     if merged is True and deployed is True and verified is False:
         return "test"
-    if merged is True and deployed is False:
+    if merged is True and deployed is not True:
         return "deploy"
     if approved is True and checks == "green" and merged is False:
         return "merge"
@@ -101,8 +107,6 @@ def _skip_reason(card: dict) -> Optional[str]:
             return "quota"
         if reason in ("waiting_for_worker_capacity", "skipped_ineligible") or "waiting_for_worker_capacity" in detail:
             return "slot"
-        if reason == "llm_paced":
-            return "quota"
     return None
 
 
@@ -112,13 +116,13 @@ def classify_reason(card: dict, step: str) -> str:
     gate_reason = card.get("gate_reason")
     if gate_reason in (LIMIT_CARDS, LIMIT_USD):
         return gate_reason
-    if card.get("held") or (card.get("status") == "triage" and card.get("block_kind") == lanes.GATE_KIND):
+    held = card.get("held", card.get("status") == "triage" and card.get("block_kind") == lanes.GATE_KIND)
+    if held:
         return "gate"
     if card.get("parents_open"):
         return "dep"
-    if card.get("status") == "scheduled" or step == "waiting" and not card.get("parents_open"):
-        if card.get("status") == "scheduled":
-            return "time"
+    if card.get("status") == "scheduled":
+        return "time"
     skip = _skip_reason(card)
     if skip:
         return skip
@@ -143,6 +147,8 @@ def classify_source(card: dict) -> dict[str, Optional[str]]:
     project = card.get("project_id") or None
     if session_id:
         return {"kind": "session", "id": session_id, "project": project}
+    if creator := card.get("creator_task_id"):
+        return {"kind": "automation", "id": creator, "project": project}
     if created in _USER:
         return {"kind": "user", "id": created, "project": project}
     if created:
@@ -175,23 +181,31 @@ def _pr_url(task, events) -> Optional[str]:
     return None
 
 
-def _pr_snapshot(task, events, awaiting) -> Optional[dict]:
+def _pr_snapshot(task, events, awaiting, reader=None) -> Optional[dict]:
     snap: dict[str, Any] = {}
-    if any((e["kind"] if not isinstance(e, dict) else e.get("kind")) == "review_requested" for e in events):
-        snap["review_requested"] = True
+    url = _pr_url(task, events)
+    if not url and isinstance(awaiting, dict):
+        ref = awaiting.get("ref")
+        if isinstance(ref, str) and ref.startswith("https://github.com/") and "/pull/" in ref:
+            url = ref
+    if url:
+        snap["url"] = url
     if isinstance(awaiting, dict) and awaiting.get("kind") == "ci":
         snap["checks"] = "pending"
     if isinstance(awaiting, dict) and awaiting.get("kind") == "deploy":
-        snap["merged"] = True
-        snap["deployed"] = False
-    url = _pr_url(task, events)
-    if url:
-        snap["url"] = url
+        snap.update(merged=True, deployed=False)
+    # Deployment has no provider-independent API. Accept explicit task-event observations only;
+    # never turn a merge receipt or elapsed time into proof of live installation.
+    for event in events:
+        meta = _payload(dict(event)).get("metadata")
+        observed = meta.get("flow_pr") if isinstance(meta, dict) else None
+        if isinstance(observed, dict) and url and observed.get("url") == url:
+            for key in ("merged", "deployed", "verified"):
+                if type(observed.get(key)) is bool:
+                    snap[key] = observed[key]
+    if reader is not None and url:
+        snap.update(reader.get(url))
     return snap or None
-
-
-def _held(task) -> bool:
-    return task["status"] == "triage" and (task["block_kind"] or "") == lanes.GATE_KIND
 
 
 def _gate_reason(events) -> Optional[str]:
@@ -216,22 +230,28 @@ def _parents_open(conn, task_id: str) -> bool:
     return bool(kb.unsatisfied_parents(conn, task_id))
 
 
-def _awaiting(task) -> Optional[dict]:
-    raw = None
-    try:
-        raw = task["awaiting"]
-    except (KeyError, IndexError):
-        raw = None
-    data = _json_obj(raw)
-    return data if isinstance(data, dict) else None
+def _awaiting(task, events=()) -> Optional[dict]:
+    if task["status"] != "scheduled":
+        return None
+    for event in reversed(events):
+        if event["kind"] == "scheduled":
+            data = _payload(dict(event)).get("awaiting")
+            return data if isinstance(data, dict) else None
+    return None
 
 
-def _card_from_row(conn, task, now: float) -> dict:
+def _card_from_row(conn, task, now: float, reader=None, pol=None) -> dict:
     events = _events(conn, task["id"])
-    awaited = _awaiting(task)
+    awaited = _awaiting(task, events)
+    held = conn.execute(f"SELECT 1 FROM tasks WHERE id=? AND {lanes.HELD}", (task["id"],)).fetchone() is not None
+    gate_reason = _gate_reason(events) if held else None
+    if gate_reason and pol is not None:
+        from hermes_cli.kanban_lane_daily_limits import reason
+        gate_reason = reason(conn, pol, task["tenant"], dict(task), now=now)
+    creator = next((_payload(dict(e)).get("creator_task_id") for e in events if e["kind"] == "created"), None)
     human = _json_obj(task["human_request"] if "human_request" in task.keys() else None)
     age = max(0.0, (now - float(task["created_at"] or now)) / 3600.0)
-    pr = _pr_snapshot(task, events, awaited)
+    pr = _pr_snapshot(task, events, awaited, reader)
     event_dicts = [{"kind": e["kind"], "payload": e["payload"]} for e in events]
     return {
         "id": task["id"], "title": task["title"], "status": task["status"],
@@ -240,7 +260,8 @@ def _card_from_row(conn, task, now: float) -> dict:
         "awaiting": awaited, "pr": pr, "created_by": task["created_by"],
         "session_id": task["session_id"] if "session_id" in task.keys() else None,
         "project_id": task["project_id"] if "project_id" in task.keys() else None,
-        "held": _held(task), "gate_reason": _gate_reason(events),
+        "held": held, "gate_reason": gate_reason,
+        "creator_task_id": creator,
         "age_h": round(age, 1), "tenant": task["tenant"],
     }
 
@@ -252,14 +273,16 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None)
     now = time.time() if now is None else now
     pol = lanes.safe_policy() if pol is None else pol
     if pol is None:
-        return {"window": window, "cards": [], "lanes": {}}
+        pol = lanes.parse({"lanes": {"other": {}}})
     window_s = WINDOWS[window]
     usage = lanes.usage(conn, pol, window_s=window_s, now=now)
     rows = conn.execute(
         f"SELECT * FROM tasks WHERE status IN {_OPEN} ORDER BY created_at, id").fetchall()
+    from hermes_cli.kanban_lanes_flow_pr import Reader
+    reader = Reader()
     cards = []
     for row in rows:
-        card = _card_from_row(conn, row, now)
+        card = _card_from_row(conn, row, now, reader, pol)
         step = classify_step(card)
         reason = classify_reason(card, step)
         source = classify_source(card)

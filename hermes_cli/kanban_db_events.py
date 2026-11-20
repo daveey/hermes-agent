@@ -6,6 +6,16 @@ import sqlite3
 import time
 
 
+def latest_event(conn: sqlite3.Connection, task_id: str, kind: str, run_id: int | None = None):
+    """Newest event payload of a kind, optionally scoped to one run."""
+    sql = "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?"
+    params = (task_id, kind)
+    if run_id is not None:
+        sql += " AND run_id = ?"
+        params = (*params, int(run_id))
+    return conn.execute(sql + " ORDER BY id DESC LIMIT 1", params).fetchone()
+
+
 def append_event(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict | None = None,
                  *, run_id: int | None = None) -> None:
     from hermes_cli.kanban_recovery_history import stamp
