@@ -62,6 +62,28 @@ def _review_runs(conn, task_id):
     return reviewing
 
 
+def _unproven_custody(rows, reviewing, target, target_commits):
+    """Never narrow across replacement PRs or unaccounted-for range commits.
+
+    The latest handoff attributes its head to its delivering run. Earlier commits
+    need earlier delivery evidence, not the latest worker's assertion that they
+    are in the diff. A changed PR identity invalidates that attribution context.
+    No review verdict alone clears missing delivery evidence.
+    """
+    if target is None or target_commits is None:
+        return True
+    covered = {target[1]}
+    deliveries = [(rid, _mapping(raw)) for rid, outcome, raw in rows
+                  if outcome == 'review_requested' and rid not in reviewing]
+    for _, metadata in deliveries[:-1]:
+        identity = _identity(metadata)
+        if identity is None or identity[0] != target[0]:
+            return True
+        covered.add(identity[1])
+        covered.update(_commit_range(metadata, identity) or ())
+    return not target_commits.issubset(covered)
+
+
 def artifact_author_runs(conn, task_id):
     """Author run ids for the latest artifact, or None for legacy artifact-less cards.
 
@@ -82,6 +104,9 @@ def artifact_author_runs(conn, task_id):
     target_commits = _commit_range(target_metadata, target)
     reviewing = _review_runs(conn, task_id)
     repeats = rehandoff_runs(conn, task_id)
+    full_history = {rid for rid, _, _ in rows if rid not in reviewing and rid not in repeats}
+    if _unproven_custody(rows, reviewing, target, target_commits):
+        return full_history
     pending, authors = set(), set()
     for rid, outcome, raw in rows:
         if rid in reviewing:
