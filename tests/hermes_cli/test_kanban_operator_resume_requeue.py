@@ -107,3 +107,35 @@ def test_receipt_survives_replica_run_ids_that_are_not_chronological(kanban_home
     assert _guard(tid) is None
     _run(clock, tid, "worker crashed")  # a genuinely newer run still spends it
     assert _guard(tid) == "active_pr"
+
+
+def _stamp_uids(tid, prefix="01a1f948-0000-7000-8000-"):
+    """Synced-schema stand-in: give every uid-less run of the card a uid, in chronological order."""
+    with kbc.connect_closing() as conn, kb.write_txn(conn):
+        rows = conn.execute("SELECT id FROM task_runs WHERE task_id=? AND uid IS NULL ORDER BY started_at, id",
+                            (tid,)).fetchall()
+        for r in rows:
+            conn.execute("UPDATE task_runs SET uid=? WHERE id=?", (f"{prefix}{r['id']:012d}", r["id"]))
+
+
+def test_receipt_matches_by_run_uid_on_synced_schema_with_out_of_order_ids(kanban_home, clock):
+    with kbc.connect_closing() as conn:
+        conn.execute("ALTER TABLE task_runs ADD COLUMN uid TEXT")
+        tid = _held(conn)
+    _stamp_uids(tid)
+    clock[0] += 60
+    with kbc.connect_closing() as conn:
+        payload = resume.resume(conn, tid, reason="operator: continue the PR", actor="op")
+    assert set(payload["after_run"]) == {"run_uid"}  # identity is the uid, not the legacy run id
+    checkpoint_uid = payload["after_run"]["run_uid"]
+    _run(clock, tid, CORE_UPDATE_REQUEUE_REASON)
+    _stamp_uids(tid)
+    _older_run_with_higher_id(tid)  # exercises the uid branch: a distinct older uid at the highest id
+    with kbc.connect_closing() as conn:
+        newest_id = conn.execute("SELECT uid FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+                                 (tid,)).fetchone()["uid"]
+    assert newest_id == "01a1f925-0000-7000-8000-000000000001" != checkpoint_uid
+    assert _guard(tid) is None
+    _run(clock, tid, "worker crashed")  # a genuinely newer run still spends it
+    _stamp_uids(tid, prefix="01a1f999-0000-7000-8000-")
+    assert _guard(tid) == "active_pr"
