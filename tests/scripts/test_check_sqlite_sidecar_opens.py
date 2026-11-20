@@ -173,3 +173,38 @@ def test_the_tree_is_clean_and_the_baseline_is_empty():
     mod = _load()
     assert mod._BASELINE == {}
     assert mod.scan() == {}
+
+
+# hermes-hub 2026-11-20: a same-file helper that opened its parameter hid the sidecar from the scan, and the
+# annotation holder's ``_head(db + "-shm", 0, 48)`` cancelled the Desktop backend's SQLite locks every 2 s.
+@pytest.mark.parametrize(
+    "src, line",
+    [
+        ('def _head(path, a, b):\n    with open(path, "rb") as f:\n        return f.read()\n'
+         '_head(db + "-shm", 0, 48)', 4),
+        ('def _read(p):\n    return Path(p).read_bytes()\n'
+         'def _wrap(x, y):\n    return _read(y)\n'
+         '_wrap(1, f"{db}-wal")', 5),
+        ('class W:\n    def head(self, path):\n        return os.open(path, os.O_RDONLY)\n'
+         '    def sig(self, db):\n        return self.head(db + "-shm")', 5),
+        ('def _head(path=None):\n    return open(path, "rb")\n_head(path="state.db")', 3),
+    ],
+)
+def test_a_same_file_helper_that_opens_its_parameter_is_followed(src, line):
+    assert _load().sidecar_open_lines(src) == [line]
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        # the helper opens only its other parameter
+        'def _copy(src, dst):\n    return open(dst, "wb")\n_copy(db + "-wal", out)',
+        # the opening line carries the opt-out marker
+        'def _head(path):\n    return open(path, "rb")  # sqlite-sidecar-open: ok — stdlib-only child\n'
+        '_head(db + "-shm")',
+        # same name, but not a self/cls method call: another object's method
+        'def head(path):\n    return open(path, "rb")\nother.head(db + "-shm")',
+    ],
+)
+def test_helpers_that_do_not_open_the_sidecar_are_not_flagged(src):
+    assert _load().sidecar_open_lines(src) == []

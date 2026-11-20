@@ -20,6 +20,8 @@ import hashlib
 import json
 import os
 
+from hermes_cli.sqlite_safe_read import pread_lock_safe
+
 
 def _stat(path: str) -> list:
     try:
@@ -30,12 +32,17 @@ def _stat(path: str) -> list:
 
 
 def _head(path: str, start: int, end: int) -> str | None:
-    try:
-        with open(path, "rb") as f:
-            f.seek(start)
-            return f.read(end - start).hex()
-    except FileNotFoundError:
+    """Bytes ``start:end`` of *path* as hex; None when it does not exist. Read through the lock-safe cached
+    descriptor: this runs in the Desktop backend, which holds live connections to these files, and a plain
+    ``open()``/``close()`` there cancels every SQLite POSIX lock the process holds on the file (its WAL writer
+    lock and read marks included). Every 2 s that let the backend write state.db's WAL alongside the gateway
+    and corrupted its indexes (hermes-hub 2026-11-18 and 2026-11-20)."""
+    data = pread_lock_safe(path, start, end - start)
+    if data is not None:
+        return data.hex()
+    if not os.path.exists(path):
         return None
+    raise OSError(f"cannot read {path}")  # callers treat any error but a missing file as "moved"
 
 
 def signature(scope: tuple[str, ...], dbs: list[str], files: list[str]) -> str:
