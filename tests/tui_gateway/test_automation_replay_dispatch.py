@@ -65,6 +65,22 @@ def test_admitted_receipt_recovers_without_assistant_or_second_dispatch(store):
     assert journal.owners() == []
 
 
+def test_admitted_quota_rewall_can_transfer_to_new_attempt(store):
+    db, journal, batch = store
+    pending, _ = stage(db, journal, batch)
+    assert pending.admit()
+    child = {**item("rewall", due=9000), "source_batch": batch["id"], "attempt": 2}
+    journal.publish("chat", [child])
+    assert journal.commit_message(batch, lambda *a: pytest.fail("retired parent wrote again")) is None
+    assert not journal.settle(batch)
+    assert journal.claim("chat", 100, "successor", lambda _: False) is None
+    successor = journal.claim("chat", 9000, "successor", lambda _: False)
+    assert successor["id"] != batch["id"]
+    assert journal.discard(successor)
+    assert journal.owners() == []
+    assert len(db.get_messages("chat")) == 1
+
+
 def test_stop_between_row_commit_and_worker_entry_refuses_dispatch(store):
     db, journal, batch = store
     pending, _ = stage(db, journal, batch)
@@ -120,7 +136,57 @@ def test_real_dispatch_storage_refusal_releases_claim_without_failure_charge(sto
     assert recovered is not None and recovered["failures"] == 0
 
 
-@pytest.mark.parametrize("stop", [False, True, "retire"])
+@pytest.mark.parametrize("failure", ["locked", "missing_store"])
+def test_submit_storage_refusal_returns_false_and_releases_claim(store, monkeypatch, failure):
+    from tui_gateway import server
+    db, journal, batch = store
+    session = {"session_key": "chat", "agent": SimpleNamespace(session_id="chat"),
+               "history_lock": threading.RLock(), "_notif_turn_claim": object()}
+    released = []
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _: failure != "missing_store")
+    monkeypatch.setattr(server, "_session_db", lambda _: nullcontext(db))
+    monkeypatch.setattr(server, "_notif_release_claim", lambda *args: released.append(args))
+    def locked(*args, **kw):
+        raise sqlite3.OperationalError("storage refused")
+    monkeypatch.setattr(journal, "commit_message", locked)
+    assert delivery(journal, batch).submit("rid", "sid", session, "report", "process_complete", {}, "test") is False
+    assert released == [(session, session["_notif_turn_claim"])]
+    assert db.get_messages("chat") == []
+
+
+def test_cleanup_preserves_newer_staged_row_and_marker(store):
+    db, journal, batch = store
+    pending, session = stage(db, journal, batch)
+    session["history_lock"] = threading.RLock()
+    newer = {"role": "user", "content": "newer turn"}
+    session["_submit_user_row"] = newer
+    pending.cleanup()
+    assert session["_submit_user_row"] is newer
+    assert session["_marker_until_tool"] is True
+    session["_submit_user_row"] = pending.staged
+    pending.cleanup()
+    assert "_submit_user_row" not in session and "_marker_until_tool" not in session
+
+
+def test_submit_refusal_cleans_exact_row_and_releases_original_claim(store, monkeypatch):
+    from tui_gateway import server
+    db, journal, batch = store
+    session = {"session_key": "chat", "agent": SimpleNamespace(session_id="chat"),
+               "history_lock": threading.RLock(), "_notif_turn_claim": object()}
+    claim = session["_notif_turn_claim"]
+    released = []
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _: True)
+    monkeypatch.setattr(server, "_session_db", lambda _: nullcontext(db))
+    monkeypatch.setattr(server, "_notif_submit", lambda *a, **kw: False)
+    monkeypatch.setattr(server, "_notif_release_claim", lambda s, c: released.append((s, c)))
+    pending = delivery(journal, batch)
+    assert not pending.submit("rid", "sid", session, "report", "process_complete", {}, "test")
+    assert released == [(session, claim)]
+    assert "_submit_user_row" not in session and "_marker_until_tool" not in session
+    assert len(db.get_messages("chat")) == 1
+
+
+@pytest.mark.parametrize("stop", [False, True, "retire", "gate_error", "gate_refused"])
 @pytest.mark.parametrize("local", [False, True])
 def test_real_wake_worker_entry_and_live_pending_claim(store, turn_env, monkeypatch, stop, local):
     from tui_gateway import server, automation_replay as ar
@@ -133,6 +199,21 @@ def test_real_wake_worker_entry_and_live_pending_claim(store, turn_env, monkeypa
     session.update(profile_home=str(journal.path.parent), session_key="chat", running=False)
     session["agent"].session_id = "chat"
     session["agent"]._session_db = db
+    from agent.session_persistence import SessionPersistenceMixin
+    from agent.turn_context import _stage_turn_user_message
+    class FlushingAgent(SessionPersistenceMixin, SimpleNamespace):
+        def run_conversation(self, text, *, persist_user_message=None, persist_user_display_kind=None,
+                             persist_user_display_metadata=None, **kwargs):
+            row, _ = _stage_turn_user_message(self, text, persist_user_message, None, None,
+                                              persist_user_display_kind, persist_user_display_metadata)
+            messages = [row, {"role": "assistant", "content": "ok"}]
+            assert self._flush_messages_to_session_db(messages)
+            assert self._flush_messages_to_session_db(messages)
+            completed.set()
+            return {"final_response": "ok", "messages": messages, "interrupted": False, "completed": True}
+    attrs = vars(session["agent"]).copy()
+    attrs.pop("run_conversation")
+    session["agent"] = FlushingAgent(**attrs, _session_db_created=True)
     monkeypatch.setattr(server, "_session_db", lambda _: nullcontext(db))
     monkeypatch.setattr(server, "_ensure_session_db_row", lambda _: True)
     monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *a: None)
@@ -167,11 +248,21 @@ def test_real_wake_worker_entry_and_live_pending_claim(store, turn_env, monkeypa
         else:
             assert ar.consume_handoffs([journal.path.parent], now=100) == 1
         assert entered.wait(10)
+        staged_identity = None if local else (session["_submit_user_row"]["_row_id"],
+                                               session["_submit_user_row"]["message_uid"])
         if local:
             assert ar.pending("chat", profile_home=journal.path.parent)
         # Wake returned, but the actual PreparedWork has not entered its body.
         assert ar.consume_handoffs([journal.path.parent], now=100) == 0
-        if stop == "retire":
+        if stop in ("gate_error", "gate_refused"):
+            from tui_gateway.automation_replay_dispatch import Delivery
+            from tui_gateway.automation_replay_local import LocalPermit
+            def refuse(_):
+                if stop == "gate_error":
+                    raise sqlite3.OperationalError("admission unavailable")
+                return False
+            monkeypatch.setattr(LocalPermit if local else Delivery, "admit", refuse)
+        elif stop == "retire":
             monkeypatch.setattr(ar, "stale_code_reason", lambda: "superseded")
             ar.handoff_all()
         elif stop:
@@ -180,13 +271,20 @@ def test_real_wake_worker_entry_and_live_pending_claim(store, turn_env, monkeypa
         session["_run_thread"].join(10)
         assert not session["_run_thread"].is_alive()
         assert completed.is_set() is (not stop)
-        # The fake agent does not flush ordinary local messages. Durable staging is real.
-        assert len(db.get_messages("chat")) == (0 if local else 1)
+        rows = db.get_messages("chat")
+        assert len(rows) == ((0 if local else 1) if stop else 2)
+        assert sum(row["role"] == "user" for row in rows) == (0 if local and stop else 1)
+        if not local:
+            assert (rows[0]["id"], rows[0]["message_uid"]) == staged_identity
+            assert rows[0]["message_uid"] == "automation-replay-" + batch["id"]
+        if not stop:
+            assert rows[0]["display_kind"] in ("process_complete", "kanban_notice")
         assert not session["running"]
         if not stop:
             # Worker admission is permanent even without relying on its assistant rows.
             ar.consume_handoffs([journal.path.parent], now=100)
-        assert journal.owners() == (["chat"] if stop == "retire" else [])
+        retained = stop == "retire" or (not local and stop in ("gate_error", "gate_refused"))
+        assert journal.owners() == (["chat"] if retained else [])
         if stop == "retire":
             # The predecessor is still alive; refusing its worker must release custody now.
             assert journal.claim("chat", 1e20, "successor", lambda _: True) is not None

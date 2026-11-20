@@ -762,6 +762,11 @@ def _consume(homes: list, wake: Callable[..., str] | None, now: float | None) ->
             continue
         try:
             journal = Journal(home)
+            try:
+                journal.compact()
+            except sqlite3.Error:
+                logger.warning("automation-replay: compaction of %s refused; delivery still proceeds", home,
+                               exc_info=True)
             owners = journal.owners()
         except Exception:  # health: allow BLE001 -- one unreadable store must not stop the others
             logger.warning("automation-replay: journal of %s unreadable", home, exc_info=True)

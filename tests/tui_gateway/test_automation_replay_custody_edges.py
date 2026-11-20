@@ -43,6 +43,42 @@ def test_second_retirement_preserves_rewall_batch_provenance(wired, monkeypatch)
     assert recovered.attempt == 1 and recovered.failed_at == 10 and recovered.persisted
 
 
+def test_retiring_build_failure_transfers_parent_to_durable_rewall_once(wired, monkeypatch):
+    import json
+    monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
+    monkeypatch.setattr(ar.time, "time", lambda: 1000)
+    wired.publish(KEY, [helpers.item(due=0)])
+    parents = []
+
+    def wake(owner, text, **kw):
+        parents.append(kw["display_metadata"][ar.REPLAY_METADATA_KEY]["batch_id"])
+        # Retirement occurs during builder failure, so schedule immediately hands
+        # the rewall to the journal rather than leaving any local evidence.
+        original = ar.rewall_due
+        def retire_after_plan(*args):
+            due = original(*args)
+            monkeypatch.setattr(ar, "stale_code_reason", lambda: "retired during build")
+            return due
+        monkeypatch.setattr(ar, "rewall_due", retire_after_plan)
+        ar.replay_failed_wake(owner, text, {
+            "profile_home": wired.path.parent,
+            "agent_failure": {"failure_resets_at": 9000},
+        }, kw["display_kind"], kw["display_metadata"], "build")
+        assert not ar.pending(KEY)
+        return "error"
+
+    assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000) == 1
+    monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
+    calls = []
+    assert ar.consume_handoffs([wired.path.parent], wake=lambda *a, **kw: calls.append(1) or "error",
+                               now=5000) == 0
+    assert calls == []
+    child = wired.claim(KEY, 10000, "successor", lambda _: False)
+    assert child["id"] != parents[0]
+    assert json.loads(child["payload"])[0]["source_batch"] == parents[0]
+    assert not wired.release({"id": parents[0], "token": "old"})
+
+
 def test_error_budget_is_not_reset_by_consumer_process_replacement(wired, monkeypatch):
     monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
     wired.publish(KEY, [helpers.item(due=0)])

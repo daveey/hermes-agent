@@ -7,6 +7,7 @@ Explicit Stop and successful-context watermarks survive backend replacement.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -22,6 +23,11 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS automation_replay_batches ("
     "id TEXT PRIMARY KEY, owner TEXT NOT NULL, token TEXT, holder TEXT, payload TEXT NOT NULL, "
     "status TEXT NOT NULL, message_row_id INTEGER, message_uid TEXT, target TEXT, committed_at REAL)",
+    "CREATE INDEX IF NOT EXISTS automation_replay_terminal_items ON automation_replay_items(status)",
+    "CREATE INDEX IF NOT EXISTS automation_replay_batch_items ON automation_replay_items(batch)",
+    "CREATE INDEX IF NOT EXISTS automation_replay_terminal_batches ON automation_replay_batches(status)",
+    "CREATE TABLE IF NOT EXISTS automation_replay_tombstones ("
+    "id TEXT PRIMARY KEY, owner TEXT NOT NULL, payload_sha256 BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS automation_replay_fences ("
     "owner TEXT PRIMARY KEY, stopped_at REAL NOT NULL DEFAULT 0, carried_through REAL NOT NULL DEFAULT 0)",
 )
@@ -60,6 +66,12 @@ class Journal:
                 covered = fence and (created <= fence["stopped_at"] or
                                      (item["persisted"] and created <= fence["carried_through"]))
                 payload = json.dumps(item, separators=(",", ":"))
+                terminal = conn.execute("SELECT owner,payload_sha256 FROM automation_replay_tombstones WHERE id=?",
+                                        (item["id"],)).fetchone()
+                if terminal:
+                    if terminal["owner"] != owner or terminal["payload_sha256"] != hashlib.sha256(payload.encode()).digest():
+                        raise ValueError("delivery identity already published with different owner or payload")
+                    continue
                 prior = conn.execute("SELECT owner,payload FROM automation_replay_items WHERE id=?",
                                      (item["id"],)).fetchone()
                 if prior and (prior["owner"] != owner or prior["payload"] != payload):
@@ -69,6 +81,17 @@ class Journal:
                     "(id,owner,payload,due,created_at,persisted,status) VALUES(?,?,?,?,?,?,?)",
                     (item["id"], owner, payload, item["due"], created,
                      bool(item["persisted"]), "cancelled" if covered else "queued"))
+                # A build can rewall and retire before _run_batch inspects local
+                # entries. Transfer custody atomically with child publication: the
+                # predecessor token must not remain dispatchable beside its child.
+                parent = item.get("source_batch")
+                if parent:
+                    changed = conn.execute(
+                        "UPDATE automation_replay_batches SET status='cancelled',token=NULL,holder=NULL "
+                        "WHERE id=? AND owner=? AND status='pending'", (parent, owner)).rowcount
+                    if changed:
+                        conn.execute("UPDATE automation_replay_items SET status='cancelled' WHERE batch=?",
+                                     (parent,))
 
     def claim(self, owner: str, now: float, holder: str, holder_alive) -> dict | None:
         """Freeze one coalesced due batch, or recover the exact batch of a dead custodian.
@@ -217,6 +240,31 @@ class Journal:
                              "WHERE id=? AND status='pending'", (row["batch"],))
                 conn.execute("UPDATE automation_replay_items SET batch=NULL,status='queued' "
                              "WHERE batch=? AND status='batched'", (row["batch"],))
+
+    def compact(self, limit: int = 256) -> None:
+        """Remove terminal payload in bounded transactions, never pending custody.
+
+        Exact UUID tombstones cannot expire: a live predecessor may publish an
+        arbitrarily old item. They retain only owner and digest, not delivery text.
+        This bounds each maintenance pass, not total outstanding/dedupe metadata.
+        """
+        with closing(sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=5.0)) as probe:
+            terminal = probe.execute(
+                "SELECT 1 FROM automation_replay_items WHERE status IN ('cancelled','dispatched') "
+                "UNION ALL SELECT 1 FROM automation_replay_batches WHERE status IN ('cancelled','dispatched') LIMIT 1"
+            ).fetchone()
+        if terminal is None:
+            return
+        with self.transaction() as conn:
+            rows = conn.execute("SELECT id,owner,payload FROM automation_replay_items "
+                                "WHERE status IN ('cancelled','dispatched') LIMIT ?", (limit,)).fetchall()
+            conn.executemany("INSERT OR IGNORE INTO automation_replay_tombstones VALUES(?,?,?)",
+                             [(r["id"], r["owner"], hashlib.sha256(r["payload"].encode()).digest()) for r in rows])
+            conn.executemany("DELETE FROM automation_replay_items WHERE id=?", [(r["id"],) for r in rows])
+            conn.execute("DELETE FROM automation_replay_batches WHERE id IN ("
+                         "SELECT id FROM automation_replay_batches WHERE status IN ('cancelled','dispatched') "
+                         "AND NOT EXISTS (SELECT 1 FROM automation_replay_items WHERE batch=automation_replay_batches.id) "
+                         "LIMIT ?)", (limit,))
 
     def owners(self) -> list[str]:
         """Read-only (no write lock, no DDL): owners with undelivered custody."""
