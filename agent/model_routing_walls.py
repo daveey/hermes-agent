@@ -109,10 +109,18 @@ def reroute_notice(wall, to_model=None):
     return f"{_label(wall.model)} quota is out until {reset_pt(wall.resets_at)}; continuing on {target}."
 
 
+def walled_pin_reply(provider, model, resets_at):
+    """The sentence for a chat pinned to *provider*/*model* whose subscription quota is out until *resets_at*.
+
+    One wording for the pre-build refusal (``held_reply``) and a build that hit the wall itself
+    (``tui_gateway.user_messages.agent_init_failed_message``)."""
+    return (f"⚠️ {provider}/{model} subscription quota is out until {reset_pt(resets_at)}. "
+            f"This chat is pinned to it; use /model to switch, or resend after the reset.")
+
+
 def held_reply(wall):
     """The reply for a walled pin that holds (explicit, or a wall under the reroute threshold)."""
-    return (f"⚠️ {wall.provider}/{wall.model} subscription quota is out until {reset_pt(wall.resets_at)}. "
-            f"This chat is pinned to it; use /model to switch, or resend after the reset.")
+    return walled_pin_reply(wall.provider, wall.model, wall.resets_at)
 
 
 def log_reroute(wall, metadata):

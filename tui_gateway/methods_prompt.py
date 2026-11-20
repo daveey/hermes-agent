@@ -671,14 +671,38 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
     return error
 
 
-def _close_agent_init_failed_turn(session: dict, message: str, error_surface: dict) -> None:
+def _agent_init_failure_surface(session: dict, message: str) -> tuple[str, dict, str | None]:
+    """[daveey] ``(message, error_surface, boundary notice)`` for a turn whose agent build failed.
+
+    A build refused by the pinned route's subscription quota wall (``agent_failure.failure_route``, recorded by
+    the build-failure handler) closes like the pre-build refusal of that pin (``gateway/run_turn_runner.py``
+    ``_resolution_failure_result``): a non-retryable ``route_refused`` card whose body names the reset in PT and
+    /model, and the boundary copy without "Send it again". Everything else stays ``agent_init_failed``."""
+    failure = session.get("agent_failure")
+    route = failure.get("failure_route") if isinstance(failure, dict) else None
+    if isinstance(route, dict):
+        try:
+            from agent.model_routing_walls import walled_pin_reply
+            reply = walled_pin_reply(route["provider"], route["model"], route["resets_at"])
+        except Exception:  # health: allow BLE001 -- a malformed record keeps the generic card
+            logger.warning("prompt.submit: unusable failure_route %r", route, exc_info=True)
+        else:
+            from agent.turn_failure_copy import ROUTE_REFUSED_TURN_NOTICE
+            return reply, {"layer": "gateway", "code": "route_refused", "retryable": False,
+                           "message": reply}, ROUTE_REFUSED_TURN_NOTICE
+    return message, {"layer": "runtime", "code": "agent_init_failed", "retryable": True}, None
+
+
+def _close_agent_init_failed_turn(
+        session: dict, message: str, error_surface: dict, notice: str | None = None) -> None:
     """[daveey] Close the accepted user row of a turn whose agent build failed with the failed-turn boundary.
 
     No agent ran, so neither ``agent/conversation_loop.py::_close_durable_failed_turn`` nor the gateway's
     ``_hmwa_close_failed_turn`` exists on this path: without this row the chat's durable tail stays the
     user row and its outcome reads ``unresolved{interrupted}`` forever instead of ``turn_failed``.
     Idempotent on the DURABLE tail (``OPEN_TURN_TAIL_ROLES``), like the other two closers: a redelivery
-    or a tail another writer already closed is a no-op. No tool ran, so the copy is ``FAILED_TURN_NOTICE``.
+    or a tail another writer already closed is a no-op. No tool ran, so the copy is ``FAILED_TURN_NOTICE``
+    unless *notice* replaces it (a route refusal's ``ROUTE_REFUSED_TURN_NOTICE``).
     Best-effort: the client frame still goes out when the store cannot be written."""
     sid = str(session.get("session_key") or "")
     if not sid:
@@ -692,7 +716,7 @@ def _close_agent_init_failed_turn(session: dict, message: str, error_surface: di
             if db is None or db.latest_conversation_role(sid) not in OPEN_TURN_TAIL_ROLES:
                 return
             error = redact_sensitive_text(str(message or "").strip()[:2000], force=True)
-            row = {"role": "assistant", "content": FAILED_TURN_NOTICE, "display_kind": FAILED_TURN_DISPLAY_KIND,
+            row = {"role": "assistant", "content": notice or FAILED_TURN_NOTICE, "display_kind": FAILED_TURN_DISPLAY_KIND,
                    "display_metadata": {k: v for k, v in (("error", error), ("error_surface", error_surface)) if v}}
             try:
                 db.append_message(sid, **row)
@@ -726,8 +750,8 @@ def _run_after_agent_ready(
         # without this the accepted message reads in agent.log as one that silently never ran. [daveey]
         logger.warning("prompt.submit: turn for session %s (%s) failed before the agent was ready: %s",
                        sid, session.get("session_key") or "", str(message)[:300])
-        surface = {"layer": "runtime", "code": "agent_init_failed", "retryable": True}
-        _close_agent_init_failed_turn(session, message, surface)
+        message, surface, notice = _agent_init_failure_surface(session, message)
+        _close_agent_init_failed_turn(session, message, surface, notice)
         # Terminal frame + retained snapshot (not a bare "error" event): the snapshot is
         # the only way resume shows this to a disconnected client.
         _emit_terminal_turn_error(sid, session, message, error_surface=surface)

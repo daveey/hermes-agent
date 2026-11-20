@@ -241,6 +241,24 @@ def quota_refusal_route(exc):
     return provider.strip().lower(), model.strip()
 
 
+def quota_refusal_wall(exc):
+    """``(provider, model, resets_at)`` when *exc*'s cause chain ends in a quota refusal that names its
+    route (``quota_refusal_route``) and carries a finite absolute ``resets_at``, else None.
+
+    For a fallback chain the reset is the terminal (last-tried) route's own. A ``retry_after`` hint is
+    not an absolute reset and gives None. Typed only, like ``quota_refusal_route``."""
+    from hermes_cli.fallback_errors import ProviderFallbackError
+
+    route = quota_refusal_route(exc)
+    if route is None:
+        return None
+    error = _terminal_refusal(exc)
+    if isinstance(error, ProviderFallbackError):
+        error = _terminal_refusal(error.failures[-1][2])
+    reset = _finite_positive(getattr(error, "resets_at", None))
+    return None if reset is None else (*route, reset)
+
+
 def is_quota_failure(exc):
     """True when *exc*'s cause chain ends in a quota refusal (every fallback route one, too),
     whether or not it carries a usable deadline."""

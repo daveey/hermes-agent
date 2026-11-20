@@ -45,6 +45,9 @@ _TURN_ERROR_CODE_COPY: dict[str, tuple[str, str]] = {
                           "Use it there, or start a new chat with /new."),
     "SESSION_COORDINATION_UNAVAILABLE": ("Hermes could not check whether this chat is open somewhere else",
                                          "Send /retry; type /logs for the trace."),
+    # [daveey] The chat's pinned route refused before any model ran (a subscription quota wall): /retry
+    # repeats the refusal until the reset, so the way out is another model.
+    "route_refused": ("This chat's model is unavailable", "Use /model to switch, or resend after the reset."),
 }
 
 _TURN_ERROR_LAYER_COPY: dict[str, tuple[str, str]] = {
@@ -130,6 +133,12 @@ _AUTH_LOCK_TIMEOUT_PREFIXES = (
 
 
 def agent_init_failed_message(exc: Any) -> str:
+    # [daveey] A build refused by the pinned route's subscription quota wall: the reset in PT and /model, the
+    # same sentence as the pre-build refusal (``held_reply``), not a raw epoch and `hermes setup` advice.
+    from agent.model_routing_unavailable import quota_refusal_wall
+    if (wall := quota_refusal_wall(exc)) is not None:
+        from agent.model_routing_walls import walled_pin_reply
+        return walled_pin_reply(*wall)
     detail = str(exc).rstrip(". ")  # resolver messages end in a sentence; no ".." before the hint
     if any(prefix in detail for prefix in _AUTH_LOCK_TIMEOUT_PREFIXES):
         return (f"Hermes could not start the assistant for this session. Details: {detail}. "

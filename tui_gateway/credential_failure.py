@@ -32,13 +32,18 @@ def credential_failure_fields(provider: str, *, pool=None) -> dict:
     return {**fields, "failure_kind": "exhausted", "reset_at": min(resets) if resets else None}
 
 
+# [daveey] ``agent_failure`` keys no wire contract declares: ``failure_resets_at`` (the automation replay's clock)
+# and ``failure_route`` (the quota-walled pin the waiting turn's route-refused card names).
+_SERVER_ONLY_FAILURE_FIELDS = frozenset({"failure_resets_at", "failure_route"})
+
+
 def client_failure_fields(failure) -> dict:
     """[daveey] ``agent_failure`` as a client may see it. ``failure_resets_at`` is the automation replay's own
     clock (``automation_replay.replay_failed_wake``): the wire contracts declare ``reset_at`` instead, so it
-    fills ``reset_at`` when that is unset and never travels under its own name."""
+    fills ``reset_at`` when that is unset and never travels under its own name. ``failure_route`` never travels."""
     if not isinstance(failure, dict):
         return failure
-    fields = {k: v for k, v in failure.items() if k != "failure_resets_at"}
+    fields = {k: v for k, v in failure.items() if k not in _SERVER_ONLY_FAILURE_FIELDS}
     if fields.get("reset_at") is None and failure.get("failure_resets_at") is not None:
         fields["reset_at"] = failure["failure_resets_at"]
     return fields
@@ -91,8 +96,10 @@ def session_failure_payload(event: str, payload: dict, session: dict) -> dict:
         return payload
     surface = payload.get("error_surface") or {}
     code = surface.get("code")
-    if code == "agent_init_failed" and session.get("agent_failure"):
-        return {**payload, **client_failure_fields(session["agent_failure"])}
+    failure = session.get("agent_failure")
+    if failure and (code == "agent_init_failed"
+                    or (code == "route_refused" and isinstance(failure, dict) and failure.get("failure_route"))):
+        return {**payload, **client_failure_fields(failure)}
     if surface.get("layer") != "auth" and code not in {"rate_limit", "billing", "quota_exceeded"}:
         return payload
     from tui_gateway.server import _session_profile_runtime_scope

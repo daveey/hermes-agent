@@ -306,6 +306,12 @@ def _start_agent_build(sid: str, session: dict) -> None:
             if (isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool)
                     and "failure_resets_at" not in current["agent_failure"]):
                 current["agent_failure"]["failure_resets_at"] = float(resets_at)
+            # [daveey] The pinned route whose quota wall refused the build, with that wall's reset: the turn waiting
+            # on it closes as a route refusal (``methods_prompt._run_after_agent_ready``). Server-side only, like
+            # failure_resets_at (``credential_failure.client_failure_fields`` drops it).
+            from agent.model_routing_unavailable import quota_refusal_wall
+            if (wall := quota_refusal_wall(e)) is not None:
+                current["agent_failure"]["failure_route"] = dict(zip(("provider", "model", "resets_at"), wall))
             current["agent_error"] = str(e)
             # Logged: a failed build otherwise leaves no trace, so a prompt waiting on it reads in agent.log as
             # a message that "never ran" (the client only got an event, which a disconnect can lose). [daveey]

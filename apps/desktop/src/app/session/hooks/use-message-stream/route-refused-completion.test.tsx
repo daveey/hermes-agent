@@ -64,6 +64,26 @@ describe('a pinned route refused before the turn (route_refused)', () => {
     expect(errorCardActions(bubble?.errorSurface)).toEqual({ primary: 'choose_model' })
   })
 
+  it('shows the same card when the agent build itself hit the wall (tui_gateway agent_init path)', async () => {
+    // tui_gateway/methods_prompt.py `_agent_init_failure_surface`: no failure_reason, the turn text is
+    // turn_error_text(), and the descriptor carries the held sentence as `message`.
+    const bubble = await failTurn({
+      failure_reason: undefined,
+      error: HELD,
+      reset_at: 1794981540,
+      text:
+        "This chat's model is unavailable. Your message was not answered.\n" +
+        `Details: ${HELD}\nUse /model to switch, or resend after the reset.`,
+      error_surface: { layer: 'gateway', code: 'route_refused', retryable: false, message: HELD }
+    })
+
+    const card = errorCardText(thread, bubble?.errorSurface)
+    expect(card.title).toBe(thread.errorCodes.route_refused.title)
+    expect(card.body).toBe(HELD)
+    expect(card.body).not.toContain(thread.errorCodes.agent_init_failed.title)
+    expect(errorCardActions(bubble?.errorSurface)).toEqual({ primary: 'choose_model' })
+  })
+
   it('control: a genuine runtime failure keeps the generic gateway card', async () => {
     const bubble = await failTurn({
       text: 'some reply text',
