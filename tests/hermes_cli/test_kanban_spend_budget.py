@@ -55,15 +55,17 @@ class Spawns:
 _CLOCK = {"t": 0}
 
 
-def _run(conn, tid: str, outcome: str = "continued", *, seconds: int = 600, usage: dict | None = None) -> int:
+def _run(conn, tid: str, outcome: str = "continued", *, seconds: int = 600, usage: dict | None = None,
+         metadata: dict | None = None) -> int:
     """One closed past run of ``tid`` (``seconds`` long), with an optional ``worker_result`` usage receipt.
     Runs are laid out back to back, ending before now, so every one is inside the read cutoff."""
     _CLOCK["t"] += seconds + 5
     end = int(time.time()) - 400_000 + _CLOCK["t"]
     with kb.write_txn(conn):
         cur = conn.execute(
-            "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome) "
-            "VALUES (?, 'default', ?, ?, ?, ?)", (tid, outcome, end - seconds, end, outcome))
+            "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome, metadata) "
+            "VALUES (?, 'default', ?, ?, ?, ?, ?)",
+            (tid, outcome, end - seconds, end, outcome, None if metadata is None else json.dumps(metadata)))
         run_id = int(cur.lastrowid)
         if usage is not None:
             kb._append_event(conn, tid, "worker_result", {"pid": 1, "claim_lock": "x", "exit_code": 0,
@@ -477,3 +479,66 @@ def test_cli_sets_and_shows_the_card_override(kanban_home):
         assert len(_events(conn, tid, ksb.OVERRIDE_EVENT)) == 3
     assert "unknown" in kc.run_slash("spend-budget t_missing --exempt --reason x")
     assert "--exempt" in kc.run_slash(f"spend-budget {tid} --exempt --runs 3 --reason x")
+
+
+# --- owner refusals ran no turn: they are not spending runs (t_01a1f874b1c702d7's 15-run hold) -----------------
+
+def _refusals(conn, tid: str) -> None:
+    """The 7 no-turn runs of t_01a1f874b1c702d7: six ``owner_unavailable`` and one ``crashed`` rc 69."""
+    for _ in range(3):
+        _run(conn, tid, "owner_unavailable")
+    _run(conn, tid, "crashed", metadata={"exit_kind": "nonzero_exit", "exit_code": 69})
+    for _ in range(3):
+        _run(conn, tid, "owner_unavailable")
+
+
+def test_owner_refusals_do_not_hold_the_t_01a1f874b1c702d7_window(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="mostly refused", assignee="default")
+        _runs(conn, tid, 8)
+        _refusals(conn, tid)  # 15 closed runs, 8 of which ran a turn
+        spent = ksb.spend(conn, tid)
+        assert (spent.runs, spent.excluded) == (8, 7)
+        assert ksb.hold(conn, tid, lim=LIMITS) is None
+        spawns = Spawns()
+        assert kbd.dispatch_once(conn, spawn_fn=spawns).no_progress_held == [] and spawns.ids == [tid]
+
+
+def test_fifteen_real_runs_still_hold_next_to_refusals(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="really spent", assignee="default")
+        _runs(conn, tid, ksb.DEFAULT_RUNS)
+        _refusals(conn, tid)
+        assert ksb.spend(conn, tid).runs == ksb.DEFAULT_RUNS
+        assert ksb.hold(conn, tid, lim=LIMITS) == "triage"
+
+
+def test_a_crashed_run_that_ran_a_turn_still_counts(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="crashed mid-turn", assignee="default")
+        _run(conn, tid, "crashed", metadata={"exit_code": 69}, usage={"input_tokens": 5})  # reported usage: a turn ran
+        _run(conn, tid, "crashed", metadata={"exit_code": 1})  # an ordinary crash
+        _run(conn, tid, "crashed")  # no receipt at all
+        spent = ksb.spend(conn, tid)
+        assert (spent.runs, spent.excluded) == (3, 0)
+
+
+def test_cache_read_limit_ignores_refusals_and_is_unchanged(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="deep reader", assignee="default")
+        _refusals(conn, tid)
+        _run(conn, tid, usage={"cache_read_tokens": 30_000_000})
+        assert ksb.hold(conn, tid, lim=LIMITS) == "triage"
+        (event,) = _events(conn, tid, ksb.EVENT)
+        assert event.payload["limit"] == "cache_read_tokens" and event.payload["runs"] == 1
+
+
+def test_readback_reports_the_excluded_count(kanban_home):
+    from hermes_cli import kanban as kc
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="mostly refused", assignee="default")
+        _runs(conn, tid, 8)
+        _refusals(conn, tid)
+    shown = json.loads(kc.run_slash(f"spend-budget {tid} --json"))
+    assert shown["spent"]["runs"] == 8 and shown["spent"]["excluded"] == 7
+    assert "spent: 8 runs (7 owner-refusal runs excluded)" in kc.run_slash(f"spend-budget {tid}")

@@ -45,7 +45,7 @@ def command(args: argparse.Namespace) -> int:
         override = ksb.card_override(conn, tid)
         spent = ksb.spend(conn, tid)
     out = {"task_id": tid, "limits": lim._asdict(), "override": override,
-           "spent": {"runs": spent.runs, "since": spent.since, "tokens": spent.tokens}}
+           "spent": {"runs": spent.runs, "since": spent.since, "tokens": spent.tokens, "excluded": spent.excluded}}
     if getattr(args, "json", False):
         print(json.dumps(out, sort_keys=True))
         return 0
@@ -56,5 +56,6 @@ def command(args: argparse.Namespace) -> int:
         print(f"{tid}: spend budget {shown}")
     if override is not None and ksb.override_set(override):
         print(f"  override set by {override.get('by')}: {override.get('reason')}")
-    print(f"  spent: {spent.runs} runs, {spent.tokens['cache_read_tokens']} cache-read tokens in this window")
+    skipped = f" ({spent.excluded} owner-refusal runs excluded)" if spent.excluded else ""
+    print(f"  spent: {spent.runs} runs{skipped}, {spent.tokens['cache_read_tokens']} cache-read tokens in this window")
     return 0

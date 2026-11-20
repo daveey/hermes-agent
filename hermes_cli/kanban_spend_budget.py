@@ -15,7 +15,9 @@ the tokens those runs reported. A spending run is a closed run that lasted at le
 quota walls, released claims and spawn failures end in seconds and spend nothing. Tokens come from the
 run's own ``worker_result`` receipt (``usage``, written by the managed worker from its agent's session
 counters on the host that ran it, so a card that ran on several workers is still summed on its home board);
-a run with no usage receipt counts as a run only.
+a run with no usage receipt counts as a run only. Runs in which the profile owner refused the claim and no
+turn ran (``owner_unavailable`` / ``owner_down``, or ``crashed`` with the owner-unreachable exit 69 and no usage
+receipt) are not spending runs; ``Spend.excluded`` counts them.
 
 At ``kanban.spend_budget_runs`` spending runs (default 15) or ``kanban.spend_budget_cache_read_tokens``
 cache-read tokens (default 30M) -- 0 disables either -- the dispatcher does not spawn the card. Deciding
@@ -46,6 +48,11 @@ OVERRIDE_EVENT = "spend_budget_set"  # a card's own limits (``set_override``); t
 AUTHOR = "kanban-spend-budget"
 # A run that handed work on closes the budget window.
 RESET_OUTCOMES = ("completed", "review_requested", "changes_requested")
+# Runs booked while the profile owner refused the claim ran no turn and spent nothing. ``owner_unavailable`` /
+# ``owner_down`` are booked as such; the fifth consecutive refusal is booked ``crashed`` with the worker's
+# owner-unreachable exit code (``kanban_owner_unavailable``: 69) and no usage receipt.
+REFUSAL_OUTCOMES = ("owner_unavailable", "owner_down")
+REFUSAL_EXIT_CODE = 69
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 _AGENT_COUNTERS = {
     "input_tokens": "session_input_tokens", "output_tokens": "session_output_tokens",
@@ -64,6 +71,7 @@ class Spend(NamedTuple):
     tokens: dict  # summed USAGE_KEYS over the runs that reported usage
     reported: int  # how many of ``runs`` carried a usage receipt
     cost_usd: float
+    excluded: int = 0  # closed runs left out because the owner refused them and no turn ran
 
 
 def _int(raw: Any, default: int) -> int:
@@ -216,16 +224,32 @@ def _run_usage(conn: sqlite3.Connection, task_id: str, run_ids: list[int]) -> di
     return out
 
 
+def _refused(outcome: Any, raw_metadata: Any, has_usage: bool) -> bool:
+    """True for a run in which the owner refused the claim and no turn ran."""
+    if outcome in REFUSAL_OUTCOMES:
+        return True
+    if outcome != "crashed" or has_usage:
+        return False
+    try:
+        meta = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+    except ValueError:
+        return False
+    code = meta.get("exit_code") if isinstance(meta, dict) else None
+    return code == REFUSAL_EXIT_CODE and not isinstance(code, bool)
+
+
 def spend(conn: sqlite3.Connection, task_id: str, *, as_of: Optional[int] = None) -> Spend:
     """What the card spent since it last handed work on (or was last sent to triage by this budget)."""
     cut = int(time.time()) + 1 if as_of is None else int(as_of)
     since = _window_start(conn, task_id, cut)
-    run_ids = [int(r[0]) for r in conn.execute(
-        "SELECT id FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL AND ended_at < ? AND started_at >= ? "
-        "AND ended_at - started_at >= ?", (task_id, cut, since, MIN_RUN_SECONDS))]
+    rows = conn.execute(
+        "SELECT id, outcome, metadata FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL AND ended_at < ? "
+        "AND started_at >= ? AND ended_at - started_at >= ?", (task_id, cut, since, MIN_RUN_SECONDS)).fetchall()
+    usage = _run_usage(conn, task_id, [int(r[0]) for r in rows])
+    run_ids = [int(r[0]) for r in rows if not _refused(r[1], r[2], int(r[0]) in usage)]
+    excluded = len(rows) - len(run_ids)
     tokens = {key: 0 for key in USAGE_KEYS}
     cost = 0.0
-    usage = _run_usage(conn, task_id, run_ids)
     for item in usage.values():
         for key in USAGE_KEYS:
             value = item.get(key)
@@ -234,7 +258,7 @@ def spend(conn: sqlite3.Connection, task_id: str, *, as_of: Optional[int] = None
         value = item.get("cost_usd")
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
             cost += float(value)
-    return Spend(len(run_ids), since, tokens, len(usage), round(cost, 2))
+    return Spend(len(run_ids), since, tokens, len(usage), round(cost, 2), excluded)
 
 
 def over(spent: Spend, lim: Limits) -> Optional[str]:
