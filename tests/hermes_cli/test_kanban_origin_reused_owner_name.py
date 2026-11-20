@@ -105,6 +105,67 @@ def test_an_offline_or_unreadable_owner_scope_stays_unknown(world, board, fault)
     assert row['status'] == 'unknown' and row['unfinished'] and row['stale']
 
 
+@pytest.mark.parametrize('fault', ['stale-heartbeat', 'no-scope', 'scope-not-ok'])
+def test_an_offline_owner_keeps_its_binding_even_when_another_gateway_publishes_the_card(world, board, fault):
+    """Like ``_retire_moved``, nothing is concluded from an owner whose scope we cannot read live."""
+    path, replica, binding, task = _setup(world, other=True)
+    _reuse_name(replica, beat=1000 if fault == 'stale-heartbeat' else 5000, other=True, task=task, binding=binding)
+    with sqlite3.connect(replica) as db:
+        info = json.loads(db.execute("SELECT data FROM replica WHERE gw='owner' AND coll='gateway'").fetchone()[0])
+        if fault == 'no-scope':
+            info['task_scopes'] = []
+        elif fault == 'scope-not-ok':
+            info['task_scopes'][0]['state'] = 'error'
+        db.execute("UPDATE replica SET data=? WHERE gw='owner' AND coll='gateway'", (json.dumps(info),))
+    row = _project(path, replica, NOW)
+    assert row['status'] == 'unknown' and row['unfinished'] and row['stale']
+
+
+def test_only_the_scope_heartbeat_proves_a_reused_owner_live(world, board):
+    """A fresh per-task stamp on the stored record (accepted for a PRESENT record) does not prove the scope was read."""
+    path, replica, binding, task = _setup(world, other=True)
+    _reuse_name(replica, beat=1000, other=True, task=task, binding=binding)
+    with sqlite3.connect(path) as db:
+        raw, = db.execute('SELECT task_json FROM origin_obligations').fetchone()
+        stored = json.loads(raw)
+        stored['origin_observation']['observed_at'] = NOW - 1
+        db.execute('UPDATE origin_obligations SET task_json=?', (json.dumps(stored),))
+    row = _project(path, replica, NOW)
+    assert row['status'] == 'unknown' and row['unfinished'] and row['stale']
+
+
+@pytest.mark.parametrize('other', [True, False])
+def test_this_gateways_own_card_is_never_judged_by_the_reused_owner_rule(world, monkeypatch, other):
+    """The owner is this gateway: its local read is the authority, not an absence from its own replica."""
+    from hermes_cli import kanban_origin_local
+    from tests.hermes_cli import test_kanban_origin_ledger as fixtures
+    from tests.hermes_cli.test_kanban_remote_completion_receipt import attest, publication
+    binding = world[2]
+    binding['owner'].update(gateway='origin', profile='default')
+    binding['task_record_key'] = 'default/build/t_one'
+    task = {**publication(binding), 'created_at': 1234}
+    attest(task)
+    with sqlite3.connect(world[1]) as db:
+        db.execute("INSERT INTO replica VALUES ('origin','tasks',?,3,?)", (binding['task_record_key'], json.dumps(task)))
+    fixtures.accept(world, sender='gw:origin')
+    with sqlite3.connect(world[1]) as db:
+        db.execute("DELETE FROM replica WHERE gw IS NOT NULL")
+        db.execute('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)')
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('last_ok', ?)", (str(NOW - 1),))
+        info = {'gateway': 'origin', 'task_scopes': [{'profile': 'default', 'board': 'build', 'state': 'ok',
+                                                      'observed_at': NOW - 1}]}
+        db.execute("INSERT INTO replica VALUES ('origin','gateway','info',1,?)", (json.dumps(info),))
+        if other:
+            db.execute("INSERT INTO replica VALUES ('hub','tasks','default/build/t_one',1,?)",
+                       (json.dumps({**task, 'gateway': 'hub'}),))
+        else:
+            db.execute("INSERT INTO replica VALUES ('hub','gateway','info',1,'{}')")
+    running = {**task, 'status': 'running'}
+    monkeypatch.setattr(kanban_origin_local, 'observe_local_binding', lambda *a, **kw: running if other else None)
+    rows = ledger.project(world[0], replica=world[1], gateway='origin', profile='default', now=NOW)
+    assert len(rows) == 1 and rows[0]['unfinished'] is True
+
+
 def test_an_owner_that_still_publishes_the_card_is_unchanged(world, board):
     """Its own record is current evidence; the new rule applies only to a card the owner does not publish."""
     path, replica, _, _ = _setup(world, other=False)

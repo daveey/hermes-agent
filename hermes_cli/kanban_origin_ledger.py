@@ -518,15 +518,16 @@ def _reused_owner(elsewhere: _Publications, owner: dict, task: dict, *, absent: 
     """``_removed_owner`` for an owner whose gateway NAME is still listed but no longer publishes the card (a scaled-in
     worker's name reused by a new instance, 2026-11-20: a done, re-homed card stayed unknown for good). [daveey]
 
-    None when another gateway publishes the same card (board, id, created_at): re-homed, binding not projected. True
-    when no one does, the owner's exact scope heartbeat is fresh and readable (``scope_live``) and the card is absent
-    from it, and the stored observation is closed (done or archived): that is its final word. False otherwise: an
-    open stored observation, an offline or unreadable owner, or a record the owner still publishes is unchanged."""
-    if not absent:
+    Every outcome needs the owner's exact scope heartbeat fresh and readable (``scope_live``) and the card absent from
+    it (like ``_retire_moved``): an offline or unreadable owner is unchanged, whether or not another gateway publishes
+    the card. Then: None when another gateway publishes the same card (board, id, created_at): re-homed, binding not
+    projected. True when no one does and the stored observation is closed (done or archived): its final word. False
+    otherwise: an open stored observation, or a record the owner still publishes."""
+    if not (absent and scope_live):
         return False
     if elsewhere.has_other(owner, task):
         return None
-    return bool(scope_live and task.get('status') in ('done', 'archived'))
+    return task.get('status') in ('done', 'archived')
 
 
 def _lock_busy(exc: sqlite3.Error) -> bool:
