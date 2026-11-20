@@ -51,11 +51,13 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
+import time
 from typing import Any, Mapping, Optional
 
 DEFAULT_MAX_MOVES = 3
 MOVED_EVENT = "moved"
 UNPUSHED_HERE = "unpushed_state_here"
+CLAIMING_FRESH_S = 90  # Board fresh(metrics.at, now) window; metrics.at is milliseconds.
 
 
 class MoveRefused(ValueError):
@@ -94,7 +96,7 @@ def history(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
 
 
 def matching_machines(runs_on: list[str], machines: Mapping[str, Mapping[str, Any]], *, me: str,
-                      exclude_me: bool = True) -> list[str]:
+                      exclude_me: bool = True, now: Optional[float] = None) -> list[str]:
     """Active, unheld registry machines carrying every label; running moves exclude ``me``.
 
     A machine that has published ``metrics.claiming == 0`` is not taking portable cards. A pin to
@@ -102,19 +104,28 @@ def matching_machines(runs_on: list[str], machines: Mapping[str, Mapping[str, An
     """
     from hermes_cli import kanban_worker_node as wn
     out = []
+    now = time.time() if now is None else now
     for name, entry in machines.items():
         if (exclude_me and name == me) or not entry or entry.get("state", "active") != "active" or entry.get("hold"):
             continue
-        if _not_claiming(entry) and f"machine:{name}" not in runs_on:
+        if _not_claiming(entry, now=now) and f"machine:{name}" not in runs_on:
             continue
         if set(runs_on) <= wn.effective_labels(entry, name):
             out.append(name)
     return sorted(out)
 
 
-def _not_claiming(entry: Mapping[str, Any]) -> bool:
+def _not_claiming(entry: Mapping[str, Any], now: Optional[float] = None) -> bool:
+    from hermes_cli.kanban_placement_coordination import SKEW_S
     metrics = entry.get("metrics")
-    return isinstance(metrics, dict) and metrics.get("claiming") == 0
+    if not isinstance(metrics, dict) or metrics.get("claiming") != 0:
+        return False
+    at = metrics.get("at")
+    if type(at) not in (int, float):
+        return False
+    now = time.time() if now is None else now
+    # Ordered bounds reject NaN/infinities too, without converting oversized integers to float.
+    return (now - CLAIMING_FRESH_S) * 1000 <= at <= (now + SKEW_S) * 1000
 
 
 def _requirement_matches(matches, machines, requires, skills, *, me=None, assignee=None):

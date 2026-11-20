@@ -56,14 +56,14 @@ def test_open_round_still_counts_as_claiming(gate):
 
 def test_portable_match_drops_a_machine_that_is_not_claiming():
     pool = {
-        "worker-1": {"state": "active", "labels": ["pool:worker"], "metrics": {"claiming": 0}},
+        "worker-1": {"state": "active", "labels": ["pool:worker"], "metrics": {"claiming": 0, "at": time.time() * 1000}},
         "worker-a1": {"state": "active", "labels": ["pool:worker"], "metrics": {"claiming": 1}},
     }
     assert matching_machines(["pool:worker"], pool, me="hub", exclude_me=False) == ["worker-a1"]
 
 
 def test_machine_pin_keeps_a_non_claiming_worker():
-    pool = {"worker-1": {"state": "active", "labels": ["pool:worker"], "metrics": {"claiming": 0}}}
+    pool = {"worker-1": {"state": "active", "labels": ["pool:worker"], "metrics": {"claiming": 0, "at": time.time() * 1000}}}
     assert matching_machines(["machine:worker-1"], pool, me="hub", exclude_me=False) == ["worker-1"]
 
 
@@ -71,7 +71,7 @@ def test_label_machines_drops_a_non_claiming_pool_worker():
     seen = int(time.time() * 1000)
     machines = {
         "worker-1": {"state": "active", "labels": ["pool:worker"], "pickup": "all",
-                     "last_seen": seen, "metrics": {"claiming": 0}},
+                     "last_seen": seen, "metrics": {"claiming": 0, "at": time.time() * 1000}},
         "worker-a1": {"state": "active", "labels": ["pool:worker"], "pickup": "all",
                       "last_seen": seen, "metrics": {"claiming": 1}},
     }
@@ -83,7 +83,7 @@ def test_label_machines_keeps_a_pinned_non_claiming_worker():
     seen = int(time.time() * 1000)
     machines = {
         "worker-1": {"state": "active", "labels": ["pool:worker", "machine:worker-1"], "pickup": "all",
-                     "last_seen": seen, "metrics": {"claiming": 0}},
+                     "last_seen": seen, "metrics": {"claiming": 0, "at": time.time() * 1000}},
     }
     assert label_machines({"pool:worker", "machine:worker-1"}, machines) == ["worker-1"]
 
@@ -92,7 +92,7 @@ def test_bare_name_pickup_drops_a_non_claiming_worker():
     """A bare-name pickup passes an empty wanted set, so the machine: pin does not keep it."""
     seen = int(time.time() * 1000)
     entry = {"state": "active", "labels": ["pool:worker", "machine:worker-1"], "pickup": "all",
-             "last_seen": seen, "metrics": {"claiming": 0}}
+             "last_seen": seen, "metrics": {"claiming": 0, "at": time.time() * 1000}}
     assert label_machines((), {"worker-1": entry}) == []
     entry["metrics"] = {"claiming": 1}
     assert label_machines((), {"worker-1": entry}) == ["worker-1"]

@@ -74,7 +74,7 @@ def _task_reasons(result, tid, reference):
         if task == tid:
             reasons.append(_reason("placement", native, reference))
     for task, native in result.claim_deferred:
-        if task == tid and native in {"labels_mismatch", "pinned_only", "offline"}:
+        if task == tid and native in {"labels_mismatch", "pinned_only", "offline", "not_claiming"}:
             reasons.append(_reason("placement", native, reference))
     if tid in result.rate_limited:
         # A reaped submitter can refuse before its managed worker ever starts.

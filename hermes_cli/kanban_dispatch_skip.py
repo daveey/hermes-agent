@@ -347,7 +347,7 @@ def is_ordering(skip: Optional[dict[str, Any]]) -> bool:
 # The details a skip carries when it says only that the machine which recorded it cannot lease the card: the Board's
 # eligibility refusals for that machine (``kanban_worker_node.eligible``) and its own unreachable Board. A tuple, not
 # a set: a synced payload's detail may be any JSON value.
-_RECORDER_ONLY = ("labels_mismatch", "pinned_only", "held", "offline")
+_RECORDER_ONLY = ("labels_mismatch", "pinned_only", "held", "offline", "not_claiming")
 
 
 def recorder_cannot_lease(skip: dict[str, Any]) -> bool:
