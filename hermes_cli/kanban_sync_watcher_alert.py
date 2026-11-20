@@ -85,8 +85,9 @@ def _body(host: str, why: str, since: float, info: dict, now: float) -> str:
         f"- origin/main: `{info.get('origin_main_sha') or 'unknown'}`",
         "",
         "Do: 1) `hermes kanban sync status` on that host; 2) recover with a core that includes the crash fix "
-        "(the supervisor retries the loop, or restart the gateway once the cause is gone); 3) done when status shows `running: yes` and the "
-        "dispatcher has spawned a card. Precedent: t_01a1f772bf13a473.",
+        "(the supervisor retries the loop, or restart the gateway once the cause is gone); "
+        "3) done when status shows `running: yes` and the dispatcher has spawned a card. "
+        "Precedent: t_01a1f772bf13a473.",
     ])
 
 
