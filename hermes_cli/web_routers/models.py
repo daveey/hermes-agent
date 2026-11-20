@@ -151,6 +151,25 @@ async def get_model_options(
     with http_failure("GET /api/model/options failed", 500, detail="Failed to list model options"):
         skew_msg = _dashboard_code_skew_guard()
         if skew_msg:
+            from hermes_cli.always_on_rollover import handoff_control_read, this_backend_port
+
+            query = []
+            if profile:
+                query.append(("profile", profile))
+            if refresh:
+                query.append(("refresh", "true"))
+            if include_unconfigured:
+                query.append(("include_unconfigured", "true"))
+            if explicit_only:
+                query.append(("explicit_only", "true"))
+            path = "/api/model/options"
+            if query:
+                from urllib.parse import urlencode
+
+                path = f"{path}?{urlencode(query)}"
+            handed = handoff_control_read(this_backend_port() or 0, path)
+            if handed is not None:
+                return handed
             _log.warning("GET /api/model/options refused: %s", skew_msg)
             raise HTTPException(status_code=503, detail=f"Restart required: {skew_msg}")
 

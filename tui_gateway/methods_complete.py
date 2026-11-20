@@ -323,6 +323,17 @@ def _model_skew_err(rid) -> dict | None:
 def _(rid, params: dict) -> dict:
     skew = _model_skew_err(rid)
     if skew is not None:
+        from hermes_cli.always_on_rollover import handoff_control_read, this_backend_port
+        from urllib.parse import urlencode
+
+        query = {k: params[k] for k in ("explicit_only", "include_unconfigured", "refresh", "profile")
+                 if k in params and params[k] not in (None, "")}
+        path = "/api/model/options"
+        if query:
+            path = f"{path}?{urlencode(query)}"
+        handed = handoff_control_read(this_backend_port() or 0, path)
+        if handed is not None:
+            return _ok(rid, handed)
         return skew
     from hermes_cli.inventory import build_model_options_payload
     # A spawned agent owns the live provider/model/base_url; empty attributes must

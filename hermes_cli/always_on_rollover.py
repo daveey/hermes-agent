@@ -62,6 +62,10 @@ BACKEND_PORTS = (9148, 9149, 9150, 9151)
 ENV_BACKEND = "HERMES_ALWAYS_ON_BACKEND"
 ACTIVE_NAME = "active.json"
 ACTIVE_SCHEMA = 1
+# Control-plane GETs a busy superseded backend may fetch from the active successor (never writes/prompts).
+CONTROL_READ_PATHS = frozenset({"/api/model/options"})
+HANDOFF_TIMEOUT_S = 5.0
+_THIS_PORT: Optional[int] = None
 
 PROXY_HOLD_S = 30.0          # a client waits this long for an answering backend before its connection is closed
 PROXY_CONNECT_TIMEOUT_S = 5.0
@@ -147,6 +151,54 @@ def successor_pending(port: int, home: Optional[Path] = None) -> bool:
     return port != record["port"] or bool(record["warming"])
 
 
+def handoff_control_read(port: int, path: str, *, get: Optional[Callable] = None,
+                         home: Optional[Path] = None,
+                         timeout_s: float = HANDOFF_TIMEOUT_S) -> Optional[dict]:
+    """If *port* is superseded, the active successor's GET *path* body.
+
+    None when this process still serves, *path* is not a control read, or the successor
+    did not answer 200 JSON. Never runs the local handler (stale ``sys.modules``)."""
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return None
+    if port not in BACKEND_PORTS:
+        return None
+    parsed = urllib.parse.urlparse(path)
+    if parsed.path not in CONTROL_READ_PATHS:
+        return None
+    try:
+        if not is_superseded(port, home):
+            return None
+        record = read_active(home)
+        if record is None:
+            return None
+        getter = get or _loopback_control_get
+        status, _elapsed, body = getter(record["port"], path, timeout_s)
+    except Exception:  # health: allow BLE001 -- a dead successor is not a stale-module bypass
+        return None
+    return body if status == 200 and isinstance(body, dict) else None
+
+
+def _loopback_control_get(port: int, path: str, timeout: float) -> tuple[Optional[int], float, Optional[dict]]:
+    token, _nonce = aod.ensure_credentials()
+    started = time.monotonic()
+    request = urllib.request.Request(f"http://127.0.0.1:{int(port)}{path}",
+                                     headers={"X-Hermes-Session-Token": token})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read()
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code, time.monotonic() - started, None
+    except (OSError, ValueError, http.client.HTTPException):
+        return None, time.monotonic() - started, None
+    parsed = None
+    with contextlib.suppress(ValueError):
+        parsed = json.loads(body) if body[:1] in (b"{", b"[") else None
+    return status, time.monotonic() - started, parsed if isinstance(parsed, dict) else None
+
+
 def backend_port_for_pid(pid: int, proc: Path = Path("/proc")) -> Optional[int]:
     """The port of the ``hermes-always-on-backend@<port>.service`` unit whose cgroup holds *pid*, else None.
     By cgroup, not environment: an agent child of a backend inherits its environment, not its unit."""
@@ -160,8 +212,17 @@ def backend_port_for_pid(pid: int, proc: Path = Path("/proc")) -> Optional[int]:
 def pop_backend_port(environ=os.environ) -> Optional[int]:
     """In a backend: the port its unit passed in ``HERMES_ALWAYS_ON_BACKEND``, removed from the environment
     so agent children never inherit it. None everywhere else."""
+    global _THIS_PORT
     raw = environ.pop(ENV_BACKEND, "")
-    return int(raw) if raw.isdigit() and 0 < int(raw) < 65536 else None
+    port = int(raw) if raw.isdigit() and 0 < int(raw) < 65536 else None
+    if port is not None:
+        _THIS_PORT = port
+    return port
+
+
+def this_backend_port() -> Optional[int]:
+    """The always-on backend port this process was started as, else None."""
+    return _THIS_PORT
 
 
 def request_roll(run: Callable = subprocess.run) -> bool:
@@ -853,7 +914,8 @@ def stop_all(run: Callable = aod._run) -> None:
 
 __all__ = [
     "BACKEND_PORTS", "ENV_BACKEND", "PROXY_UNIT", "Proxy", "Roller", "backend_port_for_pid", "bind_listener",
-    "cmd_backend", "cmd_proxy", "cmd_roll", "install_units", "is_superseded", "pop_backend_port",
-    "read_active", "render_units", "request_roll", "route_always_on_backends", "stop_all", "successor_pending",
-    "verify_backend_custody", "write_active", "write_backend_custody",
+    "cmd_backend", "cmd_proxy", "cmd_roll", "handoff_control_read", "install_units", "is_superseded",
+    "pop_backend_port", "read_active", "render_units", "request_roll", "route_always_on_backends",
+    "stop_all", "successor_pending", "this_backend_port", "verify_backend_custody", "write_active",
+    "write_backend_custody",
 ]
