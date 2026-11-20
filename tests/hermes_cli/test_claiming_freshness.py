@@ -52,3 +52,12 @@ def test_unknown_or_out_of_window_metrics_do_not_refuse(metrics):
     assert not move._not_claiming(entry, now=NOW)
     assert move.matching_machines(["pool:worker"], {"worker-1": entry}, me="hub", now=NOW) == ["worker-1"]
     assert placement._claiming_for("worker-1", entry, {"pool:worker"}, now=NOW)
+
+
+def test_explicit_now_is_honoured_by_every_caller():
+    """``now`` must reach ``_not_claiming``; the real clock (unpatched) is years after NOW, so a sample fresh at
+    NOW is stale on it and only a threaded ``now`` refuses."""
+    entry = {"labels": ["pool:worker"], "metrics": {"claiming": 0, "at": NOW * 1000}}
+    assert move._not_claiming(entry, now=NOW)
+    assert move.matching_machines(["pool:worker"], {"worker-1": entry}, me="hub", now=NOW) == []
+    assert not placement._claiming_for("worker-1", entry, {"pool:worker"}, now=NOW)
