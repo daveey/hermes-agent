@@ -188,10 +188,44 @@ def test_separate_homes_and_closed_incidents(replica, local):
     card(replica, "two", home="worker-7")
     first = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
     assert len(first) == 2
-    local.execute("UPDATE tasks SET status='done' WHERE id=?", (first[0],))
+    _close(local, first[0], NOW)
+    # Same tick, same membership: the closed incident still covers (no new card per tick).
+    same = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    assert same == first
+    assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 2
+    # Past the cooldown a still-overdue home gets a fresh repair.
+    _fresh_at(replica, NOW + subject.HOME_REPLACE_AFTER_SECONDS + 1)
+    later = subject.sweep(local, replica, "hub", now_ms=(NOW + subject.HOME_REPLACE_AFTER_SECONDS + 1) * 1000)
+    assert later[1] == first[1] and later[0] != first[0]
+
+
+def _fresh_at(replica, at):
+    replica.execute("UPDATE kanban_sync_state SET pulled_at=?", (at,))
+
+
+def _close(local, tid, at):
+    local.execute("UPDATE tasks SET status='done', completed_at=? WHERE id=?", (at, tid))
     local.commit()
-    again = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
-    assert first[1] == again[1] and first[0] != again[0]
+
+
+def test_closed_incident_does_not_respawn_every_tick(replica, local):
+    card(replica, "one")
+    [first] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    _close(local, first, NOW)
+    for minutes in (1, 2, 60, 61, 6 * 60):
+        _fresh_at(replica, NOW + minutes * 60)
+        assert subject.sweep(local, replica, "hub", now_ms=(NOW + minutes * 60) * 1000) == [first]
+    assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+
+def test_closed_incident_is_replaced_when_membership_changes(replica, local):
+    card(replica, "one")
+    [first] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    _close(local, first, NOW)
+    card(replica, "two")
+    _fresh_at(replica, NOW + 60)
+    [second] = subject.sweep(local, replica, "hub", now_ms=(NOW + 60) * 1000)
+    assert second != first
 
 
 def test_legacy_backstop_and_current_park(replica):

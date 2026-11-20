@@ -144,6 +144,25 @@ def _fresh(replica, now: float) -> bool:
     return row is not None and type(row[0]) in (int, float) and -5 <= now - row[0] <= FRESH_SECONDS
 
 
+# Pick: a closed incident keeps covering the same home and same overdue membership for 12 h (the repair
+# completes after a no-op inspect, so the 1 h REPLACE_AFTER_SECONDS floor still minted ~24 cards/day for a
+# silent Mac; 12 h gives <= 2/day). A changed membership files a fresh incident at once.
+HOME_REPLACE_AFTER_SECONDS = 12 * 3600
+_LISTED = re.compile(r"^- (\S+) \(", re.MULTILINE)
+
+
+def _recently_closed(conn, key: str, card_ids: list[str], now_ms: int) -> str | None:
+    from hermes_cli import kanban_pickup_stall as kps
+    row = conn.execute(
+        "SELECT id, body, COALESCE(completed_at, created_at) AS closed FROM tasks WHERE created_by = ? "
+        "AND idempotency_key >= ? AND idempotency_key < ? AND status IN ('done', 'archived') "
+        "ORDER BY COALESCE(completed_at, created_at) DESC, id LIMIT 1", (kps.DETECTOR, key, key + "\U0010ffff")
+    ).fetchone()
+    if row is None or now_ms / 1000 - row["closed"] >= HOME_REPLACE_AFTER_SECONDS:
+        return None
+    return row["id"] if set(_LISTED.findall(row["body"] or "")) == set(card_ids) else None
+
+
 def sweep(conn, replica, own: str, *, now_ms: int) -> list[str]:
     from hermes_cli import kanban_pickup_stall as kps
     from hermes_cli import kanban_worker_node as wn
@@ -165,6 +184,11 @@ def sweep(conn, replica, own: str, *, now_ms: int) -> list[str]:
                 f"greater than 30 minutes. {cards[0]['home_evidence']}. A todo clock starts when the "
                 "last parent completed; a scheduled clock uses its current wake/backstop.\n\n" + listed
                 + "\n\n" + HOWTO)
+        key = f"{kps.KEY_PREFIX}{own}:home-overdue-{home}:"
+        recent = _recently_closed(conn, key, [c["id"] for c in cards], now_ms)
+        if recent is not None:
+            ids.append(recent)  # silence: the same overdue set was just repaired, do not mint another worker
+            continue
         ids.append(kps._create(
             conn, key=f"{kps.KEY_PREFIX}{own}:home-overdue-{home}:",
             title=f"Home transitions overdue on {home} ({len(cards)} cards)", body=body,
