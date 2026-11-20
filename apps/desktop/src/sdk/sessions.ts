@@ -9,7 +9,8 @@ import {
 } from '@/store/layout'
 import { $sessions, sessionMatchesStoredId, sessionPinId } from '@/store/session'
 import { setSessionColorOverride } from '@/store/session-color'
-import { reportWorkSourceRead } from '@/store/session-work-source'
+import { beginWorkSourceRead, reportWorkSourceRead, type WorkSourceRead } from '@/store/session-work-source'
+import { workSourceAuthorityForSession } from '@/store/work-source-owner'
 
 /** Pins and colours are keyed by the DURABLE (lineage-root) id so they survive
  *  compression's session-id rotation; a row's live id resolves through
@@ -41,6 +42,13 @@ function liveSessionId(storedSessionId: string): string {
  *  session ids as a sidebar row slot carries them; a live id is resolved to
  *  the same row through the app's lineage matcher. */
 export const sessionsHost = {
+  /** Capture before the RPC; return this exact token with its eventual result. */
+  beginWorkSourceRead(read: Omit<WorkSourceRead, 'available' | 'authorityEpoch' | 'readVersion'>): WorkSourceRead {
+    const authority = workSourceAuthorityForSession(read.connectionId, read.profile, read.storedSessionId)
+    const epoch = read.source === 'lineage' || read.source === 'tasks' ? authority.durable : authority.runtime
+
+    return beginWorkSourceRead({ ...read, authorityEpoch: epoch ?? undefined })
+  },
   /** Report the result of a qualified authoritative work-source read. Failure vetoes completion;
    * success only clears that source's veto. It never changes tasks or stored outcomes. */
   reportWorkSourceRead,

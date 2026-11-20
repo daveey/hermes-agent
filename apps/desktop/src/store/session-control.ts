@@ -28,6 +28,8 @@ import {
   requestForOwnedSession,
   storedSessionIdForRuntimeId
 } from './session-states'
+import { beginWorkSourceRead, reportWorkSourceRead, type WorkSourceRead } from './session-work-source'
+import { qualifiedWorkSourceOwner, workSourceAuthorityForSession } from './work-source-owner'
 
 export type SessionControlGoalStatus = 'active' | 'done' | 'paused'
 export type SessionControlLoopMode = 'interval' | 'self_paced'
@@ -164,6 +166,47 @@ const ERROR_LIMIT = 240
 
 const versions = new Map<string, number>()
 const eventVersions = new Map<string, number>()
+const controlAuthority = new Map<string, WorkSourceRead>()
+
+function beginControlAuthority(sessionId: string): WorkSourceRead | undefined {
+  const owner = qualifiedWorkSourceOwner(knownOwnerForSession(sessionId))
+  const storedSessionId = storedSessionIdForRuntimeId(sessionId)
+
+  if (!owner || !storedSessionId) {
+    return undefined
+  }
+  const authority = workSourceAuthorityForSession(owner.connectionId, owner.profile, storedSessionId)
+
+  const read = beginWorkSourceRead({
+    ...owner,
+    storedSessionId,
+    source: 'control',
+    authorityEpoch: authority.runtime ?? undefined
+  })
+
+  controlAuthority.set(sessionId, read)
+
+  return read
+}
+
+function controlAuthorityIsCurrent(sessionId: string, read: WorkSourceRead): boolean {
+  const current = workSourceAuthorityForSession(read.connectionId, read.profile, read.storedSessionId)
+
+  return (
+    read.authorityEpoch !== undefined &&
+    current.runtime === read.authorityEpoch &&
+    storedSessionIdForRuntimeId(sessionId) === read.storedSessionId
+  )
+}
+
+function clearControlAuthority(sessionId: string): void {
+  const read = controlAuthority.get(sessionId)
+
+  if (read) {
+    beginWorkSourceRead(read)
+  }
+  controlAuthority.delete(sessionId)
+}
 
 // An owner miss re-reads once the owner becomes resolvable (t_01a18f128c7f815c).
 // Owner-bearing atoms give the immediate signal; the poll is a local-only
@@ -526,8 +569,11 @@ function currentVersion(sessionId: string): number {
   return versions.get(sessionId) ?? 0
 }
 
+// Resetting the per-session map must not recycle an in-flight request token.
+let nextRequestVersion = 0
+
 function advanceVersion(sessionId: string): number {
-  const next = currentVersion(sessionId) + 1
+  const next = ++nextRequestVersion
   versions.set(sessionId, next)
 
   return next
@@ -636,6 +682,7 @@ export function clearSessionControl(sessionId: string): void {
   }
 
   advanceVersion(sessionId)
+  clearControlAuthority(sessionId)
   disarmOwnerRetry(sessionId)
   const entries = $sessionControlBySession.get()
 
@@ -654,6 +701,10 @@ export function clearSessionControl(sessionId: string): void {
  * version bump so a late response cannot repopulate the map.
  */
 export function clearAllSessionControl(): void {
+  for (const sessionId of controlAuthority.keys()) {
+    clearControlAuthority(sessionId)
+  }
+
   for (const sessionId of new Set([...versions.keys(), ...Object.keys($sessionControlBySession.get())])) {
     advanceVersion(sessionId)
   }
@@ -901,6 +952,7 @@ export async function refreshSessionControl(
   }
 
   const token = beginRead(sessionId, Boolean(options.background))
+  const authority = beginControlAuthority(sessionId)
 
   try {
     const response = await requestForOwnedSession<unknown>(
@@ -920,6 +972,13 @@ export async function refreshSessionControl(
       publishFailure(sessionId, token, new Error('Invalid session.control.read response'), false)
 
       return $sessionControlBySession.get()[sessionId]
+    }
+
+    if (authority) {
+      if (!controlAuthorityIsCurrent(sessionId, authority)) {
+        return $sessionControlBySession.get()[sessionId]
+      }
+      reportWorkSourceRead({ ...authority, available: true })
     }
 
     return applyParsedSnapshot(sessionId, snapshot)

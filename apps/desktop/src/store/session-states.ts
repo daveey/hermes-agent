@@ -16,7 +16,7 @@
  * itself here as the delegate so tile UI stays dependency-light.
  */
 
-import { backendScopeKey, type GatewayEvent, LOCAL_CONNECTION_ID, registryBackendScopeKey } from '@hermes/shared'
+import { backendScopeKey, LOCAL_CONNECTION_ID, registryBackendScopeKey } from '@hermes/shared'
 import { atom, computed } from 'nanostores'
 
 import { setSessionOwnerResolver } from '@/api/client'
@@ -85,7 +85,13 @@ import {
   setTileSessionFocusStartedAt,
   setTurnStartedAt
 } from './session'
-import { secondaryProfileOwnerForEvent } from './session-event-provenance'
+import {
+  clearRuntimeEventOwners,
+  forgetRuntimeEventOwner,
+  recordSessionEventOwnerScope,
+  runtimeSessionOwner,
+  sessionEventScopeFor
+} from './session-event-owners'
 import { $focusedStoredSessionId, TILE_PANE_PREFIX } from './session-focus'
 import { turnHasReply, withNoReplyNotice } from './session-no-reply'
 import { createNoReplyRecovery, logSilentTurnCheck, settleEndedState } from './session-no-reply-recovery'
@@ -129,84 +135,18 @@ export const $sessionStates = atom<Record<string, ClientSessionState>>({})
 // or secondary marker and record nothing, so single-source behavior is untouched.
 // ---------------------------------------------------------------------------
 
-const sessionScopeByRuntimeId = new Map<string, string>()
-
-// Structured twin of the scope ledger: inbound events can carry either an
-// exact (connectionId, profile) owner or a producer-proven profile-only pool
-// owner. Consumed as the LAST rung of knownOwnerForSession so a runtime whose
-// event source already proved its owner can still route session-scoped RPCs
-// (approval.respond) when every durable binding (tile / hint / row) is absent
-// — while durable stored identity keeps outranking it (#97511).
-const sessionOwnerByRuntimeId = new Map<string, SessionOwnerScope>()
+export {
+  $sessionEventOwnersRevision,
+  forgetProfileOnlyRuntimeOwners,
+  runtimeSessionOwner,
+  sessionEventScopeFor
+} from './session-event-owners'
 
 export function recordSessionEventScope(event: { connectionId?: string; profile?: string; session_id?: string }): void {
-  if (!event.session_id) {
-    return
-  }
+  recordSessionEventOwnerScope(event)
 
-  if (event.connectionId) {
-    sessionScopeByRuntimeId.set(event.session_id, registryBackendScopeKey(event.connectionId, event.profile))
-    sessionOwnerByRuntimeId.set(event.session_id, {
-      connectionId: event.connectionId,
-      profile: String(event.profile ?? '').trim() || 'default'
-    })
-
-    // An owner resolved after the focus moved must still re-home the rail.
+  if (event.session_id) {
     syncPreviewScope()
-
-    return
-  }
-
-  // Only gateway.ts's secondary closure can add this non-serializable marker.
-  // A profile field from a primary or arbitrary inbound event is descriptive,
-  // not an owner route, and must keep failing closed in multi-profile installs.
-  const profile = secondaryProfileOwnerForEvent(event as GatewayEvent)
-
-  if (profile) {
-    const profileKey = normalizeProfileKey(profile)
-    sessionOwnerByRuntimeId.set(event.session_id, profileKey)
-    sessionScopeByRuntimeId.set(event.session_id, profileKey)
-  }
-
-  syncPreviewScope()
-}
-
-/** The owner an inbound runtime EVENT proved for `sessionId` (#97511): the
- *  exact (connectionId, profile) of the socket that delivered its events, or
- *  the bare profile of a legacy profile-only pool. Exported so the session-scoped
- *  RPC ladder can consult it WITHOUT the connection-blind profile rung
- *  preempting it (see knownOwnerForSession). */
-export function runtimeSessionOwner(sessionId: null | string | undefined): SessionOwnerScope {
-  const id = String(sessionId ?? '').trim()
-
-  return id ? sessionOwnerByRuntimeId.get(id) : undefined
-}
-
-/** The composite source scope (connection + profile) a runtime's own events
- *  proved — `registryBackendScopeKey` of the socket that delivered them.
- *  Undefined for a runtime whose events arrived untagged (the local legacy
- *  primary), whose source is then whatever gateway is actively serving this
- *  window. Reaction-overlay reads key the displayed session's scope with
- *  this, so an overlay recorded on one source never paints another
- *  source's same-numbered row. */
-export function sessionEventScopeFor(runtimeId: null | string | undefined): string | undefined {
-  const id = String(runtimeId ?? '').trim()
-
-  return id ? sessionScopeByRuntimeId.get(id) : undefined
-}
-
-/** Forget only profile-pool runtime owners during permanent LOCAL profile
- * teardown. These string routes came exclusively from the legacy secondary
- * producer; exact connection descriptors must survive a same-named remote
- * profile's local delete/rename. */
-export function forgetProfileOnlyRuntimeOwners(profile: string): void {
-  const retired = normalizeProfileKey(profile)
-
-  for (const [runtimeId, owner] of sessionOwnerByRuntimeId) {
-    if (typeof owner === 'string' && normalizeProfileKey(owner) === retired) {
-      sessionOwnerByRuntimeId.delete(runtimeId)
-      sessionScopeByRuntimeId.delete(runtimeId)
-    }
   }
 }
 
@@ -221,7 +161,7 @@ export function liveSessionScopes(): Set<string> {
       continue
     }
 
-    const scope = sessionScopeByRuntimeId.get(runtimeId)
+    const scope = sessionEventScopeFor(runtimeId)
 
     if (scope) {
       scopes.add(scope)
@@ -284,7 +224,7 @@ export function foregroundSessionScopes(): Set<string> {
       return
     }
 
-    const scope = sessionScopeByRuntimeId.get(runtimeId)
+    const scope = sessionEventScopeFor(runtimeId)
 
     if (scope) {
       scopes.add(scope)
@@ -473,7 +413,6 @@ async function checkLiveTurn(runtimeId: string): Promise<LiveTurnCheck> {
     return { lastActiveMs: null, verdict: 'unknown' }
   }
 }
-
 
 /** Write through the wiring cache when it holds the runtime, so the cache,
  *  the focused view, and tile mirrors agree (#93059); otherwise the mirror. */
@@ -926,7 +865,8 @@ export function releaseSessionTranscript(runtimeId: string, state?: ClientSessio
     return
   }
 
-  const lightweight = retained.messages?.length === 0 ? retained : { ...retained, messages: [], transcriptReleased: true }
+  const lightweight =
+    retained.messages?.length === 0 ? retained : { ...retained, messages: [], transcriptReleased: true }
 
   $sessionStates.set({ ...current, [runtimeId]: lightweight })
 }
@@ -939,8 +879,7 @@ export function dropSessionState(runtimeId: string) {
   clearWatchdog(runtimeId)
   clearEventSilence(runtimeId)
   clearSessionProviderWait(runtimeId)
-  sessionScopeByRuntimeId.delete(runtimeId)
-  sessionOwnerByRuntimeId.delete(runtimeId)
+  forgetRuntimeEventOwner(runtimeId)
   // A runtime that never bound a stored id never will now (#73890).
   forgetPendingRuntimeTabs(runtimeId)
 
@@ -976,8 +915,7 @@ export function clearAllSessionStates() {
   settledExpiry.clear()
   unconfirmedReconnectSettles.clear()
   clearAllProviderWaits()
-  sessionScopeByRuntimeId.clear()
-  sessionOwnerByRuntimeId.clear()
+  clearRuntimeEventOwners()
   forgetPendingRuntimeTabs()
   $stalledSessionIds.set([])
   $sessionStates.set({})
@@ -1037,7 +975,7 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
         continue
       }
 
-      const recorded = sessionScopeByRuntimeId.get(runtimeId)
+      const recorded = sessionEventScopeFor(runtimeId)
 
       if (scope === undefined ? recorded !== undefined : recorded !== scope) {
         continue
@@ -1808,7 +1746,7 @@ export function knownOwnerForSession(sessionId: null | string | undefined, rows 
     return durable
   }
 
-  return sessionOwnerByRuntimeId.get(sessionId) ?? durable
+  return runtimeSessionOwner(sessionId) ?? durable
 }
 
 // Session-scoped REST reads (detail / messages / timeline) resolve their
@@ -2823,7 +2761,10 @@ export function dropTilesForProfile(
   persistTiles()
   // The rail is a profile-keyed family too (a later same-named profile must not inherit the tabs).
   // F4: the cookie jar lives in LOCAL userData — clear it only for a LOCAL delete, never a remote one.
-  dropPreviewTabsForProfile(name, (String(route?.connectionId ?? '').trim() || LOCAL_CONNECTION_ID) === LOCAL_CONNECTION_ID)
+  dropPreviewTabsForProfile(
+    name,
+    (String(route?.connectionId ?? '').trim() || LOCAL_CONNECTION_ID) === LOCAL_CONNECTION_ID
+  )
   dropBrowserProfilePrefs(name, route?.connectionId?.trim() || undefined)
   dropQueuedLaunchPicksForProfile(name, route ? (route.connectionId ?? '') : undefined)
 }

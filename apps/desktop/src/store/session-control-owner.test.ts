@@ -23,7 +23,9 @@ import { makeSessionInfo } from '@/test/session-info'
 const CONTROL = { goal: null, heartbeat: null, loop: null, revision: 'r1', updated_at: 1 }
 
 function treeWith(rows: ReturnType<typeof makeSessionInfo>[]) {
-  return [{ id: 'home', isNoProject: true, label: 'Home', path: null, previewSessions: rows, repos: [], sessionCount: 1 }]
+  return [
+    { id: 'home', isNoProject: true, label: 'Home', path: null, previewSessions: rows, repos: [], sessionCount: 1 }
+  ]
 }
 
 describe('session.control.read owner resolution for a resumed chat (t_01a18f128c7f815c)', () => {
@@ -48,7 +50,15 @@ describe('session.control.read owner resolution for a resumed chat (t_01a18f128c
       primary: 'local'
     } as never)
     $profiles.set([{ name: 'default' }, { name: 'omar' }] as never)
-    setPrimaryGateway({ onEvent: () => () => undefined, request: primaryRequest, state: 'open' } as never, 'default')
+    setPrimaryGateway(
+      {
+        onEvent: () => () => undefined,
+        onState: () => () => undefined,
+        request: primaryRequest,
+        connectionState: 'open'
+      } as never,
+      'default'
+    )
     setPrimaryGatewayConnection({ connectionId: 'local' })
     $gateway.set({ request: ambientRequest } as never)
     // The resume binds the main-pane runtime to its stored id (state mirror).

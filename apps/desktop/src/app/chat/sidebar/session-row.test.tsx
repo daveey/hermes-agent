@@ -14,69 +14,79 @@ import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import type * as Time from '@/lib/time'
 import { sessionsHost } from '@/sdk/sessions'
 import type * as ComposerStatusStore from '@/store/composer-status'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
+import { setPrimaryGateway, setPrimaryGatewayConnection } from '@/store/gateway'
 import { $sidebarRowMeta } from '@/store/layout'
 import { $projectTree } from '@/store/project-tree'
 import { $pullRequestsByBranch, branchPrKey } from '@/store/pull-requests'
-import { $unreadFinishedSessionIds } from '@/store/session'
+import { $unreadFinishedSessionIds, _resetSessionOwnerHintsForTests, setSessionOwnerHint } from '@/store/session'
 import type * as SessionStore from '@/store/session'
 import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import type * as SessionStatesStore from '@/store/session-states'
 import { $unavailableWorkSources } from '@/store/session-work-source'
 import type * as WindowsStore from '@/store/windows'
+import { _resetWorkSourceOwnerForTests } from '@/store/work-source-owner'
 
 import { ReorderableList, useSortableBindings } from './reorderable-list'
 import { SidebarSessionRow } from './session-row'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  _resetWorkSourceOwnerForTests()
+  _resetSessionOwnerHintsForTests({ storage: true })
+  $unavailableWorkSources.set({})
+  setPrimaryGateway(null)
+  $connectionsRegistry.set(null)
+})
 
 vi.mock('@/i18n', async () => {
   const { enSessionRowStatus } = await import('@/i18n/en_session_row_status')
 
   return {
-  useI18n: () => ({
-    t: {
-      sidebar: {
-        messageCount: (count: number) => `${count} messages`,
-        toolCallCount: (count: number) => `${count} tool calls`,
-        projects: {
-          home: 'Home'
-        },
-        row: {
-          ...enSessionRowStatus,
-          ageMin: 'm',
-          ageNow: 'now',
-          kanbanTasks: (open: number, blocked: number) => `${open} open, ${blocked} blocked`,
-          kanbanAttention: (count: number) => `${count} dropped`,
-          kanbanStalled: (count: number) => `${count} stalled`,
-          outcomeDone: 'Done',
-          outcomeDecision: 'Waiting on your decision',
-          outcomeMuted: 'Muted',
-          outcomeRunning: 'Running',
-          outcomeWaiting: 'Waiting',
-          outcomeUnresolved: (reason: null | string) => `Unresolved: ${reason}`,
-          backgroundProcesses: (count: number) => `${count} background processes`,
-          backgroundProcessUnnamed: 'background process',
-          stopProcess: 'Stop',
-          stoppingProcess: 'Stopping…',
-          backgroundRunning: 'Running in background',
-          finishedUnread: 'Finished',
-          handoffOrigin: (platform: string) => `Started on ${platform}`,
+    useI18n: () => ({
+      t: {
+        sidebar: {
           messageCount: (count: number) => `${count} messages`,
-          needsInput: 'Needs input',
-          sessionActions: 'Session actions',
-          sessionRunning: 'Running',
-          todoProgress: 'Tasks completed',
-          waitingForAnswer: 'Waiting for answer'
-        }
-      },
-      assistant: {
-        thread: {
-          today: (time: string) => `Today at ${time}`,
-          yesterday: (time: string) => `Yesterday at ${time}`
+          toolCallCount: (count: number) => `${count} tool calls`,
+          projects: {
+            home: 'Home'
+          },
+          row: {
+            ...enSessionRowStatus,
+            ageMin: 'm',
+            ageNow: 'now',
+            kanbanTasks: (open: number, blocked: number) => `${open} open, ${blocked} blocked`,
+            kanbanAttention: (count: number) => `${count} dropped`,
+            kanbanStalled: (count: number) => `${count} stalled`,
+            outcomeDone: 'Done',
+            outcomeDecision: 'Waiting on your decision',
+            outcomeMuted: 'Muted',
+            outcomeRunning: 'Running',
+            outcomeWaiting: 'Waiting',
+            outcomeUnresolved: (reason: null | string) => `Unresolved: ${reason}`,
+            backgroundProcesses: (count: number) => `${count} background processes`,
+            backgroundProcessUnnamed: 'background process',
+            stopProcess: 'Stop',
+            stoppingProcess: 'Stopping…',
+            backgroundRunning: 'Running in background',
+            finishedUnread: 'Finished',
+            handoffOrigin: (platform: string) => `Started on ${platform}`,
+            messageCount: (count: number) => `${count} messages`,
+            needsInput: 'Needs input',
+            sessionActions: 'Session actions',
+            sessionRunning: 'Running',
+            todoProgress: 'Tasks completed',
+            waitingForAnswer: 'Waiting for answer'
+          }
+        },
+        assistant: {
+          thread: {
+            today: (time: string) => `Today at ${time}`,
+            yesterday: (time: string) => `Yesterday at ${time}`
+          }
         }
       }
-    }
-  })
+    })
   }
 })
 
@@ -186,8 +196,43 @@ function makeSession(overrides: Partial<SessionInfo> & { title: string }): Sessi
 
 const noop = vi.fn()
 
-const renderRow = (session: SessionInfo, extra?: { card?: boolean; onResume?: () => void; selected?: boolean }) =>
-  render(
+// Existing chrome tests assume authoritative source reads; establish them through
+// the real SDK/owner/transport seam, not by suppressing the mounted hook.
+function certifyRow(session: SessionInfo): void {
+  const connectionId = session.connection_id || 'local'
+  const profile = session.profile || 'default'
+  $connectionsRegistry.set({
+    activeConnectionId: connectionId,
+    primary: connectionId,
+    connections: [{ id: connectionId, kind: 'local', label: 'Fixture' }]
+  } as never)
+  setPrimaryGateway(
+    {
+      connectionState: 'open',
+      onEvent: () => () => undefined,
+      onState: () => () => undefined,
+      request: vi.fn()
+    } as never,
+    profile
+  )
+  setPrimaryGatewayConnection({ connectionId })
+  setSessionOwnerHint(session.id, { connectionId, profile })
+
+  for (const source of ['lineage', 'tasks', 'process', 'subagent', 'control'] as const) {
+    const token = sessionsHost.beginWorkSourceRead({ connectionId, profile, storedSessionId: session.id, source })
+    sessionsHost.reportWorkSourceRead({ ...token, available: true })
+  }
+}
+
+const renderRow = (
+  session: SessionInfo,
+  extra?: { card?: boolean; onResume?: () => void; selected?: boolean; unreadAuthority?: boolean }
+) => {
+  if (!extra?.unreadAuthority) {
+    certifyRow(session)
+  }
+
+  return render(
     <SidebarSessionRow
       card={extra?.card}
       isPinned={false}
@@ -201,27 +246,55 @@ const renderRow = (session: SessionInfo, extra?: { card?: boolean; onResume?: ()
       unread={false}
     />
   )
+}
 
 describe('idle sidebar authoritative source failures', () => {
   afterEach(() => $unavailableWorkSources.set({}))
 
-  it.each(['tasks', 'process', 'subagent'] as const)('repaints an idle stored-done row after a real %s read failure, and recovers', source => {
-    const session = makeSession({ title: 'Completed', connection_id: 'edge', message_count: 2,
-      outcome: { kind: 'done', source: 'derived', at: 1000 } })
+  it('does not certify a stored done row whose sources were never read', () => {
+    const session = makeSession({
+      title: 'Unread authority',
+      message_count: 2,
+      outcome: { kind: 'done', source: 'derived', at: 1000 }
+    })
 
-    const { container } = renderRow(session)
-    const row = () => container.querySelector('[data-sidebar-session-id="s1"]')
-    expect(row()?.getAttribute('data-sidebar-stripe')).toBe('done')
-    const read = { connectionId: 'edge', profile: 'default', storedSessionId: 's1', source }
-    act(() => sessionsHost.reportWorkSourceRead({ ...read, available: false }))
-    expect(row()?.getAttribute('data-sidebar-stripe')).toBe('waiting')
-    expect(container.querySelector('[data-slot="session-status-stripe"]')?.getAttribute('data-outcome')).toBeNull()
-    act(() => sessionsHost.reportWorkSourceRead({ ...read, connectionId: 'other', available: true }))
-    expect(row()?.getAttribute('data-sidebar-stripe')).toBe('waiting')
-    act(() => sessionsHost.reportWorkSourceRead({ ...read, available: true }))
-    expect(row()?.getAttribute('data-sidebar-stripe')).toBe('done')
+    const { container } = renderRow(session, { unreadAuthority: true })
+    expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('waiting')
     expect(session.outcome?.kind).toBe('done')
   })
+
+  it.each(['tasks', 'process', 'subagent'] as const)(
+    'repaints an idle stored-done row after a real %s read failure, and recovers',
+    source => {
+      const session = makeSession({
+        title: 'Completed',
+        connection_id: 'edge',
+        message_count: 2,
+        outcome: { kind: 'done', source: 'derived', at: 1000 }
+      })
+
+      const { container } = renderRow(session)
+      const row = () => container.querySelector('[data-sidebar-session-id="s1"]')
+      expect(row()?.getAttribute('data-sidebar-stripe')).toBe('done')
+      let read!: ReturnType<typeof sessionsHost.beginWorkSourceRead>
+      act(() => {
+        read = sessionsHost.beginWorkSourceRead({
+          connectionId: 'edge',
+          profile: 'default',
+          storedSessionId: 's1',
+          source
+        })
+        sessionsHost.reportWorkSourceRead({ ...read, available: false })
+      })
+      expect(row()?.getAttribute('data-sidebar-stripe')).toBe('waiting')
+      expect(container.querySelector('[data-slot="session-status-stripe"]')?.getAttribute('data-outcome')).toBeNull()
+      act(() => sessionsHost.reportWorkSourceRead({ ...read, connectionId: 'other', available: true }))
+      expect(row()?.getAttribute('data-sidebar-stripe')).toBe('waiting')
+      act(() => sessionsHost.reportWorkSourceRead({ ...read, available: true }))
+      expect(row()?.getAttribute('data-sidebar-stripe')).toBe('done')
+      expect(session.outcome?.kind).toBe('done')
+    }
+  )
 })
 
 // The arc marks the SELECTED row — the one the pane shows — not a working
@@ -670,10 +743,15 @@ describe('SidebarSessionRow kanban counts', () => {
     vi.useFakeTimers()
     vi.setSystemTime(1001_000)
 
-    const { container } = renderRow(makeSession({
-      execution_observations: [{ ...fixture.base, valid_until: 1010 }],
-      kanban_active: 1, kanban_parked: 1, message_count: 2, title: 'Expiry'
-    }))
+    const { container } = renderRow(
+      makeSession({
+        execution_observations: [{ ...fixture.base, valid_until: 1010 }],
+        kanban_active: 1,
+        kanban_parked: 1,
+        message_count: 2,
+        title: 'Expiry'
+      })
+    )
 
     expect(container.querySelector('[data-kanban-count="unknown"]')).toBeNull()
     expect(container.querySelector('[data-sidebar-stripe]')).toBeNull()
@@ -689,7 +767,9 @@ describe('SidebarSessionRow kanban counts', () => {
     vi.useFakeTimers()
     renderRow(makeSession({ execution_observations: [{ source: 'unavailable.work' }], title: 'Unknown' }))
     const counts = screen.getByTestId('session-row-kanban-counts')
-    const explanation = '1 work item has unknown current status: evidence is missing, expired or unverified. This does not mean done; no new check was requested.'
+
+    const explanation =
+      '1 work item has unknown current status: evidence is missing, expired or unverified. This does not mean done; no new check was requested.'
 
     expect(counts.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('1')
     expect(counts.getAttribute('aria-label')).toBe(explanation)
@@ -703,7 +783,12 @@ describe('SidebarSessionRow kanban counts', () => {
 
   it('shows open and blocked counts right after the age', () => {
     const { container } = renderRow(
-      makeSession({ execution_observations: [], kanban_active: 3, kanban_blocked: 1, title: 'Waiting' } as Partial<SessionInfo> & {
+      makeSession({
+        execution_observations: [],
+        kanban_active: 3,
+        kanban_blocked: 1,
+        title: 'Waiting'
+      } as Partial<SessionInfo> & {
         title: string
       }),
       { card: true }
@@ -720,7 +805,9 @@ describe('SidebarSessionRow kanban counts', () => {
   })
 
   it('labels live cards from an older producer without observations as unknown, not certain work', () => {
-    renderRow(makeSession({ kanban_active: 3, kanban_blocked: 1, title: 'Legacy' } as Partial<SessionInfo> & { title: string }))
+    renderRow(
+      makeSession({ kanban_active: 3, kanban_blocked: 1, title: 'Legacy' } as Partial<SessionInfo> & { title: string })
+    )
 
     const label = screen.getByTestId('session-row-kanban-counts').getAttribute('aria-label') ?? ''
     expect(label).toContain('3 work items have unknown current status')
@@ -908,7 +995,12 @@ describe('SidebarSessionRow own activity stamps', () => {
 
     try {
       const { container } = renderRow(
-        makeSession({ id: 'unknown-polled', kanban_unknown: true, message_count: 4, title: 'Polled' } as Partial<SessionInfo> & {
+        makeSession({
+          id: 'unknown-polled',
+          kanban_unknown: true,
+          message_count: 4,
+          title: 'Polled'
+        } as Partial<SessionInfo> & {
           title: string
         })
       )
@@ -938,9 +1030,9 @@ describe('SidebarSessionRow own activity stamps', () => {
         } as Partial<SessionInfo> & { title: string })
       )
 
-      expect(container.querySelector('[role="status"][aria-label="Running in background"]')?.getAttribute('title')).toBe(
-        'Running in background'
-      )
+      expect(
+        container.querySelector('[role="status"][aria-label="Running in background"]')?.getAttribute('title')
+      ).toBe('Running in background')
       expect(container.querySelector('[aria-label="Open work, current status unknown"]')).toBeNull()
     } finally {
       vi.useRealTimers()
@@ -949,7 +1041,13 @@ describe('SidebarSessionRow own activity stamps', () => {
 
   it('keeps the running label when a live process holds a row with unfresh card evidence', () => {
     const { container } = renderRow(
-      makeSession({ background_active: 1, id: 'proc-row', kanban_observed_at: undefined, message_count: 4, title: 'Watcher' } as Partial<SessionInfo> & {
+      makeSession({
+        background_active: 1,
+        id: 'proc-row',
+        kanban_observed_at: undefined,
+        message_count: 4,
+        title: 'Watcher'
+      } as Partial<SessionInfo> & {
         title: string
       })
     )
@@ -995,6 +1093,7 @@ describe('SidebarSessionRow own activity stamps', () => {
       unread: false
     }
 
+    certifyRow(row)
     const { container, rerender } = render(<SidebarSessionRow {...props} session={row} />)
     expect(stripe(container)).toBe('stuck')
 
@@ -1222,8 +1321,19 @@ describe('SidebarSessionRow stored outcome', () => {
     vi.setSystemTime(1001000)
     const session = makeSession({ id: 'roster-row', title: 'Roster', message_count: 2 })
     const source = gatewayRouteState(null, 'default').key
-    const record = { ...fixture.base, identity: { ...fixture.base.identity, kind: 'process', session: 'roster-row' }, valid_until: 1010 }
-    setLiveWorkRosterSource(source, [{ session_id: session.id, background: 1, subagents: 1, execution_observations: [record] }], 1001000, [session.id])
+
+    const record = {
+      ...fixture.base,
+      identity: { ...fixture.base.identity, kind: 'process', session: 'roster-row' },
+      valid_until: 1010
+    }
+
+    setLiveWorkRosterSource(
+      source,
+      [{ session_id: session.id, background: 1, subagents: 1, execution_observations: [record] }],
+      1001000,
+      [session.id]
+    )
 
     try {
       const { container } = renderRow(session)

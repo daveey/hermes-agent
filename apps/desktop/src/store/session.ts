@@ -204,6 +204,7 @@ export function migrateSessionOwnerHintsForProfile(oldProfile: string, newProfil
   }
 
   if (changed) {
+    $sessionOwnerHintsRevision.set($sessionOwnerHintsRevision.get() + 1)
     persistSessionOwnerHints()
   }
 }
@@ -1173,6 +1174,7 @@ export const $sessionResumeRequest = atom<SessionResumeRequest | null>(null)
 const SESSION_OWNER_HINT_LIMIT = 256
 const SESSION_OWNER_HINTS_KEY = 'hermes.desktop.sessionOwnerHints.v1'
 const sessionOwnerHints = new Map<string, { id: string; route: SessionOwnerRoute }>()
+export const $sessionOwnerHintsRevision = atom(0)
 
 function sessionOwnerHintKey(sessionId: string, route: Pick<SessionOwnerRoute, 'connectionId' | 'profile'>): string {
   return JSON.stringify([route.connectionId.trim(), route.profile.trim() || 'default', sessionId])
@@ -1218,6 +1220,8 @@ function rememberSessionOwnerHint(sessionId: string, route: SessionOwnerRoute): 
 
     sessionOwnerHints.delete(oldest)
   }
+
+  $sessionOwnerHintsRevision.set($sessionOwnerHintsRevision.get() + 1)
 
   return true
 }
@@ -1287,6 +1291,7 @@ export function forgetSessionOwnerHintsForConnection(connectionId: string): void
   }
 
   if (changed) {
+    $sessionOwnerHintsRevision.set($sessionOwnerHintsRevision.get() + 1)
     persistSessionOwnerHints()
   }
 }
@@ -1311,6 +1316,7 @@ export function forgetSessionOwnerHintsForSession(sessionId: string): void {
   }
 
   if (changed) {
+    $sessionOwnerHintsRevision.set($sessionOwnerHintsRevision.get() + 1)
     persistSessionOwnerHints()
   }
 }
@@ -1334,6 +1340,7 @@ export function sessionOwnerRouteFromRow(
 /** @internal Tests: forget every in-memory hint (storage untouched unless asked). */
 export function _resetSessionOwnerHintsForTests({ storage = false }: { storage?: boolean } = {}): void {
   sessionOwnerHints.clear()
+  $sessionOwnerHintsRevision.set($sessionOwnerHintsRevision.get() + 1)
 
   if (storage) {
     writeJson(SESSION_OWNER_HINTS_KEY, null)
