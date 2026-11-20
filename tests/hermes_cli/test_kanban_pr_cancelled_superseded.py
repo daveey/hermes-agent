@@ -76,6 +76,18 @@ def test_cancelled_run_superseded_by_later_green_workflow_run(evidence, actions)
     assert ids(receipt) == [2]
 
 
+@pytest.mark.parametrize("tamper", [
+    {"completed_at": None},
+    {"status": "in_progress"},
+    {"completed_at": POST_MERGE},
+])
+def test_cancelled_job_requires_terminal_premerge_completion(evidence, actions, tamper):
+    evidence["runs"][0].update(tamper)
+    receipt = collect()
+    assert receipt["ok"] is False
+    assert 1 in ids(receipt)
+
+
 def test_chain_of_cancelled_runs_each_superseded(evidence, actions):
     actions["workflow_runs"][50] = workflow_run(50, created="2026-11-02T10:00:00Z", conclusion="cancelled")
     evidence["runs"].insert(0, check("cancelled", 3, 6, started="2026-11-02T10:00:30Z",

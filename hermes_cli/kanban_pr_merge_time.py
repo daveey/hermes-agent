@@ -156,7 +156,7 @@ def _drop_cancelled_superseded(kept, every, cutoff, run_of):
                 and ((other := run_of(c)) is None or other["id"] == workflow["id"])]
 
     def superseded(check):
-        if check.get("conclusion") != "cancelled":
+        if check.get("conclusion") != "cancelled" or not finished(check):
             return False
         earlier = run_of(check)
         if earlier is None or len(jobs_in_run(check, earlier)) != 1:
