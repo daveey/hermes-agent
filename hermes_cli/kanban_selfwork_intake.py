@@ -14,6 +14,7 @@ from contextvars import ContextVar
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_selfwork as policy
 from hermes_cli import kanban_selfwork_batch as batch
+from hermes_cli import kanban_selfwork_guards as guards
 
 _CREATION = ContextVar('self_work_intake_creation', default=None)
 
@@ -93,7 +94,7 @@ def admit(conn, *, request_id, authority, local_gateway, options, now, create_gu
         from hermes_cli.kanban_lanes import lane_tenant
         tenant = lane_tenant(conn, tuple(options.get('parents', ())), options.get('initial_status', 'running'),
                              options.get('triage', False), options.get('tenant'), options)
-        decision = batch.choose(conn, value, now=now, tenant=tenant)
+        decision = guards.choose(conn, value, now=now, tenant=tenant)
         if decision.disposition == 'append':
             receipt = batch.append(conn, decision, value, request_id=request_id,
                                    title=options['title'], body=options.get('body'),
@@ -147,7 +148,7 @@ def append_existing(conn, *, request_id, authority, options, request, now):
         from hermes_cli.kanban_lanes import lane_tenant
         tenant = lane_tenant(conn, tuple(options.get('parents', ())), options.get('initial_status', 'running'),
                              options.get('triage', False), options.get('tenant'), options)
-        if batch.choose(conn, value, now=now, tenant=tenant).disposition != 'append':
+        if guards.choose(conn, value, now=now, tenant=tenant, report=False).disposition != 'append':
             return None
         return admit(conn, request_id=request_id, authority=authority, local_gateway=authority,
                      options=options, request=request, now=now)

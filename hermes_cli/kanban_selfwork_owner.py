@@ -98,8 +98,12 @@ def replay(conn, args, intent, *, origin_intent=None):
                        creator_task_id=creator_task(conn, intent),
                        created_by=intent.get('sender') or _persisted_identity(),
                        parents=_coerce_str_list(args.get('parents') or [], 'parents', 'task ids'))
-        receipt = intake.append_existing(conn, request_id=intent['request_id'], authority=authority,
-                                         options=options, request=request, now=int(time.time()))
+        from hermes_cli import kanban_selfwork_guards as guards
+        try:
+            receipt = intake.append_existing(conn, request_id=intent['request_id'], authority=authority,
+                                             options=options, request=request, now=int(time.time()))
+        except guards.GuardFrozen as exc:
+            return guards.refusal(exc)
     return _render(conn, receipt, intent) if receipt is not None else None
 
 
@@ -137,8 +141,12 @@ def create(conn, options, *, after_create, marker_placement, place_origin, reque
     # execution labels remain valid, but legacy deferred forwarding cannot.
     if marker_placement and marker_placement.get('defer'):
         raise policy.SelfWorkError('self-work admission stays at home; use Board execution labels, not gateway forwarding')
-    receipt = intake.admit(conn, request_id=intent['request_id'], authority=authority,
-                           local_gateway=authority, options=options, now=int(time.time()),
-                           create_guard=guard, on_created=after_create,
-                           request={'args': request, 'intent': intent})
+    from hermes_cli import kanban_selfwork_guards as guards
+    try:
+        receipt = intake.admit(conn, request_id=intent['request_id'], authority=authority,
+                               local_gateway=authority, options=options, now=int(time.time()),
+                               create_guard=guard, on_created=after_create,
+                               request={'args': request, 'intent': intent})
+    except guards.GuardFrozen as exc:
+        return guards.refusal(exc)
     return _render(conn, receipt, intent, marker_placement, place_origin)

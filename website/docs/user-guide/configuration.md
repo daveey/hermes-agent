@@ -3601,6 +3601,15 @@ dashboard:
 
 ## Hermes self-work spot checks
 
+`kanban.self_work.freeze_guards` defaults to `true`. At authoritative intake,
+explicit `self_work.kind: guard` requests append evidence to the oldest open guard
+owner in the same repository, area and tenant, even across UTC days. If none exists,
+creation is refused. Each new attempt logs one line; replayed receipts do not append
+again. Existing guards keep running. Set the key to `false` to restore ordinary
+area/day batching and creation. This switch does not infer guard work from titles:
+undeclared cards and other maintenance kinds are unaffected. Configure it at the
+intake authority; a sender cannot override it in a creation request.
+
 `kanban.self_work.sample_rate` sets the fraction of ordinary merged Hermes fixes
 selected for post-merge verification (default `0.2`). Set it to `1.0` to restore
 100% selection, or `0.0` to select only mandatory checks. Values must be finite
