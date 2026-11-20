@@ -35,7 +35,8 @@ def _exists(conn) -> bool:
 def file_holds(path: Path) -> bool:
     """Cheap peek: does this database file hold any quarantine row? Opens no pooled shadow connection."""
     try:
-        peek = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        # Short-lived read-only peek, closed below; never a pooled handle.
+        peek = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)  # noqa: kanban-lockguard
     except sqlite3.Error:
         return False
     try:
