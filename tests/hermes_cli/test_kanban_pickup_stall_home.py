@@ -256,6 +256,19 @@ def test_closed_incident_is_replaced_when_membership_changes(replica, local):
     assert second != first
 
 
+def test_closed_incident_for_another_home_does_not_cover_same_membership(replica, local):
+    card(replica, "one", home="worker-1")
+    [first] = subject.sweep(local, replica, "hub", now_ms=NOW * 1000)
+    _close(local, first, NOW)
+    replica.execute("UPDATE tasks SET created_on='worker-10' WHERE id='one'")
+    _fresh_at(replica, NOW + 60)
+    [second] = subject.sweep(local, replica, "hub", now_ms=(NOW + 60) * 1000)
+    assert second != first
+    assert kb.get_task(local, second).idempotency_key.startswith(
+        "pickup-stall:hub:home-overdue-worker-10:")
+    assert local.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 2
+
+
 def test_closed_incident_is_replaced_when_membership_shrinks(replica, local):
     card(replica, "one")
     card(replica, "two")
