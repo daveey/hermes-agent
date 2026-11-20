@@ -15,9 +15,9 @@ the tokens those runs reported. A spending run is a closed run that lasted at le
 quota walls, released claims and spawn failures end in seconds and spend nothing. Tokens come from the
 run's own ``worker_result`` receipt (``usage``, written by the managed worker from its agent's session
 counters on the host that ran it, so a card that ran on several workers is still summed on its home board);
-a run with no usage receipt counts as a run only. Runs in which the profile owner refused the claim and no
-turn ran (``owner_unavailable`` / ``owner_down``, or ``crashed`` with the owner-unreachable exit 69 and no usage
-receipt) are not spending runs; ``Spend.excluded`` counts them.
+a run with no usage receipt counts as a run only. ``Spend.excluded`` counts only ``owner_unavailable`` /
+``owner_down`` runs (or ``crashed`` with integer exit 69) with no owner admission, no usage receipt, and
+no ``host_refusal`` proof except one whose phase is ``preadmission``. Admitted or interrupted turns count.
 
 At ``kanban.spend_budget_runs`` spending runs (default 15) or ``kanban.spend_budget_cache_read_tokens``
 cache-read tokens (default 30M) -- 0 disables either -- the dispatcher does not spawn the card. Deciding
@@ -48,9 +48,8 @@ OVERRIDE_EVENT = "spend_budget_set"  # a card's own limits (``set_override``); t
 AUTHOR = "kanban-spend-budget"
 # A run that handed work on closes the budget window.
 RESET_OUTCOMES = ("completed", "review_requested", "changes_requested")
-# Runs booked while the profile owner refused the claim ran no turn and spent nothing. ``owner_unavailable`` /
-# ``owner_down`` are booked as such; the fifth consecutive refusal is booked ``crashed`` with the worker's
-# owner-unreachable exit code (``kanban_owner_unavailable``: 69) and no usage receipt.
+# Exclude these outcomes (or crashed with integer exit 69) only without admission or usage, and with
+# host_refusal absent or explicitly preadmission. Neutral failure-budget bookings can also be mid-turn.
 REFUSAL_OUTCOMES = ("owner_unavailable", "owner_down")
 REFUSAL_EXIT_CODE = 69
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
@@ -224,18 +223,22 @@ def _run_usage(conn: sqlite3.Connection, task_id: str, run_ids: list[int]) -> di
     return out
 
 
-def _refused(outcome: Any, raw_metadata: Any, has_usage: bool) -> bool:
-    """True for a run in which the owner refused the claim and no turn ran."""
-    if outcome in REFUSAL_OUTCOMES:
-        return True
-    if outcome != "crashed" or has_usage:
+def _refused(outcome: Any, raw_metadata: Any, has_usage: bool, admitted: bool) -> bool:
+    """Exclude only pre-turn owner refusals, not admitted or interrupted turns."""
+    if has_usage or admitted:
         return False
     try:
         meta = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
     except ValueError:
         return False
-    code = meta.get("exit_code") if isinstance(meta, dict) else None
-    return code == REFUSAL_EXIT_CODE and not isinstance(code, bool)
+    meta = meta if isinstance(meta, dict) else {}
+    proof = meta.get("host_refusal")
+    if "host_refusal" in meta and (not isinstance(proof, dict) or proof.get("phase") != "preadmission"):
+        return False
+    if outcome in REFUSAL_OUTCOMES:
+        return True
+    code = meta.get("exit_code")
+    return outcome == "crashed" and isinstance(code, int) and not isinstance(code, bool) and code == REFUSAL_EXIT_CODE
 
 
 def spend(conn: sqlite3.Connection, task_id: str, *, as_of: Optional[int] = None) -> Spend:
@@ -246,7 +249,10 @@ def spend(conn: sqlite3.Connection, task_id: str, *, as_of: Optional[int] = None
         "SELECT id, outcome, metadata FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL AND ended_at < ? "
         "AND started_at >= ? AND ended_at - started_at >= ?", (task_id, cut, since, MIN_RUN_SECONDS)).fetchall()
     usage = _run_usage(conn, task_id, [int(r[0]) for r in rows])
-    run_ids = [int(r[0]) for r in rows if not _refused(r[1], r[2], int(r[0]) in usage)]
+    admitted = {int(r[0]) for r in conn.execute(
+        "SELECT DISTINCT run_id FROM task_events WHERE task_id = ? AND kind = 'owner_admitted' "
+        "AND run_id IS NOT NULL", (task_id,))}
+    run_ids = [int(r[0]) for r in rows if not _refused(r[1], r[2], int(r[0]) in usage, int(r[0]) in admitted)]
     excluded = len(rows) - len(run_ids)
     tokens = {key: 0 for key in USAGE_KEYS}
     cost = 0.0

@@ -485,11 +485,13 @@ def test_cli_sets_and_shows_the_card_override(kanban_home):
 
 def _refusals(conn, tid: str) -> None:
     """The 7 no-turn runs of t_01a1f874b1c702d7: six ``owner_unavailable`` and one ``crashed`` rc 69."""
+    metadata = {"host_refusal": {"kind": "owner_storage_unavailable", "phase": "preadmission",
+                                 "reason": "storage_unavailable"}}
     for _ in range(3):
-        _run(conn, tid, "owner_unavailable")
+        _run(conn, tid, "owner_unavailable", metadata=metadata)
     _run(conn, tid, "crashed", metadata={"exit_kind": "nonzero_exit", "exit_code": 69})
     for _ in range(3):
-        _run(conn, tid, "owner_unavailable")
+        _run(conn, tid, "owner_unavailable", metadata=metadata)
 
 
 def test_owner_refusals_do_not_hold_the_t_01a1f874b1c702d7_window(kanban_home):
@@ -542,3 +544,25 @@ def test_readback_reports_the_excluded_count(kanban_home):
     shown = json.loads(kc.run_slash(f"spend-budget {tid} --json"))
     assert shown["spent"]["runs"] == 8 and shown["spent"]["excluded"] == 7
     assert "spent: 8 runs (7 owner-refusal runs excluded)" in kc.run_slash(f"spend-budget {tid}")
+
+
+@pytest.mark.parametrize("outcome,metadata,admitted,usage", [
+    ("owner_unavailable", None, True, None),
+    ("owner_down", None, True, None),
+    ("owner_unavailable", {"host_refusal": {"phase": "startup"}}, True, None),
+    ("owner_unavailable", {"host_refusal": {"phase": "startup"}}, False, None),
+    ("owner_unavailable", {"host_refusal": {"phase": "unknown"}}, False, None),
+    ("owner_unavailable", {"host_refusal": None}, False, None),
+    ("owner_down", None, False, {"input_tokens": 5}),
+    ("crashed", {"exit_code": 69.0}, False, None),
+])
+def test_refusal_evidence_must_prove_no_turn(kanban_home, outcome, metadata, admitted, usage):
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="uncertain refusal", assignee="default")
+        run_id = _run(conn, tid, outcome, metadata=metadata, usage=usage)
+        if admitted:
+            with kb.write_txn(conn):
+                kb._append_event(conn, tid, "owner_admitted", {}, run_id=run_id)
+        spent = ksb.spend(conn, tid)
+        assert (spent.runs, spent.excluded) == (1, 0)
+        assert spent.reported <= spent.runs
