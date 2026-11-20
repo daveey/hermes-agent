@@ -57,6 +57,16 @@ KEY = "q8ZpL2vXk9RtYwB4mN7cQ1sD5fH3jK6g"
             ],
             ["--auth-header", MASK, f"--private-key-pem={MASK}", "--apikey", MASK],
         ),
+        # NAME=value assignments: the value is judged under its name
+        (
+            ["API_TOKEN=abc123", "Config=" + KEY],
+            [f"API_TOKEN={MASK}", f"Config={MASK}"],
+        ),
+        # plural secret lists are secrets too
+        (
+            ["--github-tokens", "Qx7Lm2Zp/w", "--bot-tokens=abc"],
+            ["--github-tokens", MASK, f"--bot-tokens={MASK}"],
+        ),
         # a numeric value after a secret-named flag is the secret
         (
             ["--webhook-secret", "12345678901234567890", "--signing-key=4242424242"],
@@ -120,6 +130,14 @@ def test_secrets_are_masked(argv, expected):
         ],
         ["--model", "Qwen3-Coder-480B-A35B-Instruct"],
         ["--api-key-timeout", "30"],
+        ["profile", "create", "--isolated-auth", "work", "--no-credentials", "scratch"],
+        [
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "NumberOfPasswordPrompts=0",
+            "HERMES_PROFILE=coder",
+        ],
         # settings about a secret, not the secret: deliberate (an id, a name, an env var, a store, a jar path)
         [
             "--access-key-id",

@@ -17,21 +17,24 @@ MASK = "***"
 # A flag is secret-named when a part of its name is, or ends with, a secret word (--api-key, --apikey,
 # --client-secret-value, --token-b64, --auth-header) -- fail closed: a new suffix stays secret -- unless its LAST
 # part names a setting about the secret rather than the secret (--api-key-timeout, --token-env, --key-file).
-_SECRET_WORD = re.compile(r"(?:key|token|secret|passw(?:or)?d|passwd|pwd|auth|credentials?|cookie|bearer)$",
+_SECRET_WORD = re.compile(r"(?:key|token|secret|passw(?:or)?d|passwd|pwd|auth|credential|cookie|bearer)s?$",
                           re.IGNORECASE)
 _SETTING_SUFFIXES = frozenset({
     "file", "files", "env", "timeout", "ttl", "name", "names", "id", "ids", "path", "paths", "dir", "url", "uri",
     "host", "port", "count", "limit", "size", "length", "len", "mode", "type", "kind", "format", "store", "backend",
-    "provider", "browser", "helper", "cmd", "command", "tokens", "keys", "enabled", "required", "only",
+    "provider", "browser", "helper", "cmd", "command", "enabled", "required", "only",
 })
 # Flags that LOOK secret-named but carry public, identifying values.
 _PUBLIC_FLAGS = frozenset({"--ssh-session-token-file", "--token-file", "--key-file", "--auth-file",
                            "--keychain", "--monkey", "--keyboard", "--author", "--authority",
                            "--max-tokens", "--min-tokens", "--cache-read-tokens", "--token-env",
-                           "--idempotency-key", "--step-key", "--passkey-browser"})
+                           "--idempotency-key", "--step-key", "--passkey-browser",
+                           # booleans: they take no value, so the next positional (a profile name) is not theirs
+                           "--isolated-auth", "--no-credentials", "--no-ask-password"})
 _TOKEN_CHARS = re.compile(r"^[A-Za-z0-9_+=.~-]+$")
 _HEX = re.compile(r"^[0-9a-fA-F-]+$")
 _HERMES_ID = re.compile(r"^(?:t_[0-9a-f]+|\d{8}_\d{6}_[0-9a-z]+|[a-z]+(?:[-_][a-z]+)+)$")
+_ASSIGNMENT = re.compile(r"^([A-Za-z][A-Za-z0-9_.-]*)=")
 _NUMBER = re.compile(r"^[+-]?\d+(?:\.\d+)?$")
 _PATH_START = re.compile(r"^(?:/|~|\.{1,2}/|\\|[A-Za-z]:[\\/])")
 _MIN_BARE_SECRET = 20
@@ -96,6 +99,10 @@ def mask_argv_secrets(argv: list[str]) -> list[str]:
             else:
                 out.append(token)
                 mask_next = secret_named
+            continue
+        if assignment := _ASSIGNMENT.match(token):  # ssh -o ServerAliveInterval=15, env-style NAME=value
+            name, value = assignment.group(1), token[assignment.end():]
+            out.append(f"{name}={_mask_value(value, secret_named=_is_secret_flag('--' + name))}")
             continue
         out.append(_mask_value(token, secret_named=False))
     return out
