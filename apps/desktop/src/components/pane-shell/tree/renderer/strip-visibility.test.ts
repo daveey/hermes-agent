@@ -110,6 +110,20 @@ describe('tabStripVisibleForZone', () => {
   const contributions: Record<string, Contribution> = {
     terminal: { area: 'panes', data: { placement: 'bottom' }, id: 'terminal', render: () => null, title: 'terminal' },
     'tile:a': { area: 'panes', data: { placement: 'main' }, id: 'tile:a', render: () => null, title: 'tile' },
+    'preview-tile:one': {
+      area: 'panes',
+      data: { placement: 'main' },
+      id: 'preview-tile:one',
+      render: () => null,
+      title: 'Browser'
+    },
+    'preview-tile:two': {
+      area: 'panes',
+      data: { placement: 'main' },
+      id: 'preview-tile:two',
+      render: () => null,
+      title: 'Browser 2'
+    },
     workspace: {
       area: 'panes',
       data: { placement: 'main', uncloseable: true },
@@ -138,6 +152,12 @@ describe('tabStripVisibleForZone', () => {
     expect(visible(['workspace', 'terminal'])).toBe(true)
     expect(visible(['workspace', 'terminal'], 'never')).toBe(false)
     expect(visible([])).toBe(false)
+  })
+
+  it('keeps the strip in a preview-only zone so Browser tabs can switch', () => {
+    setTabStripDefault('single')
+    expect(visible(['preview-tile:one', 'preview-tile:two'])).toBe(true)
+    expect(visible(['preview-tile:one'])).toBe(true)
   })
 
   it('reads placement, uncloseable and collapse off the contributions', () => {

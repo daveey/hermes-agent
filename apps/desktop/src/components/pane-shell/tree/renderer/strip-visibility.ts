@@ -110,12 +110,14 @@ export function tabStripVisibleForZone(zone: {
   /** Panes currently rendered as chips. */
   shown: readonly string[]
 }): boolean {
-  // Single's main slot has no tab-strip chrome. Side/tool-panel strips still
-  // resolve through the existing Auto/Always/Never ladder below.
+  // Single's session slot has no tab-strip chrome. Side/tool-panel strips and
+  // preview-only zones still resolve through the existing Auto/Always/Never
+  // ladder: Browser tabs need chips and "+" to switch.
   if (
     $tabStripDefault.get() === 'single' &&
     zone.shown.length > 0 &&
-    zone.shown.every(id => paneChrome(zone.paneFor(id)).placement === 'main')
+    zone.shown.every(id => paneChrome(zone.paneFor(id)).placement === 'main') &&
+    !zone.shown.every(id => id.startsWith('preview-tile:'))
   ) {
     return false
   }

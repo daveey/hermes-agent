@@ -87,6 +87,7 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
   const registered = new Map<string, { dispose: () => void; dock: DockHint; title: string }>()
   // Retained tiles, oldest first (Set order = the order they were parked).
   const parked = new Set<string>()
+  const parkOwner = `mirror:${cfg.prefix}`
 
   const paneId = (key: string) => `${cfg.prefix}:${key}`
 
@@ -112,7 +113,7 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
     registered.get(key)?.dispose()
     registered.delete(key)
     parked.delete(key)
-    setTreePaneParked(paneId(key), false)
+    setTreePaneParked(paneId(key), false, parkOwner)
     removeTreePane(paneId(key))
   }
 
@@ -129,7 +130,7 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
 
       if (isHidden && !current) {
         parked.add(key)
-        setTreePaneParked(paneId(key), true)
+        setTreePaneParked(paneId(key), true, parkOwner)
       }
 
       // A retained tile coming back keeps its registration — re-registering
@@ -137,7 +138,7 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
       // anchor may have left the tree), before the tiles leaving below go.
       if (!isHidden && current && parked.delete(key)) {
         Object.assign(current.dock, dockFor(tile))
-        setTreePaneParked(paneId(key), false)
+        setTreePaneParked(paneId(key), false, parkOwner)
         unparked = true
       }
 
@@ -192,7 +193,7 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
       if (cfg.retain?.(key)) {
         if (!parked.has(key)) {
           parked.add(key)
-          setTreePaneParked(paneId(key), true)
+          setTreePaneParked(paneId(key), true, parkOwner)
           removeTreePane(paneId(key))
         }
 

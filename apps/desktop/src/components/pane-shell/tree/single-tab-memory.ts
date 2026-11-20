@@ -1,4 +1,4 @@
-import { setTreePaneParked } from './parked-panes'
+import { setTreePaneParked, TREE_PARK_SINGLE } from './parked-panes'
 
 export interface ParkedTab {
   groupId: string
@@ -17,5 +17,5 @@ export function resetSingleTabsForTests(): void {
   const entries = singleTabMemory.parked
   singleTabMemory.parked = []
   singleTabMemory.preferred = null
-  entries.forEach(entry => setTreePaneParked(entry.id, false))
+  entries.forEach(entry => setTreePaneParked(entry.id, false, TREE_PARK_SINGLE))
 }

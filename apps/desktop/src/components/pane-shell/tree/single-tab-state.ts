@@ -2,7 +2,7 @@ import { registry } from '@/contrib/registry'
 import { $tabStripDefault } from '@/store/tabstrip-prefs'
 
 import { allPaneIds, findGroup, findGroupOfPane, type LayoutNode, removePane } from './model'
-import { setTreePaneParked } from './parked-panes'
+import { isTreePaneParked, isTreePaneParkedByOthers, setTreePaneParked, TREE_PARK_SINGLE } from './parked-panes'
 import { singleTabMemory as memory, type ParkedTab } from './single-tab-memory'
 const on = () => $tabStripDefault.get() === 'single'
 
@@ -24,7 +24,8 @@ function enforce(tree: LayoutNode): LayoutNode {
 
     const mains = node.panes.filter(isMain)
 
-    if (mains.length < 2) {
+    // A preview-only zone is not the session tab slot: keep every Browser tab.
+    if (mains.length < 2 || mains.every(id => id.startsWith('preview-tile:'))) {
       return node
     }
 
@@ -42,7 +43,7 @@ function enforce(tree: LayoutNode): LayoutNode {
         ...memory.parked.filter(e => e.id !== id),
         { groupId: node.id, id, index: node.panes.indexOf(id) }
       ]
-      setTreePaneParked(id, true)
+      setTreePaneParked(id, true, TREE_PARK_SINGLE)
     }
 
     const panes = node.panes.filter(id => !displaced.includes(id))
@@ -58,7 +59,7 @@ function unpark(id: string): ParkedTab | undefined {
 
   if (entry) {
     memory.parked = memory.parked.filter(e => e.id !== id)
-    setTreePaneParked(id, false)
+    setTreePaneParked(id, false, TREE_PARK_SINGLE)
   }
 
   return entry
@@ -93,7 +94,13 @@ function remove(tree: LayoutNode, id: string): LayoutNode | null {
 
     const candidate = [...memory.parked]
       .reverse()
-      .find(e => e.groupId === zone.id && registered.has(e.id) && !inTree.has(e.id))
+      .find(
+        e =>
+          e.groupId === zone.id &&
+          registered.has(e.id) &&
+          !inTree.has(e.id) &&
+          !isTreePaneParkedByOthers(e.id, TREE_PARK_SINGLE)
+      )
 
     if (candidate) {
       unpark(candidate.id)
@@ -119,7 +126,7 @@ function remove(tree: LayoutNode, id: string): LayoutNode | null {
 function release(tree: LayoutNode | null, dismissed: ReadonlySet<string>): LayoutNode | null {
   const entries = [...memory.parked].sort((a, b) => a.index - b.index)
   memory.parked = []
-  entries.forEach(e => setTreePaneParked(e.id, false))
+  entries.forEach(e => setTreePaneParked(e.id, false, TREE_PARK_SINGLE))
 
   if (!tree) {
     return null
@@ -128,7 +135,12 @@ function release(tree: LayoutNode | null, dismissed: ReadonlySet<string>): Layou
   let next = tree
 
   for (const entry of entries) {
-    if (!registered.has(entry.id) || allPaneIds(next).includes(entry.id) || dismissed.has(entry.id)) {
+    if (
+      !registered.has(entry.id) ||
+      allPaneIds(next).includes(entry.id) ||
+      dismissed.has(entry.id) ||
+      isTreePaneParked(entry.id)
+    ) {
       continue
     }
 
