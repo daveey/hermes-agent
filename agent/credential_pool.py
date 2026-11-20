@@ -27,7 +27,7 @@ from agent.credential_pool_plugin import apply_plugin_refresh_result, plugin_row
 from agent.credential_persistence import (
     fingerprint_secret_value, is_borrowed_credential_source, sanitize_borrowed_credential_payload)
 import hermes_cli.auth as auth_mod
-from hermes_cli.auth_pool_read_scope import known_pool_pairs
+from hermes_cli.auth_pool_read_scope import read_pool_snapshot
 from hermes_cli.auth_oauth_grants import owned_profile_reads_root_state
 from hermes_cli.auth import (
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
@@ -797,7 +797,7 @@ def _update_root_pool_rows(
     provider: str, payloads: list[dict[str, Any]], global_path: Path,
     *, status_cleared_ids: Optional[Iterable[str]] = None,
     token_bases: Optional[dict[str, tuple[Any, Any]]] = None,
-) -> list[dict[str, Any]]:
+) -> Optional[list[dict[str, Any]]]:
     """UPDATE-ONLY root merge: borrowers may refresh rows, never add or delete them.
 
     Root owns their lifecycle; ignore profile singleton-prune's ``removed_ids``.
@@ -806,8 +806,7 @@ def _update_root_pool_rows(
         store = _load_auth_store(global_path)
         pool = store.get("credential_pool")
         if not isinstance(pool, dict):
-            pool = {}
-            store["credential_pool"] = pool
+            return None  # Missing/corrupt root is not evidence of peer deletion.
         existing = pool.get(provider)
         existing_list = existing if isinstance(existing, list) else []
         incoming_by_id = auth_mod._entry_ids(payloads)
@@ -2997,7 +2996,7 @@ def load_pool(provider: str, *, allowed_auth_types=None) -> CredentialPool:
         # One-time heal for installs that forked this grant across profiles
         # before the clone-strip / root write-through existed (#100339).
         auth_mod.heal_forked_single_use_oauth_grants(provider)
-    raw_entries = read_credential_pool(provider)
+    raw_entries, token_bases = read_pool_snapshot(provider)
     disk_ids = {e.get("id") for e in raw_entries if isinstance(e, dict) and e.get("id")}
     # Ownership (auth.json read) after the heal above; re-read at the tail only if _persist() ran.
     owns_provider: Optional[bool] = None
@@ -3050,7 +3049,7 @@ def load_pool(provider: str, *, allowed_auth_types=None) -> CredentialPool:
         changed |= _normalize_pool_priorities(provider, entries)
 
     pool = CredentialPool(provider, entries, allowed_auth_types=allowed_auth_types)
-    pool._persisted_token_pairs = known_pool_pairs(provider, raw_entries)
+    pool._persisted_token_pairs = token_bases
     if changed:
         pool._persist(removed_ids=sorted(disk_ids - {entry.id for entry in entries}))
     # Remember the root's borrowed rows so a later ``add_entry`` in this

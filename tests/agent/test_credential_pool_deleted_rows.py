@@ -87,6 +87,61 @@ def test_profile_fallback_flush_keeps_borrowed_rows(tmp_path, monkeypatch):
     assert [r["id"] for r in auth.read_credential_pool("openrouter")] == ["g1"]
 
 
+@pytest.mark.parametrize("damage", ["corrupt", "missing"])
+def test_borrowed_root_unavailable_preserves_runtime(tmp_path, monkeypatch, damage):
+    import json
+    from pathlib import Path
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setattr(pools, "_seed_from_singletons", lambda *a: (False, set()))
+    monkeypatch.setattr(pools, "_seed_from_env", lambda *a: (False, set()))
+    path = root / "auth.json"
+    path.write_text(json.dumps({"credential_pool": {"anthropic": [
+        {"id": "g1", "source": "manual", "auth_type": "api_key", "priority": 0,
+         "access_token": "fixture-global"}]}}))
+    pool = pools.load_pool("anthropic")
+    pool._current_id = "g1"
+    if damage == "corrupt":
+        path.write_text("{not json")
+    else:
+        path.unlink()
+    for _ in range(2):
+        pool._persist()
+        assert [e.id for e in pool.entries()] == ["g1"]
+        assert pool._current_id == "g1"
+        assert "g1" in pool._persisted_token_pairs
+    assert not (profile / "auth.json").exists()
+    # A valid empty root pool IS evidence of deletion, unlike a missing store.
+    path.write_text(json.dumps({"credential_pool": {"anthropic": []}}))
+    pool._persist()
+    assert pool.entries() == []
+    assert pool._current_id is None
+
+
+def test_peer_deletion_during_load_is_not_a_new_addition(monkeypatch):
+    provider = "openrouter"
+    rows = [pools.PooledCredential(provider=provider, id=f"row{i}", label=f"f{i}",
+                                   source="manual", auth_type="api_key", priority=i,
+                                   access_token=f"fixture-{i}") for i in range(2)]
+    auth.write_credential_pool(provider, [row.to_dict() for row in rows])
+
+    def delete_during_seed(*args):
+        _remove_in_peer(provider, ["row0"])
+        return False, set()
+
+    monkeypatch.setattr(pools, "_seed_from_singletons", delete_during_seed)
+    monkeypatch.setattr(pools, "_seed_from_env", lambda *a: (False, set()))
+    pool = pools.load_pool(provider)
+    for _ in range(2):
+        pool._persist()
+        assert [r["id"] for r in auth.read_credential_pool(provider)] == ["row1"]
+    assert [e.id for e in pool.entries()] == ["row1"]
+
+
 def test_corrupt_store_flush_self_heals_from_memory(monkeypatch):
     monkeypatch.setattr(pools, "_seed_from_singletons", lambda *a: (False, set()))
     monkeypatch.setattr(pools, "_seed_from_env", lambda *a: (False, set()))

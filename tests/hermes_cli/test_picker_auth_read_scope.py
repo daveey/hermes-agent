@@ -49,6 +49,21 @@ def test_distinct_provider_reads_share_parse_only_inside_picker(store, monkeypat
     assert len(calls) == 4
 
 
+def test_load_pool_reuses_picker_parse(store, monkeypatch):
+    from agent import credential_pool as pools
+
+    monkeypatch.setattr(pools, "_seed_from_singletons", lambda *a: (False, set()))
+    monkeypatch.setattr(pools, "_seed_from_env", lambda *a: (False, set()))
+    rows = [{"id": "one", "source": "manual", "auth_type": "api_key", "priority": 0,
+             "access_token": "fixture"}]
+    store.write_text(json.dumps({"credential_pool": {p: rows for p in ("alpha", "beta", "gamma")}}))
+    calls = count_loads(monkeypatch)
+    with picker_build_scope():
+        for provider in ("alpha", "beta", "gamma"):
+            assert [e.id for e in pools.load_pool(provider).entries()] == ["one"]
+        assert len(calls) == 1
+
+
 def test_returned_nested_payload_is_not_the_snapshot(store):
     with picker_build_scope():
         rows = auth.read_credential_pool("alpha")

@@ -84,25 +84,32 @@ def read_credential_pool(provider_id=None):
             if isinstance(rows, list) and rows and not (isinstance(existing, list) and existing):
                 merged[key] = rows
         return deepcopy(merged)
-    rows = pool.get(provider_id)
-    if not (isinstance(rows, list) and rows):
-        rows = global_pool.get(provider_id)
-    return deepcopy(rows) if isinstance(rows, list) else []
+    return _provider_snapshot(provider_id, pool, global_pool)[0]
 
 
-def known_pool_pairs(provider_id, rows):
-    """Token-generation bases for the deletion fence, limited to rows of the store written.
-
-    Rows read through the global-root fallback were never in the active store, so a missing
-    one there is an addition, not a peer deletion. Single-use providers write back to the
-    root, so their root-read rows stay known."""
-    from agent.credential_pool import SINGLE_USE_REFRESH_POOL_PROVIDERS, _profile_owns_pool_provider
+def _provider_snapshot(provider_id, pool, global_pool):
     from hermes_cli import auth
 
-    pairs = auth._token_pairs_by_id(rows)
-    if provider_id in SINGLE_USE_REFRESH_POOL_PROVIDERS and not _profile_owns_pool_provider(provider_id):
-        return pairs
-    own = auth._load_auth_store().get("credential_pool")
-    own_rows = own.get(provider_id) if isinstance(own, dict) else None
-    own_ids = set(auth._entry_ids(own_rows)) if isinstance(own_rows, list) else set()
-    return {rid: pair for rid, pair in pairs.items() if rid in own_ids}
+    rows = pool.get(provider_id)
+    own = isinstance(rows, list) and bool(rows)
+    if not own:
+        rows = global_pool.get(provider_id)
+    rows = deepcopy(rows) if isinstance(rows, list) else []
+    # Ownership and rows must come from ONE snapshot: a second read could mistake
+    # a peer deletion between reads for a never-persisted addition.
+    known = own or provider_id in auth.SINGLE_USE_REFRESH_POOL_PROVIDERS
+    return rows, auth._token_pairs_by_id(rows) if known else {}
+
+
+def read_pool_snapshot(provider_id):
+    """Return independent rows and write-target token bases from the same read.
+
+    Ordinary profile fallback rows are additions to the profile; single-use
+    fallback rows are updates to the root and therefore remain known there.
+    """
+    from hermes_cli import auth
+
+    pool = _read_store().get("credential_pool")
+    global_pool = auth._load_global_auth_store().get("credential_pool")
+    return _provider_snapshot(provider_id, pool if isinstance(pool, dict) else {},
+                              global_pool if isinstance(global_pool, dict) else {})
