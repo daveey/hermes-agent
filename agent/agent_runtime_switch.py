@@ -39,26 +39,21 @@ def _stage_compressor(compressor):
     return staged, writes
 
 
-def _switch_changes(base, pristine, working, staged):
-    """Only what the switch itself changed since its snapshot is published.
+# Turn custody is written only by turn admission and release (agent.turn_facade_lease), never by a switch.
+_TURN_CUSTODY_KEYS = frozenset({
+    '_active_session_turn_lease_holder', '_last_session_turn_lease_holder', '_active_session_turn_lease_ttl_seconds',
+})
+
+
+def _without_turn_custody(staged):
+    """The staged copy minus turn custody, which stays whatever the live agent holds now.
 
     Resolution can take seconds and the callers' ``running`` check is unlocked, so a turn may be
-    admitted on the live agent meanwhile. Publishing the whole stale copy reverted that turn's state:
-    its lease holder went back to None (the flush then skipped the lease check) or to an earlier
-    turn's released holder (the flush was refused as a lost lease)."""
-    changes = {}
-    for key, value in staged.items():
-        if key in working and value is working[key]:
-            try:
-                unchanged = value == pristine[key]
-            except (TypeError, ValueError, RecursionError):
-                unchanged = False  # incomparable content: publish, as before
-        else:
-            unchanged = key in base and value is base[key]
-        if unchanged:
-            continue
-        changes[key] = value
-    return changes
+    admitted or released on the live agent meanwhile. Publishing the snapshot's custody reverted it:
+    the holder went back to None (the flush then skipped the lease check) or to an earlier turn's
+    released holder (the flush was refused as a lost lease). Everything else is still published
+    whole, so the switch's resets land even where they equal the snapshot."""
+    return {key: value for key, value in staged.items() if key not in _TURN_CUSTODY_KEYS}
 
 
 def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabilities):
@@ -76,13 +71,11 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
     if config is None and not temporary:
         return _switch_model_runtime(agent, model, provider, api_key, base_url, api_mode, capabilities)
     staged = copy(agent)
-    base = dict(vars(agent))
     # Switch helpers mutate these containers in place. Never expose partial work
     # or clear live provenance while constructing a replacement.
-    pristine = {key: copy(value) for key, value in base.items() if isinstance(value, (dict, list, set))}
-    for key, value in pristine.items():
-        setattr(staged, key, copy(value))
-    working = {key: vars(staged)[key] for key in pristine}
+    for key, value in vars(agent).items():
+        if isinstance(value, (dict, list, set)):
+            setattr(staged, key, copy(value))
     staged.context_compressor, compressor_writes = _stage_compressor(getattr(agent, 'context_compressor', None))
     staged._session_db = None
 
@@ -105,7 +98,7 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
     backend = getattr(staged.context_compressor, '_session_db', None)
     if isinstance(backend, _DeferredSessionWrites):
         staged.context_compressor._session_db = backend.backend
-    vars(agent).update(_switch_changes(base, pristine, working, vars(staged)))
+    vars(agent).update(_without_turn_custody(vars(staged)))
     persist_class_metadata(agent)
     for method, args, kwargs in ([] if temporary else compressor_writes):
         method(*args, **kwargs)

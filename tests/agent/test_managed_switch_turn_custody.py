@@ -141,3 +141,18 @@ def test_quiet_switch_publishes_the_same_runtime(live):
     agent.switch_model(TARGET, 'anthropic')
     assert agent.model == TARGET and agent._session_db is db
     assert getattr(agent, '_active_session_turn_lease_holder', None) is None
+
+
+@pytest.mark.parametrize('field, during, expected', [
+    ('_stream_options_unsupported', True, False),
+    ('_fallback_activated', True, False),
+    ('_cached_system_prompt', 'prompt built for the old model', None),
+])
+def test_switch_reset_lands_over_a_value_set_during_the_switch(live, field, during, expected):
+    """The reset equals the snapshot value, so a publish that diffs against the snapshot would drop it."""
+    agent, _db = live
+    setattr(agent, field, expected)
+    switch = PausedSwitch(agent)
+    setattr(agent, field, during)
+    switch.finish()
+    assert getattr(agent, field) == expected and agent.model == TARGET
