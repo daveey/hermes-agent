@@ -26,7 +26,10 @@ def first_seen(seen, uid: str) -> int | None:
 
 
 def _dropped(conn, freed: set[str], blocked: set[str]) -> list[str]:
-    """This file's withheld wires of the freed tasks (none still held by another receipt)."""
+    """This file's withheld wires of the freed tasks (none still held by another receipt). Dropping them is safe
+    even for a freed task absent from this file: a non-primary file never replays withheld rows (``replay=False``),
+    and the replica's certified rows of each freed task it holds are what the lift applies. A row naming a task
+    another receipt still holds, or naming no identifiable task, stays withheld."""
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_sync_quarantine as quarantine
     if not freed or not quarantine._exists(conn, "containment_sync_withheld"):

@@ -311,11 +311,12 @@ def _release_files(slug, live_path, receipt, reason, ident, hub, done) -> None:
 
 
 def release_board(slug: str, live_path: Path, receipt: str, reason: str) -> tuple[int, str]:
-    """The CLI's release: (exit code, message). 0 released, 1 no such receipt, a refused quarantine table shape
-    or an apply-time database/runtime error (holds kept), 2 refused or busy."""
+    """The CLI's release: (exit code, message). 0 released, 1 no such receipt, any other containment refusal
+    (e.g. a quarantine table shape, another board's file) or an apply-time database/runtime error (holds kept), 2 a
+    refused release (``ReleaseRefused``) or busy."""
     from hermes_cli import kanban_sync_client as ksc
     from hermes_cli import kanban_sync_guard as guard
-    from hermes_cli.kanban_sync_quarantine import QuarantineSchemaRefused, release_command
+    from hermes_cli.kanban_sync_quarantine import release_command
     from hermes_cli.kanban_sync_quarantine_release_live import refused_suffix
     ident = ksc.load_identity()
     hub = ksc.Hub(ident)
@@ -327,9 +328,10 @@ def release_board(slug: str, live_path: Path, receipt: str, reason: str) -> tupl
         return 2, f"kanban sync: {receipt} not released: a sync round holds board {slug} ({exc}); retry shortly"
     except ReleaseRefused as exc:
         return 2, f"kanban sync: {receipt} not released: {exc}{refused_suffix(slug, done)}"
-    except QuarantineSchemaRefused as exc:  # e.g. while opening the replica: a clear error, never a traceback
-        return 1, (f"kanban sync: {receipt} not released: a quarantine table has a shape this core does not "
-                   f"know ({exc}){refused_suffix(slug, done)}")
+    except ContainmentRefused as exc:  # any other refusal (a quarantine table shape, another board's file, an
+        # adopt or certify step): a clear error, never a traceback; its transaction rolled back, so the holds stay
+        return 1, (f"kanban sync: {receipt} not released: {type(exc).__name__}: {exc}; every hold is kept"
+                   f"{refused_suffix(slug, done)}")
     except (sqlite3.Error, RuntimeError) as exc:
         return 1, (f"kanban sync: {receipt} not released: the catch-up failed to apply ({type(exc).__name__}: "
                    f"{exc}); it was rolled back, every hold is kept{refused_suffix(slug, done)}")

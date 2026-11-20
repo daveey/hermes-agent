@@ -225,3 +225,57 @@ def test_refused_quarantine_shape_while_opening_the_replica_exits_1(synced_conn,
     assert r4._run("receipt-x") == 1
     out = capsys.readouterr().out
     assert "receipt-x not released" in out and "earlier unreleased quarantine shape" in out
+
+
+# --- review of #3828: the item-6 deletion keeps rows another receipt holds and unidentifiable rows ------------
+
+def test_non_primary_lift_keeps_withheld_rows_of_another_receipt_and_unidentifiable_rows(synced_conn, kanban_home,
+                                                                                         monkeypatch, capsys):
+    shadow = synced_conn
+    case = _picked_up(shadow, kanban_home)
+    other = "t_held_by_receipt_r"
+    stale = sync.RemoteChange(4, "tasks", case.target, "upsert", {"title": "stale reconcile copy"}, 4, "", "worker")
+    edge = sync.RemoteChange(5, "task_links", f"{case.target}>{other}", "upsert",
+                             {"parent_id": case.target, "child_id": other}, 5, "", "worker")
+    orphan = sync.RemoteChange(6, "task_comments", "comment-gone", "delete", {}, 6, "", "worker")  # no known task
+    with kbc.connect_closing(db_path=case.live_path) as live:
+        r4._hold(live, other)  # a second live receipt holds the edge's other end
+        assert quarantine.withhold(live, [stale, edge, orphan]) == []
+        assert support.count(live, "containment_sync_withheld") == 3
+    r4._cli(monkeypatch, case.live_path, _path(shadow), case.hub)
+    assert r4._run(case.uid) == 0, capsys.readouterr().out
+    with kbc.connect_closing(db_path=case.live_path) as live:
+        assert not quarantine.held(live, case.target) and quarantine.held(live, other)
+        kept = {r[0] for r in live.execute("SELECT wire FROM containment_sync_withheld")}
+    assert kept == {quarantine.wire(edge), quarantine.wire(orphan)}  # only the freed task's own row is dropped
+
+
+def test_containment_refusal_in_release_board_exits_1_and_keeps_the_holds(synced_conn, kanban_home, monkeypatch,
+                                                                          capsys):
+    shadow = synced_conn
+    case = _picked_up(shadow, kanban_home)
+    other = kanban_home / "other-board.db"
+    with kbc.connect_closing(db_path=other) as conn:
+        sync.set_identity(conn, "other-board", "worker")
+    real_open = ksc.open_shadow
+
+    def open_and_adopt(slug, gateway):  # opening the replica copies its holds into a file of another board
+        conn = real_open(slug, gateway)
+        with kbc.connect_closing(db_path=other) as dest:
+            try:
+                quarantine.adopt(conn, dest)  # the real board check raises ContainmentRefused
+            except Exception:
+                conn.close()
+                raise
+        return conn
+
+    monkeypatch.setattr(ksc, "open_shadow", open_and_adopt)
+    r4._cli(monkeypatch, case.live_path, _path(shadow), case.hub)
+    assert r4._run(case.uid) == 1
+    out = capsys.readouterr().out
+    assert f"{case.uid} not released: ContainmentRefused: quarantine belongs to a different board" in out
+    assert "every hold is kept" in out
+    with kbc.connect_closing(db_path=case.live_path) as live:
+        assert quarantine.held(live, case.target) and quarantine.receipts(live) == [case.uid]
+        assert support.count(live, "containment_sync_acceptances") == 0
+    assert quarantine.receipts(shadow) == [case.uid] and support.count(shadow, "containment_sync_acceptances") == 0
