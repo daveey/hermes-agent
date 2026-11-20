@@ -114,10 +114,11 @@ def test_review_admission_failure_never_spawns_or_spends_retry(board, monkeypatc
         dispatch.dispatch_once(conn, dry_run=False, spawn_fn=lambda *args: seen.append(args))
         stored = kb.get_task(conn, t.id)
         assert seen == []
-        assert stored.status == "review"
-        assert stored.consecutive_failures == 0
+        assert stored.status == ("triage" if failure == "no_route" else "review")
+        assert stored.consecutive_failures == (1 if failure == "no_route" else 0)
         assert stored.claim_lock is None
-        events = [e.payload for e in kb.list_events(conn, t.id) if e.kind == "spawn_failed"]
+        event_kind = "gave_up" if failure == "no_route" else "spawn_failed"
+        events = [e.payload for e in kb.list_events(conn, t.id) if e.kind == event_kind]
         assert events[-1]["infrastructure"] is True
 
 

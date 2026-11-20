@@ -248,8 +248,8 @@ def test_refused_review_override_without_independent_reviewer_never_spawns(board
     dispatch_once(conn, spawn_fn=lambda *args: seen.append(args), max_spawn=1)
     assert seen == []
     task = kb.get_task(conn, tid)
-    assert task.status == 'review' and task.consecutive_failures == 0 and task.claim_lock is None
-    failed = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'spawn_failed'][-1]
+    assert task.status == 'triage' and task.claim_lock is None
+    failed = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'gave_up'][-1]
     assert failed['infrastructure'] is True
     assert FABLE in failed['error'] and 'model_pin_not_in_routing_registry' in failed['error']
 
@@ -345,6 +345,6 @@ def test_rerouted_pin_reviewer_is_distinct_from_the_model_that_ran(board, overri
         return
     assert seen == []
     task = kb.get_task(conn, tid)
-    assert task.status == 'review' and task.consecutive_failures == 0
-    failed = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'spawn_failed'][-1]
+    assert task.status == 'triage'
+    failed = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'gave_up'][-1]
     assert 'claude-opus-5-5' in failed['error'] and 'gpt-6.1-sol' in failed['error']

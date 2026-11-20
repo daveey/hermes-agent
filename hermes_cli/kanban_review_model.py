@@ -70,9 +70,11 @@ def _payload(raw):
 
 
 def implementer_models(conn, task) -> set[str]:
-    """All concrete author models, never a downstream review card's reviewer pin.
+    """Concrete author models for the current implementation epoch.
 
     Read each run independently: a live worker result supersedes its launch receipt.
+    A real review separates epochs only after new concrete implementation evidence;
+    review-only retries and missing receipts preserve the previous authors.
     Related source cards are traversed with a visited set to tolerate cyclic links.
     """
     from hermes_cli import kanban_db as kb
@@ -88,23 +90,13 @@ def implementer_models(conn, task) -> set[str]:
         skilled = "sdlc-review" in (getattr(stored, "skills", None) or [])
         models = set()
         pin = str(getattr(card, "model_override", None) or "").strip()
-        if pin and not is_class_selector(pin) and not downstream:
-            models.add(pin)
+        boundary = False
         if not downstream and not skilled:
-            from hermes_cli.kanban_review_retry import rehandoff_runs
-            repeats = rehandoff_runs(conn, card.id)
-            for row in conn.execute("SELECT id FROM task_runs WHERE task_id=?", (card.id,)).fetchall():
-                if row[0] in repeats:
-                    continue
-                events = conn.execute(
-                    "SELECT kind, payload FROM task_events WHERE task_id=? AND run_id=? "
-                    "AND kind IN ('model_tier', 'run_route') ORDER BY id DESC", (card.id, row[0])).fetchall()
-                if any(_payload(event[1]).get("lane") == "review" for event in events):
-                    continue
-                model = (_run_model(conn, card.id, row[0], "worker_result", "route_model")
-                         or _run_model(conn, card.id, row[0], "run_route", "model"))
-                if model:
-                    models.add(model)
+            models, boundary = _current_authors(conn, card.id)
+        # Preserve conservative pin provenance on the first epoch and when the
+        # current epoch has no concrete receipt; an old pin is not a new author.
+        if pin and not is_class_selector(pin) and not downstream and (not boundary or not models):
+            models.add(pin)
         if downstream:
             # Declared provenance counts as evidence of its own: the change came from outside the board.
             models.update(declared_implementers(getattr(stored, "body", None), getattr(stored, "assignee", None)))
@@ -121,6 +113,36 @@ def implementer_models(conn, task) -> set[str]:
 
     with source_reader(conn) as lookup:
         return collect(conn, task)
+
+
+def _current_authors(conn, task_id):
+    """Authors since the review preceding the latest implementation, plus epoch boundary.
+
+    Consecutive review retries keep the same author set. A pre-spawn refusal is
+    not a review boundary: nobody inspected the head. Run IDs are local and read
+    on the same connection, including when source_reader selects a replica.
+    """
+    from hermes_cli.kanban_review_retry import rehandoff_runs
+    repeats = rehandoff_runs(conn, task_id)
+    models = set()
+    for row in conn.execute("SELECT id FROM task_runs WHERE task_id=? ORDER BY id DESC",
+                            (task_id,)).fetchall():
+        events = conn.execute("SELECT kind, payload FROM task_events WHERE task_id=? AND run_id=? "
+                              "ORDER BY id DESC", (task_id, row[0])).fetchall()
+        reviewing = any(event[0] in ("model_tier", "run_route") and
+                        _payload(event[1]).get("lane") == "review" for event in events)
+        if reviewing:
+            ran = any(event[0] in ("worker_result", "spawned") for event in events)
+            if ran and models:
+                return models, True
+            continue
+        if row[0] in repeats:
+            continue
+        model = (_run_model(conn, task_id, row[0], "worker_result", "route_model")
+                 or _run_model(conn, task_id, row[0], "run_route", "model"))
+        if model:
+            models.add(model)
+    return models, False
 
 
 def is_review_run(conn, task, lane) -> bool:
@@ -178,10 +200,17 @@ class ReviewRouteDeferred(ReviewModelUnavailable):
         self.until = until
 
 
+class ReviewModelsExhausted(ReviewModelUnavailable):
+    """No configured independent candidate exists; retrying cannot change authorship."""
+
+
 def resolution_error(exc):
-    """Preserve deadline-bearing refusals through the tier's contextual error wrapper."""
-    return exc if isinstance(exc, ReviewRouteDeferred) else ReviewModelUnavailable(
-        f"Review model resolution failed: {exc}")
+    """Keep deadline and structural-exhaustion refusals typed through the tier's error wrapper."""
+    if isinstance(exc, ReviewRouteDeferred):
+        return exc
+    if isinstance(exc, ReviewModelsExhausted):
+        return ReviewModelsExhausted(f"Review model resolution failed: {exc}")
+    return ReviewModelUnavailable(f"Review model resolution failed: {exc}")
 
 
 def _handoff(conn, task):
@@ -304,6 +333,8 @@ def admission_refusal(conn, task_id, exc):
     from tools.process_registry import RestartSafeScopeUnavailable
     if isinstance(exc, ReviewRouteDeferred):
         return True, False, None  # a wall appearing after preflight never exhausts reviewer admission
+    if isinstance(exc, ReviewModelsExhausted):
+        return False, True, {"admission_refusal": "review_models_exhausted", "infrastructure": True}
     if isinstance(exc, ReviewModelUnavailable) and deferral_exhausted(conn, task_id, str(exc)):
         return False, True, {"admission_refusal": "review_model_unavailable", "deferrals": DEFERRAL_LIMIT}
     from hermes_cli.kanban_pace_reroute import OfferLost  # a lapsed pace move: requeue for a fresh judgment
@@ -419,7 +450,9 @@ def resolve_review_model(conn, task, cfg):
         if pin not in excluded:
             from itertools import chain
             candidates = chain([pin_route], candidates)
+    independent_candidate = False
     for model, provider in candidates:
+        independent_candidate = True
         if _unavailable(model, provider) or (override and registry_refusal(model, provider, assignee)):
             continue
         reason = (OVERRIDE_REFUSED if refusal else "review_override" if class_override or override_moved
@@ -427,6 +460,7 @@ def resolve_review_model(conn, task, cfg):
         return model, provider, reason
     # Refused overrides retain their existing registered-deep-only recovery contract.
     for model, provider in (() if refusal else independent_routes(excluded, cfg, assignee, level="standard")):
+        independent_candidate = True
         if _unavailable(model, provider) or (override and registry_refusal(model, provider, assignee)):
             continue
         return model, provider, "review_tier_fallback"
@@ -436,4 +470,6 @@ def resolve_review_model(conn, task, cfg):
         detail = f"review_model {override[0]!r} is refused here ({refusal.code}); {detail}"
     if waits:
         raise ReviewRouteDeferred(detail, min(waits))
+    if not independent_candidate and not override_moved:
+        raise ReviewModelsExhausted(f"{detail}; infrastructure blocker: configure an independent reviewer")
     raise ReviewModelUnavailable(detail)
