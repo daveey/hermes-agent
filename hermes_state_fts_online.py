@@ -149,10 +149,16 @@ class OnlineRecoveryRefused(Exception):
     """The plan step found a reason not to touch the store."""
 
 
-_CHECK_LIMIT = 100_000
+# Problem lines integrity_check may report before it stops. A family this module detaches leaves its pages orphaned
+# ("Page N: never used", one line per page): on the hub (2026-11-20) 611,340 such lines from an earlier recovery ran
+# past the old 100,000 cap, so every later plan read as an unfinished walk and was refused for hours. The cap must
+# stay far below SQLITE_MAX_LENGTH (1e9 bytes): SQLite builds the b-tree walk's messages in one string, and when that
+# string would overflow it is dropped and the check returns NO rows (no "ok" either), which plan_from_check refuses.
+# 5,000,000 lines of at most ~90 bytes is ~450 MB; the walk's text is one row held by SQLite while it is judged.
+_CHECK_LIMIT = 5_000_000
 
 
-def plan_from_check(lines, master) -> dict:
+def plan_from_check(lines, master, *, limit: Optional[int] = None) -> dict:
     """The decision of :func:`plan_online_recovery` from integrity_check output and the ``(rootpage, type, name)``
     rows of the same snapshot. Raises :class:`OnlineRecoveryRefused` unless every problem line is attributable.
 
@@ -160,18 +166,28 @@ def plan_from_check(lines, master) -> dict:
     against the SECOND structure that reaches it. So a family not named by any line shares no page with anything
     reached after it, and anything reached before it was named itself: a canonical tree (refused here), the other
     family (unlinked, never read again) or nothing. Draining an unnamed family therefore frees only its own pages.
-    That argument needs every line mapped and the walk complete, hence the refusals below."""
-    from hermes_state_repair import _INTEGRITY_TREE_RE, integrity_damage_is_structural
+    That argument needs every line mapped and the walk complete, hence the refusals below.
 
-    problems = [line for line in lines if line not in ("ok", "*** in database main ***")]
-    if len(problems) >= _CHECK_LIMIT - 1:
-        raise OnlineRecoveryRefused(f"integrity_check stopped at its {_CHECK_LIMIT}-error limit; later trees unchecked")
-    if integrity_damage_is_structural(problems, master):
-        raise OnlineRecoveryRefused("integrity_check reports damage outside the search indexes: "
-                                    + "; ".join(problems[:3]))
+    *lines* may be any iterable; each line is judged as it arrives and only counted (no list of problems is kept).
+    *limit* is the cap the check ran with (default :data:`_CHECK_LIMIT`). integrity_check(N) returns exactly N lines
+    when it stops early, so N - 1 problems already count as a stopped walk (conservative by one line). A check that
+    returned no line at all did not complete (its output overflowed SQLITE_MAX_LENGTH) and is refused."""
+    from hermes_state_repair import _INTEGRITY_TREE_RE, integrity_line_is_structural
+
+    limit = _CHECK_LIMIT if limit is None else limit
     by_root = {int(rp): name for rp, _type, name in master}
     damaged = set()
-    for line in problems:
+    problems = 0
+    seen = False
+    for line in lines:
+        seen = True
+        if line in ("ok", "*** in database main ***"):
+            continue
+        problems += 1
+        if problems >= limit - 1:
+            raise OnlineRecoveryRefused(f"integrity_check stopped at its {limit}-error limit; later trees unchecked")
+        if integrity_line_is_structural(line, by_root):
+            raise OnlineRecoveryRefused(f"integrity_check reports damage outside the search indexes: {line}")
         tree = _INTEGRITY_TREE_RE.search(line)
         if not tree:
             continue  # "Page N: never used", FTS5 xIntegrity blob lines: no page is shared
@@ -180,7 +196,9 @@ def plan_from_check(lines, master) -> dict:
         if family is None:  # Tree 1 (sqlite_schema) or a root this snapshot cannot name
             raise OnlineRecoveryRefused(f"integrity_check names a tree outside the search indexes: {line}")
         damaged.add(family)
-    return {"unlink": sorted(damaged), "trash": [f for f in FAMILIES if f not in damaged], "problems": len(problems),
+    if not seen:
+        raise OnlineRecoveryRefused("integrity_check returned nothing (its output overflowed SQLITE_MAX_LENGTH)")
+    return {"unlink": sorted(damaged), "trash": [f for f in FAMILIES if f not in damaged], "problems": problems,
             "roots": {name: int(rp) for rp, _type, name in master if family_of(name)},
             "trash_roots": {name: int(rp) for rp, _type, name in master if name.startswith(TRASH_PREFIX)}}
 
@@ -201,8 +219,10 @@ def plan_online_recovery(db_path) -> dict:
     try:
         conn.execute("BEGIN")  # one read snapshot for the schema and the check
         master = [tuple(r) for r in conn.execute("SELECT rootpage, type, name FROM sqlite_master WHERE rootpage > 0")]
-        lines = [line for r in conn.execute(f"PRAGMA integrity_check({_CHECK_LIMIT})")
-                 for line in str(r[0]).splitlines()]
+        # judged inside the snapshot, line by line over each row's text (the b-tree walk is one newline-joined row):
+        # no list of lines is built next to the text SQLite returns
+        plan = plan_from_check((m.group(0) for r in conn.execute(f"PRAGMA integrity_check({_CHECK_LIMIT})")
+                                for m in re.finditer(r"[^\n]+", str(r[0]))), master, limit=_CHECK_LIMIT)
         conn.execute("COMMIT")
     except sqlite3.DatabaseError as exc:
         refusal = OnlineRecoveryRefused(f"integrity_check could not complete: {exc}")
@@ -210,7 +230,7 @@ def plan_online_recovery(db_path) -> dict:
         raise (refusal if is_malformed_db_error(exc) else _transient(refusal)) from exc
     finally:
         conn.close()
-    return plan_from_check(lines, master)
+    return plan
 
 
 def _transient(exc: OnlineRecoveryRefused) -> OnlineRecoveryRefused:

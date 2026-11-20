@@ -8,6 +8,8 @@ connections keep writing.
 """
 
 import argparse
+import inspect
+import itertools
 import sqlite3
 import time
 
@@ -450,12 +452,112 @@ def test_plan_unlinks_exactly_the_named_families(lines, unlink):
     ["Tree 99 page 5: 2nd reference to page 6"],                 # a root this snapshot cannot name
     ["Tree 3 page 7 cell 0: 2nd reference to page 80"],          # a canonical table
     ["Freelist: 2nd reference to page 5"],
-    ["Tree 80 page 2: x"] * 100_000,                              # the check stopped at its limit
+    ["Tree 80 page 2: x"] * 1_000,                                # the check stopped at its limit
 ])
 def test_plan_refuses_what_it_cannot_attribute(lines):
     from hermes_state_fts_online import OnlineRecoveryRefused, plan_from_check
     with pytest.raises(OnlineRecoveryRefused):
-        plan_from_check(lines, _MASTER)
+        plan_from_check(lines, _MASTER, limit=1_000)
+
+
+def test_plan_judges_a_check_past_the_old_cap():
+    """The hub's check reported 611,340 "never used" pages left by an earlier detach, which the old 100,000 cap read
+    as an unfinished walk: every plan was refused for hours. Lines are judged as they arrive, and only counted."""
+    from hermes_state_fts_online import plan_from_check
+
+    consumed = 0
+
+    def stream():
+        nonlocal consumed
+        for i in range(250_000):
+            consumed += 1
+            yield f"Tree 80 page {i}: btreeInitPage() returns error code 11" if i % 2 else f"Page {i}: never used"
+
+    plan = plan_from_check(stream(), _MASTER)
+    assert consumed == 250_000 and plan["problems"] == 250_000
+    assert plan["unlink"] == ["messages_fts_trigram"] and plan["trash"] == ["messages_fts"]
+
+
+def test_plan_refuses_canonical_damage_after_many_index_lines():
+    from hermes_state_fts_online import OnlineRecoveryRefused, plan_from_check
+
+    lines = (f"Tree 80 page {i}: x" for i in range(200_000))
+    with pytest.raises(OnlineRecoveryRefused, match="reports damage outside"):
+        plan_from_check(itertools.chain(lines, ["Tree 3 page 7 cell 0: 2nd reference to page 80"]), _MASTER)
+
+
+def test_plan_refuses_a_check_that_returned_nothing():
+    """integrity_check returns no row at all when its b-tree-walk text would exceed SQLITE_MAX_LENGTH: an empty
+    check never means a clean store."""
+    from hermes_state_fts_online import OnlineRecoveryRefused, plan_from_check
+
+    with pytest.raises(OnlineRecoveryRefused, match="returned nothing"):
+        plan_from_check(iter(()), _MASTER)
+
+
+def test_plan_does_not_count_the_ok_and_database_marker_lines():
+    from hermes_state_fts_online import plan_from_check
+
+    assert plan_from_check(["*** in database main ***", "ok"], _MASTER)["problems"] == 0
+
+
+@pytest.mark.parametrize("count, refused", [(998, False), (999, True)])
+def test_plan_cap_boundary(count, refused):
+    """integrity_check(N) returns exactly N lines when it stops early; N - 1 problems already read as stopped."""
+    from hermes_state_fts_online import OnlineRecoveryRefused, plan_from_check
+
+    lines = [f"Page {i}: never used" for i in range(count)]
+    if refused:
+        with pytest.raises(OnlineRecoveryRefused, match="error limit"):
+            plan_from_check(lines, _MASTER, limit=1_000)
+    else:
+        assert plan_from_check(lines, _MASTER, limit=1_000)["problems"] == count
+
+
+def test_the_check_cap_stays_far_below_sqlite_max_length():
+    """Above SQLITE_MAX_LENGTH (1e9 bytes) of walk text integrity_check returns nothing; the cap must stop first."""
+    from hermes_state_fts_online import _CHECK_LIMIT
+
+    assert _CHECK_LIMIT * 120 < 1_000_000_000
+
+
+def test_plan_online_recovery_judges_the_check_lazily_with_its_cap(tmp_path, monkeypatch):
+    """plan_online_recovery hands plan_from_check a lazy iterator over the check's lines (no list of lines is built)
+    and the cap the check ran with."""
+    import hermes_state_fts_online
+
+    path = tmp_path / "state.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE t (x)")
+    seen = {}
+
+    def fake(lines, master, *, limit=0):
+        seen["lazy"], seen["limit"], seen["lines"] = inspect.isgenerator(lines), limit, list(lines)
+        return {"unlink": [], "trash": list(hermes_state_fts_online.FAMILIES), "problems": 0}
+
+    monkeypatch.setattr(hermes_state_fts_online, "plan_from_check", fake)
+    hermes_state_fts_online.plan_online_recovery(path)
+    assert seen == {"lazy": True, "limit": hermes_state_fts_online._CHECK_LIMIT, "lines": ["ok"]}
+
+
+def test_plan_online_recovery_splits_a_multi_line_walk_row(tmp_path, monkeypatch):
+    """The b-tree walk comes back as one newline-joined row: each of its lines is judged on its own."""
+    import hermes_state_fts_online
+
+    class Conn:
+        def execute(self, sql):
+            if sql.startswith("SELECT rootpage"):
+                return [(80, "table", "messages_fts_trigram_data")]
+            if sql.startswith("PRAGMA integrity_check"):
+                return [("*** in database main ***\nPage 5: never used\nTree 80 page 2: x",)]
+            return []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("hermes_cli.sqlite_safe_read.connect_tracked", lambda *a, **k: Conn())
+    plan = hermes_state_fts_online.plan_online_recovery(tmp_path / "state.db")
+    assert plan["problems"] == 2 and plan["unlink"] == ["messages_fts_trigram"]
 
 
 def test_family_of_full_matches_shadow_names():

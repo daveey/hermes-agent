@@ -608,7 +608,7 @@ def test_a_refusal_is_remembered_across_processes(store, plans, monkeypatch):
     db = SessionDB(db_path=path)
     try:
         monkeypatch.setattr(hermes_state_fts_online, "plan_from_check",
-                            lambda lines, master: (_ for _ in ()).throw(
+                            lambda lines, master, **_kw: (_ for _ in ()).throw(
                                 hermes_state_fts_online.OnlineRecoveryRefused("test damage")))
         with pytest.raises(hermes_state_fts_online.FtsFreeRefused):
             db.optimize_fts()

@@ -746,19 +746,22 @@ def integrity_damage_is_structural(integrity_lines, master_rows) -> bool:
     rebuild cannot repair a canonical b-tree, and the ``.malformed-backup`` it leaves behind
     is a snapshot of the same damage."""
     name_by_rootpage = {int(rp): name for rp, _type, name in master_rows if rp}
-    for line in integrity_lines:
-        text = str(line)
-        if text.startswith("Freelist"):
+    return any(integrity_line_is_structural(line, name_by_rootpage) for line in integrity_lines)
+
+
+def integrity_line_is_structural(line, name_by_rootpage) -> bool:
+    """One ``PRAGMA integrity_check`` line of :func:`integrity_damage_is_structural`, against a prebuilt
+    ``{rootpage: name}`` map (callers that stream the check judge each line as it arrives)."""
+    text = str(line)
+    if text.startswith("Freelist"):
+        return True
+    tree = _INTEGRITY_TREE_RE.search(text)
+    if tree:
+        name = name_by_rootpage.get(int(tree.group(1)), "")
+        if name and not _FTS_OBJECT_RE.fullmatch(name):
             return True
-        tree = _INTEGRITY_TREE_RE.search(text)
-        if tree:
-            name = name_by_rootpage.get(int(tree.group(1)), "")
-            if name and not _FTS_OBJECT_RE.fullmatch(name):
-                return True
-        missing = _INTEGRITY_MISSING_INDEX_RE.search(text)
-        if missing and not _FTS_OBJECT_RE.fullmatch(missing.group(1)):
-            return True
-    return False
+    missing = _INTEGRITY_MISSING_INDEX_RE.search(text)
+    return bool(missing and not _FTS_OBJECT_RE.fullmatch(missing.group(1)))
 
 
 def state_db_has_structural_damage(db_path: Path) -> bool:
