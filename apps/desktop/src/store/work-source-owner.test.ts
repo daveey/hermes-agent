@@ -4,6 +4,7 @@ import { createClientSessionState } from '@/lib/chat-runtime'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $gateway, setPrimaryGateway, setPrimaryGatewayConnection } from '@/store/gateway'
 import { $profiles } from '@/store/profile'
+import { $projectTree } from '@/store/project-tree'
 import {
   $activeSessionId,
   $cronSessions,
@@ -90,6 +91,7 @@ describe('work-source owner authority context', () => {
     clearAllSessionStates()
     $sessionTiles.set([])
     setSessions([])
+    $projectTree.set([])
     $activeSessionId.set(null)
     $selectedStoredSessionId.set(null)
     $profiles.set([])
@@ -340,7 +342,114 @@ describe('work-source owner authority context', () => {
     for (const row of rows.slice(1)) {
       workSourceAuthorityForSession('local', 'default', row.id)
     }
+
     expect(workSourceAuthorityForSession('local', 'default', rows[0].id).durable).not.toBe(first.durable)
+  })
+
+  it('revokes same-socket primary route-tag ABA without a read in the intermediate route', () => {
+    setSessions([makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local' })])
+    const first = workSourceAuthorityForSession('local', 'default', 'stored-chat')
+    expect(positive(first.durable)).toBe(true)
+    setPrimaryGatewayConnection({ connectionId: 'homelab' })
+    setPrimaryGatewayConnection({ connectionId: 'local' })
+    const after = workSourceAuthorityForSession('local', 'default', 'stored-chat')
+    expect(positive(after.durable)).toBe(true)
+    expect(after.durable).not.toBe(first.durable)
+    expect(after.runtime).not.toBe(first.runtime)
+  })
+
+  it.each(['preview', 'repo'])('observes project-tree-only %s rows and isolates connection/profile scopes', kind => {
+    const row = makeSessionInfo({ id: 'tree-chat', profile: 'default', connection_id: 'local' })
+    const stable = makeSessionInfo({ id: 'stable-chat', profile: 'default', connection_id: 'local' })
+    setSessions([stable])
+
+    const publish = (connectionId: string, profile = 'default') => {
+      const rows = [{ ...row, connection_id: connectionId, profile }]
+      $projectTree.set([
+        {
+          id: 'project',
+          label: 'Project',
+          path: '/project',
+          sessionCount: 1,
+          previewSessions: kind === 'preview' ? rows : [],
+          repos: kind === 'repo' ? [{ groups: [{ sessions: rows }] }] : []
+        }
+      ] as never)
+    }
+
+    publish('local')
+    const first = workSourceAuthorityForSession('local', 'default', row.id)
+    const unchanged = workSourceAuthorityForSession('local', 'default', stable.id)
+    expect(positive(first.durable)).toBe(true)
+    expect(workSourceAuthorityForSession('homelab', 'default', row.id)).toEqual({ durable: null, runtime: null })
+    expect(workSourceAuthorityForSession('local', 'other', row.id)).toEqual({ durable: null, runtime: null })
+    publish('homelab')
+    publish('local', 'other')
+    publish('local')
+    const after = workSourceAuthorityForSession('local', 'default', row.id)
+    expect(positive(after.durable)).toBe(true)
+    expect(after.durable).not.toBe(first.durable)
+    expect(workSourceAuthorityForSession('local', 'default', stable.id)).toEqual(unchanged)
+  })
+
+  it('preserves first-row lineage precedence when indexing owner observations', () => {
+    const first = makeSessionInfo({
+      id: 'tip',
+      _lineage_root_id: 'root',
+      _lineage_ids: ['middle', 'tip'],
+      profile: 'default',
+      connection_id: 'local'
+    })
+    const collision = makeSessionInfo({ id: 'root', profile: 'default', connection_id: 'homelab' })
+    setSessions([first, collision])
+    const root = workSourceAuthorityForSession('local', 'default', 'root')
+    const middle = workSourceAuthorityForSession('local', 'default', 'middle')
+    expect(positive(root.durable)).toBe(true)
+    expect(positive(middle.durable)).toBe(true)
+    setSessions([collision, first])
+    expect(workSourceAuthorityForSession('local', 'default', 'root')).toEqual({ durable: null, runtime: null })
+    expect(workSourceAuthorityForSession('local', 'default', 'middle')).toEqual(middle)
+    setSessions([])
+    expect(workSourceAuthorityForSession('local', 'default', 'middle')).toEqual({ durable: null, runtime: null })
+    setSessions([first])
+    expect(workSourceAuthorityForSession('local', 'default', 'middle').durable).not.toBe(middle.durable)
+  })
+
+  it('keeps realistic streaming observation neutral and reports structural observer cost', () => {
+    const rows = Array.from({ length: 1000 }, (_, i) =>
+      makeSessionInfo({ id: `perf-${i}`, profile: 'default', connection_id: 'local' })
+    )
+
+    setSessions(rows)
+
+    for (const row of rows) {
+      publishSessionState(`rt-${row.id}`, createClientSessionState(row.id))
+    }
+
+    for (const row of rows) {
+      workSourceAuthorityForSession('local', 'default', row.id)
+    }
+
+    const revision = $workSourceAuthorityRevision.get()
+    const stream: number[] = []
+    const structural: number[] = []
+
+    for (let i = 0; i < 100; i++) {
+      const start = performance.now()
+      publishSessionState('rt-perf-0', { ...createClientSessionState('perf-0'), streaming: Boolean(i % 2) } as never)
+      stream.push(performance.now() - start)
+    }
+
+    expect($workSourceAuthorityRevision.get()).toBe(revision)
+
+    for (let i = 0; i < 10; i++) {
+      const start = performance.now()
+      setSessions(rows.map(row => ({ ...row, title: `title-${i}` })))
+      structural.push(performance.now() - start)
+    }
+
+    expect($workSourceAuthorityRevision.get()).toBe(revision)
+    process.stdout.write(`AUTHORITY_OBSERVER_1000 ${JSON.stringify({ stream, structural })}\n`)
   })
 
   it('invalidates when the published primary socket identity is replaced', () => {

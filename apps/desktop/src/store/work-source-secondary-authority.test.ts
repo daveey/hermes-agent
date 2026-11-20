@@ -1,4 +1,5 @@
-import { act, renderHook } from '@testing-library/react'
+import { act, render, renderHook } from '@testing-library/react'
+import { createElement } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { HermesGateway } from '@/api/client'
@@ -17,7 +18,7 @@ import {
 import { $profiles } from './profile'
 import { _resetSessionOwnerHintsForTests, setSessions } from './session'
 import { $unavailableWorkSources } from './session-work-source'
-import { _resetWorkSourceOwnerForTests } from './work-source-owner'
+import { $workSourceAuthorityRevision, _resetWorkSourceOwnerForTests } from './work-source-owner'
 
 // The transport and registry are real; only the WebSocket peer is synthetic.
 class AuthoritySocket extends EventTarget {
@@ -45,6 +46,7 @@ class AuthoritySocket extends EventTarget {
     if (this.readyState === AuthoritySocket.CLOSED) {
       return
     }
+
     this.readyState = AuthoritySocket.CLOSED
     this.dispatchEvent(new CloseEvent('close', { code: 1000 }))
   }
@@ -52,6 +54,7 @@ class AuthoritySocket extends EventTarget {
 
 let primary: HermesGateway
 const row = makeSessionInfo({ id: 'remote-chat', profile: 'worker', connection_id: 'remote' })
+
 const descriptor = {
   connectionId: 'remote',
   mode: 'remote',
@@ -95,7 +98,7 @@ beforeEach(async () => {
   setPrimaryGateway(primary, 'default')
   setPrimaryGatewayConnectionId('local', 'local')
   window.hermesDesktop = {
-    getConnectionFor: vi.fn(async () => descriptor),
+    getConnectionFor: vi.fn(async (scope: { profile: string }) => ({ ...descriptor, profile: scope.profile })),
     getGatewayWsUrlFor: vi.fn(async () => descriptor.wsUrl)
   } as never
   const secondary = ensureGatewayForAgent('remote', 'worker')
@@ -119,6 +122,100 @@ afterEach(() => {
   vi.clearAllTimers()
   vi.useRealTimers()
   vi.unstubAllGlobals()
+})
+
+it('mounting a previously unread secondary row does not update another row during render', () => {
+  const other = makeSessionInfo({ id: 'other-remote-chat', profile: 'worker', connection_id: 'remote' })
+  setSessions([row, other])
+
+  function MountedRow() {
+    return createElement('span', null, String(useWorkSourceUnavailable(row)))
+  }
+
+  let rendering = false
+  const renderPublications: number[] = []
+
+  const off = $workSourceAuthorityRevision.listen(value => {
+    if (rendering) {
+      renderPublications.push(value)
+    }
+  })
+
+  function NewlyMountedRow() {
+    rendering = true
+    const unavailable = useWorkSourceUnavailable(other)
+    rendering = false
+
+    return createElement('span', null, String(unavailable))
+  }
+
+  const first = render(createElement(MountedRow))
+  const errors = vi.spyOn(console, 'error')
+  const second = render(createElement(NewlyMountedRow))
+
+  try {
+    expect(first.container.textContent).toBe('true')
+    expect(second.container.textContent).toBe('true')
+    expect(renderPublications).toEqual([])
+    expect(errors.mock.calls.flat().join(' ')).not.toContain('Cannot update a component')
+  } finally {
+    off()
+    first.unmount()
+    second.unmount()
+    errors.mockRestore()
+  }
+})
+
+it('isolates three live connection/profile routes and keeps unaffected complete rows green', async () => {
+  const opening = ensureGatewayForAgent('remote', 'default')
+  await vi.advanceTimersByTimeAsync(10)
+  expect(await opening).toBe(true)
+  const local = makeSessionInfo({ id: 'local-chat', profile: 'default', connection_id: 'local' })
+  const remoteDefault = makeSessionInfo({ id: 'remote-default-chat', profile: 'default', connection_id: 'remote' })
+  setSessions([local, row, remoteDefault])
+
+  const readFor = (session: typeof row) =>
+    (['lineage', 'tasks', 'process', 'subagent', 'control'] as const).map(source =>
+      sessionsHost.beginWorkSourceRead({
+        connectionId: session.connection_id!,
+        profile: session.profile!,
+        storedSessionId: session.id,
+        source
+      })
+    )
+
+  const localReads = readFor(local)
+  const workerReads = readFor(row)
+  const otherReads = readFor(remoteDefault)
+  expect([...localReads, ...workerReads, ...otherReads].every(read => read.authorityEpoch !== undefined)).toBe(true)
+  succeed(localReads)
+  succeed(workerReads)
+  const mounted = renderHook(() => [
+    useWorkSourceUnavailable(local),
+    useWorkSourceUnavailable(row),
+    useWorkSourceUnavailable(remoteDefault)
+  ])
+
+  try {
+    expect(mounted.result.current).toEqual([false, false, true])
+    act(() => {
+      // Identical source names/read counters from another live scope are not proof here.
+      for (const read of workerReads) {
+        sessionsHost.reportWorkSourceRead({ ...read, storedSessionId: remoteDefault.id, available: true })
+      }
+
+      for (const read of localReads) {
+        sessionsHost.reportWorkSourceRead({ ...read, storedSessionId: remoteDefault.id, available: true })
+      }
+    })
+    expect(mounted.result.current).toEqual([false, false, true])
+    act(() => succeed(otherReads))
+    expect(mounted.result.current).toEqual([false, false, false])
+    act(() => AuthoritySocket.instances.at(-1)!.close())
+    expect(mounted.result.current).toEqual([false, false, true])
+  } finally {
+    mounted.unmount()
+  }
 })
 
 it('revokes a mounted secondary owner on close and rejects old replies after real reconnect', async () => {

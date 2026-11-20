@@ -1,14 +1,25 @@
 import { act, cleanup, render } from '@testing-library/react'
 import type { WritableAtom } from 'nanostores'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { PaneTab } from '@/components/ui/pane-tab'
+import { sessionsHost } from '@/sdk/sessions'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { rowExecution } from '@/store/execution-observation-row'
+import { setPrimaryGateway, setPrimaryGatewayConnection } from '@/store/gateway'
 import { $kanbanObservationTick } from '@/store/kanban-observation'
-import { $selectedStoredSessionId, $sessions } from '@/store/session'
+import { $profiles } from '@/store/profile'
+import {
+  $selectedStoredSessionId,
+  $sessions,
+  _resetSessionOwnerHintsForTests,
+  setSessionOwnerHint
+} from '@/store/session'
 import { $blockedSessionIds } from '@/store/session-blocked'
 import { $sessionDotStateById, type SessionDotState } from '@/store/session-dot-state'
 import type * as DotStateModule from '@/store/session-dot-state'
+import { $unavailableWorkSources } from '@/store/session-work-source'
+import { _resetWorkSourceOwnerForTests } from '@/store/work-source-owner'
 import type { SessionInfo } from '@/types/hermes'
 
 import fixture from '../../../../../schemas/fixtures/execution-observations-v1.json'
@@ -22,7 +33,38 @@ vi.mock('@/store/session-dot-state', async importOriginal => ({
 }))
 
 const states = $sessionDotStateById as WritableAtom<Record<string, SessionDotState>>
-const row = { id: 'session', message_count: 2, kanban_observed_at: Date.now() / 1000 } as SessionInfo
+const row = {
+  id: 'session',
+  profile: 'default',
+  connection_id: 'local',
+  message_count: 2,
+  kanban_observed_at: Date.now() / 1000
+} as SessionInfo
+
+beforeEach(() => {
+  $connectionsRegistry.set({
+    primary: 'local',
+    activeConnectionId: 'local',
+    connections: [{ id: 'local', kind: 'local' }]
+  } as never)
+  $profiles.set([{ name: 'default' }] as never)
+  setPrimaryGateway(
+    { connectionState: 'open', onEvent: () => () => undefined, onState: () => () => undefined } as never,
+    'default'
+  )
+  setPrimaryGatewayConnection({ connectionId: 'local' })
+  setSessionOwnerHint(row.id, { connectionId: 'local', profile: 'default' })
+
+  for (const source of ['lineage', 'tasks', 'process', 'subagent', 'control'] as const) {
+    const read = sessionsHost.beginWorkSourceRead({
+      connectionId: 'local',
+      profile: 'default',
+      storedSessionId: row.id,
+      source
+    })
+    sessionsHost.reportWorkSourceRead({ ...read, available: true })
+  }
+})
 
 function tab(session: SessionInfo | null = row) {
   return (
@@ -34,6 +76,13 @@ function tab(session: SessionInfo | null = row) {
 
 afterEach(() => {
   cleanup()
+  _resetWorkSourceOwnerForTests()
+  _resetSessionOwnerHintsForTests({ storage: true })
+  $unavailableWorkSources.set({})
+  setPrimaryGateway(null)
+  setPrimaryGatewayConnection(null)
+  $connectionsRegistry.set(null)
+  $profiles.set([])
   vi.useRealTimers()
   $blockedSessionIds.set([])
   $selectedStoredSessionId.set(null)
@@ -49,16 +98,25 @@ describe('session tab underline', () => {
     const session = {
       ...row,
       kanban_observed_at: 1001,
-      execution_observations: [{
-        ...fixture.base, state: 'waiting', valid_until: 1010,
-        wait: {
-          kind: 'dependency', owner: fixture.base.owner, predicate: 'parent finishes', since: 1000,
-          target: fixture.base.identity
+      execution_observations: [
+        {
+          ...fixture.base,
+          state: 'waiting',
+          valid_until: 1010,
+          wait: {
+            kind: 'dependency',
+            owner: fixture.base.owner,
+            predicate: 'parent finishes',
+            since: 1000,
+            target: fixture.base.identity
+          }
         }
-      }]
+      ]
     } as SessionInfo
 
-    if (listed) { $sessions.set([session]) }
+    if (listed) {
+      $sessions.set([session])
+    }
     const { container } = render(tab(session))
     const stripe = () => container.querySelector('[data-session-tab-accent]')?.getAttribute('data-session-tab-accent')
 
@@ -140,15 +198,30 @@ describe('session tab underline', () => {
     expect(container.firstElementChild!.className).toContain('dark:[--session-status-color:var(--color-zinc-500)]')
   })
 
-  it.each([{ kanban_observed_at: undefined }, { kanban_unknown: true }, { kanban_active: 1 }, { kanban_observed_at: 1 }])('does not mark unverified tree-only rows done: %j', evidence => {
+  it.each([
+    { kanban_observed_at: undefined },
+    { kanban_unknown: true },
+    { kanban_active: 1 },
+    { kanban_observed_at: 1 }
+  ])('does not mark unverified tree-only rows done: %j', evidence => {
     const { container } = render(tab({ ...row, ...evidence }))
 
     expect(container.querySelector('[data-session-tab-accent="done"]')).toBeNull()
   })
 
+  it('unread authority still vetoes a stored-done tab with a known owner', () => {
+    $unavailableWorkSources.set({})
+    const { container } = render(tab({ ...row, outcome: { kind: 'done', source: 'derived', at: 1000 } }))
+    expect(container.querySelector('[data-session-tab-accent="done"]')).toBeNull()
+  })
+
   it('does not finish an unread stored tab whose row is missing', () => {
     states.set({ session: 'unread' })
-    const { container } = render(<SessionTabAccent storedSessionId="session"><span>Missing</span></SessionTabAccent>)
+    const { container } = render(
+      <SessionTabAccent storedSessionId="session">
+        <span>Missing</span>
+      </SessionTabAccent>
+    )
     expect(container.querySelector('[data-session-tab-accent="done"]')).toBeNull()
   })
 

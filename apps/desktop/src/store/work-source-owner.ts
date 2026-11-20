@@ -12,7 +12,8 @@ import {
   $selectedStoredSessionId,
   $sessionOwnerHintsRevision,
   $sessions,
-  $unlistedSessionOwnerRows
+  $unlistedSessionOwnerRows,
+  ownerLookupSessionRows
 } from '@/store/session'
 import { isSessionOwnerRoute, type SessionOwnerScope } from '@/store/session-request-router'
 import {
@@ -23,6 +24,7 @@ import {
   storedSessionIdForRuntimeId
 } from '@/store/session-states'
 import type { WorkSourceAuthority } from '@/store/session-work-source'
+import type { SessionInfo } from '@/types/hermes'
 
 export interface QualifiedWorkSourceOwner {
   connectionId: string
@@ -52,6 +54,8 @@ const unsubscribers: Array<() => void> = []
 const TRACKED_LIMIT = 4096
 let epoch = 0
 let runtimeIndex = new Map<string, string>()
+let ownerRows: readonly SessionInfo[] | undefined
+let ownerRowIndex = new Map<string, SessionInfo[]>()
 let mirrorBindings = ''
 export const $workSourceAuthorityRevision = atom(1)
 
@@ -91,6 +95,7 @@ export function qualifiedWorkSourceOwner(owner: SessionOwnerScope): QualifiedWor
   if (typeof owner !== 'string' || !owner.trim()) {
     return undefined
   }
+
   const profile = owner.trim()
   const { key } = gatewayRouteState(null, profile)
   const connectionId = pinnedPrimaryGatewayConnectionId()
@@ -106,6 +111,7 @@ function invalidate(entry: Tracked, durable: boolean): void {
   if (durable) {
     entry.durable = nextEpoch()
   }
+
   entry.runtime = nextEpoch()
   bumpRevision()
 }
@@ -114,6 +120,7 @@ function bindSocket(entry: Tracked, socket: Socket | null): void {
   if (entry.socket === socket) {
     return
   }
+
   entry.offState?.()
   entry.offState = undefined
   entry.socket = socket
@@ -123,13 +130,36 @@ function bindSocket(entry: Tracked, socket: Socket | null): void {
     if (entry.socketState === state) {
       return
     }
+
     entry.socketState = state
     invalidate(entry, true)
   })
 }
 
+/** Preserve the resolver's first matching row, including lineage aliases and list precedence. */
+function indexedOwnerForSession(id: string): SessionOwnerScope {
+  const rows = ownerLookupSessionRows()
+
+  if (rows !== ownerRows) {
+    ownerRows = rows
+    ownerRowIndex = new Map()
+
+    for (const row of rows) {
+      for (const alias of [row.id, row._lineage_root_id, ...(row._lineage_ids ?? [])]) {
+        if (alias && !ownerRowIndex.has(alias)) {
+          ownerRowIndex.set(alias, [row])
+        }
+      }
+    }
+  }
+
+  const stored = storedSessionIdForRuntimeId(id) ?? id
+
+  return knownOwnerForSession(id, ownerRowIndex.get(stored) ?? [])
+}
+
 function syncEntry(entry: Tracked): void {
-  const resolved = qualifiedWorkSourceOwner(knownOwnerForSession(entry.storedSessionId))
+  const resolved = qualifiedWorkSourceOwner(indexedOwnerForSession(entry.storedSessionId))
   const semantic = semanticOf(resolved)
   const runtimes = runtimeIndex.get(scopeKey(entry.owner, entry.storedSessionId)) ?? ''
 
@@ -155,20 +185,23 @@ function rebuildRuntimeIndex(): void {
       ids.add(tile.runtimeId)
     }
   }
+
   const active = $activeSessionId.get()
 
   if (active) {
     ids.add(active)
   }
+
   const index = new Map<string, string[]>()
 
   for (const id of ids) {
     const stored = storedSessionIdForRuntimeId(id)
-    const owner = qualifiedWorkSourceOwner(knownOwnerForSession(id))
+    const owner = qualifiedWorkSourceOwner(indexedOwnerForSession(id))
 
     if (!stored || !owner) {
       continue
     }
+
     const key = scopeKey(owner, stored)
     const values = index.get(key) ?? []
     values.push(id)
@@ -196,6 +229,7 @@ function syncMirrors(): void {
   if (bindings === mirrorBindings) {
     return
   }
+
   mirrorBindings = bindings
   syncTracked()
 }
@@ -204,6 +238,7 @@ function ensureObservers(): void {
   if (unsubscribers.length) {
     return
   }
+
   unsubscribers.push(
     $sessionOwnerHintsRevision.listen(syncTracked),
     $sessionEventOwnersRevision.listen(syncTracked),
@@ -236,11 +271,13 @@ export function workSourceAuthorityForSession(
   if (!storedSessionId?.trim() || !profile?.trim()) {
     return none
   }
+
   const requested = qualifiedWorkSourceOwner(connectionId ? { connectionId, profile } : profile)
 
   if (!requested) {
     return none
   }
+
   ensureObservers()
   const key = scopeKey(requested, storedSessionId)
   let entry = tracked.get(key)
@@ -278,17 +315,36 @@ export function workSourceAuthorityForSession(
   return { durable: entry.durable, runtime: entry.runtime }
 }
 
+/** Read-only render snapshot. Observation is installed by SDK reads or a mount effect. */
+export function peekWorkSourceAuthorityForSession(
+  connectionId: string,
+  profile: string,
+  storedSessionId: string
+): WorkSourceAuthority {
+  const entry = tracked.get(scopeKey({ connectionId, profile, routeKey: '' }, storedSessionId))
+
+  if (!entry?.semantic || !entry.socket || entry.socketState !== 'open') {
+    return { durable: null, runtime: null }
+  }
+
+  return { durable: entry.durable, runtime: entry.runtime }
+}
+
 /** Test-only: drop listeners but never recycle request authority. */
 export function _resetWorkSourceOwnerForTests(): void {
   for (const entry of tracked.values()) {
     entry.offState?.()
   }
+
   tracked.clear()
   runtimeIndex.clear()
+  ownerRows = undefined
+  ownerRowIndex.clear()
   mirrorBindings = ''
 
   while (unsubscribers.length) {
     unsubscribers.pop()?.()
   }
+
   $workSourceAuthorityRevision.set(1)
 }
