@@ -1378,6 +1378,9 @@ const progressBusy = (p: BackgroundUpdateProgress | null): boolean => p?.state =
 
 const progressInFlight: Record<UpdateTarget, boolean> = { backend: false, client: false }
 const progressAnsweredAt: Record<UpdateTarget, number> = { backend: 0, client: 0 }
+// [daveey] A busy state dropped at the stale bound: the update it showed has not been seen to finish, so the host's
+// next answer that is not busy still refreshes the version (a long restart or a long sleep would otherwise skip it).
+const progressDroppedBusy: Record<UpdateTarget, boolean> = { backend: false, client: false }
 
 /** [daveey] How long a pill keeps its last update state while its host does not answer (restarting for the update
  *  takes a few minutes); past this the state is dropped, so a host that never comes back cannot spin forever. */
@@ -1411,6 +1414,7 @@ async function pollProgressFor(target: UpdateTarget): Promise<void> {
     // backend): keep what the pill shows for a while. Only a host that answers "nothing in progress" ends an
     // update (and refreshes the version); one silent past the stale bound just drops its state.
     if (store.get() && Date.now() - progressAnsweredAt[target] > UPDATE_PROGRESS_STALE_MS) {
+      progressDroppedBusy[target] ||= progressBusy(store.get())
       store.set(null)
     }
 
@@ -1423,8 +1427,9 @@ async function pollProgressFor(target: UpdateTarget): Promise<void> {
     return
   }
 
-  const finished = progressBusy(store.get()) && !progressBusy(next)
+  const finished = (progressBusy(store.get()) || progressDroppedBusy[target]) && !progressBusy(next)
 
+  progressDroppedBusy[target] = false // answered: the store holds the truth again
   progressAnsweredAt[target] = Date.now()
   store.set(next)
 
@@ -1509,6 +1514,7 @@ export function startUpdatePoller(): void {
     lastConnectionKey = key
     // Another host now: the previous remote's update state is not this one's.
     $backendUpdateProgress.set(null)
+    progressDroppedBusy.backend = false
 
     if (conn?.mode === 'remote') {
       void checkBackendUpdates()

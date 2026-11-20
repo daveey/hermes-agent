@@ -114,7 +114,9 @@ describe('pollUpdateProgress', () => {
     expect(checkHermesUpdateSpy).not.toHaveBeenCalled()
   })
 
-  it('drops a kept state once the host has been silent past the stale bound, without a refresh', async () => {
+  it('drops a kept state once the host has been silent past the stale bound, and refreshes when it answers', async () => {
+    // A restart (or a Mac asleep) longer than the bound: the busy state is dropped without a refresh, but the
+    // update it showed was never seen to finish, so the host's next "nothing in progress" still refreshes.
     setConnection(remote)
     progressSpy.mockImplementation(async (scope?: { connectionId?: string }) => (scope ? { progress: null } : applying))
     await updates.pollUpdateProgress()
@@ -130,10 +132,47 @@ describe('pollUpdateProgress', () => {
       throw new Error('gone')
     })
     await updates.pollUpdateProgress()
-    clock.mockRestore()
 
     expect(updates.$backendUpdateProgress.get()).toBeNull()
     expect(checkHermesUpdateSpy).not.toHaveBeenCalled()
+
+    progressSpy.mockImplementation(async () => ({ progress: null }))
+    await updates.pollUpdateProgress()
+    clock.mockRestore()
+
+    await vi.waitFor(() => expect(checkHermesUpdateSpy).toHaveBeenCalledWith(true))
+    expect(checkHermesUpdateSpy).toHaveBeenCalledTimes(1)
+
+    // Once answered, the next quiet answer is just quiet: no second refresh.
+    await updates.pollUpdateProgress()
+    expect(checkHermesUpdateSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('a dropped update on one remote never refreshes the next remote', async () => {
+    setConnection(remote)
+    progressSpy.mockImplementation(async (scope?: { connectionId?: string }) => (scope ? { progress: null } : applying))
+    await updates.pollUpdateProgress()
+
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + updates.UPDATE_PROGRESS_STALE_MS + 1)
+
+    progressSpy.mockImplementation(async (scope?: { connectionId?: string }) => {
+      if (scope) {
+        return { progress: null }
+      }
+
+      throw new Error('gone')
+    })
+    await updates.pollUpdateProgress()
+    clock.mockRestore()
+    updates.startUpdatePoller()
+    setConnection({ ...remote, baseUrl: 'https://other.example', wsUrl: 'wss://other.example' })
+    await vi.waitFor(() => expect(checkHermesUpdateSpy).toHaveBeenCalled())
+    checkHermesUpdateSpy.mockClear()
+
+    progressSpy.mockImplementation(async () => ({ progress: null }))
+    await updates.pollUpdateProgress()
+    expect(checkHermesUpdateSpy).not.toHaveBeenCalled()
+    updates.stopUpdatePoller()
   })
 
   it('never stacks a second request on a host that has not answered yet', async () => {
