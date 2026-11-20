@@ -316,7 +316,7 @@ def hold(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
         which = over(spent, lim)
         if which is None:
             return None
-        if pr is not None and pr in owner.published_prs(conn, task_id):
+        if pr is not None and pr in owner.recognised_prs(conn, task_id):
             row = conn.execute(
                 "SELECT 1 FROM tasks WHERE id=? AND status IN ('ready','review') "
                 "AND current_run_id IS NULL AND " + _UNCLAIMED, (task_id, now)).fetchone()

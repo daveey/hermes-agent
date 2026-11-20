@@ -42,6 +42,10 @@ _details: dict[str, tuple[Optional[str], Optional[str], float]] = {}
 # url -> (OPEN head sha or None, monotonic time of the gh read that saw it)
 _heads: dict[str, tuple[Optional[str], float]] = {}
 _SHA = re.compile(r"[0-9a-fA-F]{40}")
+# `Hermes-Card:` ownership trailers in the PR body (same grammar as canonical ship's writer; an empty value is kept).
+_CARD_TRAILER = re.compile(r"^Hermes-Card:[ \t]*(\S*)[ \t]*\r?$", re.MULTILINE)
+# url -> (trailer values in body order or None when the body was unreadable, monotonic time of the read)
+_owners: dict[str, tuple[Optional[tuple[str, ...]], float]] = {}
 
 
 def _gh_argv() -> Optional[list[str]]:
@@ -67,9 +71,10 @@ def _gh_pr_state(url: str) -> Optional[str]:
     The same read records the OPEN head for :func:`pr_head` (``_heads``), so the awaited-review
     release costs no second ``gh pr view``. [daveey]"""
     _details.pop(norm_pr(url), None)  # a failed refresh must not retain an old OPEN/base
+    _owners.pop(norm_pr(url), None)
     gh = _gh_argv() or ["gh"]
     try:
-        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,comments,headRefOid,baseRefName"],
+        proc = subprocess.run([*gh, "pr", "view", url, "--json", "state,comments,headRefOid,baseRefName,body"],
                               stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=GH_TIMEOUT_SECONDS, check=False)
@@ -89,6 +94,8 @@ def _gh_pr_state(url: str) -> Optional[str]:
     oid = data.get("headRefOid")
     base = data.get("baseRefName")
     _details[key] = (state, base if isinstance(base, str) else None, time.monotonic())
+    body = data.get("body")
+    _owners[key] = (tuple(_CARD_TRAILER.findall(body)) if isinstance(body, str) else None, time.monotonic())
     _heads[key] = (oid.lower() if state == "OPEN" and isinstance(oid, str) and _SHA.fullmatch(oid) else None,
                    time.monotonic())
     _rejections.pop(key, None)
@@ -136,6 +143,16 @@ def pr_details(url: str) -> tuple[Optional[str], Optional[str]]:
         pr_state(url)
     hit = _details.get(norm_pr(url))
     return (hit[0], hit[1]) if hit is not None else (None, None)
+
+
+def pr_card_owners(url: str) -> Optional[tuple[str, ...]]:
+    """`Hermes-Card:` trailer values of the PR body from the cached read; None when unknown (fail closed).
+
+    Call after :func:`pr_details`, which performs or reuses the one ``gh pr view``. [daveey]"""
+    hit = _owners.get(norm_pr(url))
+    if hit is None or time.monotonic() - hit[1] >= OPEN_TTL_SECONDS:
+        return None
+    return hit[0]
 
 
 def pr_head(url: str, *, max_age: Optional[float] = None) -> Optional[str]:
@@ -638,3 +655,4 @@ def clear_cache() -> None:
     _rejections.clear()
     _heads.clear()
     _details.clear()
+    _owners.clear()

@@ -1,8 +1,10 @@
 """Proven core publication ownership for spend-budget sparing. [daveey]
 
 A PR mention, completion contract, review receipt or foreign comment is not publication.
-Only published_pr run metadata or an owning run's explicit canonical-ship publication
-report supplies the URL. Unknown GitHub state/base retains normal budget enforcement.
+Two proofs exist: ``published_pr`` run metadata (fast path), or a core PR URL in this card's
+own run's comment whose PR body carries exactly one ``Hermes-Card: <this task>`` trailer
+(written by canonical ship) and is OPEN on main. Unknown GitHub state, base or body, a
+conflicting or duplicate trailer, and quoted lines all retain normal budget enforcement.
 """
 from __future__ import annotations
 
@@ -10,50 +12,61 @@ import re
 import sqlite3
 
 _CORE_PR = re.compile(r"https://github\.com/softmax-universe/daveey-hermes/pull/[1-9][0-9]*")
-_PUBLICATION = re.compile(
-    r"^(?:(?:canonical ship )?(?:published|opened)(?: via canonical (?:ship|core-wt):)?"
-    r"|Recovered[^\n.]*?and published via canonical core-wt:"
-    r"|Run[0-9]+ canonical publication advanced [\w-]+:)\s+(?:core\s+)?PR\s*"
-    r"(?:#[0-9]+\s*)?[:(\s]*(https://github\.com/[^\s)`>,;]+)", re.IGNORECASE)
-_CANONICAL = re.compile(r"\b(?:canonical\s+(?:ship|core-wt|publication)|hermes-core-wt\s+ship)\b", re.IGNORECASE)
+_CORE_PR_IN_TEXT = re.compile(r"https://github\.com/softmax-universe/daveey-hermes/pull/[1-9][0-9]*(?![0-9A-Za-z_/])")
 EVENT = "spend_budget_spared"
 
 
 def published_prs(conn: sqlite3.Connection, task_id: str) -> set[str]:
+    """Core PR URLs from ``published_pr`` run metadata only."""
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_db_dispatch_pr_state import _comment_events
-    from hermes_cli.kanban_requeued_publisher import _has_run_uid, _writer_run
 
     urls = set()
     for row in conn.execute("SELECT metadata FROM task_runs WHERE task_id=?", (task_id,)):
         value = kb._json_dict(row[0]).get("published_pr")
         if isinstance(value, str) and _CORE_PR.fullmatch(value):
             urls.add(value)
+    return urls
+
+
+def comment_candidates(conn: sqlite3.Connection, task_id: str) -> set[str]:
+    """Core PR URLs on unquoted lines of this card's own run's comments (discovery only, unverified)."""
+    from hermes_cli.kanban_db_dispatch_pr_state import _comment_events
+    from hermes_cli.kanban_requeued_publisher import _has_run_uid, _writer_run
+
     events = _comment_events(conn, task_id)
     if events is None:
-        return urls
+        return set()
     synced = _has_run_uid(conn)
     by_comment: dict[int, list[dict]] = {}
     for data, _at, cid in events:
         if cid is not None:
             by_comment.setdefault(cid, []).append(data)
+    urls = set()
     for cid, body in conn.execute("SELECT id, body FROM task_comments WHERE task_id=?", (task_id,)):
         stamps = by_comment.get(cid, [])
         if len(stamps) != 1 or _writer_run(conn, task_id, stamps[0], synced) is None:
             continue
-        if not _CANONICAL.search(body):
-            continue
-        for value in _PUBLICATION.findall(body):
-            if _CORE_PR.fullmatch(value):
-                urls.add(value)
+        for line in (body or "").splitlines():
+            if not line.lstrip().startswith(">"):
+                urls.update(_CORE_PR_IN_TEXT.findall(line))
     return urls
 
 
-def open_core_pr(conn: sqlite3.Connection, task_id: str) -> str | None:
-    from hermes_cli.kanban_db_dispatch_pr_state import pr_details
+def recognised_prs(conn: sqlite3.Connection, task_id: str) -> set[str]:
+    """Database-only recheck set for the write transaction; the trailer is verified by :func:`open_core_pr`."""
+    return published_prs(conn, task_id) | comment_candidates(conn, task_id)
 
-    return next((url for url in sorted(published_prs(conn, task_id))
-                 if pr_details(url) == ("OPEN", "main")), None)
+
+def open_core_pr(conn: sqlite3.Connection, task_id: str) -> str | None:
+    from hermes_cli.kanban_db_dispatch_pr_state import pr_card_owners, pr_details
+
+    for url in sorted(published_prs(conn, task_id)):
+        if pr_details(url) == ("OPEN", "main"):
+            return url
+    for url in sorted(comment_candidates(conn, task_id)):
+        if pr_details(url) == ("OPEN", "main") and pr_card_owners(url) == (task_id,):
+            return url
+    return None
 
 
 def record_spared(conn, task_id, pr, spent, note):

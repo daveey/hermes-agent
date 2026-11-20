@@ -134,6 +134,7 @@ def test_canonical_publication_comment(kanban_home, github, provenance, body_tem
             other = owner(conn)
             run_id = conn.execute("SELECT id FROM task_runs WHERE task_id=? LIMIT 1", (other,)).fetchone()[0]
         body = body_template.format(pr=PR)
+        github[0]["body"] = f"Work\n\nHermes-Card: {tid}"
         cid = kb.add_comment(conn, tid, "default", body)
         conn.execute("DELETE FROM task_events WHERE task_id=? AND kind='commented'", (tid,))
         if provenance != "missing":
@@ -215,7 +216,7 @@ def test_own_review_mentions_are_not_publication(kanban_home, github, body):
         kb._append_event(conn, tid, "commented", {
             "author": "default", "len": len(body), "comment_id": cid, "writer_run_id": run_id})
         assert spend.hold(conn, tid) == "triage"
-        assert github[1] == []
+        assert helpers._events(conn, tid, "spend_budget_spared") == []
 
 
 def test_closed_pr_reopen_is_observed_after_shared_ttl(kanban_home, github, monkeypatch):
