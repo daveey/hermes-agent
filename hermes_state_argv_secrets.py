@@ -9,19 +9,22 @@ a secret-named flag (``--webhook-secret``, ``--api-key-value``, ``-Dapi.key=``, 
 env prefixes in shell strings. ``agent.redact`` still runs afterwards for known secret formats and URL credentials.
 
 Limits, measured on generated secrets of every common shape (letters and digits, base32/64, urlsafe, hex, symbol
-passwords, single-case letters, grouped keys) as a bare argument, in a path, in a URL and as a ``NAME=`` value: at most
-about 6% of 16-character secrets are shown, 2.5% of 24-character, 1% of 32-character and 0.5% of 40-character ones
-(the worst shape is random single-case letters, which can read like words); about 0.25% of this repo's identifiers
+passwords, single-case letters, grouped keys) as a bare argument, in an absolute or relative path, in a URL and as a
+``NAME=`` value -- counting a shown tail of 8+ characters as a leak: at most about 7% of 16-character secrets are shown,
+2.5% of 24-character, 1.5% of 32-character and 1% of 40-character ones (the worst shapes are random mixed- or
+single-case letters, which can read like words); about 0.15% of this repo's identifiers and 0.1% of its env names
 are masked. This is a rate, not a guarantee, and some secrets look exactly like identifiers and are shown:
 pronounceable passwords (``correcthorse``), all-digit values, UUIDs and strings under 12 characters, unless a name
 marks them secret. Short hex (up to 12 characters) is shown on purpose: it is how commits are abbreviated; longer hex
-(full commits, digests, container ids) is masked with the keys it looks like.
+(full commits, digests, container ids) is masked with the keys it looks like. ``--pin`` and ``--private`` are not
+secret names on purpose: in Hermes and common tools they are switches or provider slugs.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shlex
 from itertools import pairwise
 
 MASK = "***"
@@ -42,12 +45,18 @@ _SETTING_SUFFIXES = frozenset({
     "endpoint", "host", "port", "count", "limit", "size", "length", "len", "mode", "type", "kind", "format", "store",
     "backend", "provider", "browser", "enabled", "required", "only", "whitelist", "allowlist", "denylist",
     "blacklist", "server", "servers", "scheme", "schemes", "delegate", "signingkey", "version", "versions",
+    "arn", "fd",
 })
+# Parts that make a plural secret name a count (--max-tokens 4096, --tokens-per-delta 512), not a list of secrets.
+_COUNT_PARTS = frozenset({"max", "min", "cap", "per", "limit", "num", "count", "total", "budget"})
+# Query parameters that carry a credential although their name has no secret word.
+_QUERY_SECRETS = frozenset({"sid", "sig", "signature", "code", "session", "hash", "pass", "pwd", "otp"})
 _COMMAND_SUFFIXES = frozenset({"cmd", "command", "helper"})
 # A first part that makes a flag a switch: it takes no value, so the next argument is not its secret.
 _BOOLEAN_PREFIXES = frozenset({"no", "show", "rotate", "migrate", "with", "list", "print", "clear", "reset", "skip",
                                "allow", "require", "enable", "disable", "isolated"})
 _PUBLIC_FLAGS = frozenset({"--ssh-session-token-file", "--keychain", "--monkey", "--keyboard", "--author",
+                           "--max-tokens", "--min-tokens", "--cache-read-tokens",
                            "--authority", "--idempotency-key", "--step-key", "--passkey-browser", "--session-key",
                            "--no-credentials", "--use-partner-key-as-auth", "--keywords"})
 # Values that select an auth mechanism (mcp add --auth oauth): kept after a flag whose only secret word is "auth".
@@ -71,6 +80,7 @@ _PROGRAM_SECRET_FLAGS = {
     "lftp": ((), (), ("-u", "--user")),
 }
 _NO_FLAGS = ((), (), ())
+_COOKIE_FLAGS = frozenset({"-b", "--cookie", "cookie"})
 # Programs that run a command given as their first positional argument: that program's own flags apply after it.
 _COMMAND_WRAPPERS = frozenset({"sshpass", "sudo", "doas", "env", "nice", "nohup", "timeout", "xargs", "exec", "time",
                                "stdbuf", "ionice", "chroot", "setsid", "runuser", "caffeinate", "watch", "flock"})
@@ -92,7 +102,13 @@ _PAIRS = frozenset((
     "yd ye yl ym yn yo yp yr ys yt za ze zi zo"
 ).split())
 # Thresholds measured on random strings vs the repo's identifiers, /usr/share/dict/words and live process arguments.
-_COMMON_MIN, _VOWEL_MIN, _RARE_MAX, _CLUSTER_MIN, _CLUSTER_MIN_UPPER = 0.55, 0.1, 0.2, 7, 5
+_COMMON_MIN, _VOWEL_MIN, _RARE_MAX, _CLUSTER_MIN = 0.55, 0.1, 0.25, 7
+# a long all-caps word with a 5-consonant cluster is random unless its letter pairs read strongly (PASSPHRASE)
+_CLUSTER_MIN_UPPER, _UPPER_LEN, _UPPER_CLUSTER_COMMON = 5, 8, 0.75
+_ALPHA_FREE = 6  # letter runs this short carry too little to be a secret on their own (iOS, gRPC)
+_SHORT_WORD, _MAX_SHORT_WORDS, _MIN_AVG_WORD = 2, 3, 2.5  # camelCase word-shape limits
+# key groups: equal-length chunks, 3+ of 5-8 characters or 4+ of 3-4, mostly not words (OKWV-IDIA-T5UR-…)
+_KEY_GROUP_LEN, _KEY_GROUPS_LONG, _KEY_GROUPS_SHORT = (3, 8), 3, 4
 _COMMON_MIN_LONG, _LONG_WORD = 0.7, 14
 _MIN_JOINED = 12
 _SHORT_HEX = 12  # an abbreviated commit; longer hex is masked with the keys it looks like
@@ -106,8 +122,8 @@ _SEPARATORS = re.compile(r"[-_.:/@=,+~%?&#*\\|;()\[\]{}<>\"'`$!^ ]")
 _WORD_SEPARATORS = re.compile(r"[-_.:@,|;()\[\]{}<>\"'` ]")
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 # Ids with a known prefix: Hermes cards/processes/sessions, cloud resources.
-_KNOWN_ID_BODY = (r"(?:t_[0-9a-f]+|proc_[0-9a-f]+|\d{8}_\d{6}_[0-9a-z]+|"
-                  r"(?:i|vol|snap|sg|subnet|vpc|ami|eni|igw|rtb|nat|acl|lt)-[0-9a-f]{8,17})")
+_KNOWN_ID_BODY = (r"(?:t_[0-9a-f]+|proc_[0-9a-f]+|\d{8}_\d{6}_[0-9a-z]+|tail[0-9a-f]{4,10}|"
+                  r"(?:i|mi|vol|snap|sg|subnet|vpc|ami|eni|igw|rtb|nat|acl|lt)-[0-9a-f]{8,17})")
 _KNOWN_ID = re.compile(rf"^{_KNOWN_ID_BODY}$")
 _KNOWN_ID_INSIDE = re.compile(rf"(?<![0-9A-Za-z]){_KNOWN_ID_BODY}(?![0-9A-Za-z])")
 _PATH_START = re.compile(r"^(?:/|~|\.{1,2}/|\\|[A-Za-z]:[\\/])")
@@ -120,6 +136,7 @@ _USERINFO = re.compile(r"^([^:@/\s]+):([^:@/\s]+)@([A-Za-z][A-Za-z0-9-]*(?:\.[A-
                        r"(?::\d+)?(?:[:/].*)?$")
 _NOT_USERINFO = frozenset({"mailto", "npm", "github", "gitlab", "bitbucket", "pkg", "jsr", "docker", "oci", "git"})
 _STRUCTURE = re.compile(r"[/?&#=;@]")  # between the components of a path or URL
+_NAME_COLON = re.compile(r"^([A-Za-z_][\w.-]*):(\S+)$")  # name:value, judged by the name
 _NPM_SPEC = re.compile(r"^@[\w.-]+/[\w.-]+(?:@[\w.^~<>=-]+)?$")  # @playwright/mcp@latest
 
 
@@ -137,9 +154,10 @@ def _letters_random(*words: str) -> bool:
     rare = sum(c in _RARE for c in letters) / len(letters)
     # compound words have long clusters (launchctl, fullscreen); a long all-caps word with one is random (GPOGJHRLO)
     longest_cluster = max((len(m) for w in lowered for m in re.findall(r"[^aeiouy]+", w)), default=0)
-    upper_cluster = max((len(m) for w in words if w.isupper() and len(w) >= 8
+    upper_cluster = max((len(m) for w in words if w.isupper() and len(w) >= _UPPER_LEN
                          for m in re.findall(r"[^aeiouy]+", w.lower())), default=0)
-    clustered = longest_cluster >= _CLUSTER_MIN or (upper_cluster >= _CLUSTER_MIN_UPPER and common < 0.75)
+    clustered = longest_cluster >= _CLUSTER_MIN or (
+        upper_cluster >= _CLUSTER_MIN_UPPER and common < _UPPER_CLUSTER_COMMON)
     # one unbroken word of 14+ letters is rare in identifiers and common in random strings: it must read strongly
     floor = _COMMON_MIN_LONG if len(lowered) == 1 and len(letters) >= _LONG_WORD else _COMMON_MIN
     return common < floor or vowels < _VOWEL_MIN or rare > _RARE_MAX or clustered
@@ -150,11 +168,11 @@ def _letters_look_random(letters: str) -> bool:
     if len(set(letters.lower())) <= 2:
         return False  # a repeated letter (padding, placeholders) is no secret
     words = re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+", letters)
-    if len(words) > 1 and sum(len(w) for w in words) / len(words) < 2.5:
+    if len(words) > 1 and sum(len(w) for w in words) / len(words) < _MIN_AVG_WORD:
         return True  # "XyQwErTy": a capital every other letter
-    if len(letters) >= 10 and sum(len(w) <= 2 for w in words) >= 3:
+    if len(letters) >= 10 and sum(len(w) <= _SHORT_WORD for w in words) >= _MAX_SHORT_WORDS:
         return True  # names have at most a couple of short words (is, By, Id); random case has many (Ub…Lz…Jw)
-    acronyms = [w for w in words if len(w) <= 2 and w.isupper()]
+    acronyms = [w for w in words if len(w) <= _SHORT_WORD and w.isupper()]
     # one short acronym (JS, IO) carries no letter statistics; several are random case flips (…JPvGXi…)
     judged = [w for w in words if len(w) >= 3] if len(acronyms) <= 1 else words
     return _letters_random(*(judged if len(judged) > 1 else [letters]))
@@ -163,7 +181,7 @@ def _letters_look_random(letters: str) -> bool:
 def _alpha_ok(run: str) -> bool:
     """A letter run that is a word, an acronym or camelCase words. Runs of up to 6 letters carry too little to be a
     secret on their own (iOS, gRPC, eBPF); longer runs are judged."""
-    return len(run) <= 6 or not _letters_look_random(run)
+    return len(run) <= _ALPHA_FREE or not _letters_look_random(run)
 
 
 def _segment_ok(segment: str) -> bool:
@@ -191,37 +209,72 @@ def _flip_density(alnum: str) -> float:
     return flips / max(1, len(alnum) - 1)
 
 
+def _short_hex(alnum: str) -> bool:
+    return len(alnum) <= _SHORT_HEX and bool(re.fullmatch(r"[0-9a-fA-F]+", alnum))
+
+
+def _is_word_group(group: str) -> bool:
+    """A chunk that reads as a word or number (hermes, pytest, 2507), not a generated group (T5UR, OKWV)."""
+    if group.isdigit() or _short_hex(group) and not re.search(r"\d", group):
+        return True
+    return group.isalpha() and (len(group) <= 2 or not _letters_random(group))
+
+
+def _key_groups(groups: list[str]) -> bool:
+    """Equal-length chunks, mostly not words: a license, recovery or grouped API key (OKWV-IDIA-T5UR-F8U2-…)."""
+    if not groups or len({len(g) for g in groups}) != 1:
+        return False
+    size = len(groups[0])
+    low, high = _KEY_GROUP_LEN
+    needed = _KEY_GROUPS_LONG if size >= 5 else _KEY_GROUPS_SHORT
+    if not (low <= size <= high and len(groups) >= needed) or all(g.isdigit() for g in groups):
+        return False
+    return sum(not _is_word_group(g) for g in groups) * 2 > len(groups)
+
+
+def _random_group_letters(chunks: list[str]) -> bool:
+    """Short chunks whose letters, pairs taken inside each chunk, do not read as words (ZPTK29.PAJDOL.INCT13)."""
+    group_letters = [re.sub(r"[^A-Za-z]", "", chunk) for chunk in chunks if chunk]
+    if len(group_letters) < 3 or sum(map(len, group_letters)) < _MIN_JOINED:
+        return False
+    if any(len(g) >= 5 and g.islower() and not _letters_random(g) for g in group_letters):
+        return False  # a real lowercase word among the chunks: a name with parts (us-west-2.compute.amazonaws)
+    words = [g for g in group_letters if len(g) >= 2]
+    return len(words) >= 3 and all(w.isupper() or w.islower() for w in words) and _letters_random(*words)
+
+
+def _random_chunk(alnum: str) -> bool:
+    """One long chunk (12+ characters) that is generated: letters and digits alternating, or letters that do not
+    read as words."""
+    if len(alnum) < _MIN_JOINED or _short_hex(alnum):
+        return False
+    if len(re.findall(r"[A-Za-z]+|\d+", alnum)) >= 6:
+        return True
+    letters = re.sub(r"[^A-Za-z]", "", alnum)
+    return len(letters) >= 8 and _letters_look_random(letters)
+
+
+def _words_with_short_ids(token: str) -> bool:
+    """A name of real words with short id or version parts (hermes-gateway-7d9f8c6b5-x2k4p, v1.2.3-rc4+build5):
+    its letter/digit changes come from the short parts, not from one generated string."""
+    chunks = [c for c in re.split(r"[-_.+]", token) if c]
+    words = [c for c in chunks if (m := re.fullmatch(r"([a-z]{5,})\d*", c)) and not _letters_random(m.group(1))]
+    return bool(words) and all(len(c) <= 10 for c in chunks if c not in words)
+
+
 def _joined_random(token: str) -> bool:
     """The token is generated, judged with its symbols removed so that symbols cannot cut a secret into short,
-    innocent-looking pieces (``uAkqc7c#pilIq7s9``, ``+QBYaSITMRV…``, ``ab12_cd34_ef56_gh78``): many letter/digit
-    alternations across the whole token, or a word chunk whose letters do not read as words."""
-    whole = re.sub(r"[^A-Za-z0-9]", "", token)
-    short_hex = len(whole) <= _SHORT_HEX and re.fullmatch(r"[0-9a-fA-F]+", whole)
-    if len(whole) >= _MIN_JOINED and not short_hex and (
-            len(re.findall(r"[A-Za-z]+|\d+", whole)) >= 8 or _flip_density(whole) >= _FLIP_DENSITY_MAX):
-        return True
-    chunks = [re.sub(r"[^A-Za-z0-9]", "", chunk) for chunk in _WORD_SEPARATORS.split(token)]
-    groups = [chunk for chunk in chunks if chunk]
-    if (len({len(g) for g in groups}) == 1 and len(groups) >= (3 if len(groups[0]) >= 5 else 4)
-            and 3 <= len(groups[0]) <= 8
-            and not all(g.isdigit() for g in groups)
-            and (any(re.search(r"\d", g) and re.search(r"[A-Za-z]", g) for g in groups)
-                 or all(g.isupper() for g in groups))):
-        return True  # equal-length groups with digits or all caps: a license or recovery key (OKWV-IDIA-T5UR-…)
-    # short groups (N0BZ-AXT6-BODG-…, ZPTK29.PAJDOL.…): the letters of all chunks, pairs taken inside each chunk
-    group_letters = [re.sub(r"[^A-Za-z]", "", chunk) for chunk in chunks if chunk]
-    if len(group_letters) >= 3 and sum(map(len, group_letters)) >= _MIN_JOINED and not any(
-            len(g) >= 3 and g.islower() and not _letters_random(g) for g in group_letters if len(g) >= 5):
-        words = [g for g in group_letters if len(g) >= 2]
-        if len(words) >= 3 and all(w.isupper() or w.islower() for w in words) and _letters_random(*words):
+    innocent-looking pieces (``uAkqc7c#pilIq7s9``, ``+QBYaSITMRV…``, ``ab12_cd34_ef56_gh78``)."""
+    stem = re.sub(r"\.[A-Za-z][A-Za-z0-9]{0,4}$", "", token)  # a file extension must not hide a key (KEY.json)
+    for candidate in {token, stem}:
+        whole = re.sub(r"[^A-Za-z0-9]", "", candidate)
+        if (len(whole) >= _MIN_JOINED and not _short_hex(whole) and _flip_density(whole) >= _FLIP_DENSITY_MAX
+                and not _words_with_short_ids(candidate)):
             return True
-    for joined in chunks:
-        if len(joined) < _MIN_JOINED or (len(joined) <= _SHORT_HEX and re.fullmatch(r"[0-9a-fA-F]+", joined)):
-            continue
-        if len(re.findall(r"[A-Za-z]+|\d+", joined)) >= 6:
-            return True
-        letters = re.sub(r"[^A-Za-z]", "", joined)
-        if len(letters) >= 8 and _letters_look_random(letters):
+    for candidate in {token, stem}:
+        chunks = [re.sub(r"[^A-Za-z0-9]", "", chunk) for chunk in _WORD_SEPARATORS.split(candidate)]
+        if (_key_groups([c for c in chunks if c]) or _random_group_letters(chunks)
+                or any(_random_chunk(chunk) for chunk in chunks)):
             return True
     return False
 
@@ -250,6 +303,8 @@ def _name_parts(name: str) -> list[str]:
 def _secret_index(parts: list[str]) -> int:
     """Index of the last part that marks a secret, else -1."""
     for index in range(len(parts) - 1, -1, -1):
+        if parts[index] in _KEY_ID_NAMES or parts[index] in _SETTING_SUFFIXES:
+            continue  # signingkey, keyid: a key's id, not the key
         if parts[index] in _SECRET_PARTS or _SECRET_WORD.search(parts[index]):
             return index
     return -1
@@ -280,10 +335,12 @@ def _is_command_name(name: str) -> bool:
 
 
 def _counts_secrets(name: str) -> bool:
-    """--max-tokens, --cap-tokens: a plural secret word counts secrets; a number after it is a count."""
+    """--cap-tokens, --tokens-per-delta: a plural secret word with a count part counts secrets; a number after it
+    is a count. A plain plural (--github-tokens, --api-keys) lists secrets."""
     parts = _name_parts(name)
     index = _secret_index(parts)
-    return index >= 0 and parts[index].endswith("s") and not parts[index].endswith("ss")
+    plural = index >= 0 and parts[index].endswith("s") and not parts[index].endswith("ss")
+    return plural and any(part in _COUNT_PARTS for part in parts)
 
 
 def _auth_only(name: str) -> bool:
@@ -295,7 +352,8 @@ def _auth_only(name: str) -> bool:
 # ---- values -------------------------------------------------------------------------------------------------------
 
 def _base64_piece(part: str) -> bool:
-    """A piece base64 could have cut at "/": its alphabet, with mixed case or digits (not a plain word)."""
+    """A piece base64 could have cut at "/": its alphabet (a file extension aside), with mixed case or digits."""
+    part = re.sub(r"\.[A-Za-z][A-Za-z0-9]{0,4}$", "", part)
     return bool(re.fullmatch(r"[A-Za-z0-9+=]+", part)) and bool(
         re.search(r"\d", part) or (re.search(r"[a-z]", part) and re.search(r"[A-Z]", part)))
 
@@ -306,6 +364,7 @@ def _mask_components(value: str) -> str:
     parts = _STRUCTURE.split(value)
     seps = _STRUCTURE.findall(value)
     bad = [not is_identifier(part) for part in parts]
+    content_bad = list(bad)  # bad by what it looks like, before any name or neighbour rule
     for index in range(len(parts) - 1):
         left, right = parts[index], parts[index + 1]
         if (seps[index] in "/#" and not bad[index] and not bad[index + 1] and _base64_piece(left)
@@ -314,6 +373,34 @@ def _mask_components(value: str) -> str:
     for index, part in enumerate(parts):
         if re.search(r"[!^$*]", part) and re.search(r"[A-Za-z0-9]", part):
             bad[index] = True  # shell-unsafe symbols do not occur in path or URL names; they do in passwords
+        if index and seps[index - 1] == "=" and (
+                _is_secret_name(parts[index - 1]) or parts[index - 1].lower() in _QUERY_SECRETS):
+            bad[index] = True  # ?token=…, ?pass=…, ?sid=…: the value is a credential
+    changed = True
+    while changed:  # a base64 secret cut at "/" or "#": the pieces next to a masked piece are part of it
+        changed = False
+        for index in range(len(parts) - 1):
+            if seps[index] not in "/#":
+                continue
+            for a, b in ((index, index + 1), (index + 1, index)):
+                if bad[a] and not bad[b] and len(parts[b]) >= 4 and _base64_piece(parts[b]):
+                    bad[b] = changed = True
+    # the path part of a "/" segment (before any "?") with password symbols is one secret cut at # & @ %: when the
+    # part as a whole is not a name, mask all of its pieces (the query after it is judged piece by piece)
+    segment_start = 0
+    for index in range(len(parts) + 1):
+        if index == len(parts) or (index and seps[index - 1] == "/"):
+            path_pieces = []
+            for i in range(segment_start, index):
+                path_pieces.append(i)
+                if i < len(seps) and seps[i] == "?":
+                    break
+            text = "".join(parts[i] + (seps[i] if i != path_pieces[-1] else "") for i in path_pieces)
+            if re.search(r"[!^$*&#%@]", text) and re.search(r"[A-Za-z0-9]", text) and (
+                    any(content_bad[i] for i in path_pieces) or not is_identifier(text)):
+                for i in path_pieces:
+                    bad[i] = True
+            segment_start = index
     out = [MASK if bad[0] else parts[0]]
     for sep, part, masked in zip(seps, parts[1:], bad[1:]):
         out += [sep, MASK if masked else part]
@@ -340,9 +427,9 @@ def _mask_userpass(value: str) -> str:
     return f"{user if user and is_identifier(user) else MASK}{sep}{MASK}"
 
 
-def _mask_command(value: str) -> str:
+def _mask_command(value: str, *, depth: int = 0) -> str:
     program, _, rest = value.strip().partition(" ")
-    return f"{_judge(program, secret=False, depth=1)} {MASK}" if rest.strip() else value
+    return f"{_judge(program, secret=False, depth=depth + 1)} {MASK}" if rest.strip() else value
 
 
 def _judge_secret(value: str, *, name: str) -> str:
@@ -360,7 +447,7 @@ def _judge_secret(value: str, *, name: str) -> str:
 
 def _judge_assignment(name: str, inner: str, *, depth: int) -> str:
     if _is_command_name(name):
-        return f"{name}={_mask_command(inner)}"
+        return f"{name}={_mask_command(inner, depth=depth)}"
     if name.lower().rsplit(".", 1)[-1] in _KEY_ID_NAMES and re.fullmatch(r"[0-9A-Fa-f]{8,40}", inner):
         return f"{name}={inner}"
     if _is_secret_name(name):
@@ -368,8 +455,20 @@ def _judge_assignment(name: str, inner: str, *, depth: int) -> str:
     return f"{name}={_judge(inner, secret=False, depth=depth + 1)}"
 
 
-def _mask_shell(words: list[str], *, depth: int) -> str:
-    """Shell text: leading ``NAME=value`` env words, then a program and its arguments."""
+def _shell_words(text: str) -> list[str] | None:
+    """Shell text split as the shell would (quotes kept together), or None when its quoting does not parse."""
+    try:
+        return shlex.split(text, posix=True)
+    except ValueError:
+        return None
+
+
+def _mask_shell(text: str, *, depth: int) -> str:
+    """Shell text: leading ``NAME=value`` env words, then a program and its arguments. Text whose quoting does not
+    parse is masked whole: a quoted secret could span any number of words."""
+    words = _shell_words(text)
+    if words is None:
+        return MASK
     out: list[str] = []
     index = 0
     while index + 1 < len(words) and (assignment := _ASSIGNMENT.match(words[index])):
@@ -393,25 +492,28 @@ def _judge(value: str, *, secret: bool, depth: int, name: str = "") -> str:
     assignment = _ASSIGNMENT.match(value)
     if assignment and value[assignment.end():] and value[assignment.end()] != "=":
         name = assignment.group(1)
+        if _is_secret_name(name):
+            return f"{name}={_judge_secret(value[assignment.end():], name=name)}"  # all of it, spaces included
         if any(c.isspace() for c in value) and _ENV_NAME.match(name):
-            return _mask_shell(value.split(), depth=depth)  # SLACK_TOKEN=x ./run: env prefix, then a command
-        # the name must read as words even run together: AB12_CD34_EF56_GH78=… is random segments, not a name
-        if not (is_identifier(name) and _segment_ok(re.sub(r"[^A-Za-z0-9]", "", name))):
-            return MASK
+            return _mask_shell(value, depth=depth)  # HERMES_X=1 hermes update: env prefix, then a command
+        if not is_identifier(name):
+            return MASK  # AB12_CD34_EF56_GH78=…: random segments, not a name
         return _judge_assignment(name, value[assignment.end():], depth=depth)
+    if (named := _NAME_COLON.match(value)) and _is_secret_name(named.group(1)):
+        return f"{named.group(1)}:{MASK}"  # api_key:sunshine
     if header := _HEADER.match(value):
         name, rest = header.groups()
         secret_header = name.lower() in _SECRET_HEADERS or _is_secret_name(name)
         return f"{name}: {MASK if secret_header else _judge(rest, secret=False, depth=depth + 1)}"
     if any(c.isspace() for c in value):
-        return _mask_shell(value.split(), depth=depth)
+        return _mask_shell(value, depth=depth)
     if _URL.match(value):
         return _mask_url(value)
     if (userinfo := _USERINFO.match(value)) and userinfo.group(1).lower() not in _NOT_USERINFO and not re.match(
             r"sha\d+$", userinfo.group(3)):
         return f"{userinfo.group(1)}:{MASK}@{value[userinfo.end(2) + 1:]}"
-    if _PATH_START.match(value):
-        return _mask_components(value)
+    if _PATH_START.match(value) or "/" in value:
+        return _mask_components(value)  # absolute or relative (data/x.json, anthropic/claude-opus-4.7)
     if sep := next((c for c in ",|" if c in value), None):
         # a list (--enable-features=A,B,C, A|B): each item on its own, so one odd item does not hide the rest
         return sep.join(_judge(item, secret=False, depth=depth + 1) for item in value.split(sep))
@@ -424,17 +526,25 @@ def _program_flags(program: str):
     return _PROGRAM_SECRET_FLAGS.get(os.path.basename(program or "").lower().removesuffix(".exe"))
 
 
+def _split_flag(token: str) -> tuple[str, str, str]:
+    """``(head, separator, value)`` of a flag token; the value follows the first ``=`` or ``:`` (``/p:``-style)."""
+    match = re.match(r"^(-{1,2}[^=:]*)([=:])(.*)$", token, re.DOTALL)
+    return match.groups() if match else (token, "", "")
+
+
 def _long_flag(token: str) -> str | None:
-    """The name of a long flag: ``--name``, Go-style ``-name`` (5+ letters, or with ``=``) or a Java ``-Dname=…``."""
+    """The name of a long flag, or None. Flag shapes: ``--name``; Go-style ``-name`` (5+ letters, or with a value);
+    a Java ``-Dname=…`` property. The name must read as one, so a random token that starts with ``-`` (urlsafe
+    base64) is a value, not a flag. Short ``-x`` switches and clusters are handled by the caller."""
+    head, sep, _value = _split_flag(token)
     if token.startswith("--"):
-        name = token[2:].partition("=")[0]
+        name = head[2:]
         shaped = bool(re.fullmatch(r"[A-Za-z][\w.-]*", name))
     elif re.fullmatch(r"-D[A-Za-z_][\w.-]*=.*", token, re.DOTALL):
         name, shaped = token[2:].partition("=")[0], True
     else:
-        name = token[1:].partition("=")[0]
-        shaped = bool(re.fullmatch(r"[A-Za-z][\w.-]{2,}", name)) and ("=" in token or len(name) > 4)
-    # a name must read as one: a random token that starts with "-" (urlsafe base64) is a value, not a flag
+        name = head[1:]
+        shaped = bool(re.fullmatch(r"[A-Za-z][\w.-]{2,}", name)) and (bool(sep) or len(name) > 4)
     return name if shaped and is_identifier(name) else None
 
 
@@ -448,37 +558,43 @@ def _program_flag(token: str, flags):
         return token, "userpass"
     if eq and flag in userpass:
         return f"{flag}={_mask_userpass(value)}", None
-    for short in (*attached, *userpass):
+    for short in (*attached, *separate, *userpass):
         if len(short) == 2 and token.startswith(short) and len(token) > 2 and not token.startswith("--"):
-            return f"{short}{MASK if short in attached else _mask_userpass(token[2:])}", None
-    # combined short switches ending in a user flag: curl -su alice:pw, -fsSLu alice:pw
-    letters = {f[1] for f in userpass if len(f) == 2}
-    if re.fullmatch(r"-[A-Za-z]{2,}", token) and token[-1] in letters:
-        return token, "userpass"
+            # attached value: mysql -pPASS, curl -bsession=x, curl -ualice:pw
+            return f"{short}{_mask_userpass(token[2:]) if short in userpass else MASK}", None
+    # combined short switches ending in a flag that takes a value: curl -su alice:pw, curl -sb session=x
+    if re.fullmatch(r"-[A-Za-z]{2,}", token):
+        if token[-1] in {f[1] for f in userpass if len(f) == 2}:
+            return token, "userpass"
+        if token[-1] in {f[1] for f in separate if len(f) == 2}:
+            return token, "secret"
     return None
 
 
 def _flag(token: str, name: str, depth: int) -> str:
-    """A long flag as shown: its name, and its ``=value`` judged under that name."""
-    head, eq, value = token.partition("=")
-    if not eq:
+    """A long flag as shown: its name, and its ``=value`` (or ``:value``) judged under that name."""
+    if token.startswith("-D") and not token.startswith("--"):
+        head, sep, value = token.partition("=")
+    else:
+        head, sep, value = _split_flag(token)
+    if not sep:
         return token
     if _is_command_name(name):
-        return f"{head}={_mask_command(value)}"
+        return f"{head}{sep}{_mask_command(value, depth=depth)}"
     if _is_secret_name(name):
-        return f"{head}={_judge_secret(value, name=name)}"
-    return f"{head}={_judge(value, secret=False, depth=depth)}"
+        return f"{head}{sep}{_judge_secret(value, name=name)}"
+    return f"{head}{sep}{_judge(value, secret=False, depth=depth)}"
 
 
-def _pending_value(token: str, kind: str, name: str, *, depth: int) -> str | None:
-    """The argument after a flag that takes a secret, or None when it is the next flag instead (the secret flag was
-    a switch). Only a long ``--flag`` whose name reads as one counts as a flag: a secret may start with "-"."""
-    if re.fullmatch(r"--[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:=.*)?", token, re.DOTALL):
-        return None  # a kebab-case --flag: the secret flag was a switch
+def _pending_value(token: str, kind: str, name: str, *, depth: int) -> str:
+    """The argument after a flag that takes a secret: always its value (fail closed -- a secret may start with
+    ``-`` or ``--``; a secret-named switch is listed as public or as a switch prefix instead)."""
     if kind == "userpass":
         return _mask_userpass(token)
     if kind == "command":
-        return _mask_command(token)
+        return _mask_command(token, depth=depth)
+    if name in _COOKIE_FLAGS and "=" not in token and (_PATH_START.match(token) or is_identifier(token)):
+        return token  # curl -b cookies.txt: a cookie-jar file, not a cookie
     return _judge_secret(token, name=name)
 
 
@@ -495,24 +611,24 @@ def mask_argv_secrets(argv: list[str], *, program: str = "", _depth: int = 0) ->
             continue
         if pending is not None:
             (kind, name), pending = pending, None
-            shown = _pending_value(token, kind, name, depth=_depth)
-            if shown is not None:
-                out.append(shown)
-                continue
+            out.append(_pending_value(token, kind, name, depth=_depth))
+            continue
         if (handled := _program_flag(token, flags)) is not None:
             shown, kind = handled
             out.append(shown)
-            pending = (kind, token) if kind else None
+            pending = (kind, token if len(token) == 2 else "-" + token[-1]) if kind else None
             continue
         if token.startswith("-") and (name := _long_flag(token)):
             out.append(_flag(token, name, _depth))
-            if "=" not in token and _is_command_name(name):
+            valued = bool(_split_flag(token)[1]) or token.startswith("-D")
+            if not valued and _is_command_name(name):
                 pending = ("command", name)
-            elif "=" not in token and _is_secret_name(name):
+            elif not valued and _is_secret_name(name):
                 pending = ("secret", name)
             continue
         if re.fullmatch(r"-[A-Za-z][A-Za-z0-9]{0,3}", token):
-            out.append(token)  # a short switch or cluster
+            out.append(token)  # a short switch or cluster; Go-style -pass/-pw take a secret
+            pending = ("secret", token) if _is_secret_name(token) else None
             continue
         if (wrapped := _program_flags(token)) is not None:
             flags, wrapper = wrapped, False  # sudo mysql …, docker exec db mysql …, env X=1 mysql …
