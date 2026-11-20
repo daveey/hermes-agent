@@ -19,6 +19,8 @@ CONTAIN_SCHEMA = _schema("kanban_contain",
     "Contain an admitted run without satisfying dependencies. Protected NON-HUMAN triage preserves all open edges "
     "without dispatching review or asking a human. Can also contain an unclaimed descendant. Resume requires the exact "
     "episode and a live scoped authority or genuinely new producer completion; generic unblock cannot release it. "
+    "The authority is an open card whose later run decides release, not the actor containing it. "
+    "Containment is not a way to wait for a review; use kanban_request_review instead. "
     "Synced boards refuse until canonical containment capability is installed. After terminal_for_run=true, stop.",
     {"task_id": {"type": "string"}, "authority": {"type": "string"},
      "producer": {"type": "string"}, "summary": {"type": "string", "minLength": 1,

@@ -222,6 +222,7 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "workers alongside ``summary``."
         )), "properties": {
             "completion_receipt": _completion_receipt_schema(),
+            "containment_retained": {"description": "Retained episode uids; explain why in summary."},
             # Advertise canonical values without narrowing formerly free-form metadata.
             # Existing readers and ship gates, not deferred transport, own validation.
             "verdict": {"description": "Review verdict: use approve or request_changes for ship reviews."},

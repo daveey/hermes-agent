@@ -2449,6 +2449,8 @@ def complete_task(
     auditable event. Approving a card out of ``review`` stays exempt.
     """
     from hermes_cli.kanban_review_required import require_review
+    from hermes_cli.kanban_containment_authority import require_acknowledgement
+    require_acknowledgement(conn, task_id, metadata)
     require_review(conn, task_id, expected_run_id, placement_settled=placement_settled)
     from hermes_cli import kanban_completion_receipt as receipt_admission
     metadata, receipt_owners = receipt_admission.prepare(conn, task_id, metadata, summary=summary or result)
@@ -2468,6 +2470,7 @@ def complete_task(
     from hermes_cli.kanban_metadata_files import discard_on_error
     staged: list[Path] = []
     with _prestaged(conn, task_id, metadata), discard_on_error(staged), write_txn(conn):
+        require_acknowledgement(conn, task_id, metadata)
         require_review(conn, task_id, expected_run_id, placement_settled=placement_settled)
         if not _parents_satisfied(conn, task_id):
             return False
@@ -3572,6 +3575,8 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str, *, recovery_tai
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task, conn=conn)
+    from hermes_cli.kanban_containment_authority import render_context
+    lines.append(render_context(conn, task_id))
     _ctx_standing(lines, task, list_comments(conn, task_id))  # [daveey]
     from hermes_cli.kanban_continuation import render_checkpoint_context
     checkpoint = render_checkpoint_context(conn, task_id)
@@ -3601,18 +3606,8 @@ def _ctx_standing(lines: list[str], task: Task, comments: list[Comment]) -> None
 
     The comment thread is tail-capped (``_CTX_MAX_COMMENTS``), so a standing "don't wait" written early on a
     busy card would otherwise drop out of the worker's prompt."""
-    from agent import standing_instructions as si
-    found = si.explicit_lines(task.body or "")
-    for c in comments:
-        found += si.explicit_lines(c.body or "")
-    found = si.dedupe(found)
-    if not found:
-        return
-    lines.append("## Standing instructions (from the user; in force for this card)")
-    lines += [f"standing: {line}" for line in found]
-    lines.append("(These still govern this run: e.g. a standing \"don't wait\" means decide it yourself instead "
-                 "of blocking on the user, unless only a human can act — a credential, a physical step.)")
-    lines.append("")
+    from hermes_cli.kanban_db_context import _ctx_standing as render_standing
+    render_standing(lines, task, comments)
 
 
 # --- Stats + SLA helpers ---

@@ -158,6 +158,7 @@ def _check(cond: Any, message: str, rejection: Optional[str] = None) -> None:
 # Stable ``rejection`` classes on every kanban_complete tool_error. Consumers
 # (coach digests, board analytics) key on these strings: add, never rename.
 COMPLETE_REJECTION_CLASSES = frozenset({
+    "containment_authority_open",  # explicit release/retention decision required [daveey]
     "review_required", "goal_judge",  # required review or goal-mode judge refused completion
     "phantom_cards",  # created_cards names ids this worker did not create
     "artifacts",      # declared artifacts could not be preserved
@@ -856,6 +857,7 @@ def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff. Every refusal
     carries a ``rejection`` class from ``COMPLETE_REJECTION_CLASSES``."""
     from hermes_cli.kanban_review_required import ReviewRequiredError, require_review
+    from hermes_cli.kanban_containment_authority import AuthorityOpen
     try:
         tid = _worker_guard("kanban_complete", args)
     except _Reject as e:
@@ -903,6 +905,9 @@ def _handle_complete(args: dict, **kw) -> str:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
                 created_cards=created_cards, expected_run_id=run_id, goal_verification=goal_verification)
+        except AuthorityOpen as authority_err:
+            return tool_error(str(authority_err), code=authority_err.code,
+                              rejection=authority_err.code, episodes=authority_err.episodes)
         except ReviewRequiredError as review_err:
             return tool_error(str(review_err), rejection="review_required")
         except kb.ArtifactPreservationError as artifact_err:

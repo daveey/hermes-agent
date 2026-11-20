@@ -1256,6 +1256,7 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
 
 def _cmd_complete(args: argparse.Namespace) -> int:
     """Mark one or more tasks done. Supports a single id or a list."""
+    from hermes_cli.kanban_containment_authority import AuthorityOpen
     ids, rc = _require_ids(args)
     if rc:
         return rc
@@ -1294,6 +1295,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                                         goal_verification=verified[0] if verified else None,
                                         expected_run_id=own_run,
                                         force=bool(getattr(args, "force", False)))
+            except AuthorityOpen as authority_err:
+                fail_msg[tid] = f"cannot complete {tid}: {authority_err}"
+                return False
             except _review_contract.IndependenceRefused as outside:  # --force does not override it [daveey]
                 fail_msg[tid] = f"cannot complete {tid}: {outside}"
                 return False

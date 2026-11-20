@@ -176,6 +176,9 @@ def contain_local(conn: sqlite3.Connection, *, target: dict, resume_policy: dict
             raise ContainmentRefused("foreign containment requires an unclaimed descendant")
         if guard.pending(conn, tid, verify_release=lambda r, s: verified_release(conn, r, s)):
             raise ContainmentRefused("task is already contained; resume its exact episode")
+        from hermes_cli.kanban_containment_authority import require_open
+        authority = conn.execute("SELECT status FROM tasks WHERE id=?", (spec["authority"]["task_id"],)).fetchone()
+        require_open(authority[0] if authority else None)
         _nominees(conn, target, spec)
         baseline = _baseline(conn, spec)
         payload = {"version": 1, "target": target, "policy": spec, "producer_baseline": baseline}

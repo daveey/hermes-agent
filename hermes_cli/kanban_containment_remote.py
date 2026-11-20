@@ -124,7 +124,10 @@ def contain(
         if request is None:
             data = context(hub, board, task, producer)
             target = data["target"]
-            spec = {"version": 1, "authority": context(hub, board, authority)["target"]}
+            from hermes_cli.kanban_containment_authority import require_open
+            authority_context = context(hub, board, authority)
+            require_open(authority_context.get("status"))
+            spec = {"version": 1, "authority": authority_context["target"]}
             if producer is not None:
                 spec["producer"] = identity(data.get("producer"))
                 if spec["producer"]["task_id"] != producer:

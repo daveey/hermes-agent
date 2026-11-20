@@ -28,6 +28,22 @@ _CTX_MAX_BODY_BYTES     = 8 * 1024   # per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
 
 
+def _ctx_standing(lines: list[str], task: Task, comments: list) -> None:
+    """Preserve explicit standing instructions even when comment history is capped."""
+    from agent import standing_instructions as si
+    found = si.explicit_lines(task.body or "")
+    for c in comments:
+        found += si.explicit_lines(c.body or "")
+    found = si.dedupe(found)
+    if not found:
+        return
+    lines.append("## Standing instructions (from the user; in force for this card)")
+    lines += [f"standing: {line}" for line in found]
+    lines.append("(These still govern this run: e.g. a standing \"don't wait\" means decide it yourself instead "
+                 "of blocking on the user, unless only a human can act — a credential, a physical step.)")
+    lines.append("")
+
+
 def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
     """``just now`` / ``18h ago`` / ``3d ago``; "" for a missing/invalid ts. An LLM
     reads a bare absolute timestamp as current fact — the relative age is what
