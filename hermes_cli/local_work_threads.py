@@ -12,7 +12,7 @@ import threading
 from typing import TYPE_CHECKING
 import weakref
 
-from hermes_cli.local_work import ACTIVE_SCOPE, WorkScope, get_registry
+from hermes_cli.local_work import ACTIVE_SCOPE, WorkScope
 from hermes_cli.local_work_handle import WorkHandle
 
 
@@ -20,16 +20,30 @@ class _Reservation:
     """One custodian shared by target-finally and verified pre-start completion."""
 
     def __init__(self, owner, kind, context):
+        from hermes_cli.worker_drain_fence import admit
+
         self.owner = owner
         self.context = context
-        self.token = owner.registry.reserve(kind, home=owner.home, source=owner.source)
+        self.drain = admit('physical_work.' + kind)
+        try:
+            self.token = (owner.registry.reserve(kind, home=owner.home, source=owner.source)
+                          if owner is not None else None)
+        except BaseException:
+            if self.drain is not None:
+                self.drain.close()
+            raise
         self.lock = threading.Lock()
         self.state = "pending"
 
     def _finish(self):
         # Caller holds lock; never finish the same registry token twice.
         self.state = "done"
-        self.owner.registry.finish(self.token)
+        try:
+            if self.owner is not None:
+                self.owner.registry.finish(self.token)
+        finally:
+            if self.drain is not None:
+                self.drain.close()
 
     def never_started(self, _future=None):
         with self.lock:
@@ -48,19 +62,23 @@ class _Reservation:
                 self._finish()
 
     def _invoke(self, function, args, kwargs):
-        token = ACTIVE_SCOPE.set(self.owner)
+        from hermes_cli.worker_drain_fence import lease_scope
+
+        token = ACTIVE_SCOPE.set(self.owner) if self.owner is not None else None
         try:
-            return function(*args, **kwargs)
+            with lease_scope(self.drain):
+                return function(*args, **kwargs)
         finally:
-            ACTIVE_SCOPE.reset(token)
+            if token is not None:
+                ACTIVE_SCOPE.reset(token)
 
 
 def _owner(registry, home, source, kind):
     captured = ACTIVE_SCOPE.get()
     if registry is None and home is None and source is None and captured is not None:
         return captured
-    registry = registry if registry is not None else get_registry()
-    return WorkScope(registry, kind, home, source or "explicit-physical-work")
+    registry = registry if registry is not None else installed_registry()
+    return WorkScope(registry, kind, home, source or "explicit-physical-work") if registry is not None else None
 
 
 def _real_thread_class():
@@ -133,7 +151,8 @@ class TrackedThread(_RealThread):
                     self._work_start_attempted = False
                     self._work_reservation = None
                 else:
-                    self._work_owner.registry.mark_unknown("thread-start-outcome-uncertain")
+                    if self._work_owner is not None:
+                        self._work_owner.registry.mark_unknown("thread-start-outcome-uncertain")
                 raise
 
     def run(self):
@@ -165,8 +184,8 @@ def _refused_before_enqueue(executor):
                 or getattr(_thread, "_shutdown", False))
 
 
-def _submit_owned(executor, function, args, kwargs, owner, kind):
-    reservation = _Reservation(owner, kind, copy_context())
+def _submit_owned(executor, function, args, kwargs, owner, kind, *, context=None):
+    reservation = _Reservation(owner, kind, copy_context() if context is None else context)
     call = partial(reservation.run, function, args, kwargs)
     # Attribution may inspect the logical target, but must execute custody intact.
     call._la_target = (function, args)  # type: ignore[attr-defined]
@@ -183,7 +202,7 @@ def _submit_owned(executor, function, args, kwargs, owner, kind):
             # Even if it had raced an enqueue, never_started makes the wrapper a no-op, so
             # releasing here can never undercount physical work.
             reservation.never_started()
-        else:
+        elif owner is not None:
             owner.registry.mark_unknown("submit-outcome-uncertain")
         raise
     # done + pending proves this wrapper never began (cancelled or broken pool).
@@ -193,7 +212,7 @@ def _submit_owned(executor, function, args, kwargs, owner, kind):
 
 
 class ScopeAwareExecutor(ThreadPoolExecutor):
-    """Passive by default; scoped submissions transfer captured physical work.
+    """Scoped submissions transfer updater work; activated drain covers every submission.
 
     Install explicitly on an owning loop, not globally. Pass constructor options
     through unchanged, including initializer and thread-name semantics.
@@ -201,8 +220,6 @@ class ScopeAwareExecutor(ThreadPoolExecutor):
 
     def submit(self, function, /, *args, **kwargs):
         owner = ACTIVE_SCOPE.get()
-        if owner is None:
-            return super().submit(function, *args, **kwargs)
         return _submit_owned(self, function, args, kwargs, owner, "executor")
 
 
@@ -242,7 +259,6 @@ def _resolve(kind, source, home):
 def begin_work(kind, source, home=None):
     """Reserve BEFORE scheduling; drain custody does not depend on the updater registry."""
     from hermes_cli.worker_drain_fence import admit
-
 
     lease = admit('local_work.' + kind)
     try:
@@ -324,12 +340,11 @@ _scoped_loops = weakref.WeakKeyDictionary()  # loop -> its scope-aware default e
 async def run_in_pool(executor, ctx, func, *args, source="gateway:run_in_executor"):
     """Gateway pool offload: reserve before submit; the pool thread releases at its own exit,
     so a cancelled or timed-out waiter (``wrap_future`` cancel) never stands in for the thread.
-    Plain ``run_in_executor`` while no registry is installed."""
+    Drain custody also applies when the updater registry is absent."""
     loop = asyncio.get_running_loop()
     install_scope_default_executor(loop)
     registry = installed_registry()
-    if registry is None:
-        return await loop.run_in_executor(executor, ctx.run, func, *args)
+
     if executor is None:  # ``run_in_executor(None, ...)`` semantics: the loop's (scope-aware) default
         executor = _scoped_loops[loop]
     # This path submits directly, bypassing BaseEventLoop.run_in_executor's
@@ -338,15 +353,16 @@ async def run_in_pool(executor, ctx, func, *args, source="gateway:run_in_executo
     from hermes_cli import loop_accounting
     if loop_accounting.scopes_enabled():
         func = loop_accounting.scoped_call("thread", func, args)
-    future = submit_tracked(executor, ctx.run, func, *args, registry=registry,
-                            home=current_home(), source=source, kind="gateway_pool")
+    owner = _owner(registry, current_home(), source, "gateway_pool")
+    future = _submit_owned(executor, func, args, {}, owner, "gateway_pool", context=ctx)
     return await asyncio.wrap_future(future, loop=loop)
 
 
 def install_scope_default_executor(loop):
-    """Idempotently make ``loop``'s default executor scope-aware (explicit, per loop; never
-    patches asyncio globally). Passive unless an active scope exists at submit time, so
-    maintenance ``to_thread`` stays uncounted while scoped work keeps physical custody."""
+    """Idempotently install an explicit per-loop executor (no global asyncio patch).
+
+    Updater accounting is scoped; activated drain also retains finite maintenance offloads.
+    """
     if loop in _scoped_loops:
         return False
     executor = ScopeAwareExecutor(thread_name_prefix="hermes-gateway-default")
