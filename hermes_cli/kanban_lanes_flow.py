@@ -100,6 +100,8 @@ def classify_step(card: dict) -> str:
 
 def _skip_reason(card: dict) -> Optional[str]:
     for event in reversed(card.get("events") or ()):
+        if event.get("kind") in ("claimed", "spawned", "worker_bound", "completed", "reopened"):
+            return None
         if event.get("kind") != "dispatch_skipped":
             continue
         reason = _payload(event).get("reason") or event.get("reason")
@@ -108,6 +110,7 @@ def _skip_reason(card: dict) -> Optional[str]:
             return "quota"
         if reason in ("waiting_for_worker_capacity", "skipped_ineligible") or "waiting_for_worker_capacity" in detail:
             return "slot"
+        return None  # Only the newest skip in this waiting episode is authoritative.
     return None
 
 
@@ -124,13 +127,13 @@ def classify_reason(card: dict, step: str) -> str:
         return "dep"
     if card.get("status") == "scheduled":
         return "time"
+    if step == "running":
+        return "run"
     skip = _skip_reason(card)
     if skip:
         return skip
     if step in _LANDING_STEPS:
         return "review"
-    if step == "running":
-        return "run"
     if step == "ready":
         return "slot"
     if step == "waiting":
@@ -310,7 +313,7 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None)
             "run_hours": round(row["run_seconds"] / 3600, 1),
             "cost_usd": row["cost_usd"],
             "limits": {"cards_per_day": spec.cards_per_day, "usd_per_day": spec.usd_per_day},
-            "usage": {"cards_today": lanes.cards_today(conn, name, now=now),
+            "usage": {"cards_today": lanes.cards_today(conn, name, now=now, pol=pol),
                       "usd_today": lanes.spent_today(conn, pol, name, now=now)},
         }
     return {"window": window, "cards": cards, "lanes": out_lanes}

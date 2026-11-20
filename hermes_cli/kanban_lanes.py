@@ -478,11 +478,11 @@ def admitted_today(conn, lane: str, *, now: Optional[float] = None) -> int:
         (ADMITTED, day_start(now), lane)).fetchone()[0]
 
 
-def cards_today(conn, lane: str, *, now: Optional[float] = None) -> int:
+def cards_today(conn, lane: str, *, now: Optional[float] = None, pol=None) -> int:
     """Actual admissions since local midnight, including manual budget-exempt releases."""
     from hermes_cli.kanban_lane_daily_limits import cards_today as count
 
-    return count(conn, lane, now=now)
+    return count(conn, lane, now=now, pol=pol)
 
 
 def spent_today(conn, pol: Policy, lane: str, *, now: Optional[float] = None) -> float:

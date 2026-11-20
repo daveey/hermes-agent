@@ -3,19 +3,22 @@ import json
 import time
 
 
-def cards_today(conn, lane, *, now=None):
-    """Count actual admissions, once per card/lane/day; re-laning is not admission."""
+def cards_today(conn, lane, *, now=None, pol=None):
+    """Count admissions in the effective lane, including legacy/unconfigured tenants."""
     from hermes_cli import kanban_lanes as lanes
 
-    return conn.execute(
-        "SELECT COUNT(DISTINCT task_id) FROM task_events WHERE created_at >= ? "
-        "AND json_extract(payload, '$.lane') = ? AND (kind = 'lane_admitted' OR "
+    pol = lanes.safe_policy() if pol is None else pol
+    effective = pol.lane_of if pol is not None else lambda name: name
+    rows = conn.execute(
+        "SELECT DISTINCT task_id, json_extract(payload, '$.lane') FROM task_events WHERE created_at >= ? "
+        "AND (kind = 'lane_admitted' OR "
         "(kind = 'lane_assigned' AND (json_extract(payload, '$.admitted') = 1 OR "
         "(json_type(payload, '$.admitted') IS NULL AND json_type(payload, '$.from') IS NULL "
         "AND COALESCE(json_extract(payload, '$.would_gate'), 0) = 0 AND EXISTS "
         "(SELECT 1 FROM task_events c WHERE c.task_id=task_events.task_id AND c.kind='created' "
         "AND json_extract(c.payload, '$.status') IN ('ready', 'todo'))))))",
-        (lanes.day_start(now), lane)).fetchone()[0]
+        (lanes.day_start(now),))
+    return len({tid for tid, recorded in rows if effective(recorded) == effective(lane)})
 
 
 def exempt(conn, lane, opts):
@@ -40,7 +43,7 @@ def reason(conn, pol, lane_name, opts, *, now=None):
     now = time.time() if now is None else now
     if lane.usd_per_day is not None and lanes.spent_today(conn, pol, lane.name, now=now) >= lane.usd_per_day:
         return "limit:usd_per_day"
-    if lane.cards_per_day is not None and cards_today(conn, lane.name, now=now) >= lane.cards_per_day:
+    if lane.cards_per_day is not None and cards_today(conn, lane.name, now=now, pol=pol) >= lane.cards_per_day:
         return "limit:cards_per_day"
     return None
 
