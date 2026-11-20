@@ -36,6 +36,9 @@ def build_auth_parser(subparsers, *, cmd_auth: Callable) -> None:
     auth_add.add_argument(
         "--insecure", action="store_true", help="Disable TLS verification for OAuth login")
     auth_add.add_argument("--ca-bundle", help="Custom CA bundle for OAuth login")
+    auth_reauth = auth_subparsers.add_parser('reauth', help='Sign in again for an exact owned OAuth credential')
+    auth_reauth.add_argument('provider', choices=['anthropic', 'openai-codex'])
+    auth_reauth.add_argument('credential_id', help='Exact credential pool ID (not a label or row index)')
     auth_list = auth_subparsers.add_parser("list", help="List pooled credentials")
     auth_list.add_argument("provider", nargs="?", help="Optional provider filter")
     auth_remove = auth_subparsers.add_parser(

@@ -437,12 +437,12 @@ def _post_oauth_token(
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
             last_error = _oauth_http_error(exc, what=what)
-            logger.debug("Anthropic token %s failed at %s: %s", what, endpoint, last_error)
+            logger.debug("Anthropic token %s failed at %s: HTTP %s", what, endpoint, last_error.status)
             if last_error.relogin_required:
                 break  # a dead grant is dead at every endpoint; do not replay it
         except Exception as exc:
             last_error = exc
-            logger.debug("Anthropic token %s failed at %s: %s", what, endpoint, exc)
+            logger.debug("Anthropic token %s failed at %s: %s", what, endpoint, type(exc).__name__)
     raise last_error or ValueError(f"Anthropic token {what} failed")
 
 
@@ -771,7 +771,7 @@ def _generate_pkce() -> tuple:
     return verifier, challenge
 
 
-def run_hermes_oauth_login_pure() -> Optional[dict[str, Any]]:
+def run_hermes_oauth_login_pure(*, code_reader=None) -> Optional[dict[str, Any]]:
     """Run Hermes-native OAuth PKCE flow and return credential state."""
     from urllib.parse import urlencode
     verifier, challenge = _generate_pkce()
@@ -800,7 +800,7 @@ def run_hermes_oauth_login_pure() -> Optional[dict[str, Any]]:
             print("  (Browser opened automatically)")
     print("\nAfter authorizing, you'll see a code. Paste it below.\n")
     try:
-        auth_code = input("Authorization code: ").strip()
+        auth_code = (code_reader or input)("Authorization code: ").strip()
     except (KeyboardInterrupt, EOFError):
         return None
     if not auth_code:
@@ -818,7 +818,7 @@ def run_hermes_oauth_login_pure() -> Optional[dict[str, Any]]:
         }).encode()
         result = _post_oauth_token(exchange_data, content_type="application/json", timeout=15, what="exchange")
     except Exception as e:
-        print(f"Token exchange failed: {e}")
+        print("Token exchange failed." if code_reader is not None else f"Token exchange failed: {e}")
         return None
     if not result.get("access_token"):
         print("No access token in response.")

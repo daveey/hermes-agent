@@ -25,6 +25,7 @@ from hermes_cli.auth_plugin_providers import (
     canonical_registry_rows, dispatch_plugin_auth, is_refreshable_oauth_provider, plugin_missing_auth_handler_error)
 from hermes_constants import OPENROUTER_BASE_URL
 from hermes_cli.secret_prompt import masked_secret_prompt
+from hermes_cli.auth_reauth_command import auth_reauth_command
 
 
 # Providers that support OAuth login in addition to API keys.
@@ -955,7 +956,7 @@ def auth_upgrade_command(args) -> None:
 
 
 _AUTH_ACTIONS = {
-    "add": auth_add_command, "list": auth_list_command, "remove": auth_remove_command,
+    "add": auth_add_command, "reauth": auth_reauth_command, "list": auth_list_command, "remove": auth_remove_command,
     "reset": auth_reset_command, "priority": auth_priority_command, "refresh": auth_refresh_command, "status": auth_status_command,
     "disable": auth_disable_command, "enable": auth_enable_command,
     "logout": auth_logout_command, "upgrade": auth_upgrade_command}
