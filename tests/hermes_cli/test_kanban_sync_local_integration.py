@@ -213,27 +213,49 @@ def test_pulled_parent_rows_refresh_only_changed_parent(mirrored, monkeypatch, t
     assert row_calls == [] and full_calls == [], "settled follow-up must skip both mirror paths"
 
 
-def test_links_pass_keeps_its_300s_floor(live, kanban_home, monkeypatch):
+def test_links_pass_keeps_its_300s_floor_only_without_a_state_db_key(live, kanban_home, monkeypatch):
+    """The floor bounds a board whose state.db reads failed; a board that read them is keyed by the answers
+    (``kanban_links_chat_key``) and is not reconciled again by age."""
+    import sqlite3
+
     from hermes_cli import kanban_chat_links
     from hermes_cli import kanban_session_activity as ksa
+    from hermes_cli import kanban_session_provenance as provenance
     from hermes_cli.kanban_creator_empty import ensure
     sync.set_mode(live, "primary")
+    kb.create_task(live, title="from a chat", assignee="worker", session_id="s_chat")
     # Test the settled deadline, not the initial backfill schema invalidation.
     assert ensure(live)
     monkeypatch.setattr(ksa, "_remote_links", lambda stale_ok=False: [])
     ksc._LINKS_DONE.clear()
+    provenance._source_cache.clear()
     now = [5000.0]
     monkeypatch.setattr(ksc, "_links_clock", lambda: now[0])
     calls = []
     real = kanban_chat_links.reconcile
     monkeypatch.setattr(kanban_chat_links, "reconcile", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
     boards = [(BOARD, kanban_home / "kanban.db")]
-    for _ in range(3):
-        ksc.reconcile_links(boards, ME, skip_unchanged=True)
-    assert len(calls) == 1
+
+    def settle():
+        for _ in range(4):
+            ksc.reconcile_links(boards, ME, skip_unchanged=True)
+        calls.clear()
+
+    with sqlite3.connect(kanban_home / "state.db") as state:  # no sessions table: the source read fails
+        state.execute("CREATE TABLE other (id TEXT)")
+    state.close()
+    settle()
     now[0] += 299.0  # literal: the stated floor, not the constant under test
     ksc.reconcile_links(boards, ME, skip_unchanged=True)
-    assert len(calls) == 1
+    assert len(calls) == 0
     now[0] += 1
     ksc.reconcile_links(boards, ME, skip_unchanged=True)
-    assert len(calls) == 2
+    assert len(calls) == 1
+    with sqlite3.connect(kanban_home / "state.db") as state:
+        state.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, created_source TEXT)")
+    state.close()
+    now[0] += 300.0
+    settle()
+    now[0] += 3000.0
+    ksc.reconcile_links(boards, ME, skip_unchanged=True)
+    assert len(calls) == 0

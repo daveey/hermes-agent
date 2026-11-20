@@ -286,9 +286,13 @@ def test_a_replaced_board_file_reconciles_on_the_next_pass(live, ledger, kanban_
     assert spies["reconcile"] == 1
 
 
-def test_the_maximum_age_reconciles_an_unchanged_board(live, ledger, kanban_home, spies, scope, monkeypatch):
-    """State.db machine-session sources are not keyed (a missing session is re-read after its TTL); the pass is
+def test_the_maximum_age_reconciles_an_unchanged_board_whose_state_db_reads_failed(live, ledger, kanban_home, spies,
+                                                                                   scope, monkeypatch):
+    """State.db answers are keyed by value (``kanban_links_chat_key``); only a pass that could not read them is
     bounded by ``LINKS_MAX_AGE_S`` instead."""
+    with sqlite3.connect(kanban_home / "state.db") as state:  # no sessions table: every source read fails
+        state.execute("CREATE TABLE other (id TEXT)")
+    state.close()
     _settled(live, ledger, kanban_home, spies)
     later = time.monotonic() + ksc.LINKS_MAX_AGE_S + 1
     monkeypatch.setattr(ksc, "_links_clock", lambda: later)

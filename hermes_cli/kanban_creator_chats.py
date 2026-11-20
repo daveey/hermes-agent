@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from hermes_cli.kanban_links_chat_key import degrade as _degrade  # swallowed read errors leave no links key
+
 MAX_DEPTH = 16
 
 
@@ -221,6 +223,7 @@ class _ReplicaReader:
                 self.attempted = True
                 self._open()
         except (OSError, sqlite3.Error):
+            _degrade()
             return None
         return self.replica
 
@@ -229,6 +232,7 @@ class _ReplicaReader:
             replica = self.open()
             return resolve_chats(replica, creator_task_id, verdicts=verdicts) if replica is not None else []
         except (OSError, sqlite3.Error):
+            _degrade()
             return []
 
 
@@ -330,6 +334,7 @@ class LinkVerdicts:
                         continue
                     keys[(origin.gateway, origin.profile, str(origin.session or ""))] = None
             except sqlite3.Error:  # a missing verdict fails closed or needs no read, never a read under the lock
+                _degrade()
                 continue
         return cls(machine_verdicts([k for k in keys if not is_placeholder_session(k[2])], local_gateway=me), me)
 

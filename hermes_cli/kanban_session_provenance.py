@@ -28,42 +28,59 @@ def session_creation_source(row) -> Optional[str]:
     return created if source == "local" else source
 
 
+def _read_sources(path: str, todo: list[str]) -> tuple[dict[str, Optional[str]], Optional[bool]]:
+    """``(found, readable)`` from one state.db; ``readable`` is None when the file does not exist."""
+    found: dict[str, Optional[str]] = {}
+    if not Path(path).exists():
+        return found, None
+    try:
+        uri = Path(path).as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=5)) as db:  # noqa: kanban-lockguard (state.db)
+            columns = {r[1] for r in db.execute("PRAGMA table_info(sessions)")}
+            created = "created_source" if "created_source" in columns else "NULL"
+            for i in range(0, len(todo), 500):
+                chunk = todo[i:i + 500]
+                for sid, source, provenance in db.execute(
+                        f"SELECT id, source, {created} FROM sessions WHERE id IN ({','.join('?' * len(chunk))})", chunk):
+                    found[sid] = session_creation_source({"source": source, "created_source": provenance})
+    except sqlite3.Error:
+        return {}, False
+    return found, True
+
+
 def _local_session_sources(sessions: Iterable[str], *, home: Optional[Path] = None) -> dict[str, Optional[str]]:
-    """Read effective creation sources, without creating a store or migrating it."""
+    """Read effective creation sources, without creating a store or migrating it.
+
+    Inside a links pass (``kanban_links_chat_key``) the 300 s cache is not consulted: each id is read once per pass
+    and recorded as that board's key; an unreadable store marks the pass degraded (no key). [daveey]"""
     from hermes_constants import get_hermes_home
+    from hermes_cli import kanban_links_chat_key as chat_key
     path = str((home if home is not None else get_hermes_home()) / "state.db")
     now = time.monotonic()
+    reads = chat_key.active()
     out: dict[str, Optional[str]] = {}
     todo = []
     for sid in dict.fromkeys(sessions):
-        hit = _source_cache.get((path, sid))
-        if hit is not None and now - hit[1] < _MISSING_TTL_S:
+        if reads is not None:
+            if (value := reads.recall(("source", path, sid))) is not chat_key._MISSING:
+                out[sid] = value
+                continue
+        elif (hit := _source_cache.get((path, sid))) is not None and now - hit[1] < _MISSING_TTL_S:
             out[sid] = hit[0]
-        else:
-            todo.append(sid)
+            continue
+        todo.append(sid)
     if not todo:
         return out
-    found: dict[str, Optional[str]] = {}
-    readable = False
-    if Path(path).exists():
-        try:
-            uri = Path(path).as_uri() + "?mode=ro"
-            with closing(sqlite3.connect(uri, uri=True, timeout=5)) as db:  # noqa: kanban-lockguard (state.db)
-                columns = {r[1] for r in db.execute("PRAGMA table_info(sessions)")}
-                created = "created_source" if "created_source" in columns else "NULL"
-                for i in range(0, len(todo), 500):
-                    chunk = todo[i:i + 500]
-                    for sid, source, provenance in db.execute(
-                            f"SELECT id, source, {created} FROM sessions WHERE id IN ({','.join('?' * len(chunk))})", chunk):
-                        found[sid] = session_creation_source({"source": source, "created_source": provenance})
-            readable = True
-        except sqlite3.Error:
-            pass
+    found, readable = _read_sources(path, todo)
     for sid in todo:
         source = found.get(sid)
         out[sid] = str(source) if source is not None else None
         if readable:
             _source_cache[(path, sid)] = (out[sid], now)
+        if reads is not None and readable is not False:
+            reads.record(("source", path, sid), out[sid])
+    if readable is False:
+        chat_key.degrade()
     return out
 
 
@@ -72,7 +89,16 @@ def _local_homes(profile: Optional[str]) -> list[Path]:
 
     Boards and legacy tui subscriptions are host-wide and often omit a profile.
     Do not bind those rows to whichever profile happens to run reconciliation.
+    Inside a links pass the answer is part of the board's key (``kanban_links_chat_key``).
     """
+    from hermes_cli import kanban_links_chat_key as chat_key
+    reads = chat_key.active()
+    if reads is None:
+        return _discover_homes(profile)
+    return [Path(h) for h in reads.answer(("homes", profile), lambda: tuple(str(h) for h in _discover_homes(profile)))]
+
+
+def _discover_homes(profile: Optional[str]) -> list[Path]:
     from hermes_constants import get_hermes_home
     from hermes_cli.profiles import get_active_profile_name, get_profile_dir, list_profile_names
     active = get_active_profile_name()

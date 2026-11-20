@@ -98,6 +98,8 @@ def _local_links(conn: sqlite3.Connection, gateway: str) -> dict[str, dict[str, 
             f"SELECT s.task_id, s.chat_id FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
             f"WHERE s.platform = 'tui' AND s.chat_id != '' AND {_counted_sub_clause(conn)}")]
     except sqlite3.Error:  # board predates notify subscriptions
+        from hermes_cli.kanban_links_chat_key import degrade_unless_absent
+        degrade_unless_absent(conn, "kanban_notify_subs")
         shepherds = []
     candidates = [r[1] for r in sessions] + [r[1] for r in shepherds]
     # [daveey] Each verdict below is classified in one batch, not per row: a per-row lookup reopened every home's
@@ -188,7 +190,7 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
     A link to a machine session of this gateway (``is_machine_session``) is released whatever the card's status:
     no human reads that session, so it owns nothing even on an open card (hub t_01a19864fc42f5b2 was owned by
     MacBook worker transcript 20261029_180356_84db5f, 2026-11-01)."""
-    from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli import kanban_links_chat_key as chat_key, kanban_sync_client as ksc
     from hermes_cli.kanban_lockguard import connect
     from hermes_cli.kanban_placement import is_placeholder_session
     path = ksc.shadow_path(board)
@@ -208,6 +210,7 @@ def _owner_written_releases(board: str, gateway: str, want: dict[str, dict[str, 
             conn.close()
     except sqlite3.Error as exc:  # an unreadable replica releases nothing this round; the next one retries
         _log.info("kanban chat links: replica %s unreadable for owner-link releases (%s)", path, exc)
+        chat_key.degrade()
         return {}
     out: dict[str, dict[str, Any]] = {}
     rows = [r for r in rows if r["uid"] not in want and not is_placeholder_session(r["chat_session"])]
@@ -240,7 +243,9 @@ def _compressed_away(rows: list[dict[str, Any]], want: dict[str, dict[str, Any]]
     the lineage; an unreadable one releases nothing this pass."""
     from hermes_cli.kanban_origin import _ro
     from hermes_cli.kanban_session_provenance import _local_homes
-    from hermes_state_compression import _CHAIN_CAP, _CHAIN_STEP_SQL
+    from hermes_cli import kanban_links_chat_key as chat_key
+    from hermes_state_compression import _CHAIN_CAP
+    reads = chat_key.active()
     linked: dict[tuple[str, Any], set[str]] = {}
     for link in want.values():
         if link.get("task_id") and not link.get("released") and link.get("chat_gateway") == gateway:
@@ -254,27 +259,29 @@ def _compressed_away(rows: list[dict[str, Any]], want: dict[str, dict[str, Any]]
     for profile, group in candidates.items():
         for home in _local_homes(profile):
             path = home / "state.db"
-            if not path.exists():
+            if not (path.exists() if reads is None else reads.answer(("exists", str(path)), path.exists)):
                 continue
             try:
                 db = _ro(path)
             except sqlite3.Error as exc:
                 _log.info("kanban chat links: %s unreadable for compression lineage (%s)", path, exc)
+                chat_key.degrade()
                 continue
             try:
                 for r in group:
                     sid, seen = str(r["chat_session"]), {str(r["chat_session"])}
                     for _ in range(_CHAIN_CAP):
-                        step = db.execute(_CHAIN_STEP_SQL, (sid,)).fetchone()
-                        if step is None or step[0] in seen:
+                        step = chat_key.chain_step(db, path, sid)
+                        if step is None or step in seen:
                             break
-                        sid = str(step[0])
+                        sid = step
                         seen.add(sid)
                         if sid in linked[(r["task_id"], r["chat_profile"])]:
                             out.add(r["uid"])
                             break
             except sqlite3.Error as exc:
                 _log.info("kanban chat links: compression lineage unreadable in %s (%s)", path, exc)
+                chat_key.degrade()
             finally:
                 db.close()
     return out
@@ -295,7 +302,7 @@ def _owner_hub_links(conn: sqlite3.Connection, board: str, gateway: str) -> list
     its release (its ledger, ``_owner_written_releases``). Nothing is written while any row for that card and chat
     exists in this file or the replica, released included, so a release the chat's gateway already made is never
     reopened; an unreadable replica writes nothing this pass."""
-    from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli import kanban_links_chat_key as chat_key, kanban_sync_client as ksc
     from hermes_cli.kanban_db_notify import machine_sessions
     from hermes_cli.kanban_lockguard import connect
     from hermes_cli.kanban_origin import OriginError, parse_origin
@@ -311,6 +318,7 @@ def _owner_hub_links(conn: sqlite3.Connection, board: str, gateway: str) -> list
             f"AND {_counted_sub_clause(conn)} {mine} ORDER BY s.task_id, s.chat_id",
             (*TERMINAL_STATUSES, *((gateway,) if mine else ()))).fetchall()
     except sqlite3.Error:  # board predates notify subscriptions
+        chat_key.degrade_unless_absent(conn, "kanban_notify_subs")
         return []
     wanted: dict[tuple, dict[str, Any]] = {}
     for task_id, chat_id, created_at in subs:
@@ -341,6 +349,7 @@ def _owner_hub_links(conn: sqlite3.Connection, board: str, gateway: str) -> list
         replica = connect(f"file:{path}?mode=ro", uri=True, timeout=5) if path.exists() else None
     except sqlite3.Error as exc:
         _log.info("kanban chat links: replica %s unreadable for owner hub links (%s)", path, exc)
+        chat_key.degrade()
         return []
     try:
         for db in (conn, replica):
@@ -363,6 +372,7 @@ def _owner_hub_links(conn: sqlite3.Connection, board: str, gateway: str) -> list
                     continue
     except sqlite3.Error as exc:  # nothing is written from a partial read; the next pass retries
         _log.info("kanban chat links: owner hub links unreadable for %s (%s)", board, exc)
+        chat_key.degrade()
         return []
     finally:
         if replica is not None:

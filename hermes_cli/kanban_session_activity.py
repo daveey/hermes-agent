@@ -44,7 +44,7 @@ from hermes_cli.kanban_session_activity_attention import AttentionCache as _Atte
 from hermes_cli.kanban_session_activity_attention import run_checks as _run_done_checks
 from hermes_cli.kanban_session_activity_card_details import _add_card_details
 from hermes_cli.kanban_watch import not_watch_sql as _not_watch
-from hermes_cli.kanban_links_refresh import ScopeRefresher
+from hermes_cli.kanban_links_refresh import ScopeRefresher, refresh_decided
 from hermes_cli import kanban_links_narrow as _links_narrow, kanban_external_activity as _external_activity
 from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows
 from hermes_cli.kanban_open_asks import card_is_open_human_ask, stamp_needs_you
@@ -997,8 +997,8 @@ def _refresh_links_scope(scope: tuple) -> None:
             return
         fingerprint = _links_fingerprint()
         hit = _links_cache.get(scope)
-        if hit is None or not _links_fresh(hit, fingerprint):
-            _publish_links(scope, fingerprint)
+        fresh = hit is not None and _links_fresh(hit, fingerprint)
+        refresh_decided(hit, fingerprint, fresh, time.monotonic(), lambda: _publish_links(scope, fingerprint))
 
 
 _links_refresher = ScopeRefresher(lambda scope: _refresh_links_scope(scope), _LINKS_SCOPE_CAP)

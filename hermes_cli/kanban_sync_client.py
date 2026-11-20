@@ -1241,13 +1241,12 @@ class FeedWatcher:
 
 
 LINKS_EVERY_S = 60.0
-# Machine-session sources come from state.db (``kanban_db_notify._local_session_sources``), which is not in a links
-# pass's key: a missing session is re-read after its 300 s TTL. An unchanged board is still reconciled this long after
-# its last pass. A shared-cache refresh can add this interval after the missing-source TTL; content changes
-# still reconcile immediately on the next links pass, and notification delivery checks sources independently. [daveey]
+# state.db answers (session sources, compression lineage, homes) are keyed by value: a pass records the reads it used
+# and the next one replays them (``kanban_links_chat_key``). Only a pass that swallowed a failed read has no such key;
+# its unchanged board is still reconciled this long after that pass, as every board was before. [daveey]
 LINKS_MAX_AGE_S = 300.0
-# Per board file: (inputs, started at) of the last completed links pass (see ``_links_inputs``).
-_LINKS_DONE: dict[str, tuple[tuple, float]] = {}
+# Per board file: (inputs, started at, state.db reads or None) of the last completed links pass (``_links_inputs``).
+_LINKS_DONE: dict[str, tuple[tuple, float, Optional[dict]]] = {}
 
 
 def _links_clock() -> float:
@@ -1273,16 +1272,18 @@ def _links_pass_clock() -> float:
 _LINKS_RUNNER: Any = None  # a kanban_sync_links_pass.LinksPass while the loop runs
 
 
-def _links_unchanged(key: str, inputs: Optional[tuple], slug: str, began: float) -> tuple[bool, float]:
-    """(whether a board's links-pass inputs equal its last completed pass's, under ``LINKS_MAX_AGE_S`` ago, so the
-    pass is skipped; the pass start to record). Not a pure predicate: it pops ``_LINKS_DONE[key]`` and puts it back
-    only on a skip, so a non-skip drops the stale entry and the caller re-records it when inputs were readable and
+def _links_unchanged(key: str, inputs: Optional[tuple], slug: str, began: float, reads: Any) -> tuple[bool, float]:
+    """(whether a board's links-pass inputs equal its last completed pass's and its state.db reads answer the same
+    (no recorded reads: under ``LINKS_MAX_AGE_S`` ago), so the pass is skipped; the pass start to record). Not a
+    pure predicate: it pops ``_LINKS_DONE[key]`` and puts it back only on a skip, so a non-skip drops the stale entry
+    and the caller re-records it when inputs were readable and
     reconcile succeeded (unreadable inputs or a raising reconcile leave it dropped). A skip ``LINKS_SLOW_LOG_S`` or
     more after ``began`` names its board; ``began`` is taken before the board's connection is
     borrowed, so that time counts the connect (a lock wait included), ``board_mode`` and the inputs read."""
     done = _LINKS_DONE.pop(key, None)
     started = _links_clock()
-    if inputs is None or done is None or done[0] != inputs or started - done[1] >= LINKS_MAX_AGE_S:
+    if inputs is None or done is None or done[0] != inputs or (
+            started - done[1] >= LINKS_MAX_AGE_S if done[2] is None else not reads.unchanged(done[2])):
         return False, started
     _LINKS_DONE[key] = done
     took = _links_pass_clock() - began
@@ -1295,7 +1296,7 @@ def _links_unchanged(key: str, inputs: Optional[tuple], slug: str, began: float)
 def _links_inputs(conn: sqlite3.Connection, path: Path, slug: str, gateway: str, mode: str,
                   ledger: Optional[dict[str, frozenset]], signature: Optional[tuple]) -> Optional[tuple]:
     """Everything one board's links pass (``kanban_chat_links.reconcile`` with its creator-chats backfill) reads,
-    besides state.db (``LINKS_MAX_AGE_S``): the live file's identity and transactional activity revision (tasks,
+    besides state.db (``kanban_links_chat_key``): the live file's identity and transactional activity revision (tasks,
     events, subscriptions, links; trigger-backed, so dispatcher clocks and sync stamps do not move it), the replica's
     main-file identity/stat and covered activity revision (not transport cursor or heartbeat progress), this gateway's
     ledger rows for the board, the mode and the configuration. Legacy nonempty replica subscriptions are not covered
@@ -1334,14 +1335,14 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
     """Bring this gateway's chat links up to date in every synced board (kanban_chat_links.reconcile), creating a
     link-only board for each board this gateway's chats have cards on but this host does not have.
 
-    ``skip_unchanged`` (the sync loop): a board whose links-pass inputs (``_links_inputs``) equal those of its last
-    completed pass, less than ``LINKS_MAX_AGE_S`` ago, is not reconciled again. A failed pass records nothing, so the
-    next one retries. Explicit callers (``hermes kanban sync links``) always reconcile. Boards are borrowed through
-    the loop's connection scope (``kanban_sync_connections``). [daveey]"""
-    from hermes_cli import kanban_chat_links
+    ``skip_unchanged`` (the sync loop): a board whose links-pass inputs (``_links_inputs``) and state.db reads
+    (``kanban_links_chat_key``) equal those of its last completed pass is not reconciled again. A failed pass records
+    nothing, so the next one retries. Explicit callers (``hermes kanban sync links``) always reconcile. Boards are
+    borrowed through the loop's connection scope (``kanban_sync_connections``). [daveey]"""
+    from hermes_cli import kanban_chat_links, kanban_links_chat_key as chat_key
     from hermes_cli.kanban_placement import config_snapshot
     pass_began = _links_pass_clock()
-    with config_snapshot() as placement:
+    with config_snapshot() as placement, chat_key.pass_reads() as reads:
         ledger: Optional[dict[str, frozenset]] = None
         try:
             from hermes_cli.kanban_session_activity import _remote_links
@@ -1368,13 +1369,14 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
                     inputs, started = None, 0.0
                     if skip_unchanged:
                         inputs = _links_inputs(conn, path, slug, gateway, mode, ledger, signature)
-                        skip, started = _links_unchanged(key, inputs, slug, began)
+                        skip, started = _links_unchanged(key, inputs, slug, began, reads)
                         if skip:
                             accounting.skip()
                             continue
-                    counts = kanban_chat_links.reconcile(conn, slug, gateway)
+                    with reads.board():
+                        counts = kanban_chat_links.reconcile(conn, slug, gateway)
                     if inputs is not None:
-                        _LINKS_DONE[key] = (inputs, started)
+                        _LINKS_DONE[key] = (inputs, started, reads.key())
                 took = _links_pass_clock() - began
                 if any(counts.values()) or took >= LINKS_SLOW_LOG_S:
                     _log.info("kanban sync: %s chat links %s in %.1fs", slug, counts, took)
