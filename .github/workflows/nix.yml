@@ -156,6 +156,7 @@ jobs:
       # February 2025 with the GitHub cache API that it was built on. This
       # action uses the current API and needs no account and no secret.
       - name: Restore and save the Nix store
+        id: nix-cache
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
           # The closure changes when the flake inputs change or when the
@@ -205,7 +206,21 @@ jobs:
         # Fail before the job deadline: runner deadlines report cancelled,
         # hiding red main from failure watchers. Reserve time for setup and
         # cache post steps; GNU timeout exits 124 (or 137 after forced kill).
-        run: timeout --kill-after=30s 40m nix flake check "${{ inputs.release == true && format('path:{0}/release-source?rev={1}', runner.temp, env.CANDIDATE_COMMIT) || '.' }}" --print-build-logs
+        shell: bash
+        run: |
+          set -o pipefail
+          timeout --kill-after=30s 40m nix flake check "${{ inputs.release == true && format('path:{0}/release-source?rev={1}', runner.temp, env.CANDIDATE_COMMIT) || '.' }}" --print-build-logs 2>&1 | tee "$RUNNER_TEMP/nix-flake-check.log"
+
+      - name: Root stable Nix outputs before cache GC
+        run: |
+          set -o pipefail
+          timeout --kill-after=30s 5m bash scripts/ci/root_nix_cache.sh 2>&1 | tee "$RUNNER_TEMP/nix-cache-roots.log"
+
+      - name: Summarize Nix cache effectiveness
+        if: always()
+        env:
+          NIX_CACHE_HIT: ${{ steps.nix-cache.outputs.hit-primary-key }}
+        run: python3 scripts/ci/nix_cache_summary.py "$RUNNER_TEMP/nix-flake-check.log" "$RUNNER_TEMP/nix-cache-roots.log"
 
       - name: Verify release package runtime identity
         if: inputs.release == true

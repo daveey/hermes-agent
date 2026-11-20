@@ -4,8 +4,7 @@
   fetchurl,
   unzip,
   autoPatchelfHook,
-  patchelf,
-  fetchpatch,
+  callPackage,
 }:
 # The thin translation layer: pm/lock.json -> one fetched, unpacked
 # derivation per package for this nix system. Nothing here knows versions,
@@ -52,21 +51,7 @@ let
   originRpath = name: stdenv.hostPlatform.isLinux && name == "python";
   patchElf = name: stdenv.hostPlatform.isLinux && name != "python";
 
-  # patchelf 0.19.2 corrupts executables whose headers it must move: running
-  # --set-interpreter before --set-rpath (autoPatchelf's order) leaves a
-  # read-only LOAD overlapping the RW one, so ld.so faults on .dynamic and
-  # node segfaults on start (NixOS/patchelf#674). Fixed upstream by #672, not
-  # yet released; drop this once nixpkgs ships a patchelf that contains it.
-  patchelfFixed = patchelf.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [
-      (fetchpatch {
-        name = "patchelf-fix-executable-header-load-overlap.patch";
-        url = "https://github.com/NixOS/patchelf/commit/59acc3d98b4961cfddf02090d9426ac735603218.patch";
-        includes = [ "src/*" ];
-        hash = "sha256-rQWWZlCa4IRrcPcxMD2xrTTD4nLOsWfdZLOk9UoIOIs=";
-      })
-    ];
-  });
+  patchelfFixed = callPackage ./patchelf-fixed.nix { };
 
   # pnpm pins the @pnpm/exe executable and the `pnpm` launcher package, and both
   # archives wrap their tree in package/. Unpacked over one another, the
