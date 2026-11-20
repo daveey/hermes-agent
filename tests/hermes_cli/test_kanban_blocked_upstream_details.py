@@ -119,6 +119,17 @@ def test_foreign_parent_resolved_through_replica(board, shadow, monkeypatch):
     assert_contained(rows["child"])
 
 
+def test_locally_removed_link_is_not_restored_from_replica(board, shadow, monkeypatch):
+    """A local child's empty parent set is authoritative, even while the shadow lags."""
+    from hermes_cli import kanban_db_sync
+
+    monkeypatch.setattr(kanban_db_sync, "_db_key", lambda conn: str(shadow.parent / "local.db"))
+    monkeypatch.setattr(kanban_db_sync, "board_slug_for_path", lambda key: "default")
+    rows = details(board, [("child", "todo"), ("c", "blocked")], [], ["child"])
+    assert "blocked_upstream" not in rows["child"]
+    assert "upstream" not in rows["child"]
+
+
 def test_remote_row_annotated_through_replica(shadow):
     rows = [{"id": "child", "status": "todo", "board": "default"}]
     card_details.annotate_remote_upstream(rows)

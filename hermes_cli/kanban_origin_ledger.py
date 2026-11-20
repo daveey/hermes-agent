@@ -658,7 +658,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     'legacy_aliases': aliases_for_projection(alias_receipts.get(structure.digest(raw, binding), []), binding),
                     # [daveey] Bounded run fields for what the card waits on (kanban_wait_info, display only).
                     'park': _park_of(task),
-                    **{k: task[k] for k in ('awaiting', 'wake_check', 'human_request', 'blocked_upstream') if task.get(k)},
+                    **{k: task[k] for k in ('awaiting', 'wake_check', 'human_request', 'blocked_upstream', 'upstream') if task.get(k)},
                 })
         return result
     finally:

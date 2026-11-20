@@ -114,16 +114,13 @@ def _task_info(conn: sqlite3.Connection, replica: sqlite3.Connection | None, tas
 
 
 def _parent_ids(conn: sqlite3.Connection, replica: sqlite3.Connection | None, child: str) -> list[str]:
-    seen: set[str] = set()
-    ids: list[str] = []
-    for src, required in ((conn, True), (replica, False)):
-        for row in _query(src, "SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id",
-                          (child,), required=required):
-            parent = row[0]
-            if parent not in seen:
-                seen.add(parent)
-                ids.append(parent)
-    return ids
+    # Local membership owns the whole edge set, including an empty set after unlink.
+    # Only a foreign child's edges come from the shadow; its parents may still be local.
+    local = _query(conn, "SELECT id FROM tasks WHERE id=?", (child,), required=True)
+    src = conn if local or replica is None else replica
+    return [row[0] for row in _query(
+        src, "SELECT parent_id FROM task_links WHERE child_id=? ORDER BY parent_id",
+        (child,), required=src is conn)]
 
 
 def _authority(conn: sqlite3.Connection, replica: sqlite3.Connection | None,
@@ -159,13 +156,6 @@ def _blocked_payload(conn: sqlite3.Connection, replica: sqlite3.Connection | Non
     if info["status"] == "triage" and episode:
         out["contained"] = {"episode": episode, "authority": _authority(conn, replica, parent, episode)}
     return out
-
-
-def _nearest_blocked(conn: sqlite3.Connection, task_id: str,
-                     replica: sqlite3.Connection | None = None) -> dict[str, Any] | None:
-    """Breadth-first, so the first match is nearest; ties sort by id."""
-    blocked, _upstream = _walk(conn, task_id, replica)
-    return blocked
 
 
 def _walk(conn: sqlite3.Connection, task_id: str,

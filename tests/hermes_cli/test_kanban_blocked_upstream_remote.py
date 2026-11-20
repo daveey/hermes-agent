@@ -18,16 +18,17 @@ world = origin_fixtures.world
 
 
 @pytest.mark.parametrize("present", [True, False])
-def test_origin_ledger_projection_keeps_optional_ancestor(world, present):
+@pytest.mark.parametrize("field", ["blocked_upstream", "upstream"])
+def test_origin_ledger_projection_keeps_optional_ancestor(world, present, field):
     path, replica, binding = world
-    expected = {"id": "parent", "status": "blocked"}
-    origin_fixtures.publish(replica, binding, **({"blocked_upstream": expected} if present else {}))
+    expected = {"id": "parent", "status": "running" if field == "upstream" else "blocked"}
+    origin_fixtures.publish(replica, binding, **({field: expected} if present else {}))
     origin_fixtures.accept(world)
     row = ledger.project(path, replica=replica, gateway="origin", profile="default")[0]
     if present:
-        assert row["blocked_upstream"] == expected
+        assert row[field] == expected
     else:
-        assert "blocked_upstream" not in row
+        assert field not in row
 
 
 @pytest.mark.parametrize("status", ["blocked", "triage", "running"])
