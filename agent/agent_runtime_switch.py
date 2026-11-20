@@ -39,6 +39,28 @@ def _stage_compressor(compressor):
     return staged, writes
 
 
+def _switch_changes(base, pristine, working, staged):
+    """Only what the switch itself changed since its snapshot is published.
+
+    Resolution can take seconds and the callers' ``running`` check is unlocked, so a turn may be
+    admitted on the live agent meanwhile. Publishing the whole stale copy reverted that turn's state:
+    its lease holder went back to None (the flush then skipped the lease check) or to an earlier
+    turn's released holder (the flush was refused as a lost lease)."""
+    changes = {}
+    for key, value in staged.items():
+        if key in working and value is working[key]:
+            try:
+                unchanged = value == pristine[key]
+            except (TypeError, ValueError, RecursionError):
+                unchanged = False  # incomparable content: publish, as before
+        else:
+            unchanged = key in base and value is base[key]
+        if unchanged:
+            continue
+        changes[key] = value
+    return changes
+
+
 def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabilities):
     """Prepare managed switches privately, then publish after the allocation commits."""
     from agent.agent_runtime_helpers import _switch_model_runtime
@@ -54,11 +76,13 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
     if config is None and not temporary:
         return _switch_model_runtime(agent, model, provider, api_key, base_url, api_mode, capabilities)
     staged = copy(agent)
+    base = dict(vars(agent))
     # Switch helpers mutate these containers in place. Never expose partial work
     # or clear live provenance while constructing a replacement.
-    for key, value in vars(agent).items():
-        if isinstance(value, (dict, list, set)):
-            setattr(staged, key, copy(value))
+    pristine = {key: copy(value) for key, value in base.items() if isinstance(value, (dict, list, set))}
+    for key, value in pristine.items():
+        setattr(staged, key, copy(value))
+    working = {key: vars(staged)[key] for key in pristine}
     staged.context_compressor, compressor_writes = _stage_compressor(getattr(agent, 'context_compressor', None))
     staged._session_db = None
 
@@ -81,7 +105,7 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
     backend = getattr(staged.context_compressor, '_session_db', None)
     if isinstance(backend, _DeferredSessionWrites):
         staged.context_compressor._session_db = backend.backend
-    vars(agent).update(vars(staged))
+    vars(agent).update(_switch_changes(base, pristine, working, vars(staged)))
     persist_class_metadata(agent)
     for method, args, kwargs in ([] if temporary else compressor_writes):
         method(*args, **kwargs)
