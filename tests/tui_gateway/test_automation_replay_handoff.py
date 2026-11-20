@@ -258,12 +258,13 @@ def test_successor_replays_handed_off_mixed_delivery_exactly_once_in_exact_profi
     assert kw["profiles"] == [None]  # tmp home is not under profiles/: the launch store, never a scan
 
 
-def test_refused_admission_retains_custody_for_the_next_pass(wired, monkeypatch):
+@pytest.mark.parametrize("blocked", ["busy", "refused"])
+def test_refused_admission_retains_custody_for_the_next_pass(wired, monkeypatch, blocked):
     _arm_mixed(wired.path.parent)
     monkeypatch.setattr(ar, "stale_code_reason", lambda: "superseded")
     ar._fire(KEY)
     monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
-    verdicts = iter(["busy"] * 20 + ["started"])
+    verdicts = iter([blocked] * 20 + ["started"])
     wake = lambda *a, **k: next(verdicts)
     for _ in range(20):
         assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 1
@@ -307,7 +308,7 @@ def test_launch_profile_chat_hands_off_and_fences_via_the_launch_home(wired, mon
 def test_failing_batch_is_bounded_not_rewoken_every_pass(wired, monkeypatch):
     wired.publish(KEY, [item(due=0)])
     calls = []
-    for verdict in ("error", "refused"):
+    for verdict in ("error",):
         for _ in range(50):
             ar.consume_handoffs([wired.path.parent], wake=lambda *a, **k: calls.append(1) or verdict, now=5000.0)
         assert len(calls) <= ar.HANDOFF_FAILURES_MAX and not wired.owners()
@@ -318,9 +319,11 @@ def test_failing_batch_is_bounded_not_rewoken_every_pass(wired, monkeypatch):
 def test_build_failure_with_local_replay_settles_instead_of_double_owning(wired, monkeypatch):
     wired.publish(KEY, [item(due=0)])
 
-    def wake(*a, **k):  # the real wake's build failure arms a local replay before returning "error"
-        ar.schedule(KEY, text="x", display_kind="kanban_notice", display_metadata={}, due=9e9, cause="build",
-                    persisted=False, now=1000.0, profile_home=wired.path.parent)
+    def wake(owner, text, **kw):
+        ar.replay_failed_wake(owner, text, {
+            "profile_home": wired.path.parent,
+            "agent_failure": {"failure_resets_at": ar.time.time() + 3600},
+        }, kw["display_kind"], kw["display_metadata"], "build")
         return "error"
 
     assert ar.consume_handoffs([wired.path.parent], wake=wake, now=5000.0) == 1
@@ -389,12 +392,19 @@ def test_seam_wake_resumes_only_in_the_given_profile(monkeypatch):
     assert resumed == [None, "a", "b"]
 
 
-def test_seam_turn_success_and_user_stop_call_cancel_durable():
-    import inspect
-    from tui_gateway import prompt_turn, session_lifecycle
-    assert "cancel_durable" in inspect.getsource(prompt_turn._run_admitted_prompt)
-    src = inspect.getsource(session_lifecycle._interrupt_session_turn)
-    assert 'reason == "user_stop"' in src and "stop=True" in src
+@pytest.mark.parametrize("reason", ["user_stop", "backend_exit", "lease_takeover"])
+def test_user_stop_but_not_shutdown_fences_replays(wired, monkeypatch, reason):
+    from tui_gateway import server
+    session = {"session_key": KEY, "profile_home": wired.path.parent,
+               "history_lock": threading.RLock(), "running": False}
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda _: False)
+    monkeypatch.setattr(server, "_clear_pending", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_cancel_background_review_on_stop", lambda *a: None)
+    monkeypatch.setattr(server, "_announce_cancelled_gateway_approvals", lambda *a, **kw: None)
+    monkeypatch.setattr("tools.approval.resolve_gateway_approval", lambda *a, **kw: None)
+    wired.publish(KEY, [item(due=0)])
+    server._interrupt_session_turn("ui", session, reason=reason)
+    assert bool(wired.owners()) == (reason != "user_stop")
 
 
 def test_durable_success_and_stop_fences(wired):
@@ -406,10 +416,34 @@ def test_durable_success_and_stop_fences(wired):
     assert wired.claim(KEY, 300, "h2", lambda _: False) is None
 
 
-def test_cancel_durable_never_creates_tables(tmp_path):
-    home = tmp_path / "h"
-    home.mkdir()
-    sqlite3.connect(home / "state.db").close()
-    ar.cancel_durable(home, (KEY,), 1.0, stop=True)
-    with sqlite3.connect(home / "state.db") as conn:
-        assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
+@pytest.mark.parametrize("stop", [False, True])
+def test_cancel_before_first_publication_fences_late_items(wired, stop):
+    ar.cancel_durable(wired.path.parent, (KEY,), 60.0, stop=stop)
+    wired.publish(KEY, [item(created=50)])
+    assert wired.claim(KEY, 100, "successor", lambda _: False) is None
+
+
+def test_stop_cancels_local_unpersisted_delivery(wired):
+    ar.schedule(KEY, text="x", display_kind="kanban_notice", display_metadata={}, due=100,
+                cause="q", persisted=False, now=50, profile_home=wired.path.parent)
+    ar.cancel_durable(wired.path.parent, (KEY,), 60, stop=True)
+    assert not ar.pending(KEY)
+
+
+def test_unrelated_local_retry_does_not_dispose_of_failed_handoff(wired):
+    wired.publish(KEY, [item(due=0)])
+    ar.schedule(KEY, text="other", display_kind="kanban_notice", display_metadata={}, due=9e9,
+                cause="q", persisted=False, now=50, profile_home=wired.path.parent)
+    ar.consume_handoffs([wired.path.parent], wake=lambda *a, **k: "error", now=5000)
+    assert wired.owners() == [KEY]
+
+
+def test_named_launch_profile_is_consumed(monkeypatch, tmp_path):
+    from tui_gateway import producer_admission as pa
+    home = tmp_path / "profiles" / "work"
+    seen = []
+    monkeypatch.setattr("hermes_constants.get_process_hermes_home", lambda: home)
+    monkeypatch.setattr(pa, "_server", lambda: types.SimpleNamespace(_readopt_wake_profiles=lambda: [None]))
+    monkeypatch.setattr(ar, "consume_handoffs", lambda homes, **kw: seen.extend(homes))
+    pa._consume_replay_handoffs()
+    assert seen == [home]

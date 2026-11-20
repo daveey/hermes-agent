@@ -356,7 +356,9 @@ def _consume_replay_handoffs() -> None:
     try:
         from tui_gateway import automation_replay
         server = _server()
-        homes = [_profile_home(p) for p in server._readopt_wake_profiles()]
+        from hermes_constants import get_process_hermes_home
+        homes = [Path(get_process_hermes_home()) if p is None else _profile_home(p)
+                 for p in server._readopt_wake_profiles()]
         automation_replay.consume_handoffs([h for h in homes if h is not None])
     except Exception:
         logger.warning("automation-replay handoff pass failed", exc_info=True)
