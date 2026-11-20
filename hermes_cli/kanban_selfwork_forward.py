@@ -1,9 +1,11 @@
 """Trusted courier authorization at the origin; never creates or queues work.
 
 Remote creators need an accepted origin obligation plus a fresh Board lease.
-Origin-local detector tasks prove the live task/run/session plus that lease.
+Same-gateway creators with an accepted obligation use that path too.
+Origin-local detector tasks without an obligation prove the live task/run/session plus that lease.
 A stopped local producer may repair the SAME rejected unauthorized envelope
-from the origin hub journal using historical local provenance, never a new id.
+from the origin hub journal using historical local provenance (sender held the
+run; the refusal happened while that run was live), never a new id.
 """
 from __future__ import annotations
 
@@ -145,28 +147,73 @@ def _local_proof(origin, creator, gateway, *, require_current):
 def _rejected_unauthorized(request):
     path = Path(os.environ.get('HERMES_HUB_STATE') or Path.home() / '.local/state/hermes-hub') / 'hub.db'
     if not path.is_file() or not isinstance(request.get('id'), str):
-        return False
+        return None
     try:
         conn = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2)  # noqa: kanban-lockguard (read-only hub journal)
         try:
-            row = conn.execute('SELECT envelope_json, result FROM req_ledger WHERE id=?',
+            row = conn.execute('SELECT envelope_json, result, at FROM req_ledger WHERE id=?',
                                (request['id'],)).fetchone()
         finally:
             conn.close()
     except sqlite3.Error:
-        return False
-    if row is None or not row[0] or not row[1]:
-        return False
+        return None
+    if row is None or not row[0] or not row[1] or type(row[2]) not in (int, float) or not math.isfinite(row[2]):
+        return None
     try:
         stored, payload = json.loads(row[0]), json.loads(row[1])
     except (TypeError, ValueError):
-        return False
+        return None
     if (not isinstance(stored, dict) or not isinstance(payload, list) or len(payload) != 2
             or payload[0] != 'rejected' or not isinstance(payload[1], dict)
             or payload[1].get('code') != 'self_work_creator_unauthorized'):
-        return False
+        return None
     expected = {k: request[k] for k in _ENVELOPE if k in request}
-    return ledger._json(stored) == ledger._json(expected)
+    if ledger._json(stored) != ledger._json(expected):
+        return None
+    return row[2]
+
+
+def _historical_proof(origin, creator, gateway, request):
+    proof = _local_proof(origin, creator, gateway, require_current=False)
+    sender = request.get('from')
+    at = _rejected_unauthorized(request)
+    if (not isinstance(sender, str) or not sender.startswith('gw:') or not _ID.fullmatch(sender[3:])
+            or at is None):
+        raise ValueError('self_work_creator_unauthorized')
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_identity import _connect
+    try:
+        conn = _connect(kb.kanban_db_path(creator['board']))
+    except (OSError, sqlite3.Error) as exc:
+        raise ValueError('self_work_creator_unauthorized') from exc
+    try:
+        rows = conn.execute(
+            '''SELECT r.id, r.started_at, r.ended_at FROM tasks t JOIN task_runs r ON r.task_id=t.id
+               WHERE t.id=? AND r.uid=?''', (creator['task_id'], creator['run_uid'])).fetchall()
+        if len(rows) != 1 or rows[0][0] != proof['run_id']:
+            raise ValueError('self_work_creator_unauthorized')
+        run_id, started, ended = rows[0]
+        if type(started) not in (int, float) or not math.isfinite(started) or at < started:
+            raise ValueError('self_work_creator_unauthorized')
+        if ended is not None and (type(ended) not in (int, float) or not math.isfinite(ended) or at > ended):
+            raise ValueError('self_work_creator_unauthorized')
+        claimed = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='claimed' ORDER BY id DESC LIMIT 1",
+            (creator['task_id'], run_id)).fetchone()
+        if claimed is None:
+            raise ValueError('self_work_creator_unauthorized')
+        try:
+            data = json.loads(claimed[0])
+        except (TypeError, ValueError):
+            raise ValueError('self_work_creator_unauthorized') from None
+        if (not isinstance(data, dict) or data.get('holder') != sender[3:]
+                or not isinstance(data.get('holder'), str) or not _ID.fullmatch(data['holder'])):
+            raise ValueError('self_work_creator_unauthorized')
+        return proof
+    except sqlite3.Error as exc:
+        raise ValueError('self_work_creator_unauthorized') from exc
+    finally:
+        conn.close()
 
 
 def _lease(creator, sender, gateway):
@@ -249,16 +296,18 @@ def receive(request: dict) -> dict:
         body = request['args']
         origin, creator = body['origin'], body['creator']
         historical = False
-        if _local_origin(origin, creator, gateway, profile):
+        try:
+            binding = _obligation(conn, origin, creator)
+        except ValueError as exc:
+            if str(exc) != 'self_work_creator_unauthorized' or not _local_origin(origin, creator, gateway, profile):
+                raise
             try:
                 binding = _local_proof(origin, creator, gateway, require_current=True)
             except ValueError:
-                if not _rejected_unauthorized(request):
+                if _rejected_unauthorized(request) is None:
                     raise
-                binding = _local_proof(origin, creator, gateway, require_current=False)
+                binding = _historical_proof(origin, creator, gateway, request)
                 historical = True
-        else:
-            binding = _obligation(conn, origin, creator)
     evidence = ({'repair': 'rejected_unauthorized'} if historical
                 else _lease(creator, request['from'], gateway))
     downstream = {'id': 'swf-' + _hash([request['id'], request['from'], gateway, request['key'], home]),
@@ -274,10 +323,16 @@ def receive(request: dict) -> dict:
         prior = _replay(conn, request, home)
         if prior is not None:
             return prior
-        if _local_origin(origin, creator, gateway, profile):
-            if _local_proof(origin, creator, gateway, require_current=not historical) != binding:
+        if historical:
+            if _historical_proof(origin, creator, gateway, request) != binding:
                 raise ValueError('self_work_creator_unauthorized')
-        elif _obligation(conn, origin, creator) != binding:
+        elif 'binding' in binding:
+            if _obligation(conn, origin, creator) != binding:
+                raise ValueError('self_work_creator_unauthorized')
+        elif _local_origin(origin, creator, gateway, profile):
+            if _local_proof(origin, creator, gateway, require_current=True) != binding:
+                raise ValueError('self_work_creator_unauthorized')
+        else:
             raise ValueError('self_work_creator_unauthorized')
         if not historical:
             lease = evidence['lease']

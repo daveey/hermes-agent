@@ -231,7 +231,8 @@ def test_command_stdin(case, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)['status'] == 'accepted'
 
 
-def _seed_local_creator(tmp_path, monkeypatch, *, current=True, session='chat', created_on='origin-gw'):
+def _seed_local_creator(tmp_path, monkeypatch, *, current=True, session='chat', created_on='origin-gw',
+                       holder=None):
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_sync as sync
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
@@ -252,11 +253,15 @@ def _seed_local_creator(tmp_path, monkeypatch, *, current=True, session='chat', 
                          (tid,))
         conn.execute("INSERT INTO task_events(task_id,run_id,kind,payload,created_at) VALUES(?,?,?,?,1)",
                      (tid, 1, 'owner_admitted', json.dumps({'session_id': session})))
+        if holder is not None:
+            conn.execute("INSERT INTO task_events(task_id,run_id,kind,payload,created_at) VALUES(?,?,?,?,1)",
+                         (tid, 1, 'claimed', json.dumps({'holder': holder})))
         conn.commit()
     return tid
 
 
-def _journal_rejected(tmp_path, monkeypatch, request, *, code='self_work_creator_unauthorized', envelope=None):
+def _journal_rejected(tmp_path, monkeypatch, request, *, code='self_work_creator_unauthorized', envelope=None,
+                     at=1):
     hub = tmp_path / 'hub-state'
     hub.mkdir(exist_ok=True)
     stored = envelope if envelope is not None else {k: request[k] for k in
@@ -268,7 +273,7 @@ def _journal_rejected(tmp_path, monkeypatch, request, *, code='self_work_creator
         conn.execute('INSERT INTO req_ledger VALUES (?,?,?,?,?,?,?)',
                      (request['id'], 'finished',
                       json.dumps(['rejected', {'status': 'rejected', 'code': code, 'handoff_complete': False}]),
-                      1, json.dumps(stored, sort_keys=True, separators=(',', ':'), ensure_ascii=False),
+                      at, json.dumps(stored, sort_keys=True, separators=(',', ':'), ensure_ascii=False),
                       'finished', '{}'))
     monkeypatch.setenv('HERMES_HUB_STATE', str(hub))
 
@@ -322,7 +327,7 @@ def test_remote_obligation_path_unchanged_without_local_task(case):
 
 
 def test_stopped_local_creator_repairs_same_rejected_envelope(case, tmp_path, monkeypatch):
-    tid = _seed_local_creator(tmp_path, monkeypatch, current=False)
+    tid = _seed_local_creator(tmp_path, monkeypatch, current=False, holder='worker-gw')
     request = _local_request(case, tid)
     _journal_rejected(tmp_path, monkeypatch, request)
     result = forward.receive(request)
@@ -359,5 +364,50 @@ def test_repair_rejects_other_failure_codes(case, tmp_path, monkeypatch):
     tid = _seed_local_creator(tmp_path, monkeypatch, current=False)
     request = _local_request(case, tid)
     _journal_rejected(tmp_path, monkeypatch, request, code='self_work_route_mismatch')
+    with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
+        forward.receive(request)
+
+
+def test_same_gateway_accepted_obligation_still_authorizes(case, tmp_path):
+    origin = case.request['args']['origin']
+    owner = {'gateway': 'origin-gw', 'profile': 'default', 'board': 'work', 'task_id': 'task'}
+    binding = {'binding_id': 'local-binding', 'version': 1, 'publication_version': 1,
+               'owner': owner, 'origin': origin, 'task_record_key': 'default/work/task'}
+    replica = tmp_path / 'replica-same-gw.db'
+    with sqlite3.connect(replica) as conn:
+        conn.execute('CREATE TABLE replica (gw TEXT,coll TEXT,key TEXT,version INTEGER,data TEXT)')
+        task = {**owner, 'id': 'task', 'status': 'running', 'origin_bindings': [binding]}
+        conn.execute('INSERT INTO replica VALUES (?,?,?,?,?)',
+                     ('origin-gw', 'tasks', binding['task_record_key'], 1, json.dumps(task)))
+    assert ledger.accept_binding(
+        path=case.path, replica=replica, binding=binding, request_id='same-gw-binding',
+        sender='gw:origin-gw', gateway='origin-gw', profile='default',
+        resolve_session=lambda s: s)['status'] == 'accepted'
+    case.request['args']['creator'] = {**owner, 'run_uid': 'run'}
+    result = forward.receive(case.request)
+    assert result['code'] == 'self_work_forward_authorized'
+    with sqlite3.connect(case.path) as conn:
+        evidence = json.loads(conn.execute(
+            'SELECT evidence_json FROM selfwork_forward_admissions WHERE request_id=?',
+            (case.request['id'],)).fetchone()[0])
+    assert evidence['binding'] == binding
+    assert evidence['lease'] == case.lease
+
+
+def test_historical_repair_rejects_never_holder_sender(case, tmp_path, monkeypatch):
+    tid = _seed_local_creator(tmp_path, monkeypatch, current=False, holder='worker-gw')
+    request = _local_request(case, tid)
+    request['from'] = 'gw:never-held-gw'
+    with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
+        forward.receive(request)
+    _journal_rejected(tmp_path, monkeypatch, request)
+    with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
+        forward.receive(request)
+
+
+def test_historical_repair_rejects_stale_journal_after_stop(case, tmp_path, monkeypatch):
+    tid = _seed_local_creator(tmp_path, monkeypatch, current=False, holder='worker-gw')
+    request = _local_request(case, tid)
+    _journal_rejected(tmp_path, monkeypatch, request, at=3)
     with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
         forward.receive(request)
