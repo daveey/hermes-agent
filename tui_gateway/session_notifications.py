@@ -176,7 +176,7 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked",
                         "quota_episode_notice", "worker_repin_notice", "dependency_parent_unclaimed",
                         "chat_wait_unclaimed", "spend_budget_decision_ready", "request_withdrawn", "failure_finalized", "resolved_check_broken",
-                        "resolved_check_lost", "park_progress_notice", "decision_requested")
+                        "resolved_check_lost", "park_progress_notice", "decision_requested", "wake_probe_unproven_notice")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
@@ -627,6 +627,11 @@ def _kb_park_progress(payload):
     return ": " + notice_text(payload)
 
 
+def _unproven_text(payload):
+    from hermes_cli.kanban_wake_unproven import notice_text
+    return notice_text(payload)
+
+
 _KANBAN_EVENT_FORMATTERS = {
     "park_progress_notice": ("ℹ", lambda t, p, title: _kb_park_progress(p)),
     "decision_requested": ("❓", lambda t, p, title: _kb_decision_requested(p)),
@@ -644,6 +649,7 @@ _KANBAN_EVENT_FORMATTERS = {
     "status": ("🔄", lambda t, p, title: f" → {p.get('status') or ''}"),
     "quota_episode_notice": ("⏳", lambda t, p, title: _kb_quota_episode(p)),
     "worker_repin_notice": ("⚠", lambda t, p, title: _kb_repin_notice(p)),
+    "wake_probe_unproven_notice": ("⚠", lambda t, p, title: ": " + _unproven_text(p)),
     "dependency_parent_unclaimed": ("⏳", lambda t, p, title: _kb_parent_unclaimed(p)),
     "chat_wait_unclaimed": ("⏳", lambda t, p, title: _kb_chat_wait(p)),
 }
