@@ -3,7 +3,7 @@
  * the board marks it with its home gateway and leaves ordinary cards unmarked.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // eslint-disable-next-line no-restricted-imports
@@ -24,7 +24,14 @@ vi.mock('./api', async importOriginal => ({
         name: 'ready',
         tasks: [
           { id: 't_1a2b3c', status: 'ready', title: 'Hub card' },
-          { home_gateway: 'mini', id: 't_4d5e6f', read_only: true, remote: true, status: 'ready', title: 'BB-12 feature' }
+          {
+            home_gateway: 'mini',
+            id: 't_4d5e6f',
+            read_only: true,
+            remote: true,
+            status: 'ready',
+            title: 'BB-12 feature'
+          }
         ]
       }
     ],
@@ -41,7 +48,7 @@ afterEach(() => {
   $boardSlug.set('')
 })
 
-const tileOf = (title: string) => screen.getByText(title).closest<HTMLElement>('[draggable="true"]')!
+const tileOf = (title: string) => screen.getByText(title).closest<HTMLElement>('[data-slot="kanban-card"]')!
 
 describe('kanban board: remote shadow-replica cards', () => {
   it('marks a remote card with its home gateway and leaves local cards unmarked', async () => {
@@ -54,8 +61,15 @@ describe('kanban board: remote shadow-replica cards', () => {
     )
     await screen.findByText('BB-12 feature')
 
+    expect(tileOf('BB-12 feature').getAttribute('draggable')).toBe('false')
+    expect(tileOf('Hub card').getAttribute('draggable')).toBe('true')
     expect(within(tileOf('BB-12 feature')).getByText('remote · mini')).toBeTruthy()
     expect(tileOf('Hub card').querySelector('[data-slot="kanban-card-remote"]')).toBeNull()
+    const transfer = { setData: vi.fn() }
+    fireEvent.dragStart(tileOf('BB-12 feature'), { dataTransfer: transfer })
+    expect(transfer.setData).not.toHaveBeenCalled()
+    fireEvent.contextMenu(tileOf('BB-12 feature'))
+    expect((await screen.findByRole('menuitem', { name: 'Delete' })).getAttribute('aria-disabled')).toBe('true')
     dispose()
   })
 })

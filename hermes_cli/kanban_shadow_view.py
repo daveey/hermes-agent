@@ -62,6 +62,17 @@ def home_of(replica: sqlite3.Connection, task_id: str) -> str:
     return UNKNOWN_HOME if owner is foreign._UNSET or owner is None else str(owner)
 
 
+def homes_of(replica: sqlite3.Connection, ids: list[str]) -> dict[str, str]:
+    """Batch owner metadata, retained with the board rows rather than queried per refresh."""
+    homes = dict.fromkeys(ids, UNKNOWN_HOME)
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        for tid, owner in replica.execute(f"SELECT id, created_on FROM tasks WHERE id IN ({marks})", chunk):
+            homes[tid] = UNKNOWN_HOME if owner is None else str(owner)
+    return homes
+
+
 def open_card(live: sqlite3.Connection, scope: Any, task_id: str) -> tuple[Any, sqlite3.Connection, Optional[str]]:
     """``(task, connection, remote home)`` for ``hermes kanban show``: the live row, else a shadow board's replica
     row read through a read-only connection kept open in the ``ExitStack`` ``scope`` (home None for a live row).
@@ -71,7 +82,11 @@ def open_card(live: sqlite3.Connection, scope: Any, task_id: str) -> tuple[Any, 
     if task:
         return task, live, None
     replica = scope.enter_context(open_shadow_replica(live))
-    task = kb.get_task(replica, task_id) if replica is not None else None
+    try:
+        task = kb.get_task(replica, task_id) if replica is not None else None
+    except sqlite3.Error as exc:
+        _log.info("kanban: shadow replica card read failed (%s)", exc)
+        return None, live, None
     if not task:
         return None, live, None
     return task, replica, home_of(replica, task_id) or UNKNOWN_HOME
@@ -100,6 +115,21 @@ def remote_tasks(conn: sqlite3.Connection, **filters: Any) -> list[tuple[Any, st
         except sqlite3.Error as exc:  # an unreadable replica adds nothing; the live rows still list
             _log.info("kanban: shadow replica read failed (%s)", exc)
             return []
+
+
+def ordered(tasks: list[tuple[Any, Optional[str]]], order_by: Optional[str]) -> list[tuple[Any, Optional[str]]]:
+    """Apply the CLI's canonical SQL sort to the combined rows, without touching either board."""
+    if not order_by or not tasks:
+        return tasks
+    from hermes_cli import kanban_db as kb
+    expression = kb.VALID_SORT_ORDERS[order_by.strip().lower()]
+    with sqlite3.connect(":memory:") as order:
+        order.execute("CREATE TABLE cards (position INTEGER, id TEXT, created_at INTEGER, priority INTEGER, "
+                      "status TEXT, assignee TEXT, title TEXT, started_at INTEGER, completed_at INTEGER)")
+        order.executemany("INSERT INTO cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+            (i, t.id, t.created_at, t.priority, t.status, t.assignee, t.title, t.started_at, t.completed_at)
+            for i, (t, _home) in enumerate(tasks)])
+        return [tasks[r[0]] for r in order.execute(f"SELECT position FROM cards ORDER BY {expression}")]
 
 
 def mark(d: dict[str, Any], home: Optional[str]) -> dict[str, Any]:

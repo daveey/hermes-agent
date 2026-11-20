@@ -22,9 +22,9 @@ _MEMO_MAX = 16
 
 
 def _signature(path: str) -> tuple:
-    """Stat of the replica's main, WAL and shm files: any commit the sync pull makes moves one of them."""
+    """Data files change on commits; shm read marks also change on reads, so exclude them."""
     sig = []
-    for suffix in ("", "-wal", "-shm"):
+    for suffix in ("", "-wal"):
         try:
             st = os.stat(path + suffix)
             sig.append((st.st_mtime_ns, st.st_size))
@@ -74,13 +74,20 @@ def merge(payload: dict, live, tenant, include_archived, workflow_template_id, c
         replica_file = shadow_view.db_file(replica)
         key = (live_file, tenant, bool(include_archived), workflow_template_id, current_step_key, int(done_limit or 0))
         try:
-            rows = _remote_rows(key, replica_file, lambda: board_read.materialize(
-                replica, tenant, include_archived, workflow_template_id, current_step_key, done_limit,
-                diagnostic_inputs=diagnostic_inputs))
+            def build():
+                # Filter collisions before the final cap: otherwise a live archived/done row
+                # can consume a replica slot and hide the next remote card in the window.
+                result = board_read.materialize(
+                    replica, tenant, include_archived, workflow_template_id, current_step_key, 0,
+                    diagnostic_inputs=diagnostic_inputs)
+                result["homes"] = shadow_view.homes_of(replica, [t.id for t, _f, _x in result["cards"]])
+                return result
+
+            rows = _remote_rows(key, replica_file, build)
         except Exception:  # health: allow BLE001 -- an unreadable replica must not take the live board down with it
             shadow_view._log.warning("kanban: shadow replica board read failed", exc_info=True)
             return payload
-        homes = {t.id: shadow_view.home_of(replica, t.id) for t, _f, _x in rows["cards"]}
+        homes = rows["homes"]
     live_ids = {t["id"] for col in payload["columns"] for t in col["tasks"]}
     live_ids |= shadow_view._live_ids(live, [i for i in homes if i not in live_ids])
     remote_ids = set(homes) - live_ids

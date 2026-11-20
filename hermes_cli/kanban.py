@@ -622,8 +622,8 @@ def _cmd_list(args: argparse.Namespace) -> int:
         )
         tasks = kb.list_tasks(conn, **filters)
         remote = _shadow_view.remote_tasks(conn, **filters)  # [daveey] a shadow board's other gateways' cards, read-only
-    if _json_out(args, [_task_to_dict(t) for t in tasks]
-                 + [_shadow_view.mark(_task_to_dict(t), home) for t, home in remote]):
+    combined = _shadow_view.ordered([(t, None) for t in tasks] + remote, getattr(args, "sort", None))
+    if _json_out(args, [_shadow_view.mark(_task_to_dict(t), home) for t, home in combined]):
         return 0
     # Passive discoverability: only multi-board users see which board this is.
     try:
@@ -637,10 +637,9 @@ def _cmd_list(args: argparse.Namespace) -> int:
     if not tasks and not remote:
         print("(no matching tasks)")
         return 0
-    for t in tasks:
-        print(_fmt_task_line(t))
-    for t, home in remote:
-        print(f"{_fmt_task_line(t)}  [remote:{home}, read-only]")
+    for t, home in combined:
+        suffix = f"  [remote:{home}, read-only]" if home is not None else ""
+        print(f"{_fmt_task_line(t)}{suffix}")
     return 0
 
 

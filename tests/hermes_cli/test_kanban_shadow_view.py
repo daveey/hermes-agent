@@ -140,3 +140,50 @@ def test_dispatcher_never_claims_a_shadow_row(board):
         row = replica.execute("SELECT status, claim_lock FROM tasks WHERE id = ?", (board["ready_id"],)).fetchone()
     assert (row[0], row[1]) == ("ready", None)
     assert shadow.read_bytes() == before
+
+
+def test_unknown_home_is_marked_in_list_and_show(board):
+    with closing(kbc.connect(board["shadow"])) as replica, replica:
+        replica.execute("UPDATE tasks SET created_on=NULL WHERE id=?", (board["ready_id"],))
+    rows = {r["id"]: r for r in _list_json()}
+    assert rows[board["ready_id"]]["home_gateway"] == "unknown"
+    shown = json.loads(kanban_cli.run_slash(f"show {board['ready_id']} --json"))
+    assert shown["task"]["home_gateway"] == "unknown"
+
+
+def test_unreadable_replica_list_and_show_keep_live_rows(board, monkeypatch):
+    import sqlite3
+    original_list, original_get = kb.list_tasks, kb.get_task
+    def listing(conn, **filters):
+        if shadow_view.db_file(conn) == str(board["shadow"]):
+            raise sqlite3.OperationalError("replica unavailable")
+        return original_list(conn, **filters)
+    def getting(conn, tid):
+        if shadow_view.db_file(conn) == str(board["shadow"]):
+            raise sqlite3.OperationalError("replica unavailable")
+        return original_get(conn, tid)
+    monkeypatch.setattr(kb, "list_tasks", listing)
+    monkeypatch.setattr(kb, "get_task", getting)
+    assert [r["id"] for r in _list_json()] == [board["live_id"]]
+    assert "no such task" in kanban_cli.run_slash(f"show {board['ready_id']}")
+
+
+@pytest.mark.parametrize("sort", list(kb.VALID_SORT_ORDERS))
+def test_sort_applies_to_combined_rows(board, sort):
+    with closing(kbc.connect()) as live, live:
+        live.execute("UPDATE tasks SET created_at=30 WHERE id=?", (board["live_id"],))
+    with closing(kbc.connect(board["shadow"])) as replica, replica:
+        replica.execute("UPDATE tasks SET created_at=10 WHERE id=?", (board["ready_id"],))
+        replica.execute("UPDATE tasks SET created_at=20 WHERE id=?", (board["done_id"],))
+    with closing(kbc.connect(board["home"] / "oracle.db")) as oracle, oracle:
+        with closing(kbc.connect()) as live:
+            tasks = [(t, None) for t in kb.list_tasks(live)] + shadow_view.remote_tasks(live)
+        for task, _home in tasks:
+            oracle.execute("INSERT INTO tasks (id,title,status,assignee,priority,created_at,started_at,completed_at) "
+                           "VALUES (?,?,?,?,?,?,?,?)", (task.id, task.title, task.status, task.assignee,
+                                                      task.priority, task.created_at, task.started_at, task.completed_at))
+        expected = [t.id for t in kb.list_tasks(oracle, order_by=sort)]
+    actual = [r["id"] for r in _list_json(f"--sort {sort}")]
+    assert actual == expected
+    text = kanban_cli.run_slash(f"list --sort {sort}")
+    assert sorted(expected, key=text.index) == expected

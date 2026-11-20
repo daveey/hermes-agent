@@ -324,7 +324,7 @@ function Card({
     onSuccess: n => host.notify({ kind: 'success', message: k.attachedFiles(n, task.title || task.id) })
   })
 
-  const drop = useFileDrop(files => attach.mutate(files), !attach.isPending)
+  const drop = useFileDrop(files => attach.mutate(files), !attach.isPending && !task.read_only)
   const fileOver = drop.over || attach.isPending
 
   return (
@@ -341,10 +341,19 @@ function Card({
             fileOver && 'border-(--dt-composer-ring) bg-[color-mix(in_srgb,var(--dt-composer-ring)_7%,transparent)]'
           )}
           data-file-over={drop.over || undefined}
-          draggable
-          onClick={event => (event.metaKey || event.ctrlKey ? onToggleSelect(task.id) : onOpen(task.id))}
+          data-slot="kanban-card"
+          draggable={!task.read_only}
+          onClick={event =>
+            !task.read_only && (event.metaKey || event.ctrlKey) ? onToggleSelect(task.id) : onOpen(task.id)
+          }
           onDragEnd={() => setDragging(false)}
           onDragStart={event => {
+            if (task.read_only) {
+              event.preventDefault()
+
+              return
+            }
+
             event.dataTransfer.setData('text/plain', task.id)
             event.dataTransfer.effectAllowed = 'move'
             // Snapshot the drag image before dimming the source, so the ghost
@@ -386,7 +395,7 @@ function Card({
           <Codicon name="link-external" size="0.85rem" />
           {k.open}
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => onToggleSelect(task.id)}>
+        <ContextMenuItem disabled={task.read_only} onSelect={() => onToggleSelect(task.id)}>
           <Codicon name={selected ? 'close' : 'check-all'} size="0.85rem" />
           {selected ? k.deselect : k.select(formatModifierToken('mod'))}
         </ContextMenuItem>
@@ -394,13 +403,13 @@ function Card({
         {columns
           .filter(name => name !== task.status && !isLockedTarget(name))
           .map(name => (
-            <ContextMenuItem key={name} onSelect={() => onMove(task.id, name)}>
+            <ContextMenuItem disabled={task.read_only} key={name} onSelect={() => onMove(task.id, name)}>
               <span className="size-2 rounded-full" style={{ backgroundColor: columnMeta(name).tone }} />
               {k.moveTo(columnLabel(k, name))}
             </ContextMenuItem>
           ))}
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => onDelete(task.id)} variant="destructive">
+        <ContextMenuItem disabled={task.read_only} onSelect={() => onDelete(task.id)} variant="destructive">
           <Codicon name="trash" size="0.85rem" />
           {k.delete}
         </ContextMenuItem>
