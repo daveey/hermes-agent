@@ -10,18 +10,20 @@ from ruamel.yaml import YAML
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize(('event', 'ref', 'hit', 'copies', 'warn'), [
-    ('push', 'refs/heads/main', 'true', 11, True),
-    ('push', 'refs/heads/main', 'true', 10, False),
-    ('push', 'refs/heads/main', 'false', 11, False),
-    ('pull_request', 'refs/heads/main', 'true', 11, False),
-    ('push', 'refs/heads/topic', 'true', 11, False),
+@pytest.mark.parametrize(('event', 'ref', 'hit', 'copies', 'fetches', 'warn'), [
+    ('push', 'refs/heads/main', 'true', 368, 5, False),
+    ('push', 'refs/heads/main', 'true', 0, 11, True),
+    ('push', 'refs/heads/main', 'true', 368, 10, False),
+    ('push', 'refs/heads/main', 'true', 93, 239, True),
+    ('push', 'refs/heads/main', 'false', 93, 239, False),
+    ('pull_request', 'refs/heads/main', 'true', 0, 11, False),
+    ('push', 'refs/heads/topic', 'true', 0, 11, False),
 ])
-def test_summary_counts_real_log_lines(tmp_path, event, ref, hit, copies, warn):
+def test_summary_counts_real_log_lines(tmp_path, event, ref, hit, copies, fetches, warn):
     log = tmp_path / 'build.log'
     log.write_text(
         "copying path '/nix/store/a' from 'https://cache.nixos.org'...\n" * copies
-        + 'source> trying https://example.com/source.tar.gz\n'
+        + 'source> trying https://example.com/source.tar.gz\n' * fetches
         + 'echo "copying path /nix/store/quoted"\n'
     )
     summary = tmp_path / 'summary'
@@ -33,7 +35,7 @@ def test_summary_counts_real_log_lines(tmp_path, event, ref, hit, copies, warn):
     )
     assert result.returncode == 0, result.stderr
     assert f'Paths copied from substituters: {copies}' in summary.read_text()
-    assert 'HTTPS source fetches: 1' in summary.read_text()
+    assert f'HTTPS source fetches: {fetches}' in summary.read_text()
     assert ('::warning::' in result.stdout) is warn
 
 

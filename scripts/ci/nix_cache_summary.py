@@ -19,10 +19,12 @@ def main():
     print(report)
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
         summary.write("## Nix cache effectiveness\n\n" + report)
+    # Free binary substitutions are expected under the unchanged 5 GiB GC cap;
+    # source downloads, not copied store paths, diagnose a broken warm cache.
     if (os.environ.get("GITHUB_EVENT_NAME") == "push"
             and os.environ.get("GITHUB_REF") == "refs/heads/main"
-            and os.environ.get("NIX_CACHE_HIT") == "true" and copies > 10):
-        print(f"::warning::Nix primary-key hit still copied {copies} paths (budget: 10)")
+            and os.environ.get("NIX_CACHE_HIT") == "true" and fetches > 10):
+        print(f"::warning::Nix primary-key hit still fetched {fetches} HTTPS sources (budget: 10)")
 
 
 if __name__ == "__main__":
