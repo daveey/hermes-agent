@@ -2,12 +2,12 @@
 from datetime import UTC, datetime, timedelta
 
 from hermes_cli.kanban_pr_check_runs import _complete
-from hermes_cli.kanban_pr_merge_time import check_receipt, job_attempt, timestamp
+from hermes_cli.kanban_pr_merge_time import GITHUB_ACTIONS_APP_ID, check_receipt, job_attempt, timestamp
 
 # A just-created empty suite may be CI that has not started its jobs yet.
 IDLE_SUITE_GRACE = timedelta(minutes=15)
 # A queued empty Actions suite can be a concurrency-held workflow: never idle.
-GITHUB_ACTIONS_APP_ID = 15368
+# (GITHUB_ACTIONS_APP_ID is shared with the merge-time partition.)
 # GitHub branch protection accepts these completed conclusions as passing.
 _PASSING_CONCLUSIONS = ("neutral", "skipped")
 
@@ -125,6 +125,51 @@ def actions_attempts(api, repo, profile_home):
             return None
         return job_attempt(job, check) if isinstance(job, dict) else None
     return attempt_of
+
+
+def actions_runs(api, repo, profile_home):
+    """Resolve a check run to the Actions workflow run that owns its job.
+
+    Returns the run's identity (id, workflow id, event, head SHA, created/updated
+    times, status, conclusion) only when the job proves it is this check run, the
+    run id matches and every field is well-formed. Anything else, including
+    non-Actions apps and 404s, is unprovable (None). Transport failures propagate.
+    """
+    from hermes_cli.kanban_pr_acceptance import _GateAuthError
+
+    cache = {}
+
+    def run_of(check):
+        if check["id"] in cache:
+            return cache[check["id"]]
+        cache[check["id"]] = found = None
+        if (check.get("app") or {}).get("id") == GITHUB_ACTIONS_APP_ID:
+            try:
+                job = api(f"repos/{repo}/actions/jobs/{int(check['id'])}", profile_home=profile_home)
+                proven = job_attempt(job, check) if isinstance(job, dict) else None
+                if proven:
+                    found = _workflow_identity(
+                        api(f"repos/{repo}/actions/runs/{proven[0]}", profile_home=profile_home),
+                        proven[0], check.get("head_sha"))
+            except _GateAuthError:
+                found = None
+            cache[check["id"]] = found
+        return found
+    return run_of
+
+
+def _workflow_identity(run, run_id, sha):
+    ints = (run.get("id"), run.get("workflow_id")) if isinstance(run, dict) else (None, None)
+    if (any(type(v) is not int for v in ints) or run["id"] != run_id or run.get("head_sha") != sha
+            or not isinstance(run.get("event"), str) or not run["event"]):
+        return None
+    try:
+        created, updated = timestamp(run["created_at"]), timestamp(run["updated_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"id": run_id, "workflow_id": run["workflow_id"], "event": run["event"], "head_sha": sha,
+            "created": created, "updated": updated, "status": run.get("status"),
+            "conclusion": run.get("conclusion")}
 
 
 def mark_absence(receipt, required, outcomes, suites, where):

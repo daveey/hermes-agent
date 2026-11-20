@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
+# GitHub Actions' app id: the only producer whose workflow-run identity is provable.
+GITHUB_ACTIONS_APP_ID = 15368
+
 
 def timestamp(value):
     """Require an unambiguous GitHub timestamp; unknown chronology fails closed."""
@@ -27,7 +30,7 @@ def check_receipt(check, sha):
             "classification": _classify(check, sha, outcome, is_run), "conclusion": outcome}
 
 
-def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False, attempt_of=None):
+def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False, attempt_of=None, run_of=None):
     """Latest pre-merge execution per producer, plus every later execution.
 
     App identities stay distinct: an unpinned context must not hide another app's
@@ -85,8 +88,9 @@ def partition_at_merge(checks, merged_at, *, runs, distinct_suites=False, attemp
         family = {}
         for check in checks:
             family.setdefault(key_of(check), []).append(check)
-        return [c for key, group in latest.items()
-                for c in _unsuperseded(group, start, family[key], attempt_of)], post
+        kept = [c for key, group in latest.items()
+                for c in _unsuperseded(group, start, family[key], attempt_of)]
+        return _drop_cancelled_superseded(kept, checks, cutoff, run_of), post
     return [entry[1] for entry in latest.values()], post
 
 
@@ -127,6 +131,55 @@ def _unsuperseded(group, start, family, attempt_of):
     return kept
 
 
+def _drop_cancelled_superseded(kept, every, cutoff, run_of):
+    """Drop a ``cancelled`` job whose workflow was re-run, green, before the merge.
+
+    A concurrency group cancels the earlier workflow run when a later event starts
+    the next one; that later run is a different workflow run (and check suite), so
+    the same-run rerun proof of ``_unsuperseded`` cannot see it. The pairing is
+    proven only from Actions identity (``run_of``): the same workflow id, head SHA
+    and event, a later-created workflow run that completed with success no later
+    than the merge, and a same-named job in it that started before and succeeded
+    by the merge. Each workflow run must hold exactly one job of this name (``every``
+    is every run, post-merge included), so a matrix sibling is never assumed.
+    Anything unprovable, any other conclusion and non-Actions apps stay as evidence.
+    """
+    if run_of is None:
+        return kept
+
+    def finished(check):
+        done = check.get("completed_at")
+        return check.get("status") == "completed" and bool(done) and timestamp(done) <= cutoff
+
+    def jobs_in_run(check, workflow):
+        return [c for c in every if (c["name"], c["app"]["id"]) == (check["name"], check["app"]["id"])
+                and ((other := run_of(c)) is None or other["id"] == workflow["id"])]
+
+    def superseded(check):
+        if check.get("conclusion") != "cancelled":
+            return False
+        earlier = run_of(check)
+        if earlier is None or len(jobs_in_run(check, earlier)) != 1:
+            return False
+        for later in every:
+            if (later["id"] == check["id"] or (later["name"], later["app"]["id"]) != (check["name"], check["app"]["id"])
+                    or later.get("conclusion") != "success" or not finished(later)
+                    or timestamp(later["started_at"]) >= cutoff):
+                continue
+            workflow = run_of(later)
+            if (workflow is None
+                    or (workflow["workflow_id"], workflow["event"], workflow["head_sha"]) !=
+                    (earlier["workflow_id"], earlier["event"], earlier["head_sha"])
+                    or workflow["created"] <= earlier["created"] or workflow["conclusion"] != "success"
+                    or workflow["status"] != "completed"
+                    or workflow["updated"] > cutoff or len(jobs_in_run(later, workflow)) != 1):
+                continue
+            return True
+        return False
+
+    return [c for c in kept if not superseded(c)]
+
+
 def job_attempt(job, check):
     """(workflow run id, run_attempt) of an Actions job, only if it is this check run."""
     url, run_id, run_attempt = job.get("check_run_url"), job.get("run_id"), job.get("run_attempt")
@@ -138,13 +191,13 @@ def job_attempt(job, check):
     return run_id, run_attempt
 
 
-def merge_evidence(receipt, pr, repo, runs, statuses, *, distinct_suites=False, attempt_of=None):
+def merge_evidence(receipt, pr, repo, runs, statuses, *, distinct_suites=False, attempt_of=None, run_of=None):
     if pr["state"] != "MERGED":
         return runs, statuses
     merged_at = pr["mergedAt"]
     receipt["merged_at"] = merged_at
     runs, post_runs = partition_at_merge(runs, merged_at, runs=True, distinct_suites=distinct_suites,
-                                         attempt_of=attempt_of)
+                                         attempt_of=attempt_of, run_of=run_of)
     statuses, post_statuses = partition_at_merge(statuses, merged_at, runs=False)
     sha = receipt["head_sha"]
     receipt["post_merge_checks"] = [check_receipt(c, sha) for c in post_runs + post_statuses]
