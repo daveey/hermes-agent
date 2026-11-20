@@ -107,6 +107,29 @@ def quota_unavailable(pool, model):
     return None
 
 
+# Slack after a known reset so the retry lands past the provider's own clock, not on its edge.
+POOL_RESET_MARGIN_S = 3.0
+# Longest known reset worth sleeping through: ``RETRY_AFTER_CAP_S`` plus slack for the margin, so a reset
+# the 600 s cap would have missed by seconds (hub 11-20: 603 s away) is still waited for.
+POOL_RESET_BUDGET_S = 600.0 + 60.0
+
+
+def pool_reset_wait(pool, model, now=None):
+    """``(seconds_until_earliest_reset, SubscriptionQuotaUnavailable)`` when every pooled OAuth
+    credential is cooling down for *model* with a known reset, else None.
+
+    A real ``CredentialPool`` only: anything else (a stub, no pool) carries no reset evidence."""
+    from agent.credential_pool import CredentialPool
+    import time
+
+    if not isinstance(pool, CredentialPool):
+        return None
+    refusal = quota_unavailable(pool, model)
+    if refusal is None:
+        return None
+    return refusal.resets_at - (time.time() if now is None else now), refusal
+
+
 def half_pool_reset(waits):
     """The reset by which at least half of the walled accounts behind *waits* can serve again."""
     ordered = sorted(waits)

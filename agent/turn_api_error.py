@@ -426,6 +426,15 @@ def settle_unrecovered_error(
         logger.info("%sFree-tier cooldown outlasts the attended wait — ending retries after attempt %s",
                     agent.log_prefix, retry_count)
         retry_count = max_retries
+    if is_rate_limited and retry_count < max_retries:
+        # Every pooled account is walled past the retry cap: sleeping first would only end the turn
+        # later. End the cycle now, with the refusal that names the reset time.
+        from agent.model_routing_unavailable import POOL_RESET_BUDGET_S, pool_reset_wait
+        _pool_wait = pool_reset_wait(getattr(agent, "_credential_pool", None), _model)
+        if _pool_wait is not None and _pool_wait[0] > POOL_RESET_BUDGET_S:
+            logger.info("%sPool reset in %.0fs is past the retry cap — ending retries after attempt %s",
+                        agent.log_prefix, _pool_wait[0], retry_count)
+            api_error, error_msg, retry_count = _pool_wait[1], str(_pool_wait[1]), max_retries
     if retry_count >= max_retries:
         # Before fallback, rebuild the primary client once per API call block for
         # transient transport errors (stale pool, TCP reset).

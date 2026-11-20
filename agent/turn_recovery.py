@@ -1482,6 +1482,14 @@ def compute_error_backoff(
         wait_time, _backoff_policy = adaptive_rate_limit_backoff(
             retry_count, base_url=str(base_url), model=model, error=api_error, default_wait=wait_time,
         )
+    if is_rate_limited:
+        # Every pooled account is cooling down and the earliest reset is known: wait for it (plus a
+        # margin) instead of a fixed backoff that can wake seconds before the reset (hub 11-20: a 600s
+        # wait missed an account's reset by 3s). A reset past the cap ends the turn in the caller.
+        from agent.model_routing_unavailable import POOL_RESET_BUDGET_S, POOL_RESET_MARGIN_S, pool_reset_wait
+        _pool_wait = pool_reset_wait(getattr(agent, "_credential_pool", None), model)
+        if _pool_wait is not None and 0 < _pool_wait[0] <= POOL_RESET_BUDGET_S:
+            wait_time, _backoff_policy = _pool_wait[0] + POOL_RESET_MARGIN_S, "pool_reset"
     _reset = reset_hint(api_error) if _adaptive else ""
     _free_busy = is_rate_limited and on_free_model(agent, base_url)
     _wait_reason = ("The free model is busy" if _free_busy
