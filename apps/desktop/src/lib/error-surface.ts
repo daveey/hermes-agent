@@ -51,6 +51,8 @@ export const ERROR_CODE_KEYS = [
   // [daveey] The backend stopped the turn because another owner claimed its session lease
   // (tui_gateway/prompt_turn._surface_system_interrupt). Retry re-runs it once the session is free.
   'session_turn_lease_lost',
+  // [daveey] A forced core update stopped a turn that does not continue on its own (the same backend seam).
+  'core_update_forced_stop',
   'SESSION_NOT_OWNED',
   // The gateway that owns the chat is mid-turn and could not queue this send: transient.
   'SESSION_OWNER_BUSY',

@@ -1540,7 +1540,8 @@ export interface ForceUpdateRequest {
 /** `GET /api/hermes/update/force`: whether hermes-sync owes an update on this host, and what forcing it stops. */
 export interface ForceUpdateState {
   available: boolean
-  running_turns: number
+  /** Live turns on the host (every surface and profile); null when a state.db could not be read. */
+  running_turns: null | number
   pending: ForceUpdateRequest | null
   /** Why it is unavailable (only when `available` is false). */
   message?: string
@@ -1551,7 +1552,7 @@ export interface ForceUpdateResponse {
   ok: boolean
   requested_at: number
   expires_at: number
-  running_turns: number
+  running_turns: null | number
 }
 
 export interface UpdateReceiptSummary {

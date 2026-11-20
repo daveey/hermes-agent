@@ -105,6 +105,10 @@ export const enErrorCodes: ThreadCopy['errorCodes'] = {
     title: 'Hermes stopped this reply',
     body: 'Another Hermes process took over this chat while the reply was running, so Hermes stopped it to protect the transcript. Work done before the stop is kept. Retry to run it again.'
   },
+  core_update_forced_stop: {
+    title: 'Stopped for a forced Hermes update',
+    body: 'A forced update stopped this reply, and it does not continue on its own. Work done before the stop is kept. Send your message again to continue.'
+  },
   SESSION_OWNER_BUSY: {
     title: 'Hermes is busy in this chat',
     body: 'Another turn is running here and your message could not join its queue. Nothing was sent. Retry once that turn ends.'

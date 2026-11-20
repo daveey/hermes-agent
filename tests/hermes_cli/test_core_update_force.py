@@ -7,6 +7,7 @@ import asyncio
 import json
 import socket
 import sqlite3
+import threading
 import time
 import types
 
@@ -49,25 +50,62 @@ def test_garbage_reads_as_none(tmp_path, text):
     assert cuf.read_force_request(tmp_path) is None
 
 
-def test_running_turn_count_counts_only_live_leases(tmp_path):
-    db = SessionDB(db_path=tmp_path / "state.db")
+def test_concurrent_writes_never_collide_on_the_temp_file(tmp_path):
+    """Two request handlers in one process (same pid) used to share one temp name: one replace then failed."""
+    start, errors = threading.Barrier(8), []
+
+    def write(n):
+        start.wait()
+        try:
+            for _ in range(25):
+                cuf.write_force_request(tmp_path, f"writer-{n}")
+        except Exception as exc:  # collected and asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert errors == []
+    assert cuf.read_force_request(tmp_path)["by"].startswith("writer-")
+    assert [p.name for p in (tmp_path / "core-update").iterdir()] == ["force-request"]  # no temp file left
+
+
+def _leases(home, *keys, expired=()):
+    home.mkdir(parents=True, exist_ok=True)
+    db = SessionDB(db_path=home / "state.db")
     try:
-        for key in ("live", "expired", "other-live"):
+        for key in (*keys, *expired):
             db.create_session(session_id=key, source="tui", model="test/model")
             assert db.try_acquire_session_turn_lease(key, f"holder-{key}", ttl_seconds=300)
     finally:
         db.close()
-    with sqlite3.connect(tmp_path / "state.db") as conn:
-        conn.execute("UPDATE session_turn_leases SET expires_at=? WHERE holder=?", (time.time() - 60, "holder-expired"))
+    with sqlite3.connect(home / "state.db") as conn:
+        for key in expired:
+            conn.execute("UPDATE session_turn_leases SET expires_at=? WHERE holder=?", (time.time() - 60, f"holder-{key}"))
+
+
+def test_running_turn_count_counts_only_live_leases(tmp_path):
+    _leases(tmp_path, "live", "other-live", expired=("expired",))
     assert cuf.running_turn_count(tmp_path) == 2
     assert cuf.running_turn_count(tmp_path, now=time.time() + 3600) == 0
 
 
-def test_running_turn_count_is_zero_without_a_readable_db(tmp_path, caplog):
-    assert cuf.running_turn_count(tmp_path) == 0  # no state.db at all
-    (tmp_path / "state.db").write_text("not a database")
+def test_running_turn_count_spans_every_profile_home_under_the_root(tmp_path):
+    _leases(tmp_path, "root-turn")
+    _leases(tmp_path / "profiles" / "coder", "coder-turn", "coder-turn-2", expired=("coder-old",))
+    (tmp_path / "profiles" / "empty").mkdir()  # a profile with no state.db yet adds nothing
+    assert cuf.running_turn_count(tmp_path) == 3
+
+
+def test_running_turn_count_is_unknown_when_a_db_is_unreadable(tmp_path, caplog):
+    assert cuf.running_turn_count(tmp_path) == 0  # no state.db at all: nothing runs
+    _leases(tmp_path, "root-turn")
+    (tmp_path / "profiles" / "broken").mkdir(parents=True)
+    (tmp_path / "profiles" / "broken" / "state.db").write_text("not a database")
     with caplog.at_level("WARNING", logger="hermes_cli.core_update_force"):
-        assert cuf.running_turn_count(tmp_path) == 0
+        assert cuf.running_turn_count(tmp_path) is None  # never reported as 0 (or as the readable part)
     assert any("could not count running turns" in r.getMessage() and r.exc_info for r in caplog.records)
 
 
@@ -137,3 +175,51 @@ def test_routes_when_no_update_is_owed(root):
     body = json.loads(response.body)
     assert body["ok"] is False and body["message"] == state["message"] == body["detail"]
     assert not (root / "core-update" / "force-request").exists()
+
+
+def test_unreadable_count_is_reported_as_unknown(root):
+    from hermes_cli.web_routers import actions
+
+    _owe_update(root)
+    (root / "state.db").write_text("not a database")
+    assert asyncio.run(actions.hermes_update_force_state())["running_turns"] is None
+    assert asyncio.run(actions.hermes_update_force(_request()))["running_turns"] is None
+
+
+# ── Through the FastAPI app: the auth gate and the 409's wire shape ──────────────────────────────────
+
+
+@pytest.fixture
+def client(root, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from hermes_cli import web_server
+
+    monkeypatch.setattr(web_server, "_SESSION_TOKEN", "force-update-test-token")
+    return TestClient(web_server.app, base_url="http://127.0.0.1")
+
+
+AUTH = {"X-Hermes-Session-Token": "force-update-test-token"}
+
+
+def test_app_routes_require_the_session_token(client):
+    assert client.get("/api/hermes/update/force").status_code == 401
+    assert client.post("/api/hermes/update/force").status_code == 401
+
+
+def test_app_routes_report_write_and_refuse(client, root):
+    refused = client.post("/api/hermes/update/force", headers=AUTH)
+    assert refused.status_code == 409
+    assert refused.json()["ok"] is False and refused.json()["error"] == "force_update_unavailable"
+    assert "nothing to force" in refused.json()["detail"]
+    assert refused.json()["detail"] == refused.json()["message"]
+    got = client.get("/api/hermes/update/force", headers=AUTH)
+    assert got.status_code == 200 and got.json()["available"] is False and got.json()["running_turns"] == 0
+
+    _owe_update(root)
+    _live_turn(root)
+    assert client.get("/api/hermes/update/force", headers=AUTH).json() == {
+        "available": True, "running_turns": 1, "pending": None}
+    posted = client.post("/api/hermes/update/force", headers=AUTH)
+    assert posted.status_code == 200 and posted.json()["ok"] is True and posted.json()["running_turns"] == 1
+    assert client.get("/api/hermes/update/force", headers=AUTH).json()["pending"]["by"] == "dashboard"

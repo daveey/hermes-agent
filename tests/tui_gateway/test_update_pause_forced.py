@@ -167,3 +167,25 @@ def test_hook_stops_a_non_resumable_turn_only_when_forced(home, monkeypatch):
     assert read_turn_marker(home, "session-key").get("reason") != up.PAUSE_REASON
     af.clear_pause_request(home)
     assert hook() is None  # no request, no stop
+
+
+def test_forced_pause_ends_a_non_resumable_continuation_before_its_first_request(home, tmp_path, monkeypatch):
+    """The ``pause_before_turn`` entry: a continuation's first-request hook (``update_pause_first_request``) under a
+    forced pause, for a turn that will not continue again, ends it before any request with the forced reason."""
+    _not_resumable(monkeypatch)
+    record_turn_start(home, "session-key", "run the long job")
+    agent = _make_agent(tmp_path, "long_job")
+    session = _session(agent, home)
+    _request_pause(home, force=True)
+    agent.client.chat.completions.create.side_effect = [_response()]
+    agent.step_boundary_pause = up.boundary_pause_hook(session, "session-key")
+    agent.update_pause_first_request = True  # tui_gateway.prompt_turn marks an auto_continue turn
+    history = [{"role": "user", "content": "run the long job"}]
+    try:
+        result = agent.run_conversation("continue", conversation_history=history)
+    finally:
+        agent.step_boundary_pause = None
+    assert agent.client.chat.completions.create.call_count == 0
+    assert result["interrupted"] is True and result["paused_for_update"] == up.FORCED_STOP_REASON
+    assert result["api_calls"] == 0 and result["messages"] == history
+    assert "_update_pause_marker_key" not in session

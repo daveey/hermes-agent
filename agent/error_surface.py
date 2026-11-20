@@ -39,6 +39,7 @@ _REASON_TO_LAYER = {
     "loop_error": LAYER_GATEWAY, "interpreter_shutdown": LAYER_GATEWAY, "session_busy": LAYER_GATEWAY,
     "pre_final_gate_unresolved": LAYER_GATEWAY,
     "session_turn_lease_lost": LAYER_GATEWAY,  # [daveey] tui_gateway/prompt_turn._surface_system_interrupt
+    "core_update_forced_stop": LAYER_GATEWAY,  # [daveey] the same seam: a forced core update stopped the turn
     "gateway_connection": LAYER_GATEWAY, "host_error": LAYER_GATEWAY, "workspace_unavailable": LAYER_GATEWAY,
     "launch_credentials_unavailable": LAYER_GATEWAY, "route_refused": LAYER_GATEWAY,
     "local_runtime_unavailable": LAYER_ENDPOINT,  # the managed local model server is down

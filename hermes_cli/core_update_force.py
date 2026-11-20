@@ -6,10 +6,15 @@ drain's pause request, ``<root>/core-update/force-request``::
     {"version": 1, "requested_at": <epoch s>, "expires_at": <requested_at + FORCE_TTL_S>, "by": "<principal>"}
 
 hermes-sync reads it directly (no core call), so the format is the contract: keep it backward compatible. While
-it serves a force request its drainer stamps ``"force": true`` on the pause request, and every turn then stops at
-its next step boundary, including turns the next backend would not auto-continue
-(``hermes_cli.admission_fence.pause_forced``, ``tui_gateway.update_pause``). hermes-sync deletes the file after a
-successful apply or once it has expired; a missing, unparseable or expired file is no request.
+it serves a force request its drainer stamps ``"force": true`` on the pause request, and every Desktop/TUI turn then
+stops at its next step boundary, including turns the next backend would not auto-continue
+(``hermes_cli.admission_fence.pause_forced``, ``tui_gateway.update_pause``). Messaging-gateway, API and cron turns
+are not stopped: the drainer still waits for them.
+
+A request names no sha or version: it means "apply whatever core update is pending now", so a request written
+before a newer commit landed also forces that newer one. It is cleared by hermes-sync, never by core: hermes-sync
+deletes the file after a successful apply, and deletes it once ``expires_at`` has passed. Until then (and in any
+case once expired) a missing, unparseable or expired file is no request.
 """
 from __future__ import annotations
 
@@ -17,6 +22,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -36,7 +42,7 @@ def write_force_request(root: Path | str, by: str) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     now = time.time()
     body = {"version": 1, "requested_at": now, "expires_at": now + FORCE_TTL_S, "by": str(by)}
-    tmp = path.with_name(f".{FORCE_REQUEST}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{FORCE_REQUEST}.{uuid.uuid4().hex}.tmp")  # unique per writer: threads share a pid
     tmp.write_text(json.dumps(body) + "\n", encoding="utf-8")
     os.replace(tmp, path)
     return body
@@ -61,21 +67,41 @@ def read_force_request(root: Path | str, now: Optional[float] = None) -> Optiona
             "by": str(body.get("by") or "")}
 
 
-def running_turn_count(home: Path | str, now: Optional[float] = None) -> int:
-    """Turns holding a live cross-process turn lease in ``home``'s state.db (read-only); 0 when unreadable."""
+def _turn_homes(root: Path) -> list[Path]:
+    """The root and every named profile home under it (``<root>/profiles/<name>``): each has its own state.db."""
+    homes = [root]
+    try:
+        homes += sorted(p for p in (root / "profiles").iterdir() if p.is_dir() and not p.name.startswith("."))
+    except FileNotFoundError:
+        pass
+    return homes
+
+
+def _live_leases(db_path: Path, now: float) -> int:
     from hermes_cli.sqlite_safe_read import connect_tracked
 
-    db_path = Path(home) / "state.db"
-    if not db_path.exists():
-        return 0
+    conn = connect_tracked(f"{db_path.resolve().as_uri()}?mode=ro", tracking_path=db_path, uri=True, timeout=2.0)
     try:
-        conn = connect_tracked(f"{db_path.resolve().as_uri()}?mode=ro", tracking_path=db_path, uri=True, timeout=2.0)
-        try:
-            row = conn.execute("SELECT COUNT(*) FROM session_turn_leases WHERE expires_at > ?",
-                               (time.time() if now is None else now,)).fetchone()
-        finally:
-            conn.close()
-    except Exception:
-        logger.warning("core-update force: could not count running turns in %s", db_path, exc_info=True)
-        return 0
+        row = conn.execute("SELECT COUNT(*) FROM session_turn_leases WHERE expires_at > ?", (now,)).fetchone()
+    finally:
+        conn.close()
     return int(row[0] or 0) if row else 0
+
+
+def running_turn_count(root: Path | str, now: Optional[float] = None) -> Optional[int]:
+    """Turns holding a live cross-process turn lease in the state.db of ``root`` and of every profile under it
+    (read-only). This counts every running turn, not only the Desktop/TUI turns a forced update stops: the
+    lease does not say which surface runs it, so the confirm copy says so. None when any database cannot be
+    read: an unknown count is never reported as 0."""
+    now = time.time() if now is None else now
+    total = 0
+    for home in _turn_homes(Path(root)):
+        db_path = home / "state.db"
+        if not db_path.exists():
+            continue
+        try:
+            total += _live_leases(db_path, now)
+        except Exception:
+            logger.warning("core-update force: could not count running turns in %s", db_path, exc_info=True)
+            return None
+    return total

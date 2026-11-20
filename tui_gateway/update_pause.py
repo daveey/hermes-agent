@@ -74,6 +74,8 @@ MID_TOOL_GRACE_S = 30.0
 # reason. Nothing keeps its marker, so it ends like a stopped turn and is not continued: the user re-sends it.
 # Resumable turns pause and auto-continue exactly as without force.
 FORCED_STOP_REASON = "core_update_forced_stop"
+# The turn's error text (prompt_turn._surface_system_interrupt): Desktop renders an interrupted turn as nothing.
+FORCED_STOP_MESSAGE = "Stopped for a forced Hermes update. Send your message again to continue."
 MID_TOOL_POLL_S = 1.0
 WATCH_POLL_S = 5.0
 WATCH_MAX_S = 6 * 3600.0

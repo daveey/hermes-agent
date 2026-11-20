@@ -5,10 +5,12 @@ export const enForceUpdate: ForceUpdateCopy = {
   confirmTitle: 'Force the backend update now?',
   confirmBody: runningTurns =>
     `${
-      runningTurns === 0
-        ? 'No turns are running right now.'
-        : `${runningTurns} running turn${runningTurns === 1 ? '' : 's'} will be stopped.`
-    } Turns that can resume continue after the update; others need to be sent again.`,
+      runningTurns === null
+        ? 'Hermes could not tell how many turns are running.'
+        : runningTurns === 0
+          ? 'No turns are running right now.'
+          : `${runningTurns} turn${runningTurns === 1 ? ' is' : 's are'} running now.`
+    } The update stops Desktop and terminal turns at their next step: those that can resume continue after the update; others need to be sent again. Messaging, API and scheduled-job turns are not stopped: the update waits for them to finish.`,
   confirmLabel: 'Force update',
   cancelLabel: 'Cancel',
   requested: 'Update requested; the backend restarts within a few minutes',

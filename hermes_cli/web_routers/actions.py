@@ -309,7 +309,8 @@ def _force_update_state() -> dict[str, Any]:
 
     root = get_default_hermes_root()
     available = read_progress() is not None
-    state: dict[str, Any] = {"available": available, "running_turns": running_turn_count(get_hermes_home()),
+    # Every profile's turns under this root; None when a state.db is unreadable (the dialog says "unknown").
+    state: dict[str, Any] = {"available": available, "running_turns": running_turn_count(root),
                              "pending": read_force_request(root)}
     if not available:
         state["message"] = _FORCE_UNAVAILABLE_MESSAGE
@@ -337,7 +338,7 @@ async def hermes_update_force(request: Request):
                                                       "message": state["message"], "detail": state["message"]})
     principal = getattr(getattr(request.state, "token_principal", None), "principal", None) or "dashboard"
     body = await asyncio.to_thread(write_force_request, get_default_hermes_root(), str(principal))
-    _log.info("Hermes core update FORCE requested by %s (%d running turn(s))", principal, state["running_turns"])
+    _log.info("Hermes core update FORCE requested by %s (%s running turn(s))", principal, state["running_turns"])
     return {"ok": True, "requested_at": body["requested_at"], "expires_at": body["expires_at"],
             "running_turns": state["running_turns"]}
 

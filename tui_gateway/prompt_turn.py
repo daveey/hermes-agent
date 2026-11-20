@@ -454,18 +454,25 @@ _SURFACED_SYSTEM_INTERRUPTS = {"session_turn_lease_lost": "session_turn_lease_lo
 
 
 def _surface_system_interrupt(result: Any) -> None:
-    """Turn a lease-lost interrupt into a failed result, in place. Desktop renders an
+    """Turn a lease-lost interrupt, or a forced core update's stop (``update_pause.FORCED_STOP_REASON``), into a
+    failed result, in place. Desktop renders an
     ``interrupted`` turn with no text as nothing at all, so the user saw the agent simply stop. As a
     failure, the turn gets the error card in the transcript, a retained inflight snapshot for
     resume, and the row's error state. Text already produced is kept as a partial."""
     if not isinstance(result, dict) or not result.get("interrupted") or result.get("error"):
         return
-    reason = _SURFACED_SYSTEM_INTERRUPTS.get(str(result.get("interrupt_issuer") or ""))
+    from tui_gateway.update_pause import FORCED_STOP_MESSAGE, FORCED_STOP_REASON
+    if result.get("paused_for_update") == FORCED_STOP_REASON:
+        # [daveey] A forced core update ended a turn that does not continue: it must not look like nothing.
+        reason, message = FORCED_STOP_REASON, FORCED_STOP_MESSAGE
+    else:
+        reason = _SURFACED_SYSTEM_INTERRUPTS.get(str(result.get("interrupt_issuer") or ""))
+        message = str(result.get("interrupt_message") or "Session turn lease lost.")
     if reason is None:
         return
     result["interrupted"] = False
     result["failed"] = True
-    result["error"] = str(result.get("interrupt_message") or "Session turn lease lost.")
+    result["error"] = message
     result["failure_reason"] = reason
     result["failure_retryable"] = True
     final_text = result.get("final_response")

@@ -39,6 +39,9 @@ _TURN_ERROR_CODE_COPY: dict[str, tuple[str, str]] = {
     # [daveey] Not a provider verdict: the turn's session lease was lost (another owner claimed it).
     "session_turn_lease_lost": ("Hermes stopped this turn because it lost ownership of the session",
                                 "Send /retry to run it again."),
+    # [daveey] Not a provider verdict: a forced core update stopped a turn that does not continue on its own.
+    "core_update_forced_stop": ("Hermes stopped this turn for a forced update",
+                                "Send your message again (or /retry) to continue."),
     # [daveey] Admission refusals: another live process (often another device's Desktop) holds the chat.
     # They fell through to the gateway layer's "internal error" copy, which reads like a crash.
     "SESSION_NOT_OWNED": ("This chat is open in another Hermes window or device",

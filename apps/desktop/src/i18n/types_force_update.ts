@@ -4,8 +4,8 @@ export interface ForceUpdateCopy {
   /** The context-menu item on the backend version pill. */
   menuItem: string
   confirmTitle: string
-  /** Confirm body; `runningTurns` is how many turns the backend is running right now. */
-  confirmBody: (runningTurns: number) => string
+  /** Confirm body; `runningTurns` is how many turns the host runs right now (every surface), null when unknown. */
+  confirmBody: (runningTurns: null | number) => string
   confirmLabel: string
   cancelLabel: string
   requested: string

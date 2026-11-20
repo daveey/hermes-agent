@@ -38,7 +38,9 @@ describe('forceBackendUpdate', () => {
 
     expect(asked.title).toBe('Force the backend update now?')
     expect(asked.description).toBe(
-      '3 running turns will be stopped. Turns that can resume continue after the update; others need to be sent again.'
+      '3 turns are running now. The update stops Desktop and terminal turns at their next step: those that can ' +
+        'resume continue after the update; others need to be sent again. Messaging, API and scheduled-job turns ' +
+        'are not stopped: the update waits for them to finish.'
     )
     expect(api.forceHermesUpdate).not.toHaveBeenCalled()
 
@@ -52,9 +54,51 @@ describe('forceBackendUpdate', () => {
     })
   })
 
-  it('names one running turn, and says when none is running', () => {
-    expect(copy.confirmBody(1)).toMatch(/^1 running turn will be stopped\./)
+  it('names one running turn, says when none is running, and when the count is unknown', () => {
+    expect(copy.confirmBody(1)).toMatch(/^1 turn is running now\./)
     expect(copy.confirmBody(0)).toMatch(/^No turns are running right now\./)
+    expect(copy.confirmBody(null)).toMatch(/^Hermes could not tell how many turns are running\./)
+  })
+
+  it('says the count is unknown when the backend could not read it', async () => {
+    api.getForceUpdateState.mockResolvedValue({ available: true, pending: null, running_turns: null })
+    const done = forceBackendUpdate(copy)
+    const asked = await untilConfirmAsked()
+
+    expect(asked.description).toMatch(/^Hermes could not tell how many turns are running\./)
+    settleConfirm(false, asked)
+    await done
+  })
+
+  it('ignores a second Force while the first is still pending', async () => {
+    const first = forceBackendUpdate(copy)
+    const asked = await untilConfirmAsked()
+
+    await forceBackendUpdate(copy) // returns at once: no second GET, and the open confirm is not superseded
+    expect(api.getForceUpdateState).toHaveBeenCalledTimes(1)
+    expect($confirmRequest.get()).toBe(asked)
+
+    settleConfirm(true, asked)
+    await first
+    expect(api.forceHermesUpdate).toHaveBeenCalledTimes(1)
+
+    const again = forceBackendUpdate(copy) // the guard is released once the first finished
+    settleConfirm(false, await untilConfirmAsked())
+    await again
+    expect(api.getForceUpdateState).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows an error toast and asks nothing when the status read fails', async () => {
+    api.getForceUpdateState.mockRejectedValue(new Error('503: {"detail":"backend unavailable"}'))
+
+    await forceBackendUpdate(copy)
+
+    expect($confirmRequest.get()).toBeNull()
+    expect(api.forceHermesUpdate).not.toHaveBeenCalled()
+    const toast = $notifications.get()[0]
+
+    expect(toast?.kind).toBe('error')
+    expect(`${toast?.title ?? ''} ${toast?.message ?? ''} ${toast?.detail ?? ''}`).toContain('backend unavailable')
   })
 
   it('does not POST when the confirm is cancelled', async () => {

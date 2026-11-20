@@ -94,6 +94,16 @@ it('keeps the generic owner copy for an older backend that names no machine', ()
   expect(sessionNotOwnedSurface('no details at all').owner).toBeUndefined()
 })
 
+// [daveey] A turn a forced core update stopped does not continue on its own: its card says to send it again.
+it('renders a forced-update stop with its own card and a retry', async () => {
+  const { errorRecoveryPlan } = await import('./error-surface')
+  const surface = parseErrorSurface({ layer: 'gateway', code: 'core_update_forced_stop', retryable: true })
+  const copy = errorCardText(TRANSLATIONS.en.assistant.thread, surface)
+  expect(copy.title).toBe('Stopped for a forced Hermes update')
+  expect(copy.body).toContain('Send your message again to continue.')
+  expect(errorRecoveryPlan(surface).retry).toBe(true)
+})
+
 // [daveey] A turn the backend stopped because another owner claimed its session lease gets its own
 // card (not the generic "internal problem" gateway copy), and Retry stays on.
 it('renders a lease-lost turn with its own card and a retry', async () => {
