@@ -1482,7 +1482,8 @@ def _run_admitted_prompt(
                 outcome_sid=turn_sid(session, st.agent))
             if status == "complete":
                 # [daveey] This turn's context carried any failed delivery already in the transcript.
-                automation_replay.cancel_carried(st.marker_key, str(session.get("session_key") or ""))
+                automation_replay.cancel_carried(st.marker_key, str(session.get("session_key") or ""),
+                                                 profile_home=session.get("profile_home"), through=_turn_started_wall)
                 automation_replay.cancel_durable(session.get("profile_home"),
                                                  (st.marker_key, str(session.get("session_key") or "")),
                                                  _turn_started_wall)

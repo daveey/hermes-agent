@@ -86,12 +86,12 @@ def test_cancel_carried_keeps_an_unpersisted_delivery(timers):
                 now=NOW)
     ar.schedule("k", text="b", display_kind="kanban_notice", display_metadata={}, due=NOW, cause="c", persisted=False,
                 now=NOW)
-    assert ar.cancel_carried("k") and ar.pending("k")
-    assert not ar.cancel_carried("k")  # what is left never reached the transcript
+    assert ar.cancel_carried("k", through=NOW) and ar.pending("k")
+    assert not ar.cancel_carried("k", through=NOW)  # what is left never reached the transcript
     ar.reset()
     ar.schedule("k", text="a", display_kind="kanban_notice", display_metadata={}, due=NOW, cause="c", persisted=True,
                 now=NOW)
-    assert ar.cancel_carried("k") and not ar.pending("k") and timers[-1][2].cancelled
+    assert ar.cancel_carried("k", through=NOW) and not ar.pending("k") and timers[-1][2].cancelled
 
 
 def test_the_replay_payload_coalesces_and_marks_itself():
@@ -164,7 +164,7 @@ def test_the_rearmed_replay_carries_the_deliveries_not_the_old_note(timers, monk
                                               now=NOW)
     ar.schedule_for_turn({"session_key": "k"}, st)
     assert ar.pending("k")
-    entry = ar._entries["k"]
+    entry = ar._entries[(ar._home_of(None), "k")]
     assert [i.text for i in entry.items] == [original] and entry.items[0].attempt == 1
     text2, _, meta2 = ar.replay_payload(entry.items)
     assert text2.count("[Hermes: automatic retry") == 1 and text2.endswith(original)
@@ -179,7 +179,7 @@ def test_a_replay_wake_refused_by_a_wall_that_still_holds_is_rearmed(timers, mon
                           "This is the only retry. Check the current state before redoing anything.]\n\nbody",
                           {"agent_error": "quota", "agent_failure": {"failure_resets_at": reset}},
                           "kanban_notice", _replay_meta(), "notice-closeout")
-    assert ar.pending("k") and [i.text for i in ar._entries["k"].items] == ["body"]
+    assert ar.pending("k") and [i.text for i in ar._entries[(ar._home_of(None), "k")].items] == ["body"]
     ar.reset()
     ar.replay_failed_wake("k", "body", {"agent_error": "quota", "agent_failure": {}}, "kanban_notice",
                           _replay_meta(), "notice-closeout")

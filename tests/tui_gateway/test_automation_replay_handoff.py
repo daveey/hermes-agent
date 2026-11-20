@@ -212,6 +212,7 @@ KEY = "20261119_232638_a67251"
 
 @pytest.fixture
 def wired(journal, monkeypatch):
+    monkeypatch.setattr("hermes_constants.get_process_hermes_home", lambda: journal.path.parent)
     monkeypatch.setattr(ar, "ENABLED", True)
     monkeypatch.setattr(threading, "Timer", lambda delay, fn: types.SimpleNamespace(
         start=lambda: None, daemon=False, cancel=lambda: None))
@@ -277,7 +278,7 @@ def test_storage_failure_keeps_local_custody_without_spending_budget(wired, monk
     monkeypatch.setattr(ar, "stale_code_reason", lambda: "superseded")
     monkeypatch.setattr(Journal, "publish", lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
     ar._fire(KEY)
-    assert ar.pending(KEY) and ar._entries[KEY].busy_rechecks == 0 and len(ar._entries[KEY].items) == 2
+    assert ar.pending(KEY) and ar._entries[(ar._home_of(None), KEY)].busy_rechecks == 0 and len(ar._entries[(ar._home_of(None), KEY)].items) == 2
 
 
 def test_schedule_while_already_retired_hands_off_at_once(wired, monkeypatch):
