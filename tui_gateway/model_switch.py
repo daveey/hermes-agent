@@ -279,6 +279,9 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
                 agent.__dict__.pop('_one_turn_runtime', None)
             else:
                 agent._one_turn_runtime = previous_once
+            from agent.agent_runtime_switch import TurnAdmittedDuringSwitch
+            if isinstance(exc, TurnAdmittedDuringSwitch):
+                raise  # nothing changed; _apply_model_switch queues the pick for the next turn start
             # The in-place swap rolled back; restore its temporary ownership too.
             # Abort the commit: do NOT restart the slash worker, persist runtime, append the switch marker, set
             # a session model_override, or persist to config — all of which would otherwise leave the session
@@ -427,8 +430,18 @@ def _apply_model_switch(
     records_composer_override = (
         pin_session_override and isinstance(session, dict) and not one_turn
         and not persist_global and session.get("follow_profile_config"))
-    _commit_recording_composer_profile(
-        sid, session, agent, result, current_model, restore_snapshot, records_composer_override)
+    from agent.agent_runtime_switch import TurnAdmittedDuringSwitch
+    try:
+        _commit_recording_composer_profile(
+            sid, session, agent, result, current_model, restore_snapshot, records_composer_override)
+    except TurnAdmittedDuringSwitch as exc:
+        # The caller's unlocked running check lost to a turn admission: nothing was published and no
+        # session state changed, so queue the pick for the next turn start like a busy-time pick.
+        _stash_pending_model_switch(None, "model", raw_input, session, confirm_expensive_model, parsed_flags)
+        if not session.get("pending_model_switch"):
+            raise ValueError(f"{exc}; pick {result.new_model} again once the turn ends.") from exc
+        return {"value": result.new_model, "warning": "", "confirm_required": False, "deferred": True,
+                "scope": "once" if one_turn else ("global" if persist_global else "session")}
     # PER-SESSION override so a rebuild of THIS session (/new, resume) re-derives the model.
     # Deliberately NOT written to process-global env (HERMES_MODEL & co.): the desktop hosts
     # every same-profile session in one process, so os.environ would leak the switch to all.

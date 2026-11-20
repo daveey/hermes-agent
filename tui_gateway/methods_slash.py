@@ -480,7 +480,9 @@ def _mirror_autoprune(sid, session, agent, arg) -> str:
 
 _SLASH_MIRRORS = {
     "model": lambda sid, session, agent, arg: (
-        _apply_model_switch(sid, session, arg).get("warning", "") if arg and agent else ""),
+        (r := _apply_model_switch(sid, session, arg)).get("warning", "")
+        or ("a turn just started: the model switch applies at the next turn" if r.get("deferred") else "")
+        if arg and agent else ""),
     "approvals": _mirror_approvals, "personality": _mirror_personality,
     "compress": lambda sid, session, agent, arg: (
         _compress_live_with_feedback(sid, session, agent, arg, snapshot_kwargs=False) if agent else ""),

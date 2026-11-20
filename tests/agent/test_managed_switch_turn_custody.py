@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent import agent_runtime_helpers as runtime
+from agent.agent_runtime_switch import TurnAdmittedDuringSwitch
 from agent.turn_facade_lease import admit_durable_turn_lease
 from hermes_state import SessionDB
 from hermes_state_errors import SessionTurnLeaseLostError
@@ -67,10 +68,14 @@ class PausedSwitch:
         self.thread.start()
         assert self.snapshotted.wait(30)
 
-    def finish(self):
+    def finish(self, refused=False):
         self.resume.set()
         self.thread.join(30)
-        assert not self.thread.is_alive() and self.errors == []
+        assert not self.thread.is_alive()
+        if refused:  # a turn was admitted after the snapshot: nothing is published; the caller queues the pick
+            assert [type(e) for e in self.errors] == [TurnAdmittedDuringSwitch]
+        else:
+            assert self.errors == []
 
 
 def flush(agent, db, text):
@@ -90,9 +95,9 @@ def test_turn_admitted_during_switch_keeps_its_lease(live):
     admit(agent).release()                # an earlier turn: the agent now carries a cleared holder
     switch = PausedSwitch(agent)          # snapshot: no turn, holder None
     lease = admit(agent)                  # the unlocked running check lost the race
-    switch.finish()
+    switch.finish(refused=True)
     try:
-        assert agent.model == TARGET      # the switch itself still lands
+        assert agent.model != TARGET      # refused: the turn keeps its runtime (see the runtime test below)
         assert agent._active_session_turn_lease_holder == lease.holder
         assert agent._last_session_turn_lease_holder == lease.holder
         flush(agent, db, 'reply')
@@ -111,7 +116,7 @@ def test_switch_snapshotted_in_one_turn_does_not_install_its_holder_in_the_next(
     switch = PausedSwitch(agent)          # snapshot carries the first turn's holder
     first.release()
     second = admit(agent)
-    switch.finish()
+    switch.finish(refused=True)
     try:
         assert agent._active_session_turn_lease_holder == second.holder
         flush(agent, db, 'second reply')  # base: refused, "holder mismatch"
@@ -156,3 +161,41 @@ def test_switch_reset_lands_over_a_value_set_during_the_switch(live, field, duri
     setattr(agent, field, during)
     switch.finish()
     assert getattr(agent, field) == expected and agent.model == TARGET
+
+
+def runtime_of(agent):
+    """What the admitted turn's next API call is built from (read per call by the run loop)."""
+    return agent.model, agent.provider, agent.base_url, agent.client if hasattr(agent, 'client') else None
+
+
+def test_turn_admitted_during_switch_keeps_its_runtime(live):
+    agent, _db = live
+    before = runtime_of(agent)
+    switch = PausedSwitch(agent)
+    lease = admit(agent)                  # the callers' unlocked running check lost the race
+    switch.finish(refused=True)
+    try:
+        # The turn already runs on `before`; its next API call must not find another model/client.
+        assert runtime_of(agent) == before, f'swapped under the turn: {runtime_of(agent)[:3]}'
+    finally:
+        lease.release()
+
+
+def test_switch_after_turn_ended_publishes(live):
+    agent, _db = live
+    switch = PausedSwitch(agent)
+    admit(agent).release()                # admitted and finished entirely inside the window
+    switch.finish()
+    assert agent.model == TARGET
+
+
+def test_admission_waits_for_a_switch_publishing_in_place(live):
+    from agent.turn_facade_lease import turn_admission_lock
+    agent, _db = live
+    admitted, holding = threading.Event(), turn_admission_lock(agent)
+    with holding:                         # a switch mid-publish
+        thread = threading.Thread(target=lambda: (admit(agent).release(), admitted.set()), daemon=True)
+        thread.start()
+        assert not admitted.wait(0.3)     # admission cannot publish its holder meanwhile
+    assert admitted.wait(30)
+    thread.join(30)

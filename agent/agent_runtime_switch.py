@@ -21,6 +21,11 @@ class _DeferredSessionWrites:
         return defer
 
 
+class TurnAdmittedDuringSwitch(RuntimeError):
+    """A turn was admitted on the agent after the switch's snapshot; nothing was published.
+    Callers stash the pick for the next turn start (``_stash_pending_model_switch``)."""
+
+
 def _stage_compressor(compressor):
     """Delay the native compressor's durable resets until switch publication."""
     if compressor is None:
@@ -59,6 +64,7 @@ def _without_turn_custody(staged):
 def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabilities):
     """Prepare managed switches privately, then publish after the allocation commits."""
     from agent.agent_runtime_helpers import _switch_model_runtime
+    from agent.turn_facade_lease import turn_admission_lock
     from agent.model_routing_managed import managed_config, resolve_managed_runtime
     from agent.model_routing_agent import persist_class_metadata
 
@@ -68,8 +74,11 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
         from hermes_cli.config_effective import load_user_config_effective
         config = load_user_config_effective()
     temporary = isinstance(getattr(agent, '_one_turn_runtime', None), dict)
+    admission = turn_admission_lock(agent)
     if config is None and not temporary:
-        return _switch_model_runtime(agent, model, provider, api_key, base_url, api_mode, capabilities)
+        with admission:  # swaps the live agent in place: no turn may be admitted meanwhile
+            return _switch_model_runtime(agent, model, provider, api_key, base_url, api_mode, capabilities)
+    base_holder = getattr(agent, '_active_session_turn_lease_holder', None)
     staged = copy(agent)
     # Switch helpers mutate these containers in place. Never expose partial work
     # or clear live provenance while constructing a replacement.
@@ -98,7 +107,11 @@ def switch_runtime(agent, model, provider, api_key, base_url, api_mode, capabili
     backend = getattr(staged.context_compressor, '_session_db', None)
     if isinstance(backend, _DeferredSessionWrites):
         staged.context_compressor._session_db = backend.backend
-    vars(agent).update(_without_turn_custody(vars(staged)))
+    with turn_admission_lock(agent):
+        holder = getattr(agent, '_active_session_turn_lease_holder', None)
+        if holder is not None and holder != base_holder:
+            raise TurnAdmittedDuringSwitch('a turn is active; model switch not applied')
+        vars(agent).update(_without_turn_custody(vars(staged)))
     persist_class_metadata(agent)
     for method, args, kwargs in ([] if temporary else compressor_writes):
         method(*args, **kwargs)

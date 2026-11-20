@@ -70,6 +70,13 @@ def _retry_lease_release(db, session_id: str, holder: str, give_up_at: float) ->
     )
 
 
+def turn_admission_lock(agent):
+    """The lock around publishing a turn's admission on the agent. A runtime switch holds it to check
+    that no turn was admitted since its snapshot and to publish, so a turn is admitted either before
+    that check (the switch refuses) or after the publish (it starts on the new runtime)."""
+    return agent.__dict__.setdefault("_turn_admission_lock", threading.RLock())
+
+
 class DurableTurnLease:
     """An admitted session turn lease plus the periodic timers that keep it alive and watch the turn.
 
@@ -564,11 +571,12 @@ def admit_durable_turn_lease(
     lease = DurableTurnLease(
         agent, db, session_id, holder, expires_at=_committed_lease_expiry(db, session_id, holder, authority_floor),
     )
-    agent._active_session_turn_lease_holder = holder
-    # [daveey] Kept after release (the active attr is cleared even when a busy store defers the release): the
-    # turn-end outcome refresh discounts only this turn's own lease (hermes_state_outcome.turn_identity).
-    agent._last_session_turn_lease_holder = holder
-    agent._active_session_turn_lease_ttl_seconds = LEASE_TTL_SECONDS
+    with turn_admission_lock(agent):  # a runtime switch's check-and-publish excludes this (agent_runtime_switch)
+        agent._active_session_turn_lease_holder = holder
+        # [daveey] Kept after release (the active attr is cleared even when a busy store defers the release): the
+        # turn-end outcome refresh discounts only this turn's own lease (hermes_state_outcome.turn_identity).
+        agent._last_session_turn_lease_holder = holder
+        agent._active_session_turn_lease_ttl_seconds = LEASE_TTL_SECONDS
     try:
         # Read the row only now: the previous holder may have created or deleted it while this
         # turn waited, so an answer from before admission can be stale either way.
