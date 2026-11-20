@@ -29,11 +29,16 @@ guarantee own that case). The boundary row an automation turn leaves says what f
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import re
+import sqlite3
 import threading
 import time
+import uuid
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -75,6 +80,7 @@ class _Item:
     cause: str
     failed_at: float
     attempt: int = 0  # replays this delivery already had (a wall-refused replay re-armed: ``rewall_due``)
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)  # stable identity across a retirement handoff
 
 
 @dataclass
@@ -83,6 +89,7 @@ class _Entry:
     due: float = 0.0
     timer: Any = None
     busy_rechecks: int = 0
+    home: str | None = None  # the chat's exact profile home: where a retirement hands the custody over
 
 
 _lock = threading.Lock()
@@ -233,11 +240,12 @@ def replay_failed_wake(key: str, text: str, session: dict, display_kind: str | N
             return
         body, inner, failed_at, attempt = _unwrap_replay(text, meta, now)
         schedule(key, text=body, display_kind=str(display_kind), display_metadata=inner, due=due,
-                 cause=f"{label}: {cause}", persisted=False, attempt=attempt, failed_at=failed_at)
+                 cause=f"{label}: {cause}", persisted=False, attempt=attempt, failed_at=failed_at,
+                 profile_home=session.get("profile_home"))
         return
     due = replay_due(now, resets_at)
     schedule(key, text=text, display_kind=str(display_kind), display_metadata=meta, due=due,
-             cause=f"{label}: {cause}", persisted=False)
+             cause=f"{label}: {cause}", persisted=False, profile_home=session.get("profile_home"))
 
 
 def _task_ids(display_metadata: Any, text: Any) -> list[str]:
@@ -334,7 +342,8 @@ def _cancel_timer(entry: _Entry) -> None:
 
 def schedule(session_key: str, *, text: str, display_kind: str, display_metadata: dict | None, due: float,
              cause: str, persisted: bool, now: float | None = None,
-             fire: Callable[[str], None] | None = None, attempt: int = 0, failed_at: float | None = None) -> bool:
+             fire: Callable[[str], None] | None = None, attempt: int = 0, failed_at: float | None = None,
+             profile_home: Any = None) -> bool:
     """Arm (or join) this chat's one pending replay. True when it is pending after the call. ``attempt`` is the
     replays the delivery already had (a wall-refused replay re-armed), ``failed_at`` its first failure."""
     key = str(session_key or "")
@@ -344,9 +353,11 @@ def schedule(session_key: str, *, text: str, display_kind: str, display_metadata
     item = _Item(text, display_kind, dict(display_metadata or {}), persisted, cause,
                  now if failed_at is None else failed_at, attempt)
     fire = fire or _fire
+    home = str(profile_home) if profile_home else None
     with _lock:
         entry = _entries.get(key)
         if entry is not None:
+            entry.home = entry.home or home
             entry.items.append(item)
             # A later quota/route reset wins: the joined deliveries wait for it together. A plain failure a few
             # seconds later joins the timer already armed (no re-arm per delivery).
@@ -356,12 +367,16 @@ def schedule(session_key: str, *, text: str, display_kind: str, display_metadata
                 _arm(key, entry, max(due - now, REPLAY_MIN_DELAY_S), fire)
             logger.info("automation-replay: %s joined the pending replay of %s (%d deliveries)",
                         subject(display_kind, display_metadata, text), key, len(entry.items))
-            return True
-        entry = _Entry(items=[item], due=due)
-        _entries[key] = entry
-        _arm(key, entry, max(due - now, REPLAY_MIN_DELAY_S), fire)
-    logger.info("automation-replay: %s failed in %s (%s); one replay at %s", subject(display_kind, display_metadata,
-                text), key, cause, format_when(due, now))
+            joined = True
+        else:
+            joined = False
+            entry = _Entry(items=[item], due=due, home=home)
+            _entries[key] = entry
+            _arm(key, entry, max(due - now, REPLAY_MIN_DELAY_S), fire)
+    if not joined:
+        logger.info("automation-replay: %s failed in %s (%s); one replay at %s", subject(
+            display_kind, display_metadata, text), key, cause, format_when(due, now))
+    _handoff_if_retired(key)
     return True
 
 
@@ -482,10 +497,24 @@ def schedule_for_turn(session: dict, st: Any) -> None:
     if is_replay(meta):  # a wall refused the replay (``rewall_due``): re-arm the deliveries it wrapped
         text, meta, failed_at, attempt = _unwrap_replay(text, meta, time.time())
     schedule(key, text=text, display_kind=st.display_kind, display_metadata=meta, due=plan.due, cause=plan.cause,
-             persisted=True, attempt=attempt, failed_at=failed_at)
+             persisted=True, attempt=attempt, failed_at=failed_at,
+             profile_home=session.get("profile_home"))
 
 
 def _fire(key: str) -> None:
+    if stale_code_reason():
+        # [daveey] A retiring backend starts no wake (``retiring_backend_refuses``): that is not a busy chat, so it
+        # must neither spend the busy budget nor drop the delivery. Hand it to the successor, or keep it.
+        with _lock:
+            entry = _entries.get(key)
+            custody = entry is not None and bool(entry.home) and bool(entry.items)
+        if custody:
+            if not handoff(key):
+                with _lock:
+                    kept = _entries.get(key)
+                    if kept is not None:
+                        _arm(key, kept, BUSY_RECHECK_S, _fire)
+            return
     with _lock:
         entry = _entries.pop(key, None)
     if entry is None or not entry.items:
@@ -514,3 +543,151 @@ def _fire(key: str) -> None:
         return
     logger.warning("automation-replay: gave up on %s in %s after one retry (%s); nothing more is scheduled",
                    what, key, verdict)
+
+
+# --- retirement handoff (tui_gateway/automation_replay_handoff.py): a retiring backend publishes its pending
+# --- replays into the chat's own profile store; the successor's continuing producer-admission pass replays them.
+
+
+def _item_dict(item: _Item, due: float) -> dict:
+    return {"id": item.id, "text": item.text, "display_kind": item.display_kind,
+            "display_metadata": item.display_metadata, "persisted": item.persisted, "cause": item.cause,
+            "failed_at": item.failed_at, "attempt": item.attempt, "due": due, "created_at": item.failed_at}
+
+
+def _item_from(data: dict) -> _Item:
+    return _Item(data["text"], data["display_kind"], dict(data.get("display_metadata") or {}),
+                 bool(data["persisted"]), data.get("cause") or "", float(data["failed_at"]),
+                 int(data.get("attempt") or 0), str(data["id"]))
+
+
+def handoff(key: str) -> bool:
+    """Publish this chat's pending replay to its profile's journal; the local copy goes only once the journal
+    accepted it. False (custody kept here, nothing lost) when it cannot (no profile home, storage failure)."""
+    from tui_gateway.automation_replay_handoff import Journal
+    for _ in range(3):  # deliveries that join while the write is in flight are handed over by the next round
+        with _lock:
+            entry = _entries.get(key)
+            if entry is None or not entry.home or not entry.items:
+                return entry is None
+            items, due, home = list(entry.items), entry.due, entry.home
+        try:
+            Journal(home).publish(key, [_item_dict(i, due) for i in items])
+        except Exception:  # health: allow BLE001 -- storage failure keeps custody here
+            logger.warning("automation-replay: handing %s to the successor failed; kept here", key, exc_info=True)
+            return False
+        with _lock:
+            current = _entries.get(key)
+            if current is entry:
+                sent = {i.id for i in items}
+                current.items = [i for i in current.items if i.id not in sent]
+                if not current.items:
+                    _cancel_timer(current)
+                    del _entries[key]
+                    logger.info("automation-replay: handed the replay of %s to the successor backend", key)
+                    return True
+    return False
+
+
+def _handoff_if_retired(key: str) -> None:
+    if stale_code_reason():
+        handoff(key)
+
+
+def handoff_all() -> int:
+    """Hand every pending replay over (this process was just retired). Never raises."""
+    done = 0
+    try:
+        for key in list(_entries):
+            done += bool(handoff(key))
+    except Exception:  # health: allow BLE001 -- retirement must not fail on custody transfer
+        logger.warning("automation-replay: retirement handoff failed", exc_info=True)
+    return done
+
+
+def _has_journal(home: Any) -> bool:
+    """Cheap read-only probe: does this profile store hold replay custody at all (never creates the tables)."""
+    path = Path(str(home)) / "state.db"
+    if not path.is_file():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)  # health: allow HX015 -- one-shot read-only probe, closed below
+        try:
+            return conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='automation_replay_items'").fetchone() is not None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+
+
+def cancel_durable(home: Any, keys: Any, through: float, *, stop: bool = False) -> None:
+    """A successful turn (context started at ``through``) or an explicit Stop fences handed-off custody."""
+    if not home or not _has_journal(home):
+        return
+    try:
+        from tui_gateway.automation_replay_handoff import Journal
+        journal = Journal(home)
+        for key in dict.fromkeys(k for k in keys if k):
+            journal.cancel(str(key), through, stop=stop)
+    except Exception:  # health: allow BLE001 -- a fence that cannot be written must not break the turn
+        logger.warning("automation-replay: durable cancel failed", exc_info=True)
+
+
+def _holder() -> str:
+    from hermes_cli.host_loop_lease import _start_of
+    return f"{os.getpid()}|{_start_of(os.getpid())}"
+
+
+def _holder_alive(holder: str) -> bool:
+    from hermes_cli.host_loop_lease import _start_of
+    try:
+        pid, start = str(holder).split("|", 1)
+        return str(_start_of(int(pid))) == start
+    except (ValueError, TypeError):
+        return False
+
+
+def consume_handoffs(homes: list, wake: Callable[..., str] | None = None, now: float | None = None) -> int:
+    """The successor's pass: replay every due handed-off delivery through the ordinary wake admission, in the exact
+    profile that owns it. Returns how many batches ran. A refused admission leaves the batch pending (the
+    predecessor spent no budget). Delivery is at-least-once: a crash between the wake and settlement replays once
+    more (marked and bounded), never loses it. Never raises."""
+    if stale_code_reason():
+        return 0
+    from tui_gateway.automation_replay_handoff import Journal
+    ran = 0
+    for home in homes:
+        if not _has_journal(home):
+            continue
+        try:
+            journal = Journal(home)
+            owners = journal.owners()
+        except Exception:  # health: allow BLE001 -- one unreadable store must not stop the others
+            logger.warning("automation-replay: journal of %s unreadable", home, exc_info=True)
+            continue
+        profile = Path(str(home)).name if Path(str(home)).parent.name == "profiles" else None
+        for owner in owners:
+            batch = journal.claim(owner, time.time() if now is None else now, _holder(), _holder_alive)
+            if batch is None:
+                continue
+            ran += 1
+            try:
+                items = [_item_from(d) for d in json.loads(batch["payload"])]
+                text, kind, meta = replay_payload(items)
+                if wake is None:
+                    from tui_gateway import server
+                    wake = server._wake_session_turn
+                verdict = wake(owner, text, display_kind=kind, display_metadata=meta, label="automation-replay",
+                               profiles=[profile])
+            except Exception:  # health: allow BLE001 -- retried on the next pass
+                logger.warning("automation-replay: handed-off replay of %s raised", owner, exc_info=True)
+                verdict = "error"
+            if verdict in ("started", "missing"):
+                if verdict == "missing":
+                    logger.warning("automation-replay: %s is gone; dropping its handed-off replay", owner)
+                journal.commit_message(batch, lambda conn, uid, v=verdict: (0, v))
+                journal.settle(batch)
+            else:
+                journal.release(batch)
+    return ran

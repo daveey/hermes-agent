@@ -946,6 +946,11 @@ def _interrupt_session_turn(
     """
     reason = reason or ("ws_orphan" if orphan else "user_stop")
     agent_tool_reason = None if reason == "user_stop" else reason.replace("_", " ")
+    if reason == "user_stop":  # [daveey] an explicit Stop fences handed-off automation replays (shutdown does not)
+        from tui_gateway import automation_replay
+        import time as _time
+        automation_replay.cancel_durable(session.get("profile_home"), (session.get("session_key"),),
+                                         _time.time(), stop=True)
     from tui_gateway.process_consumer_health import invalidate
     invalidate(session)
     use_compute_host = _session_uses_compute_host(session)

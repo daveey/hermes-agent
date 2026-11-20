@@ -351,6 +351,17 @@ def _sweep_owner(server, db, profile: Optional[str], owner: str) -> dict:
 LEASE_NAME = "producer-admission"
 
 
+def _consume_replay_handoffs() -> None:
+    """[daveey] Replays a retired predecessor handed to a profile store (automation_replay_handoff). Never raises."""
+    try:
+        from tui_gateway import automation_replay
+        server = _server()
+        homes = [_profile_home(p) for p in server._readopt_wake_profiles()]
+        automation_replay.consume_handoffs([h for h in homes if h is not None])
+    except Exception:
+        logger.warning("automation-replay handoff pass failed", exc_info=True)
+
+
 def run_pass(lease) -> bool:
     """One tick: the cold-chat sweep only while this process holds the ``producer-admission`` host loop lease
     (design t_01a1d45d75851804 §2b; ``HERMES_HOST_LOOP_LEASE=0`` = every process). The per-chat poller's
@@ -361,6 +372,7 @@ def run_pass(lease) -> bool:
         return False
     try:
         sweep_once()
+        _consume_replay_handoffs()
     finally:
         lease.beat()
     return True

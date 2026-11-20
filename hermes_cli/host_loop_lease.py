@@ -121,7 +121,18 @@ def retire_host_loops(key: str, reason: str) -> bool:
         lease.release()
         if had:
             logger.info("host loop %s: released the lease (%s)", lease.name, reason)
+    _handoff_replays()
     return True
+
+
+def _handoff_replays() -> None:
+    """[daveey] The retired process hands its pending automation replays to the successor (off the caller)."""
+    try:
+        from agent.memory_provider import spawn_context_thread
+        from tui_gateway import automation_replay
+    except ImportError:
+        return
+    spawn_context_thread(automation_replay.handoff_all, name="automation-replay-handoff").start()
 
 
 def resume_host_loops(key: str) -> bool:

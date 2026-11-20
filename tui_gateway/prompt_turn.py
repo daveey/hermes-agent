@@ -1402,6 +1402,7 @@ def _run_admitted_prompt(
     # The ONE INFO record proving a prompt was accepted by THIS process; ties ui sid,
     # session_key and the agent's live session_id together.  No prompt content is logged.
     _turn_started_monotonic = time.monotonic()
+    _turn_started_wall = time.time()
     logger.info(
         # Desktop/TUI observability (#86647): this is the ONE INFO record proving a Desktop/TUI prompt was
         # accepted by THIS process, and it ties together every id a rotation-mute trace needs — the UI
@@ -1482,6 +1483,9 @@ def _run_admitted_prompt(
             if status == "complete":
                 # [daveey] This turn's context carried any failed delivery already in the transcript.
                 automation_replay.cancel_carried(st.marker_key, str(session.get("session_key") or ""))
+                automation_replay.cancel_durable(session.get("profile_home"),
+                                                 (st.marker_key, str(session.get("session_key") or "")),
+                                                 _turn_started_wall)
             automation_replay.schedule_for_turn(session, st)
 
             goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)

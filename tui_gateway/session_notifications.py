@@ -1682,7 +1682,8 @@ def _readopt_wake_profiles() -> list:
 
 
 def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None = None,
-                       display_metadata: dict | None = None, label: str = "wake", build_timeout: float = 120.0) -> str:
+                       display_metadata: dict | None = None, label: str = "wake", build_timeout: float = 120.0,
+                       profiles: list | None = None) -> str:
     """Run ONE agent turn with ``text`` in chat ``session_key`` from this backend: the chat live here is used as is,
     otherwise it is resumed in-process first (``session.resume``, launch store then each named profile, the same
     path the re-adopted-exit waker uses). For plugins that must close a loop without the user typing (e.g. a chat
@@ -1705,13 +1706,15 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
         if live is None:
             # [daveey] A paused turn is its restarting backend's: here its viewers are not attached (update_pause).
             from tui_gateway.update_pause import left_to_successor
-            if left_to_successor(_hermes_home, _readopt_wake_profiles(), key, label):
+            # [daveey] ``profiles``: a handed-off replay resumes in its exact profile, never a first-match scan.
+            wake_profiles = profiles if profiles is not None else _readopt_wake_profiles()
+            if left_to_successor(_hermes_home, wake_profiles, key, label):
                 return "busy"
             handler = _methods.get("session.resume")
             if handler is None:
                 return "error"
             resumed = False
-            for n, profile in zip(_it.count(1), _readopt_wake_profiles()):
+            for n, profile in zip(_it.count(1), wake_profiles):
                 params = {"session_id": key, "omit_messages": True, **({"profile": profile} if profile else {})}
                 env = handler(f"{label}-resume-{n}", params) or {}
                 err = env.get("error") if isinstance(env, dict) else None
