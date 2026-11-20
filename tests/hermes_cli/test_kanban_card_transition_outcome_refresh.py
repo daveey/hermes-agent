@@ -86,6 +86,26 @@ def test_shepherd_subscribers_refresh_but_touch_subscribers_do_not(board, seen):
     assert seen.calls == [["origin", "shepherd"]]
 
 
+def _link(board, task, chat, released):
+    board.execute("CREATE TABLE IF NOT EXISTS task_chat_links (id INTEGER PRIMARY KEY, uid TEXT, task_id TEXT NOT NULL, "
+                  "chat_gateway TEXT NOT NULL, chat_profile TEXT, chat_session TEXT NOT NULL, kind TEXT NOT NULL, "
+                  "released INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)")
+    board.execute("INSERT INTO task_chat_links (uid, task_id, chat_gateway, chat_session, kind, released, created_at) "
+                  "VALUES (?, ?, 'gw', ?, 'created', ?, 1)", (f"{chat}-{released}", task, chat, released))
+    board.commit()
+
+
+def test_a_chat_whose_every_link_is_released_is_not_refreshed(board):
+    task = kb.create_task(board, title="Do", assignee="worker", session_id="origin")
+    for chat in ("gone", "kept"):
+        board.execute("INSERT INTO kanban_notify_subs (task_id, platform, chat_id, delivery_metadata, created_at) "
+                      "VALUES (?, 'tui', ?, '{\"reason\": \"shepherd\"}', 1)", (task, chat))
+    _link(board, task, "gone", 1)
+    _link(board, task, "kept", 1)
+    _link(board, task, "kept", 0)  # one live link keeps the chat counted
+    assert refresh.linked_chats(board, task) == ["origin", "kept"]
+
+
 def test_no_refresh_inside_a_callers_open_transaction(board, seen):
     task = kb.create_task(board, title="Do", assignee="worker", session_id="chat-1")
     board.execute("BEGIN")
