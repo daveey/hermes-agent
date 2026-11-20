@@ -107,8 +107,8 @@ def test_decision_card_promotes_with_an_exact_four_run_window(fleet):
 
 def test_plain_manual_promote_does_not_reset_the_spend_window(fleet):
     f = fleet
-    _stop(f, at=int(time.time()) - 1000)
     stop_at = int(time.time()) - 1000
+    _stop(f, at=stop_at)
     with kb.write_txn(f.h):
         kb._append_event(f.h, f.target, "promoted_manual", {"actor": "user", "reason": "x"})
     assert ksb.spend(f.h, f.target).since == stop_at
