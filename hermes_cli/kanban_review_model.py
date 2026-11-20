@@ -130,8 +130,13 @@ def _current_authors(conn, task_id):
                             (task_id,)).fetchall():
         events = conn.execute("SELECT kind, payload FROM task_events WHERE task_id=? AND run_id=? "
                               "ORDER BY id DESC", (task_id, row[0])).fetchall()
-        reviewing = any(event[0] in ("model_tier", "run_route") and
-                        _payload(event[1]).get("lane") == "review" for event in events)
+        # Dispatch claims before resolving a model. The claim already records
+        # its source lane, even if resolution refuses before any route receipt.
+        reviewing = any(
+            (event[0] in ("model_tier", "run_route") and _payload(event[1]).get("lane") == "review")
+            or (event[0] == "claimed" and _payload(event[1]).get("source_status") == "review")
+            for event in events)
+
         if reviewing:
             # Launch/result receipts prove execution, not that anyone judged the
             # head. Parked and crashed reviewers must not release its authors.

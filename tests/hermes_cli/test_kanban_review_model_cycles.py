@@ -127,6 +127,58 @@ def test_real_reviewer_lifecycle_only_verdict_releases_authors(board, how):
         assert model not in authors
 
 
+def implement(conn, tid, model):
+    claimed = kb.claim_task(conn, tid, claimer=kb._claimer_id())
+    assert claimed is not None
+    kb._append_event(conn, tid, "run_route", {"model": model, "provider": "anthropic", "lane": "ready"},
+                     run_id=claimed.current_run_id)
+    assert kb.request_review(conn, tid)
+
+
+def verdict(conn, tid, model):
+    claimed = kb.claim_review_task(conn, tid, claimer=kb._claimer_id())
+    assert claimed is not None
+    kb._append_event(conn, tid, "model_tier", {"model": model, "lane": "review"},
+                     run_id=claimed.current_run_id)
+    assert kb.request_changes(conn, tid, reason="rework")[0]
+
+
+@pytest.mark.parametrize("refused", [False, True])
+def test_claimed_review_without_route_is_not_an_unknown_author(board, refused):
+    cfg = helpers.config(board, strong=MODELS[0], routes=MODELS)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="claimed review epoch", assignee="default")
+        implement(conn, tid, MODELS[0])
+        verdict(conn, tid, MODELS[1])
+        implement(conn, tid, MODELS[2])
+        claimed = kb.claim_review_task(conn, tid, claimer=kb._claimer_id())
+        assert claimed is not None
+        if refused:
+            # No model_tier exists when admission refuses before resolution.
+            conn.execute("UPDATE task_runs SET outcome='spawn_failed' WHERE id=?", (claimed.current_run_id,))
+        assert review.implementer_models(conn, claimed) == {MODELS[2]}
+        model, _, _ = tier.resolve_model_tier(conn, claimed, lane="review", cfg=cfg)
+        assert model == MODELS[0]
+
+
+def test_dispatch_fifth_review_after_four_real_verdict_cycles(board, monkeypatch):
+    helpers.config(board, strong=MODELS[0], routes=MODELS)
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
+    spawned = []
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="dispatch review epoch", assignee="default")
+        for index, model in enumerate(MODELS):
+            implement(conn, tid, model)
+            verdict(conn, tid, MODELS[(index + 1) % len(MODELS)])
+        implement(conn, tid, MODELS[-1])
+        result = dispatch.dispatch_once(conn, spawn_fn=lambda *args: spawned.append(args) or 4242)
+        assert len(spawned) == 1
+        assert result.auto_blocked == []
+        events = [e.payload for e in kb.list_events(conn, tid) if e.kind == "model_tier"]
+        assert events[-1]["model"] == MODELS[0]
+        assert events[-1]["implementer_models"] == [MODELS[-1]]
+
+
 def test_provider_wall_does_not_become_structural_exhaustion(board, monkeypatch):
     cfg = helpers.config(board)
     from hermes_cli import kanban_provider_walls as walls
