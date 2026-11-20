@@ -49,13 +49,19 @@ interface Tracked {
   offState?: () => void
 }
 
+interface Candidate {
+  exact: boolean
+  row: SessionInfo
+}
+
 const tracked = new Map<string, Tracked>()
 const unsubscribers: Array<() => void> = []
 const TRACKED_LIMIT = 4096
 let epoch = 0
 let runtimeIndex = new Map<string, string>()
 let ownerRows: readonly SessionInfo[] | undefined
-let ownerRowIndex = new Map<string, SessionInfo[]>()
+let ownerRowIndex = new Map<string, Candidate[]>()
+let ownerIndexBuilds = 0
 let mirrorBindings = ''
 export const $workSourceAuthorityRevision = atom(1)
 
@@ -136,30 +142,81 @@ function bindSocket(entry: Tracked, socket: Socket | null): void {
   })
 }
 
-/** Preserve the resolver's first matching row, including lineage aliases and list precedence. */
-function indexedOwnerForSession(id: string): SessionOwnerScope {
+/** Every row naming an id (own id or lineage alias), in resolver list order. Built once per row-list identity. */
+function candidateIndex(): Map<string, Candidate[]> {
   const rows = ownerLookupSessionRows()
 
   if (rows !== ownerRows) {
     ownerRows = rows
     ownerRowIndex = new Map()
+    ownerIndexBuilds++
 
     for (const row of rows) {
+      const seen = new Set<string>()
+
       for (const alias of [row.id, row._lineage_root_id, ...(row._lineage_ids ?? [])]) {
-        if (alias && !ownerRowIndex.has(alias)) {
-          ownerRowIndex.set(alias, [row])
+        if (!alias || seen.has(alias)) {
+          continue
+        }
+
+        seen.add(alias)
+        const list = ownerRowIndex.get(alias)
+        const candidate = { exact: alias === row.id, row }
+
+        if (list) {
+          list.push(candidate)
+        } else {
+          ownerRowIndex.set(alias, [candidate])
         }
       }
     }
   }
 
-  const stored = storedSessionIdForRuntimeId(id) ?? id
+  return ownerRowIndex
+}
 
-  return knownOwnerForSession(id, ownerRowIndex.get(stored) ?? [])
+/** Rows competing for an id: those of the first match's kind (own id vs lineage alias), preserving list precedence. */
+function competingRows(stored: string): SessionInfo[] {
+  const list = candidateIndex().get(stored)
+
+  if (!list?.length) {
+    return []
+  }
+
+  const exact = list[0].exact
+
+  return list.filter(candidate => candidate.exact === exact).map(candidate => candidate.row)
+}
+
+/**
+ * Owners the resolver can name for `id`. One row (or none) keeps the resolver's
+ * first-match behavior; several same-ID rows on different routes each resolve on
+ * their own, so a foreign route's row never shadows another healthy route.
+ */
+function candidateOwners(id: string): Array<QualifiedWorkSourceOwner | undefined> {
+  const stored = storedSessionIdForRuntimeId(id) ?? id
+  const rows = competingRows(stored)
+
+  if (rows.length <= 1) {
+    return [qualifiedWorkSourceOwner(knownOwnerForSession(id, rows))]
+  }
+
+  return rows.map(row => qualifiedWorkSourceOwner(knownOwnerForSession(id, [row])))
+}
+
+/** The candidate for exactly this entry's scope, else the first candidate (which then fails the scope match). */
+function ownerForEntry(entry: Tracked): QualifiedWorkSourceOwner | undefined {
+  const owners = candidateOwners(entry.storedSessionId)
+
+  return (
+    owners.find(
+      owner => owner?.connectionId === entry.owner.connectionId && owner?.profile === entry.owner.profile
+    ) ?? owners[0]
+  )
 }
 
 function syncEntry(entry: Tracked): void {
-  const resolved = qualifiedWorkSourceOwner(indexedOwnerForSession(entry.storedSessionId))
+  const resolved = ownerForEntry(entry)
   const semantic = semanticOf(resolved)
   const runtimes = runtimeIndex.get(scopeKey(entry.owner, entry.storedSessionId)) ?? ''
 
@@ -176,39 +233,60 @@ function syncEntry(entry: Tracked): void {
   bindSocket(entry, matches ? gatewayRouteState(resolved.connectionId, resolved.profile).gateway : null)
 }
 
-/** Resolve each runtime once per binding update, not once per observed scope. */
+/**
+ * Resolve each runtime once per binding update, not once per observed scope.
+ * The index value is the runtime's effective ROLES (mirror / tile / main), not
+ * mere membership: rebinding a tile or the main pane between runtimes that
+ * already have mirrors must still change what a cached proof was read against.
+ */
 function rebuildRuntimeIndex(): void {
-  const ids = new Set(Object.keys($sessionStates.get()))
+  const roles = new Map<string, string>()
+  const addRole = (id: string, role: string) => roles.set(id, (roles.get(id) ?? '') + role)
+
+  for (const id of Object.keys($sessionStates.get())) {
+    addRole(id, 'm')
+  }
 
   for (const tile of $sessionTiles.get()) {
     if (tile.runtimeId) {
-      ids.add(tile.runtimeId)
+      addRole(tile.runtimeId, 't')
     }
   }
 
   const active = $activeSessionId.get()
 
   if (active) {
-    ids.add(active)
+    addRole(active, 'a')
   }
 
-  const index = new Map<string, string[]>()
+  const index = new Map<string, Array<[string, string]>>()
 
-  for (const id of ids) {
+  for (const [id, role] of roles) {
     const stored = storedSessionIdForRuntimeId(id)
-    const owner = qualifiedWorkSourceOwner(indexedOwnerForSession(id))
 
-    if (!stored || !owner) {
+    if (!stored) {
       continue
     }
 
-    const key = scopeKey(owner, stored)
-    const values = index.get(key) ?? []
-    values.push(id)
-    index.set(key, values)
+    // A runtime of an ambiguous same-ID row set may serve any of those routes:
+    // attribute it to each so a rebinding can only over-revoke, never miss.
+    for (const owner of candidateOwners(id)) {
+      if (!owner) {
+        continue
+      }
+
+      const key = scopeKey(owner, stored)
+      const values = index.get(key) ?? []
+
+      if (!values.some(([existing]) => existing === id)) {
+        values.push([id, role])
+      }
+
+      index.set(key, values)
+    }
   }
 
-  runtimeIndex = new Map([...index].map(([key, values]) => [key, JSON.stringify(values.sort())]))
+  runtimeIndex = new Map([...index].map(([key, values]) => [key, JSON.stringify(values.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))]))
 }
 
 function syncTracked(): void {
@@ -330,8 +408,15 @@ export function peekWorkSourceAuthorityForSession(
   return { durable: entry.durable, runtime: entry.runtime }
 }
 
+/** Test-only: how many times the owner-row candidate index was rebuilt. */
+export function _ownerIndexBuildsForTests(): number {
+  return ownerIndexBuilds
+}
+
 /** Test-only: drop listeners but never recycle request authority. */
 export function _resetWorkSourceOwnerForTests(): void {
+  ownerIndexBuilds = 0
+
   for (const entry of tracked.values()) {
     entry.offState?.()
   }

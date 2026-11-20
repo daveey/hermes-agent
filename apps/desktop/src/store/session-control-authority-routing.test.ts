@@ -7,7 +7,7 @@ import { sessionsHost } from '@/sdk/sessions'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $gateway, setPrimaryGateway, setPrimaryGatewayConnection } from '@/store/gateway'
 import { $profiles } from '@/store/profile'
-import { _resetSessionOwnerHintsForTests, setSessions } from '@/store/session'
+import { $activeSessionId, _resetSessionOwnerHintsForTests, setSessions } from '@/store/session'
 import { $sessionControlBySession, clearAllSessionControl, refreshSessionControl } from '@/store/session-control'
 import { sessionStatusStripe } from '@/store/session-dot-state'
 import { $sessionTiles, clearAllSessionStates, publishSessionState } from '@/store/session-states'
@@ -145,6 +145,7 @@ describe('control authority at the real idle row hook', () => {
     for (const read of reads) {
       sessionsHost.reportWorkSourceRead({ ...read, available: true })
     }
+
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
@@ -200,6 +201,7 @@ describe('control authority at the real idle row hook', () => {
     for (const read of reads) {
       sessionsHost.reportWorkSourceRead({ ...read, available: true })
     }
+
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
@@ -219,6 +221,79 @@ describe('control authority at the real idle row hook', () => {
       expect(stripe(result.current)).toBe('done')
     } finally {
       unmount()
+    }
+  })
+
+  it('review: a tile rebind between existing mirrors vetoes cached complete proof', () => {
+    const row = makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local', outcome: DONE })
+    setSessions([row])
+    publishSessionState('rt-next', createClientSessionState(row.id))
+    $sessionTiles.set([{ storedSessionId: row.id, runtimeId: 'rt-main', ownerRoute: { connectionId: 'local', profile: 'default' } }])
+    const reads = (['lineage', 'tasks', 'process', 'subagent', 'control'] as const).map(source => sessionsHost.beginWorkSourceRead({connectionId: 'local', profile: 'default', storedSessionId: row.id, source}))
+
+    for (const read of reads) {sessionsHost.reportWorkSourceRead({...read, available: true})}
+    const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
+
+    try {
+      expect(stripe(result.current)).toBe('done')
+      act(() => { $sessionTiles.set([{ storedSessionId: row.id, runtimeId: 'rt-next', ownerRoute: { connectionId: 'local', profile: 'default' } }]) })
+      expect(stripe(result.current)).not.toBe('done')
+    } finally { unmount() }
+  })
+
+  it('a rebind between mirrored runtimes revokes cached and in-flight proof, ABA included, but not an unrelated row', () => {
+    const row = makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local', outcome: DONE })
+    const other = makeSessionInfo({ id: 'other-chat', profile: 'default', connection_id: 'local', outcome: DONE })
+    setSessions([row, other])
+    publishSessionState('rt-b', createClientSessionState(row.id))
+    const route = { connectionId: 'local', profile: 'default' }
+    const bind = (runtimeId: string) => $sessionTiles.set([{ storedSessionId: row.id, runtimeId, ownerRoute: route }])
+
+    const capture = (id: string) =>
+      (['lineage', 'tasks', 'process', 'subagent', 'control'] as const).map(source =>
+        sessionsHost.beginWorkSourceRead({ connectionId: 'local', profile: 'default', storedSessionId: id, source })
+      )
+
+    const succeed = (reads: ReturnType<typeof capture>) => {
+      for (const read of reads) {
+        sessionsHost.reportWorkSourceRead({ ...read, available: true })
+      }
+    }
+
+    bind('rt-main')
+    const inFlight = capture(row.id)
+    const stableReads = capture(other.id)
+    succeed(stableReads)
+    const mounted = renderHook(() => [useWorkSourceUnavailable(row), useWorkSourceUnavailable(other)])
+
+    try {
+      // Nothing completed for `row` yet: an in-flight read is not proof.
+      expect(mounted.result.current).toEqual([true, false])
+      act(() => bind('rt-b'))
+      act(() => succeed(inFlight)) // captured before the rebind: must be rejected
+      expect(mounted.result.current).toEqual([true, false])
+      act(() => succeed(capture(row.id)))
+      expect(mounted.result.current).toEqual([false, false])
+
+      // ABA: rt-b → rt-main → rt-b between polls. The proof of the first rt-b is gone.
+      act(() => bind('rt-main'))
+      expect(mounted.result.current).toEqual([true, false])
+      act(() => bind('rt-b'))
+      expect(mounted.result.current).toEqual([true, false])
+      act(() => succeed(capture(row.id)))
+      expect(mounted.result.current).toEqual([false, false])
+
+      // Rebinding the MAIN pane between two mirrored runtimes is a role change too.
+      publishSessionState('rt-main', createClientSessionState(row.id))
+      act(() => $activeSessionId.set('rt-main'))
+      expect(mounted.result.current).toEqual([true, false])
+      act(() => succeed(capture(row.id)))
+      expect(mounted.result.current).toEqual([false, false])
+      act(() => $activeSessionId.set('rt-b'))
+      expect(mounted.result.current).toEqual([true, false])
+    } finally {
+      $activeSessionId.set(null)
+      mounted.unmount()
     }
   })
 

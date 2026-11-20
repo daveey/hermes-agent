@@ -1002,6 +1002,14 @@ function withUnlistedOwnerStubs(rows: SessionInfo[], stubs: readonly SessionInfo
     return rows
   }
 
+  // Same (rows, stubs) inputs → same array: an unlisted draft must not hand
+  // every identity-keyed consumer (work-source owner index) a fresh copy.
+  const memo = stubShadowMemo
+
+  if (memo && memo.rows === rows && memo.stubs === stubs) {
+    return memo.result
+  }
+
   const listed = new Set<string>()
 
   for (const row of rows) {
@@ -1010,8 +1018,13 @@ function withUnlistedOwnerStubs(rows: SessionInfo[], stubs: readonly SessionInfo
 
   const visible = stubs.filter(stub => !listed.has(stub.id))
 
-  return visible.length ? [...rows, ...visible] : rows
+  const result = visible.length ? [...rows, ...visible] : rows
+  stubShadowMemo = { result, rows, stubs }
+
+  return result
 }
+
+let stubShadowMemo: { result: SessionInfo[]; rows: SessionInfo[]; stubs: readonly SessionInfo[] } | null = null
 
 /**
  * Every session row the renderer knows, for OWNER lookups. The sidebar splits

@@ -26,6 +26,7 @@ import { makeSessionInfo } from '@/test/session-info'
 
 import {
   $workSourceAuthorityRevision,
+  _ownerIndexBuildsForTests,
   _resetWorkSourceOwnerForTests,
   qualifiedWorkSourceOwner,
   workSourceAuthorityForSession
@@ -92,6 +93,7 @@ describe('work-source owner authority context', () => {
     $sessionTiles.set([])
     setSessions([])
     $projectTree.set([])
+    $unlistedSessionOwnerRows.set([])
     $activeSessionId.set(null)
     $selectedStoredSessionId.set(null)
     $profiles.set([])
@@ -165,6 +167,16 @@ describe('work-source owner authority context', () => {
       durable: null,
       runtime: null
     })
+  })
+
+  it('review: tile rebind revokes authority when both mirrors already exist', () => {
+    setSessions([makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local' })])
+    publishSessionState('rt-a', createClientSessionState('stored-chat'))
+    publishSessionState('rt-b', createClientSessionState('stored-chat'))
+    $sessionTiles.set([{ storedSessionId: 'stored-chat', runtimeId: 'rt-a', ownerRoute: { connectionId: 'local', profile: 'default' } }])
+    const first = workSourceAuthorityForSession('local', 'default', 'stored-chat')
+    $sessionTiles.set([{ storedSessionId: 'stored-chat', runtimeId: 'rt-b', ownerRoute: { connectionId: 'local', profile: 'default' } }])
+    expect(workSourceAuthorityForSession('local', 'default', 'stored-chat').runtime).not.toBe(first.runtime)
   })
 
   it('invalidates runtime on tile rebind and both epochs on semantic owner change, not on the same owner', () => {
@@ -400,6 +412,7 @@ describe('work-source owner authority context', () => {
       profile: 'default',
       connection_id: 'local'
     })
+
     const collision = makeSessionInfo({ id: 'root', profile: 'default', connection_id: 'homelab' })
     setSessions([first, collision])
     const root = workSourceAuthorityForSession('local', 'default', 'root')
@@ -415,7 +428,84 @@ describe('work-source owner authority context', () => {
     expect(workSourceAuthorityForSession('local', 'default', 'middle').durable).not.toBe(middle.durable)
   })
 
-  it('keeps realistic streaming observation neutral and reports structural observer cost', () => {
+  it('keeps same-ID rows on different routes independent while exact ids still outrank lineage aliases', () => {
+    const local = makeSessionInfo({ id: 'twin', profile: 'default', connection_id: 'local' })
+    const away = makeSessionInfo({ id: 'twin', profile: 'default', connection_id: 'homelab' })
+    setSessions([away, local])
+    const a = workSourceAuthorityForSession('local', 'default', 'twin')
+    const b = workSourceAuthorityForSession('homelab', 'default', 'twin')
+    expect(positive(a.durable)).toBe(true)
+    expect(positive(b.durable)).toBe(false) // homelab has no live socket here; local must not be blocked by it
+    setSessions([local, away])
+    expect(workSourceAuthorityForSession('local', 'default', 'twin')).toEqual(a)
+    // A third route never named by any row is still refused.
+    expect(workSourceAuthorityForSession('elsewhere', 'default', 'twin')).toEqual({ durable: null, runtime: null })
+    // An exact-id row of another route still outranks a same-scope lineage alias (list precedence kept).
+    const alias = makeSessionInfo({ id: 'tip', _lineage_root_id: 'twin', profile: 'default', connection_id: 'local' })
+    setSessions([away, alias])
+    expect(workSourceAuthorityForSession('local', 'default', 'twin')).toEqual({ durable: null, runtime: null })
+  })
+
+  it('revokes only the runtime epoch when a tile or the main pane moves between mirrored runtimes, ABA included', () => {
+    setSessions([makeSessionInfo({ id: 'stored-chat', profile: 'default', connection_id: 'local' })])
+    publishSessionState('rt-a', createClientSessionState('stored-chat'))
+    publishSessionState('rt-b', createClientSessionState('stored-chat'))
+    const route = { connectionId: 'local', profile: 'default' }
+    const tile = (runtimeId: string) => $sessionTiles.set([{ storedSessionId: 'stored-chat', runtimeId, ownerRoute: route }])
+    tile('rt-a')
+    const first = workSourceAuthorityForSession('local', 'default', 'stored-chat')
+    tile('rt-b')
+    const second = workSourceAuthorityForSession('local', 'default', 'stored-chat')
+    tile('rt-a')
+    const third = workSourceAuthorityForSession('local', 'default', 'stored-chat')
+    expect(new Set([first.runtime, second.runtime, third.runtime]).size).toBe(3)
+    expect([second.durable, third.durable]).toEqual([first.durable, first.durable])
+    $sessionTiles.set([])
+    const noTile = workSourceAuthorityForSession('local', 'default', 'stored-chat')
+    $activeSessionId.set('rt-a')
+    const mainA = workSourceAuthorityForSession('local', 'default', 'stored-chat')
+    $activeSessionId.set('rt-b')
+    const mainB = workSourceAuthorityForSession('local', 'default', 'stored-chat')
+    $activeSessionId.set('rt-a')
+    const mainA2 = workSourceAuthorityForSession('local', 'default', 'stored-chat')
+    expect(new Set([third.runtime, noTile.runtime, mainA.runtime, mainB.runtime, mainA2.runtime]).size).toBe(5)
+    expect(mainA2.durable).toBe(first.durable)
+    // Re-asserting the same effective roles is neutral.
+    $activeSessionId.set('rt-a')
+    expect(workSourceAuthorityForSession('local', 'default', 'stored-chat')).toEqual(mainA2)
+  })
+
+  it('builds the owner candidate index once per row-list change, even with an unlisted draft', () => {
+    const rows = Array.from({ length: 200 }, (_, i) => makeSessionInfo({ id: `idx-${i}`, profile: 'default', connection_id: 'local' }))
+    $unlistedSessionOwnerRows.set([makeSessionInfo({ id: 'draft', profile: 'default', connection_id: 'local' })])
+    setSessions(rows)
+
+    for (const row of rows) {
+      publishSessionState(`rt-${row.id}`, createClientSessionState(row.id))
+      workSourceAuthorityForSession('local', 'default', row.id)
+    }
+
+    const base = _ownerIndexBuildsForTests()
+
+    // Repeated lookups and a stream publish with the same row list: no rebuild.
+    for (const row of rows) {
+      workSourceAuthorityForSession('local', 'default', row.id)
+    }
+
+    publishSessionState('rt-idx-0', { ...createClientSessionState('idx-0'), streaming: true } as never)
+    expect(_ownerIndexBuildsForTests()).toBe(base)
+    // One structural change rebuilds once, not once per tracked entry or runtime.
+    setSessions(rows.map(row => ({ ...row, title: 'renamed' })))
+    expect(_ownerIndexBuildsForTests()).toBeLessThanOrEqual(base + 1)
+    expect(_ownerIndexBuildsForTests()).toBeGreaterThan(base)
+    const after = _ownerIndexBuildsForTests()
+    $unlistedSessionOwnerRows.set([makeSessionInfo({ id: 'draft-2', profile: 'default', connection_id: 'local' })])
+    expect(_ownerIndexBuildsForTests()).toBeLessThanOrEqual(after + 1)
+  })
+
+  it.each([false, true])('review: realistic structural cost with unlisted stub %s', withStub => {
+    if (withStub) {$unlistedSessionOwnerRows.set([makeSessionInfo({ id: 'unlisted-draft', profile: 'default', connection_id: 'local' })])}
+
     const rows = Array.from({ length: 1000 }, (_, i) =>
       makeSessionInfo({ id: `perf-${i}`, profile: 'default', connection_id: 'local' })
     )
