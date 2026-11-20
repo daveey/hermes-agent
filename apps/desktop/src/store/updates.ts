@@ -1377,6 +1377,11 @@ export const UPDATE_PROGRESS_POLL_MS = 10_000
 const progressBusy = (p: BackgroundUpdateProgress | null): boolean => p?.state === 'draining' || p?.state === 'applying'
 
 const progressInFlight: Record<UpdateTarget, boolean> = { backend: false, client: false }
+const progressAnsweredAt: Record<UpdateTarget, number> = { backend: 0, client: 0 }
+
+/** [daveey] How long a pill keeps its last update state while its host does not answer (restarting for the update
+ *  takes a few minutes); past this the state is dropped, so a host that never comes back cannot spin forever. */
+export const UPDATE_PROGRESS_STALE_MS = 10 * 60_000
 
 async function pollProgressFor(target: UpdateTarget): Promise<void> {
   const store = target === 'backend' ? $backendUpdateProgress : $clientUpdateProgress
@@ -1403,7 +1408,12 @@ async function pollProgressFor(target: UpdateTarget): Promise<void> {
     )
   } catch {
     // Unreachable (restarting for this very update, an older backend without the route, no warm local
-    // backend): keep what the pill shows. Only a host that answers "nothing in progress" ends an update.
+    // backend): keep what the pill shows for a while. Only a host that answers "nothing in progress" ends an
+    // update (and refreshes the version); one silent past the stale bound just drops its state.
+    if (store.get() && Date.now() - progressAnsweredAt[target] > UPDATE_PROGRESS_STALE_MS) {
+      store.set(null)
+    }
+
     return
   } finally {
     progressInFlight[target] = false
@@ -1415,6 +1425,7 @@ async function pollProgressFor(target: UpdateTarget): Promise<void> {
 
   const finished = progressBusy(store.get()) && !progressBusy(next)
 
+  progressAnsweredAt[target] = Date.now()
   store.set(next)
 
   if (finished) {

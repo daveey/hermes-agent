@@ -2,7 +2,12 @@ import assert from 'node:assert/strict'
 
 import { test } from 'vitest'
 
-import { HERMES_API_EXPECTED_404, isExpectedNotFoundSentinel, unwrapExpectedNotFound } from './api-expected-404'
+import {
+  HERMES_API_EXPECTED_404,
+  isExpectedNotFoundSentinel,
+  isExpectedPassiveMiss,
+  unwrapExpectedNotFound
+} from './api-expected-404'
 
 test('a handler-produced sentinel is recognized', () => {
   assert.equal(isExpectedNotFoundSentinel({ [HERMES_API_EXPECTED_404]: '404: {"detail":"Session not found"}' }), true)
@@ -57,4 +62,13 @@ test('the rethrown message still matches the renderer 404 probe predicate', () =
   } catch (error) {
     assert.match(String((error as Error).message), /(?:^|\s)404\b/)
   }
+})
+
+test('a passive read that finds no warm backend is expected; the same miss on a normal read is not', () => {
+  const miss = new Error('Passive read: no warm backend for "conn:local::default"')
+
+  assert.equal(isExpectedPassiveMiss({ passive: true, path: '/api/hermes/update/progress' }, miss), true)
+  assert.equal(isExpectedPassiveMiss({ path: '/api/hermes/update/progress' }, miss), false)
+  assert.equal(isExpectedPassiveMiss({ passive: true }, new Error('connect ECONNREFUSED')), false)
+  assert.equal(isExpectedPassiveMiss(null, miss), false)
 })

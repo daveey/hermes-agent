@@ -114,6 +114,28 @@ describe('pollUpdateProgress', () => {
     expect(checkHermesUpdateSpy).not.toHaveBeenCalled()
   })
 
+  it('drops a kept state once the host has been silent past the stale bound, without a refresh', async () => {
+    setConnection(remote)
+    progressSpy.mockImplementation(async (scope?: { connectionId?: string }) => (scope ? { progress: null } : applying))
+    await updates.pollUpdateProgress()
+
+    const now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + updates.UPDATE_PROGRESS_STALE_MS + 1)
+
+    progressSpy.mockImplementation(async (scope?: { connectionId?: string }) => {
+      if (scope) {
+        return { progress: null }
+      }
+
+      throw new Error('gone')
+    })
+    await updates.pollUpdateProgress()
+    clock.mockRestore()
+
+    expect(updates.$backendUpdateProgress.get()).toBeNull()
+    expect(checkHermesUpdateSpy).not.toHaveBeenCalled()
+  })
+
   it('never stacks a second request on a host that has not answered yet', async () => {
     setConnection(remote)
 

@@ -43,4 +43,15 @@ function unwrapExpectedNotFound(value: unknown): unknown {
   return value
 }
 
-export { HERMES_API_EXPECTED_404, isExpectedNotFoundSentinel, unwrapExpectedNotFound }
+// [daveey] A passive read (`passive: true`) is allowed to find no warm backend and fail fast: that refusal IS the
+// design (host-backend-singleton.ts), and background pollers (the version pills' 10 s update-progress read) hit it
+// on every tick while a local backend is cold. Rejecting printed Electron's full handler stack plus our own
+// remembered stack each time, so it rides the same sentinel: the renderer still gets the identical rejection.
+function isExpectedPassiveMiss(request: unknown, error: unknown): boolean {
+  return (
+    Boolean(request && typeof request === 'object' && (request as { passive?: unknown }).passive === true) &&
+    /^Passive read: no warm backend\b/.test(String((error as { message?: unknown } | null)?.message ?? error))
+  )
+}
+
+export { HERMES_API_EXPECTED_404, isExpectedNotFoundSentinel, isExpectedPassiveMiss, unwrapExpectedNotFound }

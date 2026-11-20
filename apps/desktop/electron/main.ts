@@ -45,7 +45,7 @@ import type { Session } from 'electron'
 
 import { type ActiveRuntimeState, classifyActiveRuntime } from './active-runtime-state'
 import { hideAgentTestInstance, isHiddenAgentTestInstance } from './agent-test-instance'
-import { HERMES_API_EXPECTED_404 } from './api-expected-404'
+import { HERMES_API_EXPECTED_404, isExpectedPassiveMiss } from './api-expected-404'
 import { formatApiRequestFailure } from './api-request-failure'
 import { destroyKeepaliveAgents, readJsonErrorBody, readStatusCode } from './api-transport'
 import { appIconCandidates, resolveAppIcon, shouldOverrideDockIcon } from './app-icon'
@@ -15879,7 +15879,7 @@ ipcMain.handle('hermes:api', async (_event, request) => {
     // a rejection with the identical `404: <body>` message. The renderer
     // contract is unchanged; only Electron's logging is bypassed. Every other
     // failure still rejects and still logs in full.
-    if (isNotFoundApiError(error)) {
+    if (isNotFoundApiError(error) || isExpectedPassiveMiss(request, error)) {
       return { [HERMES_API_EXPECTED_404]: String((error as any)?.message ?? error) }
     }
 
