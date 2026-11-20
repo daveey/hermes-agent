@@ -179,3 +179,128 @@ def test_a_flag_value_that_is_itself_a_flag_is_not_swallowed():
         "--verbose",
         "x",
     ]
+
+
+# ---- the remaining shapes: short tokens, letter-only tokens, program short flags, userinfo, "-"-leading values,
+# command-valued secret flags, UPPER_SNAKE look-alikes --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv, program, expected",
+    [
+        # 16-19 character random tokens
+        (["worker.py", "ab12cd34ef56gh78"], "python3", ["worker.py", MASK]),
+        # letters-only random tokens: case flipping or vowel-poor
+        (["worker.py", "XyQwErTyUiOpAsDfGhJk"], "python3", ["worker.py", MASK]),
+        (["worker.py", "qzxkvbnmplkjhgfdrtwz"], "python3", ["worker.py", MASK]),
+        # programs' own short password flags
+        (
+            ["-u", "root", "-phunter2", "db"],
+            "/usr/bin/mysql",
+            ["-u", "root", f"-p{MASK}", "db"],
+        ),
+        (["-p", "hunter2", "ssh", "host"], "sshpass", ["-p", MASK, "ssh", "host"]),
+        (["-a", "hunter2", "ping"], "redis-cli", ["-a", MASK, "ping"]),
+        (
+            ["enc", "-k", "hunter2", "-pass", "pass:hunter2"],
+            "openssl",
+            ["enc", "-k", MASK, "-pass", MASK],
+        ),
+        (
+            ["-u", "alice:hunter2", "https://x"],
+            "curl",
+            ["-u", f"alice:{MASK}", "https://x"],
+        ),
+        (["-ualice:hunter2"], "curl", [f"-ualice:{MASK}"]),
+        (["-U", "alice%hunter2"], "smbclient", ["-U", f"alice%{MASK}"]),
+        # user:pass@host without a scheme
+        (
+            ["push", "alice:hunter2@git.example.com"],
+            "git",
+            ["push", f"alice:{MASK}@git.example.com"],
+        ),
+        # a secret that starts with "-" after a secret-named flag
+        (["--password", "-Xy9kq2LmZ"], "tool", ["--password", MASK]),
+        # a command that prints the secret: only its program is shown
+        (
+            ["--password-cmd", "echo hunter2"],
+            "tool",
+            ["--password-cmd", f"echo {MASK}"],
+        ),
+        (
+            ["--api-key-helper=pass show openai"],
+            "tool",
+            [f"--api-key-helper=pass {MASK}"],
+        ),
+        # random segments posing as an UPPER_SNAKE name
+        (["AB12_CD34_EF56_GH78_IJ90_KL12=x"], "env", [MASK]),
+    ],
+)
+def test_remaining_secret_shapes_are_masked(argv, program, expected):
+    assert mask_argv_secrets(argv, program=program) == expected
+
+
+@pytest.mark.parametrize(
+    "argv, program",
+    [
+        (
+            [
+                "-o",
+                "ServerAliveCountMax=3",
+                "-o",
+                "NumberOfPasswordPrompts=0",
+                "-p",
+                "2222",
+                "host",
+            ],
+            "ssh",
+        ),
+        (
+            ["-p", "coder", "gateway", "run"],
+            "hermes",
+        ),  # -p is the profile for most programs: never masked
+        (
+            ["-u", "alice", "https://x"],
+            "curl",
+        ),  # a bare user: curl prompts for the password
+        (
+            [
+                "run",
+                "python:3.12-slim",
+                "127.0.0.1:8000",
+                "alice@example.com",
+                "git@github.com:org/repo.git",
+            ],
+            "docker",
+        ),
+        (
+            [
+                "internationalization",
+                "ServerAliveCountMax",
+                "NumberOfPasswordPrompts",
+                "followup:t_01a1:notify",
+            ],
+            "x",
+        ),
+        (
+            [
+                "--annotation=platform=macosarm64",
+                "--annotation=_version=5.11492.5",
+                "--password-cmd",
+                "pass",
+            ],
+            "x",
+        ),
+        (
+            [
+                "HERMES_RELAY_ID_2024=abc",
+                "OPENROUTER_BASE_URL=https://openrouter.ai/api/v1",
+            ],
+            "env",
+        ),
+        # repeated letters are padding or placeholders, not random secrets
+        (["--profile", "p" * 120, "zzzzzzzzzzzzzzzzzzzzzzzz"], "x"),
+    ],
+)
+def test_identifiers_survive_the_stricter_rules(argv, program):
+    assert mask_argv_secrets(argv, program=program) == argv

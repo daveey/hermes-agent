@@ -83,7 +83,7 @@ def describe_holder_pid(pid: int, *, limit: Optional[int] = 80) -> str:
     # shared redactor (known secret formats).
     from agent.redact import redact_sensitive_text
     from hermes_state_argv_secrets import mask_argv_secrets
-    argv = [argv[0], *mask_argv_secrets(argv[1:])]
+    argv = [argv[0], *mask_argv_secrets(argv[1:], program=argv[0])]
     who = redact_sensitive_text(" ".join(" ".join([os.path.basename(argv[0]), *argv[1:]]).split()),
                                 force=True, redact_url_credentials=True)
     return f"PID {pid} ({who[:limit]})"
