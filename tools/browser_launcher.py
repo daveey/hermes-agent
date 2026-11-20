@@ -428,9 +428,10 @@ def _prepare_dir(user_data_dir: str, ephemeral: bool) -> None:
 
 
 def _spawn(argv: list[str], env: dict, user_data_dir: str) -> subprocess.Popen:
+    from hermes_cli.worker_drain_fence import popen_worker
     log_path = os.path.join(user_data_dir, _LAUNCH_LOG)
     with open(log_path, "wb") as log:
-        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
+        return popen_worker(subprocess.Popen, argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env,
                                 **_spawn_kwargs())
 
 

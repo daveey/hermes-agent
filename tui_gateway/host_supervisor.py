@@ -377,7 +377,8 @@ class HostSupervisor:
         if root not in env["PYTHONPATH"].split(os.pathsep):
             env["PYTHONPATH"] = root + os.pathsep + env["PYTHONPATH"]
         # Lossy UTF-8 decode: a locale-mismatched byte must not raise inside the drain threads.
-        proc = subprocess.Popen(
+        from hermes_cli.worker_drain_fence import popen_worker
+        proc = popen_worker(subprocess.Popen,
             self.argv, cwd=str(self.cwd), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1,
             # detached-spawn: ok — compute host exits on its own parent-guard (compute_host._parent_guard_loop) and flushes sessions; a supervisor KILL could cut that flush short

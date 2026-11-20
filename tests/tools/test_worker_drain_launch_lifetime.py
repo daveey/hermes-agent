@@ -12,18 +12,34 @@ node = fixtures.node
 latch = fixtures.latch
 
 
-@pytest.mark.parametrize('seam', ['generic', 'owned', 'bash'])
-def test_child_holds_lease_after_spawn_returns(node, seam):
+def _launch(seam, argv, tmp_path):
+    import shlex
+    from hermes_cli.process_identity import spawn_owned
+    from hermes_cli.local_runtime.processes import spawn_server
+    from tools.environments.base_output import _popen_bash
+    from tools.environments.local import LocalEnvironment
+    from tools.browser_launcher import _spawn
+
+    def local():
+        env = LocalEnvironment.__new__(LocalEnvironment)
+        env.env, env.cwd = {}, str(tmp_path)
+        return env._run_bash(shlex.join(argv))
+
+    return {
+        'generic': lambda: f.popen_worker(subprocess.Popen, argv, env=None),
+        'owned': lambda: spawn_owned(argv, purpose='drain-lifetime-fixture'),
+        'bash': lambda: _popen_bash(argv),
+        'browser': lambda: _spawn(argv, {}, str(tmp_path)),
+        'router': lambda: spawn_server(argv)[0],
+        'local': local,
+    }[seam]()
+
+
+@pytest.mark.parametrize('seam', ['generic', 'owned', 'bash', 'browser', 'router'])
+def test_child_holds_lease_after_spawn_returns(node, tmp_path, seam):
     root, ident = node
     argv = [sys.executable, '-c', 'import time; time.sleep(30)']
-    if seam == 'generic':
-        proc = f.popen_worker(subprocess.Popen, argv, env=None)
-    elif seam == 'owned':
-        from hermes_cli.process_identity import spawn_owned
-        proc = spawn_owned(argv, purpose='drain-lifetime-fixture')
-    else:
-        from tools.environments.base_output import _popen_bash
-        proc = _popen_bash(argv)
+    proc = _launch(seam, argv, tmp_path)
     try:
         assert f.busy_leases(root) == 1
         latch(root, ident)
@@ -113,25 +129,12 @@ def test_seal_mutation_itself_checks_live_leases(node):
     assert latch(root, ident, op='seal')['phase'] == 'sealed'
 
 
-@pytest.mark.parametrize('seam', ['generic', 'owned', 'bash', 'local'])
+@pytest.mark.parametrize('seam', ['generic', 'owned', 'bash', 'local', 'browser', 'router'])
 def test_late_terminal_seams_cannot_execute(node, tmp_path, seam):
     root, ident = node
     latch(root, ident)
     output = tmp_path / 'should-not-exist'
     argv = [sys.executable, '-c', f'open({str(output)!r}, "w").write("lost")']
     with pytest.raises(f.DrainRefused):
-        if seam == 'generic':
-            f.popen_worker(subprocess.Popen, argv, env=None)
-        elif seam == 'owned':
-            from hermes_cli.process_identity import spawn_owned
-            spawn_owned(argv, purpose='drain-late-fixture')
-        elif seam == 'bash':
-            from tools.environments.base_output import _popen_bash
-            _popen_bash(argv)
-        else:
-            from tools.environments.local import LocalEnvironment
-            # Bypass unrelated startup shells; exercise the real local spawn boundary.
-            local = LocalEnvironment.__new__(LocalEnvironment)
-            local.env, local.cwd = {}, str(tmp_path)
-            local._run_bash('touch ' + str(output))
+        _launch(seam, argv, tmp_path)
     assert not output.exists()
