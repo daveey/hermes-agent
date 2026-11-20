@@ -59,6 +59,8 @@ class Identity:
 
 
 ACTIVATION_OWNERS: tuple = (0,)  # who may own the activation file (tests rebind)
+# Absent off POSIX; enforcement cannot be activated there, so 0 only keeps the module importable.
+_NOFOLLOW, _CLOEXEC = getattr(os, 'O_NOFOLLOW', 0), getattr(os, 'O_CLOEXEC', 0)
 
 
 def _trusted(uid: int | None = None) -> set:
@@ -76,7 +78,7 @@ def _secure_read(path: Path, owners: set) -> bytes:
     """Read a state file through O_NOFOLLOW; reject non-regular, hardlinked, foreign-owner or
     group/world-writable files (checked on the opened descriptor, not the path)."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW | _CLOEXEC)
     except FileNotFoundError:
         raise
     except OSError as exc:
@@ -95,6 +97,31 @@ def _check_dir(d: Path, owners: set) -> None:
         raise DrainRefused('unknown-state', f'{d.name} unreadable: {type(exc).__name__}') from exc
 
 
+def _adopt_dir(d: Path, owners: set) -> None:
+    """Installer only: bring a state dir that predates the latch to a trusted mode.
+
+    ``core-update`` is created by the update fence under the account umask (0775 on worker nodes), so
+    it exists group-writable before the first install. Only a real directory owned by a trusted uid is
+    tightened (through its own descriptor, never the path); a symlink, another type or a foreign owner
+    is refused loudly so the installer never activates over state the readers would reject.
+    """
+    try:
+        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW | _CLOEXEC)
+    except OSError as exc:
+        raise DrainRefused('unknown-state', f'{d.name} is not a usable directory: {type(exc).__name__}') from exc
+    try:
+        st = os.fstat(fd)
+        if st.st_uid not in owners:
+            raise DrainRefused('unknown-state', f'{d.name} untrusted owner')
+        if st.st_mode & 0o022:
+            os.fchmod(fd, st.st_mode & 0o7755)
+    except OSError as exc:
+        raise DrainRefused('unknown-state', f'{d.name} mode not fixable: {type(exc).__name__}') from exc
+    finally:
+        os.close(fd)
+    _check_dir(d, owners)
+
+
 def read_boot_id() -> str:
     return Path('/proc/sys/kernel/random/boot_id').read_text(encoding='ascii').strip()
 
@@ -108,7 +135,11 @@ def request_hash(req: dict) -> str:
 
 
 def load_activation(path: Path = ACTIVATION_PATH) -> dict | None:
-    """None when absent (hooks no-op). Raises DrainRefused('unknown-state') when present but invalid."""
+    """None when absent (hooks no-op). Raises DrainRefused('unknown-state') when present but invalid.
+
+    Off POSIX there is no latch to enforce (no flock, no installer): always None, never an error."""
+    if fcntl is None:
+        return None
     try:
         raw = _secure_read(Path(path), set(ACTIVATION_OWNERS))
     except FileNotFoundError:
@@ -133,7 +164,7 @@ def account_lock(root: Path, *, timeout: float = 2.0):
     d = _state_root(root)
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
-        fd = os.open(d / LOCK_FILE, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        fd = os.open(d / LOCK_FILE, os.O_CREAT | os.O_RDWR | _CLOEXEC | _NOFOLLOW, 0o600)
     except OSError as exc:
         raise DrainRefused('unknown-state', f'admission lock unavailable: {type(exc).__name__}') from exc
     deadline = time.monotonic() + timeout
@@ -180,14 +211,17 @@ def _read_json(path: Path, owners: set | None = None) -> dict:
 def install_state(root: Path, ident: Identity) -> None:
     """Installer only: immutable install binding (O_EXCL) plus an open latch at generation 0."""
     d = _state_root(root)
+    owners = _trusted(ident.uid)
     with account_lock(root):
         d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _adopt_dir(d, owners)
         (d / LEASE_DIR).mkdir(mode=0o700, exist_ok=True)
+        _adopt_dir(d / LEASE_DIR, owners)
         binding = {'version': 1, 'iid': ident.iid, 'node_epoch': ident.node_epoch}
         try:
-            fd = os.open(d / INSTALL_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            fd = os.open(d / INSTALL_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY | _NOFOLLOW, 0o600)
         except FileExistsError:
-            if _read_json(d / INSTALL_FILE, _trusted(ident.uid)) != binding:
+            if _read_json(d / INSTALL_FILE, owners) != binding:
                 raise DrainRefused('identity-mismatch', 'install binding differs') from None
         else:
             try:
@@ -261,7 +295,7 @@ def apply_request(root: Path, ident: Identity, req: dict, *, now_ms: int | None 
             new, gen, att = 'draining', req['generation'], req['attempt']
         if new is None:
             raise DrainRefused('identity-mismatch', f'illegal {req["op"]} from {phase}')
-        if new == 'sealed' and busy_leases(root):
+        if new == 'sealed' and busy_leases(root, _trusted(ident.uid)):
             raise DrainRefused('draining', 'live work leases prevent seal')
         receipt = {'phase': new, 'generation': gen, 'attempt': att, 'request_id': req['request_id'], 'hash': digest}
         _write_atomic(d / LATCH_FILE, _latch_doc(ident, new, gen, att,
@@ -300,7 +334,7 @@ class WorkLease:
 def lease_busy(path: Path) -> bool:
     """Busy only if an independent fresh flock fails (metadata existence is not busy)."""
     try:
-        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDWR | _NOFOLLOW | _CLOEXEC)
     except FileNotFoundError:
         return False
     try:
@@ -313,8 +347,11 @@ def lease_busy(path: Path) -> bool:
         os.close(fd)
 
 
-def busy_leases(root: Path) -> int:
+def busy_leases(root: Path, owners: set | None = None) -> int:
+    """Count flocked leases. The lease dir itself must be trusted: a swapped or writable-by-others dir
+    could hide live leases, so it reads as unknown-state, never as zero."""
     d = _state_root(root) / LEASE_DIR
+    _check_dir(d, _trusted() if owners is None else owners)
     try:
         return sum(1 for p in d.iterdir() if p.name.endswith('.lease') and lease_busy(p))
     except OSError as exc:
@@ -333,8 +370,9 @@ def acquire_lease(root: Path, ident: Identity, purpose: str, *, parent: WorkLeas
                 or _parent_from_fd(root, parent.fd, boot=ident.boot) is None):
             raise DrainRefused('draining')
         ld = d / LEASE_DIR
+        _check_dir(ld, _trusted(ident.uid))
         name = uuid.uuid4().hex + '.lease'
-        fd = os.open(ld / name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        fd = os.open(ld / name, os.O_CREAT | os.O_EXCL | os.O_RDWR | _CLOEXEC | _NOFOLLOW, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         os.write(fd, _canon({'version': 1, 'boot': ident.boot, 'pid': os.getpid(), 'purpose': purpose}))
         os.fsync(fd)
@@ -345,7 +383,7 @@ def seal_precheck(root: Path, ident: Identity) -> bool:
     """True when no lease is busy; callers then request op=seal. Positive leases keep the latch draining."""
     with account_lock(root):
         read_latch(root, ident)
-        return busy_leases(root) == 0
+        return busy_leases(root, _trusted(ident.uid)) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +439,15 @@ def _activation_root(act: dict) -> Path:
     if me != 0:
         raise DrainRefused('identity-mismatch', 'process uid is not the activated account')
     return Path(act['home']) / '.hermes'
+
+
+def census_root() -> tuple[Path, set]:
+    """(state root, trusted owners) the census must read: the same root ``admit`` writes leases under.
+    Not activated: this account's policy root (nothing is enforced, so nothing else can hold leases)."""
+    act = load_activation()
+    if act is None:
+        return _state_base(), _trusted()
+    return _activation_root(act), _trusted(act['uid'])
 
 
 def _inherited_parent(root: Path):

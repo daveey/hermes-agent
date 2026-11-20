@@ -4,9 +4,14 @@ Real: ``machine_persistent_jobs.collect``, the manifest census, lease adapter (r
 (real sqlite outbox + sync lock), ``fresh`` and ``send_compatible``. Stand-ins: the Board accepts the sample,
 the registry stores it, and ``scale_in_allowed`` models the consumer contract (exact integer zero, fresh,
 for the exact instance id). The real Board/registry/scaler live in the state repo and are NOT exercised here.
+
+INCOMPLETE: the card's item (f) asks for this composition against the real scaler fence of item (e)
+(card t_01a1fa0ba2ef089d, not built yet). Until that lands this is a contract test of the core producer
+side only; it is not evidence that the scaler gates termination on these samples.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 
@@ -56,7 +61,7 @@ def node(tmp_path, monkeypatch):
     monkeypatch.setattr(capacity, 'policy_root', lambda: tmp_path)
     monkeypatch.setattr(capacity, 'occupied_owners', lambda *a, **k: set())
     monkeypatch.setattr(worker_account_boards, 'paths', lambda: [board])
-    monkeypatch.setattr(fence, 'load_activation', lambda path=None: {'iid': IID})
+    monkeypatch.setattr(fence, 'load_activation', lambda path=None: {'iid': IID, 'uid': os.getuid(), 'home': str(tmp_path)})  # windows-footgun: ok
     monkeypatch.setattr(census, 'observe_processes', lambda *a, **k: census.Observation(census.ZERO))
     return tmp_path, board
 

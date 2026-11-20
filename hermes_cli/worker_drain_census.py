@@ -72,6 +72,9 @@ def _is_kernel_thread(root: str, pid: str) -> bool:
 # ---------------------------------------------------------------------------
 # Manifest census: zero is provable only when EVERY manifest adapter proves zero.
 # ---------------------------------------------------------------------------
+# Nothing writes BASELINE_PATH yet: core has no producer and the state-repo installer (Stage 2 item (d),
+# card t_01a1fa0ba16b94f7, install-drain-fence.py) does not capture one. Until it does, host_processes is
+# never ZERO in production, so the manifest count is positive or UNKNOWN and scale-in stays off. INCOMPLETE.
 BASELINE_PATH = '/var/lib/hermes-worker/drain-baseline.json'
 ADAPTERS = ('host_processes', 'work_leases', 'local_results')  # the complete manifest
 ZERO, POSITIVE, UNKNOWN = 'zero', 'positive', 'unknown'
@@ -151,10 +154,9 @@ def observe_processes(proc_root: str = '/proc', baseline: frozenset | None = Non
 
 
 def observe_leases() -> Observation:
-    from hermes_cli import worker_compute_capacity as capacity
     from hermes_cli import worker_drain_fence as fence
     try:
-        busy = fence.busy_leases(capacity.policy_root())
+        busy = fence.busy_leases(*fence.census_root())  # admit's root, also under a root-run heartbeat
     except (fence.DrainRefused, OSError):
         return Observation(UNKNOWN, reason='lease dir unreadable')
     return Observation(POSITIVE, busy) if busy else Observation(ZERO)

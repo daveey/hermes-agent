@@ -102,9 +102,11 @@ def _cli_run_json(cmd: list[str], env: dict[str, str], name: str, timeout: float
     backoff, last_err = 0.5, ""
     for attempt in range(_CLI_ATTEMPTS):
         try:
-            proc = _subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                   timeout=max(15.0, timeout), creationflags=windows_hide_flags(), env=env,
-                                   stdin=_subprocess.DEVNULL, check=False)
+            # [daveey] bounded CLI call: lease held until run() returns; a drain refusal is a spawn failure.
+            from hermes_cli.worker_drain_fence import popen_worker
+            proc = popen_worker(_subprocess.run, cmd, drain_purpose='cua.cli', capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=max(15.0, timeout),
+                                creationflags=windows_hide_flags(), env=env, stdin=_subprocess.DEVNULL, check=False)
         except Exception as e:  # pragma: no cover - subprocess spawn failure
             raise RuntimeError(f"cua-driver CLI fallback for {name} failed to spawn: {e}") from e
         out, err = (proc.stdout or "").strip(), proc.stderr or ""

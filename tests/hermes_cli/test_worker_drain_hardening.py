@@ -73,6 +73,87 @@ def test_state_dir_must_be_a_real_private_directory(root, tmp_path):
     refuses(f.read_latch, root, IDENT)
 
 
+def test_install_adopts_the_group_writable_dir_the_update_fence_left(tmp_path):
+    # Real workers: admission_fence created core-update under umask 0002 long before the first install.
+    d = tmp_path / 'core-update'
+    d.mkdir()
+    d.chmod(0o2775)
+    (d / f.LEASE_DIR).mkdir()
+    (d / f.LEASE_DIR).chmod(0o777)
+    f.install_state(tmp_path, IDENT)
+    assert d.stat().st_mode & 0o7777 == 0o2755 and (d / f.LEASE_DIR).stat().st_mode & 0o777 == 0o755
+    assert f.read_latch(tmp_path, IDENT)['phase'] == 'open'
+    lease = f.acquire_lease(tmp_path, IDENT, 'x')
+    assert f.busy_leases(tmp_path) == 1
+    lease.close()
+    f.install_state(tmp_path, IDENT)  # idempotent re-install over the adopted dir
+    assert f.seal_precheck(tmp_path, IDENT) is True
+
+
+def test_install_refuses_loudly_when_the_dir_cannot_be_trusted(tmp_path, monkeypatch):
+    real = tmp_path / 'real'
+    (real / 'core-update').mkdir(parents=True)
+    root = tmp_path / 'root'
+    root.mkdir()
+    (root / 'core-update').symlink_to(real / 'core-update')
+    refuses(f.install_state, root, IDENT)  # symlinked state dir: never chmod through it
+    assert not (real / 'core-update' / f.INSTALL_FILE).exists()
+    other = tmp_path / 'other'
+    (other / 'core-update').mkdir(parents=True)
+    monkeypatch.setattr(f, '_trusted', lambda uid=None: {os.getuid() + 12345})  # windows-footgun: ok
+    refuses(f.install_state, other, IDENT)  # foreign owner: not ours to tighten
+    assert not (other / 'core-update' / f.INSTALL_FILE).exists()
+
+
+def test_lease_dir_must_be_trusted_or_the_count_is_unknown(root):
+    ld = root / 'core-update' / f.LEASE_DIR
+    lease = f.acquire_lease(root, IDENT, 'x')
+    ld.chmod(0o777)
+    refuses(f.busy_leases, root)  # never a guessed zero
+    refuses(f.acquire_lease, root, IDENT, 'y')
+    refuses(f.seal_precheck, root, IDENT)
+    ld.chmod(0o700)
+    assert f.busy_leases(root) == 1
+    lease.close()
+    moved = root / 'moved-leases'
+    ld.rename(moved)
+    ld.symlink_to(moved)
+    refuses(f.busy_leases, root)
+
+
+def test_not_activated_or_not_posix_is_a_noop_never_an_error(tmp_path, monkeypatch):
+    absent = tmp_path / 'absent.json'
+    assert f.load_activation(absent) is None and f.admit('x', activation_path=absent) is None
+    # Windows has neither flag; the module-level fallbacks keep the absent-file path working.
+    monkeypatch.delattr(os, 'O_NOFOLLOW')
+    monkeypatch.delattr(os, 'O_CLOEXEC')
+    assert f.load_activation(absent) is None and f.admit('x', activation_path=absent) is None
+    # Off POSIX (no fcntl) nothing can be enforced: even a present file is a no-op, not a refusal.
+    present = tmp_path / 'act.json'
+    present.write_text('not json', encoding='utf-8')
+    monkeypatch.setattr(f, 'fcntl', None)
+    assert f.load_activation(present) is None and f.admit('x', activation_path=present) is None
+
+
+def test_census_reads_the_root_admit_writes_under(tmp_path, monkeypatch):
+    from hermes_cli import worker_drain_census as census
+    home = tmp_path / 'home'
+    state = home / '.hermes'
+    state.mkdir(parents=True)
+    f.install_state(state, IDENT)
+    act = {'uid': os.getuid(), 'home': str(home)}  # windows-footgun: ok
+    monkeypatch.setattr(f, 'load_activation', lambda path=None: act)
+    monkeypatch.setattr(f, '_state_base', lambda: tmp_path / 'roots-own-home')  # where a root heartbeat would look
+    monkeypatch.setattr(f.os, 'geteuid', lambda: 0)
+    lease = f.acquire_lease(state, f.Identity(IDENT.iid, IDENT.boot, IDENT.node_epoch, uid=act['uid']), 'x')
+    assert f.census_root()[0] == state
+    assert census.observe_leases() == census.Observation(census.POSITIVE, 1)
+    lease.close()
+    assert census.observe_leases() == census.Observation(census.ZERO)
+    monkeypatch.setattr(f.os, 'geteuid', lambda: os.getuid() + 12345)  # windows-footgun: ok
+    assert census.observe_leases().state == census.UNKNOWN  # foreign uid: refused, never zero
+
+
 def test_foreign_owner_is_refused(root, monkeypatch):
     # Trust is {root, effective uid, activated uid}; a state file owned by anyone else is unknown.
     monkeypatch.setattr(f.os, 'geteuid', lambda: os.getuid() + 12345)  # windows-footgun: ok

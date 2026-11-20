@@ -65,6 +65,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "agent/shell_hooks.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
+  },
   "agent/skill_preprocessing.py": {
    "direct": 1,
    "routed": 0,
@@ -105,6 +110,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "batch_runner.py": {
+   "direct": 2,
+   "routed": 0,
+   "status": "pending"
+  },
   "cli.py": {
    "direct": 1,
    "routed": 0,
@@ -117,7 +127,7 @@
   },
   "cron/scheduler.py": {
    "direct": 1,
-   "routed": 0,
+   "routed": 1,
    "status": "pending"
   },
   "cron/scheduler_script.py": {
@@ -607,7 +617,7 @@
   },
   "hermes_cli/local_runtime/processes.py": {
    "direct": 0,
-   "routed": 1,
+   "routed": 2,
    "status": "fenced"
   },
   "hermes_cli/local_runtime/supervisor.py": {
@@ -712,7 +722,7 @@
   },
   "hermes_cli/process_identity.py": {
    "direct": 1,
-   "routed": 1,
+   "routed": 2,
    "status": "pending"
   },
   "hermes_cli/profiles.py": {
@@ -1275,6 +1285,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "tools/browser_launcher.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
+  },
   "tools/browser_lightpanda.py": {
    "direct": 2,
    "routed": 0,
@@ -1312,7 +1327,7 @@
   },
   "tools/computer_use/cua_backend_session.py": {
    "direct": 0,
-   "routed": 1,
+   "routed": 2,
    "status": "fenced"
   },
   "tools/computer_use/doctor.py": {
@@ -1335,6 +1350,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "tools/environments/base_output.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
+  },
   "tools/environments/docker.py": {
    "direct": 4,
    "routed": 0,
@@ -1344,6 +1364,11 @@
    "direct": 1,
    "routed": 0,
    "status": "pending"
+  },
+  "tools/environments/local.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
   },
   "tools/environments/reattach.py": {
    "direct": 2,
@@ -1397,12 +1422,17 @@
   },
   "tools/process_registry.py": {
    "direct": 2,
-   "routed": 0,
+   "routed": 2,
    "status": "pending"
+  },
+  "tools/process_registry_ownership.py": {
+   "direct": 0,
+   "routed": 1,
+   "status": "fenced"
   },
   "tools/process_registry_survivable.py": {
    "direct": 0,
-   "routed": 1,
+   "routed": 2,
    "status": "fenced"
   },
   "tools/process_registry_termination.py": {
@@ -1487,7 +1517,7 @@
   },
   "tui_gateway/host_supervisor.py": {
    "direct": 1,
-   "routed": 0,
+   "routed": 1,
    "status": "pending"
   },
   "tui_gateway/methods_complete_helpers.py": {
@@ -1499,7 +1529,16 @@
    "direct": 1,
    "routed": 0,
    "status": "pending"
+  },
+  "tui_gateway/methods_tools.py": {
+   "direct": 0,
+   "routed": 2,
+   "status": "fenced"
   }
+ },
+ "incomplete_seams": {
+  "gateway/session_worker_spawn.py": "acquire_process runs a caller-supplied spawn callable with no drain lease; its one caller spawns in gateway/session_managed_worker.py (pending)",
+  "tools/registry.py": "registry.dispatch takes no drain lease: a tool handler is covered only where its own spawn site is fenced; handlers that spawn through a pending file run unfenced"
  },
  "version": 1
 }
