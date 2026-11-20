@@ -313,7 +313,7 @@ def test_stale_model_options_rpc_forwards_session_profile_and_live_model(home, m
     def fake(_port, path, **_k):
         calls.append(path)
         return {"providers": [{"slug": "xai", "models": ["launch-model"]}],
-                "model": "launch-model", "provider": "xai"}
+                "model": "launch-model", "provider": "anthropic"}
 
     monkeypatch.setattr(ro, "handoff_control_read", fake)
     ember = home / "profiles" / "ember"
@@ -337,3 +337,104 @@ def test_stale_model_options_rpc_refuses_unknown_session_scope(home, monkeypatch
     resp = server._methods["model.options"]("rid", {"session_id": "missing-tile", "explicit_only": True})
     assert resp.get("error", {}).get("code") == 5098, resp
     assert calls == []
+
+
+# --- mutation-closing tests (review 5991148685) ---------------------------------------------
+
+
+def test_active_or_warming_backend_never_calls_the_getter(home):
+    calls = []
+
+    def get(*a, **_k):
+        calls.append(a)  # recorded outside any swallowed AssertionError
+        return 200, 0.0, {"ok": True}
+
+    ro.write_active(9149, warming=[9148])
+    assert ro.handoff_control_read(9149, "/api/model/options", get=get) is None
+    ro.write_active(9149)
+    assert ro.handoff_control_read(9149, "/api/model/options", get=get) is None
+    assert calls == []
+
+
+def _rpc(home, monkeypatch, params, sessions=None, payload=None):
+    from tui_gateway import server
+
+    monkeypatch.setattr(code_skew, "detect_code_skew", lambda: ("74e8765b42", "fcda64965f"))
+    monkeypatch.setattr(ro, "this_backend_port", lambda: 9149)
+    calls = []
+    body = payload if payload is not None else {"providers": [], "provider": "xai", "model": "m"}
+    monkeypatch.setattr(ro, "handoff_control_read", lambda _p, path, **_k: calls.append(path) or body)
+    for sid, sess in (sessions or {}).items():
+        monkeypatch.setitem(server._sessions, sid, sess)
+    return server._methods["model.options"]("rid", params), calls
+
+
+def test_rpc_unnameable_profile_home_refuses(home, monkeypatch):
+    odd = home / "elsewhere"
+    odd.mkdir()
+    resp, calls = _rpc(home, monkeypatch, {"session_id": "s1"}, {"s1": {"agent": None, "profile_home": str(odd)}})
+    assert resp.get("error", {}).get("code") == 5098, resp
+    assert calls == []
+
+
+def test_rpc_explicit_profile_param_is_forwarded(home, monkeypatch):
+    (home / ".hermes" / "profiles" / "ember").mkdir(parents=True)
+    resp, calls = _rpc(home, monkeypatch, {"profile": "ember"})
+    assert "result" in resp, resp
+    assert calls == [ro.model_options_control_path(profile="ember")]
+    assert "profile=ember" in calls[0]
+
+
+def test_rpc_session_without_profile_home_uses_launch_profile(home, monkeypatch):
+    resp, calls = _rpc(home, monkeypatch, {"session_id": "s2"}, {"s2": {"agent": None}})
+    assert "result" in resp, resp
+    assert calls == [ro.model_options_control_path()]
+
+
+def test_rpc_default_profile_home_is_omitted_not_named(home, monkeypatch):
+    default_home = home / ".hermes"
+    default_home.mkdir(exist_ok=True)
+    resp, calls = _rpc(home, monkeypatch, {"session_id": "s3"}, {"s3": {"agent": None, "profile_home": str(default_home)}})
+    assert "result" in resp, resp
+    assert calls == [ro.model_options_control_path()]
+    assert "profile" not in calls[0]
+
+
+def test_rpc_forwards_every_flag(home, monkeypatch):
+    resp, calls = _rpc(home, monkeypatch, {"explicit_only": True, "refresh": True, "include_unconfigured": True})
+    assert "result" in resp, resp
+    assert calls == [ro.model_options_control_path(explicit_only=True, refresh=True, include_unconfigured=True)]
+    for flag in ("explicit_only=true", "refresh=true", "include_unconfigured=true"):
+        assert flag in calls[0]
+
+
+def test_rest_forwards_include_unconfigured(home, monkeypatch):
+    monkeypatch.setattr(code_skew, "detect_code_skew", lambda: ("74e8765b42", "fcda64965f"))
+    monkeypatch.setattr(ro, "this_backend_port", lambda: 9149)
+    calls = []
+    monkeypatch.setattr(ro, "handoff_control_read", lambda _p, path, **_k: calls.append(path) or {"providers": []})
+    asyncio.run(_rt_models.get_model_options(include_unconfigured=True))
+    assert calls == [ro.model_options_control_path(include_unconfigured=True)]
+    assert "include_unconfigured=true" in calls[0]
+
+
+@pytest.mark.parametrize("live,handoff_provider", [("anthropic", "xai"), ("custom", "custom:corp")])
+def test_rpc_refuses_when_live_provider_differs_from_successor_rows(home, monkeypatch, live, handoff_provider):
+    agent = types.SimpleNamespace(model="live-model", provider=live)
+    payload = {"provider": handoff_provider, "model": "disk-model",
+               "providers": [{"slug": handoff_provider, "is_current": True, "models": ["disk-model"]}]}
+    resp, calls = _rpc(home, monkeypatch, {"session_id": "s4", "explicit_only": True},
+                       {"s4": {"agent": agent}}, payload)
+    assert calls, "successor must have been asked"
+    assert resp.get("error", {}).get("code") == 5098, resp
+    assert "result" not in resp
+
+
+def test_rpc_matching_provider_overlays_live_model_only(home, monkeypatch):
+    agent = types.SimpleNamespace(model="live-model", provider="xai")
+    payload = {"provider": "xai", "model": "disk-model",
+               "providers": [{"slug": "xai", "is_current": True, "models": ["disk-model"]}]}
+    resp, _ = _rpc(home, monkeypatch, {"session_id": "s5"}, {"s5": {"agent": agent}}, payload)
+    assert resp["result"]["model"] == "live-model"
+    assert resp["result"]["provider"] == "xai"
+    assert resp["result"]["providers"] == payload["providers"]

@@ -152,15 +152,19 @@ def _model_options_handoff_scope(params: dict) -> tuple[str | None, bool]:
     return (None if name == "default" else name), False
 
 
-def _overlay_live_model_options(payload: dict, agent) -> dict:
-    """Keep the live session pick; successor disk/launch config is not the session's model."""
-    if not isinstance(payload, dict) or agent is None:
+def _overlay_live_model_options(payload: dict, agent) -> dict | None:
+    """Keep the live session model; None (fail closed) when the live provider differs from the
+    successor's: its rows (``is_current``, explicit-only current row, ``custom:<key>`` identity)
+    come from disk config and would contradict an overlaid provider."""
+    if not isinstance(payload, dict):
+        return None
+    if agent is None:
         return payload
-    out = dict(payload)
     provider = str(getattr(agent, "provider", "") or "").strip()
     model = str(getattr(agent, "model", "") or "").strip()
-    if provider:
-        out["provider"] = provider
+    if provider and provider != str(payload.get("provider") or "").strip():
+        return None
+    out = dict(payload)
     if model:
         out["model"] = model
     return out

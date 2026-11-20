@@ -335,7 +335,9 @@ def _(rid, params: dict) -> dict:
             refresh=bool(params.get("refresh")), profile=profile)
         handed = handoff_control_read(this_backend_port() or 0, path)
         if handed is not None:
-            return _ok(rid, _overlay_live_model_options(handed, _session_agent(params)))
+            overlaid = _overlay_live_model_options(handed, _session_agent(params))
+            if overlaid is not None:
+                return _ok(rid, overlaid)
         return skew
     from hermes_cli.inventory import build_model_options_payload
     # A spawned agent owns the live provider/model/base_url; empty attributes must
