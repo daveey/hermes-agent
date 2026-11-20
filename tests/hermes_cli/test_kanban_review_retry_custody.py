@@ -261,3 +261,35 @@ def test_typed_admission_receipt_works_for_ready_lane_review(board, reason, expe
     run = authors._run(conn, tid, receipt=authors.OPUS)
     kb._append_event(conn, tid, 'gave_up', {'admission_refusal': reason}, run_id=run)
     assert admission_gave_up(conn, tid, run, json.dumps({'retry_status': 'ready'}), 'refused') is expected
+
+
+def test_older_real_failure_survives_newer_admission_gave_up(board):
+    conn, _ = board
+    tid = kb.create_task(conn, title='Implementation', assignee='worker')
+    crashed = authors._run(conn, tid, receipt=authors.OPUS)
+    conn.execute("UPDATE task_runs SET outcome='crashed' WHERE id=?", (crashed,))
+    refused = authors._run(conn, tid, receipt=authors.OPUS)
+    conn.execute("UPDATE task_runs SET outcome='gave_up' WHERE id=?", (refused,))
+    kb._append_event(conn, tid, 'gave_up', {'admission_refusal': 'review_model_unavailable'}, run_id=refused)
+    conn.commit()
+    assert tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane='ready', cfg=TIER) == (
+        'class:deep', 'auto', 'retry_after_run_crashed')
+
+
+def test_changed_handoff_between_matching_ones_resets_identity(identity_board):
+    with authors.kbc.connect() as conn:
+        tid = authors._card(conn)
+        handoff(conn, tid, authors.ASTRA, ARTIFACT)
+        handoff(conn, tid, authors.GROK, {**ARTIFACT, 'merge_commit': 'c' * 40})
+        handoff(conn, tid, authors.OPUS, ARTIFACT)
+        assert review.implementer_models(conn, kb.get_task(conn, tid)) == {
+            authors.ASTRA, authors.GROK, authors.OPUS}
+
+
+def test_manual_promotion_is_newest_lifecycle_phase(board):
+    conn, _ = board
+    tid = kb.create_task(conn, title='Implementation', assignee='worker')
+    kb._append_event(conn, tid, 'gave_up', {'retry_status': 'review'})
+    assert kb._resume_status_from_events(conn, tid) == 'review'
+    kb._append_event(conn, tid, 'promoted_manual', {})
+    assert kb._resume_status_from_events(conn, tid) == 'ready'
