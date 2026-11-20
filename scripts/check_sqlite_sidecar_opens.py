@@ -37,8 +37,13 @@ Names are tracked without flow, and err toward flagging (rename the variable or 
                  method, or ``SUFFIX = "-wal"`` in a class body, marks every ``<x>.shm`` /
                  ``<x>.SUFFIX``.
 
+A function of the same file that passes a parameter to such a call (``def _head(path): open(path)``),
+directly or through another such function, is a file call too: ``_head(db + "-shm", 0, 48)`` is flagged
+at the call site (hermes-hub 2026-11-20: exactly that, in the annotation holder's watch signature, cancelled the
+Desktop backend's locks every 2 s and two writers corrupted state.db's indexes).
+
 Not caught: a sidecar path built in another file, by a helper defined elsewhere, or passed in
-as a parameter; one stored under a subscript (``d["wal"] = ...; open(d["wal"])``); an aliased
+as a parameter of a function that is called from another file; one stored under a subscript (``d["wal"] = ...; open(d["wal"])``); an aliased
 import (``from os import open as os_open``); a database path with no identifying literal;
 ``open`` under another name (``op = open``); a global one function writes
 and another opens; a copy made by a child process; and descriptors opened from C extensions. The runtime side of this rule is ``hermes_state``'s WAL
@@ -168,6 +173,55 @@ def _tainted_names(nodes: list[ast.AST], inherited: frozenset[str]) -> frozenset
     return frozenset(tainted)
 
 
+Openers = dict[str, tuple[frozenset[int], frozenset[str]]]  # function name -> (path positions, path keywords)
+
+
+def _opener_call_paths(node: ast.Call, openers: Openers) -> list[ast.AST]:
+    """Path arguments of a call to a same-file function that opens one of its parameters."""
+    func = node.func
+    if isinstance(func, ast.Name):
+        name = func.id
+    elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in {"self", "cls"}:
+        name = func.attr
+    else:
+        return []
+    if name not in openers:
+        return []
+    positions, keywords = openers[name]
+    return [*(arg for i, arg in enumerate(node.args) if i in positions),
+            *(kw.value for kw in node.keywords if kw.arg in keywords)]
+
+
+def _openers(tree: ast.AST, src_lines: list[str] | None = None) -> Openers:
+    """Functions of this file that pass a parameter to a file call, directly or through another opener
+    (``def _head(path): open(path, "rb")``): calling one on a sidecar is a plain file call on it, so
+    the call site is flagged. Matched by bare name or ``self.``/``cls.`` method name, to a fixed point. A file
+    call carrying the opt-out marker does not make its function an opener."""
+    functions = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    openers: Openers = {}
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            params = [*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs]
+            names = {arg.arg for arg in params}
+            opened: set[str] = set()
+            for node in _scope_nodes(fn):
+                if isinstance(node, ast.Call) and not (src_lines and _marked(src_lines, node.lineno)):
+                    for path in [*_file_call_paths(node), *_opener_call_paths(node, openers)]:
+                        opened.update(sub.id for sub in ast.walk(path) if isinstance(sub, ast.Name) and sub.id in names)
+            if not opened:
+                continue
+            positional = [*fn.args.posonlyargs, *fn.args.args]
+            offset = 1 if positional and positional[0].arg in {"self", "cls"} else 0
+            entry = (frozenset(i - offset for i, arg in enumerate(positional) if arg.arg in opened and i >= offset),
+                     frozenset(opened))
+            if openers.get(fn.name) != entry:
+                openers[fn.name] = entry
+                changed = True
+    return openers
+
+
 def _file_call_paths(node: ast.Call) -> list[ast.AST]:
     """The path-bearing expressions of ``node`` when it is a file open/read/write/copy call."""
     func = node.func
@@ -209,6 +263,7 @@ def sidecar_open_lines(text: str) -> list[int]:
         if found_attrs == attrs:
             break
         attrs = frozenset(found_attrs)
+    openers = _openers(tree, text.splitlines())
     lines: set[int] = set()
     scopes: list[tuple[ast.AST, frozenset[str]]] = [(tree, attrs)]
     while scopes:
@@ -218,7 +273,9 @@ def sidecar_open_lines(text: str) -> list[int]:
         for node in nodes:
             if isinstance(node, _SCOPES):
                 scopes.append((node, tainted))  # a nested function sees the names of the one around it
-            elif isinstance(node, ast.Call) and any(_names_sidecar(path, tainted) for path in _file_call_paths(node)):
+            elif isinstance(node, ast.Call) and any(
+                    _names_sidecar(path, tainted)
+                    for path in [*_file_call_paths(node), *_opener_call_paths(node, openers)]):
                 lines.add(node.lineno)
     return sorted(lines)
 

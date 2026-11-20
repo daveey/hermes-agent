@@ -66,3 +66,54 @@ def test_missing_files_are_part_of_the_signature(tmp_path):
     before = watch.signature(SCOPE, [path], [])
     _db(path, wal=False).close()
     assert watch.signature(SCOPE, [path], []) != before
+
+
+_TRY_WRITE = """
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1], timeout=0, isolation_level=None)
+try:
+    conn.execute("BEGIN IMMEDIATE")
+except sqlite3.OperationalError as exc:
+    print("locked" if "locked" in str(exc) else "error: %s" % exc)
+else:
+    conn.execute("ROLLBACK")
+    print("acquired")
+"""
+
+
+def test_signature_keeps_this_process_sqlite_locks(tmp_path):
+    """hermes-hub 2026-11-18/20: the signature read state.db and its -shm with open()/close() in the Desktop
+    backend, which cancelled every SQLite POSIX lock the process held on them; a second process then took the WAL
+    writer lock while this one was mid-write and the two corrupted state.db's indexes. A write transaction open
+    here must keep refusing a foreign writer across signature()."""
+    import subprocess
+    import sys
+
+    path = str(tmp_path / "live.db")
+    conn = _db(path, wal=True)
+
+    def foreign_writer():
+        return subprocess.run([sys.executable, "-c", _TRY_WRITE, path], capture_output=True, text=True, check=True,
+                              timeout=60).stdout.strip()
+
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("UPDATE t SET v = 'mid-write' WHERE id = 1")
+    assert foreign_writer() == "locked"
+    for _ in range(3):
+        watch.signature(SCOPE, [path], [])
+    assert foreign_writer() == "locked"
+    conn.execute("COMMIT")
+    assert foreign_writer() == "acquired"
+    conn.close()
+
+
+def test_head_reports_missing_files_and_raises_on_unreadable(tmp_path, monkeypatch):
+    assert watch._head(str(tmp_path / "absent.db"), 0, 4) is None
+    present = tmp_path / "present.db"
+    present.write_bytes(b"0123456789")
+    assert watch._head(str(present), 2, 6) == b"2345".hex()
+    monkeypatch.setattr(watch, "pread_lock_safe", lambda *_a: None)
+    import pytest
+
+    with pytest.raises(OSError):
+        watch._head(str(present), 0, 4)

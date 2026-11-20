@@ -137,3 +137,30 @@ def test_rollback_journal_copy_lets_a_live_writer_commit_between_steps(tmp_path,
             assert copy.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     else:
         assert not snapshot.exists()
+
+
+def test_uses_wal_reads_the_header_without_a_plain_open(tmp_path, monkeypatch):
+    """_safe_copy_db already holds a connection to src when it asks; a plain open()/close() of src would cancel
+    this process's SQLite locks on it (hermes-hub 2026-11-20 class of bug). The header goes through the lock-safe
+    cached descriptor instead."""
+    import builtins
+    import sqlite3
+
+    from hermes_cli import backup_sqlite
+
+    path = tmp_path / "w.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE t (x)")
+    rollback = tmp_path / "r.db"
+    with sqlite3.connect(rollback) as conn:
+        conn.execute("CREATE TABLE t (x)")
+    real_open = builtins.open
+
+    def guarded_open(file, *args, **kwargs):
+        assert str(file) not in {str(path), str(rollback)}, "plain open() of a live database"
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    assert backup_sqlite._uses_wal(path) is True
+    assert backup_sqlite._uses_wal(rollback) is False

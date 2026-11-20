@@ -65,9 +65,16 @@ _ROLLBACK_LOCK_HOLD_SECONDS = 0.25
 
 
 def _uses_wal(src: Path) -> bool:
-    # Header byte 18 (file format write version) is 2 for WAL; reading it takes no lock.
-    with open(src, "rb") as handle:
-        header = handle.read(19)
+    # Header byte 18 (file format write version) is 2 for WAL. Read through the lock-safe cached descriptor:
+    # _safe_copy_db already holds a connection to src here (and runs inside the gateway/CLI next to live
+    # ones), and a plain open()/close() would cancel this process's SQLite locks on the file.
+    try:
+        from hermes_cli.sqlite_safe_read import read_header_lock_safe
+    except ImportError:  # the standalone pre-stop script: stdlib only, and no other connection in that process
+        with open(src, "rb") as handle:  # sqlite-sidecar-open: ok — stdlib-only pre-stop process
+            header = handle.read(19)
+    else:
+        header = read_header_lock_safe(src, 19) or b""
     return len(header) == 19 and header[18] == 2
 
 
