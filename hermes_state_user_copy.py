@@ -83,8 +83,8 @@ _STORAGE_FAILURES: dict[str, tuple[str, str, str]] = {
     ),
     "turn_lease": (
         "storage_busy",
-        "another Hermes process took over this session",
-        "Wait for it to finish, then send your message again.",
+        "this chat's turn lease is missing or held by another writer",
+        "If another Hermes window holds it, wait or use Take over here; otherwise send again.",
     ),
     "unknown": (
         "storage_unavailable",

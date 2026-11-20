@@ -557,6 +557,43 @@ def test_turn_lease_fences_stale_transcript_flush_after_reclaim(tmp_path):
     db.release_session_turn_lease("shared", next_holder)
 
 
+def test_turn_lease_reclaims_missing_row_for_matching_holder(tmp_path):
+    """A still-running writer can persist if the SQLite lease row vanished.
+
+    ``_check_transcript_write_guards`` used to treat missing-or-mismatch as one
+    error; the UI glossed that as takeover even when no other holder existed.
+    """
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("shared", source="test")
+    holder = f"pid={os.getpid()}:turn=owner"
+    other = f"pid={os.getpid()}:turn=other"
+    assert db.try_acquire_session_turn_lease("shared", holder, ttl_seconds=5)
+    raw = sqlite3.connect(tmp_path / "state.db")
+    with raw:
+        raw.execute("DELETE FROM session_turn_leases WHERE conversation_id = 'shared'")
+    assert db.append_messages_batch(
+        "shared",
+        [{"role": "assistant", "content": "reclaimed"}],
+        turn_lease_holder=holder,
+    ) == 1
+    with db._read_ctx() as conn:
+        lease = conn.execute(
+            "SELECT holder FROM session_turn_leases WHERE conversation_id = ?",
+            ("shared",),
+        ).fetchone()
+    assert lease["holder"] == holder
+    assert [m["content"] for m in db.get_messages("shared")] == ["reclaimed"]
+    assert db.try_acquire_session_turn_lease("shared", other, ttl_seconds=5) is False
+    with pytest.raises(SessionTurnLeaseLostError, match="held by"):
+        db.append_messages_batch(
+            "shared",
+            [{"role": "assistant", "content": "late"}],
+            turn_lease_holder=other,
+        )
+    raw.close()
+    db.release_session_turn_lease("shared", holder)
+
+
 def test_turn_lease_revives_expired_row_still_owned_by_writer(tmp_path, monkeypatch):
     import hermes_state_compression
     import hermes_state_messages
@@ -622,17 +659,25 @@ def test_turn_lease_acquisition_sweeps_long_expired_rows_of_other_conversations(
 
 
 def test_turn_lease_fences_flush_when_row_is_absent(tmp_path):
+    """A vacant conversation is reclaimed by the presented holder, not treated as takeover."""
     db = SessionDB(tmp_path / "state.db")
     db.create_session("shared", source="test")
     holder = f"pid={os.getpid()}:turn=owner"
+    other = f"pid={os.getpid()}:turn=other"
 
-    with pytest.raises(SessionTurnLeaseLostError, match="turn lease lost"):
+    assert db.append_messages_batch(
+        "shared",
+        [{"role": "assistant", "content": "after release"}],
+        turn_lease_holder=holder,
+    ) == 1
+    assert [m["content"] for m in db.get_messages("shared")] == ["after release"]
+    with pytest.raises(SessionTurnLeaseLostError, match="held by"):
         db.append_messages_batch(
             "shared",
-            [{"role": "assistant", "content": "after release"}],
-            turn_lease_holder=holder,
+            [{"role": "assistant", "content": "late"}],
+            turn_lease_holder=other,
         )
-    assert db.get_messages("shared") == []
+    db.release_session_turn_lease("shared", holder)
 
 
 def test_turn_lease_fence_walks_compression_child_to_root(tmp_path):

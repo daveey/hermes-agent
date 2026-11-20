@@ -217,24 +217,13 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
         reject_active_turn_lease: bool = False, reject_active_compression_lock: bool = False,
         allow_closed_compression_parent: bool = False, reject_parked_turn: bool = False) -> None:
         """Transcript-write admission checks, run INSIDE the write txn by every writer. Ordinary appends do
-        NOT check compression_locks: the lock only stops two COMPRESSIONS colliding and archive_and_compact()
-        commits against a watermark, so concurrent appends are safe (blocking them killed turns during slow
-        summaries). Destructive user mutations opt in via ``reject_active_*`` so a compressor that captured
-        its watermark cannot resurrect the removed turn.
-
-        Shared by every writer (#74478 patience note below). ``reject_active_turn_lease`` also refuses a turn
-        parked for an update (its checkpoint forbids a later row); ``reject_parked_turn`` is that half alone,
-        for the public lease-less appenders: a passive row must not void the proof [daveey t_01a1d6f94ac774a2]."""
+        NOT check compression_locks (#75316): the lock only stops two COMPRESSIONS colliding and
+        archive_and_compact() commits against a watermark, so concurrent appends are safe (blocking them
+        killed turns during slow summaries; #74568, #77386). Destructive user mutations opt in via
+        ``reject_active_*`` so a compressor that captured its watermark cannot resurrect the removed turn.
+        ``reject_active_turn_lease`` / ``reject_parked_turn`` refuse a parked update [daveey t_01a1d6f94ac774a2]."""
         from hermes_state import SessionCompressionInProgressError
         from hermes_state_errors import CompressionSessionClosedError, SessionTurnLeaseLostError
-        # NOTE (#75316 redesign): appends do NOT check compression_locks. The lock's job is to stop two
-        # COMPRESSIONS colliding, not to fence ordinary transcript writes. Concurrent appends during a
-        # compression are safe by construction: archive_and_compact() commits against a watermark captured
-        # at compression start and clones every row that arrived after it back into the live transcript, in
-        # the same write transaction. Blocking appends here was the root cause of a whole symptom family —
-        # turns dying as session_persistence_failed while a slow provider summary held the lease (#74568,
-        # #77386), including stale locks from dead PIDs blocking writes for the full TTL. Keep that narrow
-        # fence opt-in so ordinary appends retain the watermark behavior.
         if reject_active_compression_lock:
             active_lock = conn.execute(_COMPRESSION_LOCK_ROW_SQL, (session_id,)).fetchone()
             if active_lock is not None:
@@ -248,11 +237,22 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
             lease = conn.execute(_TURN_LEASE_ROW_SQL, (conversation_id,)).fetchone()
             now = time.time()
             if turn_lease_holder:
-                if lease is None or lease["holder"] != turn_lease_holder:
-                    raise SessionTurnLeaseLostError(f"Session turn lease lost; refusing transcript write for {session_id!r}")
+                if lease is not None and lease["holder"] != turn_lease_holder:
+                    raise SessionTurnLeaseLostError(
+                        f"Session turn lease lost; refusing transcript write for {session_id!r} "
+                        f"(held by {lease['holder']!r})")
+                if lease is None:  # vacant row is not takeover; reclaim like expiry (same txn)
+                    conn.execute("INSERT OR IGNORE INTO session_turn_leases "
+                        "(conversation_id, holder, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
+                        (conversation_id, turn_lease_holder, now,
+                         now + max(0.1, float(turn_lease_ttl_seconds))))
+                    lease = conn.execute(_TURN_LEASE_ROW_SQL, (conversation_id,)).fetchone()
+                    if lease is None or lease["holder"] != turn_lease_holder:
+                        raise SessionTurnLeaseLostError(
+                            f"Session turn lease lost; refusing transcript write for {session_id!r}"
+                            + (f" (held by {lease['holder']!r})" if lease is not None else ""))
                 if float(lease["expires_at"]) <= now:
-                    # Expiry makes the row reclaimable, not taken over; BEGIN IMMEDIATE serializes this
-                    # renewal with acquisition, so a still-matching owner recovers from a starved refresher.
+                    # Expiry is reclaimable, not takeover; BEGIN IMMEDIATE serializes with acquisition.
                     conn.execute("UPDATE session_turn_leases SET expires_at = ? "
                         "WHERE conversation_id = ? AND holder = ?",
                         (now + max(0.1, float(turn_lease_ttl_seconds)), conversation_id, turn_lease_holder))
