@@ -943,15 +943,15 @@ describe('sessionStatusStripe external-run precedence', () => {
   })
 
   it('stalled still beats waiting when there is no external work', () => {
-    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 1, null, 0, 0)).toBe('stalled')
+    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 1, null, false, 0, 0)).toBe('stalled')
   })
 
   it('waiting when parked with no external/stalled/red', () => {
-    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 0, null, 0, 0)).toBe('waiting')
+    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 0, null, false, 0, 0)).toBe('waiting')
   })
 
   it('done when the chat has turns and nothing is waiting', () => {
-    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 0, 0, null, 0, 0)).toBe('done')
+    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 0, 0, null, false, 0, 0)).toBe('done')
   })
 
   it('absent external fields keep today: parked-only is waiting, not external', () => {

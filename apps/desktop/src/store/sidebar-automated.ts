@@ -33,7 +33,7 @@ type AutomatedRow = Pick<
   | 'pinned'
   | 'review_wait'
 > &
-  Partial<Pick<SessionInfo, 'execution_observations' | 'kanban_stalled' | 'muted'>>
+  Partial<Pick<SessionInfo, 'execution_observations' | 'kanban_stalled' | 'kanban_external' | 'kanban_external_down' | 'kanban_observed_at' | 'muted'>>
 
 export interface AutomatedRowContext {
   /** Explicit render clock for memoized filters; imperative callers use the current clock. */
@@ -67,6 +67,7 @@ export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotS
     // stripe (e.g. `unresolved` → amber) on bot / smoke-test traffic would flood the sidebar with it.
     counts.stalled,
     undefined,
+    false,
     counts.external,
     counts.externalDown
   )

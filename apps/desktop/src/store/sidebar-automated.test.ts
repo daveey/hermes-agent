@@ -33,6 +33,14 @@ describe('sessionHiddenAsAutomated [daveey]', () => {
     expect(sessionHiddenAsAutomated(legacy, false, { dotState: 'idle' })).toBe(false)
   })
 
+  it('resurfaces an automated row when external work is down, not when merely running', () => {
+    const row = { ...bot, kanban_active: 1, kanban_parked: 1, kanban_observed_at: 1000 }
+    const ctx = { dotState: 'idle' as const, nowSeconds: 1000 }
+
+    expect(sessionHiddenAsAutomated({ ...row, kanban_external: 1 }, false, ctx)).toBe(true)
+    expect(sessionHiddenAsAutomated({ ...row, kanban_external_down: 1 }, false, ctx)).toBe(false)
+  })
+
   it('shows automated rows when the toggle is on', () => {
     expect(sessionHiddenAsAutomated(bot, true, { dotState: 'idle' })).toBe(false)
     $sidebarShowAutomated.set(true)
