@@ -6,6 +6,7 @@ import logging
 from hermes_cli import kanban_containment_connections as connections
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_queue_position as kqp
+from hermes_cli import kanban_sync_quarantine as quarantine
 from hermes_cli import kanban_sync_quarantine_notice as notice
 from tests.hermes_cli import kanban_quarantine_support as support
 from tests.hermes_cli import test_kanban_containment_replica as fixtures
@@ -32,13 +33,14 @@ def test_one_hub_card_per_receipt_naming_board_tasks_kind_and_release_command(sy
     case = support.conflict(conn, both=True)
     courier = Courier()
     filed = notice.notify(conn, "fixture", runner=courier, hub_cli="hermes-hub", host="worker-1", now=1000.0)
-    keys = {f"containment-quarantine:fixture:{case.uid}", f"containment-quarantine:fixture:{case.release_uid}"}
+    at = {e["receipt"]: e["quarantined_at"] for e in quarantine.entries(conn)}
+    keys = {f"containment-quarantine:fixture:{uid}:worker-1:{at[uid]}" for uid in (case.uid, case.release_uid)}
     assert set(filed) == keys and len(courier.calls) == 2
     for argv in courier.calls:
         assert argv[:3] == ["hermes-hub", "create-task", "hub"]
         assert _arg(argv, "--id") in keys and f"idempotency_key=\"{_arg(argv, '--id')}\"" in argv
         body = _arg(argv, "--body")
-        receipt = _arg(argv, "--id").rsplit(":", 1)[1]
+        receipt = _arg(argv, "--id").split(":")[2]
         assert "fixture" in body and case.target in body and "identity_changed" in body
         assert f"hermes kanban --board fixture sync quarantine --release {receipt} --reason" in body
     assert notice.notify(conn, "fixture", runner=courier, hub_cli="hermes-hub", host="worker-1", now=1001.0) == []
@@ -55,7 +57,9 @@ def test_hub_host_logs_once_and_files_no_card(synced_conn, caplog):
         notice.notify(conn, "fixture", runner=courier, hub_cli="hermes-hub", host="hub", now=1001.0)
     assert courier.calls == []
     assert sum(case.uid in r.getMessage() for r in caplog.records) == 1
-    assert notice._read_state()["filed"][f"containment-quarantine:fixture:{case.uid}"]["hub"] is True
+    [entry] = quarantine.entries(conn)
+    key = f"containment-quarantine:fixture:{case.uid}:hub:{entry['quarantined_at']}"
+    assert notice._read_state()["filed"][key]["hub"] is True
 
 
 def test_courier_failure_backs_off_ten_minutes(synced_conn):

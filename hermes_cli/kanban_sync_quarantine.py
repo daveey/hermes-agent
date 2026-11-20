@@ -14,8 +14,17 @@ attachment deletes included); their later feed rows are withheld. Other tasks ke
 Nothing releases a hold automatically. ``hermes kanban sync quarantine --release`` (``kanban_sync_quarantine_release``)
 appends an operator acceptance of the Board's current live evidence, replays the withheld rows through certify and
 apply, and lifts only that receipt's holds inside that apply transaction. The first observed receipt is never
-rewritten and acceptances are append-only. One hub card per receipt tells the owner
+rewritten and acceptances are append-only. One hub card per receipt and host tells the owner
 (``kanban_sync_quarantine_notice``). This ledger is never synced authority and never fabricates a containment episode.
+
+Schema and downgrade. :func:`install` checks the column set of every existing ``containment_sync_*`` table and
+raises :class:`QuarantineSchemaRefused` (a ``ContainmentRefused``, so the per-board catch ends only that board's
+round) for any other shape, e.g. one left by an earlier unreleased build of this module; no host had such a table
+when this shape shipped (survey 2026-11-20: hub, MacBook, mini ~/.hermes and ~/.bb-hermes, pool workers). A core
+older than this module does not know these tables: it neither enforces the holds nor replays the withheld rows,
+whose feed cursor has already moved past them. After such a downgrade, rebuild the replica (delete
+``kanban/sync-shadow/<board>.db``; the next round resyncs it from the Board's snapshot) before trusting a held card;
+upgrading again re-enforces every hold still recorded.
 """
 from __future__ import annotations
 
@@ -26,6 +35,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
@@ -35,10 +45,13 @@ _SINK = contextvars.ContextVar("containment_quarantine_sink", default=None)
 # Released per receipt by ``lift`` (its triggers are dropped and restored inside that transaction).
 _TABLES = {
     "containment_sync_quarantine": "uid TEXT PRIMARY KEY,task_id TEXT NOT NULL,board TEXT NOT NULL,kind TEXT NOT NULL,"
-                                   "reason TEXT NOT NULL,wire TEXT NOT NULL",
+                                   "reason TEXT NOT NULL,wire TEXT NOT NULL,quarantined_at INTEGER NOT NULL",
     "containment_sync_quarantine_tasks": "task_id TEXT NOT NULL,receipt_uid TEXT NOT NULL,via TEXT NOT NULL,"
                                          "PRIMARY KEY(task_id,receipt_uid)",
-    "containment_sync_withheld": "wire TEXT PRIMARY KEY",
+    # ``ord`` is the withhold epoch (one per withheld page, increasing): replay order is (ord, seq), so snapshot
+    # rows (seq 0) withheld during a resync replay after every feed row withheld before it. The feed cursor cannot
+    # order them: a retention rebuild restarts it at 0.
+    "containment_sync_withheld": "wire TEXT PRIMARY KEY,ord INTEGER NOT NULL",
 }
 # Append-only forever: the durable audit record of each operator release.
 _ACCEPTANCES = ("containment_sync_acceptances", "receipt_uid TEXT NOT NULL,sha256 TEXT NOT NULL,evidence TEXT NOT NULL,"
@@ -46,8 +59,16 @@ _ACCEPTANCES = ("containment_sync_acceptances", "receipt_uid TEXT NOT NULL,sha25
                 "PRIMARY KEY(receipt_uid,sha256,accepted_at)")
 # The owning task of a deleted chat link/attachment: its outbox delete carries no fields and its row is gone.
 _OWNER = "containment_sync_delete_owner"
+_OWNER_COLUMNS = "table_name TEXT NOT NULL,row_uid TEXT NOT NULL,task_id TEXT NOT NULL,PRIMARY KEY(table_name,row_uid)"
 _OWNED = ("task_chat_links", "task_attachments")
 _ADOPTED = ("containment_sync_quarantine", "containment_sync_quarantine_tasks", _ACCEPTANCES[0])
+_clock = time.time  # quarantine first-seen stamps (ms); tests pin it
+
+
+class QuarantineSchemaRefused(ContainmentRefused):
+    """An existing quarantine table has another column set (an earlier unreleased shape): refuse, never guess."""
+
+
 _CLOSURE = ("WITH RECURSIVE held(id) AS (SELECT task_id FROM containment_sync_quarantine_tasks{where} UNION "
             "SELECT l.child_id FROM task_links l JOIN held h ON l.parent_id=h.id) SELECT id FROM held")
 
@@ -79,7 +100,27 @@ def _immutable(conn, table: str) -> None:
                      "BEGIN SELECT RAISE(ABORT,'containment_quarantine_immutable'); END")
 
 
+def _check_shape(conn) -> None:
+    for table, columns in (*_TABLES.items(), _ACCEPTANCES, (_OWNER, _OWNER_COLUMNS)):
+        have = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+        if have and have != _columns(columns):
+            raise QuarantineSchemaRefused(
+                f"{table} has columns {have}, this core expects {_columns(columns)}: an earlier unreleased quarantine "
+                "shape. Not migrated; rebuild the replica and move the live file's quarantine tables aside by hand")
+
+
+def _columns(spec: str) -> list[str]:
+    """Column names of a CREATE TABLE column spec (table constraints like PRIMARY KEY(...) excluded)."""
+    out, depth = [], 0
+    for part in spec.split(","):
+        if depth == 0 and not part.startswith("PRIMARY KEY"):
+            out.append(part.split()[0])
+        depth += part.count("(") - part.count(")")
+    return out
+
+
 def install(conn) -> None:
+    _check_shape(conn)
     from hermes_cli import kanban_containment_guard as guard
     from hermes_cli.kanban_containment_connections import verifier
     from hermes_cli import kanban_containment_replica as replica
@@ -88,8 +129,7 @@ def install(conn) -> None:
     for table, columns in (*_TABLES.items(), _ACCEPTANCES):
         conn.execute(f"CREATE TABLE IF NOT EXISTS {table} ({columns})")
         _immutable(conn, table)
-    conn.execute(f"CREATE TABLE IF NOT EXISTS {_OWNER} (table_name TEXT NOT NULL,row_uid TEXT NOT NULL,"
-                 "task_id TEXT NOT NULL,PRIMARY KEY(table_name,row_uid))")
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {_OWNER} ({_OWNER_COLUMNS})")
     for table in _OWNED:
         if {"uid", "task_id"} <= {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"CREATE TRIGGER IF NOT EXISTS {_OWNER}_{table} AFTER DELETE ON {table} BEGIN "
@@ -125,10 +165,10 @@ def entries(conn) -> list[dict]:
     """Owner-visible view: one dict per quarantined receipt, with every task it holds."""
     if not _exists(conn):
         return []
-    return [{"receipt": uid, "board": board, "task": task, "kind": kind, "reason": reason,
+    return [{"receipt": uid, "board": board, "task": task, "kind": kind, "reason": reason, "quarantined_at": at,
              "held_tasks": sorted(tasks(conn, uid))}
-            for uid, task, board, kind, reason in conn.execute(
-                "SELECT uid,task_id,board,kind,reason FROM containment_sync_quarantine ORDER BY rowid")]
+            for uid, task, board, kind, reason, at in conn.execute(
+                "SELECT uid,task_id,board,kind,reason,quarantined_at FROM containment_sync_quarantine ORDER BY rowid")]
 
 
 def release_command(board: str, receipt: str) -> str:
@@ -157,7 +197,7 @@ def lift(conn, receipt: str, replayed: list[str], deferred: list[str]) -> None:
     conn.execute("DELETE FROM containment_sync_quarantine_tasks WHERE receipt_uid=?", (receipt,))
     conn.execute("DELETE FROM containment_sync_quarantine WHERE uid=?", (receipt,))
     conn.executemany("DELETE FROM containment_sync_withheld WHERE wire=?", [(w,) for w in replayed])
-    conn.executemany("INSERT OR IGNORE INTO containment_sync_withheld VALUES (?)", [(w,) for w in deferred])
+    conn.executemany("INSERT OR IGNORE INTO containment_sync_withheld VALUES (?,0)", [(w,) for w in deferred])
     if not receipts(conn):
         conn.execute(f"DELETE FROM {_OWNER}")
     for sql in saved.values():
@@ -205,11 +245,12 @@ def certified_page(conn, hub, board: str, changes) -> list:
         try:
             replica.certify_page(conn, hub, board, [change])
         except ContainmentConflict as exc:
-            _quarantine(conn, board, change, exc)
-    return _withhold(conn, changes)
+            quarantine_change(conn, board, change, exc)
+    return withhold(conn, changes)
 
 
-def _quarantine(conn, board: str, change, exc) -> None:
+def quarantine_change(conn, board: str, change, exc) -> None:
+    """Journal ``change``'s receipt as quarantined (``exc`` carries ``kind``/``uid``) and hold its task."""
     from hermes_cli import kanban_containment_replica as replica
     from hermes_cli import kanban_db as kb
     held_tasks = subjects(conn, change.table, change.uid, change.fields)
@@ -221,8 +262,9 @@ def _quarantine(conn, board: str, change, exc) -> None:
     reason = str(exc) if exc.uid in (None, change.uid) else f"{exc} (receipt {exc.uid})"
     with kb.write_txn(conn, allow_nested=True):
         install(conn)
-        inserted = conn.execute("INSERT OR IGNORE INTO containment_sync_quarantine VALUES (?,?,?,?,?,?)",
-                                (change.uid, sorted(held_tasks)[0], board, exc.kind, reason, wire(change))).rowcount
+        inserted = conn.execute("INSERT OR IGNORE INTO containment_sync_quarantine VALUES (?,?,?,?,?,?,?)",
+                                (change.uid, sorted(held_tasks)[0], board, exc.kind, reason, wire(change),
+                                 int(_clock() * 1000))).rowcount
         conn.executemany("INSERT OR IGNORE INTO containment_sync_quarantine_tasks VALUES (?,?,'direct')",
                          [(task, change.uid) for task in held_tasks])
     if inserted:
@@ -232,7 +274,8 @@ def _quarantine(conn, board: str, change, exc) -> None:
     _mirror(conn)
 
 
-def _withhold(conn, changes) -> list:
+def withhold(conn, changes) -> list:
+    """The changes no quarantine holds; the rest are recorded (with this page's withhold epoch) for a release."""
     from hermes_cli import kanban_db as kb
     if not tasks(conn):
         return changes
@@ -251,12 +294,13 @@ def _withhold(conn, changes) -> list:
             conn.executemany("INSERT OR IGNORE INTO containment_sync_quarantine_tasks VALUES (?,?,'dependency')",
                              [(task, receipt) for task in mine])
         blocked = tasks(conn)
+        epoch = conn.execute("SELECT COALESCE(MAX(ord),0)+1 FROM containment_sync_withheld").fetchone()[0]
         safe = []
         for ch in changes:
             names = subjects(conn, ch.table, ch.uid, ch.fields)
             # A delete with no known subject could be an unknown deleted child of a held task: withhold it too.
             if names & blocked or (not names and ch.op != "upsert"):
-                conn.execute("INSERT OR IGNORE INTO containment_sync_withheld VALUES (?)", (wire(ch),))
+                conn.execute("INSERT OR IGNORE INTO containment_sync_withheld VALUES (?,?)", (wire(ch), epoch))
             else:
                 safe.append(ch)
     _mirror(conn)
@@ -311,6 +355,7 @@ def restore(conn, data: dict, checkpoint: Path | None = None) -> None:
         install(conn)
         for table in (*_TABLES, _ACCEPTANCES[0]):
             for row in data.get(table, ()):
+                row = tuple(row)
                 marks = ",".join("?" for _ in row)
                 conn.execute(f"INSERT OR IGNORE INTO {table} VALUES ({marks})", row)
     if checkpoint is not None:

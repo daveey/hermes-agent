@@ -9,11 +9,12 @@ from hermes_cli import kanban_sync_quarantine as quarantine
 from tests.hermes_cli import test_kanban_containment_replica as fixtures
 
 
-def conflict(conn, *, both: bool = False) -> SimpleNamespace:
+def conflict(conn, *, both: bool = False, before=None) -> SimpleNamespace:
     """Quarantine the stop receipt the way a Board re-stamp does (its certified ``created_at`` changes after this
     host remembered it). ``both`` also delivers the release event, whose certification re-checks that stop receipt,
     so a second receipt names the same task."""
     target, child, stop, release, hub = fixtures.scenario(conn)
+    extra = before(target, child) if before else None
     uid = stop["event_uid"]
     replica.remember(conn, hub.events[uid], board="fixture", task=target, uid=uid)
     original = copy.deepcopy(hub.events[uid])
@@ -23,7 +24,7 @@ def conflict(conn, *, both: bool = False) -> SimpleNamespace:
         page.append(fixtures.event(release, hub, 2))
     assert quarantine.certified_page(conn, hub, "fixture", page) == []
     return SimpleNamespace(target=target, child=child, stop=stop, release=release, hub=hub, original=original,
-                           uid=uid, release_uid=release["event_uid"])
+                           uid=uid, release_uid=release["event_uid"], extra=extra)
 
 
 def count(conn, table: str) -> int:

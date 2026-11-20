@@ -1723,6 +1723,8 @@ def reconcile(slug: str, path: Optional[Path] = None, hub: Optional[Hub] = None)
                     lost = own_partition(live, [_row_change(table, r) for r in candidates
                                                 if str(r["uid"]) not in now_live
                                                 and (table, str(r["uid"])) not in held_back], ident.gateway)
+                    from hermes_cli.kanban_sync_quarantine import withhold  # a held task's rows wait, as in a pull
+                    lost = withhold(live, lost)
                     if lost:
                         cursor = int((sync.sync_state(live) or {}).get("cursor") or 0)
                         sync.apply_remote_changes(live, lost, new_cursor=cursor, board=slug, observers=False)
