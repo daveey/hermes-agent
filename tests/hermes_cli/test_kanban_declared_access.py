@@ -168,6 +168,26 @@ def test_preflight_reads_persisted_access_labels(conn, monkeypatch, requirement,
     assert unchanged is not None and unchanged.status == "ready"
 
 
+@pytest.mark.parametrize("requirement", ["hub:read", "hub:write", "ssh:mini", "ssh:mbp"])
+def test_preflight_keeps_access_needs_without_sync_schema(tmp_path, monkeypatch, requirement):
+    from hermes_cli import kanban_capability_routing as routing
+    from tests.hermes_cli import kanban_sync_support as support
+
+    home = support.kanban_home(tmp_path, monkeypatch)
+    support.write_sync_config(home, False)
+    with kbc.connect(home / "kanban.db") as db:
+        assert "runs_on" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+        tid = kb.create_task(db, title="Check declared access", assignee="default",
+                             requires=["terminal", requirement], placement_policy=None)
+        assert kb.get_task(db, tid).placement_policy is None
+        monkeypatch.setattr(routing, "has_replica", lambda: True)
+        result = routing.preflight(db, tid, self_gw="hub", local={}, remote={})
+        assert result is not None
+        assert result["code"] == "no_capability_holder", result
+        assert requirement in result["warning"], result
+        assert kb.get_task(db, tid).status == "ready"
+
+
 @pytest.mark.parametrize("requirement,label,body", [
     ("hub:read", "capability:hub-read", "read the log on the hub"),
     ("ssh:mbp", "capability:ssh-mbp", "ssh to the MacBook for a read"),
