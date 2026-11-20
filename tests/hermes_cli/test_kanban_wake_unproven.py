@@ -224,6 +224,35 @@ def test_failed_probe_breaks_notice_streak(parked):
     assert notices(conn, tid)[0].payload["checks"] == 4
 
 
+def test_exit_1_with_error_output_breaks_notice_streak(parked):
+    conn, tid, clock = parked
+    result(parked, 0)
+    result(parked, 3)
+    state = wc.get_state(conn, tid)
+    wc.apply_result(
+        conn, tid, state["cmd"], 1, "Traceback (most recent call last):\nValueError: boom",
+        generation=state["generation"], now=clock[0] + 4 * HOUR)
+    result(parked, 7)
+    assert not notices(conn, tid)
+    for hour in (8, 12):
+        result(parked, hour)
+    assert not notices(conn, tid)
+    result(parked, 13)
+    assert len(notices(conn, tid)) == 1
+    assert notices(conn, tid)[0].payload["checks"] == 4
+
+
+def test_non_one_last_rc_with_zero_fails_breaks_notice_streak(parked):
+    conn, tid, _ = parked
+    result(parked, 0)
+    result(parked, 3)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE task_wake_checks SET last_rc = ?, fails = 0 WHERE task_id = ?",
+                     (wc.UNKNOWN_RC, tid))
+    result(parked, 7)
+    assert not notices(conn, tid)
+
+
 def test_spent_park_is_not_used(parked):
     conn, tid, _ = parked
     with kb.write_txn(conn):

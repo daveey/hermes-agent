@@ -91,9 +91,10 @@ def note_check(conn: sqlite3.Connection, task_id: str, cmd: str, out: str, now: 
     conn.execute("""CREATE TABLE IF NOT EXISTS task_wake_notice_checks (
         task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
         park_id INTEGER NOT NULL, first_at INTEGER NOT NULL, checks INTEGER NOT NULL)""")
-    previous = conn.execute("SELECT last_rc FROM task_wake_checks WHERE task_id = ?", (task_id,)).fetchone()
-    # A failed/invalid probe breaks the consecutive not-ready streak, but not notice deduplication.
-    if previous is not None and previous[0] != 1:
+    previous = conn.execute("SELECT last_rc, fails FROM task_wake_checks WHERE task_id = ?", (task_id,)).fetchone()
+    # A failed/invalid probe (non-1 last_rc, or last_rc=1 with fails from a crash posing as not-yet)
+    # breaks the consecutive not-ready streak, but not notice deduplication.
+    if previous is not None and (previous[0] != 1 or previous[1]):
         conn.execute("DELETE FROM task_wake_notice_checks WHERE task_id = ?", (task_id,))
     conn.execute("INSERT INTO task_wake_notice_checks VALUES (?, ?, ?, 1) ON CONFLICT(task_id) DO UPDATE SET "
                  "park_id = excluded.park_id, "
