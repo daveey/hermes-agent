@@ -394,6 +394,62 @@ def test_same_gateway_accepted_obligation_still_authorizes(case, tmp_path):
     assert evidence['lease'] == case.lease
 
 
+def _matching_local_obligation(case, request, damage):
+    binding = copy.deepcopy(case.binding)
+    binding['owner'] = {k: v for k, v in request['args']['creator'].items() if k != 'run_uid'}
+    binding['task_record_key'] = 'default/default/' + binding['owner']['task_id']
+    digest = ledger.binding_hash(binding)
+    with sqlite3.connect(case.path) as conn:
+        conn.execute('UPDATE origin_obligations SET binding_id=?,binding_hash=?,binding_json=?,released=?',
+                     (ledger._binding_key(binding), 'forged' if damage == 'hash' else digest,
+                      ledger._json(binding), int(damage == 'released')))
+        conn.execute('DELETE FROM origin_receipts')
+        if damage == 'accepted':
+            ack = {'status': 'accepted', 'binding_hash': digest, 'binding_id': binding['binding_id'],
+                   'owner': binding['owner'], 'origin': binding['origin']}
+            conn.execute('INSERT INTO origin_receipts VALUES (?,?,?)', ('local-ack', digest, ledger._json(ack)))
+
+
+@pytest.mark.parametrize('historical', [False, True])
+@pytest.mark.parametrize('damage', ['released', 'hash', 'receipt'])
+def test_invalid_matching_obligation_vetoes_local_fallback(case, tmp_path, monkeypatch, historical, damage):
+    tid = _seed_local_creator(tmp_path, monkeypatch, current=not historical, holder='worker-gw')
+    request = _local_request(case, tid)
+    if historical:
+        _journal_rejected(tmp_path, monkeypatch, request)
+    _matching_local_obligation(case, request, damage)
+    with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
+        forward.receive(request)
+    assert not case.calls
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute('SELECT count(*) FROM selfwork_forward_admissions').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('historical', [False, True])
+@pytest.mark.parametrize('damage', ['released', 'accepted'])
+def test_local_fallback_rechecks_obligation_veto(case, tmp_path, monkeypatch, historical, damage):
+    tid = _seed_local_creator(tmp_path, monkeypatch, current=not historical, holder='worker-gw')
+    request = _local_request(case, tid)
+    if historical:
+        _journal_rejected(tmp_path, monkeypatch, request)
+    real = forward._historical_proof if historical else forward._lease
+
+    injected = []
+
+    def add_veto(*args, **kwargs):
+        proof = real(*args, **kwargs)
+        if not injected:
+            _matching_local_obligation(case, request, damage)
+            injected.append(True)
+        return proof
+
+    monkeypatch.setattr(forward, '_historical_proof' if historical else '_lease', add_veto)
+    with pytest.raises(ValueError, match='self_work_creator_unauthorized'):
+        forward.receive(request)
+    with sqlite3.connect(case.path) as conn:
+        assert conn.execute('SELECT count(*) FROM selfwork_forward_admissions').fetchone()[0] == 0
+
+
 def test_historical_repair_rejects_never_holder_sender(case, tmp_path, monkeypatch):
     tid = _seed_local_creator(tmp_path, monkeypatch, current=False, holder='worker-gw')
     request = _local_request(case, tid)

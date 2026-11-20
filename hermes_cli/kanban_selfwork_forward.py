@@ -69,7 +69,7 @@ def _validate(request, config, gateway, profile):
     return home
 
 
-def _obligation(conn, origin, creator):
+def _obligation(conn, origin, creator, *, allow_missing=False):
     expected = {k: creator[k] for k in ('gateway', 'profile', 'board', 'task_id')}
     for key, digest, raw, released in conn.execute(
             'SELECT binding_id,binding_hash,binding_json,released FROM origin_obligations'):
@@ -87,6 +87,9 @@ def _obligation(conn, origin, creator):
                     and ack.get('binding_id') == binding['binding_id']
                     and ack.get('owner') == expected and ack.get('origin') == origin):
                 return {'binding': binding, 'binding_hash': digest}
+        raise ValueError('self_work_creator_unauthorized')
+    if allow_missing:
+        return None
     raise ValueError('self_work_creator_unauthorized')
 
 
@@ -296,11 +299,9 @@ def receive(request: dict) -> dict:
         body = request['args']
         origin, creator = body['origin'], body['creator']
         historical = False
-        try:
-            binding = _obligation(conn, origin, creator)
-        except ValueError as exc:
-            if str(exc) != 'self_work_creator_unauthorized' or not _local_origin(origin, creator, gateway, profile):
-                raise
+        binding = _obligation(conn, origin, creator,
+                              allow_missing=_local_origin(origin, creator, gateway, profile))
+        if binding is None:
             try:
                 binding = _local_proof(origin, creator, gateway, require_current=True)
             except ValueError:
@@ -323,6 +324,8 @@ def receive(request: dict) -> dict:
         prior = _replay(conn, request, home)
         if prior is not None:
             return prior
+        if 'binding' not in binding and _obligation(conn, origin, creator, allow_missing=True) is not None:
+            raise ValueError('self_work_creator_unauthorized')
         if historical:
             if _historical_proof(origin, creator, gateway, request) != binding:
                 raise ValueError('self_work_creator_unauthorized')
