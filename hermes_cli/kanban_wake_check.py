@@ -807,8 +807,20 @@ def producer_note(hit: dict) -> str:
             "`--from <that status>`. Those statuses count as met, so without it the probe passes at once.")
 
 
+def _after_probe(state: dict, claimed_next_at: Optional[int], now: int) -> int:
+    """next_at after a probe that did not wake the card. [daveey] The claim parked next_at at its slot
+    (``claimed_next_at``). A wait-comment or status expedite that committed while the probe ran moved it earlier
+    (due now): that earlier slot is kept, so the next tick re-probes and sees the change instead of this older
+    snapshot's result pushing the park a whole ``check_every`` out. Not expedited: the ordinary cadence."""
+    held = state.get("next_at")
+    if claimed_next_at is not None and held is not None and int(held) < int(claimed_next_at):
+        return int(held)
+    return now + int(state["every"])
+
+
 def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, now: Optional[int], generation: str,
-                     purpose: str = "wake", stale_interval: Optional[float] = None, passive_policy=None) -> Any:
+                     purpose: str = "wake", stale_interval: Optional[float] = None, passive_policy=None,
+                     claimed_next_at: Optional[int] = None) -> Any:
     key = (db_path, task_id)
     try:
         rc, out = _run_probe(key, cmd, cwd, env)
@@ -843,7 +855,8 @@ def _probe_and_apply(db_path: str, task_id: str, cmd: str, cwd: str, env: dict, 
                 dead_ancestry = detect(cmd, cwd)
             apply_result(conn, task_id, cmd, rc, out, now=now, generation=generation, diagnostics=diag,
                          answered=answered, producer=producer, dead_ancestry=dead_ancestry,
-                         stale_interval=stale_interval, passive_policy=passive_policy)
+                         stale_interval=stale_interval, passive_policy=passive_policy,
+                         claimed_next_at=claimed_next_at)
             if rc == 1 and not output_error(out):
                 from hermes_cli import kanban_decision_ask  # [daveey] a chat wait unanswered for 2 h goes to David
                 kanban_decision_ask.escalate_if_overdue(conn, task_id, now=now)
@@ -859,7 +872,8 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                  *, generation: str, now: Optional[int] = None,
                  diagnostics: Optional[dict] = None, answered: Optional[dict] = None,
                  producer: Optional[dict] = None, dead_ancestry: Optional[list[dict]] = None,
-                 stale_interval: Optional[float] = None, passive_policy=None) -> Optional[str]:
+                 stale_interval: Optional[float] = None, passive_policy=None,
+                 claimed_next_at: Optional[int] = None) -> Optional[str]:
     """Record one probe result; wake the card on success or a broken probe. Returns the event
     kind appended (``condition_met`` / ``wake_check_broken``) or None. A result for a probe
     that is no longer the card's (re-parked, unblocked) is dropped."""
@@ -919,7 +933,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                 return woke
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = 1, last_out = ?, fails = 0, "
-                "next_at = ? WHERE task_id = ?", (now, tail, now + int(state["every"]), task_id))
+                "next_at = ? WHERE task_id = ?", (now, tail, _after_probe(state, claimed_next_at, now), task_id))
             _note_alive(conn, task_id, cmd, now)
             return None
         age = stale_age(rc, out)
@@ -939,7 +953,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             # Not broken: the gateway is just offline. Keep any real-failure streak from before as it was.
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, "
-                "next_at = ? WHERE task_id = ?", (now, rc, tail, now + int(state["every"]), task_id))
+                "next_at = ? WHERE task_id = ?", (now, rc, tail, _after_probe(state, claimed_next_at, now), task_id))
             _note_alive(conn, task_id, cmd, now)
             return None
         gw = source_unknown(rc, out)
@@ -959,7 +973,7 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             # Same unchanged source state, already escalated: keep any real-failure streak as it was.
             conn.execute(
                 "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, "
-                "next_at = ? WHERE task_id = ?", (now, rc, tail, now + int(state["every"]), task_id))
+                "next_at = ? WHERE task_id = ?", (now, rc, tail, _after_probe(state, claimed_next_at, now), task_id))
             _note_alive(conn, task_id, cmd, now)
             return None
         fails = int(state["fails"] or 0) + 1
@@ -971,7 +985,8 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
                 "note": "The wake_check failed (not exit 0/1) repeatedly. Fix the probe, then park again."})
         conn.execute(
             "UPDATE task_wake_checks SET last_at = ?, last_rc = ?, last_out = ?, fails = ?, "
-            "next_at = ? WHERE task_id = ?", (now, rc_col, tail, fails, now + int(state["every"]), task_id))
+            "next_at = ? WHERE task_id = ?",
+            (now, rc_col, tail, fails, _after_probe(state, claimed_next_at, now), task_id))
         _note_alive(conn, task_id, cmd, now)
         return None
 
@@ -1075,7 +1090,7 @@ def run_due_wake_checks(conn: sqlite3.Connection, *, now: Optional[int] = None, 
                     continue
             cwd = probe_cwd(task.workspace_path)
             fut = _pool().submit(_probe_and_apply, db_path, task_id, cmd, cwd, _probe_env(task, db_path), now, claim,
-                                 purpose, stale_interval, passive_policy)
+                                 purpose, stale_interval, passive_policy, ts + int(every))
             with _LOCK:
                 _IN_FLIGHT[key] = fut
             submitted.append(task_id)

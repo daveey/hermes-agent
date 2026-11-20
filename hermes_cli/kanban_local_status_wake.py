@@ -18,6 +18,11 @@ the write that made them (a rolled-back transition never expedites). ``arm`` cle
 commit hands over only its own changes. Before calling ``expedite`` (which reads every scheduled park's latest park
 event), one indexed query asks whether any scheduled park mentions a changed card at all; the common commit costs
 that one read. Every failure is swallowed: the park keeps its ``check_every`` cadence and the transition stands.
+
+Scope, deferred on purpose: only ``wait-comment <the parked card itself>`` is expedited by a comment. A park waiting
+on ANOTHER card's comments keeps its cadence: matching it costs a scan of every park's cmd on every comment commit
+(the self-card match is one indexed read), and the chat-wait builder always waits on its own card. A change that
+commits while a probe is already running is kept by ``kanban_wake_check.apply_result`` (``claimed_next_at``).
 """
 from __future__ import annotations
 
