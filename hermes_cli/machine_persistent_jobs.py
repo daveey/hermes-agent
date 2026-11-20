@@ -31,6 +31,15 @@ def collect() -> dict:
     return fresh({'persistent_jobs': len(occupied), 'persistent_jobs_at_ms': at_ms})
 
 
+def census_count(count: int | None) -> int | None:
+    """The one exit for a complete-census count: a zero needs every local result acknowledged.
+
+    ``None`` means UNKNOWN (no scalar is emitted). Positive counts pass unchanged.
+    """
+    from hermes_cli import worker_drain_results_gate as gate
+    return gate.gate_count(count)
+
+
 def fresh(sample: dict) -> dict:
     """Drop incomplete, invalid or aged pairs at the send boundary; never re-stamp."""
     count, at_ms = (sample.get(key) for key in FIELDS)
