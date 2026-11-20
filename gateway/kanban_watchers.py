@@ -509,7 +509,7 @@ class GatewayKanbanWatchersMixin:
         from hermes_cli import kanban_db_sync as _sync
         if not _sync.sync_enabled():
             return
-        from hermes_cli.kanban_sync_claims import loop_expected
+        from hermes_cli.kanban_sync_claims import loop_abandoned, loop_expected
         loop_expected()  # this gateway's dispatcher claims nothing until its sync loop's first round reaches the head
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_sync_client as _ksc
@@ -519,6 +519,7 @@ class GatewayKanbanWatchersMixin:
         self._kanban_sync_lease = lease
         while self._running:
             if not await self._acquire_kanban_lease(lease):
+                loop_abandoned()  # this watcher is not coming back; do not freeze claims
                 return
             # Each tenure gets its own latching stop flag: after release the lease is idle again and
             # should_yield() reads False, so a bare lambda would revive this tenure's daemon FeedWatcher
@@ -539,4 +540,11 @@ class GatewayKanbanWatchersMixin:
                 stopped.set()
                 lease.release()
             if not yielded:
+                loop_abandoned()  # the loop ended and will not be respawned
                 return  # the loop ended on its own (stop, or sync unavailable): don't spin on it
+
+
+def sync_watcher_gave_up(_name: str = "") -> None:
+    """The supervised sync watcher will not be restarted. Clear the claim hold."""
+    from hermes_cli.kanban_sync_claims import loop_abandoned
+    loop_abandoned()

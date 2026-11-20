@@ -95,15 +95,26 @@ def history(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
 
 def matching_machines(runs_on: list[str], machines: Mapping[str, Mapping[str, Any]], *, me: str,
                       exclude_me: bool = True) -> list[str]:
-    """Active, unheld registry machines carrying every label; running moves exclude ``me``."""
+    """Active, unheld registry machines carrying every label; running moves exclude ``me``.
+
+    A machine that has published ``metrics.claiming == 0`` is not taking portable cards. A pin to
+    that machine (``machine:<name>`` in ``runs_on``) stays, because a batch or worktree may be there.
+    """
     from hermes_cli import kanban_worker_node as wn
     out = []
     for name, entry in machines.items():
         if (exclude_me and name == me) or not entry or entry.get("state", "active") != "active" or entry.get("hold"):
             continue
+        if _not_claiming(entry) and f"machine:{name}" not in runs_on:
+            continue
         if set(runs_on) <= wn.effective_labels(entry, name):
             out.append(name)
     return sorted(out)
+
+
+def _not_claiming(entry: Mapping[str, Any]) -> bool:
+    metrics = entry.get("metrics")
+    return isinstance(metrics, dict) and metrics.get("claiming") == 0
 
 
 def _requirement_matches(matches, machines, requires, skills, *, me=None, assignee=None):

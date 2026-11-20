@@ -295,7 +295,16 @@ def label_machines(label: str | Iterable[str], machines: Optional[dict] = None) 
     return sorted(name for name, entry in machines.items()
                   if isinstance(entry, dict) and entry.get("state", "active") == "active" and not entry.get("hold")
                   and ("pickup" not in entry or wn.advertises_pickup(entry)) and _fresh(entry, now)
+                  and _claiming_for(name, entry, wanted)
                   and registry_carries(entry, wanted))
+
+
+def _claiming_for(name: str, entry: dict, wanted: set) -> bool:
+    """A non-claiming machine leaves a portable label set. A pin to that machine stays."""
+    from hermes_cli.kanban_move import _not_claiming
+    if not _not_claiming(entry):
+        return True
+    return f"machine:{name}" in wanted
 
 
 def registry_carries(entry: dict, wanted: set) -> bool:

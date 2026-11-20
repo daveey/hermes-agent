@@ -34,7 +34,7 @@ def collect():
 
 # Fields newer Boards accept and older Boards reject (400, atomically). CPU busy fields are never resent: the
 # compatibility retry strips them, so an old CPU sample is never re-stamped as fresh.
-ADDITIVE_FIELDS = ("drain_active", "drain_until_ms", "cpu_busy_pct", "cpu_busy_window_ms", "cpu_busy_sample_end_ms") + ADMISSION_FIELDS
+ADDITIVE_FIELDS = ("drain_active", "drain_until_ms", "claiming", "cpu_busy_pct", "cpu_busy_window_ms", "cpu_busy_sample_end_ms") + ADMISSION_FIELDS
 
 
 def send_compatible(send, sample, on_counters_rejected=None):

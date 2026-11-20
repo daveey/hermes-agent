@@ -92,6 +92,24 @@ def loop_stopped() -> None:
             _log.warning("kanban sync: cannot remove stopped claim gate", exc_info=True)
 
 
+def loop_abandoned() -> None:
+    """Supervision will not restart the sync loop. A crashed loop must not freeze claims."""
+    with _STATE.lock:
+        _STATE.expected = False
+        _STATE.logged.clear()
+    loop_stopped()
+
+
+def claiming_bit() -> int:
+    """1 when this process may claim, 0 while its sync gate is closed and no round is open."""
+    with _STATE.lock:
+        if _STATE.open:
+            return 1
+        if _STATE.expected or _STATE.loop:
+            return 0
+    return 1
+
+
 def note_round(slug: str, path: Any, *, at_head: bool) -> None:
     """A round on this board completed; ``at_head``: its replica and live pulls reached the feed head."""
     if not at_head:

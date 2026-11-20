@@ -235,6 +235,8 @@ def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     from hermes_cli import machine_persistent_jobs
     out.update(machine_persistent_jobs.collect())
     out.update(machine_drain_metrics.collect())
+    from hermes_cli.kanban_sync_claims import claiming_bit
+    out["claiming"] = claiming_bit()
     out.update(machine_throughput_metrics.cached_counters())
     try:
         out["cpu_load1"] = round(os.getloadavg()[0], 2)

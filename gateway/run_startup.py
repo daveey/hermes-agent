@@ -1615,8 +1615,10 @@ class GatewayStartupMixin:
 
     def _start_spawn_background_watchers(self) -> None:
         """Spawn the long-lived supervised background watchers."""
+        from gateway.kanban_watchers import sync_watcher_gave_up
         for method in self._PRE_RECONNECT_WATCHERS:
-            self._spawn_supervised(getattr(self, method), method[1:])
+            give_up = sync_watcher_gave_up if method == "_kanban_sync_watcher" else None
+            self._spawn_supervised(getattr(self, method), method[1:], on_give_up=give_up)
         if self._failed_platforms:
             logger.info(
                 "Starting reconnection watcher for %d failed platform(s): %s",
