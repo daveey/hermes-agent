@@ -12,20 +12,32 @@ import contextlib
 
 
 def model_override_conflict(params: dict, build_scope) -> dict | None:
-    """The conflict record for the create params' model override, or ``None`` when coherent /
-    undecidable. Without an explicit ``provider`` the pair is judged against the provider the
-    session would actually build with (profile config, then env) inside ``build_scope`` — the
-    handler's ``_profile_build_scope(profile_home)`` context manager."""
+    """The conflict record for the create params' model override, or ``None`` when runnable /
+    undecidable. Judged inside ``build_scope`` (the handler's ``_profile_build_scope(profile_home)``:
+    the config and secrets the session's turns bind). First the managed subscription policy: the pin
+    ``create_overrides`` stores, judged by the turn's own ``pin_policy``, so a refused pick never mints
+    a chat whose every turn fails. Then catalog coherence; without an explicit ``provider`` the pair
+    is judged against the provider the session would actually build with (profile config, then env)."""
     model = str(params.get("model") or "").strip()
     if not model:
         return None
+    from hermes_cli.model_options_managed import managed_pin_refusal
     from hermes_cli.models_validate import static_model_provider_conflict
     from hermes_cli.runtime_provider import resolve_requested_provider
 
     provider = str(params.get("provider") or "").strip()
-    if not provider:
-        with build_scope:
-            provider = resolve_requested_provider()
+    # Derived where ``create_overrides`` derives it, so the judged pin is the one the session stores.
+    pin = _prefer_subscription_route({"model": model, "provider": provider or None})
+    with build_scope:
+        refusal = managed_pin_refusal(pin["model"], pin["provider"])
+        provider = provider or resolve_requested_provider()
+    if refusal is not None:
+        # Fits the Desktop toast, which swaps a message over 180 chars for its fallback
+        # (``summarizeErrorMessage``); the allowed pins ride in ``data``, and the picker lists them.
+        on = f" on {refusal.provider!r}" if refusal.provider else ""
+        return {"message": f"{refusal.model!r}{on} can't run on this host: its managed subscription policy "
+                           "refuses that pin. Pick a model the picker lists.",
+                "model": refusal.model, "provider": refusal.provider, "allowed": refusal.allowed}
     return static_model_provider_conflict(model, provider)
 
 

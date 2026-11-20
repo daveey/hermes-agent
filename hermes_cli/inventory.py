@@ -397,6 +397,20 @@ def build_model_options_payload(
     ctx: ConfigContext, *, explicit_only: bool = False, include_unconfigured: bool = False,
     refresh: bool = False,
 ) -> dict:
+    """The memoized payload, narrowed on every open to the pins this host's managed subscription policy
+    runs: the policy is read fresh, so no memo entry outlives a policy edit (``model_options_managed``)."""
+    from hermes_cli.model_options_managed import drop_refused_managed_pins
+
+    payload = _memoized_model_options_payload(
+        ctx, explicit_only=explicit_only, include_unconfigured=include_unconfigured, refresh=refresh)
+    drop_refused_managed_pins(payload.get("providers") or [])
+    return payload
+
+
+def _memoized_model_options_payload(
+    ctx: ConfigContext, *, explicit_only: bool = False, include_unconfigured: bool = False,
+    refresh: bool = False,
+) -> dict:
     """``_build_model_options_payload_uncached`` behind the whole-payload memo (see ``_STAMP_PARTS``)."""
     explicit_only, include_unconfigured, refresh = bool(explicit_only), bool(include_unconfigured), bool(refresh)
     kwargs = dict(explicit_only=explicit_only, include_unconfigured=include_unconfigured, refresh=refresh)

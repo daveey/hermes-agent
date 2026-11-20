@@ -315,8 +315,8 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
     transcript server-side and omits it from the reply."""
     # ``profile`` (app-global remote mode): stored so the build and every turn re-bind HERMES_HOME.
     profile_home = _profile_home(profile := (params.get("profile") or "").strip() or None)
-    # Reject an incoherent model×provider pair BEFORE any state exists: minting it only defers the
-    # failure to the first turn's provider 404 (#96817). Custom/unknown providers stay permissive.
+    # Reject a pin the managed policy refuses or an incoherent model×provider pair BEFORE any state
+    # exists: minting it only defers the failure to the first turn (#96817). Unknown stays permissive.
     from .methods_session_model_guard import model_override_conflict
     if conflict := model_override_conflict(params, _profile_build_scope(profile_home)):
         return _err(rid, -32602, conflict.pop("message"), conflict)
