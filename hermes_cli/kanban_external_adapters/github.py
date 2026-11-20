@@ -95,19 +95,18 @@ def _conclusion_job(conclusion: Optional[str]) -> str:
 
 
 def _run_job(jobs: list, repo: str, run_id: str, fetch_run: Optional[Callable]) -> tuple[str, str]:
-    """``(job state, detail)`` of a run from its listed jobs; the run's own read confirms a finished one."""
+    """``(job state, detail)`` of a run from its listed jobs; the run's own read decides a finished or empty one."""
     running = [j for j in jobs if isinstance(j, dict) and j.get("status") == "in_progress"]
     if running:
         return "running", f"job '{running[0].get('name') or 'job'}' running"
     unfinished = [j for j in jobs if isinstance(j, dict) and j.get("status") != "completed"]
-    if not jobs:
-        return "queued", "no jobs created yet"
     if unfinished:
         started = len(jobs) > len(unfinished)
         return ("running", "waiting on later jobs") if started else ("queued", "queued, no runner yet")
     run = (fetch_run or (lambda r, i: kcp._gh_api(f"repos/{r}/actions/runs/{i}")))(repo, run_id) or {}
     if run.get("status") != "completed":
-        return "running", "finishing up"
+        # A run cancelled before any job was created lists none and is still finished: only its own read tells.
+        return ("running", "finishing up") if jobs else ("queued", "no jobs created yet")
     job = _conclusion_job(run.get("conclusion"))
     return job, f"run {run.get('conclusion') or 'finished'}"
 
