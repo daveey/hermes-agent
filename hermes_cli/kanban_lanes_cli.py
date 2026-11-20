@@ -145,7 +145,11 @@ def _pin(args) -> int:
     return 0
 
 
-def set_lane(lane: str, *, share=None, admit_per_day=None, cards_per_day=None, usd_per_day=None,
+UNSET = object()  # omitted is distinct from explicit null (clear a nullable limit)
+
+
+def set_lane(lane: str, *, share=None, admit_per_day=None, cards_per_day=UNSET, usd_per_day=UNSET,
+             max_workers=UNSET,
              paused=None) -> None:
     """Change one lane's share, daily admit/cards/spend budget or pause state; raises ValueError.
 
@@ -168,16 +172,19 @@ def set_lane(lane: str, *, share=None, admit_per_day=None, cards_per_day=None, u
         raise ValueError("share must be a finite nonnegative number")
     if admit_per_day is not None and (type(admit_per_day) is not int or admit_per_day < 0):
         raise ValueError("admit_per_day must be a nonnegative integer")
-    if cards_per_day is not None and (type(cards_per_day) is not int or cards_per_day < 0):
+    if cards_per_day is not UNSET and cards_per_day is not None and (type(cards_per_day) is not int or cards_per_day < 0):
         raise ValueError("cards_per_day must be a nonnegative integer")
-    if usd_per_day is not None and (type(usd_per_day) not in (int, float) or not math.isfinite(usd_per_day)
+    if usd_per_day is not UNSET and usd_per_day is not None and (type(usd_per_day) not in (int, float) or not math.isfinite(usd_per_day)
                                     or usd_per_day < 0):
         raise ValueError("usd_per_day must be a finite nonnegative number")
     if paused is not None and type(paused) is not bool:
         raise ValueError("paused must be true or false")
-    changes = {"share": share, "admit_per_day": admit_per_day, "cards_per_day": cards_per_day,
-               "usd_per_day": usd_per_day, "paused": paused}
+    if max_workers is not UNSET and max_workers is not None and (type(max_workers) is not int or max_workers < 0):
+        raise ValueError("max_workers must be a nonnegative integer")
+    changes = {"share": share, "admit_per_day": admit_per_day, "paused": paused}
     changes = {key: value for key, value in changes.items() if value is not None}
+    changes.update({key: value for key, value in {"cards_per_day": cards_per_day,
+                    "usd_per_day": usd_per_day, "max_workers": max_workers}.items() if value is not UNSET})
     if not changes:
         raise ValueError("nothing to set: give a share, a daily admit/cards/spend budget, pause or resume")
     path = Path(get_default_hermes_root()) / "config.yaml"
@@ -191,9 +198,13 @@ def set_lane(lane: str, *, share=None, admit_per_day=None, cards_per_day=None, u
 
 
 def _set(args) -> int:
+    limits = {key: getattr(args, key, UNSET) for key in ("cards_per_day", "usd_per_day", "max_workers")}
+    for key in getattr(args, "unset", None) or []:
+        if limits[key] is not UNSET:
+            raise ValueError(f"cannot set and unset {key} together")
+        limits[key] = None
     set_lane(args.lane, share=args.share, admit_per_day=args.admit_per_day,
-             cards_per_day=getattr(args, "cards_per_day", None),
-             usd_per_day=getattr(args, "usd_per_day", None),
+             **limits,
              paused=True if args.pause else False if args.resume else None)
     return 0
 

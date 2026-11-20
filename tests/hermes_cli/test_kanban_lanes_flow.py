@@ -148,7 +148,7 @@ def test_flow_json_shape_and_window(conn, configured, capsys):
     assert card["source"]["kind"] in ("session", "automation", "user")
     lane = data["lanes"]["babybear"]
     assert set(lane) >= {"done", "run_hours", "cost_usd", "limits", "usage"}
-    assert set(lane["limits"]) == {"cards_per_day", "usd_per_day"}
+    assert set(lane["limits"]) == {"cards_per_day", "usd_per_day", "max_workers"}
     assert set(lane["usage"]) == {"cards_today", "usd_today"}
     assert lane["limits"]["cards_per_day"] is None and lane["limits"]["usd_per_day"] is None
 

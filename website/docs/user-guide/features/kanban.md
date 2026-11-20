@@ -1622,6 +1622,7 @@ kanban:
         admit_per_day: 50
         cards_per_day: 50        # optional; new cards wait at the gate after this many admissions today
         usd_per_day: 40          # optional; new cards wait at the gate after this much run spend today
+        max_workers: 4          # optional; ceiling on observed running workers (ready and review claims)
         match: {creators: [self-heal], key_prefixes: ["ci-main-watch:"], repos: [hermes-agent], self_work: true}
         gate_exempt: ['independent review']
         never_admit: ['lifecycle guard']
@@ -1634,6 +1635,12 @@ kanban:
 - **Shadow mode.** `lane_shadow: true` is the step before enforcement: cards are classified and `hermes kanban lanes` reports them, and each `lane_assigned` event records `would_gate`, but the gate, the cap, the lane ordering and `paused` do nothing, and `created_by` is stored as given. The only change to a card is its `tenant`.
 - **Priority cap.** `agent_priority_cap` bounds the stored priority of a card the user did not create, at creation. Later edits are not capped, and the planner may set 0 to 1000.
 - **Limits.** Worker nodes order foreign pickup with their own board copy, so lane order is exact only on the board that holds the cards; `paused` applies where `lanes` is configured. A worker that parks on a held follow-up card waits until that card is admitted.
+
+`max_workers` is an optional nonnegative integer ceiling on observed running cards, including ready and review claims. Unset/null is unlimited, zero stops new claims, and lowering it never kills an existing worker. Marked/alarm priority does not bypass it. Dispatch filters full lanes and rechecks in the local claim transaction using the existing fleet-running census. This is not a distributed reservation: concurrent claims on different gateways can temporarily overshoot a stale replica count; lanes configuration applies on gateways where installed. Shadow mode does not enforce it.
+
+Use `hermes kanban lanes set hermes --max-workers 4` to set it, or `--unset max_workers` to clear it. Daily caps can likewise be cleared with `--unset cards_per_day --unset usd_per_day`; setting and unsetting the same key together is rejected. Programmatic `set_lane` distinguishes omitted arguments (preserve) from explicit `None` (clear).
+
+Flow dependency waits include `blockers: [{id, pr}]` for all unsatisfied direct parents, plus `blocker` for the first one. A missing parent's PR is null; a card's own PR is never substituted. The field is additive so older clients can ignore it.
 
 `usd_per_day` counts only `usage.cost_usd` reported on worker-result receipts; runs reporting tokens but no cost add zero, not an inferred price. Daily caps reserve admissions, not running slots: lowering a limit does not interrupt admitted work. Review/landing titles in `gate_exempt` under an admitted creator remain exempt. Daily-limit-only waits in ungated lanes are reconsidered by dispatcher readiness maintenance (including after local midnight); ordinary gated lanes still require admission, and agent/planner admission checks both daily limits. A person's explicit admission remains an override and counts toward `cards_per_day` even when outside the planner budget.
 

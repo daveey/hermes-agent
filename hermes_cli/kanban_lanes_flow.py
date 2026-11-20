@@ -234,6 +234,18 @@ def _parents_open(conn, task_id: str) -> bool:
     return bool(kb.unsatisfied_parents(conn, task_id))
 
 
+def _blockers(conn, task_id: str) -> list:
+    from hermes_cli import kanban_db as kb
+
+    out = []
+    for parent_id, _status in kb.unsatisfied_parents(conn, task_id):
+        parent = conn.execute("SELECT * FROM tasks WHERE id=?", (parent_id,)).fetchone()
+        events = _events(conn, parent_id) if parent is not None else []
+        pr = _pr_snapshot(parent, events, _awaiting(parent, events)) if parent is not None else None
+        out.append({"id": parent_id, "pr": (pr or {}).get("url")})
+    return out
+
+
 def _awaiting(task, events=()) -> Optional[dict]:
     if task["status"] != "scheduled":
         return None
@@ -305,6 +317,9 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None)
         cards.append({"id": card["id"], "title": card["title"] or "",
                       "lane": pol.lane_of(card["tenant"]), "step": step, "reason": reason,
                       "source": source, "age_h": card["age_h"], "pr": pr})
+        if reason == "dep":
+            blockers = _blockers(conn, card["id"])
+            cards[-1].update(blockers=blockers, blocker=blockers[0] if blockers else None)
     out_lanes = {}
     for name, spec in pol.lanes.items():
         row = usage[name]
@@ -312,7 +327,8 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None)
             "done": row["done"],
             "run_hours": round(row["run_seconds"] / 3600, 1),
             "cost_usd": row["cost_usd"],
-            "limits": {"cards_per_day": spec.cards_per_day, "usd_per_day": spec.usd_per_day},
+            "limits": {"cards_per_day": spec.cards_per_day, "usd_per_day": spec.usd_per_day,
+                       "max_workers": spec.max_workers},
             "usage": {"cards_today": lanes.cards_today(conn, name, now=now, pol=pol),
                       "usd_today": lanes.spent_today(conn, pol, name, now=now)},
         }

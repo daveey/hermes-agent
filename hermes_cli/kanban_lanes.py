@@ -80,6 +80,7 @@ class Lane:
     admit_per_day: Optional[int] = None
     cards_per_day: Optional[int] = None
     usd_per_day: Optional[float] = None
+    max_workers: Optional[int] = None
     paused: bool = False
     describe: str = ""
     creators: frozenset = frozenset()
@@ -140,7 +141,7 @@ def _lane(name, raw) -> Lane:
     raw = {} if raw is None else raw
     if not isinstance(raw, dict):
         raise ValueError(f"lane {name} must be a mapping")
-    known = {"share", "gated", "admit_per_day", "cards_per_day", "usd_per_day", "paused", "describe",
+    known = {"share", "gated", "admit_per_day", "cards_per_day", "usd_per_day", "max_workers", "paused", "describe",
              "match", "gate_exempt", "never_admit"}
     if unknown := sorted(set(raw) - known):
         raise ValueError(f"lane {name}: unknown key(s) {', '.join(map(str, unknown))}")
@@ -157,12 +158,15 @@ def _lane(name, raw) -> Lane:
     if usd_per_day is not None and (type(usd_per_day) not in (int, float) or not math.isfinite(usd_per_day)
                                     or usd_per_day < 0):
         raise ValueError(f"lane {name}: usd_per_day must be a finite nonnegative number")
+    max_workers = raw.get("max_workers")
+    if max_workers is not None and (type(max_workers) is not int or max_workers < 0):
+        raise ValueError(f"lane {name}: max_workers must be a nonnegative integer")
     match = raw.get("match") or {}
     if not isinstance(match, dict) or set(match) - {"creators", "key_prefixes", "repos", "self_work"}:
         raise ValueError(f"lane {name}: match takes creators, key_prefixes, repos, self_work")
     return Lane(
         name=name, share=float(share), gated=raw.get("gated") is True, admit_per_day=per_day,
-        cards_per_day=cards_per_day,
+        cards_per_day=cards_per_day, max_workers=max_workers,
         usd_per_day=None if usd_per_day is None else float(usd_per_day),
         paused=raw.get("paused") is True, describe=str(raw.get("describe") or ""),
         creators=frozenset(_strings(match.get("creators"), "match.creators")),

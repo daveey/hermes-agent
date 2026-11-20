@@ -268,6 +268,9 @@ def claim_and_open_run(conn, task_id, source_status, lock, expires, now, *, even
     # [daveey] Review F5: this claim's own grant may already have been echoed ``running`` (own holder, its run uid,
     # no lock) before the txn; ``gate.echo`` is that proof, re-checked here in the same txn, so the CAS adopts the
     # row instead of losing to it. Any other ``running`` row still loses.
+    from hermes_cli.kanban_lane_workers import at_capacity
+    if at_capacity(conn, task_id):
+        return None
     echo = getattr(gate, "echo", None)
     if echo is not None:
         from hermes_cli.kanban_grant_echo import match_rows
