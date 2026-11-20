@@ -537,6 +537,23 @@ def test_non_stop_gestures_clear_the_held_queue_as_before(stoppable, origin, com
     assert read_turn_marker(held.home, "session-key") is None
 
 
+@pytest.mark.parametrize("origin", [None, "esc", "send_now", "rewind", "delete", "plugin:hermes-bots"])
+@pytest.mark.parametrize("compute_host", [False, True])
+def test_only_plain_stop_cancels_unpersisted_replay(stoppable, origin, compute_host, monkeypatch):
+    from tui_gateway.automation_replay_handoff import Journal
+    from tests.tui_gateway.test_automation_replay_handoff import item
+    held = stoppable
+    # Delivery has not reached this chat's transcript; interrupting for another operation must keep it.
+    with sqlite3.connect(held.home / "state.db"):
+        pass
+    journal = Journal(held.home)
+    journal.publish("session-key", [item("undelivered", persisted=False)])
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *a, **k: compute_host)
+    response = _interrupt(**({"origin": origin} if origin else {}))
+    assert response["result"]["status"] == "interrupted", response
+    assert journal.owners() == ([] if origin in (None, "esc") else ["session-key"])
+
+
 def test_idle_stop_still_clears_an_ordinary_queue(stoppable):
     """Negative control: only the update-held envelope survives; an unlabelled queued prompt is cancelled."""
     held = stoppable

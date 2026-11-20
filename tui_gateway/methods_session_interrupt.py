@@ -210,7 +210,7 @@ def _(rid, params: dict) -> dict:
             outcome: dict = {}
             try:
                 _interrupt_session_turn(sid, session, request_id=f"interrupt-{rid}", keep_update_held_queue=keep_held,
-                                        outcome=outcome)
+                                        outcome=outcome, cancel_automation_replays=keep_held)
             except Exception as exc:  # health: allow BLE001 -- the bridge raises transport-specific errors unknown here; logged, and Stop recovers the session instead of failing
                 logger.warning("session.interrupt: compute-host interrupt failed for %s: %s", sid, exc)
                 _recover_unreachable_compute_host_turn(sid, session, inflight_at_interrupt,
@@ -220,7 +220,8 @@ def _(rid, params: dict) -> dict:
         # failed Stop with 5032 once the build failed or outlived 30s (and started a build for a lazy session), so
         # the Desktop, which interrupts before session.close, could not delete such a session (#133262).
         outcome = {}
-        _interrupt_session_turn(sid, session, keep_update_held_queue=keep_held, outcome=outcome)
+        _interrupt_session_turn(sid, session, keep_update_held_queue=keep_held, outcome=outcome,
+                                cancel_automation_replays=keep_held)
         if outcome.get("kept_update_held_queue"):
             # Decided with the keep, under the same lock (never re-read here: the hold can lift and a drain start
             # the kept turn, with its own marker and key, after the helper returned). The kept queue's durable

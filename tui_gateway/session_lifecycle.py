@@ -923,7 +923,7 @@ def _cancel_background_review_on_stop(session: dict) -> None:
 
 def _interrupt_session_turn(
     sid: str, session: dict, *, request_id: str | None = None, orphan: bool = False, reason: str | None = None,
-    keep_update_held_queue: bool = False, outcome: dict | None = None,
+    keep_update_held_queue: bool = False, outcome: dict | None = None, cancel_automation_replays: bool = True,
 ) -> bool:
     """Apply the shared ``session.interrupt`` contract to one claimed session; returns whether the compute-host control
     channel was used. The WS orphan reaper reuses this so a dead client gets the same partial-history/queue semantics.
@@ -940,13 +940,15 @@ def _interrupt_session_turn(
     The keep is decided ONCE, under ``history_lock`` and before any compute-host I/O, and a kept Stop is a
     no-op for the turn machinery: no child interrupt frame (the child would bump its own queue generation
     while the parent's stays, so the drained turn would arrive stale and end as ``interrupted`` unseen).
+    ``cancel_automation_replays`` is false for interrupts serving send-now/rewind/delete/plugin operations:
+    those stop the current turn, not automation deliveries that never reached its transcript.
     ``outcome`` (optional, filled in place): ``kept_update_held_queue`` (that decision) and
     ``stale_marker_key`` (an ``_active_turn_marker_key`` of an earlier turn, taken under the same lock when
     kept), so a caller acts on this Stop's decision instead of re-reading state a drain may have changed since.
     """
     reason = reason or ("ws_orphan" if orphan else "user_stop")
     agent_tool_reason = None if reason == "user_stop" else reason.replace("_", " ")
-    if reason == "user_stop":  # [daveey] an explicit Stop fences handed-off automation replays (shutdown does not)
+    if reason == "user_stop" and cancel_automation_replays:  # [daveey] only a plain Stop cancels undelivered work
         from tui_gateway import automation_replay
         import time as _time
         automation_replay.cancel_durable(session.get("profile_home"), (session.get("session_key"),),

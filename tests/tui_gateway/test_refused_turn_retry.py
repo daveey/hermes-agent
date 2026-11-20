@@ -217,7 +217,21 @@ def test_successful_prompt_uses_its_context_start_for_replay_cancellation(
     schedule("unpersisted", persisted=False)
     schedule("foreign", profile=foreign)
 
+    from hermes_state import SessionDB
+    from tui_gateway.automation_replay_handoff import Journal
+    from tests.tui_gateway.test_automation_replay_handoff import item
+    import json
+
+    for profile in (home, foreign):
+        profile.mkdir(parents=True, exist_ok=True)
+        SessionDB(profile / "state.db").close()
+    journal, other = Journal(home), Journal(foreign)
+    journal.publish("session-key", [item("carried", created=90),
+                                   item("unpersisted", created=90, persisted=False)])
+    other.publish("session-key", [item("foreign", created=90)])
+
     def run(message, **kwargs):
+        journal.publish("session-key", [item("joined", created=110)])
         schedule("joined after context", now=110)
         clock["now"] = 120.0
         return dict(OK)
@@ -229,6 +243,10 @@ def test_successful_prompt_uses_its_context_start_for_replay_cancellation(
     assert [i.text for i in replay._entries[(str(home), "session-key")].items] == [
         "unpersisted", "joined after context"]
     assert [i.text for i in replay._entries[(str(foreign), "session-key")].items] == ["foreign"]
+    surviving = journal.claim("session-key", 5000, "probe", lambda _: False)
+    assert {i["id"] for i in json.loads(surviving["payload"])} == {"unpersisted", "joined"}
+    untouched = other.claim("session-key", 5000, "probe", lambda _: False)
+    assert {i["id"] for i in json.loads(untouched["payload"])} == {"foreign"}
 
 
 @pytest.mark.parametrize("kind", KINDS)

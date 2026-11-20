@@ -65,6 +65,23 @@ def test_admitted_receipt_recovers_without_assistant_or_second_dispatch(store):
     assert journal.owners() == []
 
 
+def test_consumer_settles_admitted_crash_without_another_wake(store, monkeypatch):
+    from tui_gateway import automation_replay as ar
+    db, journal, batch = store
+    pending, _ = stage(db, journal, batch)
+    assert pending.admit()
+    monkeypatch.setattr(ar, "stale_code_reason", lambda: None)
+    monkeypatch.setattr(ar, "_holder_alive", lambda _: False)
+    monkeypatch.setattr(ar, "_deliveries", {})
+    wakes = []
+    for _ in range(3):
+        ar.consume_handoffs([journal.path.parent], now=100,
+                            wake=lambda *a, **kw: wakes.append(a) or "started")
+    assert wakes == []
+    assert journal.owners() == []
+    assert len(db.get_messages("chat")) == 1
+
+
 def test_admitted_quota_rewall_can_transfer_to_new_attempt(store):
     db, journal, batch = store
     pending, _ = stage(db, journal, batch)
