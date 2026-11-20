@@ -282,10 +282,12 @@ def _pr_verdict(api: Callable[[str], dict], repo: str, head: str, base: str, now
         if any(r.get("status") != "completed" for r in runs):
             return "running", "checks running"
         concl = [r.get("conclusion") for r in runs]
-    if any(c in _FAILED for c in concl):
+    if any(c in (*_FAILED, "stale") for c in concl):
         return "failed", "checks failed"
     if "cancelled" in concl:
         return "cancelled", "checks cancelled"
+    if any(c not in ("success", "neutral", "skipped") for c in concl):
+        return "unknown", "checks completed without a known conclusion"
     if not required:
         newest = max((kcp._epoch(r.get("updated_at")) or 0) for r in runs)
         if (time.time() if now is None else float(now)) - newest < SETTLE_SECONDS:
