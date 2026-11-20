@@ -39,6 +39,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional
 from hermes_cli.kanban_withdrawal_notice import envelope as _withdrawal
 from tui_gateway.kanban_remote_notice_state import state as _notice_state
+from hermes_cli.kanban_remote_ask import envelope as _ask, notifiable as _notifiable
 
 FRESH_S = 6 * 3600.0
 # [daveey] How long, from this host's first observation, a state it OBSERVED (not one seeded by a source's first
@@ -108,6 +109,8 @@ def drop_mark(task: dict) -> Optional[float]:
 def _terminal_at(task: dict) -> Optional[float]:
     if (dropped := drop_mark(task)) is not None:
         return dropped
+    if (ask := _ask(task)) is not None:
+        return float(ask['created_at'])
     run = task.get("run") if isinstance(task.get("run"), dict) else {}
     for value in (task.get("completed_at") if task.get("status") == "done" else None, run.get("ended_at")):
         with contextlib.suppress(TypeError, ValueError):
@@ -333,6 +336,10 @@ def format_notice(gw: str, key: str, task: dict) -> str:
         return server._format_kanban_event_text(
             {"task_id": tid}, SimpleNamespace(**task),
             SimpleNamespace(kind="request_withdrawn", payload={}), board)
+    if (ask := _ask(task)) is not None and ask['kind'] == 'decision_requested':
+        from hermes_cli.kanban_decision_ask import notice_text
+        return (f"? {prefix}Kanban {tid} — {title}\n" + notice_text(ask['payload'])
+                + f"\nCard: @task:{board}@{gw}/{tid}")
     if task.get("status") == "done":
         handoff = _first_line(run.get("summary") or task.get("result"), 200)
         return f"✔ {prefix}Kanban {tid} done — {title}{handoff}\n(ran on {gw}; read it with cross_task @task:{board}@{gw}/{tid})"
@@ -366,6 +373,8 @@ def _shared_key(owner: str, key: str, task: dict, profile: str, sid: str) -> str
     notice = task.get("completion_notice")
     if task.get("status") == "done" and isinstance(notice, dict) and "event_id" in notice:
         return _event_key(owner, key, notice)
+    if (ask := _ask(task)) is not None and drop_mark(task) is None:
+        return f"remote:{owner}:{key}:{ask['kind']}:{ask['event_id']}"
     at = _terminal_at(task)
     return f"remote:{owner}:{key}:{task.get('status')}@{int(at) if at else 0}:{profile}:{sid}"
 
@@ -1201,6 +1210,8 @@ def _sweep_payload(owner: str, key: str, task: dict, me: str, profile: str, sid:
     metadata = {"notice_id": event_key, "board": task.get("board", "default"),
                 "task_id": task["id"], "gateway": owner, "kanban_event_keys": [event_key],
                 "blocked_on_human": remote_blocked_on_human(task)}
+    if (ask := _ask(task)) is not None:
+        metadata['event_kind'] = ask['kind']
     return event_key, metadata, format_notice(owner, key, task)
 
 
@@ -1213,7 +1224,7 @@ def _sweep_cards(rows: list[tuple], me: str):
             continue
         notice = task.get("completion_notice") if isinstance(task, dict) else None
         done = task.get("status") == "done" and isinstance(notice, dict) and "event_id" in notice
-        if not done and task.get("status") != "blocked" and _withdrawal(task) is None:
+        if not done and task.get('status') != 'blocked' and _ask(task) is None and _withdrawal(task) is None:
             continue
         links = [{"profile": profile, "session": sid} for profile, sid in _linked_chats(task, me)]
         if not links:

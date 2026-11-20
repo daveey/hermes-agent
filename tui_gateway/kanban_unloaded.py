@@ -657,6 +657,12 @@ class _RemoteWaker:
         """Start one turn with ``text`` in ``tip``, else ``persist()`` the row. Returns the verdict. Never raises.
         With every wake slot busy, ``defer()`` hands the claim back for the next pass instead of the row, until the
         notice has waited ``OVERDUE_S`` for a slot (design t_01a1d45d75851804 R4)."""
+        decision = metadata.get('event_kind') == 'decision_requested'
+        if decision and defer is not None:
+            # A passive row cannot answer an agent question: release for retry.
+            def persist():
+                defer()
+                return False
         try:
             from types import SimpleNamespace
             view = SimpleNamespace(status=task.get("status"), human_request=task.get("human_request"),

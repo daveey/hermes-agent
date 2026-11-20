@@ -474,13 +474,13 @@ def _row_print(task, me):
 def _substantive(gw, key, task, swept, path=None, me=None) -> bool:
     """A replica task row whose write the remote sweep (or ``observe``) may act on."""
     from hermes_cli.kanban_withdrawal_notice import envelope
-    from tui_gateway.kanban_remote_notices import _TERMINAL
+    from tui_gateway.kanban_remote_notices import _notifiable
     if task is None:
         return True
     ident = (str(path), gw, key)
     if me is not None and gw == me:
         return False  # ``observe`` and the sweep read every gateway's rows but this one's own
-    terminal = task.get('status') in _TERMINAL or not task.get('status')
+    terminal = _notifiable(task) or not task.get('status')
     if not (f'{gw}/{key}' in swept or envelope(task) is not None or terminal):
         _row_prints.pop(ident, None)  # left the terminal set: its next terminal write is a new state
         return False

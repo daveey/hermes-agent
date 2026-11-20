@@ -23,7 +23,7 @@ def _snapshot(replica: Path, previous, decoded: dict, lane=None) -> tuple[bool, 
     Include unlinked cards and historical done cards without completion evidence:
     linking a chat or switching between sweep and collect must not resurrect them.
     """
-    from tui_gateway.kanban_remote_notices import _canonical, _ro, _task_rows, _TERMINAL
+    from tui_gateway.kanban_remote_notices import _canonical, _ro, _task_rows, _notifiable
 
     with contextlib.closing(_ro(replica)) as conn:
         conn.execute("BEGIN")
@@ -47,7 +47,7 @@ def _snapshot(replica: Path, previous, decoded: dict, lane=None) -> tuple[bool, 
             for owner, key, _seq, raw in _canonical(_task_rows(conn, meta.get("gateway"))):
                 with contextlib.suppress(TypeError, ValueError):
                     task = json.loads(raw)
-                    if isinstance(task, dict) and (task.get("status") in _TERMINAL or _withdrawal(task) is not None):
+                    if isinstance(task, dict) and (_notifiable(task) or _withdrawal(task) is not None):
                         cards.append((owner, key, task))
             return ready, cards, signature
         cards = _changed_rows_cards(conn, replica, meta.get("gateway"), decoded, lane)
@@ -55,6 +55,7 @@ def _snapshot(replica: Path, previous, decoded: dict, lane=None) -> tuple[bool, 
 
 
 def _summary(task) -> dict | None:
+    from hermes_cli.kanban_remote_ask import notifiable
     from tui_gateway.kanban_remote_notices import drop_mark
 
     if not isinstance(task, dict):
@@ -62,7 +63,7 @@ def _summary(task) -> dict | None:
     withdrawal = _withdrawal(task)
     if withdrawal is not None:
         return {"status": task["status"], "withdrawal_notice": withdrawal}
-    if task.get("status") not in _terminal_states():
+    if notifiable(task) is False:
         return None
     run = task.get("run")
     run = run if isinstance(run, dict) else {}
@@ -72,6 +73,7 @@ def _summary(task) -> dict | None:
             "run": {"ended_at": run.get("ended_at")},
             "human_request": ({"resolved_check_dropped_at": drop_mark(task)}
                               if drop_mark(task) is not None else None),
+            "ask_notice": task.get('ask_notice'),
             "completion_notice": {"created_at": notice.get("created_at")}}
 
 

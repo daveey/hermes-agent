@@ -36,7 +36,7 @@ def notice_text(payload: dict) -> str:
     ask = str(payload.get("why") or payload.get("reason") or "")
     if len(ask) > 6000:
         ask = ask[:4500] + "\n[... full text in the card comments ...]\n" + ask[-1500:]
-    return ("This card is parked until you decide:\n" + ask
+    return ("Decision for the creator agent (not a request for the user). This card is parked until you decide:\n" + ask
             + "\nAnswer with a comment on the card (kanban_comment); the comment wakes it. "
             "If you cannot decide, block it with kind='needs_input' and a human_request for David.")
 

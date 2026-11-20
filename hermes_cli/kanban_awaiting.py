@@ -592,11 +592,10 @@ def _owns_card(conn: sqlite3.Connection, task_id: str) -> bool:
 def has_chat_subscriber(conn: sqlite3.Connection, task_id: str) -> bool:
     """A subscribed chat that ``decision_requested`` can wake.
 
-    A ``tui`` row whose chat is reachable (:func:`tui_chat_reachable`): the live poller queues the notice and
-    the unloaded sweeper starts a turn in a dormant chat. A messaging row in ``notify+wake`` / ``wake`` mode:
-    the gateway notifier wakes the agent. Never a ``hub`` relay row, whatever its mode (legacy rows were
-    backfilled to ``notify+wake``): it carries only cards that turned terminal. Not a plain ``notify``
-    messaging row either: a passive ping, possibly to a person rather than the orchestrator."""
+    A reachable local TUI chat, a wake-enabled messaging row, or a fully
+    qualified hub relay destination (current asks travel in the owner snapshot).
+    Plain notify messaging rows are not agent wakes.
+    """
     try:
         rows = conn.execute("SELECT platform, chat_id, delivery_mode FROM kanban_notify_subs WHERE task_id = ?",
                             (task_id,)).fetchall()
@@ -605,6 +604,11 @@ def has_chat_subscriber(conn: sqlite3.Connection, task_id: str) -> bool:
     for platform, chat_id, mode in rows:
         platform = (platform or "").lower()
         if platform == "hub":
+            # The owner collector publishes current asks with the origin link.
+            # Reject malformed destinations rather than silently parking them.
+            from hermes_cli.kanban_restore_chat_subs import _safe
+            if isinstance(chat_id, str) and len(chat_id.split('/')) == 3 and all(_safe(p) for p in chat_id.split('/')):
+                return True
             continue
         if platform == "tui":
             if chat_id and tui_chat_reachable(chat_id):
@@ -741,7 +745,9 @@ def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Op
         return inferred
     kanban_soak_wait.check(conn, task_id, declared, reason, short_continue=_short_continue(op, wake_in))
     text = " ".join(x for x in (reason, declared.get("why"), declared.get("ref")) if x)
-    if declared["kind"] == "external" and orchestrator_wait(text, declared.get("ref")):
+    from hermes_cli.kanban_remote_ask import own_comment_wait
+    if declared["kind"] == "external" and (orchestrator_wait(text, declared.get("ref"))
+                                            or own_comment_wait(wake_check, task_id)):
         declared = {**declared, "kind": CHAT, "reclassified_from": "external",
                     "why": declared.get("why") or (reason or "")[:600]}
     if declared["kind"] == RESOURCE and not (wake_check and str(wake_check).strip()):
@@ -811,7 +817,8 @@ def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in) -> dic
             raise wall_error(task_id, wall, text, named=producer)
     if producer:
         return {"kind": "card", "ref": producer, "inferred": True}
-    if not short and orchestrator_wait(text):
+    from hermes_cli.kanban_remote_ask import own_comment_wait
+    if (not short and orchestrator_wait(text)) or own_comment_wait(wake_check, task_id):
         record = {"kind": CHAT, "ref": "owning orchestrator", "why": text[:600], "inferred": True}
         _check_chat(conn, task_id, record, text)
         return record

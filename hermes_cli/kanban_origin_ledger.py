@@ -245,9 +245,12 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
         current_task=lambda: conn.execute('SELECT title,body FROM tasks WHERE id=?', (task['id'],)).fetchone(),
         receipt_epoch=lambda: _receipt_epoch(conn))
     payload = {k: v for k, v in task.items()
-               if k not in ('origin_observation', 'withdrawal_notice', 'withdrawal_recipients')}
+               if k not in ('origin_observation', 'withdrawal_notice', 'withdrawal_recipients', 'ask_notice')}
     from hermes_cli.kanban_session_activity_card_details import _add_blocked_upstream
     _add_blocked_upstream(conn, {task['id']: payload})
+    from hermes_cli.kanban_remote_ask import publish as publish_ask
+    if (ask := publish_ask(conn, task)) is not None:
+        payload['ask_notice'] = ask
     from hermes_cli.kanban_withdrawal_notice import publish
     withdrawal = publish(conn, task)
     if withdrawal is not None:

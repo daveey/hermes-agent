@@ -218,7 +218,8 @@ def _metadata(item: dict) -> dict:
     task_id = "" if item.get("children") else str(item.get("ref") or "").rsplit("/", 1)[-1]
     parts = str(item.get("ref") or "").split("/")
     board = parts[2] if task_id and len(parts) == 4 else ""
-    kind = {"blocked": "blocked", "done": "completed", "request_withdrawn": "request_withdrawn"}.get(
+    kind = {"blocked": "blocked", "done": "completed", "request_withdrawn": "request_withdrawn",
+            "decision_requested": "decision_requested"}.get(
         str(item.get("state") or "").split("@", 1)[0])
     card = {"task_id": task_id, "board": board, "kinds": [kind] if task_id and kind else [],
             "text": text[:_CARD_TEXT_LIMIT]}

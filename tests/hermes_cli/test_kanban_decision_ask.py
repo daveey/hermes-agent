@@ -233,8 +233,8 @@ def test_chat_wait_never_launders_a_david_ask_or_an_agent_wall(kanban_home, monk
     ("tui", None, True),
     ("telegram", "notify+wake", True),
     ("telegram", None, False),  # a passive ping, maybe to a person: no orchestrator is woken
-    ("hub", None, False),       # the hub relay carries only cards that turned terminal
-    ("hub", "notify+wake", False),  # legacy hub rows were backfilled to notify+wake: still only terminal cards
+    ("hub", None, True),       # origin asks travel in the owner snapshot
+    ("hub", "notify+wake", True),
 ])
 def test_only_a_subscription_the_notice_can_wake_counts(kanban_home, monkeypatch, platform, mode, parks) -> None:
     with kbc.connect_closing() as conn:
