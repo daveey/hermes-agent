@@ -2,7 +2,7 @@
 
 ``certify_page`` raises ``ContainmentRefused`` when a feed page's protected containment event does not match its
 canonical receipt. That refusal is correct and stays strict: nothing from the page is applied and the board's
-cursor does not move. Before this module the exception escaped ``sync_board`` -> ``sync_all_once`` ->
+cursor stays at the last good page. Before this module the exception escaped ``sync_board`` -> ``sync_all_once`` ->
 ``run_forever``, killed ``kanban_sync_watcher`` and, after the supervisor's five rapid restarts, stopped every
 board on the host until the gateway restarted (04:42Z and again 06:31Z on 2026-11-20: hub, worker-1, both Macs).
 
@@ -47,11 +47,18 @@ def refused(slug: str, exc: BaseException, *, now: Optional[Callable[[], float]]
         backoff = FIRST_BACKOFF_S if prior is None else min(prior[1] * 2, MAX_BACKOFF_S)
         _state[slug] = (clock() + backoff, backoff, text)
     if prior is None or prior[2] != text:
-        _log.error("kanban sync: %s round refused (%s); nothing applied, cursor kept; other boards keep syncing, "
-                   "retry in %ds", slug, text, int(backoff))
+        _log.error("kanban sync: %s round refused (%s); nothing from the refused page applied, cursor at the last "
+                   "good page; other boards keep syncing, retry in %ds", slug, text, int(backoff))
     else:
         _log.debug("kanban sync: %s still refused (%s); retry in %ds", slug, text, int(backoff))
     return text
+
+
+def runnable(boards, *, now: Optional[Callable[[], float]] = None):
+    """``boards`` (``(slug, path)`` pairs) without the ones backing off after a refusal. ``run_forever`` filters
+    with this before selecting a round and before choosing which outboxes may wake it, so a held board neither
+    reruns nor wakes the loop until its backoff ends (it must not reuse ``skipped``: that means a 0.5 s retry)."""
+    return [b for b in boards if waiting(b[0], now=now) is None]
 
 
 def cleared(slug: str) -> None:

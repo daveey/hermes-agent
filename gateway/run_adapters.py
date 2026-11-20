@@ -564,7 +564,9 @@ class GatewayAdapterLifecycleMixin(GatewayAdapterStatusMixin, GatewaySecondaryRe
                             self._spawn_supervised(coro_factory, name, restart=restart, _attempt=0,
                                                    on_spawn=on_spawn, on_give_up=on_give_up)
 
-                    self._retain_background_task(Context().run(lambda: asyncio.create_task(_slow_respawn())))
+                    pending = Context().run(lambda: asyncio.create_task(_slow_respawn()))
+                    pending._hermes_supervised_watcher = True  # type: ignore[attr-defined]  # scale-to-zero ignores it
+                    self._retain_background_task(pending)
                 return
             backoff = self._supervised_backoff(effective_attempt)
 

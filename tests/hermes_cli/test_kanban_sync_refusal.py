@@ -74,7 +74,8 @@ def test_refused_board_backs_off_then_retries_and_logs_once(monkeypatch, tmp_pat
         ksc.sync_all_once(_Hub(), boards=boards)          # refused: backoff 60 s
         clock["t"] += 30
         held = {r.board: r for r in ksc.sync_all_once(_Hub(), boards=boards)}
-        assert calls["refused"] == 1 and held["refused"].skipped  # still backing off: not retried
+        # still backing off: not retried, and not `skipped` (run_forever reads skipped as "retry in 0.5 s")
+        assert calls["refused"] == 1 and not held["refused"].skipped and held["refused"].error
         clock["t"] += 31
         ksc.sync_all_once(_Hub(), boards=boards)          # retried, refused again: backoff 120 s
         assert calls["refused"] == 2
@@ -101,3 +102,19 @@ def test_backoff_caps_at_fifteen_minutes():
     assert refusal.waiting("b", now=now) is not None
     clock["t"] += refusal.MAX_BACKOFF_S
     assert refusal.waiting("b", now=now) is None
+
+
+def test_run_forever_never_selects_or_wakes_on_a_held_board(tmp_path):
+    """Review of #3759: a held board must leave run_forever's selection and wake set, not spin it every 0.5 s."""
+    import inspect
+
+    clock = {"t": 0.0}
+    now = lambda: clock["t"]
+    boards = _boards(tmp_path)
+    refusal.refused("refused", ContainmentRefused("x"), now=now)
+    assert refusal.runnable(boards, now=now) == [boards[1]]
+    clock["t"] += refusal.FIRST_BACKOFF_S
+    assert refusal.runnable(boards, now=now) == boards
+    src = inspect.getsource(ksc._run_forever)
+    assert "selected = refusal.runnable(selected)" in src
+    assert "ready = refusal.runnable(" in src

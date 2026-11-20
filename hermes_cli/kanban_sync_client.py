@@ -1166,8 +1166,8 @@ def sync_all_once(hub: Optional[Hub] = None, *,
     for slug, path in board_paths() if boards is None else boards:
         mark = sync_timing.board_start(slug, results)
         held = refusal.waiting(slug)
-        if held is not None:  # backing off after a containment refusal; the other boards still run
-            results.append(RoundResult(board=slug, mode="?", error=held, skipped=True))
+        if held is not None:  # backing off after a containment refusal (run_forever never selects it)
+            results.append(RoundResult(board=slug, mode="?", error=held))
             sync_timing.board_end(mark, results)
             continue
         try:
@@ -1548,6 +1548,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                 selected += [b for b in backlog.due(boards) if b not in selected]  # a pull backlog drains round by round
                 picked = time.monotonic()  # a board backing off a failed round waits for it, whatever else is due
                 selected = [b for b in selected if not work.backing_off(b[0], picked)]
+                selected = refusal.runnable(selected)  # a refused board waits out its own backoff, no busy retry
                 outbox_age.round_started()
                 results = sync_all_once(hub, boards=selected)
                 ahead = [r for r in results if (r.error or "").startswith("SchemaAhead")]
@@ -1576,7 +1577,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                 if any(r.skipped for r in results):
                     remaining = min(remaining, BUSY_RETRY_S)
                 now = time.monotonic()
-                ready = [(s, p) for s, p in boards if not work.backing_off(s, now)]
+                ready = refusal.runnable([(s, p) for s, p in boards if not work.backing_off(s, now)])
                 deferred_due = next_deferred_repair(ready)
                 if deferred_due is not None:
                     remaining = min(remaining, max(0.0, deferred_due - _repair_clock()))

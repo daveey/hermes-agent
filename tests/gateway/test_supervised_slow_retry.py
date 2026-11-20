@@ -76,3 +76,18 @@ async def test_no_slow_respawn_after_shutdown(monkeypatch):
     runner._spawn_supervised(watcher, "kanban_sync_watcher", on_give_up=stop)
     await _settle()
     assert state["live"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_slow_respawn_when_shut_down_during_the_wait(monkeypatch):
+    runner = _runner(monkeypatch)
+    monkeypatch.setattr(GatewayRunner, "_SUPERVISED_SLOW_RETRY_SECS", {"kanban_sync_watcher": 0.05})
+    state, watcher = _crashing(crashes=3)
+    runner._spawn_supervised(watcher, "kanban_sync_watcher")
+    await _settle()
+    pending = [t for t in runner._background_tasks if not t.done()]
+    assert pending and all(getattr(t, "_hermes_supervised_watcher", False) for t in pending)
+    runner._running = False  # shutdown while the slow respawn sleeps
+    await asyncio.wait(pending, timeout=5)  # the slow respawn task finishes its wait and declines to respawn
+    await _settle()
+    assert state["live"] == 0 and state["spawns"] == 3
