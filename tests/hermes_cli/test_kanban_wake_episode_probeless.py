@@ -1,4 +1,5 @@
 """Probe-less parks add evidence only when some probe could still need clearing."""
+import itertools
 import json
 import time
 
@@ -17,6 +18,15 @@ parked = base.parked
 COOLDOWN = "SCHEDULED_UNTIL=2026-09-13T00:00:00Z rate-limit cooldown"
 
 
+_WINDOWS = itertools.count()
+
+
+def _window():
+    """A declared clock wake reason (kanban_awaiting no_wake_reason), new each park: these tests re-park one card
+    many times, and a repeated declared premise escalates on the third park (kanban_awaiting.gate)."""
+    return {"kind": "clock", "why": f"rate-limit cooldown window {next(_WINDOWS)}"}
+
+
 def _kinds(conn, tid):
     return [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id = ? ORDER BY id", (tid,))]
 
@@ -25,7 +35,7 @@ def _park_without_probe(conn, tid):
     conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
     assert kb.claim_task(conn, tid, claimer="worker") is not None
     before = len(_kinds(conn, tid))
-    assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True)
+    assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True, awaiting=_window())
     return [k for k in _kinds(conn, tid)[before:] if k not in {"claimed", "commented"}]
 
 
@@ -39,7 +49,7 @@ def test_first_park_of_created_runnable_card_carries_a_reset(kanban_home):
     with kbc.connect_closing() as conn:
         tid = helpers._running(conn)
         before = len(_kinds(conn, tid))
-        assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True)
+        assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True, awaiting=_window())
         assert [k for k in _kinds(conn, tid)[before:] if k != "commented"] == [episode.EVIDENCE_EVENT, "scheduled"]
 
 
@@ -53,7 +63,7 @@ def test_direct_triage_park_of_local_triage_card_adds_no_evidence(kanban_home):
     with kbc.connect_closing() as conn:
         tid = _triage(conn)
         before = len(_kinds(conn, tid))
-        assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True)
+        assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True, awaiting=_window())
         assert [k for k in _kinds(conn, tid)[before:] if k != "commented"] == ["scheduled"]
         assert _park(conn, tid, "scheduled") == [episode.EVIDENCE_EVENT, "scheduled"]  # marker consumed
 
@@ -159,7 +169,7 @@ def test_delivered_but_unreconciled_foreign_probe_is_cleared(kanban_home):
             assert _episode(peer, tid)
             carry.import_events(peer, conn, tid)  # delivered, not yet reconciled here
             before = len(_kinds(conn, tid))
-            assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True)
+            assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True, awaiting=_window())
             added = [k for k in _kinds(conn, tid)[before:] if k != "commented"]
             assert added == [episode.EVIDENCE_EVENT, "scheduled"]
             carry.import_events(conn, peer, tid)
@@ -205,7 +215,7 @@ def test_in_corridor_park_resets_undelivered_foreign_episode(kanban_home, kind):
     with kbc.connect_closing() as conn:
         tid = helpers._running(conn)
         before = len(_kinds(conn, tid))
-        assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True)
+        assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True, awaiting=_window())
         assert [k for k in _kinds(conn, tid)[before:] if k != "commented"] == [episode.EVIDENCE_EVENT, "scheduled"]
         conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
         assert kb.claim_task(conn, tid, claimer="worker") is not None
@@ -215,7 +225,7 @@ def test_in_corridor_park_resets_undelivered_foreign_episode(kanban_home, kind):
             assert tuple(_peer_episode(peer, tid, t0)) == (t0, 1)  # never delivered to home
             before = len(_kinds(conn, tid))
             if kind == "scheduled":
-                assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True)
+                assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True, awaiting=_window())
             else:
                 kb._append_event(conn, tid, "continued", {"reason": "rate-limit cooldown"})
             added = [k for k in _kinds(conn, tid)[before:] if k != "commented"]
@@ -234,7 +244,7 @@ def _park(conn, tid, kind):
         assert kb.claim_task(conn, tid, claimer="worker") is not None
     before = len(_kinds(conn, tid))
     if kind == "scheduled":
-        assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True)
+        assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True, awaiting=_window())
     else:
         kb._append_event(conn, tid, "continued", {"reason": "rate-limit cooldown"})
     return [k for k in _kinds(conn, tid)[before:] if k not in {"claimed", "commented"}]

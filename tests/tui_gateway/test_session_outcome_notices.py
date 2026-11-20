@@ -103,7 +103,8 @@ def test_card_status_change_refreshes_and_marks_its_blocked_notice_stale(db):
     assert so.refresh_outcome(CHAT, "manual", db=db)["on"][0]["state"] == "blocked"
 
     with contextlib.closing(kbc.connect()) as conn:
-        assert kb.schedule_task(conn, tid, reason="registry back at 14:00", clock_only=True)
+        assert kb.schedule_task(conn, tid, reason="registry back at 14:00", clock_only=True,
+                                awaiting={"kind": "clock", "why": "registry back at 14:00"})
     ksa._reset_cache_for_tests()
     changed = nf.card_change_pass(session_db=_opener(db))
 

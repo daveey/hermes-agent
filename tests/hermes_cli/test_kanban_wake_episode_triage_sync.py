@@ -39,7 +39,7 @@ def _fresh(conn, tid):
 
 def _home_park_kinds(conn, tid):
     before = len(_kinds(conn, tid))
-    assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True)  # home still sees triage
+    assert kb.schedule_task(conn, tid, reason=COOLDOWN, clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})  # home still sees triage
     return [k for k in _kinds(conn, tid)[before:] if k != "commented"]
 
 

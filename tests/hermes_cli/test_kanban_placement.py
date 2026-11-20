@@ -1213,6 +1213,9 @@ def test_forwarder_waits_for_a_queued_request_without_sending_it_twice(mac, monk
         kb.recompute_ready(conn)
         f = _forwarder(conn, child, mac, monkeypatch, await_tid=None)
         assert f.run() == "requeued" and kb.get_task(conn, child).status == "scheduled"
+        # The system clock park declares its wake reason (a bare clock is refused no_wake_reason).
+        rec = [e for e in kb.list_events(conn, child) if e.kind == "scheduled"][-1].payload["awaiting"]
+        assert rec["kind"] == "clock" and rec["why"].startswith("deferred placement retry: "), rec
         kb.unblock_task(conn, child)
         kb.recompute_ready(conn)
         f = _forwarder(conn, child, mac, monkeypatch, await_tid=HUB_TID)

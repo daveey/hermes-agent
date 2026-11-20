@@ -149,7 +149,8 @@ def test_managed_worker_that_parks_itself_exits_0_and_keeps_scheduled(kanban_hom
             # The worker's first turn parks the card (kanban_schedule / kanban_block kind=time).
             with kbc.connect() as c:
                 assert kb.schedule_task(c, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z PR not merged",
-                                        expected_run_id=run_id, clock_only=True)
+                                        expected_run_id=run_id, clock_only=True,
+                                        awaiting={"kind": "clock", "why": "the PR merge window"})
             return dict(OK_TURN)
         agent = _Agent(turn)
         assert kb.goal_run_status(conn, tid, run_id) == "running"
@@ -190,7 +191,7 @@ def test_parked_goal_worker_exit_0_is_not_booked_as_a_crash(kanban_home, monkeyp
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET worker_pid=4242 WHERE id=?", (tid,))
         assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait",
-                                expected_run_id=run_id, clock_only=True)
+                                expected_run_id=run_id, clock_only=True, awaiting={"kind": "clock", "why": "fixture wait"})
         kbd.detect_crashed_workers(conn)
         run = conn.execute("SELECT outcome FROM task_runs WHERE id=?", (run_id,)).fetchone()
         task = kb.get_task(conn, tid)

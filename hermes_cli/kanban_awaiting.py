@@ -43,9 +43,13 @@ on a wake check that names no card or CI run (an opaque probe: "python3 -c ...",
 refused too
 (``opaque_probe_wait``): a probe proves only that something polls, which is what the read side
 (``kanban_wait_info``) already reports as a stall; on 10-27 a card waited 9 h on a KeepAlive browser
-nobody would stop. Short continues (<= 2 h, pacing a job) are exempt. Anything else is recorded
-as an inferred ``clock`` / ``external`` wait so the checker can tell legacy guesses from declared
-producers. Inference never names the card's own children or descendants: a parent parked on its
+nobody would stop. Short continues (<= 2 h, pacing a job) are exempt. A live card named in the text
+or a wake check is recorded as an inferred ``card`` / ``external`` wait so the checker can tell
+legacy guesses from declared producers. A park that names nothing at all is refused
+(``no_wake_reason``): a scheduled wait needs a wake reason (a declared ``clock`` with its ``why``, a
+producer, or a probe); only a short continue, whose reason is the continuation itself, is recorded
+as an inferred ``clock``. System parkers (placement forwarding, owner-down holds, capability routing)
+declare theirs. Inference never names the card's own children or descendants: a parent parked on its
 child cycles (the child stays todo until the parent finishes, and the checker walks that edge
 back). A declared producer or wake probe that would cycle the same way is refused at schedule
 time. The third park in a row on one premise is not parked again: it becomes one
@@ -81,8 +85,11 @@ PRODUCER_DONE = "producer_done"
 CI_RUN_UNSTARTABLE = "ci_run_unstartable"
 SOAK_WAIT = "soak_wait"
 NO_CHAT_SUBSCRIBER = "no_chat_subscriber"
+# A timed park that names nothing it waits for (no awaiting, no wake_check, no live card in its text): a scheduled
+# wait needs a wake reason. Only a short continuation (pacing, its reason is the continuation itself) is exempt.
+NO_WAKE_REASON = "no_wake_reason"
 CODES = (AGENT_ACTION_WAIT, HUMAN_WAIT, INVALID_AWAITING, OPAQUE_PROBE_WAIT, PRODUCER_DONE, CI_RUN_UNSTARTABLE,
-         SOAK_WAIT, NO_CHAT_SUBSCRIBER)
+         SOAK_WAIT, NO_CHAT_SUBSCRIBER, NO_WAKE_REASON)
 # A wait on the card's own orchestrator chat: a waiting verb, then within the clause either a qualified
 # orchestrator/chat ("owning orchestrator", "origin chat", "creator chat") or the orchestrator's decision words
 # ("orchestrator's three decisions", "orchestrator to decide"). Product names ("Airflow orchestrator release",
@@ -834,7 +841,25 @@ def _infer(conn, task_id, *, reason, wake_check, clock_only, op, wake_in) -> dic
         if probe:
             raise opaque_probe_error(probe)
         return {"kind": "external", "ref": probe_ref(wake_check), "inferred": True}
-    return {"kind": "clock", "inferred": True}
+    if short:
+        return {"kind": "clock", "inferred": True}
+    # An observation window is refused as one (its remedy is to run the check now), before the missing reason.
+    from hermes_cli import kanban_soak_wait
+    kanban_soak_wait.check(conn, task_id, {"kind": "clock"}, reason, short_continue=False)
+    raise no_wake_reason_error(task_id)
+
+
+def no_wake_reason_error(task_id: str) -> AwaitingError:
+    """[daveey] A scheduled wait needs a wake reason: a bare park read "a producer the owner did not publish" on
+    every other gateway and "nothing named" here, and nobody could tell a cooldown from a forgotten card."""
+    return AwaitingError(NO_WAKE_REASON, (
+        f"{task_id}: a scheduled wait needs a wake reason, and this park names none (no awaiting, no wake_check, "
+        "no live card in its reason). Say what ends the wait: "
+        "awaiting={kind:'clock', why:'<why this time: the cooldown, release slot or quota reset>'} for a deliberate "
+        "time wait; awaiting={kind:'card'|'ci'|'deploy'|'external', ref:'<the producer: card id, run id/URL, "
+        "release, vendor or ticket>', why:'<evidence it will>'} when something produces it; or a wake_check probe "
+        "that passes once it is true. If it needs David, kanban_block(kind='needs_input', human_request={...}) "
+        "instead."))
 
 
 _INTERPRETER = re.compile(r"(?:python[\d.]*|bash|sh|zsh|node|ruby|perl|uv|nice|nohup|timeout|exec)$")
@@ -1044,7 +1069,7 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     """``resolve`` plus re-park escalation: the record to store on the parking event.
 
     Raises ``RepeatedPark`` on the third park in a row on one premise. Card waits (their producer
-    is accountable), inferred clock waits (pacing continues, operator drags) and re-parks after the
+    is accountable), inferred clock waits (short pacing continues, the only bare park left) and re-parks after the
     same probe fired (``prior_same_premise``: a natural window that closed again) do not escalate
     until ``PROBE_FIRE_REPARK_LIMIT`` such cycles (``probe_fire_reparks``: a broken probe), nor does
     a deploy wait behind a healthy core update window (``kanban_deploy_window``), whose

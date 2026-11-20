@@ -204,7 +204,8 @@ def test_schedule_without_marker_still_gets_a_wake(kanban_home):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="sched", assignee="a")
         before = int(time.time())
-        assert kb.schedule_task(conn, tid, reason=None, clock_only=True)
+        assert kb.schedule_task(conn, tid, reason=None, clock_only=True,
+                                awaiting={"kind": "clock", "why": "no marker: the default wake"})
         wake = _parking_payload(conn, tid).get("wake_at")
         assert isinstance(wake, int) and wake >= before + ktp.DEFAULT_WAKE_SECONDS - 5
 

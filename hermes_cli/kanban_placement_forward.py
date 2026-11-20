@@ -702,7 +702,7 @@ class Forwarder:
         from hermes_cli import kanban_db as kb
         ok = kb.schedule_task(
             self.conn, self.task_id, expected_run_id=self.run_id, clock_only=True,
-            awaiting={"kind": "clock"},
+            awaiting={"kind": "clock", "why": f"deferred placement retry: {why}"[:600]},
             reason=f"SCHEDULED_UNTIL={_iso(self.now() + REQUEUE_SECONDS)} {why} (deferred placement)")
         return "requeued" if ok else "park-refused"
 

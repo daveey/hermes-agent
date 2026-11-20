@@ -167,3 +167,120 @@ def test_receipt_requires_publication_and_survives_replica_loss(world):
     assert rows[0]["owner"] == binding["owner"]
     assert rows[0]["unfinished"] is True
     assert ledger.receipt(path, "request-0001") == receipt
+
+
+# -- the owner publishes its park (Desktop: "a producer the owner did not publish") [daveey] ----------------
+
+@pytest.fixture
+def owner_board(tmp_path, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    kb.init_db()
+    conn = connect()
+    try:
+        yield kb, conn
+    finally:
+        conn.close()
+        from hermes_cli import kanban_wake_check as kwc
+        kwc._shutdown_for_tests()
+
+
+def _observe(conn, tid):
+    import time
+    status, block_kind = conn.execute("SELECT status, block_kind FROM tasks WHERE id=?", (tid,)).fetchone()
+    conn.execute("BEGIN")
+    try:  # the collector's row carries block_kind (hermes_hub.collect_tasks)
+        return ledger.observe_owner_task(conn, dict(id=tid, status=status, block_kind=block_kind, gateway="hub",
+                                                    profile="default", board="default"), now=time.time())
+    finally:
+        conn.rollback()
+
+
+def _parks(kb, conn):
+    owner = kb.create_task(conn, title="builds the image", assignee="default")
+    tids = {k: kb.create_task(conn, title=k, assignee="default") for k in ("card", "ci", "probe", "clock")}
+    assert kb.schedule_task(conn, tids["card"], reason="the image", clock_only=True,
+                            awaiting={"kind": "card", "ref": owner, "why": "it builds the image"})
+    assert kb.schedule_task(conn, tids["ci"], reason="Waiting for CI run 40443505012 on PR92.",
+                            wake_check="gh run view 40443505012 --json status | grep -q completed",
+                            awaiting={"kind": "ci", "ref": "40443505012", "why": "in progress"})
+    assert kb.schedule_task(conn, tids["probe"], reason="released when the flag appears",
+                            wake_check="python3 check_flag.py")
+    assert kb.schedule_task(conn, tids["clock"], reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z quota reset",
+                            clock_only=True, awaiting={"kind": "clock", "why": "weekly quota resets"})
+    return owner, tids
+
+
+def test_scheduled_owner_record_publishes_its_park(owner_board):
+    kb, conn = owner_board
+    owner, tids = _parks(kb, conn)
+    rows = {k: _observe(conn, tid) for k, tid in tids.items()}
+    for kind, row in rows.items():
+        assert ledger._owner_evidence(row), kind  # the hash-bound observation covers the published fields
+        park = row["park"]
+        assert set(park) == {"wake_at", "reason", "ended_at", "outcome"} and park["outcome"] is None, park
+        assert isinstance(park["wake_at"], int) and park["wake_at"] > park["ended_at"], park
+        assert row["awaiting"]["kind"] == {"card": "card", "ci": "ci", "probe": "external", "clock": "clock"}[kind]
+    assert rows["card"]["awaiting"]["ref"] == owner
+    assert rows["ci"]["wake_check"].startswith("gh run view 40443505012")
+    assert rows["probe"]["wake_check"] == "python3 check_flag.py" and rows["probe"]["awaiting"]["inferred"] is True
+    assert "wake_check" not in rows["clock"] and rows["clock"]["awaiting"]["why"] == "weekly quota resets"
+    # SCHEDULED_UNTIL far out is clamped to the 14-day park maximum (kanban_timed_park.scheduled_until).
+    assert rows["clock"]["park"]["wake_at"] - rows["clock"]["park"]["ended_at"] == 14 * 24 * 3600
+    assert rows["clock"] == _observe(conn, tids["clock"])  # an unchanged park publishes an identical record
+
+
+def test_published_park_labels_the_remote_wait(owner_board):
+    """``describe_replica`` on the owner record, directly and through both remote-card projections (the hub-sync
+    replica rows and the origin-ledger rows), names the producer; never "a producer the owner did not publish"."""
+    from hermes_cli import kanban_replica_projection as proj
+    from hermes_cli.kanban_wait_info import describe_replica
+    kb, conn = owner_board
+    owner, tids = _parks(kb, conn)
+    want = {"card": f"card {owner}", "ci": "ci 40443505012", "probe": "probe check_flag.py",
+            "clock": "the clock until "}
+    for kind, tid in tids.items():
+        row = _observe(conn, tid)
+        (_, card), = proj.card_rows(("hub", "default", "default", tid), row, sids=("s1",), closed=False, synced=None,
+                                    stale=False, me="mac", origin_profile="default", legacy_record=None,
+                                    historical={})
+        assert card["park"] == row["park"]  # the published park, not the last run's fields
+        for shown in (row, card):
+            wait = describe_replica(shown)
+            assert wait["waiting_on"].startswith(want[kind]), (kind, wait)
+            assert "did not publish" not in wait["waiting_on"]
+        assert ledger._park_of(row) == row["park"]
+    clock = describe_replica(_observe(conn, tids["clock"]))
+    assert clock["agent_owned"] is False and "weekly quota resets" in clock["waiting_on"]
+
+
+def test_unparked_owner_record_publishes_no_park(owner_board):
+    kb, conn = owner_board
+    tid = kb.create_task(conn, title="ready card", assignee="default")
+    row = _observe(conn, tid)
+    assert row["status"] in ("ready", "todo")
+    assert not {"park", "awaiting", "wake_check"} & set(row), row
+    # A woken (unblocked) card: its spent park is no longer published.
+    _, tids = _parks(kb, conn)
+    assert kb.unblock_task(conn, tids["clock"])
+    row = _observe(conn, tids["clock"])
+    assert row["status"] != "scheduled" and not {"park", "awaiting", "wake_check"} & set(row), row
+
+
+def test_blocked_time_owner_record_publishes_its_park(owner_board):
+    """A legacy ``blocked`` kind=time card publishes the park that holds it; another blocked kind does not."""
+    from hermes_cli.kanban_wait_replica import published_park
+    kb, conn = owner_board
+    _, tids = _parks(kb, conn)
+    tid = tids["clock"]
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='blocked', block_kind='time' WHERE id=?", (tid,))
+    row = _observe(conn, tid)
+    assert row["park"] == published_park(conn, tid)["park"] and row["awaiting"]["kind"] == "clock"
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET block_kind='transient' WHERE id=?", (tid,))
+    assert not {"park", "awaiting"} & set(_observe(conn, tid))

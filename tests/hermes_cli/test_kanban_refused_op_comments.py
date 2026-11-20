@@ -31,6 +31,10 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
+# A scheduled wait needs a wake reason (kanban_awaiting no_wake_reason).
+WHY = ("--awaiting", "clock:", "--awaiting-why", "the cooldown window")
+
+
 def _cli(*argv: str) -> int:
     parser = argparse.ArgumentParser(prog="hermes", add_help=False)
     kc.build_parser(parser.add_subparsers(dest="command"))
@@ -59,7 +63,7 @@ def _events(conn, tid, kind) -> int:
 def test_refused_schedule_leaves_no_comment_and_says_why(kanban_home, capsys):
     with kbc.connect() as conn:
         tid = _human_blocked(conn)
-    rc = _cli("schedule", tid, "Parked on the wall", "--clock-only")
+    rc = _cli("schedule", tid, "Parked on the wall", "--clock-only", *WHY)
     err = capsys.readouterr().err
     assert rc == 1
     with kbc.connect() as conn:
@@ -91,7 +95,7 @@ def test_successful_schedule_and_unblock_write_exactly_one_comment_each(kanban_h
         task = kb.get_task(conn, tid)
         assert task.status == "ready"
         kb.claim_task(conn, tid)
-    assert _cli("schedule", tid, "waiting", "on", "the", "cooldown", "--clock-only") == 0
+    assert _cli("schedule", tid, "waiting", "on", "the", "cooldown", "--clock-only", *WHY) == 0
     with kbc.connect() as conn:
         assert kb.get_task(conn, tid).status == "scheduled"
         assert _comments(conn, tid) == ["UNBLOCK: ask moved to t_feedface", "SCHEDULED: waiting on the cooldown"]

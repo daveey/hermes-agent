@@ -191,7 +191,8 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
 def test_schedule_task_parks_time_delay_without_dispatching(kanban_home):
     with kbc.connect() as conn:
         t = kb.create_task(conn, title="delayed recheck", assignee="ops")
-        assert kb.schedule_task(conn, t, reason="run next week", clock_only=True) is True
+        assert kb.schedule_task(conn, t, reason="run next week", clock_only=True,
+                                awaiting={"kind": "clock", "why": "next week's run"}) is True
         task = kb.get_task(conn, t)
         assert task.status == "scheduled"
         assert kb.claim_task(conn, t) is None

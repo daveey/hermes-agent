@@ -380,7 +380,7 @@ def test_parked_caller_is_woken_on_the_result(fleet):
     out = _submit(f, {"op": "operator", "action": "comment", "task_id": f.target, "text": "hi"})
     ksr.drain(f.w)
     assert schedule_task(f.w, f.caller, reason=f"waiting on supervisor request #{out['request_id']}",
-                         clock_only=True)
+                         clock_only=True, awaiting={"kind": "clock", "why": "the supervisor request result"})
     f.board()
     ksr.drain(f.h)
     f.board()

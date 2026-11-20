@@ -93,8 +93,8 @@ def test_link_after_dependency_park_is_refused_and_changes_nothing(worker_env):
 
 @pytest.mark.parametrize("call", [
     ("_handle_block", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait", "kind": "time",
-                       "clock_only": True}),
-    ("_handle_schedule", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait", "clock_only": True}),
+                       "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}),
+    ("_handle_schedule", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait", "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}),
     ("_handle_continue", {"checkpoint": "resume later"}),
     ("_handle_request_review", {"summary": "please review"}),
     ("_handle_request_changes", {"reason": "please fix"}),
@@ -114,8 +114,8 @@ def test_incident_sequence_end_to_end(worker_env):
     parent, _ = _dependency_park(worker_env)
     for fn, args in (
         (kt._handle_unlink, {"parent_id": parent, "child_id": worker_env}),
-        (kt._handle_block, {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z", "kind": "time", "clock_only": True}),
-        (kt._handle_schedule, {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z", "clock_only": True}),
+        (kt._handle_block, {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z", "kind": "time", "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}),
+        (kt._handle_schedule, {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z", "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}),
     ):
         _assert_run_already_ended(json.loads(fn(dict(args))), _run_id(), "todo")
     assert _state(worker_env) == ("todo", [parent])
@@ -135,7 +135,7 @@ def test_refusal_reports_the_successor_run_status(worker_env):
         kb.claim_task(conn, worker_env)
         new_run = kb._current_run_id(conn, worker_env)
     assert new_run != old_run
-    out = json.loads(kt._handle_schedule({"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z", "clock_only": True}))
+    out = json.loads(kt._handle_schedule({"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z", "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}))
     assert out.get("code") == "run_already_ended" and out.get("run_id") == old_run, out
     assert out.get("run_outcome") == "reclaimed" and out.get("status") == "running", out
     parent = _new_task("upstream")
@@ -150,9 +150,9 @@ def test_refusal_reports_the_successor_run_status(worker_env):
 # ── successful terminal tools say the run ended ────────────────────────────────────────────────
 
 @pytest.mark.parametrize("name,args,status", [
-    ("_handle_schedule", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait", "clock_only": True}, "scheduled"),
+    ("_handle_schedule", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait", "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}, "scheduled"),
     ("_handle_block", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait", "kind": "time",
-                       "clock_only": True}, "scheduled"),
+                       "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}, "scheduled"),
     ("_handle_complete", {"summary": "done"}, "done"),
     ("_handle_continue", {"checkpoint": "resume later"}, "ready"),
     ("_handle_request_review", {"summary": "please review"}, "review"),
@@ -221,7 +221,7 @@ def test_orchestrator_park_of_a_running_card_has_no_run_ended(worker_env, monkey
     from tools import kanban_tools as kt
     monkeypatch.delenv("HERMES_KANBAN_TASK")
     monkeypatch.delenv("HERMES_KANBAN_RUN_ID")
-    out = json.loads(kt._handle_schedule({"task_id": worker_env, "clock_only": True,
+    out = json.loads(kt._handle_schedule({"task_id": worker_env, "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"},
                                           "reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait"}))
     assert out.get("ok") is True and out["status"] == "scheduled", out
     assert "run_ended" not in out and "next" not in out, out
@@ -276,7 +276,7 @@ def test_failed_annotation_keeps_the_committed_success(worker_env, monkeypatch):
     def boom(*_a, **_k):
         raise sqlite3.OperationalError("database is locked")
     monkeypatch.setattr(kre, "with_success_fields", boom)
-    out = json.loads(kt._handle_schedule({"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait", "clock_only": True}))
+    out = json.loads(kt._handle_schedule({"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait", "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}))
     assert out.get("ok") is True and out["status"] == "scheduled", out
     assert "run_ended" not in out, out
     assert _state(worker_env)[0] == "scheduled"
@@ -293,6 +293,6 @@ def test_non_worker_lifecycle_call_skips_the_run_end_reads(worker_env, monkeypat
         raise AssertionError("run-end read for a non-worker")
     monkeypatch.setattr(kre, "refusal", no_read)
     monkeypatch.setattr(kre, "with_success_fields", no_read)
-    out = json.loads(kt._handle_schedule({"task_id": worker_env, "clock_only": True,
+    out = json.loads(kt._handle_schedule({"task_id": worker_env, "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"},
                                           "reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z wait"}))
     assert out.get("ok") is True, out

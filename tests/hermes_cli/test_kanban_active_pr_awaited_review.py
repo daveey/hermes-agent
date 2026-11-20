@@ -47,7 +47,8 @@ def _comment(conn, tid, run_id, body, monkeypatch, *, task=None):
 def _park(conn, tid, kind, wait_on=None):
     if kind == "scheduled":
         kwargs = {"wake_check": f"hermes kanban wait-check task {wait_on} --gateway worker-3",
-                  "check_every": 900} if wait_on else {"clock_only": True}
+                  "check_every": 900} if wait_on else {"clock_only": True,
+                                                       "awaiting": {"kind": "clock", "why": "review window"}}
         assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on review",
                                 **kwargs)
     else:
@@ -222,7 +223,7 @@ def _awaiting_owner(conn, clock, monkeypatch, metadata, *, via="wake_check", fin
         _park(conn, tid, "scheduled", wait_on=rev)
     else:
         assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on review",
-                                clock_only=True)
+                                clock_only=True, awaiting={"kind": "clock", "why": "review window"})
         with kb.write_txn(conn):
             row = conn.execute("SELECT id, payload FROM task_events WHERE task_id=? AND kind='scheduled'",
                                (tid,)).fetchone()

@@ -523,7 +523,7 @@ def test_unpublished_park_refusal_names_the_publish_refusal(card, monkeypatch):
     with kbc.write_txn(card.conn):
         card.conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(card.path), card.id))
     with pytest.raises(ValueError) as refused:
-        kb.schedule_task(card.conn, card.id, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True,
+        kb.schedule_task(card.conn, card.id, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"},
                          expected_run_id=card.run_id)
     text = str(refused.value)
     assert text.startswith("unpublished_workspace:")
@@ -577,7 +577,7 @@ def test_unpublished_park_refusal_without_publish_refusal_is_unchanged(card, mon
     with kbc.write_txn(card.conn):
         card.conn.execute("UPDATE tasks SET workspace_path=? WHERE id=?", (str(card.path), card.id))
     with pytest.raises(ValueError) as refused:
-        kb.schedule_task(card.conn, card.id, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True,
+        kb.schedule_task(card.conn, card.id, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"},
                          expected_run_id=card.run_id)
     assert str(refused.value).endswith("to the checkpoint/reason")
 
@@ -611,7 +611,7 @@ def test_publish_refusal_never_blocks_the_ending(card):
 
 def test_scheduled_continue_carries_receipt(card):
     commit(card.path, "x.txt")
-    assert kb.schedule_task(card.conn, card.id, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True,
+    assert kb.schedule_task(card.conn, card.id, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"},
                             expected_run_id=card.run_id)
     (op,) = _leaving_op(card.conn, card.id, "scheduled")
     assert op["fields"]["source_receipt"]["state"] == "published"

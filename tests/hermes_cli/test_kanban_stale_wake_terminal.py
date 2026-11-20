@@ -164,7 +164,7 @@ def test_a_wake_pushed_after_a_remote_completion_does_not_reopen_the_board_card(
     """The MacBook fires its clock wake while its pull is behind; the push drains after the completion."""
     tid = kb.create_task(live, title="pool card", assignee="worker")
     kb.claim_task(live, tid)
-    kb.schedule_task(live, tid, reason="SCHEDULED_UNTIL=2026-11-12T21:49:20Z ci", clock_only=True)
+    kb.schedule_task(live, tid, reason="SCHEDULED_UNTIL=2026-11-12T21:49:20Z ci", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
     _round(kanban_home, svc)
     _round(kanban_home, svc)
     assert svc.board(BOARD)["rows"]["tasks"][tid]["status"] == "scheduled"

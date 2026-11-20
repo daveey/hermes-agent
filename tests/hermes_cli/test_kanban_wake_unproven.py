@@ -101,7 +101,7 @@ def test_clock_only_wait_never_notifies(kanban_home, monkeypatch):
     monkeypatch.setattr(time, "time", lambda: clock[0])
     with kbc.connect_closing() as conn:
         tid = helpers._running(conn)
-        _park(conn, tid, clock, clock_only=True)
+        _park(conn, tid, clock, clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
         assert wc.get_state(conn, tid) is None  # no probe runs, so nothing can count a check
         assert unproven._latest_park(conn, tid) is None  # the park is marked clock-only
         clock[0] += 12 * HOUR

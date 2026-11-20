@@ -83,7 +83,8 @@ def test_pre_clear_run_cannot_reopen_quota_wall(kanban_home, monkeypatch, via_ch
         else:
             assert kb.unblock_task(conn, carrier)
             assert kb.claim_task(conn, carrier)
-            assert kb.block_task(conn, carrier, reason='other wait', kind='time', clear_blocker=True, clock_only=True)
+            assert kb.block_task(conn, carrier, reason='other wait', kind='time', clear_blocker=True, clock_only=True,
+                                  awaiting={'kind': 'clock', 'why': 'the other wait'})
         cleared_at = clock[0]
         clock[0] += 30
         assert kb.block_task(conn, stale, reason='stale quota context', kind='capability', blocker_id=ALIASES[2])

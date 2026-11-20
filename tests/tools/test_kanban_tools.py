@@ -459,7 +459,7 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
     reason = "SCHEDULED_UNTIL=2026-09-13T00:00:00Z waiting for reconnect"
     entry = registry.get_entry("kanban_schedule")
     assert entry is not None and entry.toolset == "kanban"
-    out = json.loads(entry.handler({"reason": reason}))
+    out = json.loads(entry.handler({"reason": reason, "awaiting": {"kind": "clock", "why": "reconnect window"}}))
 
     assert out == {
         "ok": True, "task_id": worker_env, "run_id": out["run_id"],
@@ -474,7 +474,10 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
         assert any(
             event.kind == "scheduled" and event.payload == {
                 "reason": reason, "wake_at": event.payload.get("wake_at"),
-                "awaiting": {"kind": "clock", "inferred": True}}  # no producer named: an inferred clock wait
+                # the declared wake reason (a scheduled wait needs one), with its re-park premise
+                "awaiting": {"kind": "clock", "why": "reconnect window",
+                             "premise": event.payload["awaiting"].get("premise")}}
+            and event.payload["awaiting"]["premise"]
             and event.payload["wake_at"]  # SCHEDULED_UNTIL= sets a real wake time
             for event in kb.list_events(conn, worker_env)
         )
@@ -607,7 +610,7 @@ def test_block_dependency_without_open_parent_is_a_timed_park(worker_env):
     from tools import kanban_tools as kt
 
     d = json.loads(kt._handle_block({"reason": "upstream input is missing", "kind": "dependency",
-                                     "clock_only": True}))
+                                     "clock_only": True, "awaiting": {"kind": "clock", "why": "upstream window"}}))
     assert (d["ok"], d["status"], d["requested_kind"]) == (True, "scheduled", "dependency")
     assert d["wake_at"] and "not a human block" in d["note"]
 

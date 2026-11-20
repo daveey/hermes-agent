@@ -635,6 +635,7 @@ def test_goal_run_status_reports_own_timed_park_not_superseded(conn) -> None:
     assert kb.schedule_task(
         conn, task_id, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on a clock",
         expected_run_id=parked.current_run_id, clock_only=True,
+        awaiting={"kind": "clock", "why": "a clock"},
     )
     parked_task = kb.get_task(conn, task_id)
     assert parked_task is not None and parked_task.status == "scheduled"

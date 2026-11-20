@@ -18,6 +18,8 @@ import pytest
 from hermes_cli import kanban_db as kb
 
 COOLDOWN = "SCHEDULED_UNTIL=2099-01-01T00:00:00Z rate-limit cooldown"
+# A scheduled wait needs a wake reason (kanban_awaiting no_wake_reason).
+WHY = ("--awaiting", "clock:", "--awaiting-why", "the cooldown window")
 
 
 @pytest.fixture
@@ -92,14 +94,14 @@ def _assert_refusal(err: str, tid: str, run_id: int) -> None:
 
 def test_cli_schedule_of_a_live_claimed_card_is_refused_and_the_run_stays_open(home, capsys):
     tid, run_id = _claimed()
-    assert _cli()("schedule", tid, COOLDOWN, "--clock-only") != 0
+    assert _cli()("schedule", tid, COOLDOWN, "--clock-only", *WHY) != 0
     _assert_refusal(capsys.readouterr().err, tid, run_id)
     _assert_untouched(tid, run_id)
 
 
 def test_cli_block_of_a_live_claimed_card_is_refused_and_the_run_stays_open(home, capsys):
     tid, run_id = _claimed()
-    assert _cli()("block", tid, COOLDOWN, "--kind", "time", "--clock-only") != 0
+    assert _cli()("block", tid, COOLDOWN, "--kind", "time", "--clock-only", *WHY) != 0
     _assert_refusal(capsys.readouterr().err, tid, run_id)
     _assert_untouched(tid, run_id)
 
@@ -108,7 +110,7 @@ def test_cli_block_of_a_live_claimed_card_is_refused_and_the_run_stays_open(home
 def test_cli_bulk_ids_refuses_only_the_live_card_and_parks_the_rest(home, capsys, verb, extra):
     live, run_id = _claimed()
     idle = _ready()
-    assert _cli()(verb, live, COOLDOWN, *extra, "--clock-only", "--ids", idle) == 1
+    assert _cli()(verb, live, COOLDOWN, *extra, "--clock-only", *WHY, "--ids", idle) == 1
     out = capsys.readouterr()
     _assert_refusal(out.err, live, run_id)
     assert idle not in out.err and idle in out.out, out
@@ -120,7 +122,7 @@ def test_the_worker_still_parks_its_own_live_card_via_the_cli(home, monkeypatch,
     tid, run_id = _claimed()
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
-    assert _cli()("schedule", tid, COOLDOWN, "--clock-only") == 0, capsys.readouterr().err
+    assert _cli()("schedule", tid, COOLDOWN, "--clock-only", *WHY) == 0, capsys.readouterr().err
     assert _status(tid) == "scheduled" and _run(run_id)["outcome"] == "scheduled"
 
 
@@ -128,7 +130,7 @@ def test_the_worker_still_blocks_its_own_live_card_via_the_cli(home, monkeypatch
     tid, run_id = _claimed()
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
-    assert _cli()("block", tid, COOLDOWN, "--kind", "time", "--clock-only") == 0, capsys.readouterr().err
+    assert _cli()("block", tid, COOLDOWN, "--kind", "time", "--clock-only", *WHY) == 0, capsys.readouterr().err
     assert _status(tid) == "scheduled" and _run(run_id)["ended_at"] is not None
 
 
@@ -136,14 +138,14 @@ def test_the_worker_still_blocks_its_own_live_card_via_the_cli(home, monkeypatch
 def test_a_claim_whose_worker_is_gone_is_still_parked_via_the_cli(home, capsys, verb, extra):
     """A claim with no live worker protects no run (the same rule the tool path applies)."""
     tid, run_id = _claimed(live=False)
-    assert _cli()(verb, tid, COOLDOWN, *extra, "--clock-only") == 0, capsys.readouterr().err
+    assert _cli()(verb, tid, COOLDOWN, *extra, "--clock-only", *WHY) == 0, capsys.readouterr().err
     assert _status(tid) == "scheduled" and _run(run_id)["ended_at"] is not None
 
 
 @pytest.mark.parametrize("verb,extra", [("schedule", ()), ("block", ("--kind", "time"))])
 def test_a_ready_card_is_still_parked_via_the_cli(home, capsys, verb, extra):
     tid = _ready()
-    assert _cli()(verb, tid, COOLDOWN, *extra, "--clock-only") == 0, capsys.readouterr().err
+    assert _cli()(verb, tid, COOLDOWN, *extra, "--clock-only", *WHY) == 0, capsys.readouterr().err
     assert _status(tid) == "scheduled"
 
 
@@ -153,7 +155,7 @@ def test_tool_and_cli_refusals_carry_the_same_facts(home, capsys):
     from tools import kanban_tools as kt
     out = json.loads(kt._handle_schedule({"task_id": tid, "reason": COOLDOWN, "clock_only": True}))
     assert out.get("code") == "live_claim_park" and out.get("run_id") == run_id, out
-    assert _cli()("schedule", tid, COOLDOWN, "--clock-only") != 0
+    assert _cli()("schedule", tid, COOLDOWN, "--clock-only", *WHY) != 0
     err = capsys.readouterr().err
     assert out["holder"] in err and f"run {run_id}" in err, err
     _assert_untouched(tid, run_id)

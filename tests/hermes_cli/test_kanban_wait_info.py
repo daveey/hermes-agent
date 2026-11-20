@@ -424,3 +424,67 @@ def test_parked_waits_keeps_local_cards_when_the_remote_read_fails(kanban_root, 
         raise sqlite3.OperationalError("replica locked")
     monkeypatch.setattr(ksa, "_remote_links", boom)
     assert [r["id"] for r in ksa.parked_waits()] == ["t_b"]
+
+
+@pytest.mark.parametrize("stamp,utc", [
+    ("2026-12-04T12:32:41-08:00", (2026, 12, 4, 20, 32, 41)),
+    ("2026-12-04T12:32:41+05:30", (2026, 12, 4, 7, 2, 41)),
+    ("2026-12-04T12:32:41Z", (2026, 12, 4, 12, 32, 41)),
+    ("2026-12-04T12:32:41", (2026, 12, 4, 12, 32, 41)),  # naive: read as UTC, as before
+    ("2026-12-04T12:32-08:00", (2026, 12, 4, 20, 32, 0)),
+])
+def test_park_fields_honours_the_scheduled_until_offset(stamp, utc):
+    import calendar
+    park = kwi.park_fields({"summary": f"SCHEDULED_UNTIL={stamp} waiting", "outcome": "scheduled"})
+    assert park["wake_at"] == calendar.timegm((*utc, 0, 0, 0))
+
+
+def test_local_continued_park_reports_its_awaiting_and_its_clock(kanban_root):
+    """Hub card t_01a1fb17e589fdd8: scheduled by a ``continued`` park carrying a declared ci ``awaiting`` and a
+    ``wake_at``; ``/api/session-kanban-tasks`` showed no wait for it. A continuation without awaiting shows its
+    wake time. [daveey]"""
+    import time as _time
+    now = int(_time.time())
+    ci = {"continuation": 1, "status": "scheduled", "resume_status": "ready", "wake_at": now + 3 * H,
+          "awaiting": {"kind": "ci", "ref": "local core-wt consumer suite PID 4143137",
+                       "why": "the consumer suite runs in the background"}}
+    _board(kanban_root / "kanban.db", [
+        {"id": "t_01a1fb17e589fdd8", "status": "scheduled", "session": "s1",
+         "events": [("claimed", {}, now - 120), ("continued", ci, now - 60)]},
+        {"id": "t_paced", "status": "scheduled", "session": "s1",
+         "events": [("continued", {"continuation": 1, "status": "scheduled", "resume_status": "ready",
+                                   "wake_at": now + 600}, now - 60)]},
+    ])
+    rows = {t["id"]: t for t in ksa.session_tasks(["s1"])}
+    wait = rows["t_01a1fb17e589fdd8"]["wait"]
+    assert wait["waiting_on"] == "ci local core-wt consumer suite PID 4143137", wait
+    assert wait["agent_owned"] is False and wait["waiting_since"] == pytest.approx(now - 60)
+    assert rows["t_paced"]["wait"]["waiting_on"].startswith("the clock until "), rows["t_paced"]["wait"]
+
+
+def test_kernel_continued_park_with_awaiting_lists_its_wait(tmp_path, monkeypatch):
+    """The same hub card through the real kernel: ``continue_task`` with a declared ci ``awaiting`` (as the worker's
+    kanban_continue writes it), then the worker's ``worker_result``; the chat's task list shows the producer."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_continuation import continue_task
+    from hermes_cli.kanban_db_connect import connect
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    kb.init_db()
+    ksa._reset_cache_for_tests()
+    conn = connect()
+    try:
+        tid = kb.create_task(conn, title="core change", assignee="default", session_id="s1")
+        assert kb.claim_task(conn, tid) is not None
+        out = continue_task(conn, tid, checkpoint="suite running in the background", resume_after_seconds=600,
+                            awaiting={"kind": "ci", "ref": "local core-wt consumer suite PID 4143137",
+                                      "why": "the consumer suite runs in the background"})
+        assert out["ok"] and out["status"] == "scheduled", out
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "worker_result", {"exit_code": 0})
+    finally:
+        conn.close()
+    rows = {t["id"]: t for t in ksa.session_tasks(["s1"], stale_ok=True)}  # as /api/session-kanban-tasks asks
+    assert rows[tid]["wait"]["waiting_on"] == "ci local core-wt consumer suite PID 4143137", rows[tid].get("wait")
+    ksa._reset_cache_for_tests()

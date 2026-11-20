@@ -142,8 +142,9 @@ def test_dependency_block_with_terminal_parents_is_a_timed_park(
 
         # `hermes kanban block <child> --kind dependency waiting on upstream`
         # A 24 h wait with nothing to probe must say so (kanban_wake_check guard). [daveey]
+        # A scheduled wait needs a wake reason (kanban_awaiting no_wake_reason): the upstream release window.
         args = argparse.Namespace(task_id=child, ids=None, reason=["waiting", "on", "upstream"], kind="dependency",
-                                  clock_only=True)
+                                  clock_only=True, awaiting="clock:", awaiting_why="upstream release window")
         assert kanban_cli._cmd_block(args) == 0
         capsys.readouterr()
         parked = kb.get_task(conn, child)

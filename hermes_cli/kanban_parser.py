@@ -119,8 +119,11 @@ def _WAKE_CHECK_ARGS():
              help="Who produces the condition: card:<task id> (JSON adds gateway/board), ci:<run id>, "
                   "deploy:<id>, external:<vendor/ticket>, clock:<window>, chat:<owning orchestrator> (with --awaiting-why "
                   "<the question>; wakes the card's subscribed chat), resource:<gate> (an internal "
-                  "governor/pool hold; needs --wake-check, never escalates, backs off). A wait needs a producer; "
-                  "agent-action conditions (grant, permission, install, fix) are work, not waits."),
+                  "governor/pool hold; needs --wake-check, never escalates, backs off). Required: a scheduled "
+                  "wait needs a wake reason. A park with no --awaiting, no --wake-check and no live card in its "
+                  "reason is refused (no_wake_reason); for a deliberate time wait pass --awaiting clock: "
+                  "--awaiting-why '<why this time>'. Agent-action conditions (grant, permission, install, fix) "
+                  "are work, not waits."),
         _arg("--awaiting-why", dest="awaiting_why", default=None, help="Evidence for --awaiting"),
     )
 _NEED = _arg("--need", dest="needs", action="append", default=None, metavar="CAPABILITY",
@@ -587,7 +590,8 @@ _SPECS = [
                   "blocked (human asks require --human-request); 'assignment' routes worker-local tool/backend "
                   "mismatches to a capable supervisor; 'transient' marks a maybe-flaky failure. "
                   "Repeated same-kind re-blocks after unblock route the task to "
-                  "triage to break unblock loops. Omit for a generic block."),
+                  "triage to break unblock loops. 'time' parks it Scheduled and needs a wake reason "
+                  "(--awaiting, else refused no_wake_reason). Omit for a generic block."),
         _NEED,
         *_WAKE_CHECK_ARGS(),
     ], help="Mark one or more tasks blocked"),
@@ -597,7 +601,8 @@ _SPECS = [
         _bulk_ids("schedule"),
         _NEED,
         *_WAKE_CHECK_ARGS(),
-    ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
+    ], help="Park one or more tasks in Scheduled (waiting on time, not human input); needs a wake reason: "
+            "--awaiting (a producer, or clock: with --awaiting-why), a --wake-check, or a live card in the reason"),
     _cmd("unblock", [
         _arg("--seen", dest="seen_comment_id", type=int, help="Newest comment id read; otherwise refuse foreign comments from the last 60 minutes."),
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),

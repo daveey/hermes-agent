@@ -232,10 +232,15 @@ def test_replay_tracker_card_that_produces_nothing_is_refused(kanban_home, monke
 ])
 def test_ordinary_park_prose_is_not_a_wall(kanban_home, monkeypatch, reason) -> None:
     # clock_only: an opaque "exit 1" probe with no producer is now refused on its own (opaque_probe_wait).
+    # The prose is judged first: a bare park of it is refused only for naming no wake reason, never as a wall;
+    # declaring the clock window parks it.
     with kbc.connect_closing() as conn:
         tid = _running(conn)
         _as_worker(monkeypatch, conn, tid)
         out = _tool("schedule", {"reason": reason, "clock_only": True})
+        assert out.get("code") == kaw.NO_WAKE_REASON, out
+        out = _tool("schedule", {"reason": reason, "clock_only": True,
+                                 "awaiting": {"kind": "clock", "why": "the window the reason names"}})
         assert out.get("status") == "scheduled", out
 
 
@@ -272,7 +277,8 @@ def test_pure_clock_waits_park(kanban_home, monkeypatch, reason) -> None:
     with kbc.connect_closing() as conn:
         tid = _running(conn)
         _as_worker(monkeypatch, conn, tid)
-        out = _tool("block", {"reason": reason, "kind": "time", "clock_only": True})
+        out = _tool("block", {"reason": reason, "kind": "time", "clock_only": True,
+                              "awaiting": {"kind": "clock", "why": "release slot / cooldown"}})
         assert out.get("status") == "scheduled", out
         assert _park_payload(conn, tid)["awaiting"]["kind"] == "clock"
 
@@ -611,7 +617,7 @@ def test_opaque_probe_with_a_declared_external_producer_parks(kanban_home, monke
     ("continue", {"checkpoint": "Build still running; check again.", "resume_after_seconds": 600,
                   "wake_check": "! ps -p 3966721 >/dev/null"}),
     ("block", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z \u2014 release slot.", "kind": "time",
-               "clock_only": True}),
+               "clock_only": True, "awaiting": {"kind": "clock", "why": "the nightly release slot"}}),
 ])
 def test_named_producers_and_short_continues_still_park(kanban_home, monkeypatch, op, args) -> None:
     with kbc.connect_closing() as conn:
@@ -690,8 +696,11 @@ def test_long_continue_on_a_descendant_does_not_install_a_child_probe(kanban_hom
         parent = _running(conn)
         child = _linked_child(conn, parent)
         _as_worker(monkeypatch, conn, parent)
-        out = _tool("continue", {"checkpoint": f"waiting on child {child} to finish the build",
-                                 "resume_after_seconds": 20000, "clock_only": True})
+        args = {"checkpoint": f"waiting on child {child} to finish the build",
+                "resume_after_seconds": 20000, "clock_only": True}
+        out = _tool("continue", args)
+        assert out.get("rejection") == kaw.NO_WAKE_REASON, out  # the own child is no producer: nothing named
+        out = _tool("continue", {**args, "awaiting": {"kind": "clock", "why": "the build takes about 5 h"}})
         assert out.get("status") == "scheduled", out
         payload = _park_payload(conn, parent)
         assert payload["awaiting"]["kind"] == "clock"
@@ -1009,3 +1018,87 @@ def test_ci_premise_ignores_head_order() -> None:
     for kind in ("ci", "deploy"):
         aw = {"kind": kind, "ref": CI_PR}
         assert kaw.premise_hash(aw, "r", f"wait {a} {b}") == kaw.premise_hash(aw, "r", f"wait {b} {a}")
+
+
+# -- a scheduled wait needs a wake reason (no_wake_reason) -------------------------------------------------
+
+def test_bare_schedule_from_a_worker_is_refused_with_the_fix(kanban_home, monkeypatch) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        for op, args in (("schedule", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z later", "clock_only": True}),
+                         ("block", {"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z later", "kind": "time",
+                                    "clock_only": True}),
+                         ("continue", {"checkpoint": "later", "resume_after_seconds": 20000, "clock_only": True})):
+            out = _tool(op, args)
+            assert kaw.NO_WAKE_REASON in out["error"], (op, out)
+            for fix in ("kind:'clock', why:", "kind:'card'|'ci'|'deploy'|'external'", "wake_check",
+                        "kind='needs_input'"):
+                assert fix in out["error"], (op, fix, out)
+        assert kb.get_task(conn, tid).status == "running"
+
+
+def test_bare_schedule_from_a_non_worker_caller_is_refused(kanban_home, monkeypatch, capsys) -> None:
+    """Every entry path: the kernel (dashboard/orchestrator/system callers) and the CLI, no worker env."""
+    from hermes_cli import kanban as kcli
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t", assignee="worker")
+        with pytest.raises(kaw.AwaitingError) as err:
+            kb.schedule_task(conn, tid, reason="later")
+        assert err.value.code == kaw.NO_WAKE_REASON
+        assert kb.get_task(conn, tid).status != "scheduled"
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    kcli.build_parser(parser.add_subparsers(dest="command"))
+    assert kcli.kanban_command(parser.parse_args(["kanban", "schedule", tid, "later", "--clock-only"])) != 0
+    assert kaw.NO_WAKE_REASON in capsys.readouterr().err
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status != "scheduled"
+        assert kb.schedule_task(conn, tid, reason="later", clock_only=True,
+                                awaiting={"kind": "clock", "why": "nightly slot"})
+        assert _park_payload(conn, tid)["awaiting"]["why"] == "nightly slot"
+
+
+def test_wake_reasons_that_still_park(kanban_home, monkeypatch) -> None:
+    """Not refused: a short continue (pacing), a declared clock with its why, a named card, a wake_check."""
+    with kbc.connect_closing() as conn:
+        a, b, c, d, owner = (_running(conn) for _ in range(5))
+        _as_worker(monkeypatch, conn, a)
+        assert _tool("continue", {"checkpoint": "pacing", "resume_after_seconds": 300}).get("status") == "scheduled"
+        assert _park_payload(conn, a)["awaiting"] == {"kind": "clock", "inferred": True}
+        _as_worker(monkeypatch, conn, b)
+        out = _tool("schedule", {"reason": "cooldown", "clock_only": True,
+                                 "awaiting": {"kind": "clock", "why": "API cooldown 1 h"}})
+        assert out.get("status") == "scheduled", out
+        rec = _park_payload(conn, b)["awaiting"]
+        assert rec["kind"] == "clock" and not rec.get("inferred") and rec["why"] == "API cooldown 1 h"
+        _as_worker(monkeypatch, conn, c)
+        out = _tool("schedule", {"reason": "builds", "clock_only": True, "awaiting": {"kind": "card", "ref": owner}})
+        assert out.get("status") == "scheduled", out
+        monkeypatch.delenv("HERMES_KANBAN_TASK")
+        assert kb.schedule_task(conn, d, reason="released when the flag file appears",
+                                wake_check="test -f /tmp/release.flag")
+        assert _park_payload(conn, d)["awaiting"]["kind"] == "external"
+
+
+def test_bare_soak_park_is_still_refused_as_a_soak(kanban_home, monkeypatch) -> None:
+    """The observation-window rule keeps its own code (and remedy) ahead of the missing wake reason."""
+    from hermes_cli import kanban_soak_wait
+    monkeypatch.setattr(kanban_soak_wait, "observation_wait", lambda text: True)
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        _as_worker(monkeypatch, conn, tid)
+        out = _tool("schedule", {"reason": "soak for 24 h then report", "clock_only": True})
+        assert out.get("code") == kaw.SOAK_WAIT, out
+
+
+def test_gate_inferred_clock_early_return_is_only_short_continues(kanban_home) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        rec = kaw.gate(conn, tid, awaiting=None, reason="pacing", op="continue", wake_in=600)
+        assert rec == {"kind": "clock", "inferred": True}  # no premise: never escalates
+        with pytest.raises(kaw.AwaitingError) as err:
+            kaw.gate(conn, tid, awaiting=None, reason="pacing", op="continue", wake_in=20000)
+        assert err.value.code == kaw.NO_WAKE_REASON
+        rec = kaw.gate(conn, tid, awaiting={"kind": "clock", "why": "quota resets at 00:00 UTC"}, reason="quota")
+        assert rec["kind"] == "clock" and rec.get("premise")

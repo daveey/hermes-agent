@@ -49,7 +49,8 @@ def _clock_only_parks(conn, n):
     for i in range(n):
         tid = kb.create_task(conn, title=f"parked {i}", assignee="nobody")
         wake_at = int(time.time()) + 3600
-        assert kb.schedule_task(conn, tid, reason=f"SCHEDULED_UNTIL={wake_at} cooldown", clock_only=True)
+        assert kb.schedule_task(conn, tid, reason=f"SCHEDULED_UNTIL={wake_at} cooldown", clock_only=True,
+                                awaiting={"kind": "clock", "why": "cooldown"})
         assert kc.pending_wake(conn, tid) is not None
         ids.append(tid)
     return ids
@@ -85,7 +86,8 @@ def test_a_park_that_arrives_after_the_batch_is_still_examined(home, monkeypatch
         conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (tid,))
         conn.commit()
         assert kb.claim_task(conn, tid) is not None
-        assert kb.schedule_task(conn, tid, reason=f"SCHEDULED_UNTIL={int(time.time()) + 7200} again", clock_only=True)
+        assert kb.schedule_task(conn, tid, reason=f"SCHEDULED_UNTIL={int(time.time()) + 7200} again", clock_only=True,
+                                awaiting={"kind": "clock", "why": "cooldown again"})
         kwc.restore_missing_checks(conn)
         assert kwc._RESTORE_SEEN[seen_key] > old
 

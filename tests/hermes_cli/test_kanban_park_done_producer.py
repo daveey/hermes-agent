@@ -47,9 +47,11 @@ def dry_run(monkeypatch):
 def test_infer_never_picks_a_done_card(kanban_home) -> None:
     with kbc.connect_closing() as conn:
         done, live, tid = _done(conn), _running(conn), _running(conn)
-        only_done = kaw.resolve(conn, tid, awaiting=None, op="schedule",
-                                reason=f"{done} landed the fix earlier; waiting for main CI on 3ca096ffbbc")
-        assert only_done.get("kind") != "card", only_done
+        # Only a done card named: no producer is inferred, so the park names nothing and is refused.
+        with pytest.raises(kaw.AwaitingError) as err:
+            kaw.resolve(conn, tid, awaiting=None, op="schedule",
+                        reason=f"{done} landed the fix earlier; waiting for main CI on 3ca096ffbbc")
+        assert err.value.code == kaw.NO_WAKE_REASON
         both = kaw.resolve(conn, tid, awaiting=None, op="schedule",
                            reason=f"{done} landed the fix; now waiting on {live} to deploy it")
         assert both == {"kind": "card", "ref": live, "inferred": True}

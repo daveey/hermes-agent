@@ -778,9 +778,12 @@ def _owner_evidence_of(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def _park_of(task: dict[str, Any]) -> dict[str, Any] | None:
-    """[daveey] The bounded run fields a replicated card's wait info needs (``kanban_wait_info.park_fields``)."""
+    """[daveey] The bounded park fields a replicated card's wait info needs: the park its owner published
+    (``kanban_wait_replica.published_park``), else its last run's (``kanban_wait_info.park_fields``)."""
     try:
         from hermes_cli import kanban_wait_info as kwi
+        if isinstance(task.get("park"), dict):
+            return task["park"]
         return kwi.park_fields(task.get("run"))
     except Exception:  # display-only
         return None

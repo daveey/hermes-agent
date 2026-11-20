@@ -83,7 +83,9 @@ def _events(conn, tid, prefix="supervisor_request_"):
 
 def _park(kt, rid):
     until = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))
-    return json.loads(kt._handle_schedule({"reason": f"SCHEDULED_UNTIL={until} waiting on supervisor request #{rid}"}))
+    return json.loads(kt._handle_schedule({"reason": f"SCHEDULED_UNTIL={until} waiting on supervisor request #{rid}",
+                                           "awaiting": {"kind": "external", "ref": f"supervisor request #{rid}",
+                                                        "why": "the supervisor request executor runs it"}}))
 
 
 def _child_env(b):
@@ -489,7 +491,8 @@ def test_a_late_result_does_not_wake_an_unrelated_park(board, monkeypatch):
         ksr.drain(conn)
     _as_worker(monkeypatch, board)
     until = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))
-    assert json.loads(kt._handle_schedule({"reason": f"SCHEDULED_UNTIL={until} waiting on CI"}))["ok"]
+    assert json.loads(kt._handle_schedule({"reason": f"SCHEDULED_UNTIL={until} waiting on CI",
+                                           "awaiting": {"kind": "clock", "why": "the CI window"}}))["ok"]
     _as_executor(monkeypatch)
     with kbc.connect() as conn:
         ksr.drain(conn)

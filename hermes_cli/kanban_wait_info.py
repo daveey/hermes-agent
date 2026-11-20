@@ -56,7 +56,8 @@ _CI = re.compile(r"\bgh\s+(?:run|pr\s+checks|workflow)\b|actions/runs|/check-run
 _SCRIPT = re.compile(r"([\w.-]+\.(?:py|sh|mjs|js))\b")
 _TASK_ID = re.compile(r"\bt_[0-9a-f]{6,}\b")
 _SHELL_NOISE = {"[", "[[", "test", "!", "if", "then", "set", "export", "env", "timeout", "sh", "bash", "-c", "exec"}
-_SCHEDULED_UNTIL = re.compile(r"SCHEDULED_UNTIL=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z?)")
+# A naive stamp reads as UTC; ``Z`` / ``+HH:MM`` / ``-HH:MM`` are honoured (``park_fields``).
+_SCHEDULED_UNTIL = re.compile(r"SCHEDULED_UNTIL=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)")
 
 
 def epoch_s(value: Any) -> Optional[float]:
@@ -266,14 +267,15 @@ def park_fields(run: Any) -> Optional[dict[str, Any]]:
     until = _SCHEDULED_UNTIL.search(summary)
     wake_at = None
     if until:
-        import calendar
-        text = until.group(1).rstrip("Z")
-        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
-            try:
-                wake_at = calendar.timegm(time.strptime(text, fmt))
-                break
-            except ValueError:
-                continue
+        from datetime import UTC, datetime
+        text = until.group(1)
+        try:
+            when = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=UTC)
+            wake_at = int(when.timestamp())
+        except ValueError:
+            wake_at = None
     return {"outcome": run.get("outcome"), "ended_at": run.get("ended_at"), "reason": summary[:300],
             "wake_at": wake_at}
 

@@ -614,6 +614,9 @@ class UpdateTaskBody(BaseModel):
     wake_check: Optional[str] = None
     check_every: Optional[int] = None
     clock_only: bool = False
+    # The park's wake reason (``kanban_awaiting``): a scheduled/time park without one, a wake_check or a live card
+    # in block_reason is refused (no_wake_reason, a 400).
+    awaiting: Optional[Any] = None
     # Handoff fields forwarded to complete_task on -> 'done' (parity with ``hermes kanban complete``).
     summary: Optional[str] = None
     metadata: Optional[dict] = None
@@ -644,6 +647,9 @@ class BulkTaskBody(BaseModel):
     wake_check: Optional[str] = None
     check_every: Optional[int] = None
     clock_only: bool = False
+    # The park's wake reason (``kanban_awaiting``): a scheduled/time park without one, a wake_check or a live card
+    # in block_reason is refused (no_wake_reason, a 400).
+    awaiting: Optional[Any] = None
     # Same semantics as UpdateTaskBody.
     model_override: Optional[str] = None
     provider_override: Optional[str] = None
@@ -697,10 +703,10 @@ _STATUS_HANDLERS: dict[str, Any] = {
     "blocked": lambda conn, tid, p: kanban_db.block_task(
         conn, tid, kind=p.block_kind, human_request=p.human_request,
         reason=p.block_reason, wake_check=p.wake_check,
-        check_every=p.check_every, clock_only=p.clock_only),
+        check_every=p.check_every, clock_only=p.clock_only, awaiting=getattr(p, "awaiting", None)),
     "scheduled": lambda conn, tid, p: kanban_db.schedule_task(
         conn, tid, reason=p.block_reason, wake_check=p.wake_check,
-        check_every=p.check_every, clock_only=p.clock_only),
+        check_every=p.check_every, clock_only=p.clock_only, awaiting=getattr(p, "awaiting", None)),
     "review": lambda conn, tid, p: kanban_db.request_review(
         conn, tid, summary=p.summary, metadata=p.metadata, reviewer=(p.assignee or None), force=True),
     "ready": lambda conn, tid, p: _drag_to(conn, tid, "ready"),

@@ -132,7 +132,7 @@ def test_an_unreadable_registry_counts_the_queue_repin_as_leaving(conn, tmp_path
 # --- 3: park pins follow the card_trees owner filter --------------------------------------------------------------
 
 def _park(kt, text):
-    return json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+    return json.loads(kt._handle_block({"kind": "time", "clock_only": True, "awaiting": {"kind": "clock", "why": "the CI window"}, "reason": (
         f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z {text}")}))
 
 

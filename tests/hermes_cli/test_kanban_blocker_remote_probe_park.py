@@ -107,7 +107,8 @@ def test_bare_clock_repark_from_a_worker_is_still_woken_by_the_clear(kanban_home
     """Acceptance (b): a re-park with no wake_check of its own still wakes when the wall clears (pinned)."""
     a, b = _two_behind(monkeypatch)
     _run_on_worker_then_park(monkeypatch, gateway, a, {
-        "reason": f"SCHEDULED_UNTIL={pw._tomorrow()} wall still up; re-check tomorrow", "clock_only": True})
+        "reason": f"SCHEDULED_UNTIL={pw._tomorrow()} wall still up; re-check tomorrow", "clock_only": True,
+        "awaiting": {"kind": "clock", "why": "re-check the wall tomorrow"}})
     with kbc.connect_closing() as conn:
         park = pending_wake(conn, a)
         assert park and "wake_check" not in park and "probe_host" not in park

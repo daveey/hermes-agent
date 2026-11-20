@@ -86,7 +86,7 @@ def _complete(conn, tid, run_id):
 
 
 def _schedule(conn, tid, run_id):
-    return kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True,
+    return kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"},
                            expected_run_id=run_id)
 
 

@@ -82,7 +82,7 @@ def test_explicit_request_exempt(kanban_home, location):
                 conn.execute("UPDATE tasks SET body=? WHERE id=?", (marker, tid))
         else:
             kb.add_comment(conn, tid, author="operator", body=marker)
-        assert kb.schedule_task(conn, tid, reason=SOAKS[0], clock_only=True)
+        assert kb.schedule_task(conn, tid, reason=SOAKS[0], clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
 
 
 @pytest.mark.parametrize("marker", [

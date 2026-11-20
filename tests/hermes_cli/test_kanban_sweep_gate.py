@@ -304,7 +304,7 @@ def test_continuation_park_wakes_at_its_wake_time_with_no_other_change(home):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="parked", assignee="nobody")
         wake_at = int(time.time()) + 900
-        assert kb.schedule_task(conn, tid, reason=f"SCHEDULED_UNTIL={wake_at} rate-limit cooldown", clock_only=True)
+        assert kb.schedule_task(conn, tid, reason=f"SCHEDULED_UNTIL={wake_at} rate-limit cooldown", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
         wake_at = kc.pending_wake(conn, tid)["wake_at"]
         _, skips0 = _runs("dispatch.continuation_parks")
         for now in (wake_at - 100, wake_at - 50, wake_at - 1):

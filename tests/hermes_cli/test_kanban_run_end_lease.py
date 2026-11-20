@@ -15,6 +15,10 @@ from hermes_cli import kanban_db_sync as sync
 from tests.hermes_cli import kanban_sync_support as support
 
 
+# A scheduled wait needs a wake reason (kanban_awaiting no_wake_reason).
+WINDOW = {"kind": "clock", "why": "fixture window"}
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     return support.kanban_home(tmp_path, monkeypatch)
@@ -57,7 +61,8 @@ def _releases(lease_client):
 def test_schedule_releases_the_run_lease_while_the_outbox_is_stalled(primary, lease_client):
     tid, run_uid = _claimed(primary, lease_client)
     _stall_outbox(primary)
-    assert kb.schedule_task(primary, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True)
+    assert kb.schedule_task(primary, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True,
+                            awaiting=WINDOW)
     [req] = _releases(lease_client)
     assert req["task_uid"] == tid and req["run_uid"] == run_uid
 
@@ -100,7 +105,7 @@ def _reopen(conn, tid, parent):
 # ends, the transition). Removing any one note() call turns its case red.
 _RUN_ENDS = {
     "block": (_plain_run, lambda c, t, _: kb.block_task(c, t, reason="needs an answer", kind="time",
-                                                       clock_only=True)),
+                                                       clock_only=True, awaiting=WINDOW)),
     "complete": (_plain_run, lambda c, t, _: kb.complete_task(c, t, summary="done")),
     "review": (_plain_run, lambda c, t, _: kb.request_review(c, t, summary="please review")),
     "continue": (_plain_run, _continue),
@@ -132,7 +137,8 @@ def test_a_failed_release_leaves_the_park_intact(primary, lease_client, monkeypa
         raise error
 
     monkeypatch.setattr(lease_client, "release", release)
-    assert kb.schedule_task(primary, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True)
+    assert kb.schedule_task(primary, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True,
+                            awaiting=WINDOW)
     assert [r["run_uid"] for r in _releases(lease_client)] == [run_uid]
     task = kb.get_task(primary, tid)
     assert task.status == "scheduled"
@@ -144,7 +150,8 @@ def test_a_draining_outbox_leaves_the_release_to_the_row_push(primary, lease_cli
     """Board releaseTask turns a card it still sees running back to ready: on a healthy host the pushed
     row ends the lease itself, so a direct release would only open a window for another machine's claim."""
     tid, _run_uid = _claimed(primary, lease_client)
-    assert kb.schedule_task(primary, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True)
+    assert kb.schedule_task(primary, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True,
+                            awaiting=WINDOW)
     assert _releases(lease_client) == []
 
 

@@ -63,7 +63,7 @@ def test_triage_card_scheduled_inside_the_window_stays_scheduled(board):
     tid = _triage_card()
     with kbc.connect_closing() as conn:
         assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z fixture hold",
-                                clock_only=True)
+                                clock_only=True, awaiting={"kind": "clock", "why": "fixture hold"})
     for _ in range(3):
         dispatcher.auto_decompose_tick(3)
     with kbc.connect_closing() as conn, kb.write_txn(conn):

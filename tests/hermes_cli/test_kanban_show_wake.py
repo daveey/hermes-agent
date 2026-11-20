@@ -42,7 +42,7 @@ def _park(kanban_home: Path, *, with_check: bool) -> tuple[str, int, str]:
     probe = f"test -f {kanban_home}/mirror-landed"  # never written: the park-time dry run must not pass
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="fix card", assignee="alice")
-    flags = f"--wake-check '{probe}'" if with_check else "--clock-only"
+    flags = f"--wake-check '{probe}'" if with_check else "--clock-only --awaiting clock: --awaiting-why 'the mirror window'"
     out = kc.run_slash(f"block {tid} 'SCHEDULED_UNTIL={until} waiting on the mirror card' --kind time {flags}")
     with kbc.connect_closing() as conn:
         assert kb.get_task(conn, tid).status == "scheduled", out

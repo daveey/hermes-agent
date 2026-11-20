@@ -98,7 +98,7 @@ def _continue(conn, tid, run_id):
 
 
 def _timed_park(conn, tid, run_id):
-    return kb.block_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", kind="time", clock_only=True,
+    return kb.block_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", kind="time", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"},
                          expected_run_id=run_id)
 
 
@@ -117,7 +117,7 @@ def _escalate_schedule(conn, tid, run_id, monkeypatch):
     def repeated(*_a, **_k):
         raise kaw.RepeatedPark({"kind": "clock", "premise": "p1"})
     monkeypatch.setattr(kaw, "gate", repeated)
-    return kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True,
+    return kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"},
                             expected_run_id=run_id)
 
 

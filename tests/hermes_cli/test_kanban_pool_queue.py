@@ -295,7 +295,7 @@ def test_park_keeps_a_pushed_card_on_the_pool_and_pins_only_unpushed_state(w2, t
     # 2. An unpushed commit: the time park pins the card to this worker and says why.
     _run(w2, monkeypatch, tid)
     _commit(tree, "b.txt")
-    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "awaiting": WINDOW, "reason": (
         f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on CI; b.txt is committed in {tree}")}))
     assert out.get("ok"), out
     assert _runs_on(conn, tid) == ["machine:worker-2"]
@@ -307,7 +307,7 @@ def test_park_keeps_a_pushed_card_on_the_pool_and_pins_only_unpushed_state(w2, t
     _run(w2, monkeypatch, tid)
     _git(tree, "push", "-q", "origin", "HEAD:refs/heads/wt/x")
     out = json.loads(kt._handle_schedule({"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on CI",
-                                          "clock_only": True}))
+                                          "clock_only": True, "awaiting": WINDOW}))
     assert out.get("ok"), out
     assert _runs_on(conn, tid) == [POOL]
     assert [k for k, _ in _placement_events(conn, tid)] == ["pool_pinned", "pool_unpinned"]
@@ -331,7 +331,7 @@ def test_park_keeps_work_pushed_by_url_on_the_pool_even_after_the_remote_branch_
     _git(other, "push", "-q", "origin", "HEAD:refs/heads/wt/x")
 
     _run(w2, monkeypatch, tid)
-    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "awaiting": WINDOW, "reason": (
         f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on review; fix pushed from {tree}")}))
     assert out.get("ok"), out
     assert _runs_on(conn, tid) == [POOL] and _placement_events(conn, tid) == []
@@ -339,7 +339,7 @@ def test_park_keeps_work_pushed_by_url_on_the_pool_even_after_the_remote_branch_
     # A commit no remote branch holds still pins, even with a stale tracking ref around.
     _run(w2, monkeypatch, tid)
     _commit(tree, "c.txt")
-    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "awaiting": WINDOW, "reason": (
         f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on review; c.txt only in {tree}")}))
     assert out.get("ok"), out
     assert _runs_on(conn, tid) == ["machine:worker-2"]
@@ -488,8 +488,12 @@ def _owned_worktree(main, tree, tid, branch):
     return tree
 
 
+# A scheduled wait needs a wake reason (kanban_awaiting no_wake_reason).
+WINDOW = {"kind": "clock", "why": "the CI / review window"}
+
+
 def _park(kt, tree, extra=""):
-    return json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+    return json.loads(kt._handle_block({"kind": "time", "clock_only": True, "awaiting": WINDOW, "reason": (
         f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on CI for {tree}{extra}")}))
 
 
@@ -502,7 +506,7 @@ def test_park_ignores_a_dirty_shared_core_checkout_the_card_text_names(w2, tmp_p
     (live / "cache-sizes.txt").write_text("a stray diagnostic listing\n")
     tree = _owned_worktree(live, tmp_path / "code" / "_wt" / "core-fix", tid, "wt/core-fix")
     _run(w2, monkeypatch, tid)
-    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "reason": (
+    out = json.loads(kt._handle_block({"kind": "time", "clock_only": True, "awaiting": WINDOW, "reason": (
         f"SCHEDULED_UNTIL=2099-01-01T00:00:00Z waiting on CI for {tree}; deploys to {live} via hermes update")}))
     assert out.get("ok"), out
     assert _runs_on(conn, tid) == [POOL] and _placement_events(conn, tid) == []

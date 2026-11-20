@@ -97,7 +97,7 @@ def test_own_or_unreadable_pr_comment_after_continued_still_guards(monkeypatch, 
 def _park(conn, tid, kind):
     if kind == "scheduled":
         assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z review of the PR",
-                                clock_only=True)
+                                clock_only=True, awaiting={"kind": "clock", "why": "PR review window"})
     else:
         assert kc.continue_task(conn, tid, checkpoint="wait for review", resume_after_seconds=60)["ok"]
 

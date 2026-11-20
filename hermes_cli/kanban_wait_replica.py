@@ -107,6 +107,30 @@ def observe_wait(conn, target, *, now):
                                  (info.get("agent_owned_certain") or info.get("wait_state") == "stalled")))}
 
 
+def published_park(conn, task_id):
+    """What the owner publishes about a live park in its replica record, so another gateway can name the producer
+    (``kanban_wait_info.describe_replica``): ``awaiting`` (the park's record, verbatim), ``wake_check`` (bounded) and
+    ``park`` (``wake_at``, a bounded ``reason``, ``ended_at``, ``outcome``). Empty for a card with no live park.
+
+    Without these, every scheduled card on another gateway read "a producer the owner did not publish", whatever it
+    waited on. Only stable park facts: an unchanged park publishes an identical record. [daveey]"""
+    from hermes_cli.kanban_continuation import park_state
+    from hermes_cli.kanban_timed_park import implied_wake
+    state = park_state(conn, task_id)
+    payload = state.get("payload") or {}
+    if not payload or state.get("superseded"):
+        return {}
+    out = {}
+    if isinstance(payload.get("awaiting"), dict):
+        out["awaiting"] = payload["awaiting"]
+    if isinstance(payload.get("wake_check"), str) and payload["wake_check"].strip():
+        out["wake_check"] = payload["wake_check"][:500]
+    parked_at = int(state["parked_at"])
+    out["park"] = {"wake_at": implied_wake(payload, parked_at), "reason": str(payload.get("reason") or "")[:300],
+                   "ended_at": parked_at, "outcome": None}
+    return out
+
+
 def stale_message(target, stale):
     """``<id> <last seen status> (...)``: words 0-1 keep the shape every reader parses; ``stale_age=`` and
     ``gateway=`` are what the wake-check dispatcher reads to cap the wait. Never starts with ``error:``."""

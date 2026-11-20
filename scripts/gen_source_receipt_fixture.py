@@ -66,7 +66,9 @@ def _wire(conn, tid):
 ENDINGS = {
     "complete": (lambda c, t, r: kb.complete_task(c, t, result="ok", summary="done", expected_run_id=r), "done"),
     "schedule": (lambda c, t, r: kb.schedule_task(c, t, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z",
-                                                  clock_only=True, expected_run_id=r), "scheduled"),
+                                                  clock_only=True, expected_run_id=r,
+                                                  awaiting={"kind": "clock", "why": "fixture release slot"}),
+                 "scheduled"),
     "block": (lambda c, t, r: kb.block_task(c, t, reason="1) tap Approve", kind="needs_input",
                                             expected_run_id=r), "blocked"),
 }

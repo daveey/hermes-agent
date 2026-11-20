@@ -144,7 +144,7 @@ def test_long_park_without_wake_check_is_refused(kanban_home, monkeypatch) -> No
         out = json.loads(kt._handle_block({"reason": "soak", "kind": "time"}))
         assert "error" in out and kb.get_task(conn, tid).status == "running"
         # A pure clock wait says so.
-        out = json.loads(kt._handle_block({"reason": far, "kind": "time", "clock_only": True}))
+        out = json.loads(kt._handle_block({"reason": far, "kind": "time", "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}))
         assert out.get("status") == "scheduled", out
         assert _events(conn, tid, "scheduled")[-1].payload["clock_only"] is True
 
@@ -177,7 +177,8 @@ def test_short_park_without_wake_check_is_accepted(kanban_home, monkeypatch) -> 
         tid = _running(conn)
         _worker_env(monkeypatch, conn, tid)
         soon = datetime.fromtimestamp(time.time() + 3600, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        out = json.loads(kt._handle_schedule({"reason": f"SCHEDULED_UNTIL={soon} CI"}))
+        out = json.loads(kt._handle_schedule({"reason": f"SCHEDULED_UNTIL={soon} CI",
+                                             "awaiting": {"kind": "clock", "why": "fixture window"}}))
         assert out.get("status") == "scheduled", out
         assert kwc.get_state(conn, tid) is None
 
@@ -233,7 +234,7 @@ def test_cli_wake_check_flags_round_trip(kanban_home, capsys) -> None:
         c = _running(conn)
     # The guard holds on the CLI too, and --clock-only lifts it.
     assert run("schedule", c, "SCHEDULED_UNTIL=2099-01-01T00:00:00Z") != 0
-    assert run("schedule", c, "SCHEDULED_UNTIL=2099-01-01T00:00:00Z", "--clock-only") == 0
+    assert run("schedule", c, "SCHEDULED_UNTIL=2099-01-01T00:00:00Z", "--clock-only", "--awaiting", "clock:", "--awaiting-why", "fixture window") == 0
     capsys.readouterr()
     assert run("show", a, "--json") == 0
     shown = json.loads(capsys.readouterr().out)
@@ -314,7 +315,7 @@ def test_legacy_probe_schema_migrates_without_reparking(kanban_home):
 
 
 @pytest.mark.parametrize("op", ["schedule", "block", "continue"])
-@pytest.mark.parametrize("options", [{"clock_only": True}, {"wake_check": "exit 1"}])
+@pytest.mark.parametrize("options", [{"clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}, {"wake_check": "exit 1"}])
 def test_shared_transition_allows_explicit_long_parks(kanban_home, op, options):
     from hermes_cli.kanban_continuation import continue_task
 
@@ -349,7 +350,7 @@ def test_diagnostics_flag_clock_parks_and_failing_probes(kanban_home) -> None:
         assert kb.schedule_task(conn, failing, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z",
                                 wake_check="exit 2", check_every=120)
         assert kb.schedule_task(conn, ok, reason="SCHEDULED_UNTIL=2099-01-01T00:00:00Z",
-                                clock_only=True)
+                                clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
         kwc.run_due_wake_checks(conn, wait=True)
         states = kwc.load_states(conn)
 

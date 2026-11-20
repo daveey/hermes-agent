@@ -265,8 +265,12 @@ def observe_owner_task(conn: sqlite3.Connection, task: dict, *, now: float) -> d
         payload['completion_notice'] = {'event_id': event[0], 'created_at': event[2],
                                         'payload': json.loads(event[3] or '{}')}
     if row[0] in ('scheduled', 'blocked'):
-        from hermes_cli.kanban_wait_replica import observe_wait
+        from hermes_cli.kanban_wait_replica import observe_wait, published_park
         payload['wait_observation'] = observe_wait(conn, task['id'], now=now)
+        if row[0] == 'scheduled' or task.get('block_kind') == 'time':
+            # [daveey] What the park waits on, so other gateways name its producer (``describe_replica``) instead
+            # of "a producer the owner did not publish". Before the hash: the observation attests these too.
+            payload.update(published_park(conn, task['id']))
     # No per-task timestamp: an unchanged task must publish an identical record, or every sync republishes
     # every task. Owner liveness is the collector's per-scope heartbeat (``task_scopes[].observed_at``).
     observation = {
@@ -306,10 +310,13 @@ def _recent(observed_at: object, now: float, window: float = 180) -> bool:
 
 
 def _park_of(task: dict) -> dict | None:
-    """[daveey] Display-only run fields of an owner record (``kanban_wait_info.park_fields``); never raises."""
+    """[daveey] Display-only park fields of an owner record: the park the owner published (``published_park``), else
+    its last run's (``kanban_wait_info.park_fields``); never raises."""
     try:
         from hermes_cli.kanban_wait_info import park_fields
-        return park_fields(task.get('run')) if isinstance(task, dict) else None
+        if not isinstance(task, dict):
+            return None
+        return task['park'] if isinstance(task.get('park'), dict) else park_fields(task.get('run'))
     except Exception:
         return None
 

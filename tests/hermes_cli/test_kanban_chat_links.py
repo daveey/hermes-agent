@@ -504,3 +504,23 @@ def test_a_replica_that_carries_a_profile_owned_card_keeps_its_own_answer(tmp_pa
     got = {c["id"]: c["source"] for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)])}
     assert got == {"t_elsewhere": links.PROFILE_BOARD_SOURCE}
     assert links.replica_cards(["s0"], ME, replicas=[("default", rep)]) == []  # another chat's card
+
+
+def test_replica_row_carries_the_owner_published_wait(tmp_path):
+    """[daveey] A Board replica row has no park: the owner-published wait (``kanban_wait_replica.published_park``)
+    reaches it from the origin-ledger card, only while the ledger reports the same status."""
+    from hermes_cli.kanban_wait_info import describe_replica
+    rep = tmp_path / "default.db"
+    _replica(rep, [("t_sched", "parked", "scheduled", OTHER), ("t_moved", "moved on", "running", OTHER)],
+             [("t_sched", ME, "s1", "shepherd", 0), ("t_moved", ME, "s1", "shepherd", 0)])
+    wait = {"park": {"wake_at": 4102444800, "reason": "waits", "ended_at": 1, "outcome": None},
+            "awaiting": {"kind": "card", "ref": "t_0123456789abcdef"},
+            "wake_check": "hermes kanban wait-check task t_0123456789abcdef"}
+    ledger = [{**_ledger_row("t_sched", "s1", status="scheduled"), "profile": "default",
+               "reported_status": "scheduled", **wait},
+              {**_ledger_row("t_moved", "s1", status="running"), "profile": "default",
+               "reported_status": "scheduled", **wait}]
+    got = {c["id"]: c for c in links.replica_cards(["s1"], ME, replicas=[("default", rep)], origin_cards=ledger)}
+    assert {k: got["t_sched"][k] for k in wait} == wait
+    assert describe_replica(got["t_sched"])["waiting_on"] == "card t_0123456789abcdef"
+    assert not {"park", "awaiting", "wake_check"} & set(got["t_moved"])  # published for an earlier status

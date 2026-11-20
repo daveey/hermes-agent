@@ -49,7 +49,7 @@ def test_parentless_dependency_block_parks_scheduled_not_needs_input(kanban_home
     with kbc.connect_closing() as conn:
         tid = _running(conn)
         before = int(time.time())
-        assert kb.block_task(conn, tid, reason="waiting for tonight's 04:30 run; cron wakes it", kind="dependency", clock_only=True)
+        assert kb.block_task(conn, tid, reason="waiting for tonight's 04:30 run; cron wakes it", kind="dependency", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
         task = kb.get_task(conn, tid)
         assert task.status == "scheduled"
         assert task.block_kind is None
@@ -65,7 +65,7 @@ def test_scheduled_until_marker_sets_the_wake_and_the_dispatcher_wakes_it(kanban
     stamp = datetime.fromtimestamp(wake, tz=UTC).isoformat().replace("+00:00", "Z")
     with kbc.connect_closing() as conn:
         tid = _running(conn)
-        assert kb.block_task(conn, tid, reason=f"SCHEDULED_UNTIL={stamp} — rate-limit cooldown ends", kind="needs_input", clock_only=True)
+        assert kb.block_task(conn, tid, reason=f"SCHEDULED_UNTIL={stamp} — rate-limit cooldown ends", kind="needs_input", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
         assert kb.get_task(conn, tid).status == "scheduled"
         assert _last(conn, tid, "scheduled")["wake_at"] == wake
         assert kc.wake_due_continuations(conn, now=wake - 1) == []
@@ -76,7 +76,7 @@ def test_scheduled_until_marker_sets_the_wake_and_the_dispatcher_wakes_it(kanban
 def test_time_kind_parks_and_unblock_still_wakes_early(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _running(conn)
-        assert kb.block_task(conn, tid, reason="re-measure tomorrow", kind="time", clock_only=True)
+        assert kb.block_task(conn, tid, reason="re-measure tomorrow", kind="time", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
         assert kb.get_task(conn, tid).status == "scheduled"
         assert kb.unblock_task(conn, tid)
         assert kb.get_task(conn, tid).status == "ready"
@@ -85,12 +85,13 @@ def test_time_kind_parks_and_unblock_still_wakes_early(kanban_home: Path) -> Non
 def test_kanban_schedule_marker_becomes_a_real_timer(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _running(conn)
-        assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2000-01-01T00:00:00Z")
+        assert kb.schedule_task(conn, tid, reason="SCHEDULED_UNTIL=2000-01-01T00:00:00Z",
+                                awaiting={"kind": "clock", "why": "fixture window"})
         due = _last(conn, tid, "scheduled")["wake_at"]
         assert kc.wake_due_continuations(conn, now=due) == [tid]
         # No marker -> the default wait, never "forever" (a deleted cron stranded cards). [daveey]
         tid2 = _running(conn)
-        assert kb.schedule_task(conn, tid2, reason="rate-limit cooldown", clock_only=True)
+        assert kb.schedule_task(conn, tid2, reason="rate-limit cooldown", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
         assert _last(conn, tid2, "scheduled")["wake_at"] >= int(time.time()) + ktp.DEFAULT_WAKE_SECONDS - 5
         assert kc.wake_due_continuations(conn, now=int(time.time()) + 3600) == []
         assert kc.wake_due_continuations(conn, now=int(time.time()) + 10**7) == [tid2]
@@ -126,7 +127,7 @@ def test_kanban_block_tool_time_kind_on_goal_mode_card(kanban_home: Path, monkey
     monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
     monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
     out = json.loads(kt._handle_block({"reason": "SCHEDULED_UNTIL=2099-01-01T00:00:00Z nightly run", "kind": "time",
-                                       "clock_only": True}))
+                                       "clock_only": True, "awaiting": {"kind": "clock", "why": "fixture window"}}))
     assert out.get("status") == "scheduled", out
     assert out.get("wake_at")
 
@@ -152,7 +153,7 @@ def test_sidebar_counts_only_human_blocks_as_blocked(kanban_home: Path, monkeypa
             "evidence": "Sign-in reports a pending device confirmation",
         })
         timed = _running(conn, "s_timed")
-        kb.block_task(conn, timed, reason="nightly run; cron wakes", kind="dependency", clock_only=True)
+        kb.block_task(conn, timed, reason="nightly run; cron wakes", kind="dependency", clock_only=True, awaiting={"kind": "clock", "why": "fixture window"})
         flaky = _running(conn, "s_flaky")
         kb.block_task(conn, flaky, reason="429s", kind="transient")
         untyped = _running(conn, "s_untyped")

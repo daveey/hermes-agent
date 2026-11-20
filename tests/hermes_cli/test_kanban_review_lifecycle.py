@@ -999,7 +999,8 @@ def test_active_pr_guard_lifts_after_owner_parks_with_its_pr(
         assert kb.claim_task(conn, sched) is not None
         kb.add_comment(conn, sched, author="dev", body=pr_comment)
         _backdate_comments(conn, sched)
-        assert schedule_task(conn, sched, reason="waiting on CI", clock_only=True)
+        assert schedule_task(conn, sched, reason="waiting on CI", clock_only=True,
+                             awaiting={"kind": "clock", "why": "the CI window"})
         assert kbd.check_respawn_guard(conn, sched) is None
 
         control = kb.create_task(conn, title="crashed after pr", assignee="dev")

@@ -601,10 +601,10 @@ def _ledger_owners(stale_ok: bool = False) -> dict[tuple[str, str], list[tuple[s
     return _ledger_index(stale_ok)[0]
 
 
-def _ledger_index(stale_ok: bool = False, cards: Optional[list[dict[str, Any]]] = None) -> tuple[dict[tuple[str, str], list[tuple[str, str, str, bool]]],
-                                                   list[dict[str, Any]]]:
-    """``(_ledger_owners, the ledger's profile-board cards)`` from one origin-ledger projection; ``({}, [])`` when it
-    cannot be read (both are additions to the replica's answer, never a reason to hide it)."""
+def _ledger_index(stale_ok: bool = False, cards: Optional[list[dict[str, Any]]] = None) -> tuple:
+    """``(_ledger_owners, the ledger's profile-board cards, owner-published waits)`` from one origin-ledger
+    projection; ``({}, [], {})`` when it cannot be read (all are additions to the replica's answer, never a reason to
+    hide it). Waits are keyed ``(owner gateway, owner profile, board, id)`` (``_ledger_wait``)."""
     from hermes_cli.kanban_session_activity import _remote_links
     global _owners_memo
     try:
@@ -612,26 +612,47 @@ def _ledger_index(stale_ok: bool = False, cards: Optional[list[dict[str, Any]]] 
             cards = _remote_links(stale_ok=True) if stale_ok else _remote_links()
     except Exception as exc:  # health: allow BLE001 -- the profile is a label; a failed ledger read must not hide cards
         _log.info("kanban chat links: owner profiles unavailable (%s: %s)", type(exc).__name__, exc)
-        return {}, []
+        return {}, [], {}
     # [daveey] ``_remote_links`` hands out a new list of the SAME read-only card dicts until it re-projects: the same
     # cards (by identity; the memo holds them, so no id is reused) give the same owners. Rebuilding this index from
     # ~5k cards was ~15 ms of every count recompute on David-MBP.
     memo = _owners_memo
     if memo is not None and len(memo[0]) == len(cards) and all(a is b for a, b in zip(memo[0], cards)):
-        return memo[1], memo[2]
+        return memo[1], memo[2], memo[3]
     out: dict[tuple[str, str], list[tuple[str, str, str, bool]]] = {}
+    waits: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for c in cards:
         if c.get("gateway") and c.get("board") and c.get("id") and c.get("profile"):
             out.setdefault((str(c["board"]), str(c["id"])), []).append(
                 (str(c["gateway"]), str(c["profile"]), str(c.get("session") or ""), bool(c.get("released"))))
+            wait = {k: c[k] for k in LEDGER_WAIT_FIELDS if c.get(k)}
+            if wait:
+                waits[(str(c["gateway"]), str(c["profile"]), str(c["board"]), str(c["id"]))] = {
+                    **wait, "_status": c.get("reported_status", c.get("status"))}
     profile_cards = [c for c in cards if _is_profile_board_card(c)]
-    _owners_memo = (cards, out, profile_cards)
-    return out, profile_cards
+    _owners_memo = (cards, out, profile_cards, waits)
+    return out, profile_cards, waits
 
 
-# (cards, owners, profile-board cards) of the last ``_ledger_index`` build. Callers treat both as read-only.
+# What a scheduled card waits on, published by its owner (``kanban_wait_replica.published_park``) and carried by the
+# origin-ledger cards only: a Board replica row has no park. ``replica_cards`` copies them onto its row. [daveey]
+LEDGER_WAIT_FIELDS = ("park", "awaiting", "wake_check")
+
+
+def _ledger_wait(index: tuple, owner: str, owner_profile: str, board: str, tid: str,
+                 status: Any) -> dict[str, Any]:
+    """The owner-published wait fields of one card from ``_ledger_index``'s third map, only when the ledger record
+    reports the replica row's status (a park published for an earlier status is not this card's wait)."""
+    waits = index[2] if len(index) > 2 else {}
+    wait = waits.get((owner, owner_profile, board, tid))
+    if not wait or wait.get("_status") != status:
+        return {}
+    return {k: v for k, v in wait.items() if k != "_status"}
+
+
+# (cards, owners, profile-board cards, waits) of the last ``_ledger_index`` build. Callers treat them as read-only.
 _owners_memo: tuple[list[dict[str, Any]], dict[tuple[str, str], list[tuple[str, str, str, bool]]],
-                    list[dict[str, Any]]] | None = None
+                    list[dict[str, Any]], dict[tuple[str, str, str, str], dict[str, Any]]] | None = None
 
 
 def _owner_of(known: list[tuple[str, str, str, bool]], owner: Optional[str],
@@ -849,6 +870,8 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                 "source": "replica",
             }
             out[pair].update(upstream_fields(r))
+            if named and owner is not None and not unknown and index is not None:
+                out[pair].update(_ledger_wait(index, owner, owner_profile, board, tid, status))
             if machine := run_machine(r):
                 out[pair]["run_machine"] = machine
             # Executor-stamped liveness of the current run (kanban_replica_execution), never the pull clock.

@@ -59,12 +59,33 @@ def client(kanban_home):
     app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
     return TestClient(app)
 
+@pytest.mark.parametrize("bulk", [False, True])
+def test_dashboard_scheduled_park_needs_a_wake_reason(client, bulk):
+    """A dashboard drag into Scheduled names what ends the wait (kanban_awaiting no_wake_reason)."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="park", assignee="worker")
+    payload = {"status": "scheduled", "clock_only": True}
+    if bulk:
+        outcome = client.post("/api/plugins/kanban/tasks/bulk", json={"ids": [tid], **payload}).json()["results"][0]
+        assert outcome["ok"] is False and "no_wake_reason" in outcome["error"], outcome
+    else:
+        response = client.patch(f"/api/plugins/kanban/tasks/{tid}", json=payload)
+        assert response.status_code == 400 and "no_wake_reason" in response.text, response.text
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "ready"
+        response = client.patch(f"/api/plugins/kanban/tasks/{tid}",
+                                json={**payload, "awaiting": {"kind": "clock", "why": "release slot"}})
+        assert response.status_code == 200, response.text
+        assert kb.list_events(conn, tid)[-1].payload["awaiting"]["why"] == "release slot"
+
+
 # ---------------------------------------------------------------------------
 # GET /board on an empty DB
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("bulk", [False, True])
-@pytest.mark.parametrize("options", [{}, {"clock_only": True}, {"wake_check": "exit 1", "check_every": 120}])
+@pytest.mark.parametrize("options", [{}, {"clock_only": True, "awaiting": {"kind": "clock", "why": "release slot"}},
+                                     {"wake_check": "exit 1", "check_every": 120}])
 def test_dashboard_scheduled_park_guard(client, bulk, options):
     from hermes_cli import kanban_wake_check as kwc
 

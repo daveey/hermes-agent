@@ -141,6 +141,9 @@ def test_block_with_blocker_and_no_wake_is_given_one(kanban_home, monkeypatch):
         wake = pending_wake(conn, tid)
         assert wake and 0 < wake["wake_at"] - time.time() <= 1800 + 5
         assert _has_way_back(conn, tid)
+        # The system park names its wake reason: the shared blocker's probe cadence.
+        rec = [e for e in kb.list_events(conn, tid) if e.kind == "scheduled"][-1].payload["awaiting"]
+        assert rec["kind"] == "clock" and "github-actions-billing" in rec["why"], rec
         # Kernel path (CLI/dispatcher callers) behaves the same.
         k = kb.create_task(conn, title="k", assignee="default")
         kb.claim_task(conn, k)
@@ -261,6 +264,10 @@ def test_clear_respects_current_park(kanban_home, monkeypatch, current_blocker):
         assert ksb.release_cleared_blockers(conn) == []
 
 
+# A scheduled wait needs a wake reason (kanban_awaiting no_wake_reason): the "waiting on a deploy now" parks declare it.
+DEPLOY_WINDOW = {"kind": "clock", "why": "the deploy window"}
+
+
 def test_explicit_clear_blocker_opt_out(kanban_home, monkeypatch):
     with kbc.connect_closing() as conn:
         a = _worker_block_behind(monkeypatch, conn, "a")
@@ -268,7 +275,7 @@ def test_explicit_clear_blocker_opt_out(kanban_home, monkeypatch):
         conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (a,))
         conn.commit()
     out = json.loads(kt._handle_schedule({"task_id": a, "reason": "account is back; waiting on a deploy now", "clock_only": True,
-                                          "clear_blocker": True}))
+                                          "clear_blocker": True, "awaiting": DEPLOY_WINDOW}))
     assert "error" not in out, out
     with kbc.connect_closing() as conn:
         assert not ksb.blocker_states(conn)[BID].is_open
@@ -502,7 +509,7 @@ def _run_and_clear(monkeypatch, tid: str) -> None:
             conn.commit()
         _as_worker(monkeypatch, conn, tid)
     out = json.loads(kt._handle_schedule({"reason": "account is back; waiting on a deploy now",
-                                          "clock_only": True, "clear_blocker": True}))
+                                          "clock_only": True, "clear_blocker": True, "awaiting": DEPLOY_WINDOW}))
     assert "error" not in out, out
     _as_parent(monkeypatch)
 

@@ -95,7 +95,8 @@ def test_legacy_request_retired_by_lifecycle_transition(tmp_path, transition):
             "claim": lambda: db.claim_task(conn, task) is not None,
             "review": lambda: db.request_review(conn, task),
             "schedule": lambda: db.schedule_task(conn, task, reason="Wait for clock",
-                                                  wake_check="2099-01-01T00:00:00Z", clock_only=True),
+                                                  wake_check="2099-01-01T00:00:00Z", clock_only=True,
+                                                  awaiting={"kind": "clock", "why": "the clock"}),
             "invalidate": invalidate,
         }
         assert actions[transition]()

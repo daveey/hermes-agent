@@ -167,7 +167,8 @@ def park(
     guard = ("status = 'blocked' AND block_kind IS NULL AND current_run_id IS NULL" if from_untyped_block
              else "status IN ('running', 'ready', 'triage')")
     if blocker_wake:
-        record = {"kind": "clock", "inferred": True, "shared_blocker": blocker_id}
+        record = {"kind": "clock", "inferred": True, "shared_blocker": blocker_id,
+                  "why": f"shared blocker {blocker_id}: re-checked on the shared probe cadence"}
     else:
         try:
             record = kaw.gate(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
