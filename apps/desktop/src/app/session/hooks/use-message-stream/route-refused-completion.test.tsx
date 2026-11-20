@@ -65,16 +65,21 @@ describe('a pinned route refused before the turn (route_refused)', () => {
   })
 
   it('shows the same card when the agent build itself hit the wall (tui_gateway agent_init path)', async () => {
-    // tui_gateway/methods_prompt.py `_agent_init_failure_surface`: no failure_reason, the turn text is
-    // turn_error_text(), and the descriptor carries the held sentence as `message`.
+    // tui_gateway/methods_prompt.py `_agent_init_failure_surface`: no failure_reason, and the turn text and
+    // the descriptor's `message` are both the held sentence.
     const bubble = await failTurn({
       failure_reason: undefined,
       error: HELD,
       reset_at: 1794981540,
-      text:
-        "This chat's model is unavailable. Your message was not answered.\n" +
-        `Details: ${HELD}\nUse /model to switch, or resend after the reset.`,
-      error_surface: { layer: 'gateway', code: 'route_refused', retryable: false, message: HELD }
+      text: HELD,
+      error_surface: {
+        layer: 'gateway',
+        code: 'route_refused',
+        retryable: false,
+        provider: 'openai-codex',
+        model: 'gpt-6-astra',
+        message: HELD
+      }
     })
 
     const card = errorCardText(thread, bubble?.errorSurface)

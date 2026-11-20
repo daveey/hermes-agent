@@ -242,21 +242,23 @@ def quota_refusal_route(exc):
 
 
 def quota_refusal_wall(exc):
-    """``(provider, model, resets_at)`` when *exc*'s cause chain ends in a quota refusal that names its
-    route (``quota_refusal_route``) and carries a finite absolute ``resets_at``, else None.
+    """``(provider, model, resets_at)`` when *exc*'s cause chain ends in one route's own quota refusal (the
+    routing pool's ``SubscriptionQuotaUnavailable``, a pinned route's wall) naming its route and a finite
+    absolute ``resets_at``, else None.
 
-    For a fallback chain the reset is the terminal (last-tried) route's own. A ``retry_after`` hint is
-    not an absolute reset and gives None. Typed only, like ``quota_refusal_route``."""
+    A fallback chain gives None: its routes are the pin plus configured fallbacks, so no one route and reset
+    describes it (a mixed chain's real cause may not be a quota at all). A ``retry_after`` hint is not an
+    absolute reset. The names are as the refusal gives them, like ``model_routing_walls.held_reply``."""
     from hermes_cli.fallback_errors import ProviderFallbackError
 
-    route = quota_refusal_route(exc)
-    if route is None:
-        return None
     error = _terminal_refusal(exc)
-    if isinstance(error, ProviderFallbackError):
-        error = _terminal_refusal(error.failures[-1][2])
+    if error is None or isinstance(error, ProviderFallbackError) or not _is_quota_type(error):
+        return None
+    provider, model = getattr(error, "provider", None), getattr(error, "model", None)
     reset = _finite_positive(getattr(error, "resets_at", None))
-    return None if reset is None else (*route, reset)
+    if reset is None or not all(isinstance(v, str) and v.strip() for v in (provider, model)):
+        return None
+    return provider.strip(), model.strip(), reset
 
 
 def is_quota_failure(exc):

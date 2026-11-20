@@ -229,6 +229,21 @@ def _finish_agent_build(sid: str, key: str, current: dict, *, notify_registered:
             session_db.close()
 
 
+def _record_failure_route(failure: dict, error: BaseException) -> None:
+    """[daveey] The pinned route whose own quota wall refused the build, with that wall's reset: the turn waiting
+    on it closes as a route refusal (``methods_prompt._agent_init_failure_surface``). Server-side only, like
+    ``failure_resets_at`` (``credential_failure.client_failure_fields`` drops it); cleared when a build starts."""
+    try:
+        from agent.model_routing_unavailable import quota_refusal_wall
+        wall = quota_refusal_wall(error)
+    except Exception:  # health: allow BLE001 -- the generic init-failure card still goes out
+        logger.warning("agent build: could not read the quota wall of %r", error, exc_info=True)
+        return
+    if wall is not None:
+        provider, model, resets_at = wall
+        failure["failure_route"] = {"provider": provider, "model": model, "resets_at": resets_at}
+
+
 def _start_agent_build(sid: str, session: dict) -> None:
     """Start building the real AIAgent for a TUI session, once. Deferred until the first prompt (or any
     command needing the agent) so the composer isn't blocked on tool discovery / model metadata;
@@ -246,6 +261,9 @@ def _start_agent_build(sid: str, session: dict) -> None:
             return
         session["agent_build_started"] = True
         session.pop("lazy", None)  # now genuinely mid-construction: restore the "still starting" eviction exemption
+        # [daveey] A wall recorded by an earlier failed build says nothing about this one (``_record_failure_route``).
+        if isinstance(failure := session.get("agent_failure"), dict):
+            failure.pop("failure_route", None)
     key = session["session_key"]
 
     def _build() -> None:
@@ -306,13 +324,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
             if (isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool)
                     and "failure_resets_at" not in current["agent_failure"]):
                 current["agent_failure"]["failure_resets_at"] = float(resets_at)
-            # [daveey] The pinned route whose quota wall refused the build, with that wall's reset: the turn waiting
-            # on it closes as a route refusal (``methods_prompt._run_after_agent_ready``). Server-side only, like
-            # failure_resets_at (``credential_failure.client_failure_fields`` drops it).
-            from agent.model_routing_unavailable import quota_refusal_wall
-            if (wall := quota_refusal_wall(e)) is not None:
-                current["agent_failure"]["failure_route"] = dict(zip(("provider", "model", "resets_at"), wall))
             current["agent_error"] = str(e)
+            _record_failure_route(current["agent_failure"], e)
             # Logged: a failed build otherwise leaves no trace, so a prompt waiting on it reads in agent.log as
             # a message that "never ran" (the client only got an event, which a disconnect can lose). [daveey]
             from tui_gateway.build_diagnostics import log_build_failure

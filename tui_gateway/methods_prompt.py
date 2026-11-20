@@ -682,14 +682,15 @@ def _agent_init_failure_surface(session: dict, message: str) -> tuple[str, dict,
     route = failure.get("failure_route") if isinstance(failure, dict) else None
     if isinstance(route, dict):
         try:
+            from agent.error_surface import _surface
             from agent.model_routing_walls import walled_pin_reply
             reply = walled_pin_reply(route["provider"], route["model"], route["resets_at"])
+            surface = _surface("gateway", "route_refused", False, route["provider"], route["model"])
         except Exception:  # health: allow BLE001 -- a malformed record keeps the generic card
             logger.warning("prompt.submit: unusable failure_route %r", route, exc_info=True)
         else:
             from agent.turn_failure_copy import ROUTE_REFUSED_TURN_NOTICE
-            return reply, {"layer": "gateway", "code": "route_refused", "retryable": False,
-                           "message": reply}, ROUTE_REFUSED_TURN_NOTICE
+            return reply, {**surface, "message": reply}, ROUTE_REFUSED_TURN_NOTICE
     return message, {"layer": "runtime", "code": "agent_init_failed", "retryable": True}, None
 
 
@@ -716,7 +717,8 @@ def _close_agent_init_failed_turn(
             if db is None or db.latest_conversation_role(sid) not in OPEN_TURN_TAIL_ROLES:
                 return
             error = redact_sensitive_text(str(message or "").strip()[:2000], force=True)
-            row = {"role": "assistant", "content": notice or FAILED_TURN_NOTICE, "display_kind": FAILED_TURN_DISPLAY_KIND,
+            row = {"role": "assistant", "content": notice or FAILED_TURN_NOTICE,
+                   "display_kind": FAILED_TURN_DISPLAY_KIND,
                    "display_metadata": {k: v for k, v in (("error", error), ("error_surface", error_surface)) if v}}
             try:
                 db.append_message(sid, **row)

@@ -68,6 +68,10 @@ _TURN_ERROR_NO_RETRY_HINT: dict[str, str] = {
                                   "Local models), or switch with /model."),
 }
 
+# [daveey] Codes whose descriptor ``message`` is already the whole user-facing sentence (what happened, the reset,
+# /model): it is the turn text, as on the gateway path (``agent/error_surface.py`` ``_OWN_SENTENCE_REASONS``).
+_OWN_SENTENCE_CODES = {"route_refused"}
+
 _TURN_ERROR_DEFAULT = ("The request failed", "Send /retry, or switch with /model.")
 
 _DETAIL_LIMIT = 400
@@ -98,7 +102,11 @@ def turn_error_hint(surface: dict | None, recoverable: bool = True) -> str:
 
 def turn_error_text(error: Any, surface: dict | None = None, *, recoverable: bool = True) -> str:
     """The assistant-slot text for a turn that produced no reply: title, what it means for the
-    user, the raw provider detail on its own dimmed-able line, and the next step."""
+    user, the raw provider detail on its own dimmed-able line, and the next step. A code in
+    ``_OWN_SENTENCE_CODES`` whose descriptor carries ``message`` reads as that sentence alone."""
+    if isinstance(surface, dict) and surface.get("code") in _OWN_SENTENCE_CODES:
+        if isinstance(own := surface.get("message"), str) and own.strip():
+            return own.strip()
     detail = " ".join(str(error or "").split())
     if len(detail) > _DETAIL_LIMIT:
         detail = detail[:_DETAIL_LIMIT - 1] + "…"

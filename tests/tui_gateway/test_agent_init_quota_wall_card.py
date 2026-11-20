@@ -43,11 +43,27 @@ def test_walled_build_message_names_the_reset_in_pt_and_model_not_an_epoch_or_se
     assert "1795216785" not in message and "hermes setup" not in message
 
 
-def test_walled_build_behind_a_fallback_chain_names_the_terminal_route():
+@pytest.mark.parametrize("primary", [
+    RuntimeError("No LLM provider configured"),  # mixed chain: the real cause is not a quota
+    SubscriptionQuotaUnavailable("anthropic", "claude-fable-5-2", RESET),  # every route walled
+], ids=["mixed", "all-walled"])
+def test_a_fallback_chain_is_not_named_as_one_walled_pin(primary):
+    """Real chains list the pin first, then configured fallbacks: no one route and reset describes them."""
     from hermes_cli.fallback_errors import ProviderFallbackError
     from tui_gateway.user_messages import agent_init_failed_message
-    chain = ProviderFallbackError([("anthropic", "claude-fable-5-2", _wall())])
-    assert agent_init_failed_message(chain) == HELD
+    chain = ProviderFallbackError([("anthropic", "claude-fable-5-2", primary),
+                                   ("openai-codex", "gpt-6", SubscriptionQuotaUnavailable("openai-codex", "gpt-6", RESET + 86400))])
+    message = agent_init_failed_message(chain)
+    assert message.startswith("Hermes could not start the assistant for this session. Details: ")
+    assert "pinned to it" not in message
+
+
+def test_turn_text_for_an_own_sentence_code_is_that_sentence():
+    from tui_gateway.user_messages import turn_error_text
+    surface = {"layer": "gateway", "code": "route_refused", "retryable": False, "message": HELD}
+    assert turn_error_text("raw detail", surface) == HELD
+    # Without the sentence it keeps the title/detail/hint shape, with route_refused's own title.
+    assert turn_error_text("raw detail", {**surface, "message": ""}).startswith("This chat's model is unavailable.")
 
 
 @pytest.mark.parametrize("exc", [
@@ -78,6 +94,20 @@ def test_walled_build_records_its_route_and_never_sends_it(tmp_path, monkeypatch
     assert payload["reset_at"] == RESET
     data = server._wait_agent(session, "r")["error"]["data"] or {}
     assert "failure_route" not in data and "failure_resets_at" not in data
+
+
+def test_a_new_build_clears_an_earlier_builds_route(tmp_path, monkeypatch):
+    """A route recorded by an earlier failed build never labels a later build's failure (here: abandoned)."""
+    from tests.tui_gateway.test_provider_not_configured_code import _fail_build, _run_build
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    session = _fail_build(monkeypatch, RuntimeError("unused"))
+    monkeypatch.setattr(server, "_await_resume_history", lambda *a, **kw: False)
+    monkeypatch.setattr(server, "write_json", lambda frame: True)
+    session["agent_failure"] = {"failure_resets_at": RESET,
+                                "failure_route": {"provider": "anthropic", "model": "claude-fable-5-2", "resets_at": RESET}}
+    _run_build(session)
+    assert session["agent_error"] == server.AGENT_BUILD_ABANDONED
+    assert "failure_route" not in session["agent_failure"]
 
 
 def test_unrelated_build_failure_records_no_route(tmp_path, monkeypatch):
@@ -128,13 +158,14 @@ def test_walled_build_turn_closes_with_the_route_refused_card_and_no_send_it_aga
     failure = {"failure_resets_at": RESET,
                "failure_route": {"provider": "anthropic", "model": "claude-fable-5-2", "resets_at": RESET}}
     complete, rows = _turn_on_failed_build(monkeypatch, tmp_path, failure, str(_wall()))
-    expected = {"layer": "gateway", "code": "route_refused", "retryable": False, "message": HELD}
+    expected = {"layer": "gateway", "code": "route_refused", "retryable": False, "message": HELD,
+                "provider": "anthropic", "model": "claude-fable-5-2"}
 
     (payload,) = complete
     assert payload["status"] == "error"
-    assert payload["error_surface"] == expected
+    assert expected.items() <= payload["error_surface"].items()
     assert payload["error"] == HELD
-    assert "1795216785" not in payload["text"] and "/model" in payload["text"]
+    assert payload["text"] == HELD
     assert "failure_route" not in payload and "failure_resets_at" not in payload
     assert payload["reset_at"] == RESET
 
@@ -142,7 +173,14 @@ def test_walled_build_turn_closes_with_the_route_refused_card_and_no_send_it_aga
     boundary = rows[-1]
     assert boundary["display_kind"] == FAILED_TURN_DISPLAY_KIND
     assert "Send it again" not in boundary["content"]
-    assert _metadata(boundary)["error_surface"] == expected
+    assert _metadata(boundary)["error_surface"] == payload["error_surface"]
+
+
+def test_malformed_route_record_keeps_the_generic_card(monkeypatch, tmp_path):
+    complete, _rows = _turn_on_failed_build(
+        monkeypatch, tmp_path, {"failure_route": {"provider": "anthropic"}}, str(_wall()))
+    (payload,) = complete
+    assert payload["error_surface"] == {"layer": "runtime", "code": "agent_init_failed", "retryable": True}
 
 
 def test_control_other_build_failure_keeps_agent_init_failed(monkeypatch, tmp_path):
