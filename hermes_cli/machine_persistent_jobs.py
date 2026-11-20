@@ -27,8 +27,25 @@ def collect() -> dict:
     except (OSError, ValueError):
         return {}
     if not occupied:
-        return {}  # baseline/unscoped coverage remains UNKNOWN even after a job exits
+        return _complete_zero(at_ms)
     return fresh({'persistent_jobs': len(occupied), 'persistent_jobs_at_ms': at_ms})
+
+
+def _complete_zero(at_ms: int) -> dict:
+    """A zero only exists on a node with the drain fence installed (activation
+    file present), from the full /proc census and with no unsent results.
+    Anything else stays UNKNOWN (empty sample)."""
+    from hermes_cli import worker_drain_census as census
+    from hermes_cli import worker_drain_fence as fence
+    try:
+        if fence.load_activation() is None:
+            return {}
+        count = census.complete_count()
+    except Exception:
+        return {}
+    if count is None:
+        return {}
+    return fresh({'persistent_jobs': count, 'persistent_jobs_at_ms': at_ms})
 
 
 def census_count(count: int | None) -> int | None:
