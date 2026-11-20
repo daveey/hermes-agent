@@ -426,6 +426,8 @@ def _committed_lease_expiry(db, session_id: str, holder: str, floor: float) -> f
     if callable(reader):
         try:
             committed = reader(session_id, holder)
+            from hermes_state_lease_custody import admission_readback
+            admission_readback(db, session_id, holder, committed)  # absent right after admission: say so
             if isinstance(committed, (int, float)):
                 return float(committed)
         except Exception:

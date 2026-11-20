@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import hermes_state_lease_custody as _custody
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -84,20 +85,28 @@ def _cooldown_row(exists: bool, cooldown_until, error) -> dict[str, Any]:
 
 
 def _claim_lease_row(conn, table: str, key_col: str, key: str, holder: str, now: float, expires_at: float,
-                     stale) -> tuple[bool, Optional[str]]:
+                     stale, custody: Optional[dict] = None) -> tuple[bool, Optional[str]]:
     """Single-transaction lease claim: DELETE a stale holder's row (``stale(holder,
     expires_at)``), INSERT OR IGNORE ours, then SELECT to confirm ownership (INSERT OR
-    IGNORE gives no rowcount signal). Returns ``(acquired, reclaimed_holder)``."""
+    IGNORE gives no rowcount signal). Returns ``(acquired, reclaimed_holder)``. ``custody``
+    (turn leases only: ``store`` / ``session_id``) reports each statement as a custody event."""
     reclaimed_holder = None
     row = conn.execute(f"SELECT holder, expires_at FROM {table} WHERE {key_col} = ?", (key,)).fetchone()
     if row is not None and stale(row["holder"], row["expires_at"]):
-        conn.execute(f"DELETE FROM {table} WHERE {key_col} = ? AND holder = ?", (key, row["holder"]))
+        gone = conn.execute(f"DELETE FROM {table} WHERE {key_col} = ? AND holder = ?", (key, row["holder"])).rowcount
         reclaimed_holder = row["holder"]
-    conn.execute(
+        if custody is not None:
+            _custody.observe("reclaim", key, holder, row_holder=reclaimed_holder, changed=gone,
+                             why="stale_on_acquire", **custody)
+    inserted = conn.execute(
         f"INSERT OR IGNORE INTO {table} ({key_col}, holder, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
-        (key, holder, now, expires_at))
+        (key, holder, now, expires_at)).rowcount
     owner = conn.execute(f"SELECT holder FROM {table} WHERE {key_col} = ?", (key,)).fetchone()
-    return owner is not None and owner["holder"] == holder, reclaimed_holder
+    owned = owner is not None and owner["holder"] == holder
+    if custody is not None:
+        _custody.observe("claim", key, holder, row_holder=owner["holder"] if owner is not None else None,
+                         changed=inserted, why=f"owned={int(owned)}", **custody)
+    return owned, reclaimed_holder
 
 
 # Defensive bound on the forward compression-chain walk; ``seen`` guards cycles.
@@ -764,13 +773,13 @@ class SessionCompressionMixin:
             # behind, and nothing else revisits a conversation nobody resumes. The grace keeps the
             # recent expiries a still-live owner can renew from a starved refresher; it is also the
             # longest a suspended holder can go unrefreshed and still keep its lease.
-            conn.execute("DELETE FROM session_turn_leases WHERE expires_at < ?",
-                         (now - _TURN_LEASE_SWEEP_GRACE_S,))
+            _custody.sweep(conn, now - _TURN_LEASE_SWEEP_GRACE_S, db_path)
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             return _claim_lease_row(
                 conn, "session_turn_leases", "conversation_id", conversation_id, holder, now, expires_at,
                 lambda h, e: (_compression_lock_holder_process_is_dead(h) or _turn_lease_abandoned(db_path, h)
                               or lapsed_row_reclaimable(h, e, now)),
+                custody={"store": db_path, "session_id": session_id},
             )
         acquired, reclaimed_holder = self._execute_write(_do, patience_s=patience_s)
         if reclaimed_holder and _turn_lease_abandoned(db_path, reclaimed_holder):
@@ -899,9 +908,7 @@ class SessionCompressionMixin:
         db_path = getattr(self, "db_path", None)
         def _do(conn):
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
-            conn.execute(
-                "DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
-                (conversation_id, holder))
+            _custody.delete_row(conn, "release", conversation_id, holder, store=db_path, session_id=session_id)
         try:
             self._execute_write(_do, patience_s=patience_s)
         except sqlite3.Error as exc:

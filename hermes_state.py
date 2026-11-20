@@ -42,6 +42,7 @@ from hermes_state_health import (
     write_op_name as _write_op_name,
 )
 import hermes_state_corruption_confirm as _corrupt_confirm
+import hermes_state_lease_custody as _lease_custody
 from hermes_state_errors import (
     _DELETED_WAL_GENERATION_MSG, _DISK_IO_ERROR_MARKER, _STATE_DB_CORRUPT_MSG, _STATE_DB_GENERATION_KEY,
     _STATE_DB_REPLACED_MSG, DeletedWalGenerationError, SessionCompressionInProgressError, StateDbCorruptError,
@@ -1118,7 +1119,9 @@ class SessionDB(
                             stage = "commit"
                             self._conn.commit()
                             stage = "committed"
+                            _lease_custody.settle("committed")
                         except BaseException:
+                            _lease_custody.settle("rolled_back" if stage != "commit" else "commit_failed")
                             try:
                                 self._conn.rollback()
                             except Exception:

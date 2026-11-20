@@ -989,12 +989,14 @@ def _worker_turn(db, conn, session_id, payload, operation):
     if operation == 'turn.acquire':
         value = _claim_lease_row(conn, 'session_turn_leases', 'conversation_id', key,
             holder, now, now + ttl,
-            lambda h, e: _compression_lock_holder_process_is_dead(h) or lapsed_row_reclaimable(h, e, now))[0]
+            lambda h, e: _compression_lock_holder_process_is_dead(h) or lapsed_row_reclaimable(h, e, now),
+            custody={"store": getattr(db, "db_path", None), "session_id": session_id})[0]
     elif operation == 'turn.renew':
         value = conn.execute('UPDATE session_turn_leases SET expires_at=? WHERE conversation_id=? AND holder=?',
                              (now + ttl, key, holder)).rowcount > 0
     else:
-        conn.execute('DELETE FROM session_turn_leases WHERE conversation_id=? AND holder=?', (key, holder))
+        from hermes_state_lease_custody import delete_row
+        delete_row(conn, 'worker_release', key, holder, store=getattr(db, 'db_path', None), session_id=session_id)
         value = None
     return {'value': value}
 

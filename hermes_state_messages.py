@@ -27,6 +27,7 @@ from hermes_state_compaction_display import later_tool_copy_ids, not_a_later_too
 from hermes_state_detached_results import SessionDetachedResultsMixin
 from hermes_state_todo import SessionTodoResultMixin
 from hermes_state_wake_grace import stale_turn_lease
+import hermes_state_lease_custody as _custody
 from hermes_state_stored_reads import SessionStoredReadsMixin
 from hermes_state_identity import (
     _absorbed_uids_json, _restore_identity_columns, _stable_tool_key, _tool_call_uid_map, _tool_call_uid_or_none, _tool_call_uids_json, _uid_list)
@@ -248,9 +249,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
             now = time.time()
             if turn_lease_holder:
                 if lease is None or lease["holder"] != turn_lease_holder:
-                    reason = "missing lease row" if lease is None else "holder mismatch"
-                    raise SessionTurnLeaseLostError(
-                        f"Session turn lease lost; refusing transcript write for {session_id!r} ({reason})")
+                    _custody.refuse_lost(conn, session_id, conversation_id, turn_lease_holder, lease, getattr(self, "db_path", None))
                 if float(lease["expires_at"]) <= now:
                     # Matching-row renewal is serialized with acquisition; missing custody never renews.
                     conn.execute("UPDATE session_turn_leases SET expires_at = ? "
@@ -260,8 +259,8 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin, 
                 if not stale_turn_lease(lease, now):  # post-wake grace included (hermes_state_wake_grace)
                     raise SessionTurnLeaseLostError(f"Session has an active turn lease; refusing transcript mutation for {session_id!r}")
                 # Same reclaim rule as acquisition; deleting also fences a stale late flush after the mutation.
-                conn.execute("DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
-                    (conversation_id, lease["holder"]))
+                _custody.delete_row(conn, "reclaim", conversation_id, lease["holder"], session_id=session_id,
+                                    store=getattr(self, "db_path", None), why="stale_on_leaseless_write")
         if not turn_lease_holder and (reject_active_turn_lease or reject_parked_turn):
             from hermes_state_update_pause import refuse_parked_write
             refuse_parked_write(conn, session_id, self._session_turn_lease_key_on_conn(conn, session_id))

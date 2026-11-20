@@ -451,7 +451,8 @@ def worker_turn_cleanup(db, conn, sid, payload):
     key = db._session_turn_lease_key_on_conn(conn, sid)
     if key != db._session_turn_lease_key_on_conn(conn, target):
         raise RuntimeStoreError('permission_denied')
-    conn.execute('DELETE FROM session_turn_leases WHERE conversation_id=? AND holder=?', (key, holder))
+    from hermes_state_lease_custody import delete_row
+    delete_row(conn, 'worker_cleanup', key, holder, store=getattr(db, 'db_path', None), session_id=sid)
     return {'released': True}
 
 
