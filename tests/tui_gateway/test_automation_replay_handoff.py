@@ -22,7 +22,7 @@ def journal(tmp_path):
 def item(identity="a", *, due=100, created=50, persisted=True, kind="kanban_notice"):
     return {"id": identity, "due": due, "created_at": created, "persisted": persisted,
             "text": identity, "display_kind": kind, "display_metadata": {"task_ids": ["t_0123456789abcdef"]},
-            "cause": "quota", "failed_at": 40, "attempt": 1, "busy_rechecks": 2}
+            "cause": "quota", "failed_at": 40, "attempt": 0, "busy_rechecks": 2}
 
 
 def take(journal, now=100, holder="process-birth-A", alive=lambda _: False):
@@ -474,10 +474,20 @@ def test_named_launch_profile_is_consumed(monkeypatch, tmp_path):
 
 def test_rewalled_replay_is_not_fenced_by_an_earlier_success_but_is_by_stop(wired):
     ar.cancel_durable(wired.path.parent, (KEY,), 60.0)  # earlier turn succeeded after the first failure (created=50)
-    rewalled = dict(item("rewall", created=50), source_batch="parent-batch")
+    rewalled = dict(item("rewall", created=50), source_batch="parent-batch", attempt=1)
     wired.publish(KEY, [rewalled])
     got = wired.claim(KEY, 200, "h", lambda _: False)
     assert got and [r["id"] for r in json.loads(got["payload"])] == ["rewall"]
     ar.cancel_durable(wired.path.parent, (KEY,), 999.0, stop=True)
     wired.publish(KEY, [dict(item("rewall2", created=50), source_batch="parent-batch")])
     assert wired.claim(KEY, 300, "h2", lambda _: False) is None
+
+
+def test_locally_rewalled_replay_without_batch_is_not_fenced_by_an_earlier_success(wired):
+    ar.cancel_durable(wired.path.parent, (KEY,), 60.0)  # earlier turn succeeded after the first failure (created=50)
+    wired.publish(KEY, [dict(item("local-rewall", created=50), attempt=1)])  # timer-run replay: no source_batch
+    wired.publish(KEY, [item("fresh-old", created=50)])  # a never-replayed delivery older than the success stays fenced
+    got = wired.claim(KEY, 200, "h", lambda _: False)
+    assert got and [r["id"] for r in json.loads(got["payload"])] == ["local-rewall"]
+    again = wired.claim(KEY, 300, "h2", lambda _: False)  # the unsettled batch only, never the fenced item
+    assert [r["id"] for r in json.loads(again["payload"])] == ["local-rewall"]

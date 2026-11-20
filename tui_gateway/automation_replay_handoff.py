@@ -67,6 +67,7 @@ class Journal:
                 # between that failure and the replay says nothing about this attempt: only Stop fences it.
                 covered = fence and (created <= fence["stopped_at"] or
                                      (item["persisted"] and not item.get("source_batch")
+                                      and not int(item.get("attempt") or 0)
                                       and created <= fence["carried_through"]))
                 payload = json.dumps(item, separators=(",", ":"))
                 terminal = conn.execute("SELECT owner,payload_sha256 FROM automation_replay_tombstones WHERE id=?",
