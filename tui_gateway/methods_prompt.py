@@ -778,7 +778,13 @@ def _slot_refusal(rid, sid, session, text, params, refusal, internal_hosted_subm
     if getattr(refusal, "ledger_status", None) is not None and not internal_hosted_submit:
         return _submit_to_ledger_owner(rid, sid, session, text, params, refusal)
     reason = getattr(refusal, "reason", None)
-    return _err(rid, 4090, str(refusal), {"reason": reason} if reason else None)
+    data = {"reason": reason} if reason else None
+    if reason == "SESSION_NOT_OWNED" and not internal_hosted_submit and params.get("display_kind") is None:
+        # [daveey] Another window's backend holds this chat only for a turn Hermes started itself: the
+        # Desktop takes it over and re-sends at once (its "Take over here" flow) instead of a card.
+        if (kind := _automation_holder_kind(session)) is not None:
+            data.update(auto_take_over=True, holder_turn_kind=kind)
+    return _err(rid, 4090, str(refusal), data)
 
 
 def _submit_to_ledger_owner(rid, sid, session, text, params, refusal) -> dict:

@@ -9,6 +9,8 @@ import logging
 
 import contextlib
 
+from agent.context_compressor_turns import TURN_STARTING_NOTICE_KINDS
+
 from .method_ctx import bind_module
 
 
@@ -134,6 +136,53 @@ def _durable_owner_refusal(session: dict):
         "(session.take_over), or wait for that turn to finish.\n"
         f"Details: session {owner['conversation_id']} opened by {surface}. "
         f"Writer: {holder}", SESSION_NOT_OWNED)
+
+
+#: Display kinds of turns Hermes starts on its own (no human typed them): the turn-starting notices
+#: (a Kanban/internal notice, a finished background process or delegation) and a paused turn
+#: continuing after a core update. Not ``loop_tick``: a /loop the user started is their own work. [daveey]
+AUTOMATED_TURN_KINDS = frozenset((TURN_STARTING_NOTICE_KINDS - {"loop_tick"}) | {"auto_continue"})
+
+# Content is read only as far as the legacy prefix sniff needs.
+_LATEST_USER_KIND_SQL = """SELECT display_kind, substr(content, 1, 200) FROM messages WHERE session_id=?
+    AND role='user' AND COALESCE(active, 1)=1 ORDER BY id DESC LIMIT 1"""
+
+
+def latest_user_turn_kind(conn, session_key: str) -> str | None:
+    """``display_kind`` of the newest live user row of ``session_key`` (None: a typed row, or no row).
+    An untyped continuation note (older rows, pause replays) is recognised by its prefix, as history does."""
+    row = conn.execute(_LATEST_USER_KIND_SQL, (session_key,)).fetchone()
+    if row is None:
+        return None
+    if row[0]:
+        return row[0]
+    # Imported functions are not rebound onto server.py (method_ctx.bind_module): import here.
+    from tui_gateway.session_history import _legacy_display_kind
+    return _legacy_display_kind("user", row[1] or "") if isinstance(row[1], str) else None
+
+
+def _automation_holder_kind(session: dict) -> str | None:
+    """The automated kind of the chat's newest turn when Hermes, not a person, started it; else None.
+
+    A chat refused SESSION_NOT_OWNED because another window's backend took it for a background wake
+    (Kanban notice, finished process, post-update continuation) has no person typing there: the newest
+    user row is that wake's. Desktop takes such a chat over on the user's typed send instead of showing
+    the card. A typed newest row (someone is chatting in the other window), an unreadable store or a
+    missing key keep the card. [daveey]"""
+    key = str(session.get("session_key") or "")
+    if not key:
+        return None
+    try:
+        with _session_db(session) as db:
+            read_ctx = getattr(db, "_read_ctx", None)
+            if read_ctx is None:
+                return None
+            with read_ctx() as conn:
+                kind = latest_user_turn_kind(conn, key)
+    except Exception:
+        logger.warning("Could not read the newest turn kind for %s", key, exc_info=True)
+        return None
+    return kind if kind in AUTOMATED_TURN_KINDS else None
 
 
 def _session_moved_refusal(session: dict):

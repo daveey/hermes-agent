@@ -126,6 +126,12 @@ export interface ErrorSurface {
   /** SESSION_NOT_OWNED only: where the chat is open, parsed from the backend's
    *  `Details: session … opened by <surface> on <host> <age> ago.` line. */
   owner?: SessionOwner
+  /** SESSION_NOT_OWNED only: the other backend holds the chat just for a turn Hermes started itself
+   *  (a Kanban notice, a finished process, a post-update continuation), so this window takes it over
+   *  and re-sends without waiting for a click. [daveey] */
+  autoTakeOver?: boolean
+  /** With `autoTakeOver`: when this window was refused (ms). Only a fresh card acts on its own. */
+  refusedAt?: number
   /** usage_window only: the plan's recommended models that still work past the
    *  limit (best first) and the credits option — the card's one-click buttons
    *  (agent/plan_limits.py). Absent on older backends. */

@@ -5,7 +5,7 @@ import { translateNow, type Translations } from '@/i18n'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { isReadFileErrorResult } from '@/lib/desktop-fs'
 import { type CommandsCatalogLike, filterDesktopCommandsCatalog } from '@/lib/desktop-slash-commands'
-import type { ErrorSurface } from '@/lib/error-surface'
+import { type ErrorSurface, sessionNotOwnedSurface } from '@/lib/error-surface'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import type { ComposerAttachment } from '@/store/composer'
 
@@ -339,6 +339,23 @@ export function refusalDroppedImages(error: unknown): boolean {
   )
 }
 
+/** SESSION_NOT_OWNED fields for a refusal the backend flagged `auto_take_over` (the holder is only
+ *  running a turn Hermes started itself): the card takes the chat over on its own. [daveey] */
+export function autoTakeOverFields(error: unknown): { autoTakeOver?: true; refusedAt?: number } {
+  const data = error instanceof JsonRpcGatewayError ? (error.data as { auto_take_over?: unknown } | undefined) : null
+
+  return data?.auto_take_over === true ? { autoTakeOver: true, refusedAt: Date.now() } : {}
+}
+
+/** The card surface submit stamps on a SESSION_NOT_OWNED refusal: the owner its text names, plus the
+ *  auto-take-over stamp when the backend flagged it. [daveey] */
+export function sessionNotOwnedErrorSurface(error: unknown, fallbackText: string): ErrorSurface {
+  return {
+    ...sessionNotOwnedSurface(error instanceof Error ? error.message : fallbackText),
+    ...autoTakeOverFields(error)
+  }
+}
+
 export function gatewayReason(error: unknown): unknown {
   return error instanceof JsonRpcGatewayError ? (error.data as { reason?: unknown } | undefined)?.reason : undefined
 }
@@ -349,7 +366,9 @@ export function gatewayReason(error: unknown): unknown {
 // nothing can continue (deterministic). Empty for any other error.
 export function ownershipErrorSurface(error: unknown): { errorSurface?: ErrorSurface } {
   if (isSessionNotOwnedError(error)) {
-    return { errorSurface: { layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false } }
+    return {
+      errorSurface: { layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false, ...autoTakeOverFields(error) }
+    }
   }
 
   if (gatewayReason(error) === 'session_read_only') {

@@ -729,7 +729,43 @@ const CompressConversationAction: FC<{ className: string; label: string }> = ({ 
 // active-session lease to this window (`session.take_over` — the old owner stops its turn and
 // acknowledges), refreshes the transcript from the store (the other window may have written turns),
 // then re-runs the refused prompt through `message().reload()` — the exact call behind Retry.
-const TakeOverAction: FC<{ className: string; label: string }> = ({ className, label }) => {
+// A flagged refusal (`surface.autoTakeOver`: the other backend only runs a turn Hermes started) takes
+// over without a click, once per fresh card: a card older than AUTO_TAKE_OVER_FRESH_MS (a reopened
+// transcript) or a chat this window auto-took within AUTO_TAKE_OVER_COOLDOWN_MS (the holder grabbed it
+// back) waits for the button, so two windows can never bounce a chat between them. [daveey]
+export const AUTO_TAKE_OVER_FRESH_MS = 30_000
+export const AUTO_TAKE_OVER_COOLDOWN_MS = 120_000
+const autoTakeOverAt = new Map<string, number>()
+
+export function shouldAutoTakeOver(surface: ErrorSurface | undefined, chatId: string | null, now: number): boolean {
+  if (!surface?.autoTakeOver || !chatId || surface.refusedAt === undefined) {
+    return false
+  }
+
+  if (now - surface.refusedAt > AUTO_TAKE_OVER_FRESH_MS) {
+    return false
+  }
+
+  const last = autoTakeOverAt.get(chatId)
+
+  if (last !== undefined && now - last < AUTO_TAKE_OVER_COOLDOWN_MS) {
+    return false
+  }
+
+  autoTakeOverAt.set(chatId, now)
+
+  return true
+}
+
+export function resetAutoTakeOverForTests() {
+  autoTakeOverAt.clear()
+}
+
+const TakeOverAction: FC<{ className: string; label: string; surface?: ErrorSurface }> = ({
+  className,
+  label,
+  surface
+}) => {
   const { t } = useI18n()
   const copy = t.assistant.thread
   const aui = useAui()
@@ -769,6 +805,14 @@ const TakeOverAction: FC<{ className: string; label: string }> = ({ className, l
       setPending(false)
     }
   }, [aui, copy.errorTakeOverFailed, copy.errorTakeOverUnconfirmed, sessionId, storedSessionId])
+
+  // shouldAutoTakeOver records the attempt per chat (the stored id survives a reconnect's new runtime
+  // id), so a re-render, remount or second card never fires it twice.
+  useEffect(() => {
+    if (sessionId && shouldAutoTakeOver(surface, storedSessionId || sessionId, Date.now())) {
+      void takeOver()
+    }
+  }, [sessionId, storedSessionId, surface, takeOver])
 
   return (
     <button className={className} disabled={pending} onClick={() => void takeOver()} type="button">
@@ -1187,7 +1231,9 @@ const ERROR_ACTION_RENDERERS: Record<ErrorActionId, (ctx: ErrorActionContext) =>
     return suggestion ? <SwitchToModelAction className={className} suggestion={suggestion} /> : null
   },
   use_credits: ({ className }) => <UseCreditsAction className={className} />,
-  take_over: ({ className, copy }) => <TakeOverAction className={className} label={copy.errorTakeOver} />,
+  take_over: ({ className, copy, surface }) => (
+    <TakeOverAction className={className} label={copy.errorTakeOver} surface={surface} />
+  ),
   open_billing: ({ className, copy, surface }) => (
     <OpenBillingAction className={className} label={copy.errorOpenBillingSettings} surface={surface} />
   ),

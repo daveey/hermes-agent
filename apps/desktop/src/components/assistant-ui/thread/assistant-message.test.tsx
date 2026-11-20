@@ -19,6 +19,7 @@ import { type SessionTileDelegate, setSessionTileDelegate } from '@/store/sessio
 
 import { stubThreadEnvironment } from '../test-utils'
 
+import { AUTO_TAKE_OVER_FRESH_MS, resetAutoTakeOverForTests } from './assistant-message'
 import { formatTimelineRange, formatTimelineTimestamp } from './timestamp'
 
 import { Thread } from '.'
@@ -460,6 +461,68 @@ describe('Take over here (SESSION_NOT_OWNED)', () => {
 
     await waitFor(() => expect($notifications.get().some(n => n.kind === 'error')).toBe(true))
     expect(onReload).not.toHaveBeenCalled()
+  })
+
+  // [daveey] A refusal the backend flagged auto_take_over (the other window only runs a turn Hermes
+  // started itself) takes over and re-sends without a click, once, and only while the card is fresh.
+  function flaggedRefusal(refusedAt: number): ThreadMessage {
+    const message = ownershipRefusalMessage()
+
+    return {
+      ...message,
+      metadata: {
+        ...message.metadata,
+        custom: {
+          errorSurface: {
+            layer: 'gateway',
+            code: 'SESSION_NOT_OWNED',
+            retryable: false,
+            autoTakeOver: true,
+            refusedAt
+          }
+        }
+      }
+    } as unknown as ThreadMessage
+  }
+
+  it('takes a flagged chat over and re-sends on its own, exactly once', async () => {
+    resetAutoTakeOverForTests()
+    $activeSessionId.set('runtime-1')
+    $selectedStoredSessionId.set('stored-auto-1')
+    const { resumeTile, takeOverSession } = installDelegate({ acknowledged: true })
+    const onReload = vi.fn(async () => {})
+    const { rerender } = render(<Harness assistant={flaggedRefusal(Date.now())} onReload={onReload} />)
+
+    await waitFor(() => expect(onReload).toHaveBeenCalledTimes(1))
+    expect(takeOverSession).toHaveBeenCalledWith('runtime-1')
+    expect(resumeTile).toHaveBeenCalledWith('stored-auto-1', { refreshTranscript: true })
+
+    // The re-sent prompt refused again (the holder grabbed it back): a new fresh card waits for the click.
+    rerender(<Harness assistant={flaggedRefusal(Date.now())} onReload={onReload} />)
+    await screen.findByRole('button', { name: en.assistant.thread.errorTakeOver })
+    expect(takeOverSession).toHaveBeenCalledTimes(1)
+    expect(onReload).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves a stale flagged card (a reopened chat) to the button', async () => {
+    resetAutoTakeOverForTests()
+    $activeSessionId.set('runtime-1')
+    $selectedStoredSessionId.set('stored-auto-2')
+    const { takeOverSession } = installDelegate({ acknowledged: true })
+    render(<Harness assistant={flaggedRefusal(Date.now() - AUTO_TAKE_OVER_FRESH_MS - 1)} />)
+
+    await screen.findByRole('button', { name: en.assistant.thread.errorTakeOver })
+    expect(takeOverSession).not.toHaveBeenCalled()
+  })
+
+  it('never takes over an unflagged card on its own', async () => {
+    resetAutoTakeOverForTests()
+    $activeSessionId.set('runtime-1')
+    const { takeOverSession } = installDelegate({ acknowledged: true })
+    render(<Harness assistant={ownershipRefusalMessage()} />)
+
+    await screen.findByRole('button', { name: en.assistant.thread.errorTakeOver })
+    expect(takeOverSession).not.toHaveBeenCalled()
   })
 
   it('is not offered for other failures', async () => {

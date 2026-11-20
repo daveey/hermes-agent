@@ -6,7 +6,6 @@ import { translateNow, type Translations } from '@/i18n'
 import { type ChatMessage, finalizeInterruptedMessages, textPart } from '@/lib/chat-messages'
 import { optimisticAttachmentRef } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
-import { sessionNotOwnedSurface } from '@/lib/error-surface'
 import { setMutableRef } from '@/lib/mutable-ref'
 import { credentialFailureMetadata } from '@/lib/provider-setup-errors'
 import {
@@ -83,6 +82,7 @@ import {
   ownershipErrorSurface,
   refusalDroppedImages,
   releaseSubmitInFlight,
+  sessionNotOwnedErrorSurface,
   SessionRecoveryAborted,
   type SubmitTextOptions,
   withSessionBusyRetry,
@@ -1532,7 +1532,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                 // Another surface owns the session: carry its parsed owner [daveey]
                 // onto the SESSION_NOT_OWNED card (Take over here names it).
                 ...(isSessionNotOwnedError(err)
-                  ? { errorSurface: sessionNotOwnedSurface(err instanceof Error ? err.message : message) }
+                  ? { errorSurface: sessionNotOwnedErrorSurface(err, message) }
                   : ownershipErrorSurface(err)),
                 branchGroupId: state.pendingBranchGroup ?? undefined,
                 completedAt: occurredAt,
