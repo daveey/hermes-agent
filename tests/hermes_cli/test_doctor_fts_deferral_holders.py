@@ -167,3 +167,39 @@ def test_doctor_lists_holders_with_their_whole_command_line(tmp_path):
     finally:
         holder.stdin.close()
         holder.wait(timeout=30)
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_holder_descriptions_never_show_secrets_from_argv(tmp_path):
+    """Doctor output is pasted into issues: an API key or URL credentials in a holder's argv are redacted,
+    whole or cut."""
+    from hermes_state_holders import describe_holder_pid
+
+    key = "sk-ant-api03-" + "A1b2C3d4" * 6
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('ready', flush=True); sys.stdin.read()",
+            "--base-url",
+            "http://alice:hunter2pw@10.0.0.1:8000/v1",
+            "--api-key",
+            key,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout.readline().strip() == "ready"
+        for desc in (
+            describe_holder_pid(proc.pid, limit=None),
+            describe_holder_pid(proc.pid),
+        ):
+            assert (
+                key[:16] not in desc and "hunter2pw" not in desc and "alice" not in desc
+            ), desc
+        assert "10.0.0.1:8000/v1" in describe_holder_pid(proc.pid, limit=None)
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=30)

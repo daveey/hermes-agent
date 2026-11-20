@@ -60,7 +60,8 @@ def _read_proc_argv(pid: int) -> Optional[list[str]]:
 def describe_holder_pid(pid: int, *, limit: Optional[int] = 80) -> str:
     """``PID 123 (hermes gateway run)`` for operator-facing holder lists; /proc argv first, psutil elsewhere.
     The command line is cut to *limit* characters for log and error lines; ``None`` keeps all of it
-    (``hermes doctor``, whose holder lists are read by a person deciding what to stop)."""
+    (``hermes doctor``, whose holder lists are read by a person deciding what to stop). Secrets in the
+    command line (``--api-key`` values, URL credentials) are always redacted."""
     argv = _read_proc_argv(pid)
     if argv is None and psutil is not None:
         try:
@@ -73,8 +74,14 @@ def describe_holder_pid(pid: int, *, limit: Optional[int] = 80) -> str:
         if at is not None and at + 1 < len(argv):
             # An interpreter's inline source (launcher wrappers) would fill the description; its arguments follow.
             argv = [*argv[:at + 1], "<inline code>", *argv[at + 2:]]
-    who = " ".join(" ".join([os.path.basename(argv[0]), *argv[1:]]).split())[:limit] if argv else "command line unavailable"
-    return f"PID {pid} ({who})"
+    if not argv:
+        return f"PID {pid} (command line unavailable)"
+    # Redacted before the cut: holder lists are pasted into issues, and a process's argv can carry
+    # `--api-key …` or credentials in a URL (an early secret used to leak its prefix through the cut too).
+    from agent.redact import redact_sensitive_text
+    who = redact_sensitive_text(" ".join(" ".join([os.path.basename(argv[0]), *argv[1:]]).split()),
+                                force=True, redact_url_credentials=True)
+    return f"PID {pid} ({who[:limit]})"
 
 
 def _looks_like_python_executable(program: str) -> bool:
