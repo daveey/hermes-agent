@@ -79,7 +79,10 @@ def _local(snap, uid, *, settlement=False):
                  and json.loads(op["fields"]) == {}, "unsupported_link_work")
     _require(len(snap["events"]) >= len(snap["ops"])
              and all(e.get("uid") for e in snap["events"])
-             and all(any(e["created_at"] == o["created_at"] // 1000 for e in snap["events"]) for o in snap["ops"]),
+             # The SQL trigger and Python event writer sample separate clocks;
+             # float truncation or crossing a second can place the event next second.
+             and all(any(o["created_at"] // 1000 <= e["created_at"] <= o["created_at"] // 1000 + 1
+                         for e in snap["events"]) for o in snap["ops"]),
              "missing_unlink_audit")
     if settlement:
         _require(not snap["tombstones"], "new_local_tombstone")

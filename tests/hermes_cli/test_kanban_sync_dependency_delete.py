@@ -96,6 +96,52 @@ def test_three_deletes_preview_apply_and_normal_resolver_preserve_bytes(case):
         live.execute("UPDATE kanban_sync_dependency_recoveries SET reason='changed'")
 
 
+@pytest.mark.parametrize("event_offset", [-1, 0, 1, 2])
+def test_real_unlink_producer_audit_second_boundary(case, monkeypatch, event_offset):
+    from types import SimpleNamespace
+    from hermes_cli import kanban_db_events as events
+    from hermes_cli import kanban_sync_dependency_delete as recovery
+    from hermes_cli.kanban_sync_rejections import resolve_rejections
+    live, hub, _, uid, parent, child = case
+    # SQLite's julianday float rounds the trigger clock just below the second;
+    # append_event observes the independently sampled Python wall clock later.
+    julian = live.execute("SELECT julianday('2026-11-20T12:00:01Z')").fetchone()[0]
+    op_ms = live.execute("SELECT CAST((? - 2440587.5) * 86400000 AS INTEGER)", (julian,)).fetchone()[0]
+    assert op_ms % 1000 == 999
+    live.create_function("julianday", 1, lambda _: julian)
+    monkeypatch.setattr(events, "time", SimpleNamespace(time=lambda: op_ms // 1000 + event_offset))
+    with kbc.write_txn(live):
+        live.execute("UPDATE kanban_sync_state SET applying=1")
+        live.execute("DELETE FROM task_events WHERE kind='unlinked'")
+        live.execute("DELETE FROM kanban_sync_outbox")
+        live.execute("DELETE FROM kanban_sync_tombstones")
+        live.execute("UPDATE kanban_sync_state SET applying=0")
+    assert kb.unlink_tasks(live, parent, child)
+    with kbc.write_txn(live):
+        # Simulate containment rejection and restoration of the live dependency.
+        live.execute("UPDATE kanban_sync_state SET applying=1")
+        live.execute("INSERT INTO task_links VALUES (?,?)", (parent, child))
+        live.execute("UPDATE kanban_sync_state SET applying=0")
+        live.execute("DELETE FROM kanban_sync_outbox WHERE table_name='task_events'")
+        live.execute("UPDATE kanban_sync_outbox SET state='rejected',last_error=?", (ERROR,))
+    before = {t: rows(live, t) for t in ("tasks", "task_links", "task_events", "kanban_sync_outbox")}
+    assert before["kanban_sync_outbox"][0]["created_at"] == op_ms
+    p = recovery.plan(live, hub, BOARD, uid, "retain producer dependency")
+    if event_offset not in (0, 1):
+        assert p.get("reason") == "missing_unlink_audit", p
+        assert all(rows(live, t) == v for t, v in before.items())
+        return
+    assert p["eligible"], p
+    assert recovery.apply(live, hub, BOARD, uid, p["token"], "retain producer dependency")["action"] == "applied"
+    receipt = rows(live, recovery.TABLE)[0]
+    saved = json.loads(receipt["snapshot_json"])
+    assert saved["ops"] == before["kanban_sync_outbox"]
+    assert saved["events"] == [e for e in before["task_events"] if e["kind"] == "unlinked"]
+    assert all(r["action"] == "retired" for r in resolve_rejections(live, hub, BOARD))
+    for table in ("tasks", "task_links", "task_events"):
+        assert rows(live, table) == before[table]
+
+
 def test_normal_round_settles_receipt_while_holding_sync_lock(case, monkeypatch):
     from hermes_cli import kanban_sync_dependency_delete as recovery
     live, hub, _svc, uid, parent, child = case
@@ -174,7 +220,7 @@ def test_local_vetoes_preserve_every_input(case, defect, reason):
             "tombstone": ("UPDATE kanban_sync_tombstones SET deleted_at=9999", ()),
             "missing_audit": ("DELETE FROM task_events WHERE uid='historical-1'", ()),
             "wrong_audit": ("UPDATE task_events SET payload='{}' WHERE uid='historical-1'", ()),
-            "audit_clock": ("UPDATE task_events SET created_at=99 WHERE uid='historical-1'", ()),
+            "audit_clock": ("UPDATE task_events SET created_at=99 WHERE kind='unlinked'", ()),
             "audit_uid": ("UPDATE task_events SET uid=NULL WHERE uid='historical-1'", ()),
             "local_hold": ("UPDATE tasks SET containment_episode='current-episode' WHERE id=?", (parent,)),
         }
