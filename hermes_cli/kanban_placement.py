@@ -300,7 +300,8 @@ def label_machines(label: str | Iterable[str], machines: Optional[dict] = None) 
 
 
 def _claiming_for(name: str, entry: dict, wanted: set) -> bool:
-    """A non-claiming machine leaves a portable label set. A pin to that machine stays."""
+    """A non-claiming machine leaves a portable label set. A pin stays only when ``machine:<name>`` is in
+    ``wanted``. A bare-name pickup passes an empty set, so that carve-out does not keep it."""
     from hermes_cli.kanban_move import _not_claiming
     if not _not_claiming(entry):
         return True

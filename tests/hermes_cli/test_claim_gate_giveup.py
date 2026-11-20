@@ -88,6 +88,16 @@ def test_label_machines_keeps_a_pinned_non_claiming_worker():
     assert label_machines({"pool:worker", "machine:worker-1"}, machines) == ["worker-1"]
 
 
+def test_bare_name_pickup_drops_a_non_claiming_worker():
+    """A bare-name pickup passes an empty wanted set, so the machine: pin does not keep it."""
+    seen = int(time.time() * 1000)
+    entry = {"state": "active", "labels": ["pool:worker", "machine:worker-1"], "pickup": "all",
+             "last_seen": seen, "metrics": {"claiming": 0}}
+    assert label_machines((), {"worker-1": entry}) == []
+    entry["metrics"] = {"claiming": 1}
+    assert label_machines((), {"worker-1": entry}) == ["worker-1"]
+
+
 def test_sync_watcher_give_up_is_wired():
     from gateway.run_startup import GatewayStartupMixin
 
