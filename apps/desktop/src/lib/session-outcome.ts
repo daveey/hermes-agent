@@ -17,7 +17,15 @@ export const outcomeStripe = (outcome: null | SessionOutcome | undefined): null 
       return 'done'
 
     case 'decision':
-      return 'stuck'
+      // A recorded choice settles the human ask, not its delivery. Keep old/unknown
+      // item shapes red, but explicit settled-only lists are agent-side waits.
+      return outcome.items?.length &&
+        outcome.items.every(
+          item =>
+            Boolean(item.resolution) || ['resolved', 'superseded', 'cancelled', 'withdrawn'].includes(item.state ?? '')
+        )
+        ? 'waiting'
+        : 'stuck'
 
     case 'muted':
       return 'blocked'

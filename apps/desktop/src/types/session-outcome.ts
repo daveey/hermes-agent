@@ -14,6 +14,8 @@ export interface SessionOutcomeItem {
   choices?: { label: string; value: string }[]
   card_id?: string
   state?: string
+  /** A recorded choice is settled even while its delivery is unconfirmed. */
+  resolution?: { operationId?: string }
 }
 
 /** [daveey] One thing a `waiting` / `running` outcome waits on. */

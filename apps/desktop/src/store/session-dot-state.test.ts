@@ -1172,6 +1172,30 @@ describe('stuckReasons and the red report', () => {
     expect(stuckReasons({ ...row, review_wait: 'parked', outcome: { kind: 'done' } } as never, 'idle')).toEqual([])
   })
 
+  it('does not report outcome:decision for settled requests awaiting agent delivery', () => {
+    const settled = {
+      ...row,
+      outcome: { kind: 'decision', items: [{ id: 'question', question: 'Choose?', state: 'resolved' }] }
+    }
+    expect(stuckReasons(settled, 'idle')).toEqual([])
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, settled.outcome)).toBe('waiting')
+    const recorded = {
+      ...row,
+      outcome: {
+        kind: 'decision',
+        items: [{ id: 'question', question: 'Choose?', state: 'open', resolution: { operationId: 'pending' } }]
+      }
+    }
+    expect(stuckReasons(recorded, 'idle')).toEqual([])
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, recorded.outcome)).toBe('waiting')
+    const open = {
+      ...row,
+      outcome: { kind: 'decision', items: [{ id: 'question', question: 'Choose?', state: 'open' }] }
+    }
+    expect(stuckReasons(open, 'idle')).toEqual(['outcome:decision'])
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, open.outcome)).toBe('stuck')
+  })
+
   it('reports a red first sighting, each new red cause, and the way out; logs the reasons', () => {
     publishSessionState('rt-dead', { ...createClientSessionState('red-chat'), needsInput: true })
 
