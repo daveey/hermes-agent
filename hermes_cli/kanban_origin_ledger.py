@@ -514,6 +514,21 @@ class _Publications:
         return False
 
 
+def _reused_owner(elsewhere: _Publications, owner: dict, task: dict, *, absent: bool, scope_live: bool) -> bool | None:
+    """``_removed_owner`` for an owner whose gateway NAME is still listed but no longer publishes the card (a scaled-in
+    worker's name reused by a new instance, 2026-11-20: a done, re-homed card stayed unknown for good). [daveey]
+
+    None when another gateway publishes the same card (board, id, created_at): re-homed, binding not projected. True
+    when no one does, the owner's exact scope heartbeat is fresh and readable (``scope_live``) and the card is absent
+    from it, and the stored observation is closed (done or archived): that is its final word. False otherwise: an
+    open stored observation, an offline or unreadable owner, or a record the owner still publishes is unchanged."""
+    if not absent:
+        return False
+    if elsewhere.has_other(owner, task):
+        return None
+    return bool(scope_live and task.get('status') in ('done', 'archived'))
+
+
 def _lock_busy(exc: sqlite3.Error) -> bool:
     code = getattr(exc, "sqlite_errorcode", None)
     if code is not None:
@@ -589,6 +604,7 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                 # even when the replica version has not advanced.
                 released = bool(released and _owner_evidence(task).get('verified') is True)
                 current = settled = False
+                absent = scope_live = False
                 if fresh and source is not None:
                     row = source.execute(
                         "SELECT version,data FROM replica WHERE gw=? AND coll='tasks' AND key=?",
@@ -617,9 +633,14 @@ def project(path: Path, *, replica: Path | None, gateway: str, profile: str,
                     live = (_recent(heartbeat, now, window)
                             or _recent(_owner_evidence(task).get('observed_at'), now))
                     current = current and readable and live
+                    absent = row is None
+                    scope_live = readable and _recent(heartbeat, now, window)
                 # [daveey] An owner the Board removed (``_removed_owner``): a re-homed card's binding is dropped, and
                 # otherwise its stored observation is its last word (``final``), as a current record would be.
                 final = _removed_owner(elsewhere, listed, owner, task, (gateway, profile))
+                if final is False and listed and owner['gateway'] in listed \
+                        and (owner['gateway'], owner['profile']) != (gateway, profile):
+                    final = _reused_owner(elsewhere, owner, task, absent=absent, scope_live=scope_live)
                 if final is None:
                     continue
                 if (owner['gateway'], owner['profile']) == (gateway, profile):
