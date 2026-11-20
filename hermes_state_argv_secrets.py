@@ -14,9 +14,10 @@ import re
 from collections import Counter
 
 MASK = "***"
-# A flag whose NAME says its value is a secret: --api-key, --webhook-secret, --auth, --db-password, -token ...
+# The secret word ends the name: --api-key, --webhook-secret, --aws-secret-access-key, --db-password, --auth-token;
+# not --api-key-timeout, --token-env, --max-tokens or --password-file, whose values are settings or paths.
 _SECRET_FLAG = re.compile(
-    r"^-{1,2}[\w.-]*(?:key|token|secret|passw(?:or)?d|passwd|pwd|auth|credential|cookie|bearer)[\w.-]*$",
+    r"^-{1,2}[\w.-]*?(?:key|token|secret|passw(?:or)?d|passwd|pwd|auth|credentials?|cookie|bearer)$",
     re.IGNORECASE,
 )
 # Flags that LOOK secret-named but carry public, identifying values.
