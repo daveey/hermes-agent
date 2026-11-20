@@ -154,7 +154,8 @@ class OnlineRecoveryRefused(Exception):
 # past the old 100,000 cap, so every later plan read as an unfinished walk and was refused for hours. The cap must
 # stay far below SQLITE_MAX_LENGTH (1e9 bytes): SQLite builds the b-tree walk's messages in one string, and when that
 # string would overflow it is dropped and the check returns NO rows (no "ok" either), which plan_from_check refuses.
-# 5,000,000 lines of at most ~90 bytes is ~450 MB; the walk's text is one row held by SQLite while it is judged.
+# 5,000,000 lines of at most ~131 bytes is ~655 MB; the walk's text is one row, held by SQLite and decoded once more
+# by Python while it is judged (peak about twice the text).
 _CHECK_LIMIT = 5_000_000
 
 
@@ -171,7 +172,7 @@ def plan_from_check(lines, master, *, limit: Optional[int] = None) -> dict:
     *lines* may be any iterable; each line is judged as it arrives and only counted (no list of problems is kept).
     *limit* is the cap the check ran with (default :data:`_CHECK_LIMIT`). integrity_check(N) returns exactly N lines
     when it stops early, so N - 1 problems already count as a stopped walk (conservative by one line). A check that
-    returned no line at all did not complete (its output overflowed SQLITE_MAX_LENGTH) and is refused."""
+    returned no line at all did not complete (e.g. its output overflowed SQLITE_MAX_LENGTH) and is refused."""
     from hermes_state_repair import _INTEGRITY_TREE_RE, integrity_line_is_structural
 
     limit = _CHECK_LIMIT if limit is None else limit
@@ -197,7 +198,7 @@ def plan_from_check(lines, master, *, limit: Optional[int] = None) -> dict:
             raise OnlineRecoveryRefused(f"integrity_check names a tree outside the search indexes: {line}")
         damaged.add(family)
     if not seen:
-        raise OnlineRecoveryRefused("integrity_check returned nothing (its output overflowed SQLITE_MAX_LENGTH)")
+        raise OnlineRecoveryRefused("integrity_check returned nothing: it did not complete (e.g. output over SQLITE_MAX_LENGTH)")
     return {"unlink": sorted(damaged), "trash": [f for f in FAMILIES if f not in damaged], "problems": problems,
             "roots": {name: int(rp) for rp, _type, name in master if family_of(name)},
             "trash_roots": {name: int(rp) for rp, _type, name in master if name.startswith(TRASH_PREFIX)}}

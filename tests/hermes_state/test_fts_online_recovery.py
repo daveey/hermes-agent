@@ -465,16 +465,12 @@ def test_plan_judges_a_check_past_the_old_cap():
     as an unfinished walk: every plan was refused for hours. Lines are judged as they arrive, and only counted."""
     from hermes_state_fts_online import plan_from_check
 
-    consumed = 0
-
     def stream():
-        nonlocal consumed
         for i in range(250_000):
-            consumed += 1
             yield f"Tree 80 page {i}: btreeInitPage() returns error code 11" if i % 2 else f"Page {i}: never used"
 
     plan = plan_from_check(stream(), _MASTER)
-    assert consumed == 250_000 and plan["problems"] == 250_000
+    assert plan["problems"] == 250_000
     assert plan["unlink"] == ["messages_fts_trigram"] and plan["trash"] == ["messages_fts"]
 
 
@@ -518,7 +514,7 @@ def test_the_check_cap_stays_far_below_sqlite_max_length():
     """Above SQLITE_MAX_LENGTH (1e9 bytes) of walk text integrity_check returns nothing; the cap must stop first."""
     from hermes_state_fts_online import _CHECK_LIMIT
 
-    assert _CHECK_LIMIT * 120 < 1_000_000_000
+    assert _CHECK_LIMIT * 140 < 1_000_000_000  # the longest walk message is about 131 bytes
 
 
 def test_plan_online_recovery_judges_the_check_lazily_with_its_cap(tmp_path, monkeypatch):
@@ -531,7 +527,7 @@ def test_plan_online_recovery_judges_the_check_lazily_with_its_cap(tmp_path, mon
         conn.execute("CREATE TABLE t (x)")
     seen = {}
 
-    def fake(lines, master, *, limit=0):
+    def fake(lines, master, *, limit=None):
         seen["lazy"], seen["limit"], seen["lines"] = inspect.isgenerator(lines), limit, list(lines)
         return {"unlink": [], "trash": list(hermes_state_fts_online.FAMILIES), "problems": 0}
 
