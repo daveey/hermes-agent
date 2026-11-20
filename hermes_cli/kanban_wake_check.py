@@ -894,9 +894,12 @@ def apply_result(conn: sqlite3.Connection, task_id: str, cmd: str, rc: Any, out:
             episode.reset(conn, task_id)
             if rc != 0:
                 kb._append_event(conn, task_id, "wake_episode_reset")
-        if rc == 0:
+        from hermes_cli import kanban_external_watch as kew  # [daveey] external-run card record + HERMES_WATCH
+        ext_result = kew.note_probe_result(conn, task_id, cmd, rc, out, float(now), state["every"])
+        if rc == 0 or (ext_result and ext_result.get("outcome") in ("succeeded", "failed", "cancelled")):
             return _wake(conn, task_id, CONDITION_MET_EVENT, {
-                "wake_check": cmd, "output": tail, **({"diagnostics": diagnostics} if diagnostics else {})})
+                "wake_check": cmd, "output": tail, **({"diagnostics": diagnostics} if diagnostics else {}),
+                **({"external_result": ext_result} if ext_result else {})})
         if rc == 1 and not output_error(out) and answered:
             from hermes_cli.kanban_comment_origin import WAKE_PROBE_STALE_EVENT, stale_note
             note = stale_note(answered, cmd)

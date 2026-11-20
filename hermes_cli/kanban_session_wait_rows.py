@@ -30,7 +30,13 @@ def _local_wait_info(conn: sqlite3.Connection, task_ids: Iterable[str], now: flo
     """[daveey] ``{task_id: wait info}`` (``kanban_wait_info.describe``) for the parked cards among ``task_ids``: what
     each waits on, since when, and whether only an agent can end it. One query for the cards, one for their newest
     park events. Missing columns/tables degrade to status-only info."""
-    return _describe_waits(*_local_wait_rows(conn, task_ids), now=now)
+    return _external_overlay(conn, _describe_waits(*_local_wait_rows(conn, task_ids), now=now), now)
+
+
+def _external_overlay(conn, info, now):
+    from hermes_cli import kanban_external_activity as kea
+    kea.overlay_waits(conn, info, now)
+    return info
 
 
 def _local_wait_rows(conn: sqlite3.Connection, task_ids: Iterable[str]) -> tuple[dict[str, tuple], dict[str, tuple]]:

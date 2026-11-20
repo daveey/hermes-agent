@@ -45,7 +45,7 @@ from hermes_cli.kanban_session_activity_attention import run_checks as _run_done
 from hermes_cli.kanban_session_activity_card_details import _add_card_details
 from hermes_cli.kanban_watch import not_watch_sql as _not_watch
 from hermes_cli.kanban_links_refresh import ScopeRefresher
-from hermes_cli import kanban_links_narrow as _links_narrow
+from hermes_cli import kanban_links_narrow as _links_narrow, kanban_external_activity as _external_activity
 from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows
 from hermes_cli.kanban_open_asks import card_is_open_human_ask, stamp_needs_you
 import contextlib
@@ -1955,7 +1955,7 @@ def annotate_kanban_activity(rows: list[dict[str, Any]], *, display: bool = Fals
         from hermes_cli.kanban_execution_observations import count_snapshot
         count_snapshot(row, [key for sid in ids for key in remote_keys.get(sid, ())],
                        evidence={key: value for sid in ids for key, value in execution.get(sid, {}).items()})
-    return rows
+    return _external_activity.stamp_boards(rows, _board_db_paths, _open_ro, _parked_pairs, _identity.row_ids)
 
 
 def _reset_cache_for_tests(keep_remote: bool = False) -> None:

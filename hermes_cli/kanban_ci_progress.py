@@ -670,10 +670,58 @@ def _apply_per_pr(conn: sqlite3.Connection, task_id: str, ref: str, p: Progress)
     return woke
 
 
+def _wall_now() -> float:
+    """Wall clock of a sweep; the one seam tests move (``monotonic`` only spaces the reads)."""
+    return time.time()
+
+
+def _record_watch(conn: sqlite3.Connection, task_id: str, watched, wall: float) -> Optional[str]:
+    """[daveey] Write the poll as the card's external-watch record (and wake / assert / clear as it says). A failure
+    to record never fails the sweep. Returns the wake event kind or None."""
+    from hermes_cli import kanban_external_watch as kew
+    from hermes_cli.kanban_external_state import DEFAULT_CI_EVERY, clamp_every
+    try:
+        ctx = kew.park_context(conn, task_id) or {"payload": {}}
+        declared = ctx["payload"].get("watch") if isinstance(ctx["payload"].get("watch"), dict) else {}
+        return kew.apply_poll(conn, task_id, watched.poll, now=wall, adapter=watched.adapter, scope=watched.scope,
+                              every=clamp_every(declared.get("every"), DEFAULT_CI_EVERY),
+                              service_name=watched.service_name)
+    except (sqlite3.Error, OSError, ValueError, KeyError, TypeError):
+        logger.warning("kanban external watch: could not record the poll of %s", task_id, exc_info=True)
+        return None
+
+
+def _due_wall(conn: sqlite3.Connection, task_id: str, wall: float) -> bool:
+    """False while a 429's ``retry_after`` has not elapsed since the card's last record: the sweep's coarse
+    ``RECHECK_SECONDS`` spacing alone would read a rate-limited run too soon. Otherwise the interval is
+    ``_declared_every``."""
+    from hermes_cli import kanban_external_watch as kew
+    try:
+        ctx = kew.park_context(conn, task_id)
+        rec = kew.latest_record(conn, task_id, ctx["event_id"]) if ctx else None
+    except sqlite3.Error:
+        return True
+    return rec is None or wall >= float(rec.get("observed_at") or 0) + float(rec.get("retry_after") or 0)
+
+
+def _declared_every(conn: sqlite3.Connection, task_id: str) -> int:
+    """Seconds between reads of this card: its park's declared ``watch.every`` (min 120), else ``RECHECK_SECONDS``."""
+    from hermes_cli import kanban_external_watch as kew
+    from hermes_cli.kanban_external_state import clamp_every
+    try:
+        ctx = kew.park_context(conn, task_id)
+    except sqlite3.Error:
+        return RECHECK_SECONDS
+    watch = ((ctx or {}).get("payload") or {}).get("watch")
+    if isinstance(watch, dict) and watch.get("every") is not None:
+        return clamp_every(watch["every"])
+    return RECHECK_SECONDS
+
+
 def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
-          fetch_runners: Optional[FetchRunners] = None) -> list[str]:
+          fetch_runners: Optional[FetchRunners] = None, fetch_run: Optional[Callable] = None) -> list[str]:
     """Re-read CI-waiting cards' runs and wake the cards whose run is not starting: each card at most once per
-    ``RECHECK_SECONDS``, at most ``MAX_CARDS_PER_SWEEP`` per sweep (least recently checked first), and no ``gh``
+    ``RECHECK_SECONDS`` (its declared ``watch.every``, and never before its record's ``next_due_at``), at most ``MAX_CARDS_PER_SWEEP`` per sweep (least recently checked first), and no ``gh``
     call started after ``SWEEP_BUDGET_SECONDS`` (a run cut off before its runner list goes first next sweep).
     Network: run it off the dispatcher thread (``submit_sweep``). Never raises."""
     from hermes_cli import kanban_db_connect as kbc
@@ -687,19 +735,24 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
         waits = _ci_waits(conn)
         live = {(db, task_id) for task_id, _ref, _hint in waits}
         now = time.monotonic()
+        wall = _wall_now()
         with _LOCK:
             for key in [k for k in _LAST_CHECK if k[0] == db and k not in live]:
                 del _LAST_CHECK[key]  # re-parked on something else, woken or gone
-            due = sorted((_LAST_CHECK.get((db, task_id), float("-inf")), task_id, ref, hint)
-                         for task_id, ref, hint in waits
-                         if now - _LAST_CHECK.get((db, task_id), float("-inf")) >= RECHECK_SECONDS)
+            last_at = {task_id: _LAST_CHECK.get((db, task_id), float("-inf")) for task_id, _r, _h in waits}
+        due = sorted((last_at[task_id], task_id, ref, hint) for task_id, ref, hint in waits
+                     if now - last_at[task_id] >= _declared_every(conn, task_id) and _due_wall(conn, task_id, wall))
         for checked, (_last, task_id, ref, hint) in enumerate(due):
             if checked >= MAX_CARDS_PER_SWEEP or time.monotonic() >= deadline:
                 break  # the rest are the least recently checked ones next sweep
             with _LOCK:
                 _LAST_CHECK[(db, task_id)] = time.monotonic()
-            p = progress(ref, hint=hint, parked_at=_parked_at(conn, task_id), fetch=fetch,
-                         fetch_runners=fetch_runners, deadline=deadline)
+            from hermes_cli.kanban_external_adapters import github as external_github
+            watched = external_github.poll(ref, hint, parked_at=_parked_at(conn, task_id), now=wall, fetch=fetch,
+                                           fetch_runners=fetch_runners, fetch_run=fetch_run, deadline=deadline)
+            p = watched.progress if watched is not None else progress(
+                ref, hint=hint, parked_at=_parked_at(conn, task_id), fetch=fetch, fetch_runners=fetch_runners,
+                deadline=deadline)
             if p.deferred:
                 with _LOCK:
                     _LAST_CHECK.pop((db, task_id), None)  # least recently checked: first next sweep
@@ -709,6 +762,9 @@ def sweep(conn: sqlite3.Connection, *, fetch: Optional[Fetch] = None,
             elif p.state == "unknown" and not p.settling:
                 logger.warning("ci run progress for %s (%s) unreadable: %s", task_id, ref, p.detail)
             if p.state == NOT_STARTING and apply(conn, task_id, ref, p):
+                woken.append(task_id)
+                continue
+            if watched is not None and watched.poll is not None and _record_watch(conn, task_id, watched, wall):
                 woken.append(task_id)
     except Exception:
         logger.warning("kanban ci run progress sweep failed", exc_info=True)
