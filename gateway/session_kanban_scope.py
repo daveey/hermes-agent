@@ -142,6 +142,10 @@ def placing_spawn(spawn, policy):
         target = resolve_run_scope(policy)  # validated before anything is spawned or consumed
         from hermes_cli.worker_compute_capacity import managed_target, lower_priority
         compute = managed_target(policy, target)
+        from gateway.session_kanban_source_env import source_worker_env
+        env = source_worker_env(policy, kwargs.get('env'))
+        if env is not kwargs.get('env'):
+            kwargs['env'] = env
         rendezvous = attach_capsule_transport(policy)
         try:
             process = observing_spawn(spawn, rendezvous)(*args, **kwargs)

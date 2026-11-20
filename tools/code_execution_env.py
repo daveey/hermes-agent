@@ -40,6 +40,8 @@ def is_secret_env_name(name: str) -> bool:
 # while still inheriting HERMES_HOME.
 _HERMES_CHILD_ALLOWED = frozenset({
     "HERMES_HOME", "HERMES_PROFILE", "HERMES_CONFIG", "HERMES_ENV", "HERMES_DELEGATED_CHILD_CONTEXT",
+    # Non-secret source hints from the current Kanban worker; no board/claim mutation authority.
+    "HERMES_KANBAN_SOURCE_PATH", "HERMES_KANBAN_SOURCE_COMMIT", "HERMES_KANBAN_SOURCE_BRANCH",
 })
 
 # Windows-only: without these the CRT itself fails — socket.socket() raises
