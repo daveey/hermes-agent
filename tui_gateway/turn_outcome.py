@@ -39,9 +39,8 @@ def concluding_turn_identity(agent=None, marker: Optional[dict] = None) -> froze
     try:
         from hermes_state_outcome import turn_identity
 
-        # ``_last`` is kept after release; ``_active`` is the holder if refresh runs before the attr is copied.
-        holder = (getattr(agent, "_last_session_turn_lease_holder", None)
-                  or getattr(agent, "_active_session_turn_lease_holder", None))
+        # ``_last`` is assigned at admission and kept after release.
+        holder = getattr(agent, "_last_session_turn_lease_holder", None)
         return turn_identity(marker=marker if isinstance(marker, dict) else None,
                              lease_holder=holder if isinstance(holder, str) else None)
     except Exception:  # health: allow BLE001 -- best-effort; nothing named discounts nothing
@@ -77,6 +76,13 @@ def refresh_closed_session_outcome(session: dict) -> None:
     session after a later complete turn; without this, stored ``unresolved{turn_failed}`` from
     the earlier failed_turn row survived until a manual ``hermes sessions outcome --refresh``.
     """
+    # A held continuation marker belongs to pending recovery, not a completed reply.
+    # Its writer is still this live backend after reap; an ordinary refresh would
+    # overwrite the turn-end result with ``running``. Preserve that stored result.
+    if any(session.get(key) for key in (
+        "_refused_turn_marker_key", "_update_pause_marker_key", "_paused_marker_carried",
+    )):
+        return
     sid = turn_sid(session, session.get("agent"))
     if not sid:
         return

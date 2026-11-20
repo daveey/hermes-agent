@@ -128,11 +128,11 @@ def test_a_later_good_reply_clears_stored_turn_failed_without_manual_refresh(tur
     assert stored["kind"] == "done", stored
 
 
-def test_closed_session_refresh_clears_stored_turn_failed_after_a_later_good_reply(monkeypatch, db):
+@pytest.mark.parametrize("end_reason", ["ws_orphan_reap", "ws_disconnect", "idle_timeout", "lru_evict"])
+def test_closed_session_refresh_clears_stored_turn_failed_after_a_later_good_reply(monkeypatch, db, end_reason):
     """Hub 3ea0c6: later complete turn, then ws_orphan_reap, stored still turn_failed until
     ``hermes sessions outcome --refresh``. In-memory reap must refresh without that CLI."""
     from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE
-    from tui_gateway.turn_outcome import concluding_turn_identity, refresh_closed_session_outcome
 
     monkeypatch.setattr(server, "_get_db", lambda: db)
     monkeypatch.setattr(so, "_live_work", lambda db, sid, ids: ([], [], False))
@@ -145,12 +145,67 @@ def test_closed_session_refresh_clears_stored_turn_failed_after_a_later_good_rep
     db.append_message("reaped-retry", role="assistant", content=SUMMARY)
     assert so.get_outcome("reaped-retry", db=db)["reason"] == "turn_failed"
 
-    only_active = type("A", (), {"_active_session_turn_lease_holder": "lease-1"})()
-    assert "lease:lease-1" in concluding_turn_identity(only_active)
-
-    refresh_closed_session_outcome({"session_key": "reaped-retry"})
+    monkeypatch.setattr(server, "_teardown_session", lambda *a, **k: None)
+    monkeypatch.setattr("tui_gateway.detached_turn_cleanup.cancel", lambda s: None)
+    monkeypatch.setattr("tui_gateway.event_replay.forget_session", lambda s: None)
+    session = {"session_key": "reaped-retry", "history_lock": threading.Lock(), "_sid": "ui-reap"}
+    assert server._teardown_popped_session(session, end_reason=end_reason) is True
     stored = so.get_outcome("reaped-retry", db=db)
     assert stored is not None and stored["kind"] == "done", stored
+
+
+@pytest.mark.parametrize("held_key", [
+    "_refused_turn_marker_key", "_update_pause_marker_key", "_paused_marker_carried",
+])
+def test_reap_preserves_outcome_with_held_continuation_marker(monkeypatch, tmp_path, db, held_key):
+    from tui_gateway.turn_marker import record_turn_start
+
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    monkeypatch.setattr(so, "_live_work", lambda db, sid, ids: ([], [], False))
+    monkeypatch.setattr(server, "_teardown_session", lambda *a, **k: None)
+    monkeypatch.setattr("tui_gateway.detached_turn_cleanup.cancel", lambda s: None)
+    monkeypatch.setattr("tui_gateway.event_replay.forget_session", lambda s: None)
+    db.create_session("held-retry", source="desktop")
+    db.append_message("held-retry", role="user", content="archive receipts")
+    before = so.refresh_outcome("held-retry", "turn_end", db=db)
+    assert (before["kind"], before["reason"]) == ("unresolved", "interrupted")
+    record_turn_start(tmp_path, "held-retry", "archive receipts")
+    session = {"session_key": "held-retry", "history_lock": threading.Lock(),
+               "_sid": "ui-held", held_key: "held-retry"}
+    assert server._teardown_popped_session(session, end_reason="ws_orphan_reap") is True
+    assert so.get_outcome("held-retry", db=db) == before
+
+
+def test_refused_turn_then_reap_does_not_store_running(turn_env, tmp_path, db):
+    from . import test_refused_turn_retry as retry
+    from tui_gateway.turn_marker import read_turn_marker
+
+    timers = retry._Timers()
+    turn_env.setattr(server.threading, "Timer", timers)
+    turn_env.setattr(server, "_REFUSED_RETRY_DELAYS_S", (45.0,))
+    turn_env.setattr(server, "_active_goal_manager", lambda s: None)
+    turn_env.setattr(server, "_hermes_home", tmp_path)
+    turn_env.setattr(so, "_live_work", lambda db, sid, ids: ([], [], False))
+    turn_env.setattr(server, "_teardown_session", lambda *a, **k: None)
+    turn_env.setattr("tui_gateway.detached_turn_cleanup.cancel", lambda s: None)
+    turn_env.setattr("tui_gateway.event_replay.forget_session", lambda s: None)
+    db.create_session("row-refused", source="desktop")
+    db.append_message("row-refused", role="user", content="archive receipts")
+    agent = _Agent("row-refused", db, SUMMARY)
+    turn_env.setattr(agent, "run_conversation", retry._refused)
+    session = server._sessions["ui-retry-refused"] = _session(agent)
+    server._run_prompt_submit("rid", "ui-retry-refused", session, "archive receipts")
+    before = so.get_outcome("row-refused", db=db)
+    assert (before["kind"], before["reason"]) == ("unresolved", "interrupted")
+    assert session.get("_refused_turn_marker_key")
+    assert read_turn_marker(tmp_path, "row-refused") is not None
+    assert timers and timers[-1][0] == 45.0
+    popped = server._pop_session_by_id("ui-retry-refused")
+    assert server._teardown_popped_session(popped, end_reason="ws_orphan_reap") is True
+    assert so.get_outcome("row-refused", db=db) == before
+    timers[-1][1]()
+    assert so.get_outcome("row-refused", db=db) == before
 
 
 def test_ws_orphan_teardown_refreshes_closed_session_outcome(monkeypatch):
