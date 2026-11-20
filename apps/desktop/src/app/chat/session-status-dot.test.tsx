@@ -420,6 +420,33 @@ describe('SessionStatusDot external label', () => {
     }
   })
 
+  it('paints running-external light blue and down red (computed colour), never the hollow grey background dot', () => {
+    const bg = (el: Element | null) => getComputedStyle(el as Element).backgroundColor
+
+    const ext = dot({
+      id: 'ext-paint',
+      kanban_active: 1,
+      kanban_external: 1,
+      kanban_observed_at: Date.now() / 1000,
+      kanban_parked: 1,
+      message_count: 4
+    })
+
+    expect(bg(ext.querySelector('[data-background-label="external"]'))).toBe('rgb(56, 189, 248)')
+    cleanup()
+
+    const down = dot({
+      id: 'ext-down-paint',
+      kanban_active: 1,
+      kanban_external_down: 1,
+      kanban_observed_at: Date.now() / 1000,
+      kanban_parked: 1,
+      message_count: 4
+    })
+
+    expect(bg(down.querySelector('[data-background-label="external_down"]'))).toBe('rgb(239, 68, 68)')
+  })
+
   it('missing cards keep the generic external label, not a service claim', () => {
     const c = dot({
       id: 'ext-generic',

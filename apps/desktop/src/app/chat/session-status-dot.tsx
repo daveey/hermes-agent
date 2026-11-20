@@ -1,4 +1,5 @@
 import { useStore } from '@nanostores/react'
+import type { CSSProperties } from 'react'
 
 import { type Translations, useI18n } from '@/i18n'
 import { formatSessionExternalHover } from '@/lib/external-run'
@@ -19,11 +20,16 @@ type DotVariant = {
   ariaLabel?: (r: Translations['sidebar']['row']) => string
   className: string
   role?: 'status'
+  style?: CSSProperties
   title?: (r: Translations['sidebar']['row']) => string
 }
 
 // Shared base for every active dot; idle is smaller and uses its own class.
 const DOT_BASE = 'size-1.5 rounded-full'
+
+// [daveey] Tailwind sky-400 / red-500, the external and external_down stripe hues.
+const EXTERNAL_BLUE = '#38bdf8'
+const EXTERNAL_RED = '#ef4444'
 
 // Three colors and one fill/hollow axis, none of it moving. Motion on a 6px
 // circle can only say "something is happening" — which the row's arc already
@@ -118,7 +124,21 @@ export const sessionDotVariant = (
             ? r.backgroundExternalDown
             : r.backgroundExternal
 
-    return { ...DOT_VARIANTS.background, ariaLabel: label, title: label }
+    // [daveey] External run: filled light blue (down: red), the same hues as the row stripe. Literal colours (not
+    // class names) so the paint is the same wherever the dot renders and can be asserted as a computed colour.
+    const external = backgroundLabel === 'external' || backgroundLabel === 'external_down'
+
+    return {
+      ...DOT_VARIANTS.background,
+      ariaLabel: label,
+      ...(external
+        ? {
+            className: DOT_BASE,
+            style: { backgroundColor: backgroundLabel === 'external' ? EXTERNAL_BLUE : EXTERNAL_RED }
+          }
+        : {}),
+      title: label
+    }
   }
 
   const stripe = state === 'unread' ? unreadDotOutcomeStripe(outcome) : null
@@ -213,6 +233,7 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
           className={variant.className}
           data-background-label={dotState === 'background' ? backgroundLabel : undefined}
           role={variant.role}
+          style={variant.style}
           title={title}
         />
       )}
