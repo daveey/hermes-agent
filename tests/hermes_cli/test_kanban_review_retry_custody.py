@@ -153,6 +153,53 @@ def test_schedule_unblock_preserves_source_lane(board, source, wake):
     assert kb.get_task(conn, tid).status == ('ready' if source == 'ready' else 'review')
 
 
+@pytest.mark.parametrize('wake', ['unblock', 'timer'])
+@pytest.mark.parametrize('park', ['schedule', 'continue'])
+def test_manual_promotion_supersedes_admission_review_phase(board, monkeypatch, park, wake):
+    from hermes_cli.kanban_db_dispatch import dispatch_once
+    from hermes_cli.kanban_continuation import continue_task, wake_due_continuations
+    monkeypatch.setenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', '0')
+    conn, _ = board
+    tid = managed._hand_off_for_review(conn, {'review_model': managed.FABLE})
+    managed._receipts(conn, tid, route=('class:deep', None))
+    for _ in range(3):
+        dispatch_once(conn, spawn_fn=lambda *a: pytest.fail('unavailable reviewer spawned'), max_spawn=1)
+    assert kb.get_task(conn, tid).status == 'triage'
+    assert kb.promote_task(conn, tid, actor='operator') == (True, None)
+    if park == 'continue':
+        assert kb.claim_task(conn, tid, claimer=kb._claimer_id())
+        result = continue_task(conn, tid, checkpoint='Implementation remains', resume_after_seconds=60,
+                               clock_only=True, awaiting={'kind': 'clock', 'why': 'cooldown'})
+        assert result['ok']
+        kind = 'continued'
+    else:
+        assert kb.schedule_task(conn, tid, clock_only=True, awaiting={'kind': 'clock', 'why': 'cooldown'})
+        kind = 'scheduled'
+    payload = [event.payload for event in kb.list_events(conn, tid) if event.kind == kind][-1]
+    assert payload.get('resume_status', 'ready') == 'ready'
+    if wake == 'unblock':
+        assert kb.unblock_task(conn, tid)
+    else:
+        assert wake_due_continuations(conn, now=payload['wake_at']) == [tid]
+    assert kb.get_task(conn, tid).status == 'ready'
+
+
+@pytest.mark.parametrize('wake', ['unblock', 'timer'])
+def test_review_continuation_uses_its_own_park_phase(board, wake):
+    from hermes_cli.kanban_continuation import continue_task, wake_due_continuations
+    conn, _ = board
+    tid = managed._hand_off_for_review(conn, {'review_model': managed.FABLE})
+    assert kb.claim_review_task(conn, tid, claimer=kb._claimer_id())
+    result = continue_task(conn, tid, checkpoint='Review remains', resume_after_seconds=60,
+                           clock_only=True, awaiting={'kind': 'clock', 'why': 'cooldown'})
+    assert result['ok']
+    if wake == 'unblock':
+        assert kb.unblock_task(conn, tid)
+    else:
+        assert wake_due_continuations(conn, now=result['wake_at']) == [tid]
+    assert kb.get_task(conn, tid).status == 'review'
+
+
 @pytest.mark.parametrize('meta,error,expected', [
     ({'retry_status': 'review', 'trigger_outcome': 'spawn_failed'}, 'Review model resolution failed: no peer', True),
     ({'retry_status': 'ready', 'trigger_outcome': 'spawn_failed'}, 'Review model resolution failed: no peer', False),
