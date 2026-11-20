@@ -100,8 +100,11 @@ def mask_argv_secrets(argv: list[str]) -> list[str]:
                 out.append(token)
                 mask_next = secret_named
             continue
-        if assignment := _ASSIGNMENT.match(token):  # ssh -o ServerAliveInterval=15, env-style NAME=value
-            name, value = assignment.group(1), token[assignment.end():]
+        assignment = _ASSIGNMENT.match(token)
+        name, value = (assignment.group(1), token[assignment.end():]) if assignment else ("", "")
+        # ssh -o ServerAliveInterval=15, env-style NAME=value -- not base64 padding (``Zm9v…MA==``: a random "name"
+        # followed by "=" or nothing), which is judged as one token below.
+        if assignment and value and not value.startswith("=") and not _looks_like_bare_secret(name):
             out.append(f"{name}={_mask_value(value, secret_named=_is_secret_flag('--' + name))}")
             continue
         out.append(_mask_value(token, secret_named=False))

@@ -57,6 +57,11 @@ KEY = "q8ZpL2vXk9RtYwB4mN7cQ1sD5fH3jK6g"
             ],
             ["--auth-header", MASK, f"--private-key-pem={MASK}", "--apikey", MASK],
         ),
+        # base64 padding is not an assignment: a padded random token is masked whole
+        (
+            ["Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA==", "Xy9kq2LmZp4Rt7Wb3NcQ8abc="],
+            [MASK, MASK],
+        ),
         # NAME=value assignments: the value is judged under its name
         (
             ["API_TOKEN=abc123", "Config=" + KEY],
