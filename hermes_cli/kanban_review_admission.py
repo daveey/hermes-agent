@@ -54,8 +54,8 @@ def record_refusal(conn, task_id, exc, result, *, lane):
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_wake_check import foreign_copy
 
-    if foreign_copy(conn, task_id):
-        return  # the executor refuses safely; its home owns escalation
+    if lane not in ('ready', 'review') or foreign_copy(conn, task_id):
+        return  # never end a running source; its owner/finalizer retains custody
     now = int(time.time())
     error = str(exc)[:500]
     with kb.write_txn(conn):

@@ -278,6 +278,26 @@ def test_old_board_multi_field_refusal_strips_virtual(conn):
 
 # --- AST guard (A5 + Q2) ----------------------------------------------------------------------------------------
 
+
+def test_preclaim_refusal_cannot_end_unclaimed_running_source(conn):
+    """Even a stale unclaimed running row is not a preclaim review/ready card."""
+    from types import SimpleNamespace
+    from hermes_cli.kanban_review_admission import record_refusal
+    from hermes_cli.kanban_review_model import ReviewModelsExhausted
+
+    tid, _run_id, _run_uid = _running(conn)
+    _applying(conn, "UPDATE tasks SET claim_lock=NULL WHERE id=?", (tid,))
+    before = tuple(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    events = [tuple(row) for row in conn.execute("SELECT * FROM task_events WHERE task_id=?", (tid,))]
+    runs = [tuple(row) for row in conn.execute("SELECT * FROM task_runs WHERE task_id=?", (tid,))]
+    result = SimpleNamespace(auto_blocked=[])
+    record_refusal(conn, tid, ReviewModelsExhausted('no independent reviewer'), result, lane='running')
+    assert tuple(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()) == before
+    assert [tuple(row) for row in conn.execute("SELECT * FROM task_events WHERE task_id=?", (tid,))] == events
+    assert [tuple(row) for row in conn.execute("SELECT * FROM task_runs WHERE task_id=?", (tid,))] == runs
+    assert result.auto_blocked == []
+
+
 _UPDATE = re.compile(r"UPDATE\s+tasks\s+SET\b(?P<set>.*?)(?:\bWHERE\b(?P<where>.*))?$", re.IGNORECASE | re.DOTALL)
 _SETS_STATUS = re.compile(r"(?<![\w.])status\s*=\s*(?P<value>'[^']*'|\?|\{\})", re.IGNORECASE)
 _STATUS_EQ = re.compile(r"(?<![\w.])status\s*=\s*'(\w+)'", re.IGNORECASE)
@@ -316,6 +336,7 @@ INVOLUNTARY = {  # no receipt: custody becomes ``retained`` (fail closed)
 }
 # Sites the scan cannot prove off-``running`` from SQL text alone, each checked by hand.
 NOT_FROM_RUNNING = {
+    "hermes_cli/kanban_review_admission.py::record_refusal": "only ready/review lanes; writer transaction requires matching unclaimed row",
     "hermes_cli/kanban_containment_lifecycle.py::resume_local": "requires unclaimed triage under the writer transaction",
     "hermes_cli/kanban_containment_replica.py::_restore_released": "only restores unclaimed non-human triage projections",
     "hermes_cli/kanban_assignment_routing.py::route": "runs inside block_task after apply_block_update left running",
