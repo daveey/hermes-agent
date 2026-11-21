@@ -29,6 +29,8 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    (tmp_path / "config.yaml").write_text(_managed_yaml())
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
     return tmp_path

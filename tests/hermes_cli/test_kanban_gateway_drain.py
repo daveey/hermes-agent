@@ -12,6 +12,8 @@ from hermes_cli import kanban_db_dispatch as dispatch
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    (tmp_path / 'config.yaml').write_text(_managed_yaml())
     monkeypatch.setenv('HERMES_KANBAN_CRASH_GRACE_SECONDS', '0')
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, 'profile_exists', lambda name: True)

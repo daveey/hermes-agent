@@ -123,6 +123,8 @@ def _dispatcher_board(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    (tmp_path / "config.yaml").write_text(_managed_yaml())
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
     monkeypatch.setattr("hermes_cli.profiles.list_profiles", lambda **kw: [SimpleNamespace(name="default")])
@@ -248,6 +250,8 @@ def test_hold_requeues_a_dead_worker_and_does_not_claim_until_the_hold_lifts(tmp
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    (tmp_path / "config.yaml").write_text(_managed_yaml())
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(drain, "_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(drain, "_canonical_root", lambda: tmp_path)

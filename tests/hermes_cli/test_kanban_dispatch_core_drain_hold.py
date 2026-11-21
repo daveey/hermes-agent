@@ -44,6 +44,8 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    (tmp_path / "config.yaml").write_text(_managed_yaml())
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
     monkeypatch.setattr(drain, "_hermes_home", lambda: tmp_path)
@@ -64,8 +66,8 @@ def _make_card(monkeypatch, lane: str) -> str:
     with kbc.connect_closing(board="default") as conn:
         tid = kb.create_task(conn, title=f"{lane} card", assignee="default")
         if lane == "review":
-            assert kb.claim_task(conn, tid) is not None
-            assert kb.request_review(conn, tid, summary="ready for review") is True
+            from tests.hermes_cli.test_kanban_model_tier import _review_source
+            _review_source(conn, tid)
         task = kb.get_task(conn, tid)
         assert task.status == lane and task.claim_lock is None
     return tid
@@ -115,6 +117,7 @@ def _dispatch(entry: str, monkeypatch, capsys) -> dict:
 @pytest.mark.parametrize("entry", ["cli", "dashboard"])
 def test_live_hold_refuses_claim(board, monkeypatch, capsys, entry, lane):
     tid = _make_card(monkeypatch, lane)
+    board.spawned.clear()  # exclude the authenticated implementation run
     _write_hold(board.home, os.getpid())
     out = _dispatch(entry, monkeypatch, capsys)
     assert board.spawned == []
@@ -130,6 +133,7 @@ def test_live_hold_refuses_claim(board, monkeypatch, capsys, entry, lane):
 @pytest.mark.parametrize("entry", ["cli", "dashboard"])
 def test_dead_writer_hold_does_not_block(board, monkeypatch, capsys, entry, lane):
     tid = _make_card(monkeypatch, lane)
+    board.spawned.clear()  # exclude the authenticated implementation run
     _write_hold(board.home, _dead_pid())
     out = _dispatch(entry, monkeypatch, capsys)
     assert board.spawned == [tid]
@@ -172,6 +176,7 @@ def test_hold_that_starts_mid_tick_still_refuses_the_claim(board, monkeypatch, c
     from hermes_cli import kanban_gateway_drain as kgd
 
     tid = _make_card(monkeypatch, lane)
+    board.spawned.clear()  # exclude the authenticated implementation run
     calls = []
     real = kgd.core_update_hold
 
