@@ -17,8 +17,15 @@ def rejected_parent(conn: sqlite3.Connection, parents: list[tuple[dict, str]], r
         if result.get("status") in ("applied", "merged") and result.get("version"):
             conn.execute("UPDATE tasks SET sync_version = MAX(COALESCE(sync_version, 0), ?) WHERE id = ?",
                          (result["version"], tid))
-        if result.get("status") != "rejected" or result.get("reason") != "forbidden_field":
+        from hermes_cli.kanban_sync_envelope import retire_parent
+        if result.get("status") in ("applied", "merged"):
+            retire_parent(conn, tid)
+        if result.get("status") != "rejected":
             return None
+        # A definitive refusal is not an uncertain send. Move synthetic parents
+        # into the normal bounded rejection/remap path rather than replaying a
+        # cached refusal forever under their frozen id.
+        retire_parent(conn, tid)
         conn.execute(
             "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, hlc, created_at) "
             "VALUES (?, 'tasks', ?, 'upsert', ?, ?, ?)",

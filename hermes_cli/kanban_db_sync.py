@@ -195,6 +195,11 @@ CREATE TABLE IF NOT EXISTS kanban_sync_outbox (
     state        TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON kanban_sync_outbox(state, created_at);
+-- First-send synthetic parents are pending transport, not a permanent receipt ledger.
+CREATE TABLE IF NOT EXISTS kanban_sync_parent_envelopes (
+    task_id TEXT PRIMARY KEY,
+    wire TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS kanban_sync_omissions (
     original_op_id TEXT PRIMARY KEY,
     table_name TEXT NOT NULL,
@@ -261,6 +266,7 @@ _SYNC_COLUMN_DDL = (
     ("tasks", "workspace_source", "workspace_source TEXT"),
     ("tasks", "workspace_custody", "workspace_custody TEXT"),
     ("kanban_sync_outbox", "retry_after", "retry_after INTEGER"),
+    ("kanban_sync_outbox", "wire_json", "wire_json TEXT"),
     # 1 once repair_ms_timestamps ran on this file (the one-time repair of rows applied before the guard).
     ("kanban_sync_state", "seconds_repaired", "seconds_repaired INTEGER NOT NULL DEFAULT 0"),
     # Wall time of the last successful feed pull into this file (replicas): readers derive staleness from it. [daveey]

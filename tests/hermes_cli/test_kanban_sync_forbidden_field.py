@@ -81,7 +81,7 @@ def test_other_rejections_do_not_get_compatibility_retries(live, reason, detail,
 
 
 @pytest.mark.parametrize("reason", ["live_claim", "not_found", "storage_error"])
-def test_synthetic_parent_non_schema_rejections_retain_existing_retry_handling(live, reason):
+def test_synthetic_parent_non_schema_rejections_use_bounded_outbox_handling(live, reason):
     kb.create_task(live, title="synthetic parent", assignee="worker")
     live.execute("DELETE FROM kanban_sync_outbox WHERE table_name='tasks'")
     live.commit()
@@ -89,7 +89,9 @@ def test_synthetic_parent_non_schema_rejections_retain_existing_retry_handling(l
         return {"results": [{"client_op_id": op["client_op_id"], "status": "rejected",
                              "reason": reason, "detail": "no task missing"} for op in batch]}
     client.push(live, SimpleNamespace(ops=ops), "default", "macbook", primary=True, max_batches=1)
-    assert live.execute("SELECT COUNT(*) FROM kanban_sync_outbox WHERE table_name='tasks'").fetchone()[0] == 0
+    [parent] = live.execute("SELECT * FROM kanban_sync_outbox WHERE table_name='tasks'").fetchall()
+    assert parent["attempts"] == 1
+    assert parent["state"] == ("rejected" if reason == "live_claim" else "pending")
 
 
 @pytest.mark.parametrize("state", ["pending", "rejected"])
@@ -118,7 +120,10 @@ def test_synthetic_parent_acknowledgement_is_successful_version_only(live, statu
     result = {"client_op_id": "parent-op", "status": status}
     if version is not None:
         result["version"] = version
-    assert compat.rejected_parent(live, [({"client_op_id": "parent-op"}, tid)], result) is None
+    parent = {"client_op_id": "parent-op", "fields": {"title": "parent acknowledgement"},
+              "hlc": "0000000000001-0000-macbook"}
+    queued = compat.rejected_parent(live, [(parent, tid)], result)
+    assert (queued is not None) == (status == "rejected")
     assert live.execute("SELECT sync_version FROM tasks WHERE id=?", (tid,)).fetchone()[0] == expected
 
 

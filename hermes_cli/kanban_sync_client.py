@@ -652,8 +652,10 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
         task = conn.execute("SELECT * FROM tasks WHERE id = ? AND sync_version IS NULL", (tid,)).fetchone()
         if task is None:
             continue
-        op = {"client_op_id": sync.uuid7(), "table": "tasks", "uid": tid, "op": "upsert",
-              "fields": _wire_fields("tasks", _row_fields(conn, "tasks", task)), "hlc": _next_hlc(conn, gateway)}
+        saved = conn.execute("SELECT wire FROM kanban_sync_parent_envelopes WHERE task_id=?", (tid,)).fetchone()
+        op = json.loads(saved[0]) if saved else {
+            "client_op_id": sync.uuid7(), "table": "tasks", "uid": tid, "op": "upsert",
+            "fields": _wire_fields("tasks", _row_fields(conn, "tasks", task)), "hlc": _next_hlc(conn, gateway)}
         out.append((op, tid))
     return out
 
@@ -707,8 +709,12 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             break
         with write_txn(conn):
             from hermes_cli.kanban_terminal_guard import strip_stale_push  # no wake reopens a done card [daveey]
-            wire = [strip_stale_push(conn, translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway))) for r in rows]
-            rows, wire, parents = _within_batch(conn, rows, wire, gateway)
+            from hermes_cli import kanban_sync_envelope as envelopes
+            envelopes.prune_parents(conn)
+            rows, _wire, parents = _within_batch(conn, rows, [{} for _r in rows], gateway)
+            wire = [envelopes.outbound(conn, r, lambda r=r: strip_stale_push(
+                conn, translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway)))) for r in rows]
+            parents = [(envelopes.parent(conn, tid, lambda op=op: op), tid) for op, tid in parents]
             wire = [op for op, _tid in parents] + wire
         try:
             resp = hub.ops(board, wire)
@@ -756,7 +762,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     remap(conn, op_id, new_id)
                     from hermes_cli.kanban_sync_reserved_key import remap as remap_key_recovery
                     remap_key_recovery(conn, op_id, new_id)
-                    conn.execute("UPDATE kanban_sync_outbox SET op_id = ?, attempts = attempts + 1, last_error = ?, "
+                    conn.execute("UPDATE kanban_sync_outbox SET op_id = ?, wire_json = NULL, attempts = attempts + 1, last_error = ?, "
                                  "retry_after = ? WHERE op_id = ?",
                                  (new_id, f"retrying: {reason}"[:500], int(time.time()) + _backoff_s(row["attempts"]), op_id))
                     out.deferred += 1
