@@ -57,9 +57,10 @@ def sidebar_excluded_sources(hermes_home: str | Path) -> list[str]:
 AUTOMATED_ALL_SOURCES = "*"
 
 
-def _sessions_source_list(hermes_home: str | Path, key: str) -> list[str]:
-    """Lower-cased ``sessions.<key>`` source list from *hermes_home*'s own config.yaml [daveey];
-    ``[]`` when unset or unreadable (a comma string is accepted too)."""
+def _sessions_source_list(
+    hermes_home: str | Path, key: str | tuple[str, ...],
+) -> list[str] | tuple[list[str], ...]:
+    """Project one or several source lists from one readonly config revision; retain no config."""
     from hermes_cli.config import load_config_readonly
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
@@ -67,15 +68,18 @@ def _sessions_source_list(hermes_home: str | Path, key: str) -> list[str]:
     try:
         sessions_cfg = load_config_readonly().get("sessions") or {}
     except Exception:
-        return []
+        sessions_cfg = {}
     finally:
         reset_hermes_home_override(token)
-    raw = sessions_cfg.get(key) if isinstance(sessions_cfg, dict) else None
-    if isinstance(raw, str):
-        raw = raw.split(",")
-    if not isinstance(raw, (list, tuple)):
-        return []
-    return [str(s).strip().lower() for s in raw if str(s).strip()]
+    result = []
+    keys = (key,) if isinstance(key, str) else key
+    for source_key in keys:
+        raw = sessions_cfg.get(source_key) if isinstance(sessions_cfg, dict) else None
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        result.append([str(s).strip().lower() for s in raw if str(s).strip()]
+                      if isinstance(raw, (list, tuple)) else [])
+    return result[0] if isinstance(key, str) else tuple(result)
 
 
 class AutomatedSourcePolicy(list):
@@ -166,14 +170,15 @@ def automated_session_sources(hermes_home: str | Path) -> AutomatedSourcePolicy:
     profile NOT listed behaves as ``automated_sources: ["*"]`` unless its own config.yaml sets
     ``automated_sources`` or ``interactive_sources`` explicitly, so a new bot profile starts hidden.
     Empty policy when unset or unreadable."""
-    policy = AutomatedSourcePolicy(
-        _sessions_source_list(hermes_home, "automated_sources"),
-        _sessions_source_list(hermes_home, "interactive_sources"))
+    automated, interactive, sidebar_profiles = _sessions_source_list(
+        hermes_home, ("automated_sources", "interactive_sources", "sidebar_profiles"))
+    policy = AutomatedSourcePolicy(automated, interactive)
     try:
         profile, root = _store_profile_and_root(hermes_home)
     except Exception:
         return policy
-    sidebar_profiles = _sessions_source_list(root, "sidebar_profiles")
+    if root != Path(hermes_home):
+        sidebar_profiles = _sessions_source_list(root, "sidebar_profiles")
     if (sidebar_profiles and profile.lower() not in sidebar_profiles
             and not _profile_sets_source_policy(hermes_home)):
         return AutomatedSourcePolicy([AUTOMATED_ALL_SOURCES])
