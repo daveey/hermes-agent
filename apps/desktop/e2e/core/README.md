@@ -81,6 +81,16 @@ A small, deterministic Electron suite that guards three issue classes end to end
   runs this checkout's Python backend, so it proves the packaged shell and
   renderer, not a bundled runtime. Skipped without a build unless
   `HERMES_E2E_REQUIRE_PACKAGED=1`.
+- **Main-pane strip layout** — `main-pane-top-layout.spec.ts`: the lane's one
+  Chromium spec (no Electron, no backend). It serves
+  `e2e/fixtures/main-pane-top-layout.html` from an in-process Vite server; the
+  fixture mounts the production shell, layout tree and CSS with fake pane
+  contents. It measures real rectangles with the `workspace.mainTop`
+  contribution absent, visible and rendering nothing: the sidebar and the side
+  zone keep their top edge and height, the strip is exactly as wide as the main
+  zone, an empty or null contribution takes zero height, no window-wide band is
+  reserved, and with the sidebar hidden the strip stays below the main zone's
+  titlebar band.
 
 Known open bugs (`known.ts`): a scenario that reproduces an OPEN issue keeps
 its correct assertion as the test's LAST assertion via `expectNoSymptom`. When
