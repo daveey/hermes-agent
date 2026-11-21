@@ -41,6 +41,11 @@ def home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    (home / "config.yaml").write_text(_managed_yaml())
+    config = _assignee_config("default")
+    assert config is not None and config["model_routing"]["enabled"]
     monkeypatch.setattr("hermes_cli.profiles.list_profiles", lambda **kw: [SimpleNamespace(name="default")])
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: lambda name: name == "default")
     monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: False)
