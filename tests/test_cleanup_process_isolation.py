@@ -73,6 +73,32 @@ def test_process_census_keeps_real_child_with_requested_attributes(tmp_path):
             child.communicate("done\n", timeout=10)
 
 
+def test_cleanup_census_keeps_descendant_outside_session_roots(tmp_path, tmp_path_factory, monkeypatch):
+    from pathlib import Path
+
+    from hermes_cli import kanban_workspace_jobs as jobs
+
+    cwd = Path(__file__).resolve().parent
+    roots = [tmp_path_factory.getbasetemp(), Path(os.environ["HERMES_TEST_SANDBOX_HOME"])]
+    assert all(not cwd.is_relative_to(root.resolve()) for root in roots)
+    seen = set()
+
+    def observe(proc, *args):
+        seen.add(proc.pid)
+        return False
+
+    monkeypatch.setattr(jobs, "_holds_workspace", observe)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with subprocess.Popen([sys.executable, "-c", "input()"], cwd=cwd,
+                          stdin=subprocess.PIPE, text=True) as child:
+        try:
+            assert not jobs.defer_owned_job_cleanup("t_0123456789abcdef", workspace)
+            assert child.pid in seen
+        finally:
+            child.communicate("done\n", timeout=10)
+
+
 def test_census_keeps_real_cwd_holder_without_ancestry(tmp_path, monkeypatch):
     from tests._fixtures import process_census as census
 
