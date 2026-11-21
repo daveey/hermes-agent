@@ -186,10 +186,14 @@ def _pr_url(task, events) -> Optional[str]:
     return None
 
 
-def _pr_snapshot(task, events, awaiting, reader=None, *, url=None) -> Optional[dict]:
+_URL_UNSET = object()
+
+
+def _pr_snapshot(task, events, awaiting, reader=None, *, url=_URL_UNSET) -> Optional[dict]:
     snap: dict[str, Any] = {}
     # A caller holding the card's already derived URL (request evidence) skips re-deriving it from the history.
-    url = url or _pr_url(task, events)
+    if url is _URL_UNSET:
+        url = _pr_url(task, events)
     if not url and isinstance(awaiting, dict):
         ref = awaiting.get("ref")
         if isinstance(ref, str) and ref.startswith("https://github.com/") and "/pull/" in ref:
@@ -271,7 +275,7 @@ def _card_from_row(conn, task, now: float, reader=None, pol=None, *, evidence=No
     human = _json_obj(task["human_request"] if "human_request" in task.keys() else None)
     age = max(0.0, (now - float(task["created_at"] or now)) / 3600.0)
     pr = _pr_snapshot(task, events, awaited, reader,
-                      url=None if evidence is None else evidence.pr_url(task))
+                      url=_URL_UNSET if evidence is None else evidence.pr_url(task))
     event_dicts = [{"kind": e["kind"], "payload": e["payload"]} for e in events]
     return {
         "id": task["id"], "title": task["title"], "status": task["status"],

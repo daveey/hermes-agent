@@ -184,7 +184,7 @@ def test_spend_comes_from_one_scan_and_equals_the_per_lane_scan(conn, configured
     configured()
     now = int(time.time())
     pol = lanes.policy()
-    for lane, cost in (("babybear", 1.25), ("babybear", 2.5), ("other", 0.1), ("stranger", 7.0)):
+    for lane, cost in (("babybear", 1.25), ("babybear", 2.5), ("other", 0.126), ("stranger", 7.0)):
         tid = base._ready_in(conn, lane, f"spend {lane} {cost}")
         conn.execute("INSERT INTO task_runs (task_id, status, started_at, ended_at) VALUES (?, 'done', ?, ?)",
                      (tid, now - 10, now - 1))
@@ -203,17 +203,17 @@ def test_spend_comes_from_one_scan_and_equals_the_per_lane_scan(conn, configured
     scans.clear()
     snap = flow.snapshot(conn, window="6h", now=now, pol=pol, reader=type("R", (), {
         "prefetch": lambda self, urls: None, "get": lambda self, url: {}})())
-    assert len([s for s in scans if "GROUP BY e.task_id, e.run_id" in s and "created_at >= " in s]) >= 1
+    assert len([s for s in scans if "GROUP BY e.task_id, e.run_id" in s and "created_at >= " in s]) == 1
     assert snap["lanes"]["babybear"]["usage"]["usd_today"] == 3.75
 
 
-def test_evidence_projection_equals_plain_projection_with_pr_urls(conn, configured):
+def test_evidence_projection_equals_plain_projection_with_pr_urls(conn, configured, monkeypatch):
     configured()
     now = int(time.time())
     pol = lanes.policy()
     published = base._ready_in(conn, "babybear", "published")
     waiting = base._ready_in(conn, "babybear", "waiting on ci")
-    base._ready_in(conn, "babybear", "plain")
+    plain = base._ready_in(conn, "babybear", "plain")
     conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'review_requested', ?, ?)",
                  (published, json.dumps({"metadata": {"pr": "https://github.com/example/repo/pull/7"}}), now))
     conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (waiting,))
@@ -222,7 +222,16 @@ def test_evidence_projection_equals_plain_projection_with_pr_urls(conn, configur
     conn.commit()
     reader = type("R", (), {"prefetch": lambda self, urls: None, "get": lambda self, url: {}})()
     from hermes_cli.kanban_lanes_flow_evidence import Evidence
+    calls = []
+    original = flow._pr_url
+
+    def counted(task, events):
+        calls.append(task["id"])
+        return original(task, events)
+
+    monkeypatch.setattr(flow, "_pr_url", counted)
     with_evidence = flow.snapshot(conn, window="6h", now=now, pol=pol, reader=reader, evidence=Evidence(conn))
+    assert sorted(calls) == sorted([published, waiting, plain])
     plain_cards = [flow._card_from_row(conn, row, now, reader, pol) for row in
                    conn.execute(f"SELECT * FROM tasks WHERE status IN {flow._OPEN} ORDER BY created_at, id")]
     by_id = {c["id"]: c["pr"] for c in with_evidence["cards"]}
