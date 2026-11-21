@@ -487,9 +487,9 @@ def _private_ro(path: Path, budget: float) -> Iterator[sqlite3.Connection]:
     as the cache, SQLite busy timeout = ``budget`` (the caller passes what is left of its own, capped at the shared
     reader's ``_RO_BUSY_TIMEOUT_S``), always closed afterwards. Counted in ``ro_stats`` once it is open."""
     conn = _open_ro(path, timeout=max(0.0, budget))
-    with _RO_CACHE_LOCK:
-        ro_stats["private_fallbacks"] += 1
     try:
+        with _RO_CACHE_LOCK:
+            ro_stats["private_fallbacks"] += 1
         yield conn
     finally:
         _close_quietly(conn)
