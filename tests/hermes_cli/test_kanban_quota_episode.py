@@ -192,7 +192,8 @@ def test_shared_admission_preview_and_owner_route(board, monkeypatch, entry):
             conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
         conn.commit()
         reap(conn, tid, text='resets in ~11h', lane=lane)
-        expected_reroute = entry in {'default', 'profile'}
+        # A real review without author attribution may use the free eligible route too.
+        expected_reroute = entry in {'default', 'profile', 'review'}
         assert (dispatch.check_respawn_guard(conn, tid, lane=lane) is None) == expected_reroute
         before = conn.total_changes
         preview = task_route(conn, tid)
