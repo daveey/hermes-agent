@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { ALL_PROJECTS } from '@/store/project-scope'
 import { makeSessionInfo } from '@/test/session-info'
 
 import { groupProjects } from './presentation-groups'
@@ -40,6 +41,13 @@ describe('presentation navigation (never a placement authority)', () => {
 
     expect(catalog[0].memberIds).toHaveLength(2)
     expect(nav.expandFilter(['local-app'], catalog)).toEqual(catalog[0].memberIds)
+  })
+  it('dismisses individual members, with a group disappearing only when all are dismissed', () => {
+    expect(nav.shown([local, foreign], ALL_PROJECTS, groups, ['foreign-app'])).toEqual([local])
+    const auto = { ...local, isAuto: true }
+    expect(nav.shown([auto, foreign], ALL_PROJECTS, groups, ['foreign-app'])).toEqual([auto])
+    expect(nav.shown([auto, foreign], ALL_PROJECTS, groups, ['foreign-app', 'local-app'])).toEqual([])
+    expect(nav.shown([foreign], ALL_PROJECTS, groupProjects([foreign]), ['foreign-app'])).toEqual([])
   })
   it('retains all entered members even empty, but resolves the visible primary after dismissal', () => {
     expect(nav.shown([local, { ...foreign, sessionCount: 0 }], 'foreign-app', groups)).toHaveLength(2)

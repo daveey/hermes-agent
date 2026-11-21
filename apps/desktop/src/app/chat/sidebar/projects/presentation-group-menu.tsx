@@ -16,6 +16,11 @@ export function ProjectGroupMenu({
 }) {
   const { t } = useI18n()
   const p = t.sidebar.projects
+  const ids = group.members.filter(member => member.isAuto).map(member => member.id)
+
+  if (!ids.length) {
+    return null
+  }
 
   return (
     <DropdownMenu>
@@ -25,9 +30,9 @@ export function ProjectGroupMenu({
       <DropdownMenuContent>
         <DropdownMenuItem
           onSelect={() => {
-            const ids = [...group.memberIds]
             ids.forEach(dismissAutoProject)
-            onExitScope?.()
+
+            if (ids.length === group.members.length) {onExitScope?.()}
             notify({
               kind: 'success',
               message: p.hiddenFromSidebar,

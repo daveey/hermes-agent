@@ -34,15 +34,9 @@ function shown(
 ) {
   const entered = presentationGroupOf(groups, scope)
 
-  const hidden = new Set(
-    groups
-      .filter(group => group.members.length > 1 && group.memberIds.some(id => dismissed.includes(id)))
-      .flatMap(group => group.memberIds)
-  )
-
   return nodes.filter(
     node =>
-      !hidden.has(node.id) &&
+      !dismissed.includes(node.id) &&
       sidebarProjectPolicy.shown([node], entered?.memberIds.includes(node.id) ? node.id : scope).length
   )
 }

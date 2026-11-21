@@ -83,8 +83,7 @@ export function ProjectBackRow({ label, onClick }: { label: string; onClick: () 
 
 interface ProjectOverviewRowProps {
   project: SidebarProjectTree
-  /** Display-only, set by a presentation group on its members: the machine heading shown in place of
-   *  the project name, and whether the header's "+" and menu replace this row's own. */
+  /** Display-only machine heading; the group header replaces this row's "+", not its owner-specific menus. */
   presentation?: { heading: React.ReactNode; hideActions?: boolean }
   onEnter?: (id: string) => void
   /** `owner` is set for a project another gateway owns: the session starts there. */
@@ -110,7 +109,10 @@ interface ProjectOverviewRowProps {
 }
 
 function overviewPresentation(project: SidebarProjectTree, presentation: ProjectOverviewRowProps['presentation']) {
-  return { label: presentation?.heading ?? project.label, menu: !project.isNoProject && !presentation?.hideActions }
+  return {
+    label: presentation?.heading ?? project.label,
+    menu: !project.isNoProject
+  }
 }
 
 function overviewHandlers(

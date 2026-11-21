@@ -24,9 +24,10 @@ import { WorkspaceAddButton } from './workspace-header'
 
 /** Which machine a member lives on: the registry's device glyph and label (the window's own gateway
  *  when no other owns it). */
-export function MachineHeading({ owner }: { owner: null | string }) {
+export function MachineHeading({ project }: { project: SidebarProjectTree }) {
   const registry = useStore($connectionsRegistry)
   const activeId = useStore($activeConnectionId)
+  const owner = projectPresentationOwner(project, activeId ?? registry?.primary ?? 'local')
   const id = owner ?? activeId ?? registry?.primary ?? ''
 
   return (
@@ -169,7 +170,7 @@ export function ProjectGroupRow({
       <SidebarRowNest hidden={!open}>
         {members.map(member =>
           renderMember(member, {
-            heading: <MachineHeading owner={projectPresentationOwner(member)} />,
+            heading: <MachineHeading project={member} />,
             hideActions: true
           })
         )}

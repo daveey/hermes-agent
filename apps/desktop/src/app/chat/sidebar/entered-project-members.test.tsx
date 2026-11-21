@@ -23,7 +23,7 @@ vi.mock('./projects/model', async importOriginal => ({
   useWorkspaceNodeOpen: () => [true, vi.fn()]
 }))
 vi.mock('./projects/presentation-group-row', () => ({
-  MachineHeading: ({ owner }: { owner: string | null }) => <span>{owner || 'This device'}</span>
+  MachineHeading: ({ project }: { project: SidebarProjectTree }) => <span>{project.connectionId || 'This device'}</span>
 }))
 
 const local = makeSessionInfo({

@@ -1,8 +1,10 @@
+import { useStore } from '@nanostores/react'
 import { useEffect, useMemo } from 'react'
 import type * as React from 'react'
 
 import type { SessionInfo } from '@/hermes'
-import { refreshWorktrees } from '@/store/projects'
+import { exitProjectScope } from '@/store/project-scope'
+import { $activeProjectId, refreshWorktrees } from '@/store/projects'
 import { $workingSessionIds } from '@/store/session-states'
 
 import {
@@ -16,9 +18,8 @@ import {
 } from './projects'
 import { ProjectGroupMenu } from './projects/presentation-group-menu'
 import { MachineHeading } from './projects/presentation-group-row'
-import { projectPresentationOwner } from './projects/presentation-groups'
 import { groupProjects, presentationGroupOf } from './projects/presentation-groups'
-import { ProjectMenu } from './projects/project-menu'
+import { ProjectContextMenu, ProjectMenu } from './projects/project-menu'
 import { StartWorkButton } from './projects/workspace-header'
 import { SidebarLoadErrorState, SidebarSessionSkeletons } from './section-states'
 import { useEnteredProjectSessions } from './use-entered-project-sessions'
@@ -241,6 +242,27 @@ type BodyProps = {
   onNewSessionSplit?: React.ComponentProps<typeof EnteredProjectContent>['onNewSessionSplit']
 }
 
+function MemberHeading({ member }: { member: SidebarProjectTree }) {
+  const activeId = useStore($activeProjectId)
+  const isActive = activeId === member.id
+
+  const heading = (
+    <div className="flex items-center justify-between py-1 text-xs text-(--ui-text-tertiary)">
+      <MachineHeading project={member} />
+      <div className="flex items-center gap-1">
+        <ProjectMenu isActive={isActive} onExitScope={exitProjectScope} project={member} scoped />
+        {member.path && <StartWorkButton project={member} />}
+      </div>
+    </div>
+  )
+
+  return (
+    <ProjectContextMenu isActive={isActive} onExitScope={exitProjectScope} project={member} scoped>
+      {heading}
+    </ProjectContextMenu>
+  )
+}
+
 function MemberBody({
   member,
   state,
@@ -251,10 +273,7 @@ function MemberBody({
 }) {
   return (
     <section data-entered-project-member={member.id}>
-      <div className="flex items-center justify-between py-1 text-xs text-(--ui-text-tertiary)">
-        <MachineHeading owner={projectPresentationOwner(member)} />
-        <StartWorkButton project={member} />
-      </div>
+      <MemberHeading member={member} />
       {state.failed && <SidebarLoadErrorState onRetry={state.retry} />}
       {state.loading && !state.content?.repos.length && !state.content?.sessionCount && <SidebarSessionSkeletons />}
       {state.content && (
