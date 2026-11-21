@@ -1,0 +1,36 @@
+"""Reviewer probe for PR #3975 @6f51525418 (not part of the PR): the op='archive' clause of the unsettled query."""
+import json
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_sync as sync
+from tests.hermes_cli import test_kanban_containment_terminal_remote as tr
+
+kanban_home = tr.kanban_home
+synced_conn = tr.synced_conn
+
+
+@pytest.mark.parametrize("op", ["contain", "resume_contained"])
+def test_unresolved_non_archive_request_does_not_replay_settled_archive(synced_conn, monkeypatch, op):
+    """A lost-reply contain request whose stop later arrived by sync stays confirmed=0 with a KNOWN stop uid.
+
+    closed() still holds (only an unknown stop withdraws it), so the settled archive must stay a no-op."""
+    from hermes_cli.kanban_containment_terminal import closed
+    conn = synced_conn
+    hub = tr.setup(conn, monkeypatch)
+    assert kb.archive_task(conn, hub.target, comment=("me", "why"))
+    state = sync.sync_state(conn)
+    uid = sync.uuid7()
+    conn.execute(
+        "INSERT INTO containment_delivery(request_uid,board,gateway,op_json,confirmed) VALUES (?,?,?,?,0)",
+        (uid, state["board_id"], state["gateway_id"],
+         json.dumps({"op": op, "task": hub.target, "client_op_id": uid, "event_uid": hub.stop["event_uid"]})),
+    )
+    conn.commit()
+    assert closed(conn, hub.target)
+    before = conn.total_changes
+    assert kb.archive_task(conn, hub.target, comment=("me", "why")) is False
+    assert conn.total_changes == before
+    assert len(hub.posts) == 1
+    assert conn.execute("SELECT COUNT(*) FROM task_comments WHERE task_id=?", (hub.target,)).fetchone()[0] == 1
