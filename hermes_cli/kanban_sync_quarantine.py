@@ -410,22 +410,20 @@ def _mirror(source) -> None:
         adopt(source, dest)
 
 
-def pending_batch(conn, now: int, limit: int) -> list[dict]:
-    """Limit after filtering: a held FIFO prefix cannot starve another task."""
+def pending_rows(conn, now: int):
+    """Yield eligible FIFO rows so additional dependency filters precede the limit."""
     blocked = tasks(conn)
-    if not blocked:
-        return [dict(r) for r in conn.execute(
-            "SELECT * FROM kanban_sync_outbox WHERE state='pending' AND (retry_after IS NULL OR retry_after<=?) "
-            "ORDER BY created_at,rowid LIMIT ?", (now, limit))]
     cursor = conn.execute(
         "SELECT * FROM kanban_sync_outbox WHERE state='pending' AND (retry_after IS NULL OR retry_after<=?) "
         "ORDER BY created_at,rowid", (now,))
-    batch = []
     for row in cursor:
-        batch.extend(sendable(conn, [dict(row)], blocked=blocked))
-        if len(batch) >= limit:
-            break
-    return batch
+        yield from sendable(conn, [dict(row)], blocked=blocked) if blocked else [dict(row)]
+
+
+def pending_batch(conn, now: int, limit: int) -> list[dict]:
+    """Limit after filtering: a held FIFO prefix cannot starve another task."""
+    from itertools import islice
+    return list(islice(pending_rows(conn, now), limit))
 
 
 def save_rebuild(conn, path: Path) -> None:

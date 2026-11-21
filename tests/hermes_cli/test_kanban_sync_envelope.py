@@ -82,3 +82,31 @@ def test_release_retries_preserve_entire_envelope(board):
     send(conn, hub)
     assert hub.batches[1] == hub.batches[0]
     assert json.loads(hub.batches[0])[0]["op"] == "release"
+
+
+def test_containment_rekey_does_not_replay_retired_frozen_envelope(board):
+    from hermes_cli.kanban_containment_outbox import strip_lifecycle
+
+    conn, _ = board
+    tid = kb.create_task(conn, title="annotation survives", assignee="worker")
+    with kbc.write_txn(conn):
+        conn.execute("UPDATE tasks SET sync_version=1 WHERE id=?", (tid,))
+    hub = LostReply()
+    send(conn, hub)
+    original = next(op for op in json.loads(hub.batches[0]) if op["table"] == "tasks")
+    assert original["fields"]["status"] and original["frozen_replay"] == 1
+    with kbc.write_txn(conn):
+        strip_lifecycle(conn, tid)
+    replacement = conn.execute("SELECT op_id,wire_json FROM kanban_sync_outbox WHERE table_name='tasks'").fetchone()
+    assert replacement and replacement[0] != original["client_op_id"]
+    # The stale stored bytes remain until outbound replaces them; identity is the fence.
+    assert json.loads(replacement[1])["client_op_id"] == original["client_op_id"]
+    send(conn, hub)
+    current = next(op for op in json.loads(hub.batches[-1]) if op["table"] == "tasks")
+    assert current["client_op_id"] == replacement[0]
+    assert "status" not in current["fields"]
+    assert current["fields"]["title"] == "annotation survives"
+    assert current["frozen_replay"] == 1
+    stored = conn.execute("SELECT wire_json FROM kanban_sync_outbox WHERE op_id=?", (replacement[0],)).fetchone()[0]
+    assert json.loads(stored) == current
+

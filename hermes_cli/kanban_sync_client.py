@@ -697,11 +697,14 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
     refuse_if_schema_ahead(conn)  # an older core would strip the newer columns; the ops stay pending [daveey]
     out, seen = PushResult(), {} if seen is None else seen
     for _ in range(max_batches):
-        from hermes_cli.kanban_sync_quarantine import pending_batch
-        rows = selected = pending_batch(conn, int(time.time()), PUSH_BATCH)
+        from hermes_cli.kanban_sync_quarantine import pending_rows
+        from hermes_cli.kanban_sync_parent_order import parent_first
+        now = int(time.time())
+        rows = selected = parent_first(conn, pending_rows(conn, now), now, PUSH_BATCH)
         stopped = False
         if before_head:
             rows, stopped = backlog.sendable_before_head(conn, hub, board, rows, seen)
+            rows = parent_first(conn, rows, now, PUSH_BATCH, allowed={r['op_id'] for r in rows})
         if not rows:
             break
         from hermes_cli.kanban_sync_status_origin import absorb_clock, capability
