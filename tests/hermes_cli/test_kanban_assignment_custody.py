@@ -144,18 +144,31 @@ def test_foreign_policy_drift_still_refuses(foreign):
         kb.complete_task(conn, repair, result='Verified')
 
 
-def test_foreign_model_validation_is_not_skipped(foreign, monkeypatch):
+@pytest.mark.parametrize('model,provider,expected_model,expected_provider', [
+    ('fixture-model', 'fixture-provider', None, None),
+    ('class:deep', 'auto', 'class:deep', 'auto'),
+])
+def test_foreign_model_validation_is_not_skipped(
+    foreign, monkeypatch, model, provider, expected_model, expected_provider,
+):
     from hermes_cli import kanban_model_assignment as models
     conn, _, repair, _, evidence, _ = foreign
-    evidence['task'].update(model_override='fixture-model', provider_override='fixture-provider')
+    evidence['task'].update(model_override=model, provider_override=provider)
+    before_evidence = copy.deepcopy(evidence)
+    before = list(conn.iterdump())
+    calls = []
 
     def refuse(assignee, model, provider):
-        assert (assignee, model, provider) == ('supervisor', 'fixture-model', 'fixture-provider')
+        calls.append((assignee, model, provider))
+        assert (assignee, model, provider) == ('supervisor', expected_model, expected_provider)
         raise ValueError('model refused')
 
     monkeypatch.setattr(models, 'validate_model_assignment', refuse)
     with pytest.raises(ValueError, match='model refused'):
         kb.complete_task(conn, repair, result='Verified')
+    assert calls == [('supervisor', expected_model, expected_provider)]
+    assert evidence == before_evidence  # legacy authenticated author row is audit-only
+    assert list(conn.iterdump()) == before  # refusal never partially completes the repair
 
 
 def test_unenrolled_gateway_is_typed_refusal(foreign, monkeypatch):
