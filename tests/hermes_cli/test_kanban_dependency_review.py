@@ -16,6 +16,14 @@ PR = "https://github.com/example/repo/pull/10"
 def board(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(prs, "pr_state", lambda _: "OPEN")
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    assert _assignee_config("dev") is None
+    profile = tmp_path / "profiles" / "dev"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text(_managed_yaml())
+    config = _assignee_config("dev")
+    assert config is not None and config["model_routing"]["enabled"]
     kb.init_db()
     with kbc.connect() as conn:
         yield conn

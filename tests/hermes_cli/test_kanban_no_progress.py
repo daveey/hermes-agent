@@ -37,6 +37,13 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 "HERMES_KANBAN_RUN_ID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from hermes_cli.kanban_model_tier import class_unroutable_reason
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    assert class_unroutable_reason("class:standard", _assignee_config("default")) == "routing_disabled"
+    (home / "config.yaml").write_text(_managed_yaml())
+    config = _assignee_config("default")
+    assert config is not None and config["model_routing"]["enabled"]
     # Probes and capability refreshes run real commands off-thread; the clock wake is what is under test.
     monkeypatch.setattr(kwc, "run_due_wake_checks", lambda conn, *a, **k: [])
     monkeypatch.setattr(kcr, "maybe_refresh_async", lambda *a, **k: None)
