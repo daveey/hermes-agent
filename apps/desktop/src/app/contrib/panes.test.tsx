@@ -1,9 +1,13 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { MemoryRouter } from 'react-router'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { StatusbarControls, statusbarToggleLabel } from '@/app/shell/statusbar-controls'
 import { ContribRender } from '@/contrib/react/boundary'
 import { registry } from '@/contrib/registry'
+import { $statusbarHiddenIds, resetStatusbarLayout } from '@/store/statusbar-prefs'
+import { stubMenuDomApis, stubResizeObserver } from '@/test/jsdom'
 
 import { useStatusbarContributions } from './panes'
 
@@ -15,6 +19,7 @@ afterEach(() => {
   cleanup()
   dispose?.()
   dispose = undefined
+  resetStatusbarLayout()
 })
 
 // A stateful contribution — a chip that opens a dialog-like panel and holds
@@ -58,6 +63,57 @@ function Host() {
 }
 
 describe('useStatusbarContributions', () => {
+  it('lists every real contribution and filters custom renders before mounting them', async () => {
+    stubMenuDomApis()
+    stubResizeObserver()
+    const draw = vi.fn(() => <span>runner custom content</span>)
+    dispose = registry.registerMany([
+      { area: 'statusBar.right', id: 'runners:ci-chip', render: draw },
+      {
+        area: 'statusBar.right',
+        id: 'declared',
+        data: { id: 'existing-id', toggleLabel: 'My custom control', label: 'custom data', lockedVisible: true }
+      }
+    ])
+    $statusbarHiddenIds.set(['runners:ci-chip'])
+
+    function Bar() {
+      const items = useStatusbarContributions('right')
+
+      return (
+        <>
+          <div data-testid="expected-labels">{JSON.stringify(items.map(statusbarToggleLabel))}</div>
+          <StatusbarControls items={items} />
+        </>
+      )
+    }
+
+    render(
+      <MemoryRouter>
+        <Bar />
+      </MemoryRouter>
+    )
+    expect(draw).not.toHaveBeenCalled()
+    const bar = screen.getByRole('contentinfo')
+    fireEvent.pointerDown(bar, { button: 2, pointerType: 'mouse' })
+    fireEvent.contextMenu(bar, { button: 2 })
+    const rows = await screen.findAllByRole('menuitemcheckbox')
+    expect(rows.map(row => row.textContent)).toEqual(JSON.parse(screen.getByTestId('expected-labels').textContent!))
+    const custom = screen.getByRole('menuitemcheckbox', { name: 'Runners Ci Chip' })
+    expect(custom.getAttribute('data-disabled')).toBeNull()
+    fireEvent.click(custom)
+    expect(screen.getByText('runner custom content')).toBeTruthy()
+    expect($statusbarHiddenIds.get()).not.toContain('runners:ci-chip')
+    fireEvent.click(custom)
+    expect(screen.queryByText('runner custom content')).toBeNull()
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: 'My custom control' }))
+    expect(screen.queryByText('custom data')).toBeNull()
+    expect($statusbarHiddenIds.get()).toEqual(['runners:ci-chip', 'existing-id'])
+    expect(JSON.parse(window.localStorage.getItem('hermes.desktop.statusbarHidden.v3')!)).toEqual(
+      $statusbarHiddenIds.get()
+    )
+  })
+
   it('keeps a render-contribution mounted (state intact) across an unrelated host re-render', () => {
     dispose = registry.register({ area: 'statusBar.right', id: 'stateful-chip', render: () => <StatefulChip /> })
 

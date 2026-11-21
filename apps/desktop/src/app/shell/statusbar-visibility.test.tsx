@@ -61,7 +61,7 @@ describe('statusbar item visibility', () => {
     expect(within(statusbar).getByText('Cron')).toBeTruthy()
   })
 
-  it('never lets the user hide a locked item (system icon / update pill)', async () => {
+  it('never lets the user hide the locked Command Center recovery entry', async () => {
     const statusbar = bar([item('command-center', 'Command Center', { lockedVisible: true })])
 
     openContextMenu(statusbar)
@@ -71,11 +71,11 @@ describe('statusbar item visibility', () => {
     expect(row.getAttribute('aria-checked')).toBe('true')
   })
 
-  it('leaves items that never opted into the menu alone', () => {
+  it('honours hidden preferences for older contributions without toggle metadata', () => {
     $statusbarHiddenIds.set(['plugin-thing'])
     bar([{ id: 'plugin-thing', label: 'Plugin thing', variant: 'action' }])
 
-    expect(screen.getByText('Plugin thing')).toBeTruthy()
+    expect(screen.queryByText('Plugin thing')).toBeNull()
   })
 })
 
@@ -154,12 +154,12 @@ describe('whole-bar visibility', () => {
     expect($statusbarVisible.get()).toBe(true)
   })
 
-  it('offers the hide row even when no item opted into the show/hide list', async () => {
+  it('gives older contributions a checkbox without requiring opt-in metadata', async () => {
     const statusbar = bar([{ id: 'plugin-thing', label: 'Plugin thing', variant: 'action' }])
 
     openContextMenu(statusbar)
 
     expect(await screen.findByRole('menuitem', { name: /hide status bar/i })).toBeTruthy()
-    expect(screen.queryByRole('menuitemcheckbox')).toBeNull()
+    expect(screen.getByRole('menuitemcheckbox', { name: 'Plugin thing' })).toBeTruthy()
   })
 })

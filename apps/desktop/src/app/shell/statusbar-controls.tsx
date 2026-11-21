@@ -79,13 +79,10 @@ export interface StatusbarItem {
   title?: string
   to?: string
   variant?: 'action' | 'link' | 'menu' | 'text'
-  /** Plain-text name for the bar's right-click show/hide menu. An item without
-   *  one is never listed there and always shows — the safe default for plugin
-   *  contributions that don't opt in. */
+  /** Plain-text name for the bar's right-click show/hide menu. Older plugins
+   *  fall back to their text label/title or humanized stable id. */
   toggleLabel?: string
-  /** Listed in the menu but not switchable: the bar's own affordances (command
-   *  center, update/version pills) would strand the user if they could be
-   *  hidden from the surface that hides them. */
+  /** Reserved for the Command Center recovery entry. */
   lockedVisible?: boolean
   /** Actions shown at the top of the bar's right-click menu when the
    *  right-click lands on this item (e.g. the backend pill's "Force update"). */
@@ -98,6 +95,15 @@ export interface StatusbarSelectModifiers {
 
 export type StatusbarItemSide = 'left' | 'right'
 export type SetStatusbarItemGroup = (id: string, items: readonly StatusbarItem[], side?: StatusbarItemSide) => void
+
+export function statusbarToggleLabel(item: StatusbarItem): string {
+  return (
+    item.toggleLabel ||
+    (typeof item.label === 'string' && item.label) ||
+    item.title ||
+    item.id.replace(/[:._-]+/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase())
+  )
+}
 
 interface StatusbarControlsProps extends ComponentProps<'footer'> {
   leftItems?: readonly StatusbarItem[]
@@ -124,8 +130,7 @@ export function StatusbarControls({
     [contextItemId, items, leftItems]
   )
 
-  const visible = (item: StatusbarItem) =>
-    !item.hidden && (item.lockedVisible || !item.toggleLabel || !hiddenIds.includes(item.id))
+  const visible = (item: StatusbarItem) => !item.hidden && (item.lockedVisible || !hiddenIds.includes(item.id))
 
   return (
     <ContextMenu>
@@ -164,8 +169,8 @@ export function StatusbarControls({
   )
 }
 
-/** Right-click the bar to choose what it shows. Lists every item that named
- *  itself with `toggleLabel`, in bar order (left cluster then right), so the
+/** Right-click the bar to choose what it shows. Lists every item, including
+ *  older render-only contributions, in bar order (left cluster then right), so the
  *  menu reads like the surface it edits. Hiding the whole bar lives at the
  *  bottom — VS Code puts it on the same context menu. */
 function StatusbarVisibilityMenu({
@@ -189,7 +194,7 @@ function StatusbarVisibilityMenu({
     const seen = new Set<string>()
 
     return [...leftItems, ...items].filter(item => {
-      if (!item.toggleLabel || seen.has(item.id)) {
+      if (seen.has(item.id)) {
         return false
       }
 
@@ -233,7 +238,7 @@ function StatusbarVisibilityMenu({
               // command list).
               onSelect={event => event.preventDefault()}
             >
-              <span className="truncate">{item.toggleLabel}</span>
+              <span className="truncate">{statusbarToggleLabel(item)}</span>
             </ContextMenuCheckboxItem>
           ))}
           <ContextMenuSeparator />

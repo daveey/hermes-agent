@@ -1,10 +1,11 @@
-import { act, renderHook } from '@testing-library/react'
+import { act, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import type { WritableAtom } from 'nanostores'
 import { isValidElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { StatusbarControls } from '@/app/shell/statusbar-controls'
 import { group } from '@/components/pane-shell/tree/model'
 import { $layoutTree, noteActiveTreeGroup } from '@/components/pane-shell/tree/store'
 import { en } from '@/i18n/en'
@@ -26,8 +27,14 @@ import {
 } from '@/store/session'
 import { $focusedTreePaneId as $focusedTreePaneIdMock } from '@/store/session-focus'
 import { $sessionStates, $sessionTiles } from '@/store/session-states'
-import { $statusbarVisible, setStatusbarItemVisible } from '@/store/statusbar-prefs'
+import {
+  $statusbarHiddenIds,
+  $statusbarVisible,
+  resetStatusbarLayout,
+  setStatusbarItemVisible
+} from '@/store/statusbar-prefs'
 import { $backendUpdateProgress, $clientUpdateProgress, $desktopVersion, $updateStatus } from '@/store/updates'
+import { stubMenuDomApis, stubResizeObserver } from '@/test/jsdom'
 import type { ContextBreakdown, FreeTierStatus, UsageStats } from '@/types/hermes'
 
 import { useStatusbarItems } from './use-statusbar-items'
@@ -386,6 +393,78 @@ const statusbarOptions = {
   statusSnapshot: null,
   toggleCommandCenter: () => {}
 }
+
+describe('production statusbar visibility contract', () => {
+  it('gives every production control a menu name and locks only Command Center', () => {
+    $connection.set({ mode: 'remote' } as never)
+    const { result } = renderHook(() => useStatusbarItems(statusbarOptions), { wrapper })
+    const items = [...result.current.leftStatusbarItems, ...result.current.statusbarItems]
+    expect(items.length).toBeGreaterThan(15)
+    expect(new Set(items.map(item => item.id)).size).toBe(items.length)
+
+    for (const item of items) {
+      expect(item.toggleLabel, item.id).toBeTruthy()
+      expect(Boolean(item.lockedVisible), item.id).toBe(item.id === 'command-center')
+    }
+  })
+
+  it('hides known production versions by default and enables independent real menu toggles', async () => {
+    stubMenuDomApis()
+    stubResizeObserver()
+    resetStatusbarLayout()
+    $connection.set({ mode: 'remote' } as never)
+    $desktopVersion.set({
+      appVersion: '0.23.1',
+      electronVersion: '37',
+      hermesRoot: '/h',
+      nodeVersion: '22',
+      platform: 'linux'
+    })
+
+    function Bar() {
+      const { leftStatusbarItems, statusbarItems } = useStatusbarItems({
+        ...statusbarOptions,
+        statusSnapshot: { version: '0.23.2' } as never
+      })
+
+      return (
+        <StatusbarControls
+          items={statusbarItems.filter(item => item.id.startsWith('version-'))}
+          leftItems={leftStatusbarItems.filter(item => item.id === 'command-center')}
+        />
+      )
+    }
+
+    render(
+      <MemoryRouter>
+        <Bar />
+      </MemoryRouter>
+    )
+    const bar = screen.getByRole('contentinfo')
+    expect(bar.querySelector('[data-statusbar-item="version-client"]')).toBeNull()
+    expect(bar.querySelector('[data-statusbar-item="version-backend"]')).toBeNull()
+    fireEvent.pointerDown(bar, { button: 2, ctrlKey: false, pointerType: 'mouse' })
+    fireEvent.contextMenu(bar, { button: 2 })
+    const client = await screen.findByRole('menuitemcheckbox', { name: en.shell.statusbar.toggleVersion })
+    const backend = screen.getByRole('menuitemcheckbox', { name: en.shell.statusbar.toggleBackendVersion })
+
+    for (const row of [client, backend]) {
+      expect(row.getAttribute('data-disabled')).toBeNull()
+      expect(row.getAttribute('aria-checked')).toBe('false')
+    }
+
+    fireEvent.click(client)
+    expect(bar.querySelector('[data-statusbar-item="version-client"]')).not.toBeNull()
+    expect(bar.querySelector('[data-statusbar-item="version-backend"]')).toBeNull()
+    fireEvent.click(backend)
+    expect(bar.querySelector('[data-statusbar-item="version-backend"]')).not.toBeNull()
+    fireEvent.click(client)
+    expect(bar.querySelector('[data-statusbar-item="version-client"]')).toBeNull()
+    expect($statusbarHiddenIds.get()).toContain('version-client')
+    expect($statusbarHiddenIds.get()).not.toContain('version-backend')
+    resetStatusbarLayout()
+  })
+})
 
 function sessionTimerItem() {
   const { result } = renderHook(() => useStatusbarItems(statusbarOptions), { wrapper })

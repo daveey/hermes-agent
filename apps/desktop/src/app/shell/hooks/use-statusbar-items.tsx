@@ -162,9 +162,6 @@ function versionItem(
     ),
     id: `version-${target}`,
     label: text,
-    // Update state is not a preference: hiding it is how a user misses that
-    // they are behind. Listed in the menu, but locked on.
-    lockedVisible: true,
     onSelect: () => openUpdateOverlayFor(target),
     title: bg ? [bg.tooltip, status.tooltip].filter(Boolean).join('\n\n') : status.tooltip,
     toggleLabel,
@@ -582,7 +579,7 @@ export function useStatusbarItems({
       {
         hidden: !sessionsShowing,
         id: 'gateway-switcher',
-        lockedVisible: true,
+        toggleLabel: t.settings.connections.title,
         render: () => <StatusbarGatewaySwitcher />
       },
       {
@@ -590,7 +587,7 @@ export function useStatusbarItems({
         // colored strip is hidden, so switching profiles always has a door.
         hidden: !sessionsShowing || profileRailVisible,
         id: 'profile-switcher',
-        lockedVisible: true,
+        toggleLabel: t.sidebar.filter.profile,
         render: () => <ProfileSwitcher compact />
       },
       {
@@ -751,7 +748,9 @@ export function useStatusbarItems({
       sessionsShowing,
       subagentsFailed,
       subagentsRunning,
-      toggleCommandCenter
+      toggleCommandCenter,
+      t.settings.connections.title,
+      t.sidebar.filter.profile
     ]
   )
 
@@ -834,8 +833,7 @@ export function useStatusbarItems({
           ? copy.planUsageTitle(formatPercentUsed(planUsed), formatResetsIn(planGauge.resets_at_ms) ?? '')
           : undefined,
         to: `${SETTINGS_ROUTE}?tab=billing`,
-        // Listed in the bar's show/hide menu only for window plans; everyone else never sees the entry.
-        toggleLabel: planGauge ? copy.togglePlanUsage : undefined,
+        toggleLabel: copy.togglePlanUsage,
         variant: 'link'
       },
       systemResourcesItem,

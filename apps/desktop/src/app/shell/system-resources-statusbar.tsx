@@ -52,8 +52,8 @@ export function useSystemResourcesStatusbarItem(): StatusbarItem {
   const { t } = useI18n()
   const copy = t.shell.statusbar.systemResources
   const hiddenIds = useStore($statusbarHiddenIds)
-  // Behind the --local launch flag: without it the item is absent from the
-  // bar AND from the customize menu (no toggleLabel), and never polls.
+  // Behind the --local launch flag: without it the item never renders or polls.
+  // Its menu preference remains available for when local models are enabled.
   const enabled = $localModelsEnabled.get()
   const shown = enabled && !hiddenIds.includes('system-resources')
   const [hardware, setHardware] = useState<LocalHardware | null>(null)
@@ -190,7 +190,7 @@ export function useSystemResourcesStatusbarItem(): StatusbarItem {
         {hardware?.uma && <p className="text-[0.6875rem] text-muted-foreground">{copy.unifiedNote}</p>}
       </div>
     ),
-    toggleLabel: enabled ? copy.toggle : undefined,
+    toggleLabel: copy.toggle,
     variant: 'menu'
   }
 }

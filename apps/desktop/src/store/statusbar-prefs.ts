@@ -6,7 +6,10 @@ import { modeBound } from '@/store/interface-mode'
 // hidden, so every existing store carries an `approval-mode` the user never
 // chose. v2 seeds from v1 minus that id: other customizations survive, the
 // pill appears once on update, and hiding it again persists here.
-const STATUSBAR_HIDDEN_STORAGE_KEY = 'hermes.desktop.statusbarHidden.v2'
+// v3 hides the formerly locked version pills once, preserving every other
+// choice. Later opt-ins (including an empty hidden set) persist normally.
+const STATUSBAR_HIDDEN_STORAGE_KEY = 'hermes.desktop.statusbarHidden.v3'
+const PREVIOUS_HIDDEN_STORAGE_KEY = 'hermes.desktop.statusbarHidden.v2'
 const LEGACY_HIDDEN_STORAGE_KEY = 'hermes.desktop.statusbarHidden'
 // v1 (`hermes.desktop.statusbarVisible`) shipped a stretch where the bar was
 // opt-in, so many stores hold a `false` the user never chose. v2 is read fresh
@@ -47,6 +50,8 @@ export const STATUSBAR_HIDDEN_BY_DEFAULT: readonly string[] = [
   'system-resources',
   'terminal',
   'tokens-per-second',
+  'version-client',
+  'version-backend',
   'webhooks'
 ]
 
@@ -72,9 +77,24 @@ function legacyHiddenSeed(): string[] {
   }
 }
 
+function versionHiddenSeed(): string[] {
+  const raw = readKey(PREVIOUS_HIDDEN_STORAGE_KEY)
+  let hidden = legacyHiddenSeed()
+
+  if (raw !== null) {
+    try {
+      hidden = sanitizeHiddenIds(JSON.parse(raw))
+    } catch {
+      // Fall back to the older preference/defaults, not a destructive reset.
+    }
+  }
+
+  return [...new Set([...hidden, 'version-client', 'version-backend'])]
+}
+
 export const $statusbarHiddenIds = persistentAtom<string[]>(
   STATUSBAR_HIDDEN_STORAGE_KEY,
-  legacyHiddenSeed(),
+  versionHiddenSeed(),
   Codecs.json<string[]>(sanitizeHiddenIds)
 )
 

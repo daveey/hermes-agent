@@ -168,19 +168,23 @@ export function useStatusbarContributions(side: 'left' | 'right'): StatusbarItem
   return useMemo(
     () =>
       items
-        .map(c =>
+        .map<StatusbarItem | null>(c =>
           c.render
             ? ({
+                ...(c.data as Partial<StatusbarItem> | undefined),
                 id: c.id,
+                lockedVisible: false,
                 render: () => (
                   <ContribBoundary id={c.id} variant="chip">
                     <ContribRender render={c.render!} />
                   </ContribBoundary>
                 )
               } satisfies StatusbarItem)
-            : (c.data as StatusbarItem)
+            : c.data
+              ? { ...(c.data as StatusbarItem), id: (c.data as StatusbarItem).id || c.id, lockedVisible: false }
+              : null
         )
-        .filter(Boolean),
+        .filter((item): item is StatusbarItem => item !== null),
     [items]
   )
 }

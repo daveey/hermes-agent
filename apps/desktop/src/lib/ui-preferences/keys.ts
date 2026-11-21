@@ -49,6 +49,7 @@ const SHARED_KEYS: ReadonlySet<string> = new Set([
   'hermes.desktop.sidebarSortKey',
   // Status bar.
   'hermes.desktop.statusbarHidden.v2',
+  'hermes.desktop.statusbarHidden.v3',
   'hermes.desktop.statusbarVisible.v2',
   // Transcript and tools.
   'hermes.desktop.hideThreadTimeline',

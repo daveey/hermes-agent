@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AppContextMenu } from '@/app/context-menu/app-context-menu'
 import { $contextMenu } from '@/app/context-menu/store'
@@ -60,6 +60,7 @@ describe('statusbar context menu coordination', () => {
 })
 
 describe('statusbar item context actions', () => {
+  beforeEach(() => $statusbarHiddenIds.set([])) // These tests explicitly opt the version pills in.
   const onForce = vi.fn()
 
   const items = [
