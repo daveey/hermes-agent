@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { makeSessionInfo } from '@/test/session-info'
 
 import { gatewayProjectId, withGatewayProjectRows } from './gateway-project-rows'
+import { groupProjects } from './presentation-groups'
 import { NO_PROJECT_ID, overlayLivePreviews, type SidebarProjectTree } from './workspace-groups'
 
 const home: SidebarProjectTree = {
@@ -31,21 +32,24 @@ const foreign = (session: { connection_id?: null | string }) =>
 
 const label = (id: string) => ({ homelab: 'Homelab', studio: 'Studio' })[id] ?? id
 
-const owned = (tree: SidebarProjectTree[]) =>
-  Object.fromEntries(tree.map(node => [node.label, [...(node.sessionIds ?? [])].sort()]))
-
 describe('withGatewayProjectRows', () => {
   it('files every row another gateway owns: folder-less to Home, the rest under their folder on that gateway', () => {
     const tree = withGatewayProjectRows([home, localApp], rows, foreign, label)
 
-    expect(owned(tree)).toEqual({
-      Home: ['lab-loose', 'local-1'],
-      app: [],
-      'app · Homelab': ['lab-app'],
-      'app · Studio': ['studio-app'],
-      infra: ['studio-infra']
-    })
+    // Same-named projects keep the bare name (the overview groups them); placement is untouched.
+    expect(tree.map(node => [node.label, [...(node.sessionIds ?? [])].sort()])).toEqual([
+      ['Home', ['lab-loose', 'local-1']],
+      ['app', []],
+      ['app', ['lab-app']],
+      ['app', ['studio-app']],
+      ['infra', ['studio-infra']]
+    ])
     expect(tree.find(node => node.isNoProject)?.sessionCount).toBe(2)
+    const presentation = groupProjects(tree)
+    const apps = presentation.filter(group => group.key === 'name:app')
+    expect(apps).toHaveLength(1)
+    expect(apps[0].members.flatMap(member => member.sessionIds ?? []).sort()).toEqual(['lab-app', 'studio-app'])
+    expect(tree.some(node => node.label.includes(' · '))).toBe(false)
     expect(tree.find(node => node.label === 'infra')?.id).toBe(gatewayProjectId('studio', '/work/infra'))
     // Every row the tree was given lands in exactly one project.
     expect(tree.flatMap(node => node.sessionIds ?? []).sort()).toEqual(rows.map(row => row.id).sort())

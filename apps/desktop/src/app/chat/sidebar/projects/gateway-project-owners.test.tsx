@@ -89,8 +89,11 @@ describe('projects another gateway owns', () => {
       )
     }
 
-    fireEvent.click(screen.getByRole('button', { name: /new session in app · studio/i }))
-    fireEvent.click(screen.getByRole('button', { name: /new session in app$/i }))
+    // Same bare name on both machines now: tree order is local app, then the studio one.
+    const [local, studio] = screen.getAllByRole('button', { name: /new session in app$/i })
+
+    fireEvent.click(studio)
+    fireEvent.click(local)
 
     expect(onNewSession.mock.calls).toEqual([
       ['/code/app', { connectionId: 'studio', profile: 'research' }],

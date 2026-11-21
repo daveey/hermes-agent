@@ -1,0 +1,2855 @@
+{
+  "2+2|false|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|false|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "2+2|true|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|false|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+3|true|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|false|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+3|true|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|false|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+1|true|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|false|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 1-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "1+1+1+1|true|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 2-0", "MEMBER 3-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|false|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": ["/m1/App"]
+    }
+  },
+  "3+4|false|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": ["/m1/App"]
+    }
+  },
+  "3+4|false|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2", "MEMBER 1-3"],
+      "buttons": [],
+      "calls": ["/m1/App"]
+    }
+  },
+  "3+4|false|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|false|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|false|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|false|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|false|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|false|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|false|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|false|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|false|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2", "MEMBER 1-3"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2", "MEMBER 1-3"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2", "MEMBER 1-3"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2", "MEMBER 1-3"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2", "MEMBER 1-3"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2", "MEMBER 1-3"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1", "MEMBER 1-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "3+4|true|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|false|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 1-0"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": [],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|false|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2"],
+      "buttons": ["Show all 4 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3"],
+      "buttons": [],
+      "calls": ["/m0/App"]
+    }
+  },
+  "4+2|true|none|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|none|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|none|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0", "MEMBER 1-1"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|pinned|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|pinned|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|pinned|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|automated|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|automated|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|automated|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3", "MEMBER 1-0"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "4+2|true|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3"],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 0-3"],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|false|none|null": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 5 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 5 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": ["/m0/App", "/m1/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|none|partial": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 5 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": [],
+      "calls": ["/m0/App", "/m1/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|none|complete": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 5 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 1-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": ["/m0/App", "/m1/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|pinned|null": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 4 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 4 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": ["/m0/App", "/m1/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|pinned|partial": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 4 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": [],
+      "calls": ["/m0/App", "/m1/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|pinned|complete": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 4 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": ["/m0/App", "/m1/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|automated|null": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 4 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 4 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": ["/m0/App", "/m1/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|automated|partial": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 4 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": [],
+      "calls": ["/m0/App", "/m1/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|automated|complete": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2"
+      ],
+      "buttons": ["Show all 4 sessions", "Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": ["/m0/App", "/m1/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|count-only|null": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 2-0", "MEMBER 2-1", "MEMBER 2-2"],
+      "buttons": ["Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 2-0", "MEMBER 2-1", "MEMBER 2-2"],
+      "buttons": ["Show all 5 sessions", "Show all 5 sessions"],
+      "calls": ["/m0/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|count-only|partial": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 2-0", "MEMBER 2-1", "MEMBER 2-2"],
+      "buttons": ["Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 2-0", "MEMBER 2-1", "MEMBER 2-2"],
+      "buttons": [],
+      "calls": ["/m0/App", "/m2/App"]
+    }
+  },
+  "5+5+5|false|count-only|complete": {
+    "before": {
+      "rows": ["MEMBER 0-0", "MEMBER 0-1", "MEMBER 0-2", "MEMBER 2-0", "MEMBER 2-1", "MEMBER 2-2"],
+      "buttons": ["Show all 5 sessions", "Show all 5 sessions"],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": ["/m0/App", "/m2/App"]
+    }
+  },
+  "5+5+5|true|none|null": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 1-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 1-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|none|partial": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 1-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 1-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|none|complete": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 1-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 1-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|pinned|null": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|pinned|partial": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|pinned|complete": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|automated|null": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|automated|partial": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|automated|complete": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 1-0",
+        "MEMBER 1-1",
+        "MEMBER 1-2",
+        "MEMBER 1-3",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|count-only|null": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|count-only|partial": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  },
+  "5+5+5|true|count-only|complete": {
+    "before": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    },
+    "after": {
+      "rows": [
+        "MEMBER 0-0",
+        "MEMBER 0-1",
+        "MEMBER 0-2",
+        "MEMBER 0-3",
+        "MEMBER 0-4",
+        "MEMBER 2-0",
+        "MEMBER 2-1",
+        "MEMBER 2-2",
+        "MEMBER 2-3",
+        "MEMBER 2-4"
+      ],
+      "buttons": [],
+      "calls": []
+    }
+  }
+}

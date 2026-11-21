@@ -1,0 +1,1472 @@
+{
+  "outside-local/none/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1,
+        "ROW T1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1,
+        "ROW T1": 1,
+        "ROW T2": 1
+      },
+      "calls": ["/a/app"]
+    }
+  },
+  "outside-local/none/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1,
+        "ROW T1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1,
+        "ROW T1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    }
+  },
+  "outside-local/pinned/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1,
+        "ROW T2": 1
+      },
+      "calls": ["/a/app"]
+    }
+  },
+  "outside-local/pinned/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    }
+  },
+  "outside-local/automated/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {},
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {},
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": ["/a/app"]
+    }
+  },
+  "outside-local/automated/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {},
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {},
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    }
+  },
+  "outside-foreign/none/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW Z1": 1,
+        "ROW T1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW Z1": 1,
+        "ROW T1": 1,
+        "ROW T2": 1
+      },
+      "calls": ["[\"gateway-project\",\"studio\",\"/x/app\"]"]
+    }
+  },
+  "outside-foreign/none/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW Z1": 1,
+        "ROW T1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW Z1": 1,
+        "ROW T1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    }
+  },
+  "outside-foreign/pinned/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW Z1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW Z1": 1,
+        "ROW T2": 1
+      },
+      "calls": ["[\"gateway-project\",\"studio\",\"/x/app\"]"]
+    }
+  },
+  "outside-foreign/pinned/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW Z1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        },
+        "tools": {
+          "rows": {
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW Z1": 1,
+        "ROW T2": 1
+      },
+      "calls": []
+    }
+  },
+  "outside-foreign/automated/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW Z1": 1
+      },
+      "calls": ["[\"gateway-project\",\"studio\",\"/x/app\"]"]
+    }
+  },
+  "outside-foreign/automated/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    }
+  },
+  "nested-local/none/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"],
+            "ROW T": ["ROW T1", "ROW T2"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW T1": 1,
+        "ROW T2": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW T": ["ROW T1", "ROW T2"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW T1": 1,
+        "ROW T2": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": ["/a/app"]
+    }
+  },
+  "nested-local/none/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW T": ["ROW T1", "ROW T2"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW T1": 1,
+        "ROW T2": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW T": ["ROW T1", "ROW T2"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW T1": 1,
+        "ROW T2": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    }
+  },
+  "nested-local/pinned/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"],
+            "ROW T": ["ROW T2"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW T2": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW T": ["ROW T2"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW T2": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": ["/a/app"]
+    }
+  },
+  "nested-local/pinned/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW T": ["ROW T2"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW T2": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW T": ["ROW T2"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW T2": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    }
+  },
+  "nested-local/automated/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": ["/a/app"]
+    }
+  },
+  "nested-local/automated/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW B": ["ROW B1"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW B1": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    }
+  },
+  "nested-foreign/none/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"],
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW T1": 1,
+        "ROW T2": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"],
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW T1": 1,
+        "ROW T2": 1,
+        "ROW Z1": 1
+      },
+      "calls": ["[\"gateway-project\",\"studio\",\"/x/app\"]"]
+    }
+  },
+  "nested-foreign/none/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW T1": 1,
+        "ROW T2": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW T": ["ROW T1", "ROW T2"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW T1": 1,
+        "ROW T2": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    }
+  },
+  "nested-foreign/pinned/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"],
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW T2": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"],
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW T2": 1,
+        "ROW Z1": 1
+      },
+      "calls": ["[\"gateway-project\",\"studio\",\"/x/app\"]"]
+    }
+  },
+  "nested-foreign/pinned/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW T2": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"],
+            "ROW T": ["ROW T2"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW T1": 1,
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW T2": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    }
+  },
+  "nested-foreign/automated/false": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3"]
+          },
+          "buttons": ["Show all 4 sessions"]
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW Z1": 1
+      },
+      "calls": ["[\"gateway-project\",\"studio\",\"/x/app\"]"]
+    }
+  },
+  "nested-foreign/automated/true": {
+    "before": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    },
+    "after": {
+      "groups": {
+        "app": {
+          "rows": {
+            "ROW B": ["ROW B1"],
+            "ROW A": ["ROW A1", "ROW A2", "ROW A3", "ROW A4"]
+          },
+          "buttons": []
+        },
+        "other": {
+          "rows": {
+            "ROW Z": ["ROW Z1"]
+          },
+          "buttons": []
+        }
+      },
+      "counts": {
+        "ROW B1": 1,
+        "ROW A1": 1,
+        "ROW A2": 1,
+        "ROW A3": 1,
+        "ROW A4": 1,
+        "ROW Z1": 1
+      },
+      "calls": []
+    }
+  }
+}

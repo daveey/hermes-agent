@@ -1,0 +1,594 @@
+{
+  "same-path/false/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2", "ROW studio S1"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app\\\"]\"]": ["ROW studio S1", "ROW studio S2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW studio S1", "ROW studio S1", "ROW studio S2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2", "ROW studio S1"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app\\\"]\"]": ["ROW studio S1", "ROW studio S2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW studio S1", "ROW studio S1", "ROW studio S2", "ROW local C1"]
+    }
+  },
+  "same-path/false/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2", "ROW studio S1"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app\\\"]\"]": ["ROW studio S1", "ROW studio S2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW studio S1", "ROW studio S1", "ROW studio S2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2", "ROW studio S1"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app\\\"]\"]": ["ROW studio S1", "ROW studio S2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW studio S1", "ROW studio S1", "ROW studio S2", "ROW local C1"]
+    }
+  },
+  "same-path/true/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "same-path/true/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "same-id-path/false/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app\\\"]\"]": [],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app\\\"]\"]": [],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "same-id-path/false/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app\\\"]\"]": [],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app\\\"]\"]": [],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "same-id-path/true/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "same-id-path/true/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "same-id-different/false/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/x/app\\\"]\"]": [],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/x/app\\\"]\"]": [],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "same-id-different/false/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/x/app\\\"]\"]": [],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/x/app\\\"]\"]": [],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "same-id-different/true/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "same-id-different/true/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/b/app\"]": ["ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "deeper-fold/false/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app/deep\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": [
+        "ROW local B1",
+        "ROW local L1",
+        "ROW local A1",
+        "ROW local A2",
+        "ROW studio S1",
+        "ROW studio S2",
+        "ROW local C1"
+      ]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app/deep\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": [
+        "ROW local B1",
+        "ROW local L1",
+        "ROW local A1",
+        "ROW local A2",
+        "ROW studio S1",
+        "ROW studio S2",
+        "ROW local C1"
+      ]
+    }
+  },
+  "deeper-fold/false/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app/deep\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": [
+        "ROW local B1",
+        "ROW local L1",
+        "ROW local A1",
+        "ROW local A2",
+        "ROW studio S1",
+        "ROW studio S2",
+        "ROW local C1"
+      ]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app/deep\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": [
+        "ROW local B1",
+        "ROW local L1",
+        "ROW local A1",
+        "ROW local A2",
+        "ROW studio S1",
+        "ROW studio S2",
+        "ROW local C1"
+      ]
+    }
+  },
+  "deeper-fold/true/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local B1", "ROW local L1", "ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local B1", "ROW local L1", "ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "deeper-fold/true/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local B1", "ROW local L1", "ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local B1", "ROW local L1", "ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "deeper-unfolded/false/false": {
+    "before": {
+      "blocks": {
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/zed/deep\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[null,\"/b/zed\"]": ["ROW local L1", "ROW local A1", "ROW local A2"]
+      },
+      "all": ["ROW studio S1", "ROW studio S2", "ROW local C1", "ROW local L1", "ROW local A1", "ROW local A2"]
+    },
+    "after": {
+      "blocks": {
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/zed/deep\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[null,\"/b/zed\"]": ["ROW local L1", "ROW local A1", "ROW local A2"]
+      },
+      "all": ["ROW studio S1", "ROW studio S2", "ROW local C1", "ROW local L1", "ROW local A1", "ROW local A2"]
+    }
+  },
+  "deeper-unfolded/false/true": {
+    "before": {
+      "blocks": {
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/zed/deep\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[null,\"/b/zed\"]": ["ROW local L1", "ROW local A1", "ROW local A2"]
+      },
+      "all": ["ROW studio S1", "ROW studio S2", "ROW local C1", "ROW local L1", "ROW local A1", "ROW local A2"]
+    },
+    "after": {
+      "blocks": {
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/zed/deep\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[null,\"/b/zed\"]": ["ROW local L1", "ROW local A1", "ROW local A2"]
+      },
+      "all": ["ROW studio S1", "ROW studio S2", "ROW local C1", "ROW local L1", "ROW local A1", "ROW local A2"]
+    }
+  },
+  "deeper-unfolded/true/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[null,\"/b/zed\"]": ["ROW local L1", "ROW local A1", "ROW local A2"]
+      },
+      "all": ["ROW local C1", "ROW local L1", "ROW local A1", "ROW local A2"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[null,\"/b/zed\"]": ["ROW local L1", "ROW local A1", "ROW local A2"]
+      },
+      "all": ["ROW local C1", "ROW local L1", "ROW local A1", "ROW local A2"]
+    }
+  },
+  "deeper-unfolded/true/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[null,\"/b/zed\"]": ["ROW local L1", "ROW local A1", "ROW local A2"]
+      },
+      "all": ["ROW local C1", "ROW local L1", "ROW local A1", "ROW local A2"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[null,\"/b/zed\"]": ["ROW local L1", "ROW local A1", "ROW local A2"]
+      },
+      "all": ["ROW local C1", "ROW local L1", "ROW local A1", "ROW local A2"]
+    }
+  },
+  "worktree/false/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app/.worktrees/foo\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": [
+        "ROW local B1",
+        "ROW local L1",
+        "ROW local A1",
+        "ROW local A2",
+        "ROW studio S1",
+        "ROW studio S2",
+        "ROW local C1"
+      ]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app/.worktrees/foo\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": [
+        "ROW local B1",
+        "ROW local L1",
+        "ROW local A1",
+        "ROW local A2",
+        "ROW studio S1",
+        "ROW studio S2",
+        "ROW local C1"
+      ]
+    }
+  },
+  "worktree/false/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app/.worktrees/foo\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": [
+        "ROW local B1",
+        "ROW local L1",
+        "ROW local A1",
+        "ROW local A2",
+        "ROW studio S1",
+        "ROW studio S2",
+        "ROW local C1"
+      ]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/b/app/.worktrees/foo\\\"]\"]": [
+          "ROW studio S1",
+          "ROW studio S2"
+        ],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": [
+        "ROW local B1",
+        "ROW local L1",
+        "ROW local A1",
+        "ROW local A2",
+        "ROW studio S1",
+        "ROW studio S2",
+        "ROW local C1"
+      ]
+    }
+  },
+  "worktree/true/false": {
+    "before": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local B1", "ROW local L1", "ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local B1", "ROW local L1", "ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "worktree/true/true": {
+    "before": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local B1", "ROW local L1", "ROW local A1", "ROW local A2", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"/a/app\"]": ["ROW local B1"],
+        "[null,\"/b/app\"]": ["ROW local L1", "ROW local A1", "ROW local A2"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local B1", "ROW local L1", "ROW local A1", "ROW local A2", "ROW local C1"]
+    }
+  },
+  "foreign-only/false/false": {
+    "before": {
+      "blocks": {
+        "[null,\"__no_project__\"]": ["ROW local L1"],
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/x/zeta\\\"]\"]": ["ROW studio S1", "ROW studio S2"]
+      },
+      "all": ["ROW local L1", "ROW local C1", "ROW studio S1", "ROW studio S2"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"__no_project__\"]": ["ROW local L1"],
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/x/zeta\\\"]\"]": ["ROW studio S1", "ROW studio S2"]
+      },
+      "all": ["ROW local L1", "ROW local C1", "ROW studio S1", "ROW studio S2"]
+    }
+  },
+  "foreign-only/false/true": {
+    "before": {
+      "blocks": {
+        "[null,\"__no_project__\"]": ["ROW local L1"],
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/x/zeta\\\"]\"]": ["ROW studio S1", "ROW studio S2"]
+      },
+      "all": ["ROW local L1", "ROW local C1", "ROW studio S1", "ROW studio S2"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"__no_project__\"]": ["ROW local L1"],
+        "[null,\"/c/Other\"]": ["ROW local C1"],
+        "[\"studio\",\"[\\\"gateway-project\\\",\\\"studio\\\",\\\"/x/zeta\\\"]\"]": ["ROW studio S1", "ROW studio S2"]
+      },
+      "all": ["ROW local L1", "ROW local C1", "ROW studio S1", "ROW studio S2"]
+    }
+  },
+  "foreign-only/true/false": {
+    "before": {
+      "blocks": {
+        "[null,\"__no_project__\"]": ["ROW local L1"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local L1", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"__no_project__\"]": ["ROW local L1"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local L1", "ROW local C1"]
+    }
+  },
+  "foreign-only/true/true": {
+    "before": {
+      "blocks": {
+        "[null,\"__no_project__\"]": ["ROW local L1"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local L1", "ROW local C1"]
+    },
+    "after": {
+      "blocks": {
+        "[null,\"__no_project__\"]": ["ROW local L1"],
+        "[null,\"/c/Other\"]": ["ROW local C1"]
+      },
+      "all": ["ROW local L1", "ROW local C1"]
+    }
+  }
+}

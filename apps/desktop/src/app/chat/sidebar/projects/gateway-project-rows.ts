@@ -96,14 +96,14 @@ function gatewayProjectNode(connectionId: string, path: string, rows: SessionInf
  * The project tree is served by ONE backend (the window's gateway), so it only knows that gateway's
  * rows. Rows another gateway owns (All profiles across gateways) would otherwise match no project and
  * vanish from Project grouping. File them the way that backend files its own: a folder-less row goes
- * to Home, a row with a folder to a project for that folder on its gateway. A project name two
- * sources share gets the gateway in its label.
+ * to Home, a row with a folder to a project for that folder on its gateway. Same-named projects keep
+ * the bare name: the overview presents them as one group (`presentation-groups.ts`).
  */
 export function withGatewayProjectRows(
   tree: SidebarProjectTree[],
   live: SessionInfo[],
   foreignOwner: (session: SessionInfo) => null | string,
-  gatewayLabel: (connectionId: string) => string
+  _gatewayLabel?: (connectionId: string) => string
 ): SidebarProjectTree[] {
   const home: SessionInfo[] = []
   const byFolder = new Map<string, { connectionId: string; path: string; rows: SessionInfo[] }>()
@@ -157,22 +157,7 @@ export function withGatewayProjectRows(
     gatewayProjectNode(connectionId, path, rows)
   )
 
-  const labelCount = new Map<string, number>()
-
-  for (const node of [...next, ...added]) {
-    if (!node.isNoProject) {
-      labelCount.set(node.label, (labelCount.get(node.label) ?? 0) + 1)
-    }
-  }
-
-  return [
-    ...next,
-    ...added.map(node =>
-      (labelCount.get(node.label) ?? 0) > 1
-        ? { ...node, label: `${node.label} · ${gatewayLabel(node.connectionId!)}` }
-        : node
-    )
-  ]
+  return [...next, ...added]
 }
 
 /** The route a new chat in `project` is created on: the owning gateway profile of a project that

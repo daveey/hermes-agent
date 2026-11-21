@@ -39,12 +39,12 @@ import { GatewayProfileGroups } from './gateway-groups'
 import { mergeVisibleReorder, orderRowsWithinGroups, reorderableRowIds } from './order'
 import {
   EnteredProjectContent,
-  ProjectOverviewRow,
   type SidebarProjectTree,
   type SidebarSessionGroup,
   SidebarWorkspaceGroup,
   type SidebarWorkspaceTree
 } from './projects'
+import { PresentationOverviewList } from './projects/presentation-overview-list'
 import { WorkspaceAddButton } from './projects/workspace-header'
 import { ReorderableList, useSortableBindings } from './reorderable-list'
 import { SidebarSessionSkeletons } from './section-states'
@@ -147,12 +147,16 @@ interface SidebarSessionsSectionProps {
   // The exclusion the previews were built with (pins, filter misses, removed
   // ids) plus how many of each project's `sessionCount` it hides — applied
   // again when a row hydrates its full lanes on "Show all".
-  projectOverviewHidden?: { isHidden: (session: SessionInfo) => boolean; counts: Record<string, number> }
+  projectOverviewHidden?: {
+    isHidden: (session: SessionInfo) => boolean
+    counts: Record<string, number>
+  }
   // True while the backend project tree is loading (overview skeleton).
   projectsLoading?: boolean
   onEnterProject?: (id: string) => void
   // The entered project's flattened content: main-checkout sessions render
   // directly (no redundant repo/branch header); only linked worktrees nest.
+  projectMemberBody?: (renderRows: (rows: SessionInfo[]) => React.ReactNode) => React.ReactNode
   projectContent?: SidebarProjectTree
   // Live git lanes (`git worktree list`) for repos in the entered project —
   // a VISUAL enhancer only (empty lanes), never session membership.
@@ -231,6 +235,7 @@ export function SidebarSessionsSection({
   projectsLoading = false,
   onEnterProject,
   projectContent,
+  projectMemberBody,
   projectRepoWorktrees,
   liveSessions,
   removedSessionIds,
@@ -265,7 +270,7 @@ export function SidebarSessionsSection({
   // Declared repos are content even before their first session: each repo header owns the action that starts
   // a session in that folder. Lanes likewise survive filtering and must still render.
   const hasProjectContent = Boolean(
-    projectContent && (projectContent.sessionCount > 0 || projectContent.repos.length > 0)
+    projectMemberBody || (projectContent && (projectContent.sessionCount > 0 || projectContent.repos.length > 0))
   )
 
   const showEmptyState =
@@ -501,6 +506,7 @@ export function SidebarSessionsSection({
     !groups?.length &&
     !projectOverview?.length &&
     !projectContent &&
+    !projectMemberBody &&
     sessions.length >= VIRTUALIZE_THRESHOLD
 
   useEffect(() => {
@@ -512,7 +518,7 @@ export function SidebarSessionsSection({
             row.kind === 'session' && row.entry.session.message_count > 0 ? [row.entry.session.id] : []
           )
         : [],
-      rows: sectionOpen ? visibleRows.flatMap(row => row.kind === 'session' ? [row.entry.session] : []) : [],
+      rows: sectionOpen ? visibleRows.flatMap(row => (row.kind === 'session' ? [row.entry.session] : [])) : [],
       virtualized: flatVirtualized
     })
   }, [flatVirtualized, orderKey, sectionOpen, visibleRows])
@@ -524,20 +530,27 @@ export function SidebarSessionsSection({
   // flashing the flat session list until the overview/content/groups resolve. A
   // background refresh keeps the prior tree, so this only fires when empty.
   const showProjectsSkeleton =
-    projectsLoading && !hasProjectOverview && !hasProjectContent && !projectContent && !groups?.length
+    projectsLoading &&
+    !hasProjectOverview &&
+    !hasProjectContent &&
+    !projectContent &&
+    !projectMemberBody &&
+    !groups?.length
 
   let inner: React.ReactNode
 
   if (showProjectsSkeleton) {
     inner = <SidebarSessionSkeletons />
-  } else if (projectContent) {
+  } else if (projectContent || projectMemberBody) {
     // Entered a project: the back row is always present, then either the
     // (overlay-aware) content or a clean empty state — never a bare spinner or a
     // blank pane while lanes hydrate.
     inner = (
       <>
         {projectBackRow}
-        {hasProjectContent ? (
+        {projectMemberBody ? (
+          projectMemberBody(renderRowsDated)
+        ) : hasProjectContent && projectContent ? (
           <EnteredProjectContent
             liveSessions={liveSessions}
             onNewSession={onNewSessionInWorkspace}
@@ -555,51 +568,21 @@ export function SidebarSessionsSection({
   } else if (showEmptyState) {
     inner = emptyState
   } else if (projectOverview?.length) {
-    // The model is already ordered (Home leads; then the default sort groups
-    // explicit-before-auto, with a manual drag-order winning when present).
-    // Render in that order and make rows drag-to-reorder when a handler is
-    // wired — Home stays outside the sortable list, it's a fixture.
-    const home = projectOverview[0]?.isNoProject ? projectOverview[0] : undefined
-    const sortableProjects = home ? projectOverview.slice(1) : projectOverview
-    const projectsDraggable = sortableProjects.length > 1 && !!onReorderProjects
-    const Row = projectsDraggable ? SortableProjectOverviewRow : ProjectOverviewRow
-
-    const projectRow = (project: SidebarProjectTree, Component: typeof ProjectOverviewRow) => (
-      <Component
+    inner = (
+      <PresentationOverviewList
         activeProjectId={activeProjectId}
-        hiddenSessionCount={projectOverviewHidden?.counts[project.id]}
-        isSessionHidden={projectOverviewHidden?.isHidden}
-        key={project.id}
+        hidden={projectOverviewHidden}
         onEnter={onEnterProject}
         onNewSession={onNewSessionInWorkspace}
         onNewSessionSplit={onNewSessionSplit}
-        // Keyed by project ID to match the producer: `overlayLivePreviews`
-        // writes `out[node.id]` (workspace-groups.ts). A path key made Home
-        // (path: null) and any id/path-divergent project fall back to stale
-        // preview rows instead of the live overlay.
-        previewSessions={projectOverviewPreviews?.[project.id]}
-        project={project}
-        renderRows={showAllSessions ? items => renderPreviewRows(items, project.id) : renderRows}
+        onReorder={onReorderProjects}
+        previews={projectOverviewPreviews}
+        projects={projectOverview}
+        renderPreviewRows={renderPreviewRows}
+        renderRows={renderRows}
+        sensors={dndSensors}
+        showAllSessions={showAllSessions}
       />
-    )
-
-    const rows = sortableProjects.map(project => projectRow(project, Row))
-
-    inner = (
-      <>
-        {home && projectRow(home, ProjectOverviewRow)}
-        {projectsDraggable && onReorderProjects ? (
-          <ReorderableList
-            ids={sortableProjects.map(project => project.id)}
-            onReorder={onReorderProjects}
-            sensors={dndSensors}
-          >
-            {rows}
-          </ReorderableList>
-        ) : (
-          rows
-        )}
-      </>
     )
   } else if (groups?.length && groups.every(group => group.mode === 'profile' && group.profile)) {
     inner = (
@@ -710,8 +693,4 @@ interface SortableSessionRowProps {
 
 function SortableSidebarSessionRow(props: SortableSessionRowProps) {
   return <SidebarSessionRow {...props} {...useSortableBindings(props.session.id)} />
-}
-
-function SortableProjectOverviewRow(props: React.ComponentProps<typeof ProjectOverviewRow>) {
-  return <ProjectOverviewRow {...props} {...useSortableBindings(props.project.id)} />
 }

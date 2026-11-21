@@ -1,0 +1,650 @@
+{
+  "foreign-count-only-automated-complete": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "foreign-count-only-automated-null": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "foreign-count-only-automated-partial": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "foreign-count-only-none-complete": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "foreign-count-only-none-null": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "foreign-count-only-none-partial": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "foreign-count-only-pinned-complete": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "foreign-count-only-pinned-null": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "foreign-count-only-pinned-partial": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "foreign-preview-automated-complete": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R4"],
+      "calls": ["[\"gateway-project\",\"studio\",\"/w/App\"]"]
+    }
+  },
+  "foreign-preview-automated-null": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["[\"gateway-project\",\"studio\",\"/w/App\"]"]
+    }
+  },
+  "foreign-preview-automated-partial": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["[\"gateway-project\",\"studio\",\"/w/App\"]"]
+    }
+  },
+  "foreign-preview-none-complete": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R4", "ROW R5"],
+      "calls": ["[\"gateway-project\",\"studio\",\"/w/App\"]"]
+    }
+  },
+  "foreign-preview-none-null": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["[\"gateway-project\",\"studio\",\"/w/App\"]"]
+    }
+  },
+  "foreign-preview-none-partial": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["[\"gateway-project\",\"studio\",\"/w/App\"]"]
+    }
+  },
+  "foreign-preview-pinned-complete": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R5"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R4", "ROW R5"],
+      "calls": ["[\"gateway-project\",\"studio\",\"/w/App\"]"]
+    }
+  },
+  "foreign-preview-pinned-null": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R5"],
+      "calls": []
+    },
+    "after": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R5"],
+      "calls": ["[\"gateway-project\",\"studio\",\"/w/App\"]"]
+    }
+  },
+  "foreign-preview-pinned-partial": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R5"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R5"],
+      "calls": ["[\"gateway-project\",\"studio\",\"/w/App\"]"]
+    }
+  },
+  "gw-count-only-automated-complete": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "gw-count-only-automated-null": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "gw-count-only-automated-partial": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "gw-count-only-none-complete": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "gw-count-only-none-null": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "gw-count-only-none-partial": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "gw-count-only-pinned-complete": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "gw-count-only-pinned-null": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "gw-count-only-pinned-partial": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "gw-preview-automated-complete": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R4"],
+      "calls": ["gw:studio:/w/App"]
+    }
+  },
+  "gw-preview-automated-null": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["gw:studio:/w/App"]
+    }
+  },
+  "gw-preview-automated-partial": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["gw:studio:/w/App"]
+    }
+  },
+  "gw-preview-none-complete": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R4", "ROW R5"],
+      "calls": ["gw:studio:/w/App"]
+    }
+  },
+  "gw-preview-none-null": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["gw:studio:/w/App"]
+    }
+  },
+  "gw-preview-none-partial": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["gw:studio:/w/App"]
+    }
+  },
+  "gw-preview-pinned-complete": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R4"],
+      "calls": ["gw:studio:/w/App"]
+    }
+  },
+  "gw-preview-pinned-null": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["gw:studio:/w/App"]
+    }
+  },
+  "gw-preview-pinned-partial": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["gw:studio:/w/App"]
+    }
+  },
+  "local-count-only-automated-complete": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "local-count-only-automated-null": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "local-count-only-automated-partial": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "local-count-only-none-complete": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "local-count-only-none-null": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "local-count-only-none-partial": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "local-count-only-pinned-complete": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "local-count-only-pinned-null": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "local-count-only-pinned-partial": {
+    "before": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1"],
+      "calls": []
+    }
+  },
+  "local-preview-automated-complete": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R4"],
+      "calls": ["/w/App"]
+    }
+  },
+  "local-preview-automated-null": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["/w/App"]
+    }
+  },
+  "local-preview-automated-partial": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["/w/App"]
+    }
+  },
+  "local-preview-none-complete": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R4", "ROW R5"],
+      "calls": ["/w/App"]
+    }
+  },
+  "local-preview-none-null": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["/w/App"]
+    }
+  },
+  "local-preview-none-partial": {
+    "before": {
+      "offers": ["Show all 5 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3"],
+      "calls": ["/w/App"]
+    }
+  },
+  "local-preview-pinned-complete": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R5"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R4", "ROW R5"],
+      "calls": ["/w/App"]
+    }
+  },
+  "local-preview-pinned-null": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R5"],
+      "calls": []
+    },
+    "after": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R5"],
+      "calls": ["/w/App"]
+    }
+  },
+  "local-preview-pinned-partial": {
+    "before": {
+      "offers": ["Show all 4 sessions"],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R5"],
+      "calls": []
+    },
+    "after": {
+      "offers": [],
+      "rows": ["ROW C1", "ROW R1", "ROW R2", "ROW R3", "ROW R5"],
+      "calls": ["/w/App"]
+    }
+  }
+}

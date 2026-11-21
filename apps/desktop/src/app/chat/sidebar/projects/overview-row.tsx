@@ -83,6 +83,9 @@ export function ProjectBackRow({ label, onClick }: { label: string; onClick: () 
 
 interface ProjectOverviewRowProps {
   project: SidebarProjectTree
+  /** Display-only, set by a presentation group on its members: the machine heading shown in place of
+   *  the project name, and whether the header's "+" and menu replace this row's own. */
+  presentation?: { heading: React.ReactNode; hideActions?: boolean }
   onEnter?: (id: string) => void
   /** `owner` is set for a project another gateway owns: the session starts there. */
   onNewSession?: (path: null | string, owner?: AgentProfileRoute) => void
@@ -106,8 +109,26 @@ interface ProjectOverviewRowProps {
   style?: React.CSSProperties
 }
 
+function overviewPresentation(project: SidebarProjectTree, presentation: ProjectOverviewRowProps['presentation']) {
+  return { label: presentation?.heading ?? project.label, menu: !project.isNoProject && !presentation?.hideActions }
+}
+
+function overviewHandlers(
+  project: SidebarProjectTree,
+  presentation: ProjectOverviewRowProps['presentation'],
+  onNewSession: ProjectOverviewRowProps['onNewSession'],
+  onNewSessionSplit: ProjectOverviewRowProps['onNewSessionSplit']
+) {
+  return ownedNewSessionHandlers(
+    project,
+    presentation?.hideActions ? undefined : onNewSession,
+    presentation?.hideActions ? undefined : onNewSessionSplit
+  )
+}
+
 export function ProjectOverviewRow({
   project,
+  presentation,
   onEnter,
   onNewSession: onNewSessionIn,
   onNewSessionSplit: onNewSessionSplitIn,
@@ -125,7 +146,15 @@ export function ProjectOverviewRow({
   const { t } = useI18n()
   const s = t.sidebar
   const isActive = project.id === activeProjectId
-  const { onNewSession, onNewSessionSplit } = ownedNewSessionHandlers(project, onNewSessionIn, onNewSessionSplitIn)
+
+  const { onNewSession, onNewSessionSplit } = overviewHandlers(
+    project,
+    presentation,
+    onNewSessionIn,
+    onNewSessionSplitIn
+  )
+
+  const display = overviewPresentation(project, presentation)
   const [open, toggleOpen] = useWorkspaceNodeOpen(project.id)
   // The appearance popover anchors here (the full row) so it opens flush with
   // the sidebar's content edge regardless of which side the sidebar is on.
@@ -204,7 +233,7 @@ export function ProjectOverviewRow({
       labelClassName={cn('hover:text-foreground hover:underline', isActive && 'text-foreground')}
       onClick={() => onEnter?.(project.id)}
     >
-      {project.label}
+      {display.label}
     </SidebarRowLink>
   )
 
@@ -216,7 +245,7 @@ export function ProjectOverviewRow({
               delete — but it still starts sessions: a null path is the "no
               folder" chat. New session sits outermost: it's the one you reach
               for. */}
-          {!project.isNoProject && <ProjectMenu anchorRef={rowRef} isActive={isActive} project={project} />}
+          {display.menu && <ProjectMenu anchorRef={rowRef} isActive={isActive} project={project} />}
           {onNewSession && (
             <WorkspaceAddButton
               label={s.newSessionIn(project.label)}
@@ -297,7 +326,7 @@ export function ProjectOverviewRow({
       style={style}
     >
       {/* Home has no per-project actions, so it gets no right-click menu. */}
-      {project.isNoProject ? (
+      {!display.menu ? (
         shell
       ) : (
         <ProjectContextMenu isActive={isActive} project={project}>

@@ -63,7 +63,6 @@ import {
   type SidebarRowMeta,
   toggleSidebarPrFilter,
   toggleSidebarProfileFilter,
-  toggleSidebarProjectFilter,
   toggleSidebarRowMeta,
   toggleSidebarStatusFilter
 } from '@/store/layout'
@@ -81,6 +80,9 @@ import type { PullRequestBucket } from '@/store/pull-requests'
 import { $unreadFinishedSessionIds, markAllSessionsRead } from '@/store/session'
 import type { SessionStatusBucket } from '@/store/session-dot-state'
 import { $sessionsHaveCost } from '@/store/sidebar-archive'
+
+import { groupProjects, type ProjectPresentationGroup } from './projects/presentation-groups'
+import { presentationNavigation } from './projects/presentation-navigation'
 
 interface Option<T extends string = string> {
   /** A status dot's full className, from the row's own vocabulary. */
@@ -207,7 +209,13 @@ function OptionRadio({ option }: { option: Option }) {
   )
 }
 
-export function SidebarFilterMenu({ className }: { className?: string }) {
+export function SidebarFilterMenu({
+  className,
+  projectGroups
+}: {
+  className?: string
+  projectGroups?: ProjectPresentationGroup[]
+}) {
   const { t } = useI18n()
   const f = t.sidebar.filter
 
@@ -271,6 +279,7 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
   const nodeOpen = useStore($sidebarWorkspaceNodeOpen)
   const listGroupIds = useStore($sidebarListGroupIds)
   const projects = useStore($projectTree)
+  const groups = projectGroups ?? groupProjects(projects)
   const hasCost = useStore($sessionsHaveCost)
   const unreadIds = useStore($unreadFinishedSessionIds)
   // PR state comes from `gh` on whichever machine holds the checkout — Electron
@@ -485,20 +494,20 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
             </DropdownMenuSubContent>
           </DropdownMenuSub>
 
-          {projects.length > 1 && (
+          {groups.length > 1 && (
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>{f.project}</DropdownMenuSubTrigger>
               <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
-                {projects.map(project => (
+                {groups.map(group => (
                   <OptionCheckbox
-                    checked={projectFilter.includes(project.id)}
-                    key={project.id}
-                    onCheck={() => toggleSidebarProjectFilter(project.id)}
+                    checked={group.memberIds.some(id => projectFilter.includes(id))}
+                    key={group.primary.id}
+                    onCheck={() => $sidebarProjectFilter.set(presentationNavigation.toggleFilter(projectFilter, group))}
                     option={{
-                      icon: project.isNoProject ? 'home' : 'root-folder',
-                      id: project.id,
+                      icon: group.primary.isNoProject ? 'home' : 'root-folder',
+                      id: group.primary.id,
                       // Home is synthetic, so its label is ours to translate.
-                      label: project.isNoProject ? t.sidebar.projects.home : project.label
+                      label: group.primary.isNoProject ? t.sidebar.projects.home : group.primary.label
                     }}
                   />
                 ))}

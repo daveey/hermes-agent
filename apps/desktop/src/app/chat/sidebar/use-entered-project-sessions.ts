@@ -11,10 +11,12 @@ export function useEnteredProjectSessions(
   projectId: string | undefined,
   ready: boolean,
   treeRevision: readonly SidebarProjectTree[],
-  scope: string
+  scope: string,
+  options?: { supersedable: false }
 ) {
   const [project, setProject] = useState<SidebarProjectTree | null>(null)
   const [failed, setFailed] = useState(false)
+  const supersedable = options?.supersedable
   const [loading, setLoading] = useState(false)
   const [retryToken, setRetryToken] = useState(0)
 
@@ -40,7 +42,11 @@ export function useEnteredProjectSessions(
     }
 
     setLoading(true)
-    void fetchProjectSessions(projectId)
+    const request =
+      supersedable === false
+        ? fetchProjectSessions(projectId, { supersedable: false })
+        : fetchProjectSessions(projectId)
+    void request
       .then(next => {
         if (!cancelled) {
           // An unchanged answer keeps its reference, so the lanes don't rebuild.
@@ -61,9 +67,14 @@ export function useEnteredProjectSessions(
     return () => {
       cancelled = true
     }
-  }, [projectId, ready, enteredNode, scope, retryToken])
+  }, [projectId, ready, enteredNode, scope, retryToken, supersedable])
 
   // A background refetch keeps painting the rows it has; only a drill-in with
   // nothing loaded yet reports loading (the sidebar shows skeletons for it).
-  return { project, failed, loading: loading && !project, retry: () => setRetryToken(token => token + 1) }
+  return {
+    project,
+    failed,
+    loading: loading && !project,
+    retry: () => setRetryToken(token => token + 1)
+  }
 }
