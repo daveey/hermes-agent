@@ -69,7 +69,8 @@ def test_real_human_questions_and_clock_waits_keep_their_kind(board, kind, reaso
         "evidence": "Release policy reserves target selection and credential recovery to the owner.",
     } if human else None
     assert kb.block_task(conn, tid, kind=kind, reason=reason, clock_only=kind == "time",
-                         human_request=request)
+                         human_request=request,
+                         awaiting={"kind": "clock", "why": "the release window"} if kind == "time" else None)
     task = kb.get_task(conn, tid)
     assert bool(activity._read_counts(path, activity.BLOCKED_STATUSES)) == human
     replica = {"status": task.status, "block_kind": task.block_kind,

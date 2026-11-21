@@ -91,7 +91,7 @@ def test_failed_park_does_not_publish_notice(board, operation):
     from hermes_cli import kanban_db_connect as kbc
     tid = helpers._chat_card(board)
     with kbc.connect() as conn:
-        args = dict(reason=REASON, clock_only=True, expected_run_id=999)
+        args = dict(reason=REASON, clock_only=True, expected_run_id=999, awaiting={'kind': 'clock', 'why': 'test release window'})
         if operation == 'block':
             args['kind'] = 'time'
         assert not getattr(board, operation + '_task')(conn, tid, **args)
@@ -112,7 +112,7 @@ def test_notice_failure_rolls_back_park_and_comment(board, monkeypatch, operatio
 
     monkeypatch.setattr(board, '_append_event', fail_notice)
     with kbc.connect() as conn:
-        args = dict(reason=REASON, clock_only=True)
+        args = dict(reason=REASON, clock_only=True, awaiting={'kind': 'clock', 'why': 'test release window'})
         if operation == 'block':
             args['kind'] = 'time'
         with pytest.raises(RuntimeError, match='injected notice'):
