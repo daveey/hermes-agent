@@ -553,6 +553,7 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
     (:data:`_HOST_GROUPS`), naming the oldest card. A card an open repair about this host already lists under
     another key gets no second one (:func:`_open_coverage`). Returns the covering repair ids."""
     now_ms = _now_ms(now)
+    from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
     ids: list[str] = []
     groups: dict[str, list[dict[str, Any]]] = {}
     covered = _open_coverage(conn, own)
@@ -580,37 +581,43 @@ def file_repairs(conn, own: str, cards: list[dict[str, Any]], *, now: Optional[f
         if reason == "guard_held":
             ids.append(_create(
                 conn, key=f"{KEY_PREFIX}{own}:{card['id']}:", tenant=card["tenant"], own=own, now_ms=now_ms,
-                title=(f"Pickup stalled: {card['id']} pinned to machine:{own}, ready {waited} min, held by a "
-                       f"respawn guard ({card['skip'].get('detail') or 'guard_held'})"),
-                body=(f"Card {card['id']} ({card['title']}) has been ready on the Board, pinned to machine:{own}, "
+                title=forwarded_title(
+                    f"Pickup stalled: {card['id']} pinned to machine:{own}, ready {waited} min, held by a "
+                    f"respawn guard ({card['skip'].get('detail') or 'guard_held'})",
+                    f"Pickup stalled: {card['id']} held by a respawn guard"),
+                body=(f"Card {card['id']} has been ready on the Board, pinned to machine:{own}, "
                       f"for {waited} min (threshold {stall_seconds()} s). {own} is not on a registry hold: the "
                       f"card's Board history shows a dispatcher respawn guard holding it, and that hold lifts when "
                       f"the guard does. Check whether the guard named below is still right (an open PR, a quota "
                       f"reset clock, a shared blocker) rather than the machine.\n\nLast pickup skip recorded on "
-                      f"{own}: {describe(card['skip'])}.")))
+                      f"{own} (historical evidence):\n{forwarded_text(describe(card['skip']))}\n"
+                      f"Source title (historical evidence):\n{forwarded_text(card['title'])}")))
             continue
         ids.append(_create(
             conn, key=f"{KEY_PREFIX}{own}:{card['id']}:", tenant=card["tenant"], own=own, now_ms=now_ms,
             title=f"Pickup stalled: {card['id']} pinned to machine:{own}, ready {waited} min, not imported ({reason})",
-            body=(f"Card {card['id']} ({card['title']}) has been ready on the Board, pinned to machine:{own}, "
+            body=(f"Card {card['id']} has been ready on the Board, pinned to machine:{own}, "
                   f"for {waited} min (threshold {stall_seconds()} s) and {own} has not imported or claimed "
-                  f"it.\n\nLast pickup skip recorded on {own}: {describe(card['skip'])}.")))
+                  f"it.\n\nLast pickup skip recorded on {own} (historical evidence):\n"
+                  f"{forwarded_text(describe(card['skip']))}\n"
+                  f"Source title (historical evidence):\n{forwarded_text(card['title'])}")))
     for group, members in groups.items():
         slug, title, why = _HOST_GROUPS[group]
         if group == "hold" and (_hold_expected(own, now_ms) or _hold_lifted(own)):
             continue
         oldest = members[0]
         # The watcher deduplicates bodies: age alone is not a new observation.
-        listed = "\n".join(f"- {c['id']} ({c['title']}), ready since {_stamp(c['since_ms'])}, "
-                           f"last skip {describe(c['skip'])}" for c in members[:20])
+        listed = "\n".join(forwarded_text(f"- {c['id']} ({c['title']}), ready since {_stamp(c['since_ms'])}, "
+                           f"last skip {describe(c['skip'])}") for c in members[:20])
         # Below ordinary work: a host-wide repair must not take the slot the cards it reports on are waiting for.
         ids.append(_create(
             conn, key=f"{KEY_PREFIX}{own}:{slug}:", tenant=oldest["tenant"], own=own, now_ms=now_ms, priority=-1,
             title=(title.format(own=own) + f": oldest {oldest['id']} waiting "
                    f"{_minutes(oldest['since_ms'], now_ms)} min ({len(members)} pinned card(s))"),
             body=(f"{len(members)} card(s) pinned to machine:{own} have waited past {stall_seconds()} s, and "
-                  f"{why.format(own=own)}\n\nOldest: {oldest['id']} ({oldest['title']}), last skip "
-                  f"{describe(oldest['skip'])}.\n\n{_registry_line(own)}\n\nPickup skips recorded on {own}:\n\n"
+                  f"{why.format(own=own)}\n\nOldest: {oldest['id']}\nHistorical source title and skip:\n"
+                  f"{forwarded_text(oldest['title'])}\n{forwarded_text(describe(oldest['skip']))}\n\n"
+                  f"{forwarded_text(_registry_line(own))}\n\nPickup skips recorded on {own}:\n\n"
                   f"{listed}")))
         _refresh_targets(conn, ids[-1], members, now_ms)
     return ids

@@ -241,6 +241,7 @@ def validate_repair_completion(conn, task_id, *, observation=None):
 def route(conn, task, payload):
     """Create at most one repair card per original, atomically with its wait edge."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
 
     key = _SUPERVISOR_PREFIX + task.id
     needs = execution_authority_need(task.id, payload.get('reason'))
@@ -270,9 +271,10 @@ def route(conn, task, payload):
     )
     kb._append_event(conn, task.id, 'assigned', {'assignee': name, 'from': task.assignee})
     supervisor_id = kb.create_task(
-        conn, title=f'Repair assignment: {task.title}',
+        conn, title=forwarded_title(f'Repair assignment: {task.title}', f'Repair assignment: {task.id}'),
         body=(f'Task {task.id} cannot run under profile {task.assignee!r}. '
-              f'Block reason: {payload.get("reason") or "assignment mismatch"}\n'
+              f'Source title (historical evidence):\n{forwarded_text(task.title)}\n'
+              f'Block reason (historical evidence):\n{forwarded_text(payload.get("reason") or "assignment mismatch")}\n'
               f'The original has been reassigned to verified profile {name!r}. '
               'Inspect the original task and verify its assignment and requirements '
               'before completing this repair. Record the verification evidence. '

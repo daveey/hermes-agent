@@ -14,7 +14,16 @@ ERROR = 'Kanban is model-neutral: use a class/tier or capability requirement, no
 # Match directives, not incidental named execution evidence or author exclusions.
 _REQUIRED = re.compile(r'^\s*require_model\s*:\s*(?:true|yes|1)\s*$', re.IGNORECASE | re.MULTILINE)
 _MODEL = re.compile(r'(?:\b|(?<=independent)|(?<=primary))(?:gpt-[\w.-]+|claude-[\w.-]+|grok-[\w.-]+|gemini-[\w.-]+|opus|sonnet|fable|astra|luna|sol)\b', re.IGNORECASE)
-_FORCE = re.compile(r'\b(?:mandatory|required|must|only|pinned|pin|no fallback)\b', re.IGNORECASE)
+# Bind the obligation to the route, rather than co-occurrence with unrelated
+# words such as "required CI", "source only" or a tool-call bug report.
+_QUALIFIER = r'(?:(?:the|a|an|only|model|provider|route|reviewer|review|independent|primary|exact[- ]head|on|to|with|use|using|run|by)\s+)*'
+_ROUTE_NAME = r'(?:[\w-]+/)?' + _MODEL.pattern
+_DIRECTIVE = re.compile(
+    r'\b(?:must|require|requires|required|mandatory|use|select|choose|pin|pinned|restrict|no fallback for)\s+'
+    + _QUALIFIER + _ROUTE_NAME
+    + r'|' + _ROUTE_NAME + r'(?:/[\w-]+)?\s+(?:(?:review\s+|is\s+)?(?:required|mandatory|only)\b|must\s+be\s+used\b)',
+    re.IGNORECASE,
+)
 _EVIDENCE = 'Historical run instruction (superseded and not active): '
 
 
@@ -56,6 +65,10 @@ def validate_text(*values):
             if line.lstrip().startswith('<!-- implementer-models:'):
                 continue
             for clause in re.split(r'(?<=[.!?;])\s+', line):
+                # Remove only the observed failed-route phrase, not a trailing
+                # mandate ("...unavailable; use only <model>" still refuses).
+                clause = re.sub(r'\bPinned route\s+' + _ROUTE_NAME + r'\s+is unavailable\b',
+                                'Observed unavailable route', clause, flags=re.IGNORECASE)
                 if not _MODEL.search(clause):
                     continue
                 # Negation applies to the directive, not any unrelated safety
@@ -76,7 +89,7 @@ def validate_text(*values):
                 named_review = re.search(
                     r'(?:primary|independent|exact[- ]?head)[ -]*(?:opus|sonnet|fable|astra|luna|sol)\b'
                     r'|\breview\s*\((?:claude-|gpt-|grok-|gemini-)', clause, re.IGNORECASE)
-                if _FORCE.search(clause) or named_review:
+                if _DIRECTIVE.search(clause) or named_review:
                     raise ValueError(ERROR)
 
 
@@ -90,6 +103,15 @@ def forwarded_text(text):
             line = _EVIDENCE + json.dumps(line, ensure_ascii=False)
         lines.append(line)
     return '\n'.join(lines)
+
+
+def forwarded_title(title, fallback):
+    """Keep ordinary recovery titles; legacy mandates belong in body evidence."""
+    try:
+        validate_text(title)
+    except ValueError:
+        return fallback
+    return title
 
 
 def effective_selector(task):

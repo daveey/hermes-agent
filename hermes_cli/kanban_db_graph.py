@@ -168,6 +168,7 @@ def missing_parent_repair(conn: sqlite3.Connection, task_id: str, missing: list[
     """Compose repair admission in the readiness transaction, once per open incident."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_triage_sweep import _supervisor_profile
+    from hermes_cli.kanban_model_neutral import forwarded_text
     existing = conn.execute(
         "SELECT t.id FROM task_events e JOIN tasks t "
         "ON t.id = json_extract(e.payload, '$.repair_task_id') "
@@ -182,9 +183,10 @@ def missing_parent_repair(conn: sqlite3.Connection, task_id: str, missing: list[
     task = conn.execute("SELECT title, tenant FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return kb.create_task(
         conn, title=f"Recover missing dependencies for {task_id}",
-        body=(f"Card {task_id} ({task['title']}) has waited at least "
+        body=(f"Card {task_id} has waited at least "
               f"{kb.PARENT_MISSING_BLOCK_SECONDS} seconds for unknown parent(s): "
-              + ", ".join(missing) + ".\n\n"
+              + ", ".join(missing) + ".\n\nSource title (historical evidence):\n"
+              + forwarded_text(task['title']) + "\n\n"
               "Inspect the owning gateway, full Board replica and authoritative Board row evidence. "
               "A missing local row is not proof of Board loss; check sync freshness and pickup eligibility. "
               "Recover missing publication or dependency state, then unblock the child with the kanban_unblock "

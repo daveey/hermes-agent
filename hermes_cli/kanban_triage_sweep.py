@@ -15,6 +15,7 @@ import time
 from typing import Optional
 
 from hermes_cli import kanban_db as _kb
+from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
 
 logger = logging.getLogger(__name__)
 
@@ -76,16 +77,17 @@ def _cap(conn: sqlite3.Connection, row, now: int) -> str:
     reasons = triage_reasons(conn, tid)
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
     body = (
-        f"Card {tid} ({row['title']!r}) keeps landing in triage. The stale-triage sweep released it "
+        f"Card {tid} keeps landing in triage. The stale-triage sweep released it "
         f"{TRIAGE_SWEEP_CAP} times in 24 h and it came back each time, so the sweep stopped and left it in "
         "triage. No chat owns it, so nothing else will release it: this card is its producer.\n\n"
-        "Its last triage reasons:\n" + "\n".join(f"- {r}" for r in reasons) + "\n\n"
+        "Source title (historical evidence):\n" + forwarded_text(row['title']) + "\n\n"
+        "Its last triage reasons (historical evidence):\n" + "\n".join(forwarded_text(r) for r in reasons) + "\n\n"
         f"Find why {tid} keeps failing and fix that cause (or file the fix card). Then release it with "
         f"`hermes kanban promote {tid} --reason '<what changed>'`, or archive it if the work is no longer "
         f"wanted. Record what you did as a comment on {tid}."
     )
     sup_id = _kb.create_task(
-        conn, title=f"Triage loop: {row['title']}"[:200], body=body,
+        conn, title=forwarded_title(f"Triage loop: {row['title']}"[:200], f"Triage loop: {tid}"), body=body,
         assignee=_supervisor_profile(), created_by="triage-sweep", workspace_kind="scratch",
         idempotency_key=f"triage-sweep-cap:{tid}:{day}", tenant=row["tenant"],
     )
@@ -213,9 +215,11 @@ def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float
             continue
         wait, shown = card["wait"], card["wait"]["contained"]
         body = (
-            f"Card {tid} ({card['title']!r}) is held by containment episode {episode} and no chat owns it. Its "
+            f"Card {tid} is held by containment episode {episode} and no chat owns it. Its "
             f"authority card {shown['authority']['id']} is {shown['authority']['status']}, so nothing will release it: "
-            f"{wait['waiting_on']}.\n\nThe held card cannot be archived, promoted, completed, unblocked or unlinked. "
+            "\nHistorical source title and wait:\n" + forwarded_text(card['title']) + "\n"
+            + forwarded_text(wait['waiting_on']) + "\n\n"
+            "The held card cannot be archived, promoted, completed, unblocked or unlinked. "
             "The exits are `kanban_resume_contained(task_id, episode, kind='authority')` from a live run of the "
             f"authority (reopen {shown['authority']['id']} first if it is done), or `kind='producer'` once the producer "
             "has a new completed run. If the hold is deliberate (a spend or decision hold), say so on this card and "
@@ -223,7 +227,8 @@ def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float
         )
         try:
             sup_id = _kb.create_task(
-                conn, title=f"Contained card stranded: {card['title']}"[:200], body=body,
+                conn, title=forwarded_title(f"Contained card stranded: {card['title']}"[:200],
+                                            f"Contained card stranded: {tid}"), body=body,
                 assignee=_supervisor_profile(), created_by="triage-sweep", workspace_kind="scratch",
                 idempotency_key=key, tenant=card["tenant"])
             _kb.add_comment(conn, tid, "triage-sweep",

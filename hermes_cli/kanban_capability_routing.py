@@ -308,13 +308,15 @@ def _previous_routes(conn, task_id: str) -> dict[str, dict]:
 
 def owner_body(task, need: str, *, self_gw: str, board: str, reason: str) -> str:
     """Deterministic for (card, need, reason): retries resend an identical envelope."""
+    from hermes_cli.kanban_model_neutral import forwarded_text
     ref = f"{self_gw}/default/{board}/{task.id}"
     excerpt = redact_sensitive_text((reason or "").strip(), force=True)
     title = redact_sensitive_text((task.title or "")[:160], force=True)
     if len(excerpt) > 3000:
         excerpt = excerpt[:3000] + "…"
     return (
-        f"Capability owner card for waiting card {ref} (\"{title}\").\n"
+        f"Capability owner card for waiting card {ref}.\n"
+        f"Source title (historical evidence):\n{forwarded_text(title)}\n\n"
         f"It needs `{need}`. This gateway holds it (live-checked in the hermes-hub capability registry); "
         f"{self_gw} does not.\n\n"
         "## Action (from the waiting card, inside its approved plan)\n"
@@ -571,6 +573,8 @@ def route(conn, task_id: str, needs, *, reason: str, expected_run_id: Optional[i
             gw = r["gateway"]
             title = redact_sensitive_text(
                 f"Capability owner: {r['need']} for {self_gw}/{task_id} ({(task.title or '')[:80]})", force=True)
+            from hermes_cli.kanban_model_neutral import forwarded_title
+            title = forwarded_title(title, f"Capability owner: {r['need']} for {self_gw}/{task_id}")
             body = owner_body(task, r["need"], self_gw=self_gw, board=board_slug, reason=reason)
             assignee = _owner_assignee()
             overlap_opts = _overlap_option_argv(None, overlap_exclusions(conn, task_id))
@@ -869,6 +873,8 @@ def _apply_relay(conn, task, entry: dict, payload: dict, *, now: Optional[float]
     gw = decided["routes"][0]["gateway"]
     title = redact_sensitive_text(f"Capability owner: {need} for {self_gw}/{task.id} ({(task.title or '')[:80]})",
                                   force=True)
+    from hermes_cli.kanban_model_neutral import forwarded_title
+    title = forwarded_title(title, f"Capability owner: {need} for {self_gw}/{task.id}")
     body = owner_body(task, need, self_gw=self_gw, board=board, reason=reason)
     argv = [_hub_cli(), "create-task", gw, title, "--body", body, "--assignee", _owner_assignee(),
             "--origin-session", "", "--id", rid, *_overlap_option_argv(None, overlap_exclusions(conn, task.id))]
@@ -896,11 +902,15 @@ def local_owner_text(task, need: str, *, self_gw: str, from_gw: str, reason: str
     Shared by the relay-time judge and :func:`_local_owner`, so the judged text is the card's text.
     """
     excerpt = redact_sensitive_text((reason or "").strip(), force=True)[:3000]
+    from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
     title = redact_sensitive_text(f"Capability owner: {need} for {task.id} ({(task.title or '')[:80]})", force=True)
+    title = forwarded_title(title, f"Capability owner: {need} for {task.id}")
     body = (
-        f"Capability owner card for waiting card {task.id} (\"{redact_sensitive_text((task.title or '')[:160], force=True)}\") "
+        f"Capability owner card for waiting card {task.id} "
         f"on this board. It was running on {from_gw}, which does not hold `{need}`; this gateway ({self_gw}) "
         "holds it (live-checked).\n\n"
+        "Source title (historical evidence):\n"
+        + forwarded_text(redact_sensitive_text((task.title or '')[:160], force=True)) + "\n\n"
         "## Action (from the waiting card, inside its approved plan)\n"
         f"{excerpt or '(no reason given; read the waiting card first)'}\n\n"
         "## Do\n"

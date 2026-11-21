@@ -1197,6 +1197,7 @@ def escalate(conn: sqlite3.Connection, task_id: str, *, record: dict, reason: Op
     from hermes_cli import kanban_wake_check as kwc
 
     task = kb.get_task(conn, task_id)
+    from hermes_cli.kanban_model_neutral import forwarded_text
     if task is None:
         return None
     sql = ("UPDATE tasks SET status = 'todo', block_kind = NULL, human_request = NULL, claim_lock = NULL, "
@@ -1217,14 +1218,16 @@ def escalate(conn: sqlite3.Connection, task_id: str, *, record: dict, reason: Op
         fired = record.get("fired_reparks")
         title = (f"Unstick {task_id}: probe fired {fired}x, re-parked each time" if fired
                  else f"Unstick {task_id}: parked 3x on the same premise")
-        lead = (f"Card {task_id} ({task.title}): probe fired {fired} times and the worker re-parked each time: "
+        lead = (f"Card {task_id}: probe fired {fired} times and the worker re-parked each time: "
                 "fix the probe or the worker's check." if fired else
-                f"Card {task_id} ({task.title}) tried to park a third time on the same premise with no new "
+                f"Card {task_id} tried to park a third time on the same premise with no new "
                 "evidence.")
         owner = kb.create_task(
             conn, title=title,
-            body=(f"{lead}\n\nPremise: {json.dumps({k: v for k, v in record.items() if k != 'premise'})}\n"
-                  f"Latest reason: {(reason or '(none)')[:1500]}\n\n"
+            body=(f"{lead}\n\nSource title (historical evidence):\n{forwarded_text(task.title)}\n"
+                  "Premise (historical evidence):\n"
+                  + forwarded_text(json.dumps({k: v for k, v in record.items() if k != 'premise'})) + "\n"
+                  f"Latest reason (historical evidence):\n{forwarded_text((reason or '(none)')[:1500])}\n\n"
                   "This is agent-owned work, not a wait and not a question for David. Remove the cause: "
                   "do the action (grant, install, fix) where the capability lives, or route the card to the "
                   "profile/gateway that can, or prove the premise false. Then complete this card with the "

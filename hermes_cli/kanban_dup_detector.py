@@ -104,6 +104,7 @@ def _occurrence(task_id: str, sibling: str, creator: str, text: str) -> str:
 
 
 def _body(line: str) -> str:
+    from hermes_cli.kanban_model_neutral import forwarded_text
     return ("A card completed as a duplicate of, or superseded by, a card its own creator had filed earlier, so "
             "a worker ran on work that was already owned. `kanban_create`'s overlap check compares a creator's "
             "own open cards (hermes_cli/kanban_overlap.py, hermes_cli/kanban_overlap_own.py) and missed this "
@@ -113,7 +114,7 @@ def _body(line: str) -> str:
             "tests/tools/test_kanban_create_overlap_same_creator.py: every legitimate fan-out still admitted) or "
             "record why the pair cannot be told apart from fan-out at create time.\n\n"
             "Later occurrences are added here as comments while this card is open.\n\n"
-            f"Occurrences:\n{line}\n")
+            f"Occurrences (historical evidence):\n{forwarded_text(line)}\n")
 
 
 def note_completion(conn: sqlite3.Connection, task_id: str, *texts: Optional[str]) -> Optional[str]:

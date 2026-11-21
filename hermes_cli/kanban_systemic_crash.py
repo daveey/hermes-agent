@@ -43,6 +43,7 @@ def ensure_fix_card(conn: sqlite3.Connection, fingerprint: str, task_ids: list[s
     """
     from hermes_cli import kanban_db as kb
     base = fix_key(fingerprint)
+    from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
     try:
         for n in range(1, _MAX_ROUNDS + 1):
             key = base if n == 1 else f"{base}:r{n}"
@@ -58,12 +59,15 @@ def ensure_fix_card(conn: sqlite3.Connection, fingerprint: str, task_ids: list[s
             body = (
                 f"{len(task_ids)} Kanban workers crashed with the same error in one dispatcher tick, so the "
                 "sweep tripped their cards instead of retrying into the same wall.\n\n"
-                f"Fingerprint: `{fingerprint}`\n\nSample error:\n```\n{sample_error[:500]}\n```\n\n"
+                "Fingerprint and sample error (historical evidence):\n"
+                + forwarded_text(fingerprint) + "\n" + forwarded_text(sample_error[:500]) + "\n\n"
                 f"Tripped cards (children of this card): {listed}\n\n"
                 "Find and fix the root cause of this crash. When this card is done, the tripped cards resume "
                 "on their own (they are linked as its children). Do not re-queue them by hand.")
             return kb.create_task(
-                conn, title=f"Systemic Kanban crash: {len(task_ids)} cards died with `{fingerprint[:60]}`",
+                conn, title=forwarded_title(
+                    f"Systemic Kanban crash: {len(task_ids)} cards died with `{fingerprint[:60]}`",
+                    f"Systemic Kanban crash: {len(task_ids)} cards ({base})"),
                 body=body, assignee=assignee, created_by=AUTHOR, idempotency_key=key)
     except (sqlite3.Error, ValueError):
         _log.warning("kanban: opening the systemic-crash fix card failed", exc_info=True)

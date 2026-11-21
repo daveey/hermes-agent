@@ -98,16 +98,17 @@ def file_alarm(conn, own: str, cards: list[dict[str, Any]], *, now_ms: int, stal
     """ONE alarm per held machine listing ``cards`` (an open one is reused and gets new targets appended)."""
     from hermes_cli import kanban_pickup_stall as kps
     from hermes_cli import kanban_pickup_stall_repin as repin
+    from hermes_cli.kanban_model_neutral import forwarded_text
     oldest = cards[0]
-    listed = "\n".join(f"- {c['id']} ({c['title']}), ready {kps._minutes(c['since_ms'], now_ms)} min, default "
-                       "placement, created here" for c in cards[:20])
+    listed = "\n".join(forwarded_text(f"- {c['id']} ({c['title']}), ready {kps._minutes(c['since_ms'], now_ms)} min, default "
+                       "placement, created here") for c in cards[:20])
     who = entry.get("hold_owner") or entry.get("hold_by") or "?"
     body = (f"{len(cards)} default-placement card(s) created on {own} have been ready past {stall_s} s while {own} "
             f"is held in the machine registry (by {who}: {entry.get('hold_reason')!r}). Default placement means "
             f"\"its creator\", and no other machine copies them: every other pickup machine is held, `explicit` "
             "(copies only cards with runs_on) or lacks the creator's labels. Nothing claims them until the hold "
             f"ends. Re-place each listed card to the pool queue; do not lift or shorten the hold.\n\n"
-            f"Oldest: {oldest['id']} ({oldest['title']}).\n\n"
+            f"Oldest: {oldest['id']}\nHistorical source title:\n{forwarded_text(oldest['title'])}\n\n"
             f"{kps._registry_line(own)}\n\nStranded cards on {own}:\n\n{listed}")
     tid = kps._create(conn, key=f"{kps.KEY_PREFIX}{own}:{SLUG}:", tenant=oldest["tenant"], own=own, now_ms=now_ms,
                       title=(f"Pickup stranded on held {own}: oldest {oldest['id']} ready "

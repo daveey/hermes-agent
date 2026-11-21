@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_model_neutral import forwarded_text, forwarded_title
 
 EVENT = "spend_budget_triaged"
 NOTICE = "spend_budget_decision_ready"
@@ -97,8 +98,10 @@ def producer(conn, task_id: str, note: str) -> dict:
         return {"kind": "chats"}
     episode = conn.execute("SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0]
     sup = kb.create_task(
-        conn, title=f"Spend budget decision: {task.title}"[:200],
-        body=f"Card {task_id} ({task.title}) has stopped. No chat owns its decision.\n\n" + notice({"reason": note})
+        conn, title=forwarded_title(f"Spend budget decision: {task.title}"[:200], f"Spend budget decision: {task_id}"),
+        body=f"Card {task_id} has stopped. No chat owns its decision.\n\n"
+             + "Source title and stop reason (historical evidence):\n" + forwarded_text(task.title) + "\n"
+             + forwarded_text(note) + "\n\n" + notice({})
              + f"\n\nRecord the decision on {task_id}; use `hermes kanban promote {task_id} --reason '<what changed>'` "
                "only after re-scoping or justifying further spend, or archive it. Do not run the original work here.",
         assignee=_supervisor_profile(), created_by="kanban-spend-budget", workspace_kind="scratch",
