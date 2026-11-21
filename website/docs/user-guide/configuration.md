@@ -3762,6 +3762,8 @@ Kanban requirements select a class/tier or capability, never an exclusive concre
 
 Legacy and synced concrete restrictions are ignored for future admission, without changing a running agent's client or rewriting its concrete execution receipts. Clear stored restrictions with `hermes kanban set-model <id> none --no-mandatory`; this affects future dispatch only. The dispatcher dynamically chooses a qualified independent reviewer excluding every authenticated author model. Missing author evidence or no eligible independent route must not be resolved by dropping exclusions or pinning another reviewer. Subscription reserve, quota, billing, capability and safety gates remain in force. A concrete chosen route in a current-run receipt is execution evidence, not a persistent card restriction.
 
+`kanban.pin_quota_reroute_min_hours` (default `6`) remains a legacy compatibility setting for the old concrete-pin reroute helper's wall threshold. Model-neutral admission ignores legacy concrete pins before route selection, so this threshold does not delay or restrict dynamic class selection and cannot restore mandatory model routing. Do not set a concrete task selector to use this compatibility helper.
+
 `kanban.auto_recover_corruption` (default `true`): when a board's table b-trees fail `integrity_check` (damage `REINDEX` can't fix), its dispatch pauses and the gateway dispatcher also starts `hermes kanban recover` for it in a child process (salvage, fill from the newest healthy backup, write back in place, loss report and a follow-up card). Set it to `false` to keep only the pause. `kanban.recovery_card_assignee` (default `default`) is the assignee of that follow-up card.
 
 ## Kanban default placement
