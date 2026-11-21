@@ -64,10 +64,11 @@ def test_walled_review_cards_do_not_starve_a_pinned_card(gws, monkeypatch):
     pinned = support._hub_card(hub, title="pinned, eligible", priority=0, runs_on=PIN)
     worker.round()
     imports.clear()
+    ticks = []
     for _ in range(8):
         worker.round()
-        worker.tick(max_spawn=2)
-    assert imports == [pinned]
+        ticks.append(worker.tick(max_spawn=2))
+    assert imports == [pinned], ticks
     assert _status(worker.conn, pinned) == "running"
     assert all(_status(worker.conn, tid) is None for tid in walled)
 

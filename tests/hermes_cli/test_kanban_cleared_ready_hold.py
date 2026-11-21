@@ -17,7 +17,15 @@ def test_clear_retires_ready_hold_before_capacity_and_dispatches_next_tick(kanba
     _, spawn = spawns
     monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: True)
     with kbc.connect_closing() as conn:
-        held = shared._blocked_behind(conn, "held")
+        if lane == "review":
+            from tests.hermes_cli.test_kanban_model_tier import _review_source
+            held = kb.create_task(conn, title="held", assignee="default")
+            _review_source(conn, held)
+            assert kb.claim_review_task(conn, held) is not None
+            assert kb.block_task(conn, held, reason="GitHub Actions refuses jobs: billing",
+                                 kind="capability", blocker_id=shared.BID)
+        else:
+            held = shared._blocked_behind(conn, "held")
         probe = shared._blocked_behind(conn, "probe")
         shared._age_runs(conn, 60)
         kb.unblock_task(conn, held)
@@ -27,7 +35,7 @@ def test_clear_retires_ready_hold_before_capacity_and_dispatches_next_tick(kanba
             conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (lane, held))
         # Actual dispatcher guard writes the history, not a fabricated diagnostic event.
         first = kbd.dispatch_once(conn, spawn_fn=spawn)
-        assert (held, ksb.GUARD_REASON) in first.respawn_guarded
+        assert (held, ksb.GUARD_REASON) in first.respawn_guarded, first
         assert not ksb.release_cleared_blockers(conn)
         assert kb.complete_task(conn, probe, result="wall gone")
         busy = kb.create_task(conn, title="unrelated worker", assignee="default")

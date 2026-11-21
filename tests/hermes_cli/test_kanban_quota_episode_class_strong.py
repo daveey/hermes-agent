@@ -43,7 +43,8 @@ def _walled_card(conn, clock, *, lane='ready', title='retry after a crash'):
         conn.execute("INSERT INTO task_runs(task_id,started_at,ended_at,status,outcome) "
                      "VALUES (?,?,?,'crashed','crashed')", (tid, clock[0] - 20, clock[0] - 10))
     else:
-        conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
+        from tests.hermes_cli.test_kanban_model_tier import _review_source
+        _review_source(conn, tid)
     conn.commit()
     reap(conn, tid, lane=lane, admit=CLASS_CFG, **_codex_wall(clock[0] + 55 * 3600))
     clock[0] += 301
@@ -98,20 +99,24 @@ def test_pattern_strong_class_card_takes_the_free_provider(board, monkeypatch):
         assert decision(conn, kb.get_task(conn, tid), lane='ready') == (None, ('claude-opus-5-5', 'anthropic'))
 
 
-def test_unpinned_class_review_takes_the_free_provider_but_a_chosen_reviewer_waits(board, monkeypatch):
+def test_unpinned_class_review_takes_the_free_provider_but_a_chosen_reviewer_waits(
+        board, monkeypatch, all_assignees_spawnable):
     clock = _clock(monkeypatch)
-    _deep_routes(monkeypatch)
+    config = _deep_routes(monkeypatch)
+    config['model_routing']['routes']['standard'] = [dict(
+        config['model_routing']['routes']['deep'][1], model='claude-sonnet-5-5')]
     _serving(monkeypatch, {'anthropic'})
     monkeypatch.setattr(walls, 'active_walls', lambda **_k: {})
     with kbc.connect() as conn:
         tid = _walled_card(conn, clock, lane='review', title='legacy unpinned review')
+        # The failed review allocation discovered this provider wall; the next review resolver sees it.
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': clock[0] + 55 * 3600})
         task = kb.get_task(conn, tid)
-        assert tier.resolve_model_tier(conn, task, lane='review') == ('gpt-6-astra', 'openai-codex', 'review_unpinned')
-        assert decision(conn, task, lane='review') == ('subscription_quota_reset', None)
-        # Legacy class allocation may move to a free deep pool; concrete selections still respect the episode.
-        assert decision(conn, task, lane='review', base=('class:deep', 'auto', 'review')) == (
-            None, ('claude-opus-5-5', 'anthropic'))
-        # A concrete review route never bypasses its live quota episode.
+        assert tier.resolve_model_tier(conn, task, lane='review') == (
+            'claude-opus-5-5', 'anthropic', 'review_unpinned')
+        # Dynamic review resolution already chose the free independent route, so no second reroute is needed.
+        assert decision(conn, task, lane='review') == (None, None)
+        # A reviewer chosen for independence (review_unpinned) never moves off its walled provider.
         chosen = ('gpt-6-astra', 'openai-codex', 'review_unpinned')
         assert decision(conn, task, lane='review', base=chosen) == ('subscription_quota_reset', None)
         # Nor does the review lane take the default tier's class reroute.

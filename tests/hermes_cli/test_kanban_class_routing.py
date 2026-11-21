@@ -57,19 +57,33 @@ def test_class_tiers_keep_strong_work_deep(board, routable, monkeypatch, case):
     cfg = {"default_model": "class:standard", "default_model_keep_patterns": ["security"]}
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="security" if case == "pattern" else "routine", assignee="default")
+        if case in ("review", "skill"):
+            test_kanban_model_tier._review_source(conn, tid)
+            if case == "skill":
+                kb.complete_task(conn, tid, summary="Source implementation complete")
+                tid = kb.create_task(conn, title="Independent review", assignee="default",
+                                     creator_task_id=tid, skills=["sdlc-review"])
         if case == "failure":
             kb.claim_task(conn, tid)
             conn.execute("UPDATE task_runs SET outcome='crashed' WHERE task_id=?", (tid,))
             conn.commit()
         task = kb.get_task(conn, tid)
-        task.current_run_id = None
+        if case == "review":
+            task = kb.claim_review_task(conn, tid)
+        elif case == "skill":
+            task = kb.claim_task(conn, tid)
+        else:
+            task.current_run_id = None
         if case == "skill":
             task.skills = ["sdlc-review"]
         tier.apply_model_tier(conn, task, lane="review" if case == "review" else "ready", cfg=cfg)
         assert kb.get_task(conn, tid).model_override is None
         model, provider = owner_pin(task, conn)
-    assert model == ("class:standard" if case == "routine" else "class:deep")
-    assert provider == "auto"
+    if case in ("review", "skill"):
+        assert (model, provider) == (test_kanban_model_tier.OPUS, "anthropic")
+    else:
+        assert model == ("class:standard" if case == "routine" else "class:deep")
+        assert provider == "auto"
 
 
 def test_dispatch_tick_reads_class_default_and_keeps_review_deep(board, routable, monkeypatch):
@@ -77,17 +91,16 @@ def test_dispatch_tick_reads_class_default_and_keeps_review_deep(board, routable
     _write_cfg(board, default_model="class:standard", default_provider="auto")
     seen = {}
     with kbc.connect() as conn:
-        routine = kb.create_task(conn, title="routine", assignee="default")
         review = kb.create_task(conn, title="review", assignee="default")
-        kb.claim_task(conn, review)
-        kb.request_review(conn, review, summary="ready")
+        test_kanban_model_tier._review_source(conn, review)
+        routine = kb.create_task(conn, title="routine", assignee="default")
         dispatch.dispatch_once(conn, dry_run=False, spawn_fn=lambda task, workspace: seen.update({task.id: task}))
         assert kb.get_task(conn, routine).model_override is None
         assert kb.get_task(conn, review).model_override is None
         # The owner re-reads the card from the board (not the dispatcher's in-memory task).
         pins = {tid: owner_pin(kb.get_task(conn, tid), conn) for tid in seen}
-    for tid, model in ((routine, "class:standard"), (review, "class:deep")):
-        assert pins[tid] == (model, "auto")
+    assert pins[routine] == ("class:standard", "auto")
+    assert pins[review] == (test_kanban_model_tier.OPUS, "anthropic")
 
 
 @pytest.mark.parametrize("lane", ["ready", "review"])

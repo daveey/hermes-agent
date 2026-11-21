@@ -44,6 +44,26 @@ def _write_cfg(home: Path, **kanban) -> None:
     home.joinpath("config.yaml").write_text(json.dumps(cfg), encoding="utf-8")
 
 
+def _review_source(conn, tid):
+    """A real dispatched source run and its worker result, before independent handoff.
+
+    No author metadata is asserted by the handoff: custody comes from the source run.
+    The spawn seam stands in for an implementation worker completing on Sonnet.
+    """
+    from hermes_cli.kanban_review_model import implementer_models
+    seen = []
+    result = kbd.dispatch_once(conn, max_spawn=1, spawn_fn=lambda task, ws: seen.append(task.id))
+    assert seen == [tid], result
+    task = kb.get_task(conn, tid)
+    kb._append_event(conn, tid, "worker_result", {"route_model": SONNET, "route_provider": "anthropic"},
+                     run_id=task.current_run_id)
+    assert kb.request_review(conn, tid, summary="Implementation ready for independent review")
+    task = kb.get_task(conn, tid)
+    assert implementer_models(conn, task) == {SONNET}
+    assert (task.model_override, task.provider_override) == (None, None)
+    return task
+
+
 def _dispatch(conn) -> dict[str, tuple]:
     """One tick; returns {task_id: (model_override, provider_override, skills)} as the spawn fn saw them."""
     seen: dict[str, tuple] = {}
@@ -103,13 +123,13 @@ def test_review_lane_uses_deep_class(board):
     _write_cfg(board, default_model=SONNET)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="impl", assignee="default")
-        kb.claim_task(conn, tid)
-        kb.request_review(conn, tid, summary="done, please review")
+        _review_source(conn, tid)
         seen = _dispatch(conn)
         events = _tier_events(conn, tid)
     assert "sdlc-review" in seen[tid][2]
-    assert seen[tid][0] == "class:deep"
-    assert events[-1]["reason"] == "review"
+    assert seen[tid][:2] == (OPUS, "anthropic")
+    assert events[-1]["reason"] == "review_unpinned"
+    assert events[-1]["implementer_models"] == [SONNET]
 
 
 def test_retry_after_failed_run_uses_deep_class(board):

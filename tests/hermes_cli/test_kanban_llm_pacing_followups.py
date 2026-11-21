@@ -235,7 +235,13 @@ def test_class_selector_is_paced_on_its_class_providers(paced_board, monkeypatch
 
 def test_class_selector_with_an_ungoverned_route_always_starts(paced_board, monkeypatch):
     """Any ungoverned candidate admits the card: it may run there whatever the governed pools say."""
-    _class_config(paced_board, "anthropic", "zai")
+    # Use a verified native subscription transport, outside this fixture's governed pool list.
+    # A zai route labelled subscription is invalid policy, not an ungoverned eligible route.
+    _class_config(paced_board, "anthropic", "xai-oauth")
+    path = paced_board / "config.yaml"
+    config = json.loads(path.read_text())
+    config["kanban"] = {"llm_pacing": {"providers": ["anthropic"]}}
+    path.write_text(json.dumps(config))
     # Every pool reads paced (20% one day into the week): a paced pool holds no start.
     monkeypatch.setattr(pd, "read_pool", lambda provider, now: [
         lp.Reading(now, f"{provider}-1", lp.SEVEN_DAY, 20, now + 6 * DAY)])
@@ -243,4 +249,4 @@ def test_class_selector_with_an_ungoverned_route_always_starts(paced_board, monk
         tid = kb.create_task(conn, title="deep", assignee="default", model_override="class:deep",
                              provider_override="auto")
         seen, result = _tick(conn)
-    assert seen == [tid] and result.llm_paced == []
+    assert seen == [tid] and result.llm_paced == [], result

@@ -28,12 +28,16 @@ def conn(tmp_path, monkeypatch):
         yield connection
 
 
-def _claim(conn, lane):
+def _claim(conn, lane, *, authored=False):
     assert str(kb.kanban_db_path()).startswith(str(kb.kanban_home()))
     tid = kb.create_task(conn, title='quota', assignee='w')
     if lane == 'review':
-        conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
-        conn.commit()
+        if authored:
+            from tests.hermes_cli.test_kanban_model_tier import _review_source
+            _review_source(conn, tid)
+        else:
+            conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
+            conn.commit()
     host = kb._claimer_id().split(':', 1)[0]
     claim = kb.claim_review_task if lane == 'review' else kb.claim_task
     task = claim(conn, tid, claimer=f'{host}:owner')
@@ -80,9 +84,18 @@ def test_no_unproven_quota_deadline(reason, reset):
 @pytest.mark.parametrize('model', ['claude-opus-5-5', 'claude-sonnet-5-5'])
 def test_wrapped_startup_quota_retains_lane_and_retry_budget(conn, monkeypatch, lane, model):
     from agent.managed_worker import _construct_agent
-    from hermes_cli.kanban_model_tier import resolve_model_tier
+    from hermes_cli.kanban_model_tier import _prior_failure, resolve_model_tier
+    from tests.hermes_cli.test_kanban_model_tier import _write_cfg
+    home = kb.kanban_home()
+    _write_cfg(home)
+    profile = home / 'profiles' / 'w'
+    profile.mkdir(parents=True)
+    _write_cfg(profile)
     now = int(time.time())
-    tid, _task, frame = _claim(conn, lane)
+    tid, task, frame = _claim(conn, lane, authored=True)
+    if lane == 'review':
+        assert resolve_model_tier(conn, task, lane=lane) == (
+            'claude-opus-5-5', 'anthropic', 'review_unpinned')
     def factory(**kwargs):
         raise RuntimeError('init') from SubscriptionQuotaUnavailable('anthropic', model, now + 7200)
     monkeypatch.setattr('gateway.session_worker_construct.worker_route', lambda *_: {})
@@ -93,8 +106,11 @@ def test_wrapped_startup_quota_retains_lane_and_retry_budget(conn, monkeypatch, 
     row = kb.get_task(conn, tid)
     assert row.status == lane
     assert not row.consecutive_failures
-    tier = resolve_model_tier(conn, row, lane=lane, cfg={'default_model': 'class:standard'})
-    assert not tier[2].startswith('retry_after')
+    # Classifying the outcome must not require allocating a route on the now-walled pool.
+    assert _prior_failure(conn, tid, row.current_run_id) is None
+    if lane == 'ready':
+        tier = resolve_model_tier(conn, row, lane=lane, cfg={'default_model': 'class:standard'})
+        assert not tier[2].startswith('retry_after')
     monkeypatch.setattr(dispatch.time, 'time', lambda: now + 600)
     assert dispatch.check_respawn_guard(conn, tid, lane=lane) == 'subscription_quota_reset'
     # A later triage sweep cannot turn quota recovery into a new crash/review run.

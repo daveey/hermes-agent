@@ -388,9 +388,9 @@ def test_a_fault_keeps_todays_route_and_is_logged_with_its_traceback(hub, monkey
 
 
 def _review_card(conn):
+    from tests.hermes_cli.test_kanban_model_tier import _review_source
     tid = kb.create_task(conn, title='review me', assignee='a')
-    conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
-    conn.commit()
+    _review_source(conn, tid)
     return tid
 
 
@@ -404,7 +404,7 @@ def _retry_card(conn):
 CARDS = {
     'class_pin': (lambda conn: kb.create_task(conn, title='p', assignee='a', model_override='class:deep',
                                               provider_override='auto'), 'ready', 'class'),
-    'review': (_review_card, 'review', 'review'),
+    'review': (_review_card, 'review', 'review_unpinned'),
     'retry': (_retry_card, 'ready', 'retry_after_changes_requested'),
     'keep_pattern': (lambda conn: kb.create_task(conn, title='security audit', assignee='a'), 'ready',
                      'pattern:security'),
@@ -412,7 +412,7 @@ CARDS = {
 
 
 @pytest.mark.parametrize('card', sorted(CARDS))
-def test_cards_outside_the_unpinned_default_tier_are_untouched(hub, card):
+def test_cards_outside_the_unpinned_default_tier_are_untouched(hub, card, all_assignees_spawnable):
     """Class pins, reviews and the strong tier (retries, keep-patterns) keep the route they resolve to with
     ratio routing off."""
     make, lane, reason = CARDS[card]
