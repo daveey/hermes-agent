@@ -133,6 +133,37 @@ def test_context_legacy_owner_fallback_only_for_method_not_found(worker):
     assert calls.count('worker.persist') == 2
 
 
+@pytest.mark.parametrize('cached_legacy', [False, True])
+def test_context_legacy_refused_target_does_not_poison_store(worker, cached_legacy):
+    store, original = worker.store, worker.store.rpc
+    worker.db.create_session('foreign', 'cli')
+    calls = []
+
+    def legacy(method, **params):
+        calls.append((method, params.get('operation'), params.get('payload')))
+        if method == 'worker.sessionContext':
+            error = WorkerPersistenceError('Method not found')
+            error.code = -32601
+            raise error
+        return original(method, **params)
+
+    store.rpc = legacy
+    if cached_legacy:
+        assert store.get_session('owned')['id'] == 'owned'
+        calls.clear()
+    with pytest.raises((WorkerPersistenceError, RuntimeStoreError), match='^permission_denied$'):
+        store.get_session('foreign')
+    assert store.failure is None
+    assert store.journal['pending'] == []
+    assert not any(operation == 'compression.context' for _, operation, _ in calls)
+    assert store.get_session('owned')['id'] == 'owned'
+    assert store.try_acquire_compression_lock('owned', 'after-refused-read')
+    store.publish_compression_child(parent_session_id='owned', child_session_id='child', source='cli',
+        messages=[{'role': 'assistant', 'content': 'summary'}], compression_lock_holder='after-refused-read')
+    assert store.get_session('child')['id'] == 'child'
+    assert store.get_session('owned')['id'] == 'owned'
+
+
 @pytest.mark.parametrize('code', [None, 4001, -32603])
 def test_context_does_not_downgrade_other_owner_errors(worker, code):
     calls = []

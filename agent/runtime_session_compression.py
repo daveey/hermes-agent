@@ -48,6 +48,11 @@ class RuntimeSessionCompressionMixin:
                     except _retryable_owner_errors() as exc:
                         if not is_retryable_owner_error(exc) or attempt + 1 == _RETRYABLE_ATTEMPTS:
                             raise
+            # Old owners journal reads; reject foreign targets before enqueueing one.
+            if session_id != self.scope['session_id']:
+                ids = self._apply('compression.lineage', {'target': self.scope['session_id']})['readable_ids']
+                if session_id not in ids:
+                    raise WorkerPersistenceError('permission_denied')
             return self._apply('compression.context', {'target': session_id})['session']
 
     def get_compression_lineage(self, session_id):
