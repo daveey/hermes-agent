@@ -564,16 +564,21 @@ def _moved_sessions(home: Path, start: int, end: int) -> list[dict]:
                 return col if col in have else alt
             activity = ("COALESCE(last_activity_at, started_at)" if {"last_activity_at", "started_at"} <= have
                         else pick("started_at"))
+            internal = ("json_extract(CASE WHEN json_valid(model_config) THEN model_config END, '$._delegate_from') "
+                        "IS NOT NULL" if "model_config" in have else "0")
             ids = [row[0] for row in moved]
             rows = {row[0]: row for row in conn.execute(
                 f"SELECT id, {pick('message_count')}, {activity}, {pick('profile_name')}, "
-                f"{pick('parent_session_id')} FROM sessions WHERE id IN ({', '.join('?' for _ in ids)})", ids)}
+                f"{pick('parent_session_id')}, {pick('hidden', '0')}, LOWER(COALESCE({pick('source')}, '')), "
+                f"{internal} FROM sessions WHERE id IN ({', '.join('?' for _ in ids)})", ids)}
         finally:
             conn.execute("COMMIT")
     fallback_profile = _home_profile_name(home)
     out = []
     for session_id, last_id in moved:
         row = rows.get(session_id)
+        if row is None or _not_listed(row):
+            continue
         out.append({
             "id": session_id, "profile": (row[3] if row is not None and row[3] else fallback_profile),
             "message_count": row[1] if row is not None else None,
@@ -583,23 +588,48 @@ def _moved_sessions(home: Path, start: int, end: int) -> list[dict]:
     return out
 
 
-def _sessions_moved_payload(before: tuple, after: tuple) -> dict | None:
-    """``{"sessions": [...]}`` for every store whose cursor advanced; None (no frame) when none did (a store
-    seen for the first time, replaced or restored to a lower id seeds its cursor silently)."""
+# Sources the session listings never show (a tool-run or subagent transcript): a push about one widens the
+# broadcast past what any client lists. Hidden rows and delegate children are dropped the same way.
+_UNLISTED_SOURCES = frozenset({"tool", "subagent"})
+
+
+def _not_listed(row) -> bool:
+    return bool(row[5]) or row[6] in _UNLISTED_SOURCES or bool(row[7])
+
+
+class _SettledSig:
+    """A 4th-slot result that also names the signature to remember: a part it could not read stays at its old
+    value, so the next pass reads that range again instead of skipping it."""
+
+    __slots__ = ("payload", "sig")
+
+    def __init__(self, payload, sig):
+        self.payload, self.sig = payload, sig
+
+
+def _sessions_moved_payload(before: tuple, after: tuple) -> _SettledSig:
+    """``{"sessions": [...]}`` for every store whose cursor advanced (None payload, no frame, when none did; a
+    store seen for the first time, replaced or restored to a lower id seeds its cursor silently). A store whose
+    cursor read or row read failed keeps its previous cursor in the settled signature, so its rows go out on a
+    later pass rather than never."""
     prior = dict(before or ())
     moved: list[dict] = []
+    settled = []
     for home, cursor in after:
         start = prior.get(home)
-        if start is None or cursor is None or cursor <= start:
+        if start is not None and cursor is None:
+            settled.append((home, start))  # unreadable now: keep the range for the next pass
+            continue
+        settled.append((home, cursor))
+        if start is None or cursor <= start:
             continue
         try:
             moved += _moved_sessions(Path(home), start, cursor)
-        except Exception:  # health: allow BLE001 -- a busy/foreign store skips this frame; the Desktop's listing poll is the backstop
+        except Exception:  # health: allow BLE001 -- busy/foreign store: retried from the same cursor next pass
             logger.debug("sessions.moved read failed home=%s", home, exc_info=True)
-    if not moved:
-        return None
+            settled[-1] = (home, start)
     moved.sort(key=lambda entry: entry["last_message_id"], reverse=True)
-    return {"sessions": moved[:SESSIONS_MOVED_MAX]}
+    return _SettledSig({"sessions": moved[:SESSIONS_MOVED_MAX]} if moved else None, tuple(settled))
 
 
 def _skills_sig():
@@ -673,6 +703,8 @@ def _broadcast_watched_changes(now: float | None = None) -> None:
         before, _change_sigs[event] = _change_sigs[event], sig
         with contextlib.suppress(Exception):
             payload = diff_fn[0](before, sig) if diff_fn else payload_fn()
+            if isinstance(payload, _SettledSig):
+                _change_sigs[event], payload = payload.sig, payload.payload
             if payload is None:
                 continue  # the move carried nothing to tell (sessions.moved: no rows in range)
             _change_broadcast_at[event] = now

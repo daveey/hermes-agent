@@ -860,6 +860,17 @@ BEGIN
     -- cache keys on (conversation_revision). Whoever wrote the row, old builds included.
     UPDATE sessions SET transcript_revision = transcript_revision + 1 WHERE id = new.session_id;
 END;
+DROP TRIGGER IF EXISTS messages_visibility_revision_update;
+CREATE TRIGGER IF NOT EXISTS messages_visibility_revision_update
+AFTER UPDATE OF active, compacted ON messages
+WHEN old.active IS NOT new.active OR old.compacted IS NOT new.compacted
+BEGIN
+    -- [daveey] A row hidden or archived in place (a queued-prompt drain, a model-switch pivot, a rewind,
+    -- compaction) changes what a display page shows without moving the highest id: a cached transcript tail
+    -- extended by `?after_id=` deltas keys on this revision to know it must refetch. Its own name, like the
+    -- trigger below, so an older build's open leaves it in place.
+    UPDATE sessions SET transcript_revision = transcript_revision + 1 WHERE id = new.session_id;
+END;
 DROP TRIGGER IF EXISTS messages_display_revision_update;
 CREATE TRIGGER IF NOT EXISTS messages_display_revision_update
 AFTER UPDATE OF codex_reasoning_items, codex_message_items, display_kind, display_metadata ON messages

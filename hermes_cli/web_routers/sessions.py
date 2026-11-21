@@ -895,8 +895,10 @@ async def get_session_messages(
     after_id: Optional[int] = Query(None, ge=0)):
     if order not in (None, "oldest", "latest"):
         raise HTTPException(status_code=400, detail="order must be one of: oldest, latest")
-    if after_id is not None:
-        return await _session_messages_after(request, session_id, profile, after_id, limit, inline_images)
+    # A direct call (not through FastAPI) leaves the Query() defaults in place: only a real int is a delta ask.
+    if isinstance(after_id, int) and not isinstance(after_id, bool):
+        return await _session_messages_after(request, session_id, profile, after_id,
+                                             limit if isinstance(limit, int) else None, inline_images)
 
     def _read(db):
         sid = _resolve_session_id(db, session_id)
@@ -974,13 +976,30 @@ async def _session_messages_after(request: Request, session_id: str, profile: Op
         _project_for_display, rows[:_limit], home=_history_profile_home(profile), inline_images=inline_images)
     if request.headers.get(DISPLAY_TRANSCRIPT_HEADER) == "1":
         projected = _slim_for_display(projected)
-    return {
+    body = {
         "session_id": sid,
         "profile": _serving_profile(profile),
         "messages": projected,
-        "delta": {"after_id": after_id, "anchor_found": bool(page["anchor_found"]), "has_more": has_more,
+        "delta": {"after_id": after_id, "anchor_found": bool(page["anchor_found"]),
+                  "fold_conflict": bool(page.get("fold_conflict")), "has_more": has_more,
                   "transcript_revision": page["transcript_revision"], "limit": _limit,
                   "returned": len(projected)}}
+    return _delta_response(request, body)
+
+
+# A delta this small is cheaper sent as is than gzipped (most pushes carry a row or two).
+DELTA_GZIP_MIN_BYTES = 16 * 1024
+
+
+def _delta_response(request: Request, body: dict):
+    """The latest page's gzip path (``_display_transcript_response``) for a delta big enough to gain from it."""
+    if "gzip" not in (request.headers.get("accept-encoding") or "").lower():
+        return body
+    raw = json.dumps(jsonable_encoder(body), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(raw) < DELTA_GZIP_MIN_BYTES:
+        from fastapi.responses import Response
+        return Response(content=raw, media_type="application/json")
+    return _display_transcript_response(request, body)
 
 
 def _timeline_session_id(db, session_id: str, owner: str) -> str:

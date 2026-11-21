@@ -41,6 +41,11 @@ export const SAFETY_NET_MS = 60_000
 export const EARLY_PASS_MIN_MS = 5_000
 /** [daveey] Transcript revisions remembered (one per pushed session), oldest forgotten first. */
 const REVISIONS_MAX = 2_000
+/** [daveey] A gateway that answered without the `after_id` route is asked again after this long (it may update). */
+export const DELTA_REPROBE_MS = 10 * 60_000
+/** [daveey] A pushed session an early listing pass did not pick up asks for no further early pass for this long. */
+export const UNKNOWN_IGNORE_MS = 10 * 60_000
+const UNKNOWN_IGNORED_MAX = 2_000
 
 export interface HubSessionRecord {
   activity?: null | number
@@ -80,6 +85,8 @@ export interface MovedSession {
 /** [daveey] `GET /api/sessions/{id}/messages?after_id=` as the prefetcher reads it. */
 export interface DeltaPage {
   anchorFound: boolean
+  /** A new row the latest page would fold into an earlier slot (a display-identity or archived tool copy). */
+  foldConflict?: boolean
   hasMore: boolean
   messages: unknown[]
   sessionId: string
@@ -252,8 +259,13 @@ export class TranscriptPrefetcher {
   private readonly pushLanes = new Map<string, { done: Promise<void>; queued: MovedSession | null }>()
   /** Transcript revision each session's cached run was last made whole at (a latest page or a clean delta). */
   private readonly revisions = new Map<string, null | number>()
-  /** Connections whose gateway has no `after_id` route: pushes there refetch the latest page. */
-  private readonly deltaUnsupported = new Set<string>()
+  /** Connections whose gateway had no `after_id` route, until when: pushes there refetch the latest page. */
+  private readonly deltaUnsupported = new Map<string, number>()
+  /** (connection, profile) scopes the last listing covered: only their unknown movers ask for an early pass. */
+  private readonly listedScopes = new Set<string>()
+  /** Unknown movers an early pass was asked for, and those a pass did not pick up (ignored until the time). */
+  private readonly unknownPending = new Set<string>()
+  private readonly unknownIgnored = new Map<string, number>()
   private lastListingAt = Number.NEGATIVE_INFINITY
   private earlyPassTimer: null | ReturnType<typeof setTimeout> = null
   /** [daveey] Push work counted for logs and measurement. */
@@ -336,8 +348,8 @@ export class TranscriptPrefetcher {
       if (tracked(keys[index]) || tracked(parents[index])) {
         work.push(this.enqueuePush(keys[index], entry))
       } else {
-        unknown = true
         this.pushStats.unknown += 1
+        unknown = this.noteUnknown(keys[index]) || unknown
       }
     })
 
@@ -346,6 +358,49 @@ export class TranscriptPrefetcher {
     }
 
     await Promise.all(work)
+  }
+
+  /**
+   * [daveey] Whether an untracked mover is worth an early listing pass: its (connection, profile) is one the
+   * listing covers (else no pass would pick it up), and no recent pass already left it out. A busy hub moves many
+   * sessions the listing never targets (automations past the window); without this every push re-armed a pass.
+   */
+  private noteUnknown(key: TranscriptCacheKey): boolean {
+    const id = keyString(key)
+
+    if (!this.listedScopes.has(`${key.connectionId}\u0000${key.profile}`)) {
+      return false
+    }
+
+    if ((this.unknownIgnored.get(id) ?? 0) > this.now()) {
+      return false
+    }
+
+    this.unknownPending.add(id)
+
+    return true
+  }
+
+  /** After an early pass: the movers it did not pick up are ignored for UNKNOWN_IGNORE_MS. */
+  private settleUnknown(): void {
+    const until = this.now() + UNKNOWN_IGNORE_MS
+
+    for (const id of this.unknownPending) {
+      if (!this.targetKeys.has(id)) {
+        this.unknownIgnored.delete(id)
+        this.unknownIgnored.set(id, until)
+      }
+    }
+
+    this.unknownPending.clear()
+
+    for (const stale of this.unknownIgnored.keys()) {
+      if (this.unknownIgnored.size <= UNKNOWN_IGNORED_MAX) {
+        break
+      }
+
+      this.unknownIgnored.delete(stale)
+    }
   }
 
   /** One fetch in flight per session and the newest entry queued behind it (older queued entries are superseded). */
@@ -442,7 +497,7 @@ export class TranscriptPrefetcher {
   ): Promise<{ outcome?: PushOutcome; reason: string; revision?: null | number }> {
     const { fetchAfter, store } = this.deps
 
-    if (!fetchAfter || !store.tailId || !store.putAfter || this.deltaUnsupported.has(key.connectionId)) {
+    if (!fetchAfter || !store.tailId || !store.putAfter || (this.deltaUnsupported.get(key.connectionId) ?? 0) > this.now()) {
       return { reason: 'no delta route' }
     }
 
@@ -456,7 +511,7 @@ export class TranscriptPrefetcher {
     const page = await fetchAfter(key, anchor ?? 0, LATEST_ROWS)
 
     if (page === null) {
-      this.deltaUnsupported.add(key.connectionId)
+      this.deltaUnsupported.set(key.connectionId, this.now() + DELTA_REPROBE_MS)
 
       return { reason: 'no delta route' }
     }
@@ -502,9 +557,9 @@ export class TranscriptPrefetcher {
     this.earlyPassTimer = setTimeout(() => {
       this.earlyPassTimer = null
       this.pushStats.earlyPasses += 1
-      void this.tick({ force: true }).catch(error =>
-        this.deps.log?.(`transcript prefetch early pass failed: ${(error as Error)?.message || error}`)
-      )
+      void this.tick({ force: true })
+        .then(() => this.settleUnknown())
+        .catch(error => this.deps.log?.(`transcript prefetch early pass failed: ${(error as Error)?.message || error}`))
     }, wait)
     this.earlyPassTimer.unref?.()
   }
@@ -790,11 +845,13 @@ export class TranscriptPrefetcher {
 
     // [daveey] Every listed session's hub meta (not just the targets), for on-demand freshness checks.
     this.listed.clear()
+    this.listedScopes.clear()
 
     for (const record of records) {
       const connectionId = record?.id && record.gateway ? names.get(record.gateway) : undefined
 
       if (connectionId) {
+        this.listedScopes.add(`${connectionId}\u0000${profileOf(record.profile)}`)
         this.listed.set(keyString({ connectionId, profile: profileOf(record.profile), sessionId: record.id }), {
           activity: record.activity ?? null,
           messageCount: record.message_count ?? null
@@ -913,6 +970,10 @@ export function deltaMismatch(
 
   if (page.hasMore) {
     return 'gap'
+  }
+
+  if (page.foldConflict) {
+    return 'display fold'
   }
 
   if (page.sessionId !== sessionId) {

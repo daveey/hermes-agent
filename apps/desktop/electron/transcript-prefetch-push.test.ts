@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { type TranscriptCacheKey, TranscriptCacheStore } from './transcript-cache'
 import {
+  DELTA_REPROBE_MS,
   type DeltaPage,
   EARLY_PASS_MIN_MS,
   type HubSessionRecord,
@@ -14,7 +15,8 @@ import {
   type PrefetchDeps,
   PUSH_LIVE_MS,
   SAFETY_NET_MS,
-  TranscriptPrefetcher
+  TranscriptPrefetcher,
+  UNKNOWN_IGNORE_MS
 } from './transcript-prefetch'
 
 interface Row {
@@ -34,6 +36,7 @@ class FakeGateway {
   afterCalls: { afterId: number; sessionId: string }[] = []
   rowsServed = 0
   afterSupported = true
+  foldConflict = false
   gate: null | Promise<void> = null
 
   append(sessionId: string, count = 1): MovedSession {
@@ -91,6 +94,7 @@ class FakeGateway {
 
     return {
       anchorFound,
+      foldConflict: this.foldConflict,
       hasMore: after.length > limit,
       messages: page.map(row => ({ ...row })),
       sessionId,
@@ -223,6 +227,13 @@ describe('push fallbacks to the latest page', () => {
       }
     ],
     [
+      'a row the page would fold into an earlier slot',
+      (gateway: FakeGateway) => {
+        gateway.append('chat')
+        gateway.foldConflict = true
+      }
+    ],
+    [
       'a rotation to a new stored id',
       (gateway: FakeGateway) => {
         gateway.rows.set('chat-child', [{ content: 'continued', id: gateway.nextId++, role: 'user' }])
@@ -293,9 +304,11 @@ describe('push coalescing', () => {
 })
 
 describe('tracked set', () => {
+  const covering = () => [{ activity: 1, gateway: 'hub', id: 'listed', message_count: 1 }] as HubSessionRecord[]
+
   it('ignores an unknown session but lists early (at most every EARLY_PASS_MIN_MS) so it is fetched', async () => {
     vi.useFakeTimers()
-    const env = setup()
+    const env = setup({ records: covering })
     env.prefetcher.start(5_000)
     await vi.advanceTimersByTimeAsync(0)
     const listingsBefore = env.listings.length
@@ -309,6 +322,40 @@ describe('tracked set', () => {
     expect(env.prefetcher.pushStats.earlyPasses).toBe(1)
     expect(env.listings.length).toBeGreaterThan(listingsBefore)
     env.prefetcher.stop()
+  })
+
+  it('asks no early pass for a mover outside every listed (connection, profile) scope', async () => {
+    vi.useFakeTimers()
+    const env = setup({ records: covering })
+    env.prefetcher.start(5_000)
+    await vi.advanceTimersByTimeAsync(0)
+
+    await env.push({ ...env.gateway.append('bot'), profile: 'alpha' }) // no listed session is on profile alpha
+
+    await vi.advanceTimersByTimeAsync(EARLY_PASS_MIN_MS)
+    expect(env.prefetcher.pushStats.earlyPasses).toBe(0)
+    env.prefetcher.stop()
+  })
+
+  it('a mover an early pass did not pick up asks for no further early pass for UNKNOWN_IGNORE_MS', async () => {
+    vi.useFakeTimers()
+    const env = setup({ records: covering })
+    env.prefetcher.start(60_000)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // An automation past the listing window: every push used to re-arm an early pass on a busy hub.
+    await env.push(env.gateway.append('automation'))
+    await vi.advanceTimersByTimeAsync(EARLY_PASS_MIN_MS)
+    expect(env.prefetcher.pushStats.earlyPasses).toBe(1)
+
+    for (let index = 0; index < 5; index += 1) {
+      await env.push(env.gateway.append('automation'))
+      await vi.advanceTimersByTimeAsync(EARLY_PASS_MIN_MS)
+    }
+
+    expect(env.prefetcher.pushStats.earlyPasses).toBe(1)
+    env.prefetcher.stop()
+    expect(UNKNOWN_IGNORE_MS).toBe(600_000)
   })
 
   it('treats a compression child of a cached session as tracked', async () => {
@@ -408,6 +455,22 @@ describe('older gateway', () => {
 
     expect(env.gateway.afterCalls).toHaveLength(1)
     expect(env.gateway.latestCalls).toEqual(['chat', 'chat'])
+    expect(env.cachedIds('chat')).toEqual((env.gateway.rows.get('chat') ?? []).map(row => row.id))
+  })
+
+  it('asks a gateway without the route again after DELTA_REPROBE_MS (an upgrade mid-session gets deltas)', async () => {
+    const env = setup()
+    env.gateway.afterSupported = false
+    await warm(env, 'chat')
+    await env.push(env.gateway.append('chat'))
+    expect(env.gateway.afterCalls).toHaveLength(0) // still within the window the warm-up's probe opened
+
+    env.gateway.afterSupported = true
+    env.advance(DELTA_REPROBE_MS)
+    await env.push(env.gateway.append('chat')) // probes again: learns the revision (page)
+    await env.push(env.gateway.append('chat'))
+
+    expect(env.prefetcher.pushStats.delta).toBe(1)
     expect(env.cachedIds('chat')).toEqual((env.gateway.rows.get('chat') ?? []).map(row => row.id))
   })
 

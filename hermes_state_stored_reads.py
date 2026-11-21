@@ -463,31 +463,57 @@ class SessionStoredReadsMixin:
 
     def get_display_messages_after(self, session_id: str, after_id: int, limit: int) -> dict[str, Any]:
         """[daveey] The live display rows of ONE stored session after ``after_id`` (a cached tail's last row id),
-        for the Desktop's push-driven transcript delta (``sessions.moved``). ``anchor_found`` is False when that
-        row is no longer a live row of this session (rewind, in-session compaction, a rotation moved new rows to a
-        child): the caller's cached run cannot be extended and it refetches the latest page. ``transcript_revision``
-        is read FIRST (an in-place rewrite of an older row bumps it; ``messages_*_revision_update`` triggers), so a
-        caller that remembers the revision of its last full page can tell a rewrite it would otherwise miss. Rows
-        are chronological, model-only rows hidden like every display read; at most ``limit`` (the caller asks one
-        more than it applies to learn whether the page was cut).
+        for the Desktop's push-driven transcript delta (``sessions.moved``). Read in one snapshot
+        (``transcript_read_snapshot``; a read that cannot prove one generation reports ``anchor_found`` False).
+
+        ``anchor_found`` False: that row is no longer a live row of this session (rewind, in-session compaction, a
+        rotation moved new rows to a child), so the caller's cached run cannot be extended; it refetches the latest
+        page. ``fold_conflict`` True: a new row is one the latest page would fold into an earlier slot (its display
+        identity is already shown, or it is a later copy of an archived tool result), so appending it would differ
+        from a fresh page; the caller refetches too. ``transcript_revision`` sums the resume lineage's revisions
+        (an ancestor's rewrite or (de)activation moves it as well as the tip's; ``messages_*_revision_update``
+        triggers), so a caller that remembers the revision of its last full page can tell a change it would
+        otherwise miss. Rows are chronological, model-only rows hidden like every display read; at most ``limit``
+        (the caller asks one more than it applies to learn whether the page was cut).
 
         Storage interface: port as ``display_rows_after``."""
+        from hermes_state_compaction_display import not_a_later_tool_copy_sql
         from hermes_state_messages import DISPLAY_VISIBLE_SQL
+
+        visible = f" AND m.active = 1{DISPLAY_VISIBLE_SQL}"
+        lineage = list(dict.fromkeys([*self._resume_lineage_ids(session_id), session_id]))
+        marks = _placeholders(lineage)
+        fold_sql = (
+            f"SELECT 1 FROM messages AS m WHERE m.session_id = ? AND m.id > ?{visible} AND ("
+            "(m.display_identity IS NOT NULL AND EXISTS (SELECT 1 FROM messages AS o WHERE o.session_id IN "
+            f"({marks}) AND o.display_identity = m.display_identity AND o.id <> m.id AND (o.active = 1 OR o.compacted = 1)))"
+            f" OR NOT (1 = 1{not_a_later_tool_copy_sql('m')})) LIMIT 1")
 
         def read(conn) -> dict[str, Any]:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
             revision = None
             if "transcript_revision" in columns:
-                found = conn.execute("SELECT transcript_revision FROM sessions WHERE id = ?", (session_id,)).fetchone()
-                revision = int(found[0] or 0) if found is not None else None
+                found = conn.execute(f"SELECT COUNT(*), COALESCE(SUM(transcript_revision), 0) FROM sessions "
+                                     f"WHERE id IN ({marks})", lineage).fetchone()
+                revision = int(found[1] or 0) if found and found[0] else None
             anchor = conn.execute("SELECT 1 FROM messages WHERE id = ? AND session_id = ? AND active = 1 LIMIT 1",
                                   (after_id, session_id)).fetchone() is not None
+            if not anchor:
+                return {"anchor_found": False, "fold_conflict": False, "transcript_revision": revision, "rows": []}
+            fold = conn.execute(fold_sql, (session_id, after_id, *lineage)).fetchone() is not None
             rows = conn.execute(
-                f"SELECT * FROM messages WHERE session_id = ? AND id > ? AND active = 1{DISPLAY_VISIBLE_SQL} "
-                "ORDER BY id ASC LIMIT ?", (session_id, after_id, max(0, int(limit)))).fetchall() if anchor else []
-            return {"anchor_found": anchor, "transcript_revision": revision, "rows": rows}
+                f"SELECT * FROM messages AS m WHERE m.session_id = ? AND m.id > ?{visible} ORDER BY m.id ASC LIMIT ?",
+                (session_id, after_id, max(0, int(limit)))).fetchall()
+            return {"anchor_found": True, "fold_conflict": fold, "transcript_revision": revision, "rows": rows}
 
-        result = self._read_retrying_ioerr(read)
+        result = None
+        for _attempt in range(2):
+            with self.transcript_read_snapshot() as consistent:
+                result = self._read_retrying_ioerr(read)
+                if consistent():
+                    break
+        else:
+            result = {**result, "anchor_found": False, "rows": []}  # no proven generation: the caller refetches
         result["messages"] = [self._row_to_message_dict(row, warn_context="get_display_messages_after",
                                                         summary_flag=True) for row in result.pop("rows")]
         return result

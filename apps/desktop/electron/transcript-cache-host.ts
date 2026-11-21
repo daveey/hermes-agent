@@ -312,6 +312,7 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
 
       return {
         anchorFound: delta.anchor_found === true,
+        foldConflict: delta.fold_conflict === true,
         hasMore: delta.has_more === true,
         messages: page.messages,
         sessionId: typeof page.session_id === 'string' ? page.session_id : key.sessionId,

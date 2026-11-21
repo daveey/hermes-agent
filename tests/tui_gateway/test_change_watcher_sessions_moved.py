@@ -146,3 +146,61 @@ def test_a_non_sqlite_store_neither_raises_nor_sends(watcher, tmp_path, monkeypa
     (other / "state.db").write_text("xy")
     server._broadcast_watched_changes(now=10.0)
     assert _moved(events) == []
+
+
+# ── review of #3912 ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_failed_row_read_keeps_the_range_for_the_next_pass(watcher, monkeypatch):
+    home, db, events = watcher
+    server._broadcast_watched_changes(now=0.0)
+    db.append_messages_batch("busy", [{"role": "assistant", "content": "lost?"}])
+
+    real = server._moved_sessions
+    monkeypatch.setattr(server, "_moved_sessions", lambda *args: (_ for _ in ()).throw(sqlite3.OperationalError("busy")))
+    server._broadcast_watched_changes(now=10.0)
+    assert _moved(events) == []  # nothing sent, and no floor started
+
+    monkeypatch.setattr(server, "_moved_sessions", real)
+    server._broadcast_watched_changes(now=10.5)
+    [payload] = _moved(events)
+    assert [(e["id"], e["last_message_id"]) for e in payload["sessions"]] == [("busy", _max_id(home, "busy"))]
+
+
+def test_an_unreadable_cursor_keeps_the_range_for_the_next_pass(watcher, monkeypatch):
+    _home, db, events = watcher
+    server._broadcast_watched_changes(now=0.0)
+    db.append_messages_batch("quiet", [{"role": "assistant", "content": "x"}])
+
+    real = server._sessions_moved_sig
+    monkeypatch.setattr(server, "_sessions_moved_sig", lambda: tuple((h, None) for h, _c in real()))
+    monkeypatch.setitem(server._CHANGE_WATCHES, "sessions.moved",
+                        (0.5, server._sessions_moved_sig, dict, server._sessions_moved_payload))
+    server._broadcast_watched_changes(now=10.0)
+    assert _moved(events) == []
+
+    monkeypatch.setitem(server._CHANGE_WATCHES, "sessions.moved",
+                        (0.5, real, dict, server._sessions_moved_payload))
+    server._broadcast_watched_changes(now=10.5)
+    [payload] = _moved(events)
+    assert [e["id"] for e in payload["sessions"]] == ["quiet"]
+
+
+@pytest.mark.parametrize("make", [
+    lambda db: db.create_session(session_id="t", source="tool"),
+    lambda db: db.create_session(session_id="t", source="subagent"),
+    lambda db: db.create_session(session_id="t", source="desktop", model_config={"_delegate_from": "busy"}),
+    lambda db: (db.create_session(session_id="t", source="desktop"),
+                sqlite3.connect(db.db_path).execute("UPDATE sessions SET hidden = 1 WHERE id = 't'").connection.commit()),
+], ids=["tool", "subagent", "delegate-child", "hidden"])
+def test_sessions_the_listing_never_shows_are_not_pushed(watcher, make):
+    _home, db, events = watcher
+    make(db)
+    server._broadcast_watched_changes(now=0.0)
+
+    db.append_messages_batch("t", [{"role": "assistant", "content": "internal"}])
+    db.append_messages_batch("busy", [{"role": "assistant", "content": "visible"}])
+    server._broadcast_watched_changes(now=10.0)
+
+    [payload] = _moved(events)
+    assert [e["id"] for e in payload["sessions"]] == ["busy"]
