@@ -219,12 +219,13 @@ def main():
     import argparse
     import json
     from pathlib import Path
+    from hermes_cli.kanban_lockguard import connect
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', required=True)
     parser.add_argument('--task-id')
     parser.add_argument('--limit', type=int, default=1000)
     args = parser.parse_args()
-    conn = sqlite3.connect(Path(args.db).expanduser().resolve().as_uri() + '?mode=ro', uri=True)
+    conn = connect(Path(args.db).expanduser().resolve().as_uri() + '?mode=ro', uri=True)
     try:
         print(json.dumps(read(conn, task_id=args.task_id, limit=args.limit), sort_keys=True))
     finally:
