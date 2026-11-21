@@ -17,6 +17,9 @@ def _model_names():
     """Offline catalog identity, not vendor-prefix guesses or live entitlement."""
     from hermes_cli.models_catalog_static import _PROVIDER_MODELS
     names = {name.lower().rsplit('/', 1)[-1] for rows in _PROVIDER_MODELS.values() for name in rows}
+    # Catalog transport selectors (e.g. moa/default) are not model identities.
+    # Otherwise ordinary board/profile references such as default/task become pins.
+    names.difference_update({'default', 'auto'})
     # These are human shorthand for catalog families, not arbitrary claude-* tools.
     aliases = {alias for alias in ('opus', 'sonnet', 'fable', 'astra', 'luna', 'sol')
                if any(alias in re.split(r'[-.]', name) for name in names)}
