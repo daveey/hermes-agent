@@ -53,6 +53,39 @@ def captured_hooks():
         mgr._hooks = saved
 
 
+@pytest.mark.parametrize("stamp", ["source", ""])
+def test_alarm_source_is_pulled_but_never_pushed(synced_conn, stamp):
+    conn = synced_conn
+    tid = "t_remote000000099"
+    sync.apply_remote_changes(conn, [_ch(1, "tasks", tid, _task_fields(alarm_source=stamp))], new_cursor=1)
+    row = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    assert row.get("alarm_source") == stamp
+    before = _outbox_count(conn)
+    conn.execute("UPDATE tasks SET alarm_source=? WHERE id=?", ("local-forgery", tid))
+    assert _outbox_count(conn) == before
+    conn.execute("UPDATE tasks SET title='changed' WHERE id=?", (tid,))
+    assert all("alarm_source" not in op["fields"] for op in sync.outbox(conn))
+    assert "alarm_source" not in sync.captured_columns(conn, "tasks")
+
+
+def test_alarm_source_reaches_local_prefilter(synced_conn, monkeypatch):
+    from hermes_cli import kanban_worker_node as worker
+    from hermes_cli import kanban_worker_placement as placement
+
+    conn = synced_conn
+    tid = "t_remote000000098"
+    sync.apply_remote_changes(conn, [_ch(1, "tasks", tid, _task_fields(
+        created_by="pickup-stall-detector", idempotency_key="pickup-stall:source:queue-full:1",
+        created_on="new-owner", alarm_source="source"))], new_cursor=1)
+    monkeypatch.setattr(sync, "board_mode", lambda conn: "primary")
+    monkeypatch.setattr(worker, "_own", lambda conn: "executor")
+    monkeypatch.setattr(worker, "registry", lambda: None)
+    monkeypatch.setattr(placement, "local_refusals", lambda conn, status: {})
+    assert tid not in worker.local_refusals(conn, "ready")
+    monkeypatch.setattr(worker, "_own", lambda conn: "source")
+    assert worker.local_refusals(conn, "ready")[tid] == "pickup_stall_source"
+
+
 def test_remote_changes_are_not_echoed_into_the_outbox(synced_conn):
     conn = synced_conn
     before = _outbox_count(conn)

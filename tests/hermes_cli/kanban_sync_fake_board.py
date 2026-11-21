@@ -223,6 +223,8 @@ class FakeService:
             cur = rows.get(uid)
             if cur is None:
                 clocks = {k: op["hlc"] for k in f}
+                if f.get("created_by") == "pickup-stall-detector":
+                    f["alarm_source"] = gw
                 return {"status": "applied", "row": self._put(b, table, uid, {"id": uid, **f, "created_on": gw,
                                                                                 "field_hlc": clocks}, gw, op["client_op_id"], op["hlc"])}
             if op.get("import") and cur.get("created_on") not in (None, gw):

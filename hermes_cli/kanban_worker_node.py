@@ -442,7 +442,7 @@ def local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
         return out
     own = _own(conn)
     rows = conn.execute(
-        "SELECT id, runs_on, created_on, created_by, idempotency_key, workspace_kind FROM tasks "
+        "SELECT id, runs_on, created_on, alarm_source, created_by, idempotency_key, workspace_kind FROM tasks "
         "WHERE status = ? AND claim_lock IS NULL "
         "AND (runs_on IS NOT NULL OR (created_on IS NOT NULL AND created_on != ?) "
         "OR created_by = 'pickup-stall-detector' OR idempotency_key LIKE 'pickup-stall:%' "

@@ -9,7 +9,8 @@ re-placed them by hand.
 The grant (:func:`refusal`) is the alarm's own run moving one target with ``kanban_move(task_id=<target>,
 runs_on=["pool:worker"], reason=...)``. Every condition must hold, each read on the board the move would write:
 
-* the caller is an open alarm the detector filed: ``created_by`` the detector, ``created_on`` M, idempotency key
+* the caller is an open alarm the detector filed: ``created_by`` the detector, immutable ``alarm_source`` M
+  (legacy NULL falls back to ``created_on``), idempotency key
   ``pickup-stall:<M>:...`` (M is read from the key, never from the arguments);
 * the target is one the alarm lists: the card its per-card key names, or a ``- <id> (`` line in its body or in a
   detector comment (``_refresh_targets``);
@@ -84,7 +85,10 @@ def alarm_own(alarm: Any) -> Optional[str]:
     if not key.startswith(kps.KEY_PREFIX):
         return None
     own = key[len(kps.KEY_PREFIX):].split(":", 1)[0]
-    if not own or ("created_on" in _cols(alarm) and alarm["created_on"] != own):
+    provenance = _stored(alarm, "alarm_source")
+    if provenance is None:
+        provenance = _stored(alarm, "created_on")
+    if not own or (("created_on" in _cols(alarm) or provenance is not None) and provenance != own):
         return None
     return own
 

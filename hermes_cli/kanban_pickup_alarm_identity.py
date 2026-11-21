@@ -1,8 +1,9 @@
 """Pickup alarm source exclusion, matching the Board's pickup_alarm.ts contract. [daveey]
 
-The Board stamps created_on from the authenticated gateway and fences changes to
-these detector identity fields. No caller-supplied list of excluded machines is used.
-Before that authoritative creation is pulled, missing provenance fails closed.
+The Board stamps alarm_source from the authenticated gateway and fences changes to
+these detector identity fields. Legacy NULL falls back to created_on; an empty
+source is an explicit refusal. Ownership may change without changing provenance.
+No caller-supplied list of excluded machines is used.
 """
 from __future__ import annotations
 
@@ -31,6 +32,9 @@ def refusal(card: Mapping[str, Any], machine: str) -> str | None:
         return None
     match = _KEY.fullmatch(key) if isinstance(key, str) else None
     source = (match[1] or match[2]) if match else None
-    if not detector or source is None or source != card.get("created_on"):
+    provenance = card.get("alarm_source")
+    if provenance is None:
+        provenance = card.get("created_on")
+    if not detector or source is None or source != provenance:
         return "pickup_stall_provenance"
     return "pickup_stall_source" if source == machine else None

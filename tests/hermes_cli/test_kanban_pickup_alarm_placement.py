@@ -115,6 +115,7 @@ def test_another_worker_claims_the_alarm_after_the_source_regains_capacity(tmp_p
         worker.round()
         row = svc.board(support.BOARD)["rows"]["tasks"][alarm]
         assert row["created_by"] == kps.DETECTOR and row["created_on"] == WORKER
+        assert row.get("alarm_source") == WORKER
         assert row["idempotency_key"].startswith(f"pickup-stall:{WORKER}:")
         monkeypatch.setitem(support.MACHINES, WORKER, _worker(WORKER, metrics={"active_card_runs": 0}))
         worker.enter()
