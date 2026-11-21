@@ -16,6 +16,10 @@ import pytest_asyncio
 from gateway.session_contract import SessionActor
 from hermes_state_runtime import list_session_admissions
 
+from tests.gateway import bot_retry_interleaving
+
+receipt_interleaving = bot_retry_interleaving.receipt_interleaving
+
 KEY = 'c' * 32
 
 
@@ -138,7 +142,7 @@ async def test_retry_that_fails_again_and_non_transient_failures_are_never_repla
 
 
 @pytest.mark.asyncio
-async def test_context_overflow_retries_once_unless_the_failed_dm_is_still_an_open_tail(bot):
+async def test_context_overflow_retries_once_unless_the_failed_dm_is_still_an_open_tail(bot, receipt_interleaving):
     """Main re-ran an overflowed delivery once (compress-then-resume: the re-run's own preflight
     compaction does the compress). The owner retry keeps that for an overflow that left no open DM
     row, and refuses (recorded, typed) when the DM is still the durable tail: the owner execution has
@@ -154,11 +158,16 @@ async def test_context_overflow_retries_once_unless_the_failed_dm_is_still_an_op
     bot.errors[:] = ["This model's maximum context length is 200000 tokens"]
     bot.authority.db.append_message(bot.chat, 'user', content='overflowed dm')
     await deliver(bot.connection, dict(id=other, profile='default', message='overflowed dm'))
-    for _ in range(100):
-        await asyncio.sleep(0.02)
-        record = (await asyncio.to_thread(read_delivery_result, bot.home, other))
-        if (record.get('retry') or {}).get('refused'):
-            break
+    from tests.waiting import async_wait_until
+
+    async def complete_refusal():
+        record = await asyncio.to_thread(read_delivery_result, bot.home, other)
+        # Refusal is published before refresh_receipt's terminal projection. It can still
+        # carry the earlier queued/claimed status and no failure reason at that boundary.
+        return record if (record and (record.get('retry') or {}).get('refused')
+                          and record.get('status') == 'failed' and 'reason' in record) else None
+
+    record = await async_wait_until(complete_refusal, what='the complete overflow refusal receipt')
     assert record['retry']['refused'] == 'open_user_tail' and len(_admissions(bot)) == 3
     assert (record['status'], record['reason']) == ('failed', 'context_overflow'), record
 
