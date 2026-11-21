@@ -56,8 +56,11 @@ def test_scratch_prune_ignores_foreign_deleted_cwd(tmp_path, foreign_deleted_cwd
     assert not idle.exists()
 
 
-def test_process_census_keeps_current_test_process():
-    assert os.getpid() in {proc.pid for proc in psutil.process_iter()}
+def test_process_census_keeps_current_test_process(tmp_path):
+    from pathlib import Path
+
+    assert not Path.cwd().resolve().is_relative_to(tmp_path.resolve())
+    assert os.getpid() in {proc.pid for proc in session_process_iter((str(tmp_path),))}
 
 
 def test_process_census_keeps_real_child_with_requested_attributes(tmp_path):
