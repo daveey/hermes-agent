@@ -125,6 +125,24 @@ def test_slow_refresh_error_keeps_previous_and_releases_lock(scoped, caplog):
     assert ksa._annotation_snapshot()[0] == {"s1": 4}
 
 
+@pytest.mark.parametrize("host_age, expected", [(10, 1), (5, 1), (4, 0)])
+def test_display_peek_preserves_newer_restart_seed(scoped, host_age, expected):
+    from hermes_cli import kanban_annotation_disk as disk
+
+    now = time.time()
+    # Exercise the real restart seed path, not a process-local bounded read.
+    scoped.undo()
+    ksa._reset_cache_for_tests()
+    scoped.setattr(ksa, "_origin_scope", lambda: SCOPE)
+    scoped.setattr(disk, "load", lambda scope: (_parts(1), now - 5))
+    scoped.setattr(ksa._host_copy, "_display_read", lambda scope: (_parts(0), now - host_age, True))
+    with ksa._annotate_refresh_lock:
+        row = ksa.annotate_kanban_activity([{"id": "s1"}], display=True)[0]
+    assert row.get("kanban_active", 0) == expected, row
+    assert row["kanban_observed_at"] == now - (5 if expected else host_age)
+    assert not row.get("kanban_unknown")
+
+
 def test_fast_cold_scope_returns_counts_with_caller_context(scoped):
     from contextvars import ContextVar
 

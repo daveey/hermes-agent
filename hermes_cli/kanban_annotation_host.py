@@ -394,7 +394,10 @@ def peek_display(scope: tuple[str, ...], previous: tuple | None) -> tuple | None
     if read is None or not read[2]:
         return previous
     parts, observed_at, _complete = read
-    previous_at = bounded.read_at(previous)
+    # Restart seeds carry provenance in the disk cache, not the bounded-read registry.
+    previous_at = _disk.observed_at(previous)
+    if previous_at is None:
+        previous_at = bounded.read_at(previous)
     if previous_at is not None and previous_at >= observed_at:
         return previous
     return bounded.ObservedParts(parts, observed_at)
