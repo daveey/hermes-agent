@@ -46,8 +46,27 @@ def presentation(local, fleet=None):
     return Sources(local, fleet) if primary else Evidence(fleet)
 
 
-def _metadata(db):
-    return {r['id']: r for r in db.execute('SELECT id,status,sync_version FROM tasks')}
+def _metadata(db, ids=None):
+    """Read open candidates, or their exact counterparts; never all history."""
+    from hermes_cli import kanban_lanes_flow as flow
+
+    if ids is None:
+        return {r['id']: r for r in db.execute(
+            f'SELECT id,status,sync_version FROM tasks WHERE status IN {flow._OPEN}')}
+    rows = {}
+    ids = list(ids)
+    for start in range(0, len(ids), 400):
+        batch = ids[start:start + 400]
+        marks = ','.join('?' for _ in batch)
+        rows.update((r['id'], r) for r in db.execute(
+            f'SELECT id,status,sync_version FROM tasks WHERE id IN ({marks})', batch))
+    return rows
+
+
+def _selected_source(task_id, own, remote, pending, local, fleet):
+    use_local = own is not None and (task_id in pending or remote is None or
+        int(own['sync_version'] or 0) >= int(remote['sync_version'] or 0))
+    return local if use_local else fleet
 
 
 def open_counts(out, pol, evidence, now):
@@ -109,8 +128,8 @@ def _pending(db):
 class Sources(Evidence):
     """Request-local selected open cards, lazy parents and source-owned histories.
 
-    Caller owns both connections and their short read snapshots. Metadata scans
-    contain no bodies; full terminal rows are read only when a parent needs one.
+    Metadata reads cover open candidates and their counterparts; full terminal
+    rows and their source metadata are read only when a parent needs one.
     """
 
     def __init__(self, local, fleet):
@@ -123,18 +142,22 @@ class Sources(Evidence):
         self._urls: dict[str, Any] = {}
         self._readers = {id(db): Evidence(db, rows=[]) for db in (local, fleet)}
         local_meta, fleet_meta = _metadata(local), _metadata(fleet)
-        pending = _pending(local)
+        # A terminal counterpart can suppress an open candidate. Unrelated
+        # terminal cards need no source decision until used as a parent.
+        candidates = local_meta.keys() | fleet_meta.keys()
+        local_meta.update(_metadata(local, candidates - local_meta.keys()))
+        fleet_meta.update(_metadata(fleet, candidates - fleet_meta.keys()))
+        self._pending = _pending(local)
         self._deleted = _deleted(local) | _deleted(fleet)
         self._source: dict[str, Any] = {}
         selected = {}
-        for tid in local_meta.keys() | fleet_meta.keys():
+        for tid in candidates:
             if tid in self._deleted:
                 continue
             own, remote = local_meta.get(tid), fleet_meta.get(tid)
-            use_local = own is not None and (tid in pending or remote is None or
-                int(own['sync_version'] or 0) >= int(remote['sync_version'] or 0))
-            self._source[tid] = local if use_local else fleet
-            selected[tid] = own if use_local else remote
+            db = _selected_source(tid, own, remote, self._pending, local, fleet)
+            self._source[tid] = db
+            selected[tid] = own if db is local else remote
         for db in (local, fleet):
             ids = [tid for tid, row in selected.items()
                    if self._source[tid] is db and row['status'] in flow._OPEN]
@@ -146,7 +169,12 @@ class Sources(Evidence):
         self.rows = sorted(self._rows.values(), key=lambda r: (r['created_at'], r['id']))
 
     def connection(self, task_id) -> sqlite3.Connection:
-        return self._source[task_id] if task_id in self._source else self.conn
+        if task_id not in self._source and task_id not in self._deleted:
+            own = _metadata(self.local, [task_id]).get(task_id)
+            remote = _metadata(self.conn, [task_id]).get(task_id)
+            self._source[task_id] = _selected_source(
+                task_id, own, remote, self._pending, self.local, self.conn)
+        return self._source.get(task_id, self.conn)
 
     def identity(self, task_id):
         return self._readers[id(self.connection(task_id))].identity(task_id)

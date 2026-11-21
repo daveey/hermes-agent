@@ -188,6 +188,50 @@ def test_terminal_bodies_are_not_bulk_loaded(copies, configured):
     assert full and all('WHERE id IN' in q for q in full), full
 
 
+def test_historical_metadata_is_not_materialized(copies, configured):
+    import sqlite3
+    from hermes_cli.kanban_lanes_sources import Sources
+    live, fleet = copies
+    card(live, 'open', 'ready')
+    card(live, 'parent', 'done', 3)
+    card(fleet, 'parent', 'archived', 2)
+    for i in range(200):
+        card(fleet, f'past-{i}', 'done')
+    metadata_rows = []
+    def factory(cursor, values):
+        if tuple(col[0] for col in cursor.description) == ('id', 'status', 'sync_version'):
+            metadata_rows.append(values[0])
+        return sqlite3.Row(cursor, values)
+    old = [db.row_factory for db in (live, fleet)]
+    for db in (live, fleet):
+        db.row_factory = factory
+    try:
+        chosen = Sources(live, fleet)
+        assert [row['id'] for row in chosen.rows] == ['open']
+        assert chosen.row('parent')['status'] == 'done'
+        assert chosen.connection('parent') is live
+        assert len(metadata_rows) < 10, len(metadata_rows)
+    finally:
+        for db, original in zip((live, fleet), old):
+            db.row_factory = original
+
+
+@pytest.mark.parametrize('pending,expected', [(False, 'archived'), (True, 'done')])
+def test_terminal_only_parent_keeps_revision_and_pending_authority(copies, configured, pending, expected):
+    from hermes_cli.kanban_lanes_sources import Sources
+    live, fleet = copies
+    card(live, 'p', 'done', 1)
+    card(fleet, 'p', 'archived', 2)
+    if pending:
+        live.execute('INSERT INTO kanban_sync_outbox VALUES(?,?,?,?,?)',
+                     ('p', 'tasks', 'upsert', 'pending', '{}'))
+    evidence = Sources(live, fleet)
+    assert evidence.rows == []
+    assert evidence.row('p')['status'] == expected
+    assert evidence.connection('p') is (live if pending else fleet)
+    assert evidence.row('absent') is None
+
+
 def test_flow_held_predicate_reads_selected_source(copies, configured):
     from hermes_cli import kanban_lanes_flow as flow
     from hermes_cli.kanban_lanes_sources import Sources
