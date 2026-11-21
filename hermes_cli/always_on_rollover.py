@@ -16,11 +16,14 @@ Three units now share the work. Every restart caller keeps naming ``hermes-alway
 * ``hermes-always-on-backend@<port>.service`` (ports 9148-9151): the same isolated SSH ``hermes serve``
   as before, with ``HERMES_ALWAYS_ON_BACKEND=<port>``. Such a backend does not self-retire on code
   skew. It retires through the idle fence once ``active.json`` stops naming its port
-  (``web_server_skew_exit.start_superseded_watchdog``), so live turns are never cut by a roll.
+  (``web_server_skew_exit.start_superseded_watchdog``), so live turns are never cut by a roll. Two
+  backstops stop a backend that never goes idle (SIGTERM, its turns checkpoint): any superseded one after
+  SUPERSEDED_HARD_S (6 h), and one rolled away from because it stopped answering after DEMOTED_HARD_S (30 min).
 * ``hermes-always-on-dashboard.service`` (the roller, ``Type=simple``, so a restart returns at once):
   it starts a backend on a free port, waits for it to answer, warms it by replaying the reads Desktop
   actually made, then switches ``active.json``. Afterwards it watches the active backend: a dead
-  backend, a commit behind the checkout HEAD, or a replaced runtime starts another roll.
+  backend, a commit behind the checkout HEAD, a replaced runtime, or a backend that is running but has not
+  answered /api/health for UNRESPONSIVE_CONFIRMATIONS polls starts another roll.
 
 ``hermes update`` no longer kills a ``backend@`` pid. It asks the roller to roll instead
 (``route_always_on_backends``, called from ``dashboard_procs._kill_stale_dashboard_processes``), because a cold restart of the active backend is exactly
@@ -801,6 +804,26 @@ class Roller:
         with contextlib.suppress(OSError):
             aod._write_private(self._demoted_path(), json.dumps({str(k): v for k, v in since.items()}))
 
+    def demote_if_replaced(self, port: int) -> bool:
+        """Demote *port* after a roll away from it. A backend that exited between the drift poll and the roll can
+        have its freed port reused by the replacement: the port active now is never demoted."""
+        after = read_active(self.home)
+        if after is None or after["port"] == int(port):
+            return False
+        self.demote(port)
+        return True
+
+    def start(self) -> bool:
+        """The roller's first roll. A starved active backend found at start (a core update restarts the roller)
+        is demoted like one supervise() rolls away from, so it is not adopted again or kept for 6 h."""
+        before = read_active(self.home)
+        starved = (before is not None and self.unit_active(before["port"]) and not self.update_in_progress()
+                   and self.health(before["port"]) is None)
+        ok = self.roll("roller started")
+        if ok and starved:
+            self.demote_if_replaced(before["port"])
+        return ok
+
     def demote(self, port: int) -> None:
         demoted = self._load_demoted()
         demoted.setdefault(int(port), self.wall())
@@ -880,7 +903,7 @@ class Roller:
                     if not self.roll(reason):
                         retry_at = self.clock() + FAILED_ROLL_BACKOFF_S
                     elif unresponsive and before is not None:
-                        self.demote(before["port"])
+                        self.demote_if_replaced(before["port"])
             # One bad poll (a malformed answer, a systemctl hiccup) must not end supervision.
             except Exception:  # health: allow BLE001 -- supervisor loop boundary; traceback logged
                 log(f"supervise: poll failed:\n{traceback.format_exc()}")
@@ -928,7 +951,7 @@ def cmd_roll(args) -> int:
     roller = Roller(token=token, checkout=default_checkout(hermes_home),
                     marker=hermes_home / ".hermes-update-in-progress",
                     loop_watch=hermes_home / "logs" / "loop-watch.jsonl")
-    roller.roll("roller started")
+    roller.start()
     roller.supervise()
     return 0
 

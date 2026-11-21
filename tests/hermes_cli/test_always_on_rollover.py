@@ -444,12 +444,55 @@ def test_reap_stops_a_demoted_backend_after_the_short_hard_limit(home):
     roller._retire_fenced = lambda port: False  # type: ignore[method-assign]  # busy: the fence refuses
     roller.demote(9148)
     assert roller.reap_superseded() == []
-    wall[0] += ro.DEMOTED_HARD_S
+    wall[0] += ro.DEMOTED_HARD_S - 1
+    assert roller.reap_superseded() == []  # just under the limit: still kept
+    wall[0] += 1
     assert roller.reap_superseded() == [9148]
     assert ("stop", "--no-block", ro.backend_unit(9148)) in host.calls
     host.running.discard(9148)
     roller.reap_superseded()
     assert roller._load_demoted() == {}
+
+
+def test_a_failed_unresponsive_roll_demotes_nothing(home):
+    host = FakeHost(running={9148}, commits={9148: "c" * 40}, answers=False)
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    roller.roll = lambda reason: False  # type: ignore[method-assign]
+    roller.supervise(max_polls=ro.UNRESPONSIVE_CONFIRMATIONS)
+    assert roller._load_demoted() == {}
+
+
+def test_a_replacement_on_the_freed_port_is_not_demoted(home):
+    # The starved backend exited between drift() and roll(); the roll restarted on that same port.
+    host = FakeHost(running={9148}, commits={9148: "c" * 40}, answers=False)
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+
+    def roll(reason):
+        ro.write_active(9148, home=home)
+        return True
+    roller.roll = roll  # type: ignore[method-assign]
+    roller.supervise(max_polls=ro.UNRESPONSIVE_CONFIRMATIONS)
+    assert roller._load_demoted() == {}
+
+
+def test_start_demotes_a_starved_active_backend_it_replaces(home):
+    host = FakeHost(running={9148}, commits={9148: "c" * 40})
+    ro.write_active(9148)
+    real_get = host.get
+    roller = make_roller(home, host)
+    roller.get = lambda port, path, timeout: (None, 0.0, None) if port == 9148 else real_get(port, path, timeout)
+    assert roller.start() is True
+    assert ro.read_active()["port"] == 9149 and set(roller._load_demoted()) == {9148}
+
+
+def test_start_does_not_demote_a_healthy_active_backend(home):
+    host = FakeHost(running={9148}, commits={9148: "a" * 40})
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    assert roller.start() is True
+    assert ro.read_active()["port"] == 9149 and roller._load_demoted() == {}
 
 
 def test_unanswered_health_mid_update_is_not_a_reason_to_roll(home):
