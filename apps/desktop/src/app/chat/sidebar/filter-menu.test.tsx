@@ -7,6 +7,7 @@ import { $interfaceMode } from '@/store/interface-mode'
 import {
   $sidebarListGroupIds,
   $sidebarOrdering,
+  $sidebarRowMeta,
   $sidebarStatusFilter,
   resetSidebarView,
   setSidebarGrouping,
@@ -16,6 +17,35 @@ import {
 import { SidebarFilterMenu } from './filter-menu'
 
 let i18n: I18nContextValue
+
+it('drops age, tokens and cost from Show without removing their sorting keys or legacy persistence', () => {
+  $interfaceMode.set('advanced')
+  $sidebarRowMeta.set(['updated', 'tokens', 'cost'])
+  render(
+    <I18nProvider configClient={null} initialLocale="en">
+      <Menu />
+    </I18nProvider>
+  )
+  const f = TRANSLATIONS.en.sidebar.filter
+  fireEvent.keyDown(screen.getByRole('button', { name: f.filters }), { key: 'Enter' })
+  fireEvent.keyDown(screen.getByRole('menuitem', { name: f.show }), { key: 'ArrowRight' })
+
+  for (const name of [f.updated, f.tokens, f.cost]) {
+    expect(screen.queryByRole('menuitemcheckbox', { name })).toBeNull()
+  }
+
+  expect(screen.getByRole('menuitemcheckbox', { name: f.profile })).toBeTruthy()
+  expect($sidebarRowMeta.get()).toEqual(['updated', 'tokens', 'cost'])
+  fireEvent.keyDown(screen.getByRole('menuitemcheckbox', { name: f.profile }), { key: 'Escape' })
+  fireEvent.keyDown(screen.getByRole('button', { name: f.filters }), { key: 'Enter' })
+  // Selecting cost retains the existing conditional sort visibility even without cost-bearing sessions.
+  act(() => setSidebarOrdering('cost'))
+  fireEvent.keyDown(screen.getByRole('menuitem', { name: f.ordering }), { key: 'ArrowRight' })
+
+  for (const name of [f.updated, f.tokens, f.cost]) {
+    expect(screen.getByRole('menuitemradio', { name })).toBeTruthy()
+  }
+})
 
 function Menu() {
   i18n = useI18n()

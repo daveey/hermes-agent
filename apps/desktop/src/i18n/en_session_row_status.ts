@@ -39,6 +39,14 @@ const watchLabel = (card: { id: string; label?: string; eta?: number }): string 
 
 // [daveey] Sidebar row status copy (kanban + process badges, outcome stripe tooltips), spread into en.ts.
 export const enSessionRowStatus = {
+  cardColours: {
+    red: 'Needs you',
+    pink: 'Held',
+    amber: 'Stalled / attention',
+    blue: 'Running',
+    grey: 'Waiting',
+    green: 'Done'
+  },
   kanbanUnknown: count =>
     `${count} work ${count === 1 ? 'item has' : 'items have'} unknown current status: evidence is missing, expired or unverified. This does not mean done; no new check was requested.`,
   kanbanTasks: (open, blocked) =>

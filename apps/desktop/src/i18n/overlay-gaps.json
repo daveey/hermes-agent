@@ -1,4 +1,10 @@
 {
+  "sidebar.row.cardColours.red": ["ar", "de", "es", "fr", "ja", "ru", "zh", "zh-hant"],
+  "sidebar.row.cardColours.pink": ["ar", "de", "es", "fr", "ja", "ru", "zh", "zh-hant"],
+  "sidebar.row.cardColours.amber": ["ar", "de", "es", "fr", "ja", "ru", "zh", "zh-hant"],
+  "sidebar.row.cardColours.blue": ["ar", "de", "es", "fr", "ja", "ru", "zh", "zh-hant"],
+  "sidebar.row.cardColours.grey": ["ar", "de", "es", "fr", "ja", "ru", "zh", "zh-hant"],
+  "sidebar.row.cardColours.green": ["ar", "de", "es", "fr", "ja", "ru", "zh", "zh-hant"],
   "sidebar.row.outcomeCrons": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "sidebar.row.outcomeWatches": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "agents.ageDays": ["ar"],

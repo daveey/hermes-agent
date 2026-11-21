@@ -441,6 +441,52 @@ describe('SidebarSessionRow', () => {
   })
 })
 
+describe('SidebarSessionRow approved flat trailing slot', () => {
+  it('ignores legacy age/token/cost preferences and keeps only squares then the gateway', () => {
+    const before = $sidebarRowMeta.get()
+    $sidebarRowMeta.set(['updated', 'tokens', 'cost'])
+
+    const row = makeSession({
+      title: 'Squares',
+      kanban_blocked: 2,
+      input_tokens: 12000,
+      output_tokens: 500,
+      estimated_cost_usd: 1.25,
+      background_active: 1,
+      background_processes: [{ id: 'p', command: 'sleep 600' }]
+    })
+
+    certifyRow(row)
+    $connectionsRegistry.set({
+      activeConnectionId: 'local',
+      primary: 'local',
+      connections: [
+        { id: 'local', kind: 'local', label: 'Laptop' },
+        { id: 'remote', kind: 'ssh', label: 'Cloud' }
+      ]
+    } as never)
+    const { container } = renderRow(row, { unreadAuthority: true })
+    expect(container.querySelector('time')).toBeNull()
+    expect(screen.queryByTestId('session-row-kanban-counts')).toBeNull()
+    expect(screen.queryByTestId('session-row-background-processes')).toBeNull()
+    const squares = screen.getByTestId('session-row-card-squares')
+    const gateway = container.querySelector('[data-slot="session-gateway-device"]')!
+    expect(gateway).not.toBeNull()
+    expect(squares.nextElementSibling).toBe(gateway)
+    expect(gateway.nextElementSibling).toBeNull()
+    expect(container.textContent).not.toContain('12.5k')
+    expect(container.textContent).not.toContain('$1.25')
+    $sidebarRowMeta.set(before)
+  })
+
+  it('leaves the card-mode age and badges unchanged', () => {
+    const { container } = renderRow(makeSession({ title: 'Card', kanban_blocked: 1 }), { card: true })
+    expect(container.querySelector('time')).not.toBeNull()
+    expect(screen.getByTestId('session-row-kanban-counts')).toBeTruthy()
+    expect(screen.queryByTestId('session-row-card-squares')).toBeNull()
+  })
+})
+
 describe('SidebarSessionRow keyboard stops', () => {
   const rowMeta = $sidebarRowMeta.get()
   const pullRequests = $pullRequestsByBranch.get()
@@ -458,7 +504,14 @@ describe('SidebarSessionRow keyboard stops', () => {
     const timestamp = container.querySelector('time')!
 
     primary.focus()
-    timestamp.focus()
+
+    if (card) {
+      expect(timestamp).not.toBeNull()
+      timestamp.focus()
+    } else {
+      expect(timestamp).toBeNull()
+    }
+
     expect(globalThis.document.activeElement).toBe(primary)
 
     const stops = [...container.querySelectorAll<HTMLElement>('button, [tabindex]')].filter(
@@ -497,14 +550,14 @@ describe('SidebarSessionRow keyboard stops', () => {
   it('lifts the hover cluster over a hiding tail, sized to its buttons', () => {
     $sidebarRowMeta.set(['updated'])
 
-    const { container, unmount } = renderRow(makeSession({ title: 'Plain' }))
+    const { container, unmount } = renderRow(makeSession({ title: 'Plain', kanban_unseen: 1 }))
     const cluster = screen.getByRole('button', { name: 'Session actions' }).closest('span.flex')!
 
     expect(cluster.className).toContain('absolute')
     expect(container.querySelector('.session-row-tail')?.className).toContain('min-w-11')
     unmount()
 
-    const archived = renderRow(makeSession({ archived: true, title: 'Old' }))
+    const archived = renderRow(makeSession({ archived: true, title: 'Old', kanban_unseen: 1 }))
 
     expect(archived.container.querySelector('.session-row-tail')?.className).toContain('min-w-5')
   })
@@ -738,7 +791,8 @@ describe('SidebarSessionRow kanban counts', () => {
         kanban_blocked: 1,
         kanban_blocked_on: ['remote/default/t_owner'],
         title: 'Forwarded'
-      })
+      }),
+      { card: true }
     )
 
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stuck')
@@ -759,7 +813,7 @@ describe('SidebarSessionRow kanban counts', () => {
     )
 
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).not.toBe('stuck')
-    expect(screen.getByTestId('session-row-kanban-counts').getAttribute('aria-label')).toBe('2 open, 0 blocked')
+    expect(screen.getByTestId('session-row-card-squares').getAttribute('aria-label')).toBe('Waiting 2')
   })
 
   afterEach(() => vi.useRealTimers())
@@ -776,7 +830,8 @@ describe('SidebarSessionRow kanban counts', () => {
         kanban_parked: 1,
         message_count: 2,
         title: 'Expiry'
-      })
+      }),
+      { card: true }
     )
 
     expect(container.querySelector('[data-kanban-count="unknown"]')).toBeNull()
@@ -791,7 +846,9 @@ describe('SidebarSessionRow kanban counts', () => {
 
   it('explains unknown work in the accessible label and tooltip without implying a new poll', () => {
     vi.useFakeTimers()
-    renderRow(makeSession({ execution_observations: [{ source: 'unavailable.work' }], title: 'Unknown' }))
+    renderRow(makeSession({ execution_observations: [{ source: 'unavailable.work' }], title: 'Unknown' }), {
+      card: true
+    })
     const counts = screen.getByTestId('session-row-kanban-counts')
 
     const explanation =
@@ -832,7 +889,8 @@ describe('SidebarSessionRow kanban counts', () => {
 
   it('labels live cards from an older producer without observations as unknown, not certain work', () => {
     renderRow(
-      makeSession({ kanban_active: 3, kanban_blocked: 1, title: 'Legacy' } as Partial<SessionInfo> & { title: string })
+      makeSession({ kanban_active: 3, kanban_blocked: 1, title: 'Legacy' } as Partial<SessionInfo> & { title: string }),
+      { card: true }
     )
 
     const label = screen.getByTestId('session-row-kanban-counts').getAttribute('aria-label') ?? ''
@@ -843,9 +901,9 @@ describe('SidebarSessionRow kanban counts', () => {
   it('shows blocked-only work and hides the zero side', () => {
     renderRow(makeSession({ kanban_blocked: 2, title: 'Stuck' } as Partial<SessionInfo> & { title: string }))
 
-    const counts = screen.getByTestId('session-row-kanban-counts')
-    expect(counts.querySelector('[data-kanban-count="open"]')).toBeNull()
-    expect(counts.querySelector('[data-kanban-count="blocked"]')?.textContent).toBe('2')
+    const squares = screen.getByTestId('session-row-card-squares')
+    expect(squares.querySelector('[data-card-colour="blue"]')).toBeNull()
+    expect(squares.getAttribute('aria-label')).toBe('Needs you 2')
   })
 
   it('paints the red (stuck) stripe while a kanban card it created is blocked', () => {
@@ -867,9 +925,9 @@ describe('SidebarSessionRow kanban counts', () => {
     )
 
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('attention')
-    const counts = screen.getByTestId('session-row-kanban-counts')
-    expect(counts.querySelector('[data-kanban-count="attention"]')?.textContent).toBe('1')
-    expect(counts.getAttribute('aria-label')).toBe('1 dropped')
+    const squares = screen.getByTestId('session-row-card-squares')
+    expect(squares.querySelector('[data-card-colour="amber"]')).not.toBeNull()
+    expect(squares.getAttribute('aria-label')).toBe('Stalled / attention 1')
   })
 
   // [daveey] A parked card nothing has produced for over 2 h: an amber stalled count in BOTH trailing branches
@@ -913,8 +971,9 @@ describe('SidebarSessionRow kanban counts', () => {
       )
 
       expect(container.querySelector('time')).toBeNull()
-      const counts = screen.getByTestId('session-row-kanban-counts')
-      expect(counts.querySelector('[data-kanban-count="stalled"]')?.textContent).toBe('1')
+      const squares = screen.getByTestId('session-row-card-squares')
+      expect(squares.querySelector('[data-card-colour="amber"]')).not.toBeNull()
+      expect(squares.getAttribute('aria-label')).toBe('Stalled / attention 1')
       expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stalled')
       const glyph = container.querySelector('[data-slot="session-status-stripe"]')
       expect(glyph?.getAttribute('data-status-stripe')).toBe('stalled')
@@ -937,7 +996,7 @@ describe('SidebarSessionRow kanban counts', () => {
     )
 
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('waiting')
-    expect(screen.getByTestId('session-row-kanban-counts').querySelector('[data-kanban-count="stalled"]')).toBeNull()
+    expect(screen.getByTestId('session-row-card-squares').querySelector('[data-card-colour="amber"]')).toBeNull()
   })
 
   it('stays green (done) without kanban_attention', () => {
@@ -950,6 +1009,7 @@ describe('SidebarSessionRow kanban counts', () => {
     renderRow(makeSession({ title: 'Idle' }))
 
     expect(screen.queryByTestId('session-row-kanban-counts')).toBeNull()
+    expect(screen.queryByTestId('session-row-card-squares')).toBeNull()
   })
 })
 
@@ -1170,30 +1230,27 @@ describe('SidebarSessionRow background process badge', () => {
       ...extra
     } as Partial<SessionInfo> & { title: string })
 
-  it('shows the glyph (no count for one) and keeps the row off green', () => {
+  it('hides the process badge on flat rows but keeps the row off green', () => {
     const { container } = renderRow(held())
-    const badge = screen.getByTestId('session-row-background-processes')
-
-    expect(badge.getAttribute('aria-label')).toBe('1 background processes')
-    expect(badge.textContent).toBe('')
+    expect(screen.queryByTestId('session-row-background-processes')).toBeNull()
     expect(container.querySelector('[data-sidebar-stripe]')).toBeNull()
   })
 
-  it('shows the count when more than one, in the one-line row and the card', () => {
+  it('hides the count on the one-line row but preserves it on the card', () => {
     const two = held({
       background_active: 2,
       background_processes: [proc, { command: 'gh run watch 1', id: 'proc_b' }]
     } as Partial<SessionInfo>)
 
     renderRow(two)
-    expect(screen.getByTestId('session-row-background-processes').textContent).toBe('2')
+    expect(screen.queryByTestId('session-row-background-processes')).toBeNull()
     cleanup()
     renderRow(two, { card: true })
     expect(screen.getByTestId('session-row-background-processes').textContent).toBe('2')
   })
 
   it('hover lists the command, its age and a Stop button', async () => {
-    renderRow(held())
+    renderRow(held(), { card: true })
     fireEvent.pointerEnter(screen.getByTestId('session-row-background-processes'))
 
     const card = await screen.findByTestId('session-row-background-processes-card')
@@ -1204,7 +1261,7 @@ describe('SidebarSessionRow background process badge', () => {
 
   it('click opens the session', () => {
     const onResume = vi.fn()
-    renderRow(held(), { onResume })
+    renderRow(held(), { card: true, onResume })
     fireEvent.click(screen.getByTestId('session-row-background-processes'))
 
     expect(onResume).toHaveBeenCalledTimes(1)
@@ -1363,12 +1420,16 @@ describe('SidebarSessionRow stored outcome', () => {
 
     try {
       const { container } = renderRow(session)
-      expect(container.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('1')
+      expect(container.querySelector('[data-testid="session-row-card-squares"]')?.getAttribute('aria-label')).toBe(
+        'Waiting 1'
+      )
       await act(async () => {
         vi.setSystemTime(1011000)
         $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
       })
-      expect(container.querySelector('[data-kanban-count="unknown"]')?.textContent).toBe('2')
+      expect(container.querySelector('[data-testid="session-row-card-squares"]')?.getAttribute('aria-label')).toBe(
+        'Waiting 2'
+      )
     } finally {
       $liveWorkRoster.set({})
       vi.useRealTimers()

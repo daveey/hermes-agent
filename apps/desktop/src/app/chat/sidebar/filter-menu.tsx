@@ -230,10 +230,7 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
   ]
 
   const ROW_META: Option<SidebarRowMeta>[] = [
-    { icon: 'clock', id: 'updated', label: f.updated },
     { icon: 'comment', id: 'preview', label: f.preview },
-    { icon: 'symbol-numeric', id: 'tokens', label: f.tokens },
-    { icon: 'credit-card', id: 'cost', label: f.cost },
     { icon: 'git-pull-request', id: 'pr', label: f.pr },
     { icon: 'account', id: 'profile', label: f.profile }
   ]
@@ -314,10 +311,6 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
   })
 
   const rowMetaOptions = ROW_META.filter(option => {
-    if (option.id === 'cost') {
-      return hasCost || rowMeta.includes('cost')
-    }
-
     // Preview is a card line; the one-line row has nowhere to put it.
     if (option.id === 'preview') {
       return cardRows

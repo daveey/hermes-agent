@@ -57,6 +57,7 @@ import {
 } from './chrome'
 import { shellOwnsPress } from './reorderable-list'
 import { SessionContextMenu } from './session-actions-menu'
+import { flatRowCardMarks } from './session-row-card-squares'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
 import { RowHoverActions } from './session-row-hover-actions'
@@ -223,7 +224,7 @@ function SidebarSessionRowImpl({
 
   // Pinned metadata occupies the actions slot and swaps out for the kebab on
   // hover, so the row reserves the same width either way and never reflows.
-  const pinnedAge = rowMeta.includes('updated')
+  const pinnedAge = card && rowMeta.includes('updated')
   // The default profile has no mark worth spending a row slot on — a chip on
   // every row that says "the normal one" is noise. Named profiles only.
   const hasProfileTag = normalizeProfileKey(session.profile) !== 'default'
@@ -267,14 +268,14 @@ function SidebarSessionRowImpl({
     trailing.push({ key: 'pr', node: <PrTag pr={pr} /> })
   }
 
-  const showAge = pinnedAge || card
+  const flatMarks = flatRowCardMarks(session, executionUnknown, gatewayIcon)
 
-  if (figures.length || showAge) {
+  if (card) {
     // The card's meta lines separate by spacing alone, so its header figures
     // match (non-breaking pair — plain spaces collapse to one); the one-line
     // row keeps the interpunct between joined figures.
-    const sep = card ? '\u00A0\u00A0' : ' · '
-    const head = (showAge ? figures : figures.slice(0, -1)).join(sep)
+    const sep = '\u00A0\u00A0'
+    const head = figures.join(sep)
 
     trailing.push({
       key: 'figures',
@@ -284,19 +285,15 @@ function SidebarSessionRowImpl({
           {/* The figures own their tail: the separator goes with it. */}
           <span className={cn('inline-block text-right', tail)}>
             {head && sep}
-            {showAge ? (
-              <Tip label={absoluteAge} side="top">
-                <time
-                  aria-label={`${age}, ${absoluteAge}`}
-                  className="pointer-events-auto"
-                  dateTime={timestampDate.toISOString()}
-                >
-                  {age}
-                </time>
-              </Tip>
-            ) : (
-              figures.at(-1)
-            )}
+            <Tip label={absoluteAge} side="top">
+              <time
+                aria-label={`${age}, ${absoluteAge}`}
+                className="pointer-events-auto"
+                dateTime={timestampDate.toISOString()}
+              >
+                {age}
+              </time>
+            </Tip>
             {kanbanCounts}
             {processBadge}
             {gatewayIcon}
@@ -304,21 +301,15 @@ function SidebarSessionRowImpl({
         </span>
       )
     })
-  } else if (kanbanCounts || processBadge || gatewayIcon) {
+  } else if (flatMarks) {
     trailing.push({
       key: 'gateway',
-      node: (
-        <span className="pointer-events-none whitespace-nowrap text-[0.625rem] leading-none text-(--ui-text-tertiary)">
-          {kanbanCounts}
-          {processBadge}
-          {gatewayIcon}
-        </span>
-      )
+      node: flatMarks
     })
   }
 
   // A chip that ends the slot hides whole; the figures handle their own tail.
-  const chipEndsSlot = trailing.length > 0 && !figures.length && !pinnedAge
+  const chipEndsSlot = trailing.length > 0 && !(card && figures.length) && !pinnedAge
   const end = rowEndLayout(trailing.at(-1)?.key, chipEndsSlot, Boolean(pr), tail)
   // A handed-off session's live source is local, but it originated on a
   // messaging platform — surface that origin as a small badge so e.g. a
