@@ -117,7 +117,7 @@ def test_a_launch_key_is_refused_for_an_entry_only_the_model_chose(tmp_path):
     assert (refused.value.reason, refused.value.field) == ('invalid_params', 'api_key')
 
 
-def test_a_kanban_custom_provider_override_stays_on_the_profiles_endpoint(tmp_path, monkeypatch):
+def test_a_kanban_legacy_custom_override_cannot_force_the_profiles_endpoint(tmp_path, monkeypatch):
     from contextlib import closing
     from types import SimpleNamespace
     from gateway.session_contract import SessionActor
@@ -134,17 +134,39 @@ def test_a_kanban_custom_provider_override_stays_on_the_profiles_endpoint(tmp_pa
                         lambda name, *_required: {'terminal', 'file', 'git', 'host_repo', 'kanban'})
     kb.create_board('owned')
     with closing(connect(board='owned')) as conn:
+        before = list(conn.iterdump())
+        with pytest.raises(ValueError, match='model-neutral'):
+            kb.create_task(conn, title='t', assignee='default', workspace_kind='dir',
+                           workspace_path=str(tmp_path), model_override='qwen3-32b', provider_override='custom')
+        assert list(conn.iterdump()) == before
         task_id = kb.create_task(conn, title='t', assignee='default', workspace_kind='dir',
-                                 workspace_path=str(tmp_path), model_override='qwen3-32b', provider_override='custom')
+                                 workspace_path=str(tmp_path))
+        # Old synced author evidence remains intact, but cannot select an execution endpoint.
+        conn.execute("UPDATE tasks SET model_override='qwen3-32b', provider_override='custom' WHERE id=?", (task_id,))
+        conn.commit()
         kb.recompute_ready(conn)
         task = kb.claim_task(conn, task_id)
     connection = SimpleNamespace(authority=SimpleNamespace(profile_id=str(tmp_path)), native_owner=True,
                                  actor=SessionActor('owner', str(tmp_path), frozenset({'session:create'}), 'transport'))
     policy, _secrets = build_kanban_policy(connection, dict(board='owned', task_id=task.id, run_id=task.current_run_id,
                                                             claim_lock=task.claim_lock), BARE_LOCAL)
-    model_cfg = policy.effective()[0]['model']
-    assert (model_cfg['base_url'], model_cfg.get('key_env'), model_cfg.get('context_length')) == (
-        LOCAL, 'LOCAL_KEY', 32768)
+    frozen, model = policy.effective()
+    assert (model, frozen['model']['provider']) == ('class:standard', 'auto')
+    # No eligible registry was configured. Do not mistake a class selector for runnable custom work.
+    from agent.model_routing import ModelRoutingError
+    from agent.model_routing_runtime import resolve_class_runtime
+    from gateway.session_worker_construct import route_runtime
+    from unittest.mock import patch
+    with patch('httpx.Client.send') as send:
+        runtime, _ = route_runtime(policy, frozen, model, None, fallback=False)
+        assert (runtime['provider'], runtime['base_url'], runtime['api_key']) == ('auto', None, None)
+        # Pre-build lookup intentionally defers classes; the actual allocation boundary refuses.
+        with pytest.raises(ModelRoutingError):
+            resolve_class_runtime(model, runtime['provider'], config=frozen, session_id='legacy-custom-test')
+        send.assert_not_called()
+    with closing(connect(board='owned')) as conn:
+        stored = kb.get_task(conn, task_id)
+        assert (stored.model_override, stored.provider_override) == ('qwen3-32b', 'custom')
 
 
 @pytest.mark.asyncio
