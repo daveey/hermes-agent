@@ -642,10 +642,13 @@ def _ledger_index(stale_ok: bool = False, cards: Optional[list[dict[str, Any]]] 
 LEDGER_WAIT_FIELDS = ("park", "awaiting", "wake_check")
 
 
-def _ledger_wait(index: tuple, owner: str, owner_profile: str, board: str, tid: str,
-                 status: Any) -> dict[str, Any]:
-    """The owner-published wait fields of one card from ``_ledger_index``'s third map, only when the ledger record
-    reports the replica row's status (a park published for an earlier status is not this card's wait)."""
+def _ledger_wait(index: Optional[tuple], owner: Optional[str], owner_profile: str, board: str, tid: str,
+                 status: Any, *, named: bool = True) -> dict[str, Any]:
+    """The owner-published wait fields of one replica row from ``_ledger_index``'s third map: none unless a ledger
+    row ``named`` its owner (and the row's status is known), and only when the ledger record reports the replica
+    row's status (a park published for an earlier status is not this card's wait)."""
+    if not named or owner is None or index is None:
+        return {}
     waits = index[2] if len(index) > 2 else {}
     wait = waits.get((owner, owner_profile, board, tid))
     if not wait or wait.get("_status") != status:
@@ -873,8 +876,8 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                 "source": "replica",
             }
             out[pair].update(upstream_fields(r))
-            if named and owner is not None and not unknown and index is not None:
-                out[pair].update(_ledger_wait(index, owner, owner_profile, board, tid, status))
+            out[pair].update(_ledger_wait(index, owner, owner_profile, board, tid, status,
+                                          named=named and not unknown))
             if machine := run_machine(r):
                 out[pair]["run_machine"] = machine
             # Executor-stamped liveness of the current run (kanban_replica_execution), never the pull clock.

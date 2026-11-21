@@ -26,6 +26,7 @@ once, under a new request id; an overlap with another card blocks this one for a
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import sqlite3
@@ -33,6 +34,8 @@ import sys
 import time
 from datetime import datetime, timezone, UTC
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 DEFERRED = "placement_deferred"
 FORWARDED = "placement_forwarded"
@@ -724,8 +727,9 @@ def hold(conn: sqlite3.Connection, task_id: str, run_id: Optional[int], why: str
               + "; fix the forward or re-place the card, then unblock it.")
     try:
         ok = kb.block_task(conn, task_id, kind="transient", reason=reason, expected_run_id=run_id)
-    except Exception as exc:  # the card stays claimed; the dispatcher's crash path reclaims it, never a local run
-        print(f"placement forward: could not block {task_id}: {exc!r}", flush=True)
+    except Exception:  # boundary: whatever the block raises, the card stays claimed (the dispatcher's crash path
+        # reclaims it) and main() exits non-zero; it is never run here, so nothing may escape to main()'s fallback.
+        logger.exception("placement forward: could not block %s", task_id)
         return "hold-failed"
     return "held" if ok else "hold-failed"
 
@@ -737,7 +741,8 @@ def recover(conn: sqlite3.Connection, task_id: str, run_id: Optional[int], fwd: 
     the park refused, a broken board) it is held, never run here. [daveey]"""
     try:
         st = state(conn, task_id)
-    except Exception:
+    except Exception:  # boundary: an unreadable placement state is "unknown", which holds the card (never a local run)
+        logger.exception("placement forward: placement state of %s unreadable", task_id)
         st = None
         unknown = True
     else:
@@ -756,7 +761,8 @@ def recover(conn: sqlite3.Connection, task_id: str, run_id: Optional[int], fwd: 
             # Already sent: a local run would duplicate it. Retry the forward later.
             return fwd._park_clock(f"forward step failed ({type(exc).__name__}: {str(exc)[:160]}); retrying")
         return fwd._cancel(f"forward failed: {exc!r}"[:400])
-    except Exception as again:
+    except Exception as again:  # boundary: any failure of the requeue decides fallback-or-hold here, never escapes
+        logger.exception("placement forward: recovery of %s failed", task_id)
         print(f"placement forward recovery failed: {again!r}", flush=True)
         if local_ok:
             return "fallback"

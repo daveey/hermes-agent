@@ -27,6 +27,7 @@ from hermes_cli import kanban_counts_scopes as _count_scopes
 from hermes_cli.kanban_execution_source import transaction as _execution_transaction
 from hermes_cli import kanban_session_activity_recent_done as _recent_done
 from hermes_cli.kanban_session_activity_decode import _decode_replica_task
+from hermes_cli.kanban_session_activity_remote_wait import _park_of, _remote_wait  # re-exported: projection, outcome tasks
 from hermes_cli import kanban_execution_receipt as _receipts
 from hermes_cli.kanban_session_activity_origin_snapshot import SnapshotRootMoved as _RootMoved
 from hermes_cli.kanban_session_activity_origin_snapshot import remote_snapshot as _remote_snapshot
@@ -119,7 +120,6 @@ def _origin_scope() -> tuple[str, ...]:
     return (str(get_hermes_home()), get_active_profile_name(), str(kanban_db.kanban_home()),
             os.environ.get('HERMES_HUB_STATE', str(Path.home() / '.local/state/hermes-hub')),
             os.environ.get('HERMES_MAIL_CONFIG', str(Path.home() / '.config/hermes-mail/config.json')))
-
 
 
 def _board_db_paths() -> list[Path]:
@@ -666,7 +666,6 @@ def _read_remote_links(path: Path, now: float | None = None, *,
         return cards
 
 
-
 def _replica_synced(seen_at: dict[str, float], last_ok: float | None) -> tuple:
     """Per owner gateway, the ``synced_at`` ``_project_replica`` stamps on its cards (same expression)."""
     out = []
@@ -775,18 +774,6 @@ def _owner_evidence_of(task: dict[str, Any]) -> dict[str, Any]:
     """The hash-bound owner observation of a replica record, or {} (``kanban_origin_ledger._owner_evidence``)."""
     from hermes_cli.kanban_origin_ledger import _owner_evidence
     return _owner_evidence(task) if isinstance(task, dict) else {}
-
-
-def _park_of(task: dict[str, Any]) -> dict[str, Any] | None:
-    """[daveey] The bounded park fields a replicated card's wait info needs: the park its owner published
-    (``kanban_wait_replica.published_park``), else its last run's (``kanban_wait_info.park_fields``)."""
-    try:
-        from hermes_cli import kanban_wait_info as kwi
-        if isinstance(task.get("park"), dict):
-            return task["park"]
-        return kwi.park_fields(task.get("run"))
-    except Exception:  # display-only
-        return None
 
 
 def _replica_paths() -> list[Path]:
@@ -1484,18 +1471,6 @@ def stalled_task_counts() -> dict[str, int]:
     _all_counts()
     with _cache_lock:
         return _stalled_cache[0]
-
-
-def _remote_wait(card: dict[str, Any]) -> dict[str, Any] | None:
-    """Wait info of a remote card row, computed now from its fields (never a stored copy, which would freeze the
-    age). Stale (last-known) rows get none: they prove nothing about how long a wait has run."""
-    if card.get("stale"):
-        return None
-    try:
-        from hermes_cli import kanban_wait_info as kwi
-        return kwi.describe_replica(card)
-    except Exception:
-        return None
 
 
 def parked_waits(now: float | None = None) -> list[dict[str, Any]]:
