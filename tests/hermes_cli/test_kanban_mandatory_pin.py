@@ -122,9 +122,17 @@ def gws(tmp_path, monkeypatch, svc):
         policy += (f"      - model: {model}\n        provider: anthropic\n        billing: subscription\n"
                    "        weight: 1\n        eligible: true\n        funding_verified: true\n"
                    "        capabilities: {tools: true, streaming: true}\n")
+    import hermes_yaml as yaml
     for gateway in (hub, worker):
         path = gateway.home / "config.yaml"
-        path.write_text(path.read_text() + policy)
+        config = yaml.safe_load(path.read_text())
+        config["model_routing"] = yaml.safe_load(policy)["model_routing"]
+        path.write_text(json.dumps(config))
+        # The same strict reader the sync/dispatch path uses must retain sync.
+        from hermes_cli.config_effective import load_profile_config_effective
+        effective = load_profile_config_effective(path, fail_closed=True)
+        assert effective["kanban"]["sync"]["enabled"] is True
+        assert effective["model_routing"]["routes"]["deep"][0]["model"] == PIN["model"]
     yield hub, worker
     for gateway in (hub, worker):
         gateway.conn.close()
