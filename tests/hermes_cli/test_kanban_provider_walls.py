@@ -73,9 +73,10 @@ def test_legacy_pinned_card_on_walled_provider_is_routed_by_class_not_its_pin(bo
     with pytest.raises(ValueError):  # new concrete pins / mandatory directives are refused at ingress
         kb.create_task(conn, title="c", assignee="default", model_override="gpt-6-astra", provider_override=CODEX)
     seen = _dispatch(conn)
-    # Retired restrictions are ignored at dispatch: both run on the class route, never the legacy pin.
-    assert seen[a][:2] == (OPUS, "anthropic")
-    assert seen[b][:2] == (OPUS, "anthropic")
+    # This registry has only Anthropic: the Codex wall is unrelated and must
+    # preserve deferred class allocation, never concretize the legacy pin.
+    assert seen[a][:2] == ("class:standard", "auto")
+    assert seen[b][:2] == ("class:standard", "auto")
     # Author provenance is retained untouched.
     assert (kb.get_task(conn, a).model_override, kb.get_task(conn, a).provider_override) == ("gpt-6-astra", CODEX)
     assert "require_model: true" in kb.get_task(conn, b).body
@@ -218,8 +219,8 @@ def test_default_tier_with_retired_concrete_config_stays_on_the_class_route_unde
     conn = kbc.connect()
     tid = kb.create_task(conn, title="plain card", assignee="default")
     seen = _dispatch(conn)
-    assert seen[tid][:2] == (OPUS, "anthropic")
-    assert _tier_events(conn, tid)[-1]["reason"] == "default+wall:openai-codex"
+    assert seen[tid][:2] == ("class:standard", "auto")
+    assert _tier_events(conn, tid)[-1]["reason"] == "default"
     stored = kb.get_task(conn, tid)
     assert stored.model_override is None and stored.provider_override is None
 

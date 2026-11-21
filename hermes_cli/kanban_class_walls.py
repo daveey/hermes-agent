@@ -87,9 +87,14 @@ def class_wall_routes(task, model, *, now, extra_walls=None):
     providers = config.get('providers') or {}
     candidates = eligible_routes(policy, model.removeprefix('class:'), class_requirements(config),
                                  eligible=lambda r: is_provider_enabled(providers.get(r['provider'], {})))
-    known = dict(pw.active_walls(now=now))
+    # Only walls that constrain this class may force a concrete per-run alternate.
+    # Unrelated provider state must leave healthy weighted allocation deferred.
+    candidate_providers = {route['provider'] for route in candidates}
+    known = {provider: until for provider, until in pw.active_walls(now=now).items()
+             if provider in candidate_providers}
     for provider, until in (extra_walls or {}).items():
-        known[provider] = max(known.get(provider, 0), until)
+        if provider in candidate_providers:
+            known[provider] = max(known.get(provider, 0), until)
     provider_walls = dict(known)
     routes = []
     for route in candidates:
