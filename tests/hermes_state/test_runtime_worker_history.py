@@ -25,7 +25,13 @@ def test_history_and_lineage_keep_cache_scope_distinct_from_attribution(tmp_path
         epoch = begin_runtime_epoch(db, instance_id='fixture')
         scope = dict(epoch=epoch, execution_id='worker', session_id='tip', generation=0)
         register_worker_execution(db, **scope, kind='compute', adoption_secret='secret')
-        store = RuntimeSessionStore(lambda method, **p: mutate_worker_execution(db, **p), scope, tmp_path / 'outbox')
+        def rpc(method, **params):
+            if method == 'worker.sessionContext':
+                from hermes_state_worker_observations import worker_session_context
+                return worker_session_context(db, **params)
+            return mutate_worker_execution(db, **params)
+
+        store = RuntimeSessionStore(rpc, scope, tmp_path / 'outbox')
         try:
             assert store.get_messages_as_conversation('tip', include_row_ids=True) == db.get_messages_as_conversation('tip', include_row_ids=True)
             assert store.get_compression_lineage('tip') == db.get_compression_lineage('tip') == ['child', 'tip']
@@ -54,7 +60,13 @@ def test_declared_cache_boundary_matches_local_database(tmp_path):
         epoch = begin_runtime_epoch(db, instance_id='fixture')
         scope = dict(epoch=epoch, execution_id='worker', session_id='next', generation=0)
         register_worker_execution(db, **scope, kind='compute', adoption_secret='secret')
-        store = RuntimeSessionStore(lambda method, **p: mutate_worker_execution(db, **p), scope, tmp_path / 'outbox')
+        def rpc(method, **params):
+            if method == 'worker.sessionContext':
+                from hermes_state_worker_observations import worker_session_context
+                return worker_session_context(db, **params)
+            return mutate_worker_execution(db, **params)
+
+        store = RuntimeSessionStore(rpc, scope, tmp_path / 'outbox')
         try:
             assert store.latest_conversation_boundary('chat', 'cli') == db.latest_conversation_boundary('chat', 'cli')
             def agent(handle):

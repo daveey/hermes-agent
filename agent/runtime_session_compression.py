@@ -26,12 +26,29 @@ class RuntimeSessionCompressionMixin:
         return result['count']
 
     def get_session(self, session_id):
-        if session_id != self.scope['session_id']:
-            from agent.runtime_session_store import WorkerPersistenceError
-            ids = self._apply('compression.lineage', {'target': self.scope['session_id']})['readable_ids']
-            if session_id not in ids:
-                raise WorkerPersistenceError('permission_denied')
-        return self._apply('compression.context', {'target': session_id})['session']
+        from agent.runtime_session_store import (
+            WorkerPersistenceError, is_retryable_owner_error, _RETRYABLE_ATTEMPTS, _retryable_owner_errors,
+        )
+        with self.lock:
+            # A read may not overtake an unacknowledged write or hide its sticky failure.
+            if self.failure:
+                raise WorkerPersistenceError(self.failure)
+            if self.journal['pending']:
+                raise WorkerPersistenceError('pending_receipt')
+            if not getattr(self, '_legacy_session_context', False):
+                for attempt in range(_RETRYABLE_ATTEMPTS):
+                    try:
+                        return self.rpc('worker.sessionContext', **self.scope, target=session_id)['session']
+                    except WorkerPersistenceError as exc:
+                        # Only an explicit old-owner unknown-method reply permits downgrade.
+                        if exc.code != -32601:
+                            raise
+                        self._legacy_session_context = True
+                        break
+                    except _retryable_owner_errors() as exc:
+                        if not is_retryable_owner_error(exc) or attempt + 1 == _RETRYABLE_ATTEMPTS:
+                            raise
+            return self._apply('compression.context', {'target': session_id})['session']
 
     def get_compression_lineage(self, session_id):
         return self._apply('compression.lineage', {'target': session_id})['lineage']

@@ -9,7 +9,14 @@ the TUI, Desktop (local), the API server, ACP, cron, Bot Chat and Kanban workers
 clients that admit input to its session authority over `/api/ws` (see
 [Gateway local sessions](./gateway-local-sessions.md)). Out-of-process managed
 workers write through that owner (`RuntimeSessionStore` RPC), never by opening
-`state.db` for transcript writes themselves.
+`state.db` for transcript writes themselves. Their session-context reads use
+`worker.sessionContext`: the owner verifies the live producer, epoch, execution
+generation and readable lineage in a consistent read snapshot. These fresh
+observations neither consume a write sequence nor create durable replay receipts.
+The worker serializes them after acknowledged writes and refuses a read while a
+write is pending or failed. During rolling upgrades, only an explicit unknown-method
+reply selects the older journaled `compression.context` path; authorization and
+transport failures never downgrade to it.
 
 Source files: `hermes_state.py` (facade) plus the `hermes_state_*.py` siblings (schema, fts, search, compression, portability, gateway, ...)
 

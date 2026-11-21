@@ -248,6 +248,7 @@ class AuthorityConnection:
                     'worker.register': self.worker_register, 'worker.adopt': self.worker_adopt,
                     'worker.persist': self.worker_persist, 'worker.turnLease': self.worker_turn_lease,
                     'worker.nativeOrigin': self.worker_native_origin,
+                    'worker.sessionContext': self.worker_session_context,
                     'setup.status': self.setup_status, 'setup.runtime_check': self.setup_runtime_check,
                     'session.resume': self.resume, 'session.detach': self.detach,
                     'prompt.submit': self.submit,
@@ -483,6 +484,10 @@ class AuthorityConnection:
     async def worker_turn_lease(self, ref, params):
         from gateway.session_worker import worker_request
         return await worker_request(self, ref, params, operation='turnLease')
+
+    async def worker_session_context(self, ref, params):
+        from gateway.session_worker import worker_request
+        return await worker_request(self, ref, params, operation='sessionContext')
 
     async def worker_native_origin(self, ref, params):
         from gateway.session_worker import worker_request

@@ -536,6 +536,19 @@ class WorkerTurnLeaseParams(WorkerScopeParams):
     holder: str
 
 
+class WorkerSessionContextParams(WorkerScopeParams):
+    epoch: int
+    target: str
+
+
+class WorkerSessionContextResult(Result):
+    session: dict[str, JsonValue]
+
+
+canonical_method("worker.sessionContext", params=WorkerSessionContextParams, result=WorkerSessionContextResult,
+                 doc="Fresh owner-fenced lineage session context, without write receipts or sequence changes.")
+
+
 class WorkerTurnLeaseResult(Result):
     expires_at: float | None
 

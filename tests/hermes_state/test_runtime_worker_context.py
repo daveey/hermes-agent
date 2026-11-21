@@ -15,7 +15,8 @@ def test_worker_context_preserves_authority_identity_and_prompt_receipts(tmp_pat
         epoch = begin_runtime_epoch(db, instance_id='fixture')
         scope = dict(epoch=epoch, execution_id='worker', session_id='owned', generation=0)
         register_worker_execution(db, **scope, kind='child', adoption_secret='test-secret')
-        store = RuntimeSessionStore(lambda method, **p: mutate_worker_execution(db, **p), scope, tmp_path / 'outbox')
+        from tests.worker_store_rpc import worker_store_rpc
+        store = RuntimeSessionStore(lambda method, **p: worker_store_rpc(db, method, **p), scope, tmp_path / 'outbox')
         try:
             assert store.get_session('owned')['system_prompt'] == 'prefix'
             with pytest.raises(WorkerPersistenceError, match='permission_denied'):
@@ -58,7 +59,8 @@ def test_worker_constructor_restores_persisted_compressor_guards(tmp_path):
         epoch = begin_runtime_epoch(db, instance_id='fixture')
         scope = dict(epoch=epoch, execution_id='worker', session_id='owned', generation=0)
         register_worker_execution(db, **scope, kind='compute', adoption_secret='test-secret')
-        store = RuntimeSessionStore(lambda method, **p: mutate_worker_execution(db, **p), scope, tmp_path / 'outbox')
+        from tests.worker_store_rpc import worker_store_rpc
+        store = RuntimeSessionStore(lambda method, **p: worker_store_rpc(db, method, **p), scope, tmp_path / 'outbox')
         try:
             compressor = ContextCompressor(model='fixture', config_context_length=100000, quiet_mode=True)
             compressor.bind_session_state(store, 'owned')

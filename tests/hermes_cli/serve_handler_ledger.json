@@ -5,7 +5,7 @@
    "undecided": 354
   },
   "rpc": {
-   "authority": 114,
+   "authority": 115,
    "keep-host-wide": 1,
    "undecided": 184
   },
@@ -685,6 +685,7 @@
   {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "worker.nativeOrigin", "kind": "rpc", "ref": ""},
   {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "worker.persist", "kind": "rpc", "ref": ""},
   {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "worker.register", "kind": "rpc", "ref": ""},
+  {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "worker.sessionContext", "kind": "rpc", "ref": ""},
   {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "worker.turnLease", "kind": "rpc", "ref": ""}
  ]
 }

@@ -45,6 +45,7 @@ def apply_row_annotations(messages, annotations):
                 message[key] = value
 
 class WorkerPersistenceError(RuntimeError):
+    code = None  # JSON-RPC code, retained for explicit old-owner compatibility only
     data = {}  # the owner's structured ``error.data`` (field, detail, expected_sequence) when it refused
 
 
@@ -328,6 +329,7 @@ class WorkerRPC:
                                    method, params.get('operation'), params.get('sequence'),
                                    error.get('message'), data.get('field'), data.get('detail'))
                 failure = WorkerPersistenceError(error.get('message', 'persistence_failed'))
+                failure.code = error.get('code')
                 failure.data = data  # the str stays the bare wire code; recovery reads the structure
                 raise failure
             if method in ('worker.register', 'worker.adopt') and params.get('pid') == os.getpid():

@@ -122,7 +122,8 @@ async def _worker_request(connection, ref, params, *, operation):
         from gateway.session_worker_child import worker_child_request
         return await worker_child_request(connection, ref, params)
     extra = {'register': {'kind'}, 'adopt': set(), 'persist': {'epoch', 'sequence', 'operation', 'payload'},
-             'turnLease': {'epoch', 'holder'}, 'nativeOrigin': {'epoch', 'holder'}}[operation]
+             'turnLease': {'epoch', 'holder'}, 'nativeOrigin': {'epoch', 'holder'},
+             'sessionContext': {'epoch', 'target'}}[operation]
     if set(params) != _SCOPE | extra:
         raise RuntimeStoreError('invalid_params')
     claim = _claim(connection, ref, params)
@@ -141,6 +142,12 @@ async def _worker_request(connection, ref, params, *, operation):
     if 'worker:adopt' not in connection.actor.capabilities:
         raise RuntimeStoreError('permission_denied')
     _verify(connection, ref, params, claim)
+    if operation == 'sessionContext':
+        from hermes_state_worker_observations import worker_session_context
+        if type(params['epoch']) is not int or params['epoch'] != authority.epoch:
+            raise RuntimeStoreError('stale_epoch')
+        return await asyncio.to_thread(worker_session_context, authority.db, epoch=authority.epoch,
+                                       **scope, target=params['target'])
     if operation in ('turnLease', 'nativeOrigin'):
         from hermes_state_runtime import worker_turn_lease
         if type(params['epoch']) is not int or params['epoch'] != authority.epoch:

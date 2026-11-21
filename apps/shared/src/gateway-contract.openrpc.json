@@ -51306,6 +51306,75 @@
         "title": "WorkerScopeParams",
         "type": "object"
       },
+      "WorkerSessionContextParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "execution_id": {
+            "title": "Execution Id",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "pid": {
+            "title": "Pid",
+            "type": "integer"
+          },
+          "birth": {
+            "title": "Birth",
+            "type": "number"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          },
+          "epoch": {
+            "title": "Epoch",
+            "type": "integer"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "session_id",
+          "execution_id",
+          "generation",
+          "pid",
+          "birth",
+          "secret",
+          "epoch",
+          "target"
+        ],
+        "title": "WorkerSessionContextParams",
+        "type": "object"
+      },
+      "WorkerSessionContextResult": {
+        "additionalProperties": false,
+        "properties": {
+          "session": {
+            "additionalProperties": true,
+            "title": "Session",
+            "type": "object"
+          }
+        },
+        "required": [
+          "session"
+        ],
+        "title": "WorkerSessionContextResult",
+        "type": "object"
+      },
       "WorkerTurnLeaseParams": {
         "additionalProperties": false,
         "properties": {
@@ -52402,6 +52471,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/WorkerExecution"
+        }
+      }
+    },
+    {
+      "name": "worker.sessionContext",
+      "summary": "Fresh owner-fenced lineage session context, without write receipts or sequence changes.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/WorkerSessionContextParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/WorkerSessionContextResult"
         }
       }
     },

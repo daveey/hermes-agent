@@ -5222,6 +5222,20 @@ export interface WorkerScopeParams {
   birth: number
   secret: string
 }
+export interface WorkerSessionContextParams {
+  profile_id: string
+  session_id: string
+  execution_id: string
+  generation: number
+  pid: number
+  birth: number
+  secret: string
+  epoch: number
+  target: string
+}
+export interface WorkerSessionContextResult {
+  session: Record<string, unknown>
+}
 export interface WorkerTurnLeaseParams {
   profile_id: string
   session_id: string
@@ -7404,6 +7418,8 @@ export interface CanonicalRpcMethods {
   'worker.persist': { params: WorkerPersistParams; result: WorkerPersistResult }
   /** Register a compute worker execution on an idle session. */
   'worker.register': { params: WorkerRegisterParams; result: WorkerExecution }
+  /** Fresh owner-fenced lineage session context, without write receipts or sequence changes. */
+  'worker.sessionContext': { params: WorkerSessionContextParams; result: WorkerSessionContextResult }
   /** Fresh owner-fenced exact-holder turn lease expiry; never a persistence receipt. */
   'worker.turnLease': { params: WorkerTurnLeaseParams; result: WorkerTurnLeaseResult }
 }
@@ -7463,6 +7479,7 @@ export const CANONICAL_RPC_METHODS = [
   'worker.nativeOrigin',
   'worker.persist',
   'worker.register',
+  'worker.sessionContext',
   'worker.turnLease'
 ] as const satisfies readonly CanonicalRpcMethod[]
 
