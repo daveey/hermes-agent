@@ -91,7 +91,8 @@ def test_dispatch_routes_legacy_incompatible_pin_without_spawning(board, monkeyp
         assert config is not None
         validate_policy(config['model_routing'])
         qualified = {(route['model'], route['provider'])
-                     for route in eligible_routes(config['model_routing'], 'standard', class_requirements(config))}
+                     for level in ('deep', 'standard')
+                     for route in eligible_routes(config['model_routing'], level, class_requirements(config))}
         assert len(spawned) == 1 and spawned[0][0] == tid, repr(result)
         assert spawned[0][1:] in qualified
         assert kb.get_task(conn, tid).current_run_id != source_run

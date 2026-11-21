@@ -259,15 +259,20 @@ def test_review_card_waits_when_its_strong_provider_is_walled_elsewhere(board, m
         free = dispatch.check_respawn_guard(conn, tid, lane='review')
         monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'anthropic': float(clock[0] + 3600)})
         walled = dispatch.check_respawn_guard(conn, tid, lane='review')
-        from hermes_cli.kanban_review_model import ReviewModelUnavailable
-        with pytest.raises(ReviewModelUnavailable, match='author|implementer'):
+        # Tier selection may see a standard fallback, but episode admission must
+        # still refuse it: codex is held by this card's authenticated quota receipt.
+        assert tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane='review')[1] == 'openai-codex'
+        from hermes_cli.kanban_review_model import ReviewRouteDeferred
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {
+            'anthropic': float(clock[0] + 3600), 'openai-codex': float(clock[0] + 54 * 3600)})
+        with pytest.raises(ReviewRouteDeferred, match='No eligible deep or standard review route'):
             tier.apply_model_tier(conn, kb.get_task(conn, tid), lane='review')
         seen = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append(task.id))
         assert seen == []
-    # This fixture has only a review-lane failure, not authenticated implementation evidence.
-    # Even a free provider must not turn unknown authorship into an eligible reviewer.
-    assert free == 'subscription_quota_reset'
+    # Missing model attribution is audit-only: the free eligible deep route is
+    # usable, but neither a deep nor a standard route bypasses real provider walls.
+    assert free is None
     assert walled == 'subscription_quota_reset'
 
 

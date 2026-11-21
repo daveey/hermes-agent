@@ -35,7 +35,8 @@ def test_fifth_review_uses_strong_route_and_retains_current_author(board):
 
 @pytest.mark.parametrize("current", MODELS)
 def test_current_epoch_collects_all_authors_and_the_strong_route_may_review_across_retries(board, current):
-    cfg = helpers.config(board, strong=current, routes=MODELS)
+    cfg = helpers.config(board, strong=MODELS[(MODELS.index(current) + 1) % len(MODELS)],
+                         routes=[current] + [model for model in MODELS if model != current])
     with kbc.connect() as conn:
         task = helpers.task(conn, MODELS[0])
         for model in MODELS:
@@ -48,7 +49,7 @@ def test_current_epoch_collects_all_authors_and_the_strong_route_may_review_acro
             run(conn, task.id, MODELS[0], "review")
         authors = review.implementer_models(conn, kb.get_task(conn, task.id))
         assert authors == {current, other}
-        # Model diversity is retired: the author set is evidence only, so the strong route (itself an author) reviews.
+        # Registry order, not concrete strong config or author diversity, chooses the reviewer.
         model, _, _ = tier.resolve_model_tier(conn, kb.get_task(conn, task.id), lane="review", cfg=cfg)
         assert model == current and model in authors
 

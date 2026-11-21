@@ -126,8 +126,11 @@ def test_a_host_without_a_routing_policy_accepts_no_declaration(board):
     with kbc.connect_closing() as conn:
         task = _review(conn, '<!-- implementer-models: claude-code -->')
         assert review.implementer_models(conn, task) == set()
-        # No author evidence to lift: the strong route still admits a real separate review.
-        assert review.resolve_review_model(conn, task, {'strong_model': routing.OPUS})[0] == routing.OPUS
+        # Concrete strong config is not authority to invent a route without a registry.
+        before = list(conn.iterdump())
+        with pytest.raises(review.ReviewModelsExhausted, match='No eligible deep or standard review route'):
+            review.resolve_review_model(conn, task, {'strong_model': routing.OPUS})
+        assert list(conn.iterdump()) == before
         task = _review(conn, f'<!-- implementer-models: {OPUS} -->')  # a real model, but no policy to confirm it
         assert review.implementer_models(conn, task) == set()
 

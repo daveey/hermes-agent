@@ -126,10 +126,13 @@ def test_review_lane_uses_deep_class(board):
         _review_source(conn, tid)
         seen = _dispatch(conn)
         events = _tier_events(conn, tid)
+        assert events[-1]['review_independence'] == 'separate_execution'
+        assert 'implementer_models' not in events[-1] and 'implementer_model' not in events[-1]
+        from hermes_cli.kanban_review_model import implementer_models
+        assert implementer_models(conn, kb.get_task(conn, tid)) == {SONNET}
     assert "sdlc-review" in seen[tid][2]
     assert seen[tid][:2] == (OPUS, "anthropic")
     assert events[-1]["reason"] == "review_unpinned"
-    assert events[-1]["implementer_models"] == [SONNET]
 
 
 def test_retry_after_failed_run_uses_deep_class(board):
