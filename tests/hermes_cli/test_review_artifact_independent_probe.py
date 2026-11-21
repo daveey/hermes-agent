@@ -11,7 +11,7 @@ from tests.hermes_cli.test_kanban_review_retry_custody import ARTIFACT
 board = helpers.board
 
 @pytest.mark.parametrize('prior_range', [False, True])
-def test_known_prior_head_in_new_pr_range_stays_excluded(board, prior_range):
+def test_known_prior_head_in_new_pr_range_retains_author_without_excluding_route(board, prior_range):
     cfg = helpers.config(board, strong=MODELS[0], routes=MODELS)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='artifact cross-PR custody', assignee='default')
@@ -29,11 +29,10 @@ def test_known_prior_head_in_new_pr_range_stays_excluded(board, prior_range):
             'reviewed_sha': 'd'*40, 'merge_commit': 'c'*40,
             'review_commit_range': {'base': '0'*40, 'head': 'd'*40, 'commits': ['b'*40, 'd'*40]}})
         claimed = kb.claim_review_task(conn, tid, claimer=kb._claimer_id())
-        excluded = review.implementer_models(conn, claimed)
+        authors = review.implementer_models(conn, claimed)
         chosen, _, _ = tier.resolve_model_tier(conn, claimed, lane='review', cfg=cfg)
-        print('prior_range=', prior_range, 'authors=', excluded, 'reviewer=', chosen)
-        assert MODELS[0] in excluded
-        assert chosen != MODELS[0]
+        assert authors == {MODELS[0], MODELS[2]}
+        assert chosen == MODELS[0] and chosen in authors
 
 @pytest.mark.parametrize('with_ranges', [False, True])
 def test_fifth_artifact_review_dispatch(board, monkeypatch, with_ranges):
@@ -57,12 +56,11 @@ def test_fifth_artifact_review_dispatch(board, monkeypatch, with_ranges):
         spawned = []
         dispatch.dispatch_once(conn, spawn_fn=lambda *args: spawned.append(args) or 4242)
         stored = kb.get_task(conn, tid)
-        if with_ranges:
-            assert len(spawned) == 1
-            events = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier']
-            assert events[-1]['model'] != MODELS[0]
-            assert events[-1]['implementer_models'] == [MODELS[0]]
-        else:
-            assert spawned == []
-            assert stored.status == 'triage'
-            assert 'No eligible' in stored.last_failure_error
+        assert len(spawned) == 1
+        assert stored.status == 'running'
+        events = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier']
+        assert events[-1]['model'] == MODELS[0]
+        assert events[-1]['review_independence'] == 'separate_execution'
+        assert 'implementer_models' not in events[-1] and 'implementer_model' not in events[-1]
+        # Explicit disjoint ranges narrow history; absent ranges conservatively retain every artifact author.
+        assert review.implementer_models(conn, stored) == ({MODELS[0]} if with_ranges else set(MODELS))

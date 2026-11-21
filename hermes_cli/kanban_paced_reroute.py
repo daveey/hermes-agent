@@ -45,7 +45,7 @@ REASON = "paced"
 DEFAULT_REROUTE_AFTER_S = 3600.0
 _MAX_PEER_PROBES = 8  # peers refused for no live pool on this host before the route stays
 # Review tier reasons a far hold moves: the unpinned independent reviewer and an explicit handoff
-# ``review_model`` (kept or substituted by the registry), each to the next independent registered reviewer.
+# ``review_model`` (kept or substituted by the registry), each to an eligible registered reviewer.
 REVIEW_REASONS = ("review_unpinned", "review_override", "review_override_refused")
 
 
@@ -70,17 +70,14 @@ def _held(cfg: Optional[dict], now: float) -> dict[str, float]:
 
 
 def _review_peer(conn, task, cfg, held, now, *, registered=False):
-    """The first independent reviewer (``_review_off_wall``'s candidates) on a provider neither held nor walled.
+    """The first eligible reviewer on a provider neither held nor walled.
     ``registered`` (override fallbacks) also requires this host's routing registry to accept it, as the
     refused-override fallback does: a handoff's own model may sit outside the registry's deep routes."""
     from hermes_cli import kanban_provider_walls as pw
-    from hermes_cli.kanban_review_model import implementer_models, independent_routes, registry_refusal
-    implementer = implementer_models(conn, task)
-    if not implementer:
-        return None
+    from hermes_cli.kanban_review_model import independent_routes, registry_refusal
     assignee = getattr(task, "assignee", None)
     walled = pw.active_walls(now=now)
-    for alt_model, alt_provider in independent_routes(implementer, cfg, assignee):
+    for alt_model, alt_provider in independent_routes(set(), cfg, assignee):
         alt_provider = pw._norm(alt_provider)
         if (not alt_provider or alt_provider == "auto" or alt_provider in held or alt_provider in walled
                 or pw.live_quota_wall(alt_provider, alt_model)):
@@ -141,9 +138,9 @@ def paced_route(conn: sqlite3.Connection, task: Any, base: tuple, *, lane: str,
         return None
     if not moved:
         return None
-    from hermes_cli.kanban_review_model import implementer_models, is_review_run, mandatory_reviewer_pin
-    if is_review_run(conn, task, lane) and (mandatory_reviewer_pin(task) or moved[0] in implementer_models(conn, task)):
-        return None  # a review peer is never an implementer, and a mandatory reviewer pin never moves
+    from hermes_cli.kanban_review_model import is_review_run, mandatory_reviewer_pin
+    if is_review_run(conn, task, lane) and mandatory_reviewer_pin(task):
+        return None  # a mandatory reviewer pin never moves
     return moved[0], moved[1], f"{base[2]}+{REASON}:{moved[2]}"
 
 

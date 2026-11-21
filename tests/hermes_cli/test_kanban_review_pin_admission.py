@@ -1,4 +1,4 @@
-"""Reviewer pins must pass independence at the actual dispatcher spawn boundary."""
+"""Reviewer pins at the actual dispatcher spawn boundary: author models and missing author evidence never deny."""
 import pytest
 
 from hermes_cli import kanban_db_connect as kbc
@@ -11,8 +11,8 @@ clock = helpers.clock
 
 @pytest.mark.parametrize('pin,mandatory,expected', [
     (helpers.OPUS, True, helpers.OPUS),
-    (helpers.ASTRA, True, None),
-    (helpers.ASTRA, False, helpers.OPUS),
+    (helpers.ASTRA, True, helpers.ASTRA),
+    (helpers.ASTRA, False, helpers.ASTRA),
 ])
 def test_downstream_pin_dispatch(board, clock, monkeypatch, all_assignees_spawnable, pin, mandatory, expected):
     helpers._routing(monkeypatch)
@@ -23,16 +23,19 @@ def test_downstream_pin_dispatch(board, clock, monkeypatch, all_assignees_spawna
         conn.execute("UPDATE tasks SET status='done' WHERE id<>?", (tid,))
         conn.commit()
         spawned = helpers.pin_tests._tick(conn)
-        assert spawned == ([] if expected is None else [(expected, helpers.PROVIDER[expected])])
-        if expected:
-            event = helpers.pin_tests._events(conn, tid, 'model_tier')[-1]
-            assert event['reason'].startswith('review_')
-            assert event['implementer_models'] == [helpers.ASTRA]
+        # A reviewer pin that is also an author is used as-is (mandatory pins never move; a non-mandatory pin leads).
+        assert spawned == [(expected, helpers.PROVIDER[expected])]
+        event = helpers.pin_tests._events(conn, tid, 'model_tier')[-1]
+        assert event['reason'].startswith('review_')
+        assert event['review_independence'] == 'separate_execution'
+        assert 'implementer_models' not in event
+        # Attribution is still collected from the source run, just not used for admission.
+        assert review.implementer_models(conn, helpers.kb.get_task(conn, tid)) == {helpers.ASTRA}
 
 
 @pytest.mark.parametrize('pin', [None, helpers.ASTRA])
 @pytest.mark.parametrize('missing', ['empty', 'unreadable', 'evicted_source', 'partial_sources'])
-def test_downstream_missing_evidence_never_spawns_pin(
+def test_downstream_missing_evidence_does_not_deny_the_spawn(
         board, clock, monkeypatch, all_assignees_spawnable, missing, pin):
     helpers._routing(monkeypatch)
     with kbc.connect() as conn:
@@ -55,4 +58,19 @@ def test_downstream_missing_evidence_never_spawns_pin(
                 raise sqlite3.OperationalError('author evidence unavailable')
 
             monkeypatch.setattr(review, 'implementer_models', unavailable)
+        # Missing author attribution is no refusal: the pin (or, unpinned, the strong route) spawns.
+        expected = pin or helpers.OPUS
+        assert helpers.pin_tests._tick(conn) == [(expected, helpers.PROVIDER[expected])]
+
+
+def test_downstream_review_with_every_pool_walled_still_never_spawns(
+        board, clock, monkeypatch, all_assignees_spawnable):
+    """The real refusal: an unavailable route (every provider pool walled), not missing author metadata."""
+    helpers._routing(monkeypatch)
+    monkeypatch.setattr(helpers.walls, 'active_walls', lambda **_k: {
+        name: float(clock[0] + 99999) for name in ('anthropic', 'openai-codex', 'xai-oauth')})
+    with kbc.connect() as conn:
+        tid = helpers._card(conn, None, title='Independent exact-head review')
+        conn.commit()
         assert helpers.pin_tests._tick(conn) == []
+        assert helpers.kb.get_task(conn, tid).consecutive_failures == 0

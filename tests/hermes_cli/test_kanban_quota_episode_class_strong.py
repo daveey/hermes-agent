@@ -106,9 +106,12 @@ def test_unpinned_class_review_takes_the_free_provider_but_a_chosen_reviewer_wai
     with kbc.connect() as conn:
         tid = _walled_card(conn, clock, lane='review', title='legacy unpinned review')
         task = kb.get_task(conn, tid)
-        assert tier.resolve_model_tier(conn, task, lane='review') == ('class:deep', 'auto', 'review')
-        assert decision(conn, task, lane='review') == (None, ('claude-opus-5-5', 'anthropic'))
-        # A reviewer chosen for independence (review_unpinned) never moves off its walled provider.
+        assert tier.resolve_model_tier(conn, task, lane='review') == ('gpt-6-astra', 'openai-codex', 'review_unpinned')
+        assert decision(conn, task, lane='review') == ('subscription_quota_reset', None)
+        # Legacy class allocation may move to a free deep pool; concrete selections still respect the episode.
+        assert decision(conn, task, lane='review', base=('class:deep', 'auto', 'review')) == (
+            None, ('claude-opus-5-5', 'anthropic'))
+        # A concrete review route never bypasses its live quota episode.
         chosen = ('gpt-6-astra', 'openai-codex', 'review_unpinned')
         assert decision(conn, task, lane='review', base=chosen) == ('subscription_quota_reset', None)
         # Nor does the review lane take the default tier's class reroute.

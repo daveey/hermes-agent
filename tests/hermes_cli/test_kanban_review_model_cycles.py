@@ -1,4 +1,4 @@
-"""Current-head authorship survives retries without exhausting historical reviewers."""
+"""Current-head authorship (attribution) survives retries; it is history, never a review-route gate."""
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -20,7 +20,7 @@ def run(conn, tid, model, lane="ready"):
     return rid
 
 
-def test_fifth_review_reuses_older_models_not_current_author(board):
+def test_fifth_review_uses_strong_route_and_retains_current_author(board):
     cfg = helpers.config(board, strong=MODELS[0], routes=MODELS)
     with kbc.connect() as conn:
         task = helpers.task(conn, MODELS[0])
@@ -29,12 +29,12 @@ def test_fifth_review_reuses_older_models_not_current_author(board):
             run(conn, task.id, MODELS[(index + 1) % len(MODELS)], "review")
         run(conn, task.id, MODELS[-1])
         model, _, _ = tier.resolve_model_tier(conn, kb.get_task(conn, task.id), lane="review", cfg=cfg)
-        assert model in MODELS and model != MODELS[-1]
+        assert model == MODELS[0]
         assert review.implementer_models(conn, kb.get_task(conn, task.id)) == {MODELS[-1]}
 
 
 @pytest.mark.parametrize("current", MODELS)
-def test_current_epoch_excludes_all_authors_even_across_review_retries(board, current):
+def test_current_epoch_collects_all_authors_and_the_strong_route_may_review_across_retries(board, current):
     cfg = helpers.config(board, strong=current, routes=MODELS)
     with kbc.connect() as conn:
         task = helpers.task(conn, MODELS[0])
@@ -48,8 +48,9 @@ def test_current_epoch_excludes_all_authors_even_across_review_retries(board, cu
             run(conn, task.id, MODELS[0], "review")
         authors = review.implementer_models(conn, kb.get_task(conn, task.id))
         assert authors == {current, other}
+        # Model diversity is retired: the author set is evidence only, so the strong route (itself an author) reviews.
         model, _, _ = tier.resolve_model_tier(conn, kb.get_task(conn, task.id), lane="review", cfg=cfg)
-        assert model not in authors
+        assert model == current and model in authors
 
 
 @pytest.mark.parametrize("outcome", ["spawn_failed", "scheduled", "crashed"])
@@ -125,8 +126,9 @@ def test_real_reviewer_lifecycle_only_verdict_releases_authors(board, how):
         implement(MODELS[2])
         authors = review.implementer_models(conn, kb.get_task(conn, tid))
         assert authors == ({MODELS[2]} if how == "verdict" else {MODELS[0], MODELS[2]})
+        # Only the verdict releases authors from the collected history; none of them gates the route.
         model, _, _ = tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane="review", cfg=cfg)
-        assert model not in authors
+        assert model == MODELS[0]
 
 
 def implement(conn, tid, model):
@@ -178,7 +180,10 @@ def test_dispatch_fifth_review_after_four_real_verdict_cycles(board, monkeypatch
         assert result.auto_blocked == []
         events = [e.payload for e in kb.list_events(conn, tid) if e.kind == "model_tier"]
         assert events[-1]["model"] == MODELS[0]
-        assert events[-1]["implementer_models"] == [MODELS[-1]]
+        assert events[-1]["review_independence"] == "separate_execution"
+        assert "implementer_models" not in events[-1] and "implementer_model" not in events[-1]
+        # Attribution is still collected from the real run history, but is not written to the admission receipt.
+        assert review.implementer_models(conn, kb.get_task(conn, tid)) == {MODELS[-1]}
 
 
 @pytest.mark.parametrize("merged", [True, False])
@@ -222,8 +227,9 @@ def test_artifact_authors_survive_nonhandoff_rework(board, middle, merged):
         claimed = kb.claim_review_task(conn, tid, claimer=kb._claimer_id())
         excluded = review.implementer_models(conn, claimed)
         assert MODELS[0] in excluded
+        # The first author is the strong route and may review: authorship no longer excludes it.
         chosen, _, _ = tier.resolve_model_tier(conn, claimed, lane="review", cfg=cfg)
-        assert chosen not in excluded
+        assert chosen == MODELS[0] and chosen in excluded
 
 
 def test_provider_wall_does_not_become_structural_exhaustion(board, monkeypatch):
@@ -238,7 +244,8 @@ def test_provider_wall_does_not_become_structural_exhaustion(board, monkeypatch)
 
 
 def test_structural_exhaustion_blocks_once_without_spawn_retry_loop(board, monkeypatch):
-    helpers.config(board, strong=helpers.OPUS, routes=[helpers.OPUS])
+    # An enabled but empty policy is structural exhaustion; the implementer's model no longer is.
+    helpers.config(board, strong="", routes=[])
     monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
     spawned = []
     with kbc.connect() as conn:
@@ -251,7 +258,7 @@ def test_structural_exhaustion_blocks_once_without_spawn_retry_loop(board, monke
         assert stored.status == "triage"
         assert result.auto_blocked == [task.id]
         assert stored.human_request is None
-        assert helpers.OPUS in stored.last_failure_error
+        assert "No eligible deep or standard review route" in stored.last_failure_error
         events = kb.list_events(conn, task.id)
         gave_up = [e.payload for e in events if e.kind == "gave_up"]
         assert len(gave_up) == 1

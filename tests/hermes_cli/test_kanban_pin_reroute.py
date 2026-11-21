@@ -12,6 +12,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli import kanban_db_sync as kbsync
+from hermes_cli import kanban_llm_pacing_dispatch as pacing
 from hermes_cli import kanban_model_tier as tier
 from hermes_cli import kanban_pin_reroute as pr
 from hermes_cli import kanban_provider_walls as walls
@@ -144,8 +145,8 @@ def test_review_lane_selects_independent_model_despite_author_wall(board, monkey
         assert _events(conn, tid, 'model_reroute') == []
 
 
-def test_review_lane_after_a_closed_episode_selects_independent_model(board, monkeypatch, all_assignees_spawnable):
-    """Historical author walls cannot override the independent review selection."""
+def test_review_lane_after_a_closed_episode_allows_the_author_model(board, monkeypatch, all_assignees_spawnable):
+    """A prior author run does not disqualify an otherwise available strong reviewer."""
     clock = _clock(monkeypatch)
     _, cfg = _deep(monkeypatch)
     with kbc.connect() as conn:
@@ -154,10 +155,7 @@ def test_review_lane_after_a_closed_episode_selects_independent_model(board, mon
         kb.reclaim_task(conn, tid, reason='test')
         task = kb.get_task(conn, tid)
         assert tier.resolve_dispatch_tier(conn, task, lane='ready')[:2] == PEER
-        from hermes_cli.kanban_review_model import ReviewModelUnavailable
-        # Both the original pin and the concrete rerouted author are excluded.
-        with pytest.raises(ReviewModelUnavailable):
-            tier.resolve_dispatch_tier(conn, task, lane='review')
+        assert tier.resolve_dispatch_tier(conn, task, lane='review') == (*PEER, 'review_unpinned')
         assert (task.model_override, task.provider_override) == PIN
         # Only the preceding ready run was quota-rerouted; review is its own policy.
         assert len(_events(conn, tid, 'model_reroute')) == 1
@@ -468,8 +466,7 @@ GROK = ('grok-5', 'xai-oauth')
 
 
 def _review_card(conn, body=None):
-    """A card in review whose implementer ran opus: strong tier = opus, so review_unpinned picks the next
-    deep route distinct from it, astra on openai-codex."""
+    """A card in review whose implementer ran opus; opus is also its eligible strong reviewer."""
     tid = kb.create_task(conn, title='review me', body=body, assignee='a', model_override=PEER[0],
                          provider_override=PEER[1])
     conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
@@ -477,11 +474,17 @@ def _review_card(conn, body=None):
     return tid
 
 
+def _hold_author_pool(monkeypatch, clock):
+    """Exercise later policy candidates by holding strong, not by excluding its authorship."""
+    monkeypatch.setattr(pacing, 'held_pools', lambda *_a: {'anthropic': float(clock[0] + 55 * 3600)})
+
+
 @pytest.mark.parametrize('evidence', ['provider_file', 'live_pool'])
-def test_review_unpinned_on_a_walled_provider_moves_to_a_free_independent_reviewer(
+def test_review_unpinned_on_a_walled_provider_moves_to_a_free_reviewer(
         board, monkeypatch, evidence):
     clock = _clock(monkeypatch)
     config, _ = _deep(monkeypatch)
+    _hold_author_pool(monkeypatch, clock)
     config['model_routing']['routes']['deep'].append(
         dict(config['model_routing']['routes']['deep'][0], model=GROK[0], provider=GROK[1]))
     with kbc.connect() as conn:
@@ -496,16 +499,18 @@ def test_review_unpinned_on_a_walled_provider_moves_to_a_free_independent_review
         assert reason == 'review_unpinned'
         assert (task.model_override, task.provider_override) == GROK
         tier_event = _events(conn, tid, 'model_tier')[-1]
-        assert (tier_event['model'], tier_event['provider'], tier_event['implementer_model']) == (*GROK, PEER[0])
+        assert (tier_event['model'], tier_event['provider']) == GROK
+        assert tier_event['review_independence'] == 'separate_execution'
         persisted = kb.get_task(conn, tid)
         assert (persisted.model_override, persisted.provider_override) == PEER  # the row never moves
 
 
 @pytest.mark.parametrize('case', ['no_alternative', 'alternative_walled', 'marker'])
 def test_review_resolution_excludes_walls_before_rerouting(board, monkeypatch, case):
-    """A known author set requires an unwalled independent reviewer at resolution."""
+    """With strong held, every remaining candidate must be unwalled at resolution."""
     clock = _clock(monkeypatch)
     config, _ = _deep(monkeypatch)
+    _hold_author_pool(monkeypatch, clock)
     if case != 'no_alternative':
         config['model_routing']['routes']['deep'].append(
             dict(config['model_routing']['routes']['deep'][0], model=GROK[0], provider=GROK[1]))
@@ -535,6 +540,7 @@ def test_review_unpinned_skips_an_alternative_walled_only_in_the_live_pool(board
     keeps its route; never into grok-5's wall."""
     clock = _clock(monkeypatch)
     config, _ = _deep(monkeypatch)
+    _hold_author_pool(monkeypatch, clock)
     deep = config['model_routing']['routes']['deep']
     deep.append(dict(deep[0], model=GROK[0], provider=GROK[1]))
     if case == 'later_free':

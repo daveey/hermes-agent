@@ -66,7 +66,9 @@ def test_continued_review_resolves_replica_author_at_real_dispatch(gws, monkeypa
     assert receipt['model'] == pool.PIN['model'] and receipt['model'] != AUTHOR
     event = worker.conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='model_tier' "
                                 "ORDER BY id DESC LIMIT 1", (down,)).fetchone()
-    assert json.loads(event[0])['implementer_models'] == [AUTHOR]
+    payload = json.loads(event[0])
+    assert payload['review_independence'] == 'separate_execution'
+    assert 'implementer_models' not in payload
     with wn.open_replica(worker.conn) as replica:
         assert replica.execute('SELECT 1 FROM task_links WHERE parent_id=? AND child_id=?',
                                (down, landing)).fetchone()
@@ -90,14 +92,17 @@ def test_absent_replica_remains_fail_closed(gws, monkeypatch, fault):
     assert pool._route(worker.conn, down) == []
 
 
-def test_replica_author_pin_is_refused_without_rewriting_pin(gws, monkeypatch):
+def test_replica_author_pin_is_used_without_rewriting_pin(gws, monkeypatch):
+    """The replica still carries the author, but a mandatory reviewer pin on the author's model is admitted as-is."""
     pool._attest(monkeypatch)
     _, down, _ = _carried(gws)
     _, worker = gws
     worker.conn.execute('UPDATE tasks SET model_override=? WHERE id=?', (AUTHOR, down))
     worker.conn.commit()
+    assert review.implementer_models(worker.conn, kb.get_task(worker.conn, down)) == {AUTHOR}
     worker.tick()
-    assert pool._route(worker.conn, down) == []
+    routes = pool._route(worker.conn, down)
+    assert len(routes) == 1 and routes[-1]['model'] == AUTHOR and routes[-1]['source'] == 'pin'
     assert kb.get_task(worker.conn, down).model_override == AUTHOR
 
 
@@ -247,11 +252,16 @@ def test_picked_up_review_reads_its_source_links_from_the_replica(gws, monkeypat
     assert kb.get_task(worker.conn, source) is None
 
 
-def test_linked_review_without_a_replica_stays_fail_closed(gws, monkeypatch):
+def test_linked_review_without_a_replica_still_resolves_a_route(gws, monkeypatch):
+    """Missing author evidence is attribution only: the collector reports no authors, the review still routes, and
+    only a genuinely unavailable route (nothing configured) refuses."""
     pool._attest(monkeypatch)
     _, down = _linked(gws)
     _, worker = gws
     monkeypatch.setattr(wn, 'open_replica', lambda conn: None)
-    assert review.implementer_models(worker.conn, kb.get_task(worker.conn, down)) == set()
-    with pytest.raises(review.ReviewModelUnavailable, match='Downstream review implementer evidence'):
-        review.resolve_review_model(worker.conn, kb.get_task(worker.conn, down), {'strong_model': pool.PIN['model']})
+    task = kb.get_task(worker.conn, down)
+    assert review.implementer_models(worker.conn, task) == set()
+    model, _, reason = review.resolve_review_model(worker.conn, task, {'strong_model': pool.PIN['model']})
+    assert model == pool.PIN['model'] and reason == 'review_unpinned'
+    with pytest.raises(review.ReviewModelsExhausted, match='No eligible deep or standard review route'):
+        review.resolve_review_model(worker.conn, task, {})

@@ -77,15 +77,17 @@ def test_a_declared_review_has_implementer_evidence(board):
         assert review.implementer_models(conn, task) == {OPUS}
 
 
-def test_an_undeclared_review_with_no_source_still_fails_closed(board):
+def test_an_undeclared_review_with_no_source_fails_only_for_no_route(board):
+    """Missing author provenance is not a refusal; an empty route set still is."""
+    _routing(board, routes=[])
     with kbc.connect_closing() as conn:
         task = _review(conn, 'Review it.')
         assert review.implementer_models(conn, task) == set()
-        with pytest.raises(review.ReviewModelUnavailable, match='Downstream review implementer evidence'):
+        with pytest.raises(review.ReviewModelsExhausted, match='No eligible deep or standard review route'):
             review.resolve_review_model(conn, task, {})
 
 
-def test_declared_and_linked_implementers_are_both_excluded(board):
+def test_declared_and_linked_implementers_are_both_collected(board):
     _routing(board)
     with kbc.connect_closing() as conn:
         source = base._card(conn, ASTRA)
@@ -104,9 +106,9 @@ def test_a_declaration_on_a_card_that_is_not_a_review_is_ignored(board):
         assert review.implementer_models(conn, kb.get_task(conn, tid)) == set()
 
 
-def test_the_reviewer_is_never_a_declared_implementer(board):
+def test_a_declared_implementer_may_still_review(board):
     """Through ``resolve_review_model`` with a real routing config (deep routes opus and fable, strong opus): the
-    declared implementer opus is excluded, so fable reviews."""
+    declared author model is diagnostic only, so the strong route opus reviews."""
     from tests.hermes_cli import test_kanban_review_model as routing
     cfg = routing.config(board)
     with kbc.connect_closing() as conn:
@@ -114,7 +116,7 @@ def test_the_reviewer_is_never_a_declared_implementer(board):
         conn.commit()
         task = kb.get_task(conn, tid)
         assert review.implementer_models(conn, task) == {routing.OPUS}
-        assert review.resolve_review_model(conn, task, cfg)[0] == routing.FABLE
+        assert review.resolve_review_model(conn, task, cfg)[0] == routing.OPUS
 
 
 def test_a_host_without_a_routing_policy_accepts_no_declaration(board):
@@ -124,8 +126,8 @@ def test_a_host_without_a_routing_policy_accepts_no_declaration(board):
     with kbc.connect_closing() as conn:
         task = _review(conn, '<!-- implementer-models: claude-code -->')
         assert review.implementer_models(conn, task) == set()
-        with pytest.raises(review.ReviewModelUnavailable, match='Downstream review implementer evidence'):
-            review.resolve_review_model(conn, task, {'strong_model': routing.OPUS})
+        # No author evidence to lift: the strong route still admits a real separate review.
+        assert review.resolve_review_model(conn, task, {'strong_model': routing.OPUS})[0] == routing.OPUS
         task = _review(conn, f'<!-- implementer-models: {OPUS} -->')  # a real model, but no policy to confirm it
         assert review.implementer_models(conn, task) == set()
 

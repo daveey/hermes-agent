@@ -644,7 +644,8 @@ def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
     monkeypatch.setattr(
         cfgmod,
         "load_config",
-        lambda *args, **kwargs: {"kanban": {"review_dispatch": True}},
+        # Review admission needs a real route; a concrete strong model supplies one (the author model is irrelevant).
+        lambda *args, **kwargs: {"kanban": {"review_dispatch": True, "strong_model": "claude-opus-5-5"}},
     )
     captured: list[list[str]] = []
 

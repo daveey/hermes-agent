@@ -27,6 +27,19 @@ def handoff(conn, tid, model, metadata):
     return run
 
 
+def wall_every_review_route(monkeypatch):
+    """Every concrete provider pool is quota-walled with no known reset: a genuine route outage.
+
+    Review admission no longer refuses on author model equality, so admission-failure custody fixtures need a
+    reviewer route that is really unavailable. An unknown reset is a plain ``ReviewModelUnavailable`` (no
+    deadline to defer to), the refusal the retry custody counts.
+    """
+    from hermes_cli import kanban_provider_walls as walls
+    monkeypatch.setattr(walls, 'live_quota_wall',
+                        lambda provider, model: None if not provider or provider == 'auto'
+                        or str(model).startswith('class:') else float('inf'))
+
+
 def test_immutable_merged_rehandoff_does_not_consume_reviewer(identity_board):
     with authors.kbc.connect() as conn:
         tid = authors._card(conn)
@@ -102,6 +115,7 @@ def test_three_refusals_park_and_wake_stay_review(board, monkeypatch):
     conn, _ = board
     tid = managed._hand_off_for_review(conn, {'review_model': managed.FABLE})
     managed._receipts(conn, tid, route=('class:deep', None))
+    wall_every_review_route(monkeypatch)
     for _ in range(3):
         dispatch_once(conn, spawn_fn=lambda *a: pytest.fail('unavailable reviewer spawned'), max_spawn=1)
     assert kb.get_task(conn, tid).status == 'triage'
@@ -117,6 +131,7 @@ def test_review_admission_gave_up_does_not_escalate_implementation(board, monkey
     conn, _ = board
     tid = managed._hand_off_for_review(conn, {'review_model': managed.FABLE})
     managed._receipts(conn, tid, route=('class:deep', None))
+    wall_every_review_route(monkeypatch)
     for _ in range(3):
         dispatch_once(conn, spawn_fn=lambda *a: pytest.fail('unavailable reviewer spawned'), max_spawn=1)
     task = kb.get_task(conn, tid)
@@ -183,6 +198,7 @@ def test_manual_promotion_supersedes_admission_review_phase(board, monkeypatch, 
     conn, _ = board
     tid = managed._hand_off_for_review(conn, {'review_model': managed.FABLE})
     managed._receipts(conn, tid, route=('class:deep', None))
+    wall_every_review_route(monkeypatch)
     for _ in range(3):
         dispatch_once(conn, spawn_fn=lambda *a: pytest.fail('unavailable reviewer spawned'), max_spawn=1)
     assert kb.get_task(conn, tid).status == 'triage'
@@ -238,6 +254,7 @@ def test_ready_park_does_not_reuse_old_review_phase(board, monkeypatch, exit_pat
         assert wake_due_continuations(conn, now=result['wake_at']) == [tid]
     else:
         managed._receipts(conn, tid, route=('class:deep', None))
+        wall_every_review_route(monkeypatch)
         for _ in range(3):
             dispatch_once(conn, spawn_fn=lambda *a: pytest.fail('unavailable reviewer spawned'), max_spawn=1)
         assert kb.get_task(conn, tid).status == 'triage'

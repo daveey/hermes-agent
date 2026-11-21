@@ -60,7 +60,7 @@ def test_strong_model_for_review_retry_and_keep_pattern(board):
         got_retry = tier.resolve_model_tier(conn, retry, lane="ready", cfg=cfg)
         got_keep = tier.resolve_model_tier(conn, keep, lane="ready", cfg=cfg)
         got_plain = tier.resolve_model_tier(conn, plain, lane="ready", cfg=cfg)
-    assert got_review == (OPUS, "anthropic", "review")
+    assert got_review == (OPUS, "anthropic", "review_unpinned")
     assert got_retry == (OPUS, "anthropic", "retry_after_run_crashed")
     assert got_keep == (OPUS, "anthropic", "pattern:hermes-core-wt")
     assert got_plain == (SONNET, "anthropic", "default")
@@ -70,15 +70,15 @@ def test_strong_provider_unset_is_inferred_from_strong_model(board):
     with kbc.connect() as conn:
         t = kb.get_task(conn, kb.create_task(conn, title="impl", assignee="default"))
         assert tier.resolve_model_tier(conn, t, lane="review", cfg=_cfg(strong_model=OPUS)) == (
-            OPUS, "anthropic", "review")
+            OPUS, "anthropic", "review_unpinned")
 
 
 def test_strong_model_unset_keeps_old_behaviour(board):
     with kbc.connect() as conn:
         t = kb.get_task(conn, kb.create_task(conn, title="impl", assignee="default"))
         assert tier.resolve_model_tier(conn, t, lane="review", cfg=_cfg(strong_model="")) == (None, None, "review")
-        assert tier.resolve_model_tier(conn, t, lane="review", cfg={"default_model": "class:standard"})[:2] == (
-            "class:deep", "auto")
+        assert tier.resolve_model_tier(conn, t, lane="review", cfg={"default_model": "class:standard"}) == (
+            "class:deep", "auto", "review")
 
 
 def test_pins_and_out_of_scope_profiles_ignore_strong_model(board):
@@ -89,7 +89,13 @@ def test_pins_and_out_of_scope_profiles_ignore_strong_model(board):
         other = kb.get_task(conn, kb.create_task(conn, title="impl", assignee="bb-dev"))
         assert tier.resolve_model_tier(conn, pinned, lane="ready", cfg=cfg) == (None, None, "pinned")
         assert tier.resolve_model_tier(conn, pinned, lane="review", cfg=cfg) == (OPUS, "anthropic", "review_unpinned")
-        assert tier.resolve_model_tier(conn, other, lane="review", cfg=cfg) == (None, None, "profile_out_of_scope")
+        assert tier.resolve_model_tier(conn, other, lane="ready", cfg=cfg) == (None, None, "profile_out_of_scope")
+        assert tier.resolve_model_tier(conn, other, lane="review", cfg=cfg) == (OPUS, "anthropic", "review_unpinned")
+        # Without a concrete strong route or enabled policy, legacy profile scope and pins still apply.
+        legacy = {**cfg, "strong_model": ""}
+        assert tier.resolve_model_tier(conn, other, lane="review", cfg=legacy) == (
+            None, None, "profile_out_of_scope")
+        assert tier.resolve_model_tier(conn, pinned, lane="review", cfg=legacy) == (None, None, "pinned")
 
 
 def test_dispatcher_review_lane_runs_on_strong_model_and_records_it(board):
@@ -106,4 +112,4 @@ def test_dispatcher_review_lane_runs_on_strong_model_and_records_it(board):
                                                                                task.provider_override)))
         events = [e.payload for e in kb.list_events(conn, tid) if e.kind == "model_tier"]
     assert seen[tid] == (OPUS, "anthropic")
-    assert events[-1]["reason"] == "review" and events[-1]["model"] == OPUS
+    assert events[-1]["reason"] == "review_unpinned" and events[-1]["model"] == OPUS

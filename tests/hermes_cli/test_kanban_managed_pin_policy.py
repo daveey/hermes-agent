@@ -239,11 +239,31 @@ def test_refused_review_override_falls_back_to_registered_independent_reviewer(b
     assert kb.get_task(conn, tid).consecutive_failures == 0
 
 
-def test_refused_review_override_without_independent_reviewer_never_spawns(board):
+def test_refused_review_override_may_use_the_registered_model_the_author_ran(board):
     from hermes_cli.kanban_db_dispatch import dispatch_once
     conn, _ = board
-    # The implementer ran on the only registered deep model: no distinct registered reviewer exists.
+    # The implementer ran on the only registered deep model; model diversity is retired, so it may review too.
     tid = _hand_off_for_review(conn, {'review_model': FABLE}, pin='claude-opus-5-5')
+    seen = []
+    dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
+    assert seen == ['claude-opus-5-5']
+    event = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
+    assert event['reason'] == 'review_override_refused' and event['requested']['model'] == FABLE
+    assert kb.get_task(conn, tid).consecutive_failures == 0
+
+
+def _disable_anthropic(profile='worker'):
+    """Unavailable routing fixture: the registry's only deep route (anthropic) is no longer enabled on the host."""
+    import os
+    path = Path(os.environ['HERMES_HOME']) / 'profiles' / profile / 'config.yaml'
+    path.write_text(path.read_text() + 'providers:\n  anthropic:\n    enabled: false\n')
+
+
+def test_refused_review_override_without_registered_reviewer_never_spawns(board):
+    from hermes_cli.kanban_db_dispatch import dispatch_once
+    conn, _ = board
+    tid = _hand_off_for_review(conn, {'review_model': FABLE}, pin='claude-opus-5-5')
+    _disable_anthropic()
     seen = []
     dispatch_once(conn, spawn_fn=lambda *args: seen.append(args), max_spawn=1)
     assert seen == []
@@ -289,10 +309,9 @@ def _second_deep_route():
     path.write_text(text.replace('    standard:\n', extra + '    standard:\n', 1))
 
 
-def test_class_routed_implementer_is_named_by_worker_result(board):
-    """Finding (a) of review t_01a1cee1163b8aa2: a class-routed implementer run (run_route ``class:deep``, the
-    common case under ``kanban.strong_model: class:deep``) left _implementer_model with no concrete name, so a
-    refused override deferred silently on every claim. The run's worker_result.route_model is what ran."""
+def test_class_routed_implementer_receipts_do_not_gate_review_admission(board):
+    """A class-routed implementer run (run_route ``class:deep``) with a worker_result naming what ran no longer
+    matters to a refused override: the registered deep route reviews regardless of attribution."""
     from hermes_cli.kanban_db_dispatch import dispatch_once
     conn, _ = board
     tid = _hand_off_for_review(conn, {'review_model': FABLE})
@@ -305,13 +324,14 @@ def test_class_routed_implementer_is_named_by_worker_result(board):
 
 
 def test_repeated_identical_review_refusal_moves_to_a_visible_block(board, monkeypatch):
-    """With no concrete implementer receipt at all, the third identical refusal stops deferring silently."""
+    """An unroutable review class (its registry pool unavailable) defers, and the third identical refusal stops
+    deferring silently."""
     from hermes_cli.kanban_db_dispatch import dispatch_once
     DEFERRAL_LIMIT = 3  # hermes_cli.kanban_review_model.DEFERRAL_LIMIT
     monkeypatch.setenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', '0')
     conn, _ = board
-    tid = _hand_off_for_review(conn, {'review_model': FABLE})
-    _receipts(conn, tid, route=('class:deep', None))
+    tid = _hand_off_for_review(conn, {'review_model': 'class:deep'})
+    _disable_anthropic()
     seen = []
     for attempt in range(1, DEFERRAL_LIMIT + 1):
         dispatch_once(conn, spawn_fn=lambda *args: seen.append(args), max_spawn=1)
@@ -323,13 +343,13 @@ def test_repeated_identical_review_refusal_moves_to_a_visible_block(board, monke
     gave_up = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'gave_up'][-1]
     # The breaker owns reason_code (worker_failures_exhausted); the admission refusal rides beside it.
     assert gave_up['admission_refusal'] == 'review_model_unavailable' and gave_up['sticky'] is True
-    assert 'implementer' in gave_up['error'] and FABLE in gave_up['error']
+    assert 'class:deep' in gave_up['error'] and 'no_eligible_routes' in gave_up['error']
 
 
 @pytest.mark.parametrize('override', [None, FABLE])
 @pytest.mark.parametrize('receipt', ['run_route', 'worker_result'])
-def test_rerouted_pin_reviewer_is_distinct_from_the_model_that_ran(board, override, receipt):
-    """Both the pin and concrete rerouted author are excluded; neither may review."""
+def test_rerouted_pin_reviewer_is_a_registered_deep_route_whatever_ran(board, override, receipt):
+    """The pin and rerouted author are attribution only: a registered deep route reviews, a refused override says so."""
     from hermes_cli.kanban_db_dispatch import dispatch_once
     conn, _ = board
     _second_deep_route()
@@ -338,13 +358,7 @@ def test_rerouted_pin_reviewer_is_distinct_from_the_model_that_ran(board, overri
     _receipts(conn, tid, **({'route': ran} if receipt == 'run_route' else {'ran': ran}))
     seen = []
     dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
-    if override is None:
-        assert seen == ['claude-sonnet-5-5']
-        event = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
-        assert event['reason'] == 'review_tier_fallback'
-        return
-    assert seen == []
-    task = kb.get_task(conn, tid)
-    assert task.status == 'triage'
-    failed = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'gave_up'][-1]
-    assert 'claude-opus-5-5' in failed['error'] and 'gpt-6.1-sol' in failed['error']
+    event = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
+    assert seen == [event['model']] and seen[0] in ('claude-opus-5-5', 'gpt-6.1-sol')
+    assert event['reason'] == ('review_unpinned' if override is None else 'review_override_refused')
+    assert kb.get_task(conn, tid).consecutive_failures == 0

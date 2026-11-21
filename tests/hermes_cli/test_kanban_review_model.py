@@ -1,4 +1,4 @@
-"""Pinned implementation models must not silently choose their own reviewer."""
+"""Pinned implementation cards still get a registry-eligible review route; author model equality is not a gate."""
 import json
 
 import pytest
@@ -13,10 +13,10 @@ board = helpers.board
 SONNET, OPUS, FABLE = helpers.SONNET, helpers.OPUS, "claude-fable-5-2"
 
 
-def config(board, *, strong=OPUS, routes=None):
+def config(board, *, strong=OPUS, routes=None, enabled=True):
     route_models = [OPUS, FABLE] if routes is None else routes
     cfg = {"kanban": {"default_model": SONNET, "strong_model": strong},
-           "model_routing": {"enabled": True, "routes": {"deep": [
+           "model_routing": {"enabled": enabled, "routes": {"deep": [
                {"model": model, "provider": "anthropic", "weight": 1,
                 "billing": "subscription", "eligible": True, "funding_verified": True,
                 "capabilities": {"tools": True, "streaming": True}} for model in route_models]}}}
@@ -38,11 +38,11 @@ def test_pinned_review_uses_strong(board, lane, skills):
         assert tier.resolve_model_tier(conn, t, lane=lane, cfg=cfg) == (OPUS, "anthropic", "review_unpinned")
 
 
-def test_strong_pin_uses_distinct_deep_route(board):
+def test_strong_pin_may_review_on_the_same_strong_route(board):
     cfg = config(board)
     with kbc.connect() as conn:
         assert tier.resolve_model_tier(conn, task(conn, OPUS), lane="review", cfg=cfg) == (
-            FABLE, "anthropic", "review_unpinned")
+            OPUS, "anthropic", "review_unpinned")
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -82,13 +82,14 @@ def test_dispatch_receipt_and_owner_use_review_model_without_changing_row(board)
         assert stored.model_override == SONNET
         assert tier.owner_model_pin(conn, stored) == (OPUS, "anthropic")
         assert events[-1] == {"model": OPUS, "provider": "anthropic", "reason": "review_unpinned",
-                              "lane": "review", "implementer_model": SONNET, "implementer_models": [SONNET]}
+                              "lane": "review", "review_independence": "separate_execution"}
 
 
 @pytest.mark.parametrize("failure", ["no_route", "receipt_write", "bad_metadata", "class_pin"])
 def test_review_admission_failure_never_spawns_or_spends_retry(board, monkeypatch, failure):
     import sqlite3
-    config(board, strong=OPUS, routes=[OPUS])
+    # Enabled but empty routing is the refusal, not the author's model or legacy profile allocation.
+    config(board, strong="", routes=[])
     seen = []
     with kbc.connect() as conn:
         t = task(conn, OPUS)
@@ -99,7 +100,7 @@ def test_review_admission_failure_never_spawns_or_spends_retry(board, monkeypatc
                 json.dumps({"review_model": []}), t.id))
             conn.commit()
         if failure == "receipt_write":
-            config(board, strong=FABLE)
+            config(board, strong=FABLE, routes=[FABLE])
             original = kb._append_event
 
             def append(conn, task_id, kind, *args, **kwargs):
@@ -110,6 +111,8 @@ def test_review_admission_failure_never_spawns_or_spends_retry(board, monkeypatc
             monkeypatch.setattr(kb, "_append_event", append)
         if failure == "class_pin":
             conn.execute("UPDATE tasks SET model_override='class:deep', provider_override='auto' WHERE id=?", (t.id,))
+            conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=?", (
+                json.dumps({"review_model": "class:deep"}), t.id))
             conn.commit()
         dispatch.dispatch_once(conn, dry_run=False, spawn_fn=lambda *args: seen.append(args))
         stored = kb.get_task(conn, t.id)
@@ -149,9 +152,10 @@ def test_owner_rejects_missing_or_invalid_current_review_receipt(board, receipt)
 ])
 def test_deep_route_uses_worker_eligibility(board, monkeypatch, key, value):
     from hermes_cli import kanban_model_assignment as assignment
-    cfg = config(board, routes=[OPUS, "claude-ineligible", FABLE])
+    # No concrete strong model: the registry's eligibility filter alone decides, as the worker applies it.
+    cfg = config(board, strong="", routes=["claude-ineligible", FABLE])
     data = json.loads(board.joinpath("config.yaml").read_text(encoding="utf-8"))
-    bad = data["model_routing"]["routes"]["deep"][1]
+    bad = data["model_routing"]["routes"]["deep"][0]
     data["model"] = {"context_length": 10000}
     data["providers"] = {"openai-codex": {"enabled": False}}
     for route in data["model_routing"]["routes"]["deep"]:
@@ -176,12 +180,12 @@ def test_pinned_review_not_gated_by_default_tier(board, cfg):
 
 
 @pytest.mark.parametrize("metadata,expected", [
-    ({"review_model": SONNET}, (OPUS, "anthropic", "review_unpinned")),
+    ({"review_model": SONNET}, (SONNET, "anthropic", "review_override")),
     ({"review_model": "custom", "review_provider": "custom-provider"},
      ("custom", "custom-provider", "review_override")),
     ({"review_model": "class:deep"}, (OPUS, "anthropic", "review_override")),
 ])
-def test_explicit_review_override_preserves_independence(board, metadata, expected):
+def test_explicit_review_override_is_honored_even_when_it_matches_the_author(board, metadata, expected):
     cfg = config(board)
     with kbc.connect() as conn:
         t = task(conn)
@@ -207,15 +211,20 @@ def test_bad_override_fails_closed(board, metadata):
             tier.apply_model_tier(conn, t, lane="review", cfg=cfg)
 
 
-def test_disabled_routing_cannot_choose_deep_model(board):
+def test_disabled_routing_keeps_legacy_pin_but_refuses_explicit_class_override(board):
     from hermes_cli.kanban_review_model import ReviewModelUnavailable
-    cfg = config(board)
+    cfg = config(board, strong="")
     data = json.loads(board.joinpath("config.yaml").read_text(encoding="utf-8"))
     data["model_routing"]["enabled"] = False
     board.joinpath("config.yaml").write_text(json.dumps(data), encoding="utf-8")
     with kbc.connect() as conn:
+        t = task(conn, OPUS)
+        assert t is not None
+        assert tier.resolve_model_tier(conn, t, lane="review", cfg=cfg) == (None, None, "pinned")
+        kb.claim_task(conn, t.id)
+        assert kb.request_review(conn, t.id, metadata={"review_model": "class:deep"})
         with pytest.raises(ReviewModelUnavailable):
-            tier.resolve_model_tier(conn, task(conn, OPUS), lane="review", cfg=cfg)
+            tier.resolve_model_tier(conn, kb.get_task(conn, t.id), lane="review", cfg=cfg)
 
 
 def test_unroutable_override_does_not_restore_pin(board, monkeypatch):

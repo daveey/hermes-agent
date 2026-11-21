@@ -175,10 +175,9 @@ def is_review_run(conn, task, lane) -> bool:
 
 
 def validate_pace_offer(model, excluded):
-    """Refuse stale or unsafe offers before recording any reviewer route."""
-    if excluded and (model in excluded or is_class_selector(model)):
-        from hermes_cli.kanban_pace_reroute import OfferLost
-        raise OfferLost("pace reroute would violate reviewer independence")
+    """Compatibility hook: model diversity is not an offer-admission criterion."""
+    # Compatibility hook: equality no longer refuses an offer. Expiry, provider
+    # holds and mandatory pins are still checked by the owning callers.
 
 
 def mandatory_reviewer_pin(task) -> bool:
@@ -208,12 +207,12 @@ def redact_review_value(value: Any) -> Any:
 
 
 # model_tier reason when this host's routing registry refuses the handoff's review_model: the review runs on a
-# registered model distinct from the implementer instead of spawning a worker that dies at startup.
+# registered model instead of spawning a worker that dies at startup.
 OVERRIDE_REFUSED = "review_override_refused"
 
 
 class ReviewModelUnavailable(ModelRoutingError):
-    """No independent reviewer is configured; do not spawn the implementer's model."""
+    """No eligible reviewer route is configured."""
 
 
 class ReviewRouteDeferred(ReviewModelUnavailable):
@@ -225,7 +224,7 @@ class ReviewRouteDeferred(ReviewModelUnavailable):
 
 
 class ReviewModelsExhausted(ReviewModelUnavailable):
-    """No configured independent candidate exists; retrying cannot change authorship."""
+    """No configured reviewer candidate exists; retrying cannot add a route."""
 
 
 def resolution_error(exc):
@@ -366,14 +365,14 @@ def admission_refusal(conn, task_id, exc):
 
 
 def independent_routes(pin, cfg, assignee, *, level="deep"):
-    """Eligible routes at *level*, with concrete strong first for deep, excluding every author model.
+    """Eligible reviewer routes at *level*, with concrete strong first for deep.
 
-    Accept a single model for legacy callers, or the complete implementer set.
+    The legacy pin/author-set argument is ignored; attribution is diagnostic only.
     Read-only; an unreadable routing policy contributes no policy candidates.
     """
-    excluded = {pin} if isinstance(pin, str) else set(pin or ())
+    # Model diversity is retired; pin is retained for caller compatibility.
     strong = str(cfg.get("strong_model") or "").strip()
-    if level == "deep" and strong and strong not in excluded and not is_class_selector(strong):
+    if level == "deep" and strong and not is_class_selector(strong):
         from hermes_cli.kanban_model_tier import infer_provider
         yield strong, str(cfg.get("strong_provider") or "").strip() or infer_provider(strong)
     from agent.model_routing_agent import class_requirements
@@ -390,38 +389,26 @@ def independent_routes(pin, cfg, assignee, *, level="deep"):
     providers = config.get("providers") or {}
     for route in eligible_routes(policy, level, class_requirements(config), eligible=lambda r: is_provider_enabled(
             providers.get(r["provider"], {}))):
-        if route["model"] not in excluded:
-            yield route["model"], route["provider"]
+        yield route["model"], route["provider"]
 
 
 def resolve_review_model(conn, task, cfg):
-    """Concrete independent reviewer when author evidence exists; legacy routing otherwise."""
+    """Select a real review route without requiring different model provenance."""
     import math
     import time
     from hermes_cli import kanban_provider_walls as pw
-    excluded = implementer_models(conn, task)
+    # Separate execution is enforced by verdict custody, not model identity.
     override = _override(conn, task)
     assignee = getattr(task, "assignee", None)
     refusal = registry_refusal(override[0], override[1], assignee) if override else None
     class_override = bool(override and is_class_selector(override[0]))
-    if override and class_override and excluded and not refusal:
+    if override and class_override and not refusal:
         from hermes_cli.kanban_model_tier import class_unroutable_reason
         from hermes_cli.kanban_model_assignment import _assignee_config
         why = class_unroutable_reason(override[0], _assignee_config(assignee) or {})
         if why:
             raise ReviewModelUnavailable(f"Review model {override[0]} is unroutable: {why}")
-    if not excluded:
-        if _downstream(task):
-            raise ReviewModelUnavailable("Downstream review implementer evidence is unavailable")
-        # Legacy same-card reviews may have an explicit handoff but no recorded author.
-        if override and refusal is None:
-            return override
-        if refusal and override:
-            raise ReviewModelUnavailable(
-                f"review_model {override[0]!r} is refused here ({refusal.code}) and the implementer's model is unknown")
-        if str(getattr(task, "model_override", None) or "").strip():
-            raise ReviewModelUnavailable("A class pin does not identify the implementer; set review_model in the handoff")
-        return None
+
     from hermes_cli.kanban_llm_pacing_dispatch import held_pools
     from hermes_cli.kanban_model_tier import infer_provider
     from hermes_cli.kanban_pin_reroute import is_mandatory_pin
@@ -452,28 +439,22 @@ def resolve_review_model(conn, task, cfg):
             return True
         return False
 
-    # A concrete, independent handoff override is honored unless its pool is held or walled (the fast return
-    # used to skip that check and run the reviewer into the hold/wall): then the next independent route takes it.
+    # Honor a concrete handoff override unless its pool is held or walled.
     override_moved = False
-    if override and refusal is None and not class_override and override[0] not in excluded:
+    if override and refusal is None and not class_override:
         if not _unavailable(override[0], override[1]):
             return override
         override_moved = True
-    # A downstream card's pin names its reviewer, not an author, so it never joins the author set. A
-    # mandatory reviewer pin is never swapped for another model: it is used as-is when independent (a held or
-    # walled pool is then the pool's/governor's wait, as for every mandatory pin) and refused when it authored.
+    # A downstream pin names its reviewer. Mandatory pins never move: the
+    # provider governor still judges held/walled pools before launching.
     pin = str(getattr(task, "model_override", None) or "").strip()
-    candidates = independent_routes(excluded, cfg, assignee)
+    candidates = independent_routes(set(), cfg, assignee)
     if _downstream(task) and pin and not is_class_selector(pin):
         pin_route = (pin, getattr(task, "provider_override", None) or infer_provider(pin))
         if is_mandatory_pin(task):
-            if pin in excluded:
-                raise ReviewModelUnavailable(
-                    f"Mandatory reviewer pin {pin!r} is one of the implementer models {sorted(excluded)!r}")
             return (*pin_route, "review_unpinned")
-        if pin not in excluded:
-            from itertools import chain
-            candidates = chain([pin_route], candidates)
+        from itertools import chain
+        candidates = chain([pin_route], candidates)
     independent_candidate = False
     for model, provider in candidates:
         independent_candidate = True
@@ -483,15 +464,22 @@ def resolve_review_model(conn, task, cfg):
                   else "review_unpinned")
         return model, provider, reason
     # Refused overrides retain their existing registered-deep-only recovery contract.
-    for model, provider in (() if refusal else independent_routes(excluded, cfg, assignee, level="standard")):
+    for model, provider in (() if refusal else independent_routes(set(), cfg, assignee, level="standard")):
         independent_candidate = True
         if _unavailable(model, provider) or (override and registry_refusal(model, provider, assignee)):
             continue
         return model, provider, "review_tier_fallback"
     levels = "deep" if refusal else "deep or standard"
-    detail = f"No eligible {levels} review model distinct from {sorted(excluded)!r}"
+    detail = f"No eligible {levels} review route"
     if refusal and override:
         detail = f"review_model {override[0]!r} is refused here ({refusal.code}); {detail}"
+    if not independent_candidate and not override and not _downstream(task):
+        # Keep the normal profile/class tier route when no concrete review policy
+        # is configured. Missing attribution must not disable legacy allocation.
+        from hermes_cli.kanban_model_assignment import _assignee_config
+        policy = (_assignee_config(assignee) or {}).get("model_routing") or {}
+        if not policy.get("enabled", False):
+            return None
     _raise_no_route(detail, waits, independent_candidate or override_moved)
 
 

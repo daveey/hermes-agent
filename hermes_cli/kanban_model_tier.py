@@ -323,7 +323,7 @@ def _ratio_receipt(conn: sqlite3.Connection, task: Any, reason: str) -> Optional
 def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
     """Pin the tier's model on the in-memory ``task`` (never the DB row) and record a ``model_tier`` event,
     plus the run's resolved ``run_route`` receipt (every spawn, tier off included).
-    Returns the reason. Review resolution/receipt failures refuse admission rather than reusing an author pin."""
+    Returns the reason. Review resolution/receipt failures refuse admission rather than inventing a route."""
     reason = _apply_model_tier(conn, task, lane=lane, cfg=cfg)
     record_run_route(conn, task, lane=lane, reason=reason)
     return reason
@@ -347,10 +347,7 @@ def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
 def _route_from_base(conn, task, base, *, lane, cfg):
     """:func:`resolve_dispatch_tier` after the tier and ratio choice: the episode, wall and pace moves of *base*."""
     from hermes_cli.kanban_quota_episode import active, decision
-    from hermes_cli.kanban_review_model import implementer_models, is_review_run
     _, route = decision(conn, task, lane=lane, cfg=cfg, base=base)
-    if route and is_review_run(conn, task, lane) and route[0] in implementer_models(conn, task):
-        route = None
     if base[2] == 'pinned':
         from hermes_cli.kanban_pin_reroute import REASON, pinned_route
         if not route and not active(conn, task.id):
@@ -394,13 +391,13 @@ def _review_off_wall(conn, task, base, cfg):
     """``(model, provider, walled_provider)``: another independent reviewer when the ``review_unpinned`` route's
     provider is walled right now (provider file or live pool), else None. [daveey]
 
-    Candidates are the ones the review resolver itself would pick (strong tier, then deep routes distinct
-    from the implementer), skipping any on a walled provider. None keeps the route: never a second wall.
+    Candidates are the ones the review resolver itself would pick (strong tier, then eligible deep routes),
+    skipping any on a walled provider. None keeps the route: never a second wall.
     Hub run 174730 (2026-11-12): review_unpinned chose openai-codex while provider_walls.json held it for
     days, and the reviewer exited 75 into the wall."""
     import time
     from hermes_cli import kanban_provider_walls as pw
-    from hermes_cli.kanban_review_model import implementer_models, independent_routes
+    from hermes_cli.kanban_review_model import independent_routes
     model, provider = _str(base[0]), pw._norm(base[1])
     if not model or not provider or provider == 'auto' or pw.requires_model(task):
         return None
@@ -408,10 +405,7 @@ def _review_off_wall(conn, task, base, cfg):
     walled = pw.active_walls(now=now)
     if not (walled.get(provider) or pw.live_quota_wall(provider, model)):
         return None
-    implementer = implementer_models(conn, task)
-    if not implementer:
-        return None
-    for alt_model, alt_provider in independent_routes(implementer, cfg, getattr(task, 'assignee', None)):
+    for alt_model, alt_provider in independent_routes(set(), cfg, getattr(task, 'assignee', None)):
         alt_provider = pw._norm(alt_provider)
         if (not alt_provider or alt_provider == 'auto' or alt_provider == provider or alt_provider in walled
                 or pw.live_quota_wall(alt_provider, alt_model)):
@@ -440,9 +434,7 @@ def _class_alternate_off_wall(conn, task, base):
     if not until:
         return None
     route = alternate_route(conn, task, {provider: until}, base, now)
-    from hermes_cli.kanban_review_model import implementer_models, is_review_run
-    excluded = implementer_models(conn, task) if is_review_run(conn, task, getattr(task, "status", "")) else set()
-    if not route or route[0] in excluded or pw.live_quota_wall(route[1], route[0]):
+    if not route or pw.live_quota_wall(route[1], route[0]):
         return None
     return route[0], route[1], provider
 
@@ -458,10 +450,8 @@ def _paced_receipt(conn, task, reason, *, lane, cfg):
 
 
 def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Optional[dict[str, Any]] = None) -> str:
-    from hermes_cli.kanban_review_model import _implementer_model, implementer_models, is_review_run, validate_pace_offer
+    from hermes_cli.kanban_review_model import is_review_run
     is_review = is_review_run(conn, task, lane)
-    excluded = implementer_models(conn, task) if is_review else set()
-    implementer_model = _implementer_model(conn, task) if is_review else None
     try:
         model, provider, reason = resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg)
     except Exception as exc:
@@ -488,7 +478,7 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
         from agent.model_routing import is_class_selector
         why = class_unroutable_reason(model) if is_class_selector(model) else None
         if why:
-            if is_review and (implementer_model or reason == "review_override"):
+            if is_review:
                 from hermes_cli.kanban_review_model import ReviewModelUnavailable
                 raise ReviewModelUnavailable(f"Review model {model} is unroutable: {why}")
             # A tier-chosen class this host cannot route would crash the worker at startup ("No eligible
@@ -505,7 +495,6 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
     resolved = (model, provider) if model else effective_route(task)[:2]
     moved = _take_pace_move(getattr(task, "id", ""), resolved)
     if moved:
-        validate_pace_offer(moved[0], excluded)
         model, provider = moved[0], moved[1]
         reason = f"{reason}+{_PACED}:{moved[2]}"
     origin = (getattr(task, "model_override", None), getattr(task, "provider_override", None))
@@ -522,8 +511,7 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
                        "lane": lane}
             payload.update(_ratio_block(conn, task, reason))
             if is_review:
-                payload["implementer_model"] = implementer_model
-                payload["implementer_models"] = sorted(excluded)
+                payload["review_independence"] = "separate_execution"
                 if paced:
                     payload["paced"] = paced
                 if reason == "review_override_refused":

@@ -1,12 +1,13 @@
-"""A review never runs on any model that implemented the card (``implementer_models`` / ``is_review_run``).
+"""Author-model history (``implementer_models`` / ``is_review_run``) is attribution, never a review gate.
 
-Before: ``_implementer_model`` named ONE model (the latest ``review_requested`` handoff run, else the pin), so a card
-implemented by several models (a pin quota reroute, a crashed retry on a peer, an upstream creator card) could be
-reviewed by an earlier implementer, and the pace governor / paced reroute / ``_apply_model_tier`` could move a review
-onto an implementer's model. Behavioural tests on a real SQLite board; pools, walls and the routing registry are
-the fixtures the neighbouring review tests use.
+``implementer_models`` still collects every model that ran the card (a pin quota reroute, a crashed retry on a peer,
+an upstream creator card). Model diversity is retired: that set no longer excludes a review route, so the strong
+route, a paced move or a pace offer may land on an author's model. Provider holds/walls, mandatory pins and the
+routing registry still decide admission; an unavailable route (every pool held or walled) still refuses.
+Behavioural tests on a real SQLite board; pools, walls and the routing registry are the fixtures the neighbouring
+review tests use.
 
-Fixture: strong tier = opus (anthropic); deep routes opus, astra (openai-codex), grok (xai-oauth).
+Fixture: strong tier = opus (anthropic); deep routes astra (openai-codex), opus, grok (xai-oauth) in that order.
 """
 import pytest
 
@@ -94,25 +95,27 @@ def test_downstream_unpinned_route_excludes_source(board, clock, monkeypatch, so
         assert _review_route(conn, down, 'ready')[:2] == (OPUS, 'anthropic')
 
 
-def test_paced_route_rejects_unsafe_probe(board, clock, monkeypatch):
+def test_paced_route_accepts_a_probe_on_an_author_model(board, clock, monkeypatch):
     _routing(monkeypatch)
     monkeypatch.setattr(paced, '_probe', lambda *a: (ASTRA, 'openai-codex', 'anthropic'))
     with kbc.connect() as conn:
         tid = _handoff_card(conn, None, [ASTRA])
         assert paced.paced_route(conn, kb.get_task(conn, tid), (OPUS, 'anthropic', 'review_unpinned'),
-                                 lane='review', cfg=tier.load_tier_config()) is None
+                                 lane='review', cfg=tier.load_tier_config()) == (
+            ASTRA, 'openai-codex', 'review_unpinned+paced:anthropic')
 
 
-def test_governor_rejects_unsafe_review_peer(board, clock, monkeypatch):
+def test_governor_accepts_a_review_peer_on_an_author_model(board, clock, monkeypatch):
     _routing(monkeypatch)
     from hermes_cli import kanban_llm_pacing as lp
     monkeypatch.setattr(paced, '_review_peer', lambda *a, **k: (ASTRA, 'openai-codex'))
     cfg = lp.config_from({'providers': ['anthropic', 'openai-codex'], 'enabled': True})
     with kbc.connect() as conn:
         tid = _handoff_card(conn, None, [ASTRA])
-        assert lpd._pace_alternate_route(conn, kb.get_task(conn, tid), (OPUS, 'anthropic', 'review_unpinned'),
-                                         'review', cfg, conn, [{'provider': 'anthropic',
-                                                               'until': clock[0] + HELD_FAR}]) is None
+        moved = lpd._pace_alternate_route(conn, kb.get_task(conn, tid), (OPUS, 'anthropic', 'review_unpinned'),
+                                          'review', cfg, conn, [{'provider': 'anthropic',
+                                                                'until': clock[0] + HELD_FAR}])
+        assert moved is not None and moved[:3] == (ASTRA, 'openai-codex', 'anthropic')
 
 
 # --- implementer_models: what counts as an implementer ------------------------------------------------------
@@ -228,20 +231,21 @@ def test_single_implementer_review_uses_the_strong_tier_when_it_is_independent(b
         assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_unpinned')
 
 
-def test_multi_model_card_excludes_every_implementer(board, clock, monkeypatch):
-    """opus implemented, then a reroute ran astra: neither may review; the strong tier (opus) is skipped for
-    the next deep route, grok."""
+def test_multi_model_card_history_does_not_exclude_the_strong_route(board, clock, monkeypatch):
+    """opus implemented, then a reroute ran astra: both are recorded, and the strong tier (opus) still reviews."""
     _routing(monkeypatch)
     with kbc.connect() as conn:
         tid = _handoff_card(conn, ASTRA, [OPUS, ASTRA])
-        assert _review_route(conn, tid) == (GROK, 'xai-oauth', 'review_unpinned')
+        assert _models(conn, tid) == {OPUS, ASTRA}
+        assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_unpinned')
         reason = tier.apply_model_tier(conn, kb.get_task(conn, tid), lane='review')
         assert reason == 'review_unpinned'
         event = pin_tests._events(conn, tid, 'model_tier')[-1]
-        assert event['model'] == GROK
+        assert event['model'] == OPUS
+        assert event['review_independence'] == 'separate_execution'
 
 
-def test_earlier_implementer_with_a_class_routed_last_run_still_excluded(board, clock, monkeypatch):
+def test_earlier_implementer_with_a_class_routed_last_run_is_still_recorded(board, clock, monkeypatch):
     """The pin names astra, the last run was class-routed with no concrete receipt, an earlier run ran opus."""
     _routing(monkeypatch)
     with kbc.connect() as conn:
@@ -249,13 +253,17 @@ def test_earlier_implementer_with_a_class_routed_last_run_still_excluded(board, 
         _run(conn, tid, model='class:deep')
         conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
         conn.commit()
-        assert _review_route(conn, tid)[:2] == (GROK, 'xai-oauth')
+        assert _models(conn, tid) == {OPUS, ASTRA}
+        assert _review_route(conn, tid)[:2] == (OPUS, 'anthropic')
 
 
-def test_every_route_an_implementer_ran_on_is_unavailable_raises(board, clock, monkeypatch):
+def test_every_review_route_walled_raises_even_for_author_models(board, clock, monkeypatch):
     _routing(monkeypatch, grok=False)
     with kbc.connect() as conn:
         tid = _handoff_card(conn, ASTRA, [OPUS, ASTRA])
+        assert _review_route(conn, tid)[:2] == (OPUS, 'anthropic')  # authors alone no longer refuse
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {
+            'anthropic': float(clock[0] + 99999), 'openai-codex': float(clock[0] + 99999)})
         with pytest.raises(review.ReviewModelUnavailable):
             _review_route(conn, tid)
         with pytest.raises(review.ReviewModelUnavailable):
@@ -263,28 +271,37 @@ def test_every_route_an_implementer_ran_on_is_unavailable_raises(board, clock, m
         assert pin_tests._events(conn, tid, 'model_tier') == []
 
 
-def test_a_walled_independent_route_is_skipped(board, clock, monkeypatch):
+def test_a_walled_review_route_is_skipped(board, clock, monkeypatch):
     _routing(monkeypatch)
     monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'xai-oauth': float(clock[0] + 99999)})
     with kbc.connect() as conn:
         tid = _handoff_card(conn, ASTRA, [ASTRA])
-        # strong (opus) is not walled and independent of astra
         assert _review_route(conn, tid)[:2] == (OPUS, 'anthropic')
-        # opus + astra implemented and grok is walled: nobody independent is left
+        # opus + astra implemented and grok is walled: the unwalled strong route still reviews
         both = _handoff_card(conn, ASTRA, [OPUS, ASTRA])
+        assert _review_route(conn, both)[:2] == (OPUS, 'anthropic')
+        # strong route walled too: the next unwalled route (astra) reviews
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {
+            'xai-oauth': float(clock[0] + 99999), 'anthropic': float(clock[0] + 99999)})
+        assert _review_route(conn, both)[:2] == (ASTRA, 'openai-codex')
+        # every pool walled: no route is left
+        monkeypatch.setattr(walls, 'active_walls', lambda **_k: {
+            name: float(clock[0] + 99999) for name in ('xai-oauth', 'anthropic', 'openai-codex')})
         with pytest.raises(review.ReviewModelUnavailable):
             _review_route(conn, both)
 
 
-def test_a_held_independent_route_is_skipped_by_the_base_resolver(board, clock, monkeypatch):
-    """opus + astra implemented; grok is the only independent reviewer and it is held. The BASE resolver skips held
-    providers (a kept held route was the old, wrong expectation): there is no independent reviewer, so the review
-    is refused, never kept on a held pool and never moved onto an implementer's pool. A paced move from a held
-    base route lands nowhere either."""
+def test_a_held_review_route_is_skipped_by_the_base_resolver(board, clock, monkeypatch):
+    """opus + astra implemented; grok is held. The BASE resolver skips held providers: grok is never kept, and the
+    unheld strong route reviews. When every pool is held there is no route: the review is refused, and a paced move
+    from a held base route lands nowhere either."""
     _routing(monkeypatch)
     paced_tests._pools(clock, anthropic=('paced', None), openai_codex=('paced', None), xai_oauth=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = _handoff_card(conn, ASTRA, [OPUS, ASTRA])
+        assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_unpinned')
+        paced_tests._pools(clock, anthropic=('held', HELD_FAR), openai_codex=('held', HELD_FAR),
+                           xai_oauth=('held', HELD_FAR))
         with pytest.raises(review.ReviewModelUnavailable):
             _review_route(conn, tid)
         moved = paced.paced_route(conn, kb.get_task(conn, tid), (GROK, 'xai-oauth', 'review_unpinned'),
@@ -292,8 +309,8 @@ def test_a_held_independent_route_is_skipped_by_the_base_resolver(board, clock, 
         assert moved is None
 
 
-def test_unknown_implementer_keeps_the_existing_behaviour(board, clock, monkeypatch):
-    """A class pin with no concrete receipt anywhere: the review is refused, exactly as before."""
+def test_unknown_implementer_still_admits_a_separate_review(board, clock, monkeypatch):
+    """A class pin with no concrete receipt anywhere: missing provenance does not refuse the review."""
     _routing(monkeypatch)
     with kbc.connect() as conn:
         tid = _card(conn)
@@ -301,24 +318,23 @@ def test_unknown_implementer_keeps_the_existing_behaviour(board, clock, monkeypa
                      "WHERE id=?", (tid,))
         conn.commit()
         assert _models(conn, tid) == set()
-        with pytest.raises(review.ReviewModelUnavailable):
-            _review_route(conn, tid)
+        assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_unpinned')
 
 
-def test_unpinned_review_without_any_receipt_is_still_a_legacy_review(board, clock, monkeypatch):
+def test_unpinned_review_without_any_receipt_resolves_a_concrete_route(board, clock, monkeypatch):
     _routing(monkeypatch)
     with kbc.connect() as conn:
         tid = _card(conn, status='review')
         assert _models(conn, tid) == set()
-        assert _review_route(conn, tid)[2] != 'review_unpinned'
+        assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_unpinned')
 
 
 # --- paced reroute / governor / OfferLost -------------------------------------------------------------------------
 
 
-def test_paced_route_never_lands_on_an_earlier_implementer(board, clock, monkeypatch):
-    """astra is held (far); opus and astra both implemented, grok free: the move is to grok. With grok held too
-    nothing moves (opus is free but implemented the card)."""
+def test_paced_route_may_land_on_an_earlier_implementer_until_every_pool_is_held(board, clock, monkeypatch):
+    """astra is held (far); opus and astra both implemented, opus free: the move is to opus. With every pool held
+    nothing moves."""
     _routing(monkeypatch)
     paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
@@ -327,23 +343,27 @@ def test_paced_route_never_lands_on_an_earlier_implementer(board, clock, monkeyp
         base = (ASTRA, 'openai-codex', 'review_unpinned')
         cfg = tier.load_tier_config()
         moved = paced.paced_route(conn, task, base, lane='review', cfg=cfg)
-        assert moved is not None and moved[:2] == (GROK, 'xai-oauth')
-        paced_tests._pools(clock, openai_codex=('held', HELD_FAR), xai_oauth=('held', HELD_FAR))
+        assert moved is not None and moved[:2] == (OPUS, 'anthropic')
+        paced_tests._pools(clock, anthropic=('held', HELD_FAR), openai_codex=('held', HELD_FAR),
+                           xai_oauth=('held', HELD_FAR))
         assert paced.paced_route(conn, task, base, lane='review', cfg=cfg) is None
 
 
-def test_paced_route_for_a_review_override_also_excludes_the_full_set(board, clock, monkeypatch):
+def test_paced_route_for_a_review_override_may_move_to_an_author_model(board, clock, monkeypatch):
     _routing(monkeypatch)
     paced_tests._pools(clock, openai_codex=('held', HELD_FAR), xai_oauth=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = _handoff_card(conn, ASTRA, [OPUS, ASTRA])
-        moved = paced.paced_route(conn, kb.get_task(conn, tid), (ASTRA, 'openai-codex', 'review_override'),
-                                  lane='review', cfg=tier.load_tier_config())
-        assert moved is None  # anthropic is free but opus implemented the card
+        task, base, cfg = kb.get_task(conn, tid), (ASTRA, 'openai-codex', 'review_override'), tier.load_tier_config()
+        assert paced.paced_route(conn, task, base, lane='review', cfg=cfg) == (
+            OPUS, 'anthropic', 'review_override+paced:openai-codex')
+        paced_tests._pools(clock, anthropic=('held', HELD_FAR), openai_codex=('held', HELD_FAR),
+                           xai_oauth=('held', HELD_FAR))
+        assert paced.paced_route(conn, task, base, lane='review', cfg=cfg) is None
 
 
-@pytest.mark.parametrize('implementers, expect', [([ASTRA], (OPUS, 'anthropic')), ([OPUS, ASTRA], (GROK, 'xai-oauth'))])
-def test_governor_pace_alternate_skips_implementer_models(board, clock, monkeypatch, implementers, expect):
+@pytest.mark.parametrize('implementers, expect', [([ASTRA], (OPUS, 'anthropic')), ([OPUS, ASTRA], (OPUS, 'anthropic'))])
+def test_governor_pace_alternate_ignores_implementer_models(board, clock, monkeypatch, implementers, expect):
     _routing(monkeypatch)
     paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
     from hermes_cli import kanban_llm_pacing as lp
@@ -367,7 +387,7 @@ def test_governor_pace_alternate_skips_implementer_models(board, clock, monkeypa
     assert got is not None and got[:2] == expect, (got, seen_walls)
 
 
-def test_governor_pace_alternate_refuses_when_only_implementers_have_room(board, clock, monkeypatch):
+def test_governor_pace_alternate_refuses_only_when_no_pool_has_room(board, clock, monkeypatch):
     _routing(monkeypatch, grok=False)
     paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
     from hermes_cli import kanban_llm_pacing as lp
@@ -377,25 +397,27 @@ def test_governor_pace_alternate_refuses_when_only_implementers_have_room(board,
                         lambda conn, task, walls_, base, now: None if 'anthropic' in walls_ else (OPUS, 'anthropic'))
     with kbc.connect() as conn:
         tid = _handoff_card(conn, ASTRA, [OPUS, ASTRA])
-        assert lpd._pace_alternate_route(conn, kb.get_task(conn, tid), (ASTRA, 'openai-codex', 'review_unpinned'),
-                                         'review', cfg, conn, verdicts) is None
+        task, base = kb.get_task(conn, tid), (ASTRA, 'openai-codex', 'review_unpinned')
+        moved = lpd._pace_alternate_route(conn, task, base, 'review', cfg, conn, verdicts)
+        assert moved is not None and moved[:2] == (OPUS, 'anthropic')  # an author's pool with room is a route
+        paced_tests._pools(clock, anthropic=('held', HELD_FAR), openai_codex=('held', HELD_FAR))
+        both = verdicts + [{'provider': 'anthropic', 'until': clock[0] + HELD_FAR}]
+        assert lpd._pace_alternate_route(conn, task, base, 'review', cfg, conn, both) is None
 
 
-def test_apply_model_tier_raises_offer_lost_when_the_take_lands_on_an_implementer(board, clock, monkeypatch):
-    """An offer judged on the review's route but moving it onto an implementer is unsafe: the launch is refused
-    (OfferLost, the card requeues) and nothing is recorded."""
+def test_apply_model_tier_takes_an_offer_that_lands_on_an_implementer(board, clock, monkeypatch):
+    """An offer moving the review onto an author's model is no longer a diversity violation: it is taken."""
     _routing(monkeypatch)
     with kbc.connect() as conn:
         tid = _handoff_card(conn, ASTRA, [OPUS, ASTRA])
         task = kb.get_task(conn, tid)
-        judged = _review_route(conn, tid)  # grok
-        pace_offer.offer(tid, judged, (OPUS, 'anthropic', 'openai-codex'))  # the move targets implementer opus
+        judged = _review_route(conn, tid)  # opus
+        pace_offer.offer(tid, judged, (ASTRA, 'openai-codex', 'anthropic'))  # the move targets implementer astra
         try:
-            with pytest.raises(pace_offer.OfferLost):
-                tier.apply_model_tier(conn, task, lane='review')
+            reason = tier.apply_model_tier(conn, task, lane='review')
         finally:
             pace_offer.clear()
-        assert pin_tests._events(conn, tid, 'model_tier') == []
+        assert reason.endswith('+paced:anthropic')
         assert (task.model_override, task.provider_override) == (ASTRA, 'openai-codex')
 
 
@@ -414,8 +436,8 @@ def test_apply_model_tier_still_takes_a_safe_offer(board, clock, monkeypatch):
         assert (task.model_override, task.provider_override) == (GROK, 'xai-oauth')
 
 
-def test_offer_lost_is_requeued_not_spawned_end_to_end(board, clock, monkeypatch, all_assignees_spawnable):
-    """Through a real dispatcher tick: an unsafe offer spawns nothing and does not spend a retry."""
+def test_pace_take_onto_an_author_model_spawns_end_to_end(board, clock, monkeypatch, all_assignees_spawnable):
+    """Through a real dispatcher tick: a pace take landing on an author's model spawns there and spends no retry."""
     _routing(monkeypatch)
     from hermes_cli import kanban_db_dispatch as dispatch
     seen = []
@@ -425,25 +447,26 @@ def test_offer_lost_is_requeued_not_spawned_end_to_end(board, clock, monkeypatch
 
         def unsafe_take(task_id, resolved):
             real_take(task_id, resolved)
-            return (OPUS, 'anthropic', 'openai-codex')
+            return (ASTRA, 'openai-codex', 'anthropic')
 
         monkeypatch.setattr('hermes_cli.kanban_pace_reroute.take', unsafe_take)
-        pace_offer.offer(tid, _review_route(conn, tid), (GROK, 'xai-oauth', 'openai-codex'))
+        pace_offer.offer(tid, _review_route(conn, tid), (GROK, 'xai-oauth', 'anthropic'))
         dispatch.dispatch_once(conn, dry_run=False, spawn_fn=lambda *a: seen.append(a))
         stored = kb.get_task(conn, tid)
         pace_offer.clear()
-        assert seen == []
-        assert stored.status == 'review' and stored.consecutive_failures == 0 and stored.claim_lock is None
+        assert len(seen) == 1
+        assert (seen[0][0].model_override, seen[0][0].provider_override) == (ASTRA, 'openai-codex')
+        assert stored is not None and stored.consecutive_failures == 0
 
 
 @pytest.mark.parametrize('held', [False, True])
-def test_unpinned_astra_implementation_gets_concrete_independent_reviewer(board, clock, monkeypatch, held):
+def test_unpinned_astra_implementation_gets_a_concrete_reviewer(board, clock, monkeypatch, held):
     _routing(monkeypatch)
     paced_tests._pools(clock, anthropic=('held' if held else 'paced', HELD_FAR if held else None))
     with kbc.connect() as conn:
         tid = _handoff_card(conn, None, [ASTRA])
         route = _review_route(conn, tid)
-        assert route[:2] == ((GROK, 'xai-oauth') if held else (OPUS, 'anthropic'))
+        assert route[:2] == ((ASTRA, 'openai-codex') if held else (OPUS, 'anthropic'))
         assert not route[0].startswith('class:')
 
 
@@ -465,11 +488,11 @@ def test_downstream_reviewer_pin_is_not_an_implementer(board, clock, monkeypatch
             assert _review_route(conn, down, 'ready')[:2] == (OPUS, 'anthropic')
             tier.apply_model_tier(conn, task, lane='ready')
             event = pin_tests._events(conn, down, 'model_tier')[-1]
-            assert event['implementer_models'] == [ASTRA]
-            assert event['implementer_model'] is None
+            assert event['review_independence'] == 'separate_execution'
+            assert 'implementer_models' not in event and 'implementer_model' not in event
 
 
-def test_receipt_names_concrete_handoff_and_sorted_full_set(board, clock, monkeypatch):
+def test_receipt_records_separate_execution_not_author_models(board, clock, monkeypatch):
     _routing(monkeypatch)
     with kbc.connect() as conn:
         tid = _handoff_card(conn, OPUS, [OPUS])
@@ -479,10 +502,11 @@ def test_receipt_names_concrete_handoff_and_sorted_full_set(board, clock, monkey
         assert claim is not None
         kb._append_event(conn, tid, 'worker_result', {'route_model': ASTRA}, run_id=claim.current_run_id)
         assert kb.request_review(conn, tid)
+        assert _models(conn, tid) == {OPUS, ASTRA}  # the history is still collected
         tier.apply_model_tier(conn, kb.get_task(conn, tid), lane='review')
         event = pin_tests._events(conn, tid, 'model_tier')[-1]
-        assert event['implementer_model'] == ASTRA
-        assert event['implementer_models'] == sorted([OPUS, ASTRA])
+        assert event['review_independence'] == 'separate_execution'
+        assert 'implementer_models' not in event and 'implementer_model' not in event
 
 
 def test_review_lane_model_tier_without_run_route_is_not_an_author(board):
@@ -497,11 +521,11 @@ def test_review_lane_model_tier_without_run_route_is_not_an_author(board):
 
 
 @pytest.mark.parametrize('reset', [600, HELD_FAR, None], ids=['near_reset', 'far_reset', 'unknown_reset'])
-def test_unpinned_astra_with_anthropic_held_reviews_on_the_third_concrete_route(
+def test_unpinned_astra_with_anthropic_held_reviews_on_the_next_concrete_route(
         board, clock, monkeypatch, all_assignees_spawnable, reset):
     """Unpinned card implemented by astra (openai-codex); the strong tier (opus, anthropic) is pacing-held. The review
-    must run on the third route, grok (xai-oauth): concrete (never ``class:deep``), neither the implementer
-    nor the held pool, and a real dispatcher tick must spawn it there with the full receipt."""
+    runs on the next unheld deep route, astra (openai-codex): concrete (never ``class:deep``), not the held pool,
+    the author's model is no obstacle, and a real dispatcher tick must spawn it there with the receipt."""
     _routing(monkeypatch)
     paced_tests._pools(clock, anthropic=('held', reset))
     with kbc.connect() as conn:
@@ -512,21 +536,25 @@ def test_unpinned_astra_with_anthropic_held_reviews_on_the_third_concrete_route(
         assert kb.request_review(conn, tid)  # a real handoff: the receipt's implementer_model reads it
         task = kb.get_task(conn, tid)
         assert task is not None and task.model_override is None
-        assert _review_route(conn, tid) == (GROK, 'xai-oauth', 'review_unpinned')
+        assert _review_route(conn, tid) == (ASTRA, 'openai-codex', 'review_unpinned')
         spawned = pin_tests._tick(conn)
-        assert spawned == [(GROK, 'xai-oauth')]
+        assert spawned == [(ASTRA, 'openai-codex')]
         receipt = pin_tests._events(conn, tid, 'model_tier')[-1]
-        assert (receipt['model'], receipt['provider'], receipt['reason']) == (GROK, 'xai-oauth', 'review_unpinned')
-        assert receipt['implementer_model'] == ASTRA and receipt['implementer_models'] == [ASTRA]
+        assert (receipt['model'], receipt['provider'], receipt['reason']) == (ASTRA, 'openai-codex', 'review_unpinned')
+        assert receipt['review_independence'] == 'separate_execution'
+        assert _models(conn, tid) == {ASTRA}
         assert not receipt['model'].startswith('class:') and 'paced' not in receipt
 
 
-def test_unpinned_astra_with_anthropic_and_xai_held_has_no_independent_reviewer(board, clock, monkeypatch):
+def test_unpinned_astra_with_every_pool_held_has_no_reviewer_route(board, clock, monkeypatch):
     _routing(monkeypatch)
     paced_tests._pools(clock, anthropic=('held', HELD_FAR), xai_oauth=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = _handoff_card(conn, None, [ASTRA])
-        with pytest.raises(review.ReviewModelUnavailable):  # astra authored, the other two pools are held
+        assert _review_route(conn, tid) == (ASTRA, 'openai-codex', 'review_unpinned')  # astra's own pool is open
+        paced_tests._pools(clock, anthropic=('held', HELD_FAR), openai_codex=('held', HELD_FAR),
+                           xai_oauth=('held', HELD_FAR))
+        with pytest.raises(review.ReviewModelUnavailable):
             _review_route(conn, tid)
 
 
@@ -563,14 +591,14 @@ def test_independent_review_override_on_a_free_pool_is_honored(board, clock, mon
         assert _review_route(conn, tid) == (GROK, 'xai-oauth', 'review_override')
 
 
-def test_unknown_implementer_keeps_an_override_on_a_held_pool_as_before(board, clock, monkeypatch):
-    """No author evidence: today's route is kept (the exclusion has nothing to act on), held pool included."""
+def test_override_on_a_held_pool_moves_even_without_author_evidence(board, clock, monkeypatch):
+    """No author evidence is no reason to keep a held pool: the override moves to the next available route."""
     _routing(monkeypatch)
     paced_tests._pools(clock, xai_oauth=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = _override_card(conn, None, GROK)
         assert _models(conn, tid) == set()
-        assert _review_route(conn, tid) == (GROK, 'xai-oauth', 'review_override')
+        assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_override')
 
 
 # --- mandatory reviewer pins never silently move to another model ---------------------------------------------------
@@ -610,14 +638,14 @@ def test_mandatory_downstream_reviewer_pin_is_never_moved_off_its_pool(board, cl
                                  cfg=tier.load_tier_config()) is None
 
 
-def test_mandatory_downstream_reviewer_pin_that_authored_the_work_is_refused(board, clock, monkeypatch):
-    """The mandatory pin names the implementer too (e.g. via a child card): it cannot be swapped silently, so the
-    review is unavailable instead of running on some other model."""
+def test_mandatory_downstream_reviewer_pin_that_authored_the_work_is_still_used(board, clock, monkeypatch):
+    """The mandatory pin names the implementer too (e.g. via a child card): authorship is no refusal, and the pin is
+    still never swapped for another model."""
     _routing(monkeypatch)
     with kbc.connect() as conn:
         down = _mandatory_downstream(conn, pin=OPUS, ran=OPUS)
-        with pytest.raises(review.ReviewModelUnavailable):
-            _review_route(conn, down, 'ready')
+        assert _models(conn, down) == {OPUS}
+        assert _review_route(conn, down, 'ready') == (OPUS, 'anthropic', 'review_unpinned')
 
 
 def test_non_mandatory_downstream_reviewer_pin_on_a_held_pool_yields_to_the_next_route(board, clock, monkeypatch):
@@ -627,5 +655,5 @@ def test_non_mandatory_downstream_reviewer_pin_on_a_held_pool_yields_to_the_next
         impl = _card(conn, ASTRA)
         _run(conn, impl, model=ASTRA)
         down = _card(conn, OPUS, title='Independent code review of the thing', creator=impl)
-        assert _review_route(conn, down, 'ready') == (GROK, 'xai-oauth', 'review_unpinned')
+        assert _review_route(conn, down, 'ready') == (ASTRA, 'openai-codex', 'review_unpinned')
 

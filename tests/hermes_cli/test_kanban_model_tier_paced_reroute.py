@@ -195,35 +195,35 @@ def test_a_review_peer_with_no_live_pool_on_this_host_is_skipped(board, clock, m
     """The same walk for a review route moved by ``paced_route`` itself (the base resolver already skips every held
     pool, so the move is exercised on an explicit base route that sits on a held one)."""
     _deep(monkeypatch, {'llm_pacing': {'providers': ['anthropic', 'openai-codex', 'xai-oauth']}}, grok=True)
-    _pools(clock, openai_codex=('held', HELD_FAR))
+    _pools(clock, openai_codex=('held', HELD_FAR), anthropic=('held', HELD_FAR))
     with kbc.connect() as conn:
         task = kb.get_task(conn, pin_tests._review_card(conn))  # the implementer ran opus
         base, cfg = (*PIN, 'review_unpinned'), tier.load_tier_config()
         first = paced.paced_route(conn, task, base, lane='review', cfg=cfg)
         assert first is not None and first[:2] == GROK and first[2] == 'review_unpinned+paced:openai-codex'
         UNSERVED.add(GROK[1])
-        assert paced.paced_route(conn, task, base, lane='review', cfg=cfg) is None  # opus authored: never its peer
+        assert paced.paced_route(conn, task, base, lane='review', cfg=cfg) is None  # other pools held, grok unserved
 
 
-def test_review_unpinned_on_a_held_provider_moves_to_a_free_independent_reviewer(board, clock, monkeypatch):
+def test_review_unpinned_on_held_providers_moves_to_a_free_reviewer(board, clock, monkeypatch):
     _deep(monkeypatch, {'llm_pacing': {'providers': ['anthropic', 'openai-codex', 'xai-oauth']}}, grok=True)
     with kbc.connect() as conn:
         tid = pin_tests._review_card(conn)
-        assert _route(conn, tid, lane='review') == (*PIN, 'review_unpinned')  # nothing held yet
-        _pools(clock, openai_codex=('held', HELD_FAR))
+        assert _route(conn, tid, lane='review') == (*PEER, 'review_unpinned')  # strong author is eligible
+        _pools(clock, openai_codex=('held', HELD_FAR), anthropic=('held', HELD_FAR))
         assert _route(conn, tid, lane='review') == (*GROK, 'review_unpinned')  # the base resolver skips held pools
         task = kb.get_task(conn, tid)
         assert tier.apply_model_tier(conn, task, lane='review') == 'review_unpinned'
         assert (task.model_override, task.provider_override) == GROK
-        _pools(clock, openai_codex=('held', HELD_FAR), xai_oauth=('held', HELD_FAR))
-        with pytest.raises(review.ReviewModelUnavailable):  # every independent reviewer held: nobody independent
+        _pools(clock, openai_codex=('held', HELD_FAR), anthropic=('held', HELD_FAR), xai_oauth=('held', HELD_FAR))
+        with pytest.raises(review.ReviewModelUnavailable):  # every review pool is held
             _route(conn, tid, lane='review')
 
 
 def test_require_model_on_the_implementation_card_does_not_pin_its_reviewer(board, clock, monkeypatch):
-    """``require_model`` pins the card's own (implementer) model; the independent reviewer still skips held pools."""
+    """``require_model`` pins the card's own (implementer) model; the reviewer still skips held pools."""
     _deep(monkeypatch, grok=True)
-    _pools(clock, openai_codex=('held', HELD_FAR))
+    _pools(clock, openai_codex=('held', HELD_FAR), anthropic=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = pin_tests._review_card(conn, body=walls.REQUIRE_MODEL_MARKER)
         assert _route(conn, tid, lane='review') == (*GROK, 'review_unpinned')
@@ -286,15 +286,15 @@ def test_a_sqlite_fault_in_the_probe_propagates(board, clock, monkeypatch):
 
 
 @pytest.mark.parametrize('block', ['walled', 'live_wall'])
-def test_review_unpinned_with_every_independent_reviewer_held_or_walled_is_unavailable(board, clock, monkeypatch, block):
+def test_review_unpinned_with_every_reviewer_held_or_walled_is_unavailable(board, clock, monkeypatch, block):
     _deep(monkeypatch, grok=True)
-    _pools(clock, openai_codex=('held', HELD_FAR))
+    _pools(clock, openai_codex=('held', HELD_FAR), anthropic=('held', HELD_FAR))
     if block == 'walled':
         monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'xai-oauth': float(clock[0] + 3600)})
     else:
         monkeypatch.setattr(walls, 'live_quota_wall', lambda p, m: float(clock[0] + 3600) if p == 'xai-oauth' else None)
     with kbc.connect() as conn:
-        with pytest.raises(review.ReviewModelUnavailable):  # astra held, grok walled, opus authored
+        with pytest.raises(review.ReviewModelUnavailable):  # astra and opus held, grok walled
             _route(conn, pin_tests._review_card(conn), lane='review')
 
 

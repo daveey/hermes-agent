@@ -72,15 +72,15 @@ def test_routable_class_tier_is_kept(board, monkeypatch):
     assert events[-1]["reason"] == "default"
 
 
-def test_unroutable_strong_tier_on_review_lane(board):
-    """Review/retry work asks for class:deep; a host with only standard routes keeps the profile model."""
+def test_review_with_only_eligible_standard_route_uses_tier_fallback(board):
+    """The review resolver may use its eligible standard fallback without author-model history."""
     cfg = {"enabled": True, "routes": {"standard": [ROUTE]}}
     _write(board, cfg)
     with kbc.connect() as conn:
         task = kb.get_task(conn, kb.create_task(conn, title="impl", assignee="default"))
         reason = tier.apply_model_tier(conn, task, lane="review", cfg={"default_model": "class:standard"})
-    assert reason == "review+unroutable:class:deep:no_eligible_routes"
-    assert task.model_override is None
+    assert reason == "review_tier_fallback"
+    assert task.model_override == ROUTE['model']
 
 
 def test_card_pinned_class_is_left_to_the_card(board):
