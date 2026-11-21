@@ -2,8 +2,8 @@
 
 Runtime consumers use append_records/seal_records in an exclusively owned directory. DB export preserves
 its transactionally monotonic journal_seq separately from each exporter process epoch's envelope seq.
-The current DB journal does not observe monotonic clocks, clock error, or event source UIDs: those remain
-unknown. Export never retroactively invents them from a present-day row or an assumed clock bound.
+New journals persist local observation UIDs and optionally writer-side clock samples. Legacy
+rows stay unknown: export never substitutes drain-time clocks or a remote lifecycle event UID.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from hermes_cli.kanban_fairness_segments import append_records, seal_records
 __all__ = ["append_records", "drain", "load", "seal_records", "write_manifest"]
 
 RECEIPTS, MANIFEST, OWNERS = segments.RECEIPTS, segments.MANIFEST, "owner_authority.jsonl"
+MAX_OWNER_BYTES = 64 * 1024 * 1024
 _PROCESS_EPOCH = (os.getpid(), str(uuid.uuid4()))
 
 
@@ -99,12 +100,14 @@ def drain(conn: sqlite3.Connection, out: Path) -> dict:
         seq = cuts.get((receipts["source_gateway"], epoch), 0)
         records = []
         try:
+            provenance = _provenance(conn, rows[0][0], rows[-1][0])
             for db_seq, kind, wall_ms, task_id, op, fields in rows:
                 seq += 1
+                source_uid, clock = provenance.get(db_seq, (None, {}))
                 record_kind = "opening" if kind == "opening" else "row_change"
                 payload = {"task_id": task_id, "op": op, "fields": json.loads(fields),
                            "journal_seq": db_seq, "journal_kind": kind,
-                           "database_uid": receipts["database_uid"], "source_uid": None}
+                           "database_uid": receipts["database_uid"], "source_uid": source_uid}
                 if kind == "creation":
                     record_kind, payload = "creation", json.loads(fields)
                 if len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > MAX_PAYLOAD_BYTES:
@@ -115,13 +118,30 @@ def drain(conn: sqlite3.Connection, out: Path) -> dict:
                 records.append(make_record(
                     capture_id=state["capture_id"], source_gateway=receipts["source_gateway"],
                     board_uid=receipts["board_uid"], source_epoch=epoch, seq=seq,
-                    kind=record_kind, wall_ns=wall_ms * 1_000_000, payload=payload))
+                    kind=record_kind, wall_ns=clock.get("wall_ns", wall_ms * 1_000_000), payload=payload,
+                    mono_ns=clock.get("mono_ns"), clock_error_ns=clock.get("clock_error_ns")))
             receipts = append_records(out, records, _metadata={"journal_seq": rows[-1][0]})
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, TypeError, RecursionError) as exc:
             _gap(receipts, "export_failed", type(exc).__name__)
             _write(out / RECEIPTS, segments.encoded(receipts))
             return receipts
 
+
+
+def _provenance(conn, first, last):
+    columns = {r[1] for r in conn.execute(f"PRAGMA table_info({journal.JOURNAL})")}
+    if not {"source_uid", "clock_json"} <= columns:
+        return {}
+    result = {}
+    for seq, uid, raw in conn.execute(
+            f"SELECT seq, source_uid, clock_json FROM {journal.JOURNAL} WHERE seq BETWEEN ? AND ?", (first, last)):
+        clock = json.loads(raw) if raw is not None else {}
+        if (not isinstance(clock, dict) or (raw is not None and (
+                set(clock) != {"wall_ns", "mono_ns", "clock_error_ns"}
+                or any(type(v) is not int or v < 0 for v in clock.values())))):
+            raise ValueError("invalid journal clock sample")
+        result[seq] = (uid, clock)
+    return result
 
 
 def write_manifest(conn: sqlite3.Connection, out: Path, *, board: str, assumptions: dict,
@@ -214,7 +234,9 @@ def _owners(out: Path, gaps: list[dict]) -> Optional[list[dict]]:
         return None
     owners = []
     try:
-        data = segments.read_bounded(path, min(segments.MAX_CAPTURE_BYTES, segments.MAX_METADATA_BYTES))
+        # A JSONL journal is not metadata. Keep all coverage/interval lines, not a tail
+        # which can silently discard the beginning of the capture's owner history.
+        data = segments.read_bounded(path, MAX_OWNER_BYTES)
         lines = data.decode("utf-8-sig").splitlines()
     except (OSError, ValueError):
         gaps.append({"code": "bad_owner_record", "detail": "owner file unreadable or over bound"})

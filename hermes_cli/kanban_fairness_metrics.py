@@ -274,6 +274,9 @@ def verdict(capture: dict, *, alarm_prefixes: tuple, min_window_s: float = 0) ->
     armed_s, close_s = armed_ms / 1000, close_ms / 1000
     assumed = manifest.get("assumptions") or {}
     err, lag = float(assumed.get("clock_error_s", 2.0)), float(assumed.get("apply_lag_s", 0.0))
+    # Never narrow writer-attested uncertainty to a smaller report assumption.
+    err = max([err, *(rec["clock_error_ns"] / 1_000_000_000 for rec in capture["records"]
+                     if rec.get("clock_error_ns") is not None)])
     unclaimed = assumed.get("unclaimed_exit", "unknown")
     clock = Clock(close_s, err, lag, unclaimed == "elapsed_ready")
     if close_s - armed_s < min_window_s:

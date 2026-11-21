@@ -228,6 +228,9 @@ def connect_tracked(
     with _tracking_access(wait_for_tracking, key=key, unknown=unknown):
         conn = opener(str(path), **kwargs)
         try:
+            from hermes_cli.kanban_fairness_clocks import register
+
+            register(conn)
             resolved = _key(tracking_path) if tracking_path is not None else _canonical_db_path(conn)
             if resolved is None:
                 return conn  # in-memory / unnamed: nothing on disk to byte-probe

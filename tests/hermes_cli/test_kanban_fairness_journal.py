@@ -109,7 +109,7 @@ def test_seal_stops_capture_and_survives_a_reopen(conn, tmp_path):
         assert journal.status(again)["triggers"] == []
         assert journal.status(again)["stored"] == manifest["journal"]["stored"]
     capture = store.load(out)
-    expected_gaps = {"source_identity_unknown", "clock_unknown", "source_uid_unknown"}
+    expected_gaps = {"source_identity_unknown", "clock_unknown"}
     assert {g["code"] for g in capture["gaps"]} == expected_gaps
     assert len(manifest["segments"]) == 2
     assert [r["seq"] for r in capture["records"]] == list(range(1, len(capture["records"]) + 1))

@@ -57,6 +57,9 @@ ENVELOPE_KEYS = ("version", "capture_id", "source_gateway", "board_uid", "source
 RECORD_KINDS = ("opening", "row_change", "owner_generation", "membership", "creation", "loss")
 LIFECYCLE_KINDS = ("opening", "row_change")
 LIFECYCLE_KEYS = ("task_id", "op", "fields", "journal_seq", "journal_kind", "database_uid", "source_uid")
+# source_uid identifies the source observation row, not a remote lifecycle event.
+# journal-observation: IDs survive exporter restarts; replica sightings remain local
+# observations and must never be deduplicated as upstream events across databases.
 MAX_PAYLOAD_BYTES = 256 * 1024
 _MAX_DEPTH = 16
 

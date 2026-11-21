@@ -24,11 +24,12 @@ _NOW_MS = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
 _WATCHED = ("status", "priority", "idempotency_key", "assignee", "ready_since", "lease_holder")
 _SCHEMA = (
     f"CREATE TABLE {JOURNAL} (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, "
-    "wall_ms INTEGER NOT NULL, task_id TEXT NOT NULL, op TEXT, fields TEXT NOT NULL)",
+    "wall_ms INTEGER NOT NULL, task_id TEXT NOT NULL, op TEXT, fields TEXT NOT NULL, "
+    "source_uid TEXT NOT NULL DEFAULT ('journal-observation:' || lower(hex(randomblob(16)))), clock_json TEXT)",
     f"CREATE TABLE {SESSION} (id INTEGER PRIMARY KEY CHECK (id = 1), capture_id TEXT NOT NULL, "
     "armed_ms INTEGER NOT NULL, sealed_ms INTEGER, max_records INTEGER NOT NULL, max_bytes INTEGER NOT NULL, "
     "stored INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0, dropped INTEGER NOT NULL DEFAULT 0, "
-    "first_drop_ms INTEGER, last_drop_ms INTEGER, admit INTEGER NOT NULL DEFAULT 1)",
+    "first_drop_ms INTEGER, last_drop_ms INTEGER, admit INTEGER NOT NULL DEFAULT 1, clock_error_ns INTEGER)",
 )
 
 
@@ -63,7 +64,7 @@ def _triggers(conn: sqlite3.Connection) -> dict[str, str]:
     changed = " OR ".join(f"OLD.{c} IS NOT NEW.{c}" for c in _WATCHED if c in present)
     kinds = ", ".join(f"'{k}'" for k in EVENT_KINDS)
     event = "json_object('kind', NEW.kind, 'created_at', NEW.created_at)"
-    return {
+    triggers = {
         "kanban_fairness_tasks_ins": "CREATE TRIGGER kanban_fairness_tasks_ins AFTER INSERT ON tasks BEGIN "
         + _append("task", "NEW.id", "insert", _fields_sql(columns, "NEW")) + " END",
         "kanban_fairness_tasks_upd": "CREATE TRIGGER kanban_fairness_tasks_upd AFTER UPDATE ON tasks "
@@ -73,6 +74,14 @@ def _triggers(conn: sqlite3.Connection) -> dict[str, str]:
         "kanban_fairness_events_ins": "CREATE TRIGGER kanban_fairness_events_ins AFTER INSERT ON task_events "
         f"WHEN NEW.kind IN ({kinds}) BEGIN " + _append("event", "NEW.task_id", None, event) + " END",
     }
+    columns = {r[1] for r in conn.execute(f"PRAGMA table_info({SESSION})")}
+    if "clock_error_ns" in columns and conn.execute(
+            f"SELECT clock_error_ns FROM {SESSION} WHERE id=1").fetchone()[0] is not None:
+        triggers["kanban_fairness_clock"] = (
+            f"CREATE TRIGGER kanban_fairness_clock AFTER INSERT ON {JOURNAL} BEGIN "
+            f"UPDATE {JOURNAL} SET clock_json = hermes_fairness_clock("
+            f"(SELECT clock_error_ns FROM {SESSION} WHERE id=1)) WHERE seq=NEW.seq; END")
+    return triggers
 
 
 def _has(conn: sqlite3.Connection, name: str) -> bool:
@@ -121,10 +130,14 @@ def status(conn: sqlite3.Connection) -> Optional[dict]:
 
 
 def arm(conn: sqlite3.Connection, capture_id: str, *, max_records: int = MAX_RECORDS,
-        max_bytes: int = MAX_BYTES, replace: bool = False) -> dict:
+        max_bytes: int = MAX_BYTES, replace: bool = False, clock_error_ns: Optional[int] = None) -> dict:
     """Start a capture on this database: tables, opening snapshot and triggers in one transaction."""
     from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli.kanban_fairness_clocks import register
 
+    if clock_error_ns is not None and (type(clock_error_ns) is not int or clock_error_ns < 0):
+        raise JournalError("clock_error_ns must be a nonnegative integer or None")
+    register(conn)
     if not capture_id or not all(c.isalnum() or c in "-_." for c in capture_id):
         raise JournalError("capture id must be letters, digits, '-', '_' or '.'")
     with write_txn(conn):
@@ -137,8 +150,11 @@ def arm(conn: sqlite3.Connection, capture_id: str, *, max_records: int = MAX_REC
             conn.execute(f"DROP TABLE IF EXISTS {SESSION}")
         for ddl in _SCHEMA:
             conn.execute(ddl)
-        conn.execute(f"INSERT INTO {SESSION} (id, capture_id, armed_ms, max_records, max_bytes) "
-                     f"VALUES (1, ?, {_NOW_MS}, ?, ?)", (capture_id, max_records, max_bytes))
+        conn.execute(f"INSERT INTO {SESSION} (id, capture_id, armed_ms, max_records, max_bytes, clock_error_ns) "
+                     f"VALUES (1, ?, {_NOW_MS}, ?, ?, ?)", (capture_id, max_records, max_bytes, clock_error_ns))
+        # Install before the opening snapshot so opening observations get real clocks too.
+        for ddl in _triggers(conn).values():
+            conn.execute(ddl)
         present = [r[1] for r in conn.execute("PRAGMA table_info(tasks)")]
         fields = _fields_sql([c for c in TASK_FIELDS if c in present], "s")
         # The opening snapshot is not optional evidence: an armed session that could not hold it is a gap.
@@ -157,8 +173,6 @@ def arm(conn: sqlite3.Connection, capture_id: str, *, max_records: int = MAX_REC
             f"(SELECT COUNT(*) FROM {JOURNAL})) WHERE id = 1")
         conn.execute(f"UPDATE {SESSION} SET first_drop_ms = armed_ms, last_drop_ms = armed_ms "
                      "WHERE id = 1 AND dropped > 0")
-        for ddl in _triggers(conn).values():
-            conn.execute(ddl)
     return _open_status(conn)
 
 

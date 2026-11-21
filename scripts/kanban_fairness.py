@@ -75,6 +75,8 @@ def _policy() -> dict:
 
 def _arm(args) -> int:
     out = Path(args.out)
+    if getattr(args, "writer_clocks", False) and not args.db:
+        raise ValueError("writer clocks require explicit --db and exclusively controlled upgraded writers")
     if args.db:
         db = args.db
     else:
@@ -107,7 +109,9 @@ def _arm(args) -> int:
             # schema cookie witnesses commit even for same-id, same-ms replacement.
             armed = True  # Keep the plan unless rollback is positively established.
             try:
-                state = journal.arm(conn, args.capture_id, replace=args.replace)
+                state = journal.arm(conn, args.capture_id, replace=args.replace,
+                                    clock_error_ns=int(args.clock_error_s * 1_000_000_000)
+                                    if getattr(args, "writer_clocks", False) else None)
             except BaseException:
                 conn.rollback()  # Also discard a transaction interrupted by Ctrl-C.
                 armed = conn.execute("PRAGMA schema_version").fetchone()[0] != schema_before
@@ -230,6 +234,8 @@ def _parser() -> argparse.ArgumentParser:
     capture.add_argument("--board", default="default")
     capture.add_argument("--replica", action="store_true")
     capture.add_argument("--clock-error-s", type=float, default=2.0)
+    capture.add_argument("--writer-clocks", action="store_true",
+                         help="sample clocks in writer transactions; ALL writers must use upgraded native connections")
     capture.add_argument("--apply-lag-s", type=float, default=None)
     capture.add_argument("--unclaimed-exit", choices=("unknown", "elapsed_ready"), default="unknown")
     capture.add_argument("--replace", action="store_true")

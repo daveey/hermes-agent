@@ -42,6 +42,42 @@ cards from one host, arm the board's replica (`--board default --replica`, the `
 its worst pull lag with `--apply-lag-s`. The reader widens every time by that lag. A replica that is rebuilt
 from a snapshot loses its journal; the next drain records `journal_missing` and the capture is incomplete.
 
+## Observation provenance and writer clocks
+
+New journals assign each source observation row a persistent, transactionally generated
+`journal-observation:<random-id>` UID. Export preserves it across drains and exporter restarts.
+It identifies a local database observation, **not** a remote Board lifecycle event: replica
+applications are separate sightings, and these IDs must not be used for cross-database event
+deduplication. The original remote event UID is not attested by this capture.
+
+`capture arm --db PATH --writer-clocks --clock-error-s 2` additionally persists a wall/monotonic pair
+inside each writer transaction (including the opening snapshot and creation receipts).
+The operator declares UTC disagreement at arm time; it is an assumption, not an NTP
+measurement. Each persisted bound includes the sampling duration. Reports use at least the
+largest persisted uncertainty, even if the manifest declares a smaller bound. No export-time
+clock is substituted for an unknown historical sample. Old journals stay incomplete.
+
+**Writer compatibility is a hard prerequisite.** Clock-enabled triggers invoke a
+connection-local SQLite function registered by upgraded native tracked connections.
+Pre-upgrade long-lived connections and raw/nonnative SQLite writers lack it and their writes
+will fail atomically while the capture is armed. Do not enable writer clocks on a shared
+live database merely because this CLI has upgraded. Use a dedicated capture replica with
+exclusively controlled upgraded writers, or first verify that every writer process and
+connection has been replaced naturally with the upgraded build. A version check of the
+exporter alone is not sufficient. The default capture leaves clock sampling off, preserving
+legacy writer compatibility and the explicit `clock_unknown` gap. If an incompatible writer
+is discovered, stop the capture and run `capture clear --out DIR` from an upgraded CLI to
+remove the triggers; preserve the incomplete evidence rather than certifying it.
+Reconnect affected old writers to discard SQLite's cached failed statements/schema.
+The CLI requires explicit `--db` in this mode; it will not select the shared board or
+shared `--replica` automatically. That path selection is not a writer-readiness attestation.
+
+The owner JSONL input has its own 64 MiB bound, separate from the 8 MiB metadata bound.
+The entire file is validated, including early intervals and coverage lines; it is never
+silently tail-truncated. Above 64 MiB it remains a `bad_owner_record` coverage gap. The
+assembled capture byte limit still applies. Archive older owner history only outside the
+capture, keeping every interval overlapping the window and both sources' coverage.
+
 ## Reading a capture
 
 `validate --input DIR` lists coverage gaps. `report --mode live --input DIR --output live.json` writes the
