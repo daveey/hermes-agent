@@ -1280,10 +1280,12 @@ def _links_unchanged(key: str, inputs: Optional[tuple], slug: str, began: float,
     reconcile succeeded (unreadable inputs or a raising reconcile leave it dropped). A skip ``LINKS_SLOW_LOG_S`` or
     more after ``began`` names its board; ``began`` is taken before the board's connection is
     borrowed, so that time counts the connect (a lock wait included), ``board_mode`` and the inputs read."""
+    from hermes_cli import kanban_links_diagnostics as diag
     done = _LINKS_DONE.pop(key, None)
     started = _links_clock()
-    if inputs is None or done is None or done[0] != inputs or (
-            started - done[1] >= LINKS_MAX_AGE_S if done[2] is None else not reads.unchanged(done[2])):
+    reason = diag.board_decision(done, inputs, started, LINKS_MAX_AGE_S, reads)
+    diag.board_reason(slug, reason, done[0] if done is not None else None, inputs)
+    if reason != "skip":
         return False, started
     _LINKS_DONE[key] = done
     took = _links_pass_clock() - began
@@ -1340,14 +1342,16 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
     nothing, so the next one retries. Explicit callers (``hermes kanban sync links``) always reconcile. Boards are
     borrowed through the loop's connection scope (``kanban_sync_connections``). [daveey]"""
     from hermes_cli import kanban_chat_links, kanban_links_chat_key as chat_key
+    from hermes_cli import kanban_links_diagnostics as diag
     from hermes_cli.kanban_placement import config_snapshot
     pass_began = _links_pass_clock()
-    with config_snapshot() as placement, chat_key.pass_reads() as reads:
+    with diag.source("sync.links"), config_snapshot() as placement, chat_key.pass_reads() as reads:
         ledger: Optional[dict[str, frozenset]] = None
         try:
             from hermes_cli.kanban_session_activity import _remote_links
             with la.pass_("sync.links.sources"):
-                ledger = ledger_slices(_remote_links(), gateway)
+                cards = _remote_links()
+                ledger = la.timed("sync.links.ledger_slices", ledger_slices, cards, gateway)
             local = {slug for slug, _path in boards}
             if not skip_unchanged or set(ledger) - local:
                 created = la.timed("sync.links.ensure_boards", ensure_link_boards, set(ledger), gateway)
@@ -1362,7 +1366,7 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
             counts: dict = {}
             began = _links_pass_clock()
             try:
-                with la.pass_("sync.links.board") as accounting, connection(path, lambda: _connect(path)) as conn:
+                with la.pass_("sync.links.board") as accounting, la.pass_(diag.board_name(slug) + ".work"), connection(path, lambda: _connect(path)) as conn:
                     mode = sync.board_mode(conn)
                     if mode == "off":
                         continue
@@ -1377,6 +1381,8 @@ def reconcile_links(boards: list[tuple[str, Path]], gateway: str, *, skip_unchan
                         counts = kanban_chat_links.reconcile(conn, slug, gateway)
                     if inputs is not None:
                         _LINKS_DONE[key] = (inputs, started, reads.key())
+                        if reads.key() is None:
+                            diag.event(diag.board_name(slug) + ".certificate.degraded")
                 took = _links_pass_clock() - began
                 if any(counts.values()) or took >= LINKS_SLOW_LOG_S:
                     _log.info("kanban sync: %s chat links %s in %.1fs", slug, counts, took)

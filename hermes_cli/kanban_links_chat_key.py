@@ -81,6 +81,7 @@ class ChatReads:
                 _replay(self, recorded)
             return not self.degraded and self.used == recorded
         except (OSError, sqlite3.Error, KeyError):  # KeyError: a read kind this code cannot replay
+            self.degraded = True  # diagnostic reason; the False/retry policy is unchanged
             return False
         finally:
             self.used = None

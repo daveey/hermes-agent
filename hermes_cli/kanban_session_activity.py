@@ -46,7 +46,8 @@ from hermes_cli.kanban_session_activity_attention import AttentionCache as _Atte
 from hermes_cli.kanban_session_activity_attention import run_checks as _run_done_checks
 from hermes_cli.kanban_session_activity_card_details import _add_card_details
 from hermes_cli.kanban_watch import not_watch_sql as _not_watch
-from hermes_cli.kanban_links_refresh import ScopeRefresher, refresh_decided
+from hermes_cli.kanban_links_refresh import ScopeRefresher
+from hermes_cli import kanban_links_diagnostics as diag
 from hermes_cli import kanban_links_narrow as _links_narrow, kanban_external_activity as _external_activity
 from hermes_cli.kanban_session_wait_rows import _describe_waits, _local_wait_info, _local_wait_rows
 from hermes_cli.kanban_open_asks import card_is_open_human_ask, stamp_needs_you
@@ -932,22 +933,27 @@ def _links_entry(stale_ok: bool, *, with_rows: bool = False):
 
 
 def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
-    hit = _links_cache.get(scope)
-    # Even revision/fingerprint reads can wait on Python locks. A matching warm
-    # stale read must precede ALL of that work; an evicted/cold scope still waits.
-    if stale_ok and hit is not None:
-        _refresh_links_in_background(scope)
-        return hit
-    fingerprint = _links_fingerprint()
-    if hit is not None and _links_fresh(hit, fingerprint):
-        return hit
-    with _links_lock:
+    with diag.source("links_display" if stale_ok else "links_strict"):
         hit = _links_cache.get(scope)
-        if hit is not None and _links_fresh(hit, fingerprint):
-            return hit
+        # A warm display read still precedes ALL fingerprint and lock work.
         if stale_ok and hit is not None:
+            diag.event("links_display.stale")
+            _refresh_links_in_background(scope)
             return hit
-        return _publish_links(scope, fingerprint)
+        fingerprint = diag.timed("fingerprint", _links_fingerprint)
+        if hit is not None and _links_fresh(hit, fingerprint):
+            diag.source_decision(hit, fingerprint, True, time.monotonic())
+            return hit
+        with _links_lock:
+            hit = _links_cache.get(scope)
+            if hit is not None and _links_fresh(hit, fingerprint):
+                diag.source_decision(hit, fingerprint, True, time.monotonic())
+                return hit
+            if stale_ok and hit is not None:
+                diag.event("links_display.stale")
+                return hit
+            diag.source_decision(hit, fingerprint, False, time.monotonic())
+            return _publish_links(scope, fingerprint)
 
 
 def _links_fresh(hit: tuple, fingerprint: tuple) -> bool:
@@ -966,7 +972,7 @@ def _store_links(scope: tuple, fingerprint: tuple) -> tuple:
     global _links_cache
     _origin_rows_sink.rows = []
     try:
-        cards = _project_remote_links()
+        cards = diag.timed("projection", _project_remote_links)
         rows = _origin_rows_sink.rows
     finally:
         _origin_rows_sink.rows = None
@@ -978,6 +984,7 @@ def _store_links(scope: tuple, fingerprint: tuple) -> tuple:
     while len(updated) > _LINKS_SCOPE_CAP:
         del updated[next(iter(updated))]
     _links_cache = updated
+    diag.published()
     return entry
 
 
@@ -991,10 +998,7 @@ def _refresh_links_scope(scope: tuple) -> None:
         # changed meanwhile: never publish another origin's projection under this key.
         if _origin_scope() != scope:
             return
-        fingerprint = _links_fingerprint()
-        hit = _links_cache.get(scope)
-        fresh = hit is not None and _links_fresh(hit, fingerprint)
-        refresh_decided(hit, fingerprint, fresh, time.monotonic(), lambda: _publish_links(scope, fingerprint))
+        diag.refresh(scope, _links_cache, _links_fingerprint, _links_fresh, _publish_links, time.monotonic)
 
 
 _links_refresher = ScopeRefresher(lambda scope: _refresh_links_scope(scope), _LINKS_SCOPE_CAP)
