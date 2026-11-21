@@ -182,6 +182,53 @@ def owner_wake_listed_cards(task, board: str) -> list[str]:
     return [tid for slug, tid in owner_wake_listed_refs(task) if slug == board]
 
 
+def owner_wake_authority_reopen_grant(conn, worker_task_id: str, authority_id: str, *,
+                                      board: Optional[str] = None, expected_run_id: Optional[int] = None,
+                                      ) -> Optional[str]:
+    """Return the supervisor id when it may reopen one nominated done authority.
+
+    The authority is not itself listed in the owner-wake body: the body lists the
+    contained cards. Resolve those cards' authenticated ``contained`` events and
+    allow only the authority named by one of them. This is intentionally separate
+    from ``requeue_grant`` so ordinary unblock and ``resume_contained`` cannot gain
+    the reopen privilege.
+    """
+    if not worker_task_id or not authority_id:
+        return None
+    worker = kb.get_task(conn, worker_task_id)
+    if worker is None or not _is_owner_wake_supervisor(worker) or worker.status != "running":
+        return None
+    if expected_run_id is None or worker.current_run_id != expected_run_id:
+        return None
+    slug = board or kb.get_current_board()
+    listed = owner_wake_listed_cards(worker, slug)
+    if not listed:
+        return None
+    authority = kb.get_task(conn, authority_id)
+    if authority is None or authority.status != "done":
+        return None
+    for target_id in listed:
+        target = kb.get_task(conn, target_id)
+        episode = getattr(target, "containment_episode", None) if target is not None else None
+        if not episode:
+            continue
+        row = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND uid=? AND kind='contained'",
+            (target_id, episode),
+        ).fetchone()
+        if row is None:
+            continue
+        try:
+            payload = json.loads(row[0] or "{}")
+        except (TypeError, ValueError):
+            continue
+        policy = payload.get("policy") if isinstance(payload, dict) else None
+        named = policy.get("authority") if isinstance(policy, dict) else None
+        if isinstance(named, dict) and named.get("task_id") == authority_id:
+            return worker_task_id
+    return None
+
+
 def requeue_grant(conn, worker_task_id: str, target_id: str, *,
                   board: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
     """``(via, source_card)`` when this worker may unblock ``target_id``, else ``(None, None)``.
