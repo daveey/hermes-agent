@@ -149,6 +149,12 @@ def archive(conn, task, *, comment=None, precondition=None, via=None, event_extr
     from hermes_cli.kanban_containment_terminal import terminal_closed
     if conn.in_transaction:
         raise ContainmentRefused("canonical terminal archive cannot run inside a writer transaction")
+    # Retained containment still routes archived cards here. A settled local
+    # projection is not a retry: do not replay its request or reason comment.
+    from hermes_cli.kanban_containment_terminal import closed
+    current = kb.get_task(conn, task)
+    if current is not None and current.status == "archived" and closed(conn, task):
+        return False
     _scope_refusal(conn, task, precondition)  # before any network operation
     meta = _metadata(via, event_extra)
     state = sync.sync_state(conn)

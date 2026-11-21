@@ -59,6 +59,13 @@ the task remains held, its episode marker and dependency edges remain, and its
 dependents remain unsatisfied. It cannot dispatch, resume, unblock or be deleted.
 Ordinary archived tasks without containment keep their existing dependency behavior.
 
+Every dependency edge is retained, including edges from ancestors into the closed
+card. This terminal cancellation does not notify dependent owners automatically or
+provide a new producer. Owners inspecting a waiting dependent must read the closed
+parent's `containment_closed` receipt: its displayed archived status is not successful
+completion. The dependency remains intentionally unsatisfied, and unlink/delete
+remain fenced; do not use `archive --rm` for a contained terminal archive.
+
 Enrolled boards additionally require `terminal_archive: 1` in the containment
 capability advertisement. Core sends the ordinary canonical `archive` operation,
 recovers uncertain delivery with the same request ID, and reads back the exact
