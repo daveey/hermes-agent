@@ -73,7 +73,7 @@ def test_reader_close_does_not_wait_for_busy_native_opener(tmp_path, monkeypatch
         activity._reset_cache_for_tests()
 
 
-def test_untracked_reader_close_while_native_open_waits_for_registry(tmp_path, monkeypatch):
+def test_tracked_reader_close_serializes_with_registry_without_deadlock(tmp_path, monkeypatch):
     from hermes_cli import sqlite_safe_read
 
     path = tmp_path / "board.db"
@@ -84,6 +84,7 @@ def test_untracked_reader_close_while_native_open_waits_for_registry(tmp_path, m
     entered = threading.Event()
     release = threading.Event()
     ready = threading.Event()
+    closing = threading.Event()
     original = sqlite_safe_read.connect_tracked
 
     def observed(*args, **kwargs):
@@ -96,6 +97,7 @@ def test_untracked_reader_close_while_native_open_waits_for_registry(tmp_path, m
         conn = open_ro(path)
         ready.set()
         assert release.wait(10)
+        closing.set()
         conn.close()
 
     def native():
@@ -112,10 +114,13 @@ def test_untracked_reader_close_while_native_open_waits_for_registry(tmp_path, m
             with sqlite_safe_read._live_lock:
                 opening = pool.submit(native)
                 assert entered.wait(10)
-                # Synchronize on the tracking-open boundary, not a sleep.
+                # Readers now register their fd lifetime too: real close and
+                # unregister must serialize under this mutex, not escape it.
                 release.set()
-                reading.result(timeout=3)
+                assert closing.wait(3)
+                assert not reading.done()
                 assert not opening.done()
+            reading.result(timeout=3)
         finally:
             release.set()
         opening.result(timeout=5)

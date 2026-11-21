@@ -94,6 +94,10 @@ def test_busy_board_open_does_not_block_session_poll(tmp_path, monkeypatch, http
             blocker.rollback()
             blocker.close()
         opening.result(timeout=10)
+    if discover_board:
+        # Annotation legitimately retains a tracked cached reader after its poll.
+        # Release that custody before asserting that all board handles are gone.
+        activity._reset_cache_for_tests()
     assert not has_live_connection(board_path)
     assert not has_live_connection(state_path)
     client.close()

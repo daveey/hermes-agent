@@ -71,24 +71,33 @@ def test_gc_releases_tracked_reader(tmp_path):
     assert not has_live_connection(target)
 
 
+@pytest.mark.platforms('linux')
 def test_cross_thread_close_failure_retains_tracking(tmp_path):
     target = tmp_path / 'board.db'
+    with contextlib.closing(sqlite3.connect(target)) as setup:
+        setup.execute('PRAGMA journal_mode=WAL')
+        setup.execute('CREATE TABLE t(v)')
     conn = guard.connect(target)
+    assert guard.is_guarded(conn)
     errors = []
+    counts = dict(guard._lockguard._HANDLES)
 
     def close():
-        try:
-            conn.close()
-        except sqlite3.ProgrammingError as exc:
-            errors.append(exc)
+        for _ in range(3):
+            try:
+                conn.close()
+            except sqlite3.ProgrammingError as exc:
+                errors.append(exc)
 
     thread = threading.Thread(target=close)
     thread.start()
     thread.join(3)
     assert not thread.is_alive()
     try:
-        assert len(errors) == 1
+        assert len(errors) == 3
         assert has_live_connection(target)
+        assert guard.is_guarded(conn)
+        assert dict(guard._lockguard._HANDLES) == counts
         assert conn.execute('SELECT 1').fetchone() == (1,)
     finally:
         conn.close()

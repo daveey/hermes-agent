@@ -96,6 +96,7 @@ class _GuardMixin:
 
     def close(self) -> None:  # type: ignore[misc]
         held = getattr(self, "_hermes_lockguard", None)
+        was_guarded = bool(held)
         _release(self)
         try:
             super().close()  # type: ignore[misc]
@@ -103,8 +104,13 @@ class _GuardMixin:
             forget(self)
         except sqlite3.ProgrammingError:
             # Cross-thread close refused: the connection stays open, so put the guard back.
-            if held is not None:
-                _apply(self, held_path=getattr(self, "_hermes_lockguard_path", None))
+            if was_guarded:
+                try:
+                    # SQL cannot run on this foreign thread either. The held WAL
+                    # guard already proved the mode before release emptied it.
+                    _apply(self, held_path=self._hermes_lockguard_path, wal_verified=True)
+                except Exception:
+                    logger.debug("kanban guard rearm after refused close failed", exc_info=True)
             raise
 
 
@@ -141,19 +147,23 @@ def unguard(conn: sqlite3.Connection) -> None:
         conn._hermes_lockguard = None
 
 
-def _apply(conn: Any, held_path: Optional[str] = None, *, strict=False) -> bool:
+def _apply(conn: Any, held_path: Optional[str] = None, *, strict=False, wal_verified=False) -> bool:
+    # Refused-close rearming may not execute SQL on the foreign thread.
+    if wal_verified and not held_path:
+        return False
     path = held_path or _db_file(conn)
     if not path:
         return False
-    try:
-        # Also the first read: it opens -wal/-shm, so hold() can lock SQLite's own -shm descriptor.
-        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-    except sqlite3.Error:
-        if strict:
-            raise
-        return False
-    if str(mode).lower() != "wal":
-        return False
+    if not wal_verified:
+        try:
+            # First read attaches -wal/-shm so hold() can use SQLite's own fds.
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        except sqlite3.Error:
+            if strict:
+                raise
+            return False
+        if str(mode).lower() != "wal":
+            return False
     held = getattr(conn, "_hermes_lockguard", None)
     if held is None or getattr(conn, "_hermes_lockguard_finalizer", None) is None:
         held = {}

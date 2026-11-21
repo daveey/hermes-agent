@@ -11,6 +11,8 @@ from hermes_cli import backup_restore as restore
 from hermes_cli.kanban_session_activity import cached_ro, evict_readers
 from hermes_cli.sqlite_safe_read import pread_lock_safe, release_unlinked_fds
 
+pytestmark = pytest.mark.platforms('linux')  # Real pread and deleted-inode descriptor proofs.
+
 
 def make_db(path, marker):
     with contextlib.closing(sqlite3.connect(path)) as conn:
