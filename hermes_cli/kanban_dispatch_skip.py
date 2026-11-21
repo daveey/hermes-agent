@@ -277,7 +277,7 @@ def pinned_quota_hold(conn: sqlite3.Connection, task_id: str, *, lane: str = 're
         neutral = routing_view(task)
         model, provider, reason = resolve_model_tier(conn, neutral, lane='ready')
         from hermes_cli.kanban_quota_episode import active
-        if reason == 'default' and isinstance(model, str) and model.startswith('class:') and not active(conn, task_id):
+        if reason in ('default', 'class') and isinstance(model, str) and model.startswith('class:') and not active(conn, task_id):
             routes, known = class_wall_routes(neutral, model, now=time.time())
             if known and not routes:
                 return model, provider or 'auto', min(known.values())
