@@ -545,19 +545,27 @@ def cards_today(conn, lane: str, *, now: Optional[float] = None, pol=None) -> in
     return count(conn, lane, now=now, pol=pol)
 
 
-def spent_today(conn, pol: Policy, lane: str, *, now: Optional[float] = None) -> float:
-    """Run spend charged to ``lane`` since local midnight (same receipts ``usage`` uses)."""
+def spent_by_lane(conn, pol: Policy, *, now: Optional[float] = None) -> dict[str, float]:
+    """Run spend charged to every lane since local midnight, from ONE scan of the receipts. [daveey]
+
+    ``spent_today`` per lane re-ran this whole aggregate once for each lane in every lanes projection.
+    """
     start = day_start(now)
-    total = 0.0
+    totals = {name: 0.0 for name in pol.lanes}
     for tenant, cost in conn.execute(
             "SELECT tenant, SUM(cost) FROM ("
             "SELECT t.tenant AS tenant, MAX(COALESCE(json_extract(e.payload, '$.usage.cost_usd'), 0)) AS cost "
             "FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.kind = 'worker_result' "
             "AND e.created_at >= ? AND json_extract(e.payload, '$.usage') IS NOT NULL "
             "GROUP BY e.task_id, e.run_id) GROUP BY tenant", (start,)):
-        if pol.lane_of(tenant) == lane:
-            total += float(cost or 0)
-    return round(total, 2)
+        name = pol.lane_of(tenant)
+        totals[name] = totals.get(name, 0.0) + float(cost or 0)
+    return {name: round(total, 2) for name, total in totals.items()}
+
+
+def spent_today(conn, pol: Policy, lane: str, *, now: Optional[float] = None) -> float:
+    """Run spend charged to ``lane`` since local midnight (same receipts ``usage`` uses)."""
+    return spent_by_lane(conn, pol, now=now).get(lane, 0.0)
 
 
 def _daily_limit_reason(conn, pol: Policy, lane_name: str, opts: dict) -> Optional[str]:

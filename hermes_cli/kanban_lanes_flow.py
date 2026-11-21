@@ -186,9 +186,10 @@ def _pr_url(task, events) -> Optional[str]:
     return None
 
 
-def _pr_snapshot(task, events, awaiting, reader=None) -> Optional[dict]:
+def _pr_snapshot(task, events, awaiting, reader=None, *, url=None) -> Optional[dict]:
     snap: dict[str, Any] = {}
-    url = _pr_url(task, events)
+    # A caller holding the card's already derived URL (request evidence) skips re-deriving it from the history.
+    url = url or _pr_url(task, events)
     if not url and isinstance(awaiting, dict):
         ref = awaiting.get("ref")
         if isinstance(ref, str) and ref.startswith("https://github.com/") and "/pull/" in ref:
@@ -269,7 +270,8 @@ def _card_from_row(conn, task, now: float, reader=None, pol=None, *, evidence=No
     creator = next((_payload(dict(e)).get("creator_task_id") for e in events if e["kind"] == "created"), None)
     human = _json_obj(task["human_request"] if "human_request" in task.keys() else None)
     age = max(0.0, (now - float(task["created_at"] or now)) / 3600.0)
-    pr = _pr_snapshot(task, events, awaited, reader)
+    pr = _pr_snapshot(task, events, awaited, reader,
+                      url=None if evidence is None else evidence.pr_url(task))
     event_dicts = [{"kind": e["kind"], "payload": e["payload"]} for e in events]
     return {
         "id": task["id"], "title": task["title"], "status": task["status"],
@@ -339,6 +341,7 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None,
             blockers = evidence.blockers(card["id"])
             cards[-1].update(blockers=blockers, blocker=blockers[0] if blockers else None)
     out_lanes = {}
+    spent = lanes.spent_by_lane(conn, pol, now=now)
     for name, spec in pol.lanes.items():
         row = usage[name]
         out_lanes[name] = {
@@ -348,6 +351,6 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None,
             "limits": {"cards_per_day": spec.cards_per_day, "usd_per_day": spec.usd_per_day,
                        "max_workers": spec.max_workers},
             "usage": {"cards_today": lanes.cards_today(conn, name, now=now, pol=pol),
-                      "usd_today": lanes.spent_today(conn, pol, name, now=now)},
+                      "usd_today": spent.get(name, 0.0)},
         }
     return {"window": window, "cards": cards, "lanes": out_lanes}

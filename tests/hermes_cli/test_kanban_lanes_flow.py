@@ -164,3 +164,68 @@ def test_set_persists_daily_limits(conn, configured):
 def test_unknown_window_is_rejected():
     with pytest.raises(SystemExit):
         cli("lanes", "flow", "--json", "--window", "2h")
+
+
+def _legacy_spent(conn, pol, lane, now):
+    """The per-lane scan spent_today used before one aggregate served every lane."""
+    total = 0.0
+    for tenant, cost in conn.execute(
+            "SELECT tenant, SUM(cost) FROM (SELECT t.tenant AS tenant, "
+            "MAX(COALESCE(json_extract(e.payload, '$.usage.cost_usd'), 0)) AS cost FROM task_events e "
+            "JOIN tasks t ON t.id = e.task_id WHERE e.kind = 'worker_result' AND e.created_at >= ? "
+            "AND json_extract(e.payload, '$.usage') IS NOT NULL GROUP BY e.task_id, e.run_id) GROUP BY tenant",
+            (lanes.day_start(now),)):
+        if pol.lane_of(tenant) == lane:
+            total += float(cost or 0)
+    return round(total, 2)
+
+
+def test_spend_comes_from_one_scan_and_equals_the_per_lane_scan(conn, configured):
+    configured()
+    now = int(time.time())
+    pol = lanes.policy()
+    for lane, cost in (("babybear", 1.25), ("babybear", 2.5), ("other", 0.1), ("stranger", 7.0)):
+        tid = base._ready_in(conn, lane, f"spend {lane} {cost}")
+        conn.execute("INSERT INTO task_runs (task_id, status, started_at, ended_at) VALUES (?, 'done', ?, ?)",
+                     (tid, now - 10, now - 1))
+        run_id = conn.execute("SELECT MAX(id) FROM task_runs").fetchone()[0]
+        conn.execute("INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+                     (tid, run_id, "worker_result", json.dumps({"usage": {"cost_usd": cost}}), now - 1))
+    conn.commit()
+    scans = []
+    conn.set_trace_callback(lambda sql: scans.append(sql) if "worker_result" in sql else None)
+    spent = lanes.spent_by_lane(conn, pol, now=now)
+    assert len(scans) == 1
+    assert set(spent) >= set(pol.lanes)
+    for name in pol.lanes:
+        assert spent[name] == _legacy_spent(conn, pol, name, now) == lanes.spent_today(conn, pol, name, now=now)
+    assert spent["babybear"] == 3.75 and spent[pol.lane_of("stranger")] >= 7.0
+    scans.clear()
+    snap = flow.snapshot(conn, window="6h", now=now, pol=pol, reader=type("R", (), {
+        "prefetch": lambda self, urls: None, "get": lambda self, url: {}})())
+    assert len([s for s in scans if "GROUP BY e.task_id, e.run_id" in s and "created_at >= " in s]) >= 1
+    assert snap["lanes"]["babybear"]["usage"]["usd_today"] == 3.75
+
+
+def test_evidence_projection_equals_plain_projection_with_pr_urls(conn, configured):
+    configured()
+    now = int(time.time())
+    pol = lanes.policy()
+    published = base._ready_in(conn, "babybear", "published")
+    waiting = base._ready_in(conn, "babybear", "waiting on ci")
+    base._ready_in(conn, "babybear", "plain")
+    conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'review_requested', ?, ?)",
+                 (published, json.dumps({"metadata": {"pr": "https://github.com/example/repo/pull/7"}}), now))
+    conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (waiting,))
+    conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'scheduled', ?, ?)",
+                 (waiting, json.dumps({"awaiting": {"kind": "ci", "ref": "https://github.com/example/repo/pull/8"}}), now))
+    conn.commit()
+    reader = type("R", (), {"prefetch": lambda self, urls: None, "get": lambda self, url: {}})()
+    from hermes_cli.kanban_lanes_flow_evidence import Evidence
+    with_evidence = flow.snapshot(conn, window="6h", now=now, pol=pol, reader=reader, evidence=Evidence(conn))
+    plain_cards = [flow._card_from_row(conn, row, now, reader, pol) for row in
+                   conn.execute(f"SELECT * FROM tasks WHERE status IN {flow._OPEN} ORDER BY created_at, id")]
+    by_id = {c["id"]: c["pr"] for c in with_evidence["cards"]}
+    assert by_id[published] == "https://github.com/example/repo/pull/7"
+    assert by_id[waiting] == "https://github.com/example/repo/pull/8"
+    assert by_id == {c["id"]: (c["pr"] or {}).get("url") for c in plain_cards}
