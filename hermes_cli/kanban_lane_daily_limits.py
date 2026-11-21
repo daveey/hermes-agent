@@ -32,13 +32,14 @@ def exempt(conn, lane, opts):
     return False
 
 
-def reason(conn, pol, lane_name, opts, *, now=None):
+def reason(conn, pol, lane_name, opts, *, now=None, provenance_conn=None):
     from hermes_cli import kanban_lanes as lanes
     from hermes_cli.kanban_admission_score import _alarm_key
 
     lane = pol.lanes[pol.lane_of(lane_name)]
     if (opts.get("created_by") in lanes.RECOVERY_CREATORS or opts.get("admission_class") == "urgent"
-            or _alarm_key(opts.get("idempotency_key")) or exempt(conn, lane, opts)):
+            or _alarm_key(opts.get("idempotency_key")) or exempt(
+                conn if provenance_conn is None else provenance_conn, lane, opts)):
         return None
     now = time.time() if now is None else now
     if lane.usd_per_day is not None and lanes.spent_today(conn, pol, lane.name, now=now) >= lane.usd_per_day:

@@ -259,12 +259,13 @@ def _awaiting(task, events=()) -> Optional[dict]:
 
 def _card_from_row(conn, task, now: float, reader=None, pol=None, *, evidence=None) -> dict:
     events = _events(conn, task["id"]) if evidence is None else evidence.events(task["id"])
+    source = conn if evidence is None else evidence.connection(task['id'])
     awaited = _awaiting(task, events)
-    held = conn.execute(f"SELECT 1 FROM tasks WHERE id=? AND {lanes.HELD}", (task["id"],)).fetchone() is not None
+    held = source.execute(f"SELECT 1 FROM tasks WHERE id=? AND {lanes.HELD}", (task["id"],)).fetchone() is not None
     gate_reason = _gate_reason(events) if held else None
     if gate_reason and pol is not None:
         from hermes_cli.kanban_lane_daily_limits import reason, row_opts
-        gate_reason = reason(conn, pol, task["tenant"], row_opts(conn, task), now=now)
+        gate_reason = reason(conn, pol, task["tenant"], row_opts(source, task), now=now, provenance_conn=source)
     creator = next((_payload(dict(e)).get("creator_task_id") for e in events if e["kind"] == "created"), None)
     human = _json_obj(task["human_request"] if "human_request" in task.keys() else None)
     age = max(0.0, (now - float(task["created_at"] or now)) / 3600.0)
@@ -315,8 +316,8 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None,
     if pol is None:
         pol = lanes.parse({"lanes": {"other": {}}})
     window_s = WINDOWS[window]
-    usage = lanes.usage(conn, pol, window_s=window_s, now=now)
     evidence = Evidence(conn) if evidence is None else evidence
+    usage = lanes.usage(conn, pol, window_s=window_s, now=now, evidence=evidence)
     rows = evidence.rows
     if reader is None:
         from hermes_cli.kanban_lanes_flow_pr import Reader

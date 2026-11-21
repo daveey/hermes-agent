@@ -692,7 +692,7 @@ def drop_paused(conn, rows: list) -> list:
 
 # ── report ──────────────────────────────────────────────────────────────────
 
-def usage(conn, pol: Policy, *, window_s: int, now: Optional[float] = None) -> dict[str, dict]:
+def usage(conn, pol: Policy, *, window_s: int, now: Optional[float] = None, evidence=None) -> dict[str, dict]:
     """Per lane on one connection: target and actual share of run-seconds in the window, and what is waiting.
 
     ``blocked_on_you`` is the count of ``blocked``/``triage`` cards whose stored ask ``needs_human`` (the same
@@ -755,4 +755,7 @@ def usage(conn, pol: Policy, *, window_s: int, now: Optional[float] = None) -> d
         row["target"] = 0.0 if row["paused"] else round(row["share"] / total_share, 4)
         row["actual"] = round(row["run_seconds"] / total_run, 4)
         row["admitted_today"] = admitted_today(conn, name, now=now) if row["gated"] else 0
+    if evidence is not None:
+        from hermes_cli.kanban_lanes_sources import open_counts
+        open_counts(out, pol, evidence, now)
     return out

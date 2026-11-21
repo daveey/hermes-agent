@@ -29,21 +29,20 @@ def _fleet(conn, local: bool):
         return None
 
 
-def snapshot(conn, *, hours: float, local: bool = False) -> dict:
+def snapshot(conn, *, hours: float, local: bool = False, evidence=None) -> dict:
     from hermes_cli import kanban_lanes_plan as plan
 
     pol = lanes.policy()
     if pol is None:
         return {"configured": False}
-    replica = _fleet(conn, local)
-    try:
-        rows = lanes.usage(replica or conn, pol, window_s=int(hours * 3600))
-    finally:
-        if replica is not None:
-            replica.close()
+    if evidence is None:
+        from hermes_cli.kanban_lanes_sources import read_view
+        with read_view(conn, local=local) as evidence:
+            return snapshot(conn, hours=hours, local=local, evidence=evidence)
+    rows = lanes.usage(evidence.conn, pol, window_s=int(hours * 3600), evidence=evidence)
     for name, lane in pol.lanes.items():
         rows[name]["describe"] = lane.describe
-    return {"configured": True, "window_hours": hours, "scope": "fleet" if replica is not None else "local",
+    return {"configured": True, "window_hours": hours, "scope": "fleet" if evidence.conn is not conn else "local",
             "default": pol.default, "agent_priority_cap": pol.priority_cap, "shadow": pol.shadow, "lanes": rows,
             "planner": plan.read_notes()}
 
@@ -211,14 +210,11 @@ def _set(args) -> int:
 
 def _flow(args) -> int:
     from hermes_cli import kanban_lanes_flow as flow
+    from hermes_cli.kanban_lanes_sources import read_view
 
     with kbc.connect_closing() as conn:
-        replica = _fleet(conn, local=False)
-        try:
-            data = flow.snapshot(replica or conn, window=args.window)
-        finally:
-            if replica is not None:
-                replica.close()
+        with read_view(conn) as evidence:
+            data = flow.snapshot(evidence.conn, window=args.window, evidence=evidence)
     if not _json_out(args, data):
         print(json.dumps(data, indent=2))
     return 0

@@ -9,16 +9,26 @@ from __future__ import annotations
 class Evidence:
     """Read each card's ordered history and parent state at most once per view."""
 
-    def __init__(self, conn):
+    def __init__(self, conn, *, rows=None):
         from hermes_cli import kanban_lanes_flow as flow
 
         self.conn = conn
-        self.rows = conn.execute(
+        self.rows = (conn.execute(
             f"SELECT * FROM tasks WHERE status IN {flow._OPEN} ORDER BY created_at, id").fetchall()
+            if rows is None else rows)
+        self._identity = tuple(tuple(r) for r in conn.execute('PRAGMA database_list'))
+        if not any(r[2] for r in self._identity):
+            self._identity = ('memory', id(conn))
         self._rows = {row["id"]: row for row in self.rows}
         self._events = {}
         self._parents = {}
         self._urls = {}
+
+    def connection(self, task_id):
+        return self.conn
+
+    def identity(self, task_id):
+        return self._identity
 
     def row(self, task_id):
         if task_id not in self._rows:
