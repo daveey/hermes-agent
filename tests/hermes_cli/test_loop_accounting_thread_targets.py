@@ -191,7 +191,10 @@ def test_user_system_split_matches_cpu_and_family_sum_still_reconciles():
     finally:
         release.set()
     for t in snap["threads"]:
-        assert abs(t["user_s"] + t["system_s"] - t["cpu_s"]) <= 0.011
+        # proc stat truncates user and system separately to ticks; the boundary
+        # clock is now precise, while this split retains its original raw units.
+        assert abs(t["user_s"] + t["system_s"] - t["cpu_stat_s"]) <= 0.001
+        assert abs(t["cpu_stat_s"] - t["cpu_s"]) <= 2 / la._clk_tck() + 0.001
     res = snap["residual"]
     fam = res["families"]["tt-split"]
     assert fam["user_s"] + fam["system_s"] == pytest.approx(fam["cpu_s"], abs=0.02)

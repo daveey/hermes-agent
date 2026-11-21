@@ -67,8 +67,8 @@ ended threads at the end of ``run``). It is an overlay, not additive with ``fami
 ``loop_accounting.thread_targets`` (default on) switches it off; cost is one ``Thread.run`` wrapper: about
 3-6 µs of CPU per thread lifecycle (``tests/hermes_cli/test_loop_accounting_thread_targets.py`` pins <= 50 µs).
 
-**Cost.** One pass is two ``thread_time`` and two ``perf_counter`` reads, a thread-local depth and one
-uncontended lock: a few microseconds (``tests/hermes_cli/test_loop_accounting_bench.py`` pins <= 20 µs).
+**Cost.** One pass is two ``thread_time`` and two ``perf_counter`` reads, a thread-local depth and two
+uncontended lock rounds: a few microseconds (``tests/hermes_cli/test_loop_accounting_bench.py`` pins <= 20 µs).
 """
 
 from __future__ import annotations
@@ -87,6 +87,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from hermes_cli import http_body_accounting, loop_callback_latency
+from hermes_cli.loop_accounting_open import OpenIntervals
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +145,8 @@ class _Stat:
                 "last_at": round(self.last_at, 3)}
 
 
-_lock = threading.Lock()
+_lock = threading.RLock()
+_open_intervals = OpenIntervals()
 _stats: dict[str, _Stat] = {}
 _thread_accounted: dict[int, float] = {}  # native thread id -> CPU of its outermost passes
 _local = threading.local()
@@ -193,6 +195,7 @@ def _fold_exited() -> None:
         except IndexError:
             return
         gone = _thread_accounted.pop(tid, None)
+        _open_intervals.discard(tid)
         if gone:
             _state["exited_accounted"] = _state.get("exited_accounted", 0.0) + gone
 
@@ -219,7 +222,7 @@ class Pass:
     """One accounted pass (a context manager); see the module docstring. Mark the outcome with
     :meth:`skip`, :meth:`change`, :meth:`fallback` and :meth:`rows` at any point before it exits."""
 
-    __slots__ = ("_c0", "_gen", "_outer", "_w0", "changed", "fell_back", "name", "nrows", "skipped")
+    __slots__ = ("_c0", "_gen", "_outer", "_tid", "_w0", "changed", "fell_back", "name", "nrows", "skipped")
 
     def __init__(self, name: str, skipped: bool = False, changed: Optional[bool] = None, fallback: bool = False,
                  rows: Optional[int] = None) -> None:
@@ -247,10 +250,19 @@ class Pass:
         self._outer = depth == 0
         self._gen = _fork["gen"]
         self._w0 = _perf()
-        self._c0 = _thread_time()
+        with _lock:
+            self._tid = _own_tid()
+            _fold_exited()
+            self._c0 = _thread_time()
+            _open_intervals.enter(self._tid, self, self.name, self._c0,
+                                  _thread_accounted.get(self._tid, 0.0))
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        with _lock:
+            self._close(exc_type)
+
+    def _close(self, exc_type) -> None:
         if self._gen == _fork["gen"]:
             cpu = _thread_time() - self._c0
             wall = _perf() - self._w0
@@ -261,6 +273,7 @@ class Pass:
         _local.depth = max(0, getattr(_local, "depth", 1) - 1)
         tid = _own_tid() if self._outer else 0
         with _lock:
+            _open_intervals.close(self._tid, self)
             st = _stat(self.name)
             st.runs += 1
             if self.skipped:
@@ -318,15 +331,23 @@ def span_open(name: str) -> tuple:
     with _lock:
         _fold_exited()
         acc0 = _thread_accounted.get(tid, 0.0)
-    return name, tid, _thread_time(), _perf(), acc0
+        token = name, tid, _thread_time(), _perf(), acc0
+        _open_intervals.enter(tid, id(token), name, token[2], acc0)
+        return token
 
 
 def span_close(token: tuple, *, error: bool = False, error_kind: Optional[str] = None) -> bool:
+    with _lock:
+        return _span_close_locked(token, error=error, error_kind=error_kind)
+
+
+def _span_close_locked(token: tuple, *, error: bool = False, error_kind: Optional[str] = None) -> bool:
     """Close a :func:`span_open` token. False (nothing recorded) when called on another thread. ``error_kind``
     names the exception class of an ``error`` (else it counts as ``unknown``)."""
     name, tid, c0, w0, acc0 = token
     if tid != _native_id():
         return False
+    _open_intervals.close(tid, id(token))
     cpu = _thread_time() - c0
     wall = _perf() - w0
     with _lock:
@@ -471,6 +492,14 @@ def _darwin_thread_cpu() -> list[tuple[int, str, float]]:
 
 
 def thread_cpu() -> list[dict[str, Any]]:
+    with _lock:
+        rows = _thread_cpu_locked()
+        for row in rows:
+            _open_intervals.apply(row)
+        return rows
+
+
+def _thread_cpu_locked() -> list[dict[str, Any]]:
     """Every live thread of this process: native id, name and CPU seconds (user + system), plus the CPU its
     outermost accounted passes took. Linux reads ``/proc/self/task``; elsewhere only live accounted threads are
     listed (their ``cpu_s`` is None)."""
@@ -490,12 +519,17 @@ def thread_cpu() -> list[dict[str, Any]]:
         if got is None:
             continue
         comm, user, system = got
-        out.append({"tid": tid, "name": names.get(tid, comm), "cpu_s": round(user + system, 3),
+        try:
+            cpu = time.clock_gettime((~tid << 3) | 6)  # Linux numeric TID CPUCLOCK_SCHED, not a pthread pointer
+        except (OSError, ValueError):
+            cpu = user + system
+        out.append({"tid": tid, "name": names.get(tid, comm), "cpu_s": round(cpu, 6),
+                    "cpu_stat_s": round(user + system, 3),
                     "user_s": round(user, 3), "system_s": round(system, 3),
                     "accounted_cpu_s": round(accounted_by.get(tid, 0.0), 6)})
     if not tids and sys.platform == "darwin":
         for tid, name, cpu in _darwin_thread_cpu():
-            row = {"tid": tid, "name": names.get(tid) or name or "?", "cpu_s": round(cpu, 3),
+            row = {"tid": tid, "name": names.get(tid) or name or "?", "cpu_s": round(cpu, 6),
                    "accounted_cpu_s": round(accounted_by.get(tid, 0.0), 6)}
             if tid in _thread_split:
                 row["user_s"], row["system_s"] = (round(v, 3) for v in _thread_split[tid])
@@ -518,6 +552,23 @@ def _process_start_time() -> Optional[float]:
 
 
 def snapshot() -> dict[str, Any]:
+    """Sample native CPU and open Pass/Scope/span intervals under the booking lock.
+
+    Thread totals include the unbooked part of the oldest open interval (its
+    nested completed work is subtracted). ``open_accounting`` names that part;
+    completed loop counters are unchanged. Callback hooks remain best-effort.
+    Linux cpu_s uses the numeric-TID high-resolution clock; cpu_stat_s retains
+    the tick-granular user/system sum. Diagnostic metadata is read afterwards.
+    """
+    with _lock:
+        result = _snapshot_locked()
+    result.update(process_start_time=_process_start_time(),
+                  slow_callbacks=loop_callback_latency.snapshot(), http=http_body_accounting.snapshot(),
+                  diagnostic_code=loop_callback_latency.code_provenance())
+    return result
+
+
+def _snapshot_locked() -> dict[str, Any]:
     """The JSON-ready snapshot this process writes (see the module docstring)."""
     times = os.times()
     threads = thread_cpu()
@@ -533,6 +584,8 @@ def snapshot() -> dict[str, Any]:
     with _lock:
         _fold_exited()
         by_tid = _copy_accounted()
+        by_tid.update({t["tid"]: t["accounted_cpu_s"] for t in threads
+                       if t.get("open_accounting") and t["tid"] in _open_intervals.by_tid})
         if live_tids:
             for tid in [tid for tid in by_tid if tid not in live_tids]:
                 _state["exited_accounted"] = _state.get("exited_accounted", 0.0) + by_tid.pop(tid)
@@ -545,7 +598,6 @@ def snapshot() -> dict[str, Any]:
         "role": _state["role"] or _role_guess(),
         "pid": os.getpid(),
         "started_at": round(_started_at, 3),
-        "process_start_time": _process_start_time(),
         "written_at": round(time.time(), 3),
         "uptime_s": round(time.time() - _started_at, 3),
         "process": {
@@ -559,9 +611,6 @@ def snapshot() -> dict[str, Any]:
         "threads": threads,
         "residual": _residual(threads, process_cpu, accounted_total, procfs),
         "loops": counters(),
-        "slow_callbacks": loop_callback_latency.snapshot(),
-        "http": http_body_accounting.snapshot(),
-        "diagnostic_code": loop_callback_latency.code_provenance(),
     }
 
 
@@ -816,6 +865,7 @@ def reset() -> None:
     with _lock:
         _stats.clear()
         _thread_accounted.clear()
+        _open_intervals.clear()
         _exited_tids.clear()
         _cb_stats.clear()
         _cb_cache.clear()
@@ -846,14 +896,21 @@ class Scope:
         self.skipped = True
 
     def __enter__(self) -> Scope:
-        self._tid = _own_tid()
-        self._acc0 = _thread_accounted.get(self._tid, 0.0)
-        self._gen = _fork["gen"]
-        self._w0 = _perf()
-        self._c0 = _thread_time()
+        with _lock:
+            self._tid = _own_tid()
+            _fold_exited()
+            self._acc0 = _thread_accounted.get(self._tid, 0.0)
+            self._gen = _fork["gen"]
+            self._w0 = _perf()
+            self._c0 = _thread_time()
+            _open_intervals.enter(self._tid, self, self.name, self._c0, self._acc0)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        with _lock:
+            self._close(exc_type)
+
+    def _close(self, exc_type) -> None:
         if self._gen == _fork["gen"]:
             cpu = _thread_time() - self._c0
             wall = _perf() - self._w0
@@ -862,6 +919,7 @@ class Scope:
             wall = _perf() - _fork["w0"]
         tid = self._tid
         with _lock:
+            _open_intervals.close(tid, self)
             inner = max(0.0, _thread_accounted.get(tid, 0.0) - self._acc0)
             own = max(0.0, cpu - inner)
             st = _stat(self.name)
@@ -1130,8 +1188,8 @@ def instrument_thread_targets() -> bool:
         finally:
             if key is not None:
                 try:
-                    cpu = _thread_time()
                     with _lock:
+                        cpu = _thread_time()
                         if _exited_tids:
                             _fold_exited()
                         acc = _thread_accounted.get(tid, 0.0)
@@ -1233,7 +1291,8 @@ THREAD_TARGETS_DEFAULT = True  # per-target thread naming: two lock rounds per t
 
 def _after_fork_child() -> None:
     global _lock, _started_at
-    _lock = threading.Lock()
+    _lock = threading.RLock()
+    old_tid = getattr(getattr(_local, "exit_mark", None), "tid", 0)
     _stats.clear()
     _thread_accounted.clear()
     _cb_stats.clear()
@@ -1248,6 +1307,7 @@ def _after_fork_child() -> None:
     _local.depth = depth  # child-opened passes remain nested until the inherited outer pass exits
     _exited_tids.clear()
     _fork.update(gen=_fork["gen"] + 1, c0=_thread_time(), w0=_perf())
+    _open_intervals.after_fork(old_tid, _native_id(), _fork["c0"])
 
 
 if hasattr(os, "register_at_fork"):
