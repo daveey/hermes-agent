@@ -596,6 +596,7 @@ def _unimported_pinned(conn: sqlite3.Connection, replica: sqlite3.Connection, ow
 def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *, mode: str, limit: Any,
               profile_exists: Optional[Callable[[str], bool]], full_detail: str,
               held: Optional[dict[str, tuple]] = None,
+              statuses: Optional[dict[str, str]] = None,
               ) -> tuple[list[str], dict[str, tuple[str, Optional[str]]]]:
     """One pass over the candidates: ids to copy (at most ``limit``, in candidate order) and, for each card pinned
     to this machine that the pass leaves on the Board, why. ``budget_exhausted`` only for a card this pass would
@@ -624,6 +625,8 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     room = PoolBudget(limit.regular, limit.priority, limit.limit) if isinstance(limit, PoolBudget) else \
         PoolBudget(limit, 0)  # an int is a classless budget; a hub's pool budget never copies unstartable work
     for card in listed:
+        if statuses is not None:
+            statuses[card["id"]] = card["status"]
         full = not room.admits(row_class(card))
         if full and card["id"] not in mine:
             from hermes_cli.kanban_candidate_receipts import note
@@ -777,9 +780,10 @@ def pickup(conn: sqlite3.Connection, *, budget: Any,
     from hermes_cli import kanban_pickup_held as kph
     own = _own(conn)
     held: dict[str, tuple] = {}
+    statuses: dict[str, str] = {}
     try:
         picked, skips = _evaluate(conn, replica, own, mode=mode, limit=limit, profile_exists=profile_exists,
-                                  full_detail="pickup batch full this tick", held=held)
+                                  full_detail="pickup batch full this tick", held=held, statuses=statuses)
         from hermes_cli import kanban_replica_lag as lag  # copied back next tick, once the replica holds our push
         behind = lag.lagging(_replica_path(conn), picked)
         skips.update({tid: ("other", "replica behind this gateway's push") for tid in behind})
@@ -796,7 +800,8 @@ def pickup(conn: sqlite3.Connection, *, budget: Any,
     skips.update(denied)
     from hermes_cli.kanban_candidate_receipts import pickup_skip
     for tid, why in skips.items():
-        pickup_skip(tid, why)
+        # Preserve the observed lane; unlisted/unknown cards are not ready-only evidence.
+        pickup_skip(tid, why, status=statuses.get(tid, 'unknown'))
     imported = [tid for tid in imported if tid not in denied]
     kph.remember({tid: sig for tid, sig in held.items() if tid in imported})
     _record_skips(conn, {tid: why for tid, why in skips.items() if tid not in imported})
