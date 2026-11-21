@@ -54,6 +54,8 @@ class CanonicalCreateParams(ProfileParams):
     editor: dict[str, JsonValue] | None = None
     title: str | None = None
     hidden: bool = False
+    # CLI ancestry attribution, not an authorization or source override.
+    agent_cli: bool = False
     follow_profile_config: bool | None = None
     service_tier: str | None = None
     cwd_explicit: bool | None = None

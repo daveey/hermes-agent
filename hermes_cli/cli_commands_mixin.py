@@ -919,10 +919,8 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         _, branch_name = parse_branch_args(_command_arg(cmd_original))
         now = datetime.now()
         from tools.approval_yolo import transfer_session_yolo, with_session_yolo
-        # Create the child BEFORE ending the parent: a failed create_session or gateway branch (or its /yolo
-        # carry) must leave the session the user is still on open, not ended "branched" with no branch (#11030).
-        # The stable ``_branched_from`` marker keeps the branch visible in /resume + /sessions even after the
-        # parent is re-ended with a different end_reason; with_session_yolo keeps a live /yolo on the branch.
+        # Create BEFORE ending the parent: failure must leave the original open (#11030).
+        # ``_branched_from`` keeps /resume visibility; with_session_yolo carries the live /yolo.
         # The child sends the parent's exact system prompt: a row without one makes the branch's first turn
         # rebuild (re-probing the workspace), losing the copied transcript's warm cache if the repo moved since.
         try:
@@ -939,6 +937,8 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
                 model=self.model, parent_session_id=parent_session_id, system_prompt=parent_prompt or None,
                 model_config=with_session_yolo({"max_iterations": self.max_turns, "reasoning_config":
                                                 self.reasoning_config, "_branched_from": parent_session_id}, parent_session_id))
+            from hermes_cli.chat_visibility import hide_classic_session
+            hide_classic_session(self._session_db, new_session_id)
         except Exception as e:
             return _cp(f"  {_gt('branch.create_failed', error=e)}")
         _end_current_session(self, "branched")

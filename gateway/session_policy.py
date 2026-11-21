@@ -17,7 +17,7 @@ CREATE_FIELDS = frozenset({'request_id', 'source', 'cwd', 'model', 'toolsets',
                            'yolo', 'safe_mode', 'ignore_user_config',
                            'skills', 'checkpoints', 'accept_hooks', 'pass_session_id', 'follow_profile_config',
                            'service_tier', 'cwd_explicit', 'run_budget', 'verbose', 'row_cwd', 'client_env',
-                           'client'})
+                           'client', 'hidden', 'agent_cli'})
 # Sections a ``follow_profile_config`` session re-reads from the owning profile's CURRENT config each
 # turn (main's Bot Chat row), credentials included: a frozen key never crosses a profile route change.
 FOLLOW_MODEL_SECTIONS = ('model', 'providers', 'custom_providers', 'fallback_providers', 'fallback_model', 'model_aliases')
@@ -479,6 +479,9 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
     if bad_bypass:
         _refuse(bad_bypass, 'must be a boolean')
     safe_mode = params.get('safe_mode', False)
+    for flag in ('hidden', 'agent_cli'):
+        if flag in params and type(params[flag]) is not bool:
+            _refuse(flag, 'must be a boolean')
     ignore_user_config = safe_mode or params.get('ignore_user_config', False)
     if 'api_key' in params and (not isinstance(params['api_key'], str) or not params['api_key'].strip()):
         _refuse('api_key', 'must be a non-empty string')

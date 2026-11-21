@@ -489,14 +489,16 @@ class SessionMaintenanceMixin:
         """:meth:`archive_empty_drafts` at most once per ``DRAFT_SWEEP_INTERVAL_S`` after a sweep
         that archived rows (state_meta ``last_draft_archive``; an empty sweep is read-only). Runs whatever ``sessions.auto_archive`` says. Never raises."""
         try:
+            from hermes_state_agent_cli import archive_agent_cli
+            agent_count = archive_agent_cli(self)
             now = time.time()
             since = _seconds_since(now, self.get_meta("last_draft_archive"))
             if since is not None and since < self.DRAFT_SWEEP_INTERVAL_S:
-                return 0
+                return agent_count
             count = self.archive_empty_drafts()
             if count:  # a sweep that found nothing writes nothing: GET /api/sessions polls reach here
                 self.set_meta("last_draft_archive", str(now))
-            return count
+            return count + agent_count
         except Exception:  # health: allow BLE001 -- a maintenance chore must never break its tick; logged
             logger.warning("state.db empty-draft archive failed", exc_info=True)
             return 0

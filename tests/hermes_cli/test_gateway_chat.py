@@ -69,7 +69,7 @@ async def test_creation_preserves_advertised_cwd_model_and_toolsets(monkeypatch,
         async def rpc(self, method, **params):
             calls.append((method, params))
             if method == "runtime.describe":
-                return {"session_create": {"sources": ["cli"], "parameters": [
+                return {"session_create": {"sources": ["cli"], "parameters": ["agent_cli", "hidden",
                     "cwd", "model", "toolsets", "request_id", "source", "skills", "checkpoints", "accept_hooks",
                     "pass_session_id"]}}
             return {"stored_session_id": "stored"}
@@ -112,7 +112,7 @@ async def test_finite_runs_create_oneshot_sessions_and_explicit_source_wins(monk
     class Peer:
         async def rpc(self, method, **params):
             if method == "runtime.describe":
-                return {"session_create": {"sources": sources, "parameters": ["cwd", "request_id", "source"]}}
+                return {"session_create": {"sources": sources, "parameters": ["agent_cli", "hidden", "cwd", "request_id", "source"]}}
             created.append(params["source"])
             return {"stored_session_id": "stored"}
 
@@ -216,7 +216,7 @@ async def test_documented_env_opt_ins_ride_the_classic_create_and_bypass_needs_a
     class Peer:
         async def rpc(self, method, **params):
             if method == "runtime.describe":
-                return {"session_create": {"sources": ["cli"], "parameters": [
+                return {"session_create": {"sources": ["cli"], "parameters": ["agent_cli", "hidden",
                     "cwd", "model", "request_id", "source", *flags]}}
             created.append(params)
             return {"stored_session_id": "stored"}
@@ -262,7 +262,7 @@ async def test_launch_key_flags_are_never_silently_dropped(monkeypatch, tmp_path
         async def rpc(self, method, **params):
             calls.append((method, params))
             if method == "runtime.describe":
-                return {"session_create": {"sources": ["cli"], "parameters": ["cwd", "model", "api_key", "source"]}}
+                return {"session_create": {"sources": ["cli"], "parameters": ["agent_cli", "hidden", "cwd", "model", "api_key", "source"]}}
             if method == "session.info":
                 return {"launch_request": {"source": "cli", "model": "m"}, "cwd": str(tmp_path)}
             return {"stored_session_id": "stored", "execution_generation": 0,
@@ -300,7 +300,7 @@ async def test_new_and_branch_move_the_terminal_continue_pointer(monkeypatch, tm
     class Peer:
         async def rpc(self, method, **params):
             if method == "runtime.describe":
-                return {"session_create": {"sources": ["cli"], "parameters": ["cwd", "source"]}}
+                return {"session_create": {"sources": ["cli"], "parameters": ["agent_cli", "hidden", "cwd", "source"]}}
             if method == "session.info":
                 return {"launch_request": {"source": "cli"}, "cwd": str(tmp_path)}
             if method == "session.mutate":
@@ -332,7 +332,7 @@ async def test_oneshot_z_writes_no_session_lines_to_stderr_like_main(monkeypatch
     class Peer:
         async def rpc(self, method, **params):
             if method == "runtime.describe":
-                return {"session_create": {"sources": ["cli", "oneshot"], "parameters": ["cwd", "request_id", "source"]}}
+                return {"session_create": {"sources": ["cli", "oneshot"], "parameters": ["agent_cli", "hidden", "cwd", "request_id", "source"]}}
             return {"stored_session_id": "stored-z"}
 
     @asynccontextmanager

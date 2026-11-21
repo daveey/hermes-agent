@@ -538,7 +538,7 @@ class AuthorityConnection:
         from hermes_state_local import commit_local_session
         # Bot Mode's forever-chat mint: born hidden from the sidebar. `follow_profile_config` stays in
         # the frozen request: the policy re-reads the profile's current route every turn.
-        hidden = params.pop('hidden', False)
+        hidden = params.get('hidden', False)
         if type(hidden) is not bool:
             raise RuntimeStoreError('invalid_params', field='hidden', detail='must be a boolean')
         ref = title and resolve_titled_session(self.authority, self.actor, title, missing_ok=True)
@@ -579,8 +579,7 @@ class AuthorityConnection:
                 await asyncio.to_thread(accept_launch_hooks, policy)
             if title:
                 await tracked_write(self.authority, partial(title_new_session, self.authority, ref, title))
-            if hidden:
-                await tracked_write(self.authority, partial(self.authority.db.set_session_hidden, ref.session_id, True))
+
         return await self.resume(ref, {})
 
     async def ping(self, ref, params):

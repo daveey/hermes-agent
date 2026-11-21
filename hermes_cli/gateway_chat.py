@@ -278,6 +278,8 @@ async def _open_session(client, args, oneshot, oneshot_prompt, *, request_id=Non
         if create_if_missing:
             policy["title"] = title
         policy.update(env_launch_flags())
+        from hermes_cli.chat_visibility import creation_visibility
+        policy.update(creation_visibility(visible=getattr(args, 'visible', False)))
         policy.update(client_env_policy(parameters))
         cwd = await asyncio.to_thread(_caller_cwd, args)
         if "cwd" in parameters:

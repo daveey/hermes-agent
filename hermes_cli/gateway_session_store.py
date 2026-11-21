@@ -197,6 +197,8 @@ class GatewaySessionStore:
             # older code, a job it started) made every descendant ``hermes chat`` fail before sending.
             source = ONESHOT_SOURCE if get_session_env("HERMES_SINGLE_QUERY_SESSION", "") == "1" else "cli"
         params["source"] = create_surface(source)
+        from hermes_cli.chat_visibility import creation_visibility
+        params.update(creation_visibility())
         # Main's row stamp (run_agent._launch_cwd_for_session): this process's cwd (``-w`` never
         # chdirs, so the repo root), only for a CLI-family label on a local terminal backend.
         local = (os.getenv("TERMINAL_ENV") or "local").strip().lower() in ("", "local")

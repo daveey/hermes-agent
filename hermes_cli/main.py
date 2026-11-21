@@ -1526,6 +1526,8 @@ _CHAT_PASSTHROUGH = (
 
 def cmd_chat(args):
     """Run interactive chat CLI."""
+    if getattr(args, 'visible', False):  # health: allow HX002 -- CLI flag also applies to classic /new and /branch
+        os.environ['HERMES_CHAT_VISIBLE'] = '1'  # health: allow HX002 -- launch-only visibility opt-out
     from hermes_cli.stream_json import stream_json_requested
     # stream-json and the --safe-mode / --ignore-user-config bypass keep the transport client; the
     # classic CLI (interactive, -q/-Q) is main's HermesCLI with a gateway-backed agent (gateway_agent.py).
@@ -1558,11 +1560,9 @@ def cmd_chat(args):
     # callers that invoke cmd_chat directly (e.g. subcommand dispatch).
     if getattr(args, "yolo", False):
         os.environ["HERMES_YOLO_MODE"] = "1"
-    # --ignore-rules: skip AGENTS.md/SOUL.md/.cursorrules injection, memory
-    # entries and preloaded skills (AIAgent(skip_context_files, skip_memory)).
+    # --ignore-rules skips project rules, memory and preloaded skills.
     if getattr(args, "ignore_rules", False):
         os.environ["HERMES_IGNORE_RULES"] = "1"
-    # --source: tag session source for filtering (e.g. 'tool' for integrations)
     if getattr(args, "source", None):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
         # Explicit, not inherited: one-shot runs keep it (agent.session_source.session_source_for).

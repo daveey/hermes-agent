@@ -638,6 +638,8 @@ class CLISessionMixin:
                             "max_iterations": self.max_turns, "reasoning_config": self.reasoning_config,
                         })
                     self.agent._session_db_created = True
+                    from hermes_cli.chat_visibility import hide_classic_session
+                    hide_classic_session(self._session_db, self.session_id)
                 if title:
                     title = _apply_new_session_title(self, title)
             # Tell memory providers the session_id rotated (reset=True flushes per-session

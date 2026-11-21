@@ -319,6 +319,7 @@ def _build_chat_parser(subparsers) -> argparse.ArgumentParser:
               help="Skip auto-injection of AGENTS.md, SOUL.md, .cursorrules, memory, and preloaded skills. Combine with --ignore-user-config for a fully isolated run.")
     inherited(chat_parser, "--safe-mode", action="store_true", default=SUPPRESS,
               help="Troubleshooting mode: disable ALL customizations — user config, AGENTS.md/memory injection, plugins, and MCP servers (implies --ignore-user-config and --ignore-rules). Use to isolate whether a problem comes from your setup or from Hermes itself.")
+    add("--visible", action="store_true", help="Keep an agent-started chat visible in session lists (or HERMES_CHAT_VISIBLE=1)")
     add("--source", default=None,
         help="Session source tag (default: cli). Use 'tool' for third-party integrations that should not appear in user session lists; any other lowercase tag (e.g. 'peer-mail') runs as 'tool' and is stored under its own name for --source filters and sessions.sidebar_exclude_sources. Messaging platform names are refused.")
     add("--origin-session", default=None,
