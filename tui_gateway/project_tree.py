@@ -377,6 +377,9 @@ def _auto_buckets(
     by_auto_root: dict[str, dict] = {}
     homeless: list[dict] = []
     for session in unowned:
+        if junk_cwd(_field(session, "cwd")) and _field(session, "cwd"):
+            homeless.append(session)
+            continue
         root = _session_repo_root(session, resolve)
         if root:
             # Stricter repo policy for real git roots; a root gone from disk is stale and
@@ -418,7 +421,7 @@ def build_tree(
     """Build the authoritative project tree -> ``{"projects", "scoped_session_ids"}``.
 
     ``is_junk_root`` flags git roots that must never become an AUTO project; ``is_junk_cwd``
-    is the narrower non-git policy (explicit projects are honored regardless); ``exists``
+    flags session cwds that cannot create auto projects (explicit projects are honored regardless); ``exists``
     keeps a DELETED workspace from becoming a phantom AUTO project (omit on remote backends).
     ``hydrate`` False empties lane ``sessions`` but keeps counts + ``previewSessions``.
     """
@@ -476,7 +479,7 @@ def build_tree(
     # Tier 3: discovered repos with no loaded sessions, folded to their common root.
     for repo in discovered_repos or []:
         raw_root = _field(repo, "root")
-        if not raw_root:
+        if not raw_root or _junk(raw_root):
             continue
         info = resolve(raw_root) if resolve else None
         root = (info or {}).get("repo_root") or raw_root

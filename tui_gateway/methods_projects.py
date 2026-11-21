@@ -139,29 +139,38 @@ def _non_workspace_dirs() -> set[str]:
     return {os.path.normcase(os.path.realpath(path)) for path in candidates if path}
 
 
-def _is_repo_junk(root: str) -> bool:
-    """A git root never auto-surfaced as a project: a non-workspace dir or anything under
-    HERMES_HOME. User-created projects pointing there are still honored."""
-    if not root:
+def _canonical_workspace_path(path: str) -> str:
+    """Resolve local aliases before policy checks and project/repo/lane keying."""
+    return os.path.normcase(os.path.realpath(path)) if path else ""
+
+
+def _is_non_workspace_path(path: str) -> bool:
+    """One auto-discovery policy; explicit user-created projects bypass this filter."""
+    import tempfile
+    from pathlib import Path
+    from hermes_constants import get_hermes_home, _get_platform_default_hermes_home
+    real = _canonical_workspace_path(path)
+    if not real or real in _non_workspace_dirs():
         return True
-    from hermes_constants import get_hermes_home
-    real = os.path.realpath(root)
-    hermes_home = os.path.realpath(str(get_hermes_home()))
-    return (
-        os.path.normcase(real) in _non_workspace_dirs()
-        or real == hermes_home
-        or real.startswith(hermes_home + os.sep))
+    # Resolve sibling profile homes too: a profile can be symlinked outside the base home.
+    default_home = _get_platform_default_hermes_home()
+    profile_homes = tuple(str(p) for p in (Path(default_home) / "profiles").glob("*"))
+    roots = (str(get_hermes_home()), str(default_home), *profile_homes,
+             # no-tmp: ok — classify OS temp roots, not scratch-file creation.
+             tempfile.gettempdir(), "/tmp", "/private/tmp", "/var/folders", os.getenv("TMPDIR", ""))
+    return any(real == root or real.startswith(root.rstrip(os.sep) + os.sep)
+               for root in {_canonical_workspace_path(p) for p in roots if p})
+
+
+def _is_repo_junk(root: str) -> bool:
+    """Git roots use the same never-a-workspace policy as non-git session cwds."""
+    return _is_non_workspace_path(root)
 
 
 def _is_session_cwd_junk(cwd: str) -> bool:
-    """A non-git cwd that stays in flat Recents. A DESCENDANT of HERMES_HOME may be an
-    intentional prose/data workspace, so only HERMES_HOME itself is excluded here."""
-    if not cwd:
-        return True
-    from hermes_constants import get_hermes_home
-    real = os.path.normcase(os.path.realpath(cwd))
-    hermes_home = os.path.normcase(os.path.realpath(str(get_hermes_home())))
-    return real in _non_workspace_dirs() or real == hermes_home
+    """Internal and temporary cwds stay in Home. A workspace under HERMES_HOME
+    requires an explicit user-created project, including prose/data folders."""
+    return _is_non_workspace_path(cwd)
 
 
 def _repo_discovery_policy(raw: dict | None = None) -> dict:
@@ -271,6 +280,7 @@ def _discover_repos_payload(
     repos: dict[str, dict] = {}
 
     def _agg(root: str) -> dict:
+        root = _canonical_workspace_path(root)
         return repos.setdefault(
             root, {"root": root, "label": "", "sessions": 0, "last_active": 0.0})
     # ``db`` is None for a profile whose session store was never initialized (read-only foreign
@@ -281,7 +291,9 @@ def _discover_repos_payload(
     cwd_to_root: dict[str, str] = {}
     for row in cwd_rows:
         cwd = str(row.get("cwd") or "")
-        root = git_probe.common_repo_root(cwd)
+        if _is_non_workspace_path(cwd):
+            continue
+        root = _canonical_workspace_path(git_probe.common_repo_root(cwd))
         if not root:
             continue
         cwd_to_root[cwd] = root
@@ -304,7 +316,7 @@ def _discover_repos_payload(
             from hermes_cli import projects_db as pdb
             with (contextlib.nullcontext(conn) if conn is not None else pdb.connect_closing()) as c:
                 for entry in pdb.list_discovered_repos(c):
-                    root = str(entry.get("root") or "")
+                    root = _canonical_workspace_path(str(entry.get("root") or ""))
                     if root and not _is_repo_junk(root):
                         agg = _agg(root)
                         if entry.get("label"):
@@ -437,12 +449,23 @@ def _build_project_tree(
     _DIR_EXISTS_CACHE.clear()
     sessions, projects, discovered, active_id = _project_tree_inputs(
         db, session_limit, include_discovered=include_discovered)
+    # Normalize copies, not persisted rows: aliases must share ownership and lane identities.
+    def paths(row: dict, *keys: str) -> dict:
+        return {**row, **{k: _canonical_workspace_path(str(row.get(k) or "")) for k in keys}}
+    sessions = [paths(s, "cwd", "git_repo_root") for s in sessions]
+    projects = [{**p, "folders": [paths(f, "path") for f in p.get("folders") or []]}
+                for p in projects]
+    discovered = [paths(r, "root") for r in discovered]
+
+    def resolve(path: str):
+        info = git_probe.resolve(path)
+        return paths(info, "repo_root", "worktree_root") if info else None
     # build_tree also resolves declared project folders and discovered roots — warm them too.
     git_probe.warm_roots(
         [str(f.get("path") or "") for p in projects for f in (p.get("folders") or [])]
         + [str(r.get("root") or "") for r in discovered])
     tree = project_tree.build_tree(
-        projects, sessions, discovered, git_probe.resolve, preview_limit=preview_limit,
+        projects, sessions, discovered, resolve, preview_limit=preview_limit,
         hydrate=hydrate, is_junk_root=_is_repo_junk, is_junk_cwd=_is_session_cwd_junk,
         exists=_dir_exists_cached)
     return tree, active_id

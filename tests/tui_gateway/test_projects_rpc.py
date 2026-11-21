@@ -22,6 +22,16 @@ def _call(method, params=None):
 
 
 @pytest.fixture(autouse=True)
+def _workspace_temp_policy(tmp_path, monkeypatch):
+    """Fixture workspaces are not OS scratch: reserve a distinct disposable temp root."""
+    import tempfile
+    root = tmp_path / "os-temp"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(root))
+    monkeypatch.setenv("TMPDIR", str(root))
+
+
+@pytest.fixture(autouse=True)
 def _fast_git_probe(monkeypatch):
     """Replace real git subprocess probes with a cheap .git-directory check.
 
