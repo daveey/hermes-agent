@@ -441,8 +441,10 @@ def local_refusals(conn: sqlite3.Connection, status: str) -> dict[str, str]:
     if sync.board_mode(conn) != "primary":
         return out
     own = _own(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+    source = "alarm_source" if "alarm_source" in columns else "NULL AS alarm_source"
     rows = conn.execute(
-        "SELECT id, runs_on, created_on, alarm_source, created_by, idempotency_key, workspace_kind FROM tasks "
+        f"SELECT id, runs_on, created_on, {source}, created_by, idempotency_key, workspace_kind FROM tasks "
         "WHERE status = ? AND claim_lock IS NULL "
         "AND (runs_on IS NOT NULL OR (created_on IS NOT NULL AND created_on != ?) "
         "OR created_by = 'pickup-stall-detector' OR idempotency_key LIKE 'pickup-stall:%' "

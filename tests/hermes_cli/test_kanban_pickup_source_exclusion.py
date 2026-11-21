@@ -68,9 +68,9 @@ def test_local_dispatch_refuses_without_labels_or_registry(monkeypatch, origin, 
     with sqlite3.connect(":memory:") as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("CREATE TABLE tasks (id, runs_on, created_on, created_by, idempotency_key, "
-                     "workspace_kind, status, claim_lock, alarm_source)")
-        conn.execute("INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     "workspace_kind, status, claim_lock)")
+        conn.execute("INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                      ("alarm", None, origin, "pickup-stall-detector",
-                      "pickup-stall:worker-1:queue-full:1794700000000", "scratch", "ready", None, None))
+                      "pickup-stall:worker-1:queue-full:1794700000000", "scratch", "ready", None))
         assert wn.local_refusals(conn, "ready") == {"alarm": reason}
 
