@@ -23,11 +23,56 @@ PRE_PATCH = ("SELECT t.id, t.session_id, e.payload FROM tasks t JOIN task_events
              "AND done.kind='creator_chats_resolved')")
 
 
+@pytest.fixture(scope='module')
+def session_schema_template(tmp_path_factory):
+    return tmp_path_factory.mktemp('backfill-session-schema') / 'empty.db'
+
+
 @pytest.fixture
-def board(tmp_path, monkeypatch):
+def board(tmp_path, monkeypatch, session_schema_template):
+    # These exercise creator backfill, not SessionDB's cold migrations. Reuse only
+    # the empty migrated session schema; every case still constructs its real
+    # SessionDB and gets fresh worker/human rows in its own home and board.
+    import shutil
+    import hermes_state
+
+    session_db = hermes_state.SessionDB
+
+    def with_empty_schema(*args, **kwargs):
+        path = kwargs['db_path']
+        if session_schema_template.exists():
+            assert not path.exists(), 'template must never overwrite a populated session DB'
+            shutil.copyfile(session_schema_template, path)
+        db = session_db(*args, **kwargs)
+        if not session_schema_template.exists():
+            from contextlib import closing
+            with closing(sqlite3.connect(path)) as source, closing(sqlite3.connect(session_schema_template)) as target:
+                source.backup(target)
+        return db
+
+    monkeypatch.setattr(hermes_state, 'SessionDB', with_empty_schema)
     make_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(hermes_state, 'SessionDB', session_db)
     with kbc.connect_closing() as conn:
         yield conn
+
+
+@pytest.mark.parametrize('sentinel', ['first', 'second'])
+def test_session_template_keeps_each_backfill_home_isolated(board, tmp_path, session_schema_template, sentinel):
+    from contextlib import closing
+    from hermes_state import SessionDB
+    from tests.tools.test_kanban_worker_created_chats import CHAT, WORKER
+
+    path = tmp_path / '.hermes' / 'state.db'
+    assert path.stat().st_ino != session_schema_template.stat().st_ino
+    with closing(sqlite3.connect(session_schema_template)) as template:
+        assert template.execute('SELECT count(*) FROM sessions').fetchone()[0] == 0
+    with closing(sqlite3.connect(path)) as current:
+        assert {r[0] for r in current.execute('SELECT id FROM sessions')} == {CHAT, WORKER}
+    with closing(SessionDB(db_path=path)) as current:
+        current.create_session(sentinel, source='desktop')
+    with closing(sqlite3.connect(session_schema_template)) as template:
+        assert template.execute('SELECT count(*) FROM sessions').fetchone()[0] == 0
 
 
 def seed(conn, payload, event_id=123):
