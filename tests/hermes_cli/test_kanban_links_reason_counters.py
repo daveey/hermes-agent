@@ -213,6 +213,10 @@ def test_each_changed_component_is_named(index, component):
 def test_board_names_are_bounded_without_evicting_admitted_boards(monkeypatch):
     from hermes_cli import kanban_links_diagnostics as diag
     monkeypatch.setattr(diag, "_boards", {})
+    assert diag.board_name("x" * 81) == "sync.links.board.other"
+    assert diag._boards == {}
+    assert diag.board_name("x" * 80) == "sync.links.board." + "x" * 80
+    monkeypatch.setattr(diag, "_boards", {})
     first = diag.board_name("first")
     for i in range(100):
         diag.board_name(str(i))
