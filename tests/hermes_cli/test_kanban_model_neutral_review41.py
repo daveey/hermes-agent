@@ -1,4 +1,4 @@
-"""Reviewer probe 3 (not part of the PR): create_task with text that names a route/plugin but carries no card-route mandate.
+"""Create-path controls for route/plugin evidence without a card-route mandate.
 
 Strings are copied from live board rows or origin/main commit subjects. Controls are real mandates.
 """

@@ -39,6 +39,16 @@ _DIRECTIVE = re.compile(
     re.IGNORECASE,
 )
 _EVIDENCE = 'Historical run instruction (superseded and not active): '
+_TEXT_GUIDANCE = ('; for superseded historical evidence only, put the unchanged line in a JSON string after '
+                  + _EVIDENCE + '(do not quote active instructions)')
+# Replace only the negated obligation phrase, never its surrounding clause: a
+# trailing positive mandate must still be checked normally.
+_NEGATED_OBLIGATION = re.compile(
+    r'\b(?:no longer\s+(?:requires?|required|mandatory)|does? not\s+require|'
+    r'non[- ]mandatory)\b', re.IGNORECASE)
+_REMOVED_OBLIGATION = re.compile(
+    r'^(\s*(?:[-*]\s*)?(?:remove|delete)\s+(?:the\s+)?(?:skill\s+)?'
+    r'(?:text|instruction|wording)\s+that\s+)(?:requires?|mandates?)\b', re.IGNORECASE)
 
 
 def _active_text(line):
@@ -75,10 +85,12 @@ def validate_text(*values):
         for line in (text or '').splitlines():
             line = _active_text(line)
             if _REQUIRED.search(line):
-                raise ValueError(f'{ERROR}; refused line: {line}')
+                raise ValueError(f'{ERROR}; refused line: {line}{_TEXT_GUIDANCE}')
             if line.lstrip().startswith('<!-- implementer-models:'):
                 continue
             for clause in re.split(r'(?<=[.!?;])\s+', line):
+                clause = _NEGATED_OBLIGATION.sub('optional', clause)
+                clause = _REMOVED_OBLIGATION.sub(r'\1mentions', clause)
                 # Remove only the observed failed-route phrase, not a trailing
                 # mandate ("...unavailable; use only <model>" still refuses).
                 clause = re.sub(r'\bPinned route\s+' + _ROUTE_NAME + r'\s+is unavailable\b',
@@ -112,7 +124,7 @@ def validate_text(*values):
                     r'(?:independent\s+)?review\s*\(\s*' + _ROUTE_NAME,
                     clause, re.IGNORECASE)
                 if _DIRECTIVE.search(clause) or named_review or required_review:
-                    raise ValueError(f'{ERROR}; refused line: {line}')
+                    raise ValueError(f'{ERROR}; refused line: {line}{_TEXT_GUIDANCE}')
 
 
 def forwarded_text(text):
