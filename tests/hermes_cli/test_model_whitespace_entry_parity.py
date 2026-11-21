@@ -152,7 +152,9 @@ def test_cmd_chat_m_accepts_local_spaced_id(main_mod, fake_cli, monkeypatch, mod
     assert fake_cli["model"] == model
 
 
-# ── Kanban --model pins ─────────────────────────────────────────────────
+# ── Kanban restrictions: stricter than interactive model selection ──────
+
+from hermes_cli.kanban_model_neutral import ERROR as NEUTRAL_MSG
 
 @pytest.fixture
 def board(tmp_path, monkeypatch):
@@ -179,7 +181,7 @@ def board(tmp_path, monkeypatch):
 def test_kanban_create_rejects(board, model, provider):
     from hermes_cli import kanban_db as kb
 
-    with pytest.raises(ValueError, match=SPACES_MSG):
+    with pytest.raises(ValueError, match=NEUTRAL_MSG):
         kb.create_task(board, title="probe", assignee="worker", model_override=model, provider_override=provider)
     assert board.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
 
@@ -189,14 +191,30 @@ def test_kanban_set_model_rejects(board, model, provider):
     from hermes_cli import kanban_db as kb
 
     tid = kb.create_task(board, title="probe", assignee="worker")
-    with pytest.raises(ValueError, match=SPACES_MSG):
+    before = tuple(board.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    events = [tuple(row) for row in board.execute("SELECT * FROM task_events ORDER BY id")]
+    with pytest.raises(ValueError, match=NEUTRAL_MSG):
         kb.set_model_override(board, tid, model, provider)
-    assert kb.get_task(board, tid).model_override is None
+    assert tuple(board.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()) == before
+    assert [tuple(row) for row in board.execute("SELECT * FROM task_events ORDER BY id")] == events
 
 
-def test_kanban_create_accepts_custom_spaced_id(board):
+@pytest.mark.parametrize("model,provider,base_url", GOOD_LOCAL)
+def test_kanban_create_refuses_custom_spaced_id(board, model, provider, base_url):
+    """Interactive local ids stay valid above; Kanban never stores a concrete pin."""
     from hermes_cli import kanban_db as kb
 
-    tid = kb.create_task(board, title="probe", assignee="worker", model_override="My Model",
-                         provider_override="custom")
-    assert kb.get_task(board, tid).model_override == "My Model"
+    with pytest.raises(ValueError, match=NEUTRAL_MSG):
+        kb.create_task(board, title="probe", assignee="worker", model_override=model,
+                       provider_override=provider)
+    assert board.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("model,provider", [(None, None), ("class:standard", "auto")])
+def test_kanban_neutral_and_class_selectors_still_work(board, model, provider):
+    from hermes_cli import kanban_db as kb
+
+    tid = kb.create_task(board, title="probe", assignee="worker", model_override=model,
+                         provider_override=provider)
+    task = kb.get_task(board, tid)
+    assert (task.model_override, task.provider_override) == (model, provider)

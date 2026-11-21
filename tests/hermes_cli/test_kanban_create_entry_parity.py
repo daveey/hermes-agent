@@ -255,7 +255,7 @@ def test_single_decomposer_returns_rejected_outcome(restricted_creator, monkeypa
 
 @pytest.mark.parametrize("surface", ["tool", "cli", "rest"])
 def test_every_create_path_refuses_a_pin_the_managed_registry_rejects(chat, monkeypatch, surface):
-    """[daveey] A pin the worker's managed subscription policy refuses at startup is refused at create on every path."""
+    """Concrete selectors are refused before insert, even if registry validation once handled them."""
     from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
     (chat / "config.yaml").write_text("model:\n  default: claude-sonnet-5-5\n  provider: anthropic\n" + _managed_yaml())
     monkeypatch.setattr(kc, "_check_dispatcher_presence", lambda **kw: (True, ""))
@@ -263,7 +263,7 @@ def test_every_create_path_refuses_a_pin_the_managed_registry_rejects(chat, monk
         from tools.registry import registry
         bad = json.loads(registry.dispatch("kanban_create", {"title": "Bad", "assignee": "default",
                                                              "model": "claude-sonnet-4-5"}))
-        assert bad["code"] == "model_pin_not_in_routing_registry", bad
+        assert "Kanban is model-neutral" in bad.get("error", ""), bad
     elif surface == "cli":
         root = argparse.ArgumentParser()
         kc.build_parser(root.add_subparsers())
@@ -278,7 +278,7 @@ def test_every_create_path_refuses_a_pin_the_managed_registry_rejects(chat, monk
         with TestClient(app) as client:
             bad = client.post("/tasks", json={"title": "Bad", "assignee": "default",
                                               "model_override": "claude-sonnet-4-5"})
-            assert bad.status_code == 400 and "model_pin_not_in_routing_registry" in bad.text, bad.text
+            assert bad.status_code == 400 and "Kanban is model-neutral" in bad.text, bad.text
     with kbc.connect_closing() as conn:
         assert kb.list_tasks(conn) == []
 

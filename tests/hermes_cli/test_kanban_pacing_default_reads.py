@@ -28,8 +28,12 @@ def _default_config(monkeypatch):
 
 
 def _anthropic_card(conn, priority=900):
-    return kb.create_task(conn, title="paced pool card", assignee="default", priority=priority,
-                          model_override=notices.OPUS, provider_override="anthropic")
+    # The fixture's real class registry has only the Anthropic subscription route.
+    # Pacing follows eligible class providers, never a stored per-card selector.
+    tid = kb.create_task(conn, title="paced pool card", assignee="default", priority=priority)
+    task = kb.get_task(conn, tid)
+    assert (task.model_override, task.provider_override) == (None, None)
+    return tid
 
 
 def test_a_paced_pool_is_no_hold_to_describe_and_a_held_one_still_is(board):
