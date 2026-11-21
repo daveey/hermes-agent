@@ -77,11 +77,9 @@ class ActivityTrackingMixin:
         if os.environ.get("HERMES_KANBAN_TASK"):
             # Never let the bridge break the loop; this guard covers import-time failures.
             with suppress(Exception):
-                from tools.kanban_tools import (
-                    heartbeat_current_worker_from_env, inject_new_comments_from_env,
-                    inject_soft_deadline_from_env,
-                )
-                heartbeat_current_worker_from_env()
+                from tools.kanban_tools import inject_new_comments_from_env, inject_soft_deadline_from_env
+                from tools.kanban_heartbeat_background import heartbeat_in_background
+                heartbeat_in_background()
                 # Fold new operator notes into the running turn (OUT-OF-BAND steer).
                 inject_new_comments_from_env(self)
                 # Near max_runtime: tell the worker to checkpoint via kanban_continue.

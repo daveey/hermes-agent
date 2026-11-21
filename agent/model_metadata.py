@@ -1829,51 +1829,9 @@ def _remember_no_codex_catalog(cache_key: str) -> None:
 
 
 def _fetch_codex_oauth_context_lengths_with_source(access_token: str, base_url: str = "") -> tuple[dict[str, int], bool]:
-    """Account-scoped catalogue context lengths and HTTP freshness; also retain max-context and
-    speed metadata. In-process hits report False and must not drive persistent writes."""
-    if not _codex_catalog_probe_allowed(access_token, base_url):
-        return {}, False
-    now = time.time()
-    cache_key = _codex_oauth_token_fingerprint(access_token, base_url)
-    cached = _codex_oauth_context_cache.get(cache_key)
-    if cached is not None and now - cached[1] < _CODEX_OAUTH_CONTEXT_CACHE_TTL:
-        return cached[0], False
-    # Without ChatGPT-Account-ID /backend-api/codex/models returns ``{"models":[]}`` (HTTP 200) and
-    # the probe silently falls back; residency-enforced workspaces 401 without the residency header.
-    from agent.codex_headers import codex_account_headers
-    headers = {"Authorization": f"Bearer {access_token}", **codex_account_headers(access_token)}
-    try:
-        entries, status = fetch_codex_catalog_entries(
-            lambda url: model_metadata_http.get(url, headers=headers, timeout=(5, 10), verify=model_metadata_http.resolve_verify()),
-            base_url=base_url,
-        )
-        if status != 200:
-            logger.debug("Codex /models probe returned HTTP %s; falling back to hardcoded defaults", status)
-            _remember_no_codex_catalog(cache_key)
-            return {}, False
-    except Exception as exc:
-        logger.debug("Codex /models probe failed: %s", exc)
-        _remember_no_codex_catalog(cache_key)
-        return {}, False
-    from agent.codex_service_tiers import remember_catalog
-    remember_catalog(cache_key, entries)
-    result: dict[str, int] = {}
-    max_result: dict[str, int] = {}
-    for item in entries:
-        slug, ctx, max_ctx = (item.get("slug"), item.get("context_window"), item.get("max_context_window")) if isinstance(item, dict) else (None, None, None)
-        if isinstance(slug, str) and isinstance(ctx, int) and ctx > 0:
-            result[slug.strip()] = ctx
-            if isinstance(max_ctx, int) and max_ctx > 0:
-                max_result[slug.strip()] = max_ctx
-    if not result:
-        _remember_no_codex_catalog(cache_key)
-        return {}, False
-    # Max first: a reader that sees the fresh context entry must also see its cap.
-    with MEMO_LOCK:
-        bound_codex_caches(cache_key)
-        _codex_oauth_max_context_cache[cache_key] = max_result
-        _codex_oauth_context_cache[cache_key] = (result, now)
-    return result, True
+    """Coalesce a concurrent boot prefetch; do not cache beyond the existing metadata TTL."""
+    from agent.model_metadata_codex_prefetch import fetch, resolve
+    return resolve(access_token, base_url, fetch)
 
 
 def _codex_catalog_key(keys, slug: str) -> Optional[str]:
