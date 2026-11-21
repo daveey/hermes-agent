@@ -84,6 +84,25 @@ def test_unreadable_config_fails_open_for_single_and_multi_key(monkeypatch, tmp_
     assert get_hermes_home() == prior_home
 
 
+def test_default_home_unlisted_in_its_own_sidebar_profiles_is_automated(tmp_path):
+    root = tmp_path / "home"
+    root.mkdir()
+    (root / "config.yaml").write_text("sessions:\n  sidebar_profiles: [work]\n")
+    assert list(listing.automated_session_sources(root)) == ["*"]
+    rows = listing.stamp_automated([{"id": "a", "source": "cli"}], root)
+    assert rows == [{"id": "a", "source": "cli", "automated": True}]
+
+
+@pytest.mark.parametrize("bad", [["automated_sources"], "automated_sources", 7])
+def test_non_dict_sessions_section_fails_open(monkeypatch, tmp_path, bad):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(config, "load_config_readonly", lambda: {"sessions": bad})
+    assert listing._sessions_source_list(home, "interactive_sources") == []
+    assert listing._sessions_source_list(home, ("automated_sources", "sidebar_profiles")) == ([], [])
+    assert not listing.automated_session_sources(home)
+
+
 def test_errors_restore_home_and_do_not_memoize_fallback(monkeypatch, tmp_path):
     from hermes_cli.config_backend import ConfigBackendUnavailable
 
