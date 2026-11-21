@@ -121,6 +121,9 @@ def handle_unblock(args: dict, **kw) -> str:
     from hermes_cli.kanban_shared_blockers import unblock_verdict
 
     kt._reject_delegated_child_mutation("kanban_unblock")
+    if args.get("reopen_authority") is not None:
+        from tools.kanban_tools_authority_reopen import handle
+        return handle(args)
     tid = args.get("task_id")
     kt._check(tid, "task_id is required")
     tid = str(tid)

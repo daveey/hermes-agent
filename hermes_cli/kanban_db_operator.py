@@ -124,7 +124,7 @@ def set_completion_contract(
 
 
 def reopen_done_task(
-    conn: sqlite3.Connection, task_id: str, *, reason: str, actor: str,
+    conn: sqlite3.Connection, task_id: str, *, reason: str, actor: str, precondition=None,
 ) -> Optional[str]:
     """Operator reopen: ``done`` -> ``ready`` (``todo`` while a parent is open,
     the same re-gate unblock uses), ``completed_at`` cleared, the breaker reset.
@@ -140,6 +140,8 @@ def reopen_done_task(
         raise KanbanEditRefused("reopen requires a reason")
     from hermes_cli.kanban_terminal_guard import stale_hold
     with _kb.write_txn(conn):
+        if precondition is not None:
+            precondition(conn)
         # A blocked/scheduled/triage row held done by its event log (a stale copy; ``unblock_task`` refuses it and
         # points here) is reopened too: otherwise no verb revives it.
         previous = _kb._task_status(conn, task_id)

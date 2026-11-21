@@ -10,7 +10,6 @@ import argparse
 import contextlib
 import importlib
 import json
-import sqlite3
 
 from hermes_cli.kanban_published_worktree import publication_scope
 import logging
@@ -72,9 +71,8 @@ from hermes_cli.kanban_archive_scope import (  # moved here from this module; re
     archive_scope_for, worker_archive_scope, worker_may_archive,
 )
 from hermes_cli.kanban_requeue import (  # moved here from this module; re-exported for callers
-    OWNER_WAKE_REQUEUE_STATUSES, _is_owner_wake_supervisor, _is_self_heal_fix_card,
-    has_requeue_grant, named_defect_card, owner_wake_authority_reopen_grant,
-    owner_wake_listed_cards, requeue_grant, self_heal_requeue_grant,
+    OWNER_WAKE_REQUEUE_STATUSES, _is_owner_wake_supervisor, _is_self_heal_fix_card, has_requeue_grant,
+    named_defect_card, owner_wake_listed_cards, requeue_grant, self_heal_requeue_grant,
 )
 
 
@@ -168,8 +166,7 @@ def kanban_command(args: argparse.Namespace) -> int:
 
     # Fast-fail for UX only; the durable trust boundary is in kanban_db, since children can
     # import DB mutators directly.
-    if _is_delegated_child_cli_mutation(args) and not (
-            action == "reopen" and _owner_wake_reopen_cli_allowed(args)):
+    if _is_delegated_child_cli_mutation(args):
         from hermes_cli.top_level_env import delegated_child_refusal  # names a leaked worker env [daveey]
         return _err(delegated_child_refusal(
             "kanban: delegate_task child contexts cannot mutate Kanban tasks via the CLI "
@@ -280,32 +277,6 @@ _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
     "create", "new", "rm", "remove", "delete", "switch", "use", "rename",
     "set-default-workdir", "dispatch-owner", "import",
 })
-
-
-def _owner_wake_reopen_cli_allowed(args: argparse.Namespace) -> bool:
-    """Permit the exact owner-wake authority reopen before the worker-shell fence."""
-    env_tid = os.environ.get("HERMES_KANBAN_TASK")
-    target = getattr(args, "task_id", None)
-    if not env_tid or not target or env_tid == target:
-        return False
-    from agent.delegation_context import is_delegated_child_context, is_dispatcher_owned_worker_context
-    if is_delegated_child_context() or not is_dispatcher_owned_worker_context():
-        return False
-    raw_run = os.environ.get("HERMES_KANBAN_RUN_ID")
-    try:
-        expected_run = int(raw_run) if raw_run else None
-    except ValueError:
-        return False
-    try:
-        with (kb.scoped_current_board(args.board) if getattr(args, "board", None)
-              else contextlib.nullcontext()):
-            kb.init_db()
-            with kbc.connect_closing() as conn:
-                return owner_wake_authority_reopen_grant(
-                    conn, env_tid, target, board=getattr(args, "board", None),
-                    expected_run_id=expected_run) is not None
-    except (OSError, sqlite3.Error, ValueError):
-        return False
 
 
 def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
@@ -1406,17 +1377,6 @@ def _cmd_edit(args: argparse.Namespace) -> int:
 def _cmd_reopen(args: argparse.Namespace) -> int:
     """``done`` -> ``ready`` (``todo`` while a parent is open) with an audited reason. [daveey]"""
     with kbc.connect_closing() as conn:
-        env_tid = os.environ.get("HERMES_KANBAN_TASK")
-        if env_tid and env_tid != args.task_id:
-            raw_run = os.environ.get("HERMES_KANBAN_RUN_ID")
-            try:
-                expected_run = int(raw_run) if raw_run else None
-            except ValueError:
-                expected_run = None
-            if owner_wake_authority_reopen_grant(
-                    conn, env_tid, args.task_id, board=getattr(args, "board", None),
-                    expected_run_id=expected_run) is None:
-                return _err(f"kanban reopen: worker is not authorized to reopen {args.task_id}", 2)
         try:
             status = kbo.reopen_done_task(conn, args.task_id, reason=args.reason, actor=_profile_author())
         except kbo.KanbanEditRefused as exc:

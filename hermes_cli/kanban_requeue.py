@@ -184,6 +184,7 @@ def owner_wake_listed_cards(task, board: str) -> list[str]:
 
 def owner_wake_authority_reopen_grant(conn, worker_task_id: str, authority_id: str, *,
                                       board: Optional[str] = None, expected_run_id: Optional[int] = None,
+                                      worker_conn=None, target_id: Optional[str] = None,
                                       ) -> Optional[str]:
     """Return the supervisor id when it may reopen one nominated done authority.
 
@@ -195,10 +196,15 @@ def owner_wake_authority_reopen_grant(conn, worker_task_id: str, authority_id: s
     """
     if not worker_task_id or not authority_id:
         return None
-    worker = kb.get_task(conn, worker_task_id)
+    worker = kb.get_task(worker_conn if worker_conn is not None else conn, worker_task_id)
     if worker is None or not _is_owner_wake_supervisor(worker) or worker.status != "running":
         return None
     if expected_run_id is None or worker.current_run_id != expected_run_id:
+        return None
+    runs = worker_conn if worker_conn is not None else conn
+    live = runs.execute("SELECT status FROM task_runs WHERE id=? AND task_id=?",
+                        (expected_run_id, worker_task_id)).fetchone()
+    if live is None or live[0] != "running":
         return None
     slug = board or kb.get_current_board()
     listed = owner_wake_listed_cards(worker, slug)
@@ -207,14 +213,16 @@ def owner_wake_authority_reopen_grant(conn, worker_task_id: str, authority_id: s
     authority = kb.get_task(conn, authority_id)
     if authority is None or authority.status != "done":
         return None
-    for target_id in listed:
-        target = kb.get_task(conn, target_id)
+    for listed_id in listed:
+        if target_id is not None and listed_id != target_id:
+            continue
+        target = kb.get_task(conn, listed_id)
         episode = getattr(target, "containment_episode", None) if target is not None else None
         if not episode:
             continue
         row = conn.execute(
             "SELECT payload FROM task_events WHERE task_id=? AND uid=? AND kind='contained'",
-            (target_id, episode),
+            (listed_id, episode),
         ).fetchone()
         if row is None:
             continue
@@ -224,7 +232,8 @@ def owner_wake_authority_reopen_grant(conn, worker_task_id: str, authority_id: s
             continue
         policy = payload.get("policy") if isinstance(payload, dict) else None
         named = policy.get("authority") if isinstance(policy, dict) else None
-        if isinstance(named, dict) and named.get("task_id") == authority_id:
+        if (isinstance(named, dict) and named.get("task_id") == authority_id
+                and named.get("board") == slug):
             return worker_task_id
     return None
 

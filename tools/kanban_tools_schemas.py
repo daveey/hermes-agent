@@ -1113,10 +1113,14 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
         "in triage or blocked; a missing-parent repair card may unblock the child "
         "whose newest parent_missing block names it (on another gateway the call "
         "is forwarded to the child's home as an operator call). Any other worker "
-        "call is refused, and the worker shell stays fenced."
+        "call is refused, and the worker shell stays fenced. "
+        "An owner-wake supervisor may pass reopen_authority=<done authority id> with task_id=<listed "
+        "contained target> and its board to reopen only that target’s nominated authority, without "
+        "releasing containment or changing its gates."
     ),
     {
         "task_id": _prop("string", "Blocked task id to move to ready or parent-gated todo."),
+        "reopen_authority": _prop("string", "Owner-wake only: reopen this listed contained target’s exact done authority; do not release the target."),
         "seen_comment_id": _prop("integer", "Newest comment id read on this card. Without it, foreign-session comments in the last 60 minutes refuse manual release with unread_comments; read the listing before retrying."),
     },
     ["task_id"],
