@@ -132,8 +132,11 @@ def before_provider_work(agent: Any, messages: Any, conversation_history: Any, a
             tracked_messages = messages or [{"role": "user", "content": ""}]
             verdict = wait_restored(agent, retry, tracked_messages, api_call_count + 1)
         except InterruptedError:
+            from agent.interrupt_control import interrupt_issuer
+
+            issuer = interrupt_issuer(agent)
             return {"messages": messages, "final_response": "", "interrupted": True,
-                    "turn_exit_reason": "interrupted_by_user"}
+                    "turn_exit_reason": f"interrupted_by_system({issuer})" if issuer else "interrupted_by_user"}
         if verdict == "done":
             return None
         if verdict == "redirect":

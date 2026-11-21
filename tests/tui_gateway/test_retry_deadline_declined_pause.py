@@ -1,4 +1,4 @@
-"""Repro (review only): a declined boundary pause after the durable API-error wait yields -> early provider call?"""
+"""A declined boundary pause must retain the selected API-error retry deadline."""
 import threading, time
 import httpx, pytest
 from openai import RateLimitError
@@ -51,9 +51,6 @@ def test_declined_pause_keeps_deadline(home, tmp_path, monkeypatch, mode):
         result = agent.run_conversation("run the quick job")
     finally:
         stop(); th.join(6); reservation.close()
-    print(mode, "paused=", result.get("paused_for_update"), "ncalls=", len(calls),
-          "gap=", round(calls[2] - calls[1], 2) if len(calls) > 2 else None,
-          "marker_deadline_left=", (read_turn_marker(home, "session-key") or {}).get("provider_retry_not_before", 0) - calls[-1])
     assert not result.get("paused_for_update")
     assert len(calls) == 3
     assert calls[2] - calls[1] >= WAIT - 0.2, f"{mode}: provider called {calls[2]-calls[1]:.2f}s after a {WAIT}s retry wait"
