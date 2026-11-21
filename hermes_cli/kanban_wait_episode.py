@@ -11,6 +11,8 @@ import math
 import re
 import sqlite3
 
+from hermes_cli.kanban_awaiting import run_heads
+
 HISTORY_LIMIT = 512
 PARKS = ("scheduled", "continued", "blocked")
 EXITS = ("completed", "archived", "reopened", "gave_up", "triage_swept",
@@ -27,11 +29,13 @@ def _identity(payload):
             match = re.match(r"(ci|git-ci|deploy)\b", ref, re.IGNORECASE)
             kind = ("deploy" if match[1].lower() == "deploy" else "ci") if match else kind
         if kind in ("ci", "deploy") and isinstance(ref, str) and ref.strip():
-            return kind, ref.strip(), str(awaiting.get("gateway") or "")
+            # Commit heads are part of identity: a new head is a new CI/deploy run.
+            heads = tuple(run_heads({"ref": ref}, payload.get("wake_check")))
+            return kind, ref.strip(), str(awaiting.get("gateway") or ""), heads
         return None
     check = payload.get("wake_check")
     if isinstance(check, str) and re.search(r"\bgit-ci\b", check):
-        return "ci", check.strip(), ""
+        return "ci", check.strip(), "", tuple(run_heads({}, check))
     return None
 
 
