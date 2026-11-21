@@ -112,15 +112,31 @@ def test_every_retirement_predicate_fails_closed(refused, veto):
     assert not moot_event(op, before, evidence), veto
 
 
+@pytest.mark.parametrize('target_first', [True, False])
 @pytest.mark.parametrize('race', ['audit', 'mode', 'tombstone'])
-def test_evidence_read_revalidates_retirement_provenance(refused, svc, monkeypatch, race):
+def test_evidence_read_revalidates_retirement_provenance(refused, svc, monkeypatch, race, target_first):
     from hermes_cli.kanban_sync_rejections import resolve_rejections
     hub, op, before, _ = refused
+    # The phantom-run fixture also rejects its completed event. Exercise both
+    # orders explicitly instead of depending on random outbox operation IDs.
+    ordered_id = '0000-target' if target_first else 'zzzz-target'
+    with hub.conn:
+        hub.conn.execute("UPDATE kanban_sync_outbox SET op_id=? WHERE op_id=?", (ordered_id, op['op_id']))
+        hub.conn.execute("UPDATE task_events SET payload=json_set(payload, '$.op_id', ?) WHERE uid=?",
+                         (ordered_id, before['fenced_event']['audits'][0]['uid']))
+    op['op_id'] = ordered_id
     transport = svc.hub(child.HUB)
     original = transport.row_evidence
+    reads = []
+    injected = []
+    target = (child.BOARD, op['table_name'], op['row_uid'])
 
     def read(*args):
         evidence = original(*args)
+        reads.append(args)
+        if args != target:
+            return evidence
+        injected.append(args)
         with hub.conn:
             if race == 'audit':
                 hub.conn.execute("UPDATE task_events SET payload='{}' WHERE uid=?",
@@ -134,8 +150,12 @@ def test_evidence_read_revalidates_retirement_provenance(refused, svc, monkeypat
 
     monkeypatch.setattr(transport, 'row_evidence', read)
     report = resolve_rejections(hub.conn, transport, child.BOARD)
-    assert report[0]['action'] == 'retained'
-    assert report[0]['proof'] == 'local state changed during evidence read'
+    assert injected == [target]
+    if op['table_name'] == 'task_runs':
+        assert (reads[0] == target) is target_first
+    target_report = next(item for item in report if item['op_id'] == op['op_id'])
+    assert target_report['action'] == 'retained'
+    assert target_report['proof'] == 'local state changed during evidence read'
     assert hub.conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE op_id=?", (op['op_id'],)).fetchone()
 
 
