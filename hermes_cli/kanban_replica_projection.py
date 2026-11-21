@@ -52,12 +52,12 @@ def linked_sessions(task: dict[str, Any], me: str, origin_profile: str) -> tuple
                          and link.get('profile') == origin_profile and link.get('rel') in LINK_RELS}))
 
 
-def historical_fields(raw: dict[str, Any], tkey: tuple) -> dict[str, Any]:
+def historical_fields(raw: dict[str, Any], tkey: tuple, evidence: dict) -> dict[str, Any]:
     from hermes_cli.kanban_completion_receipt_projection import remote_fields
     from hermes_cli.kanban_terminal_release_snapshot import observation
     gw, owner_profile, board, tid = tkey
     return {**remote_fields(raw, gateway=gw, profile=owner_profile, board=board, task_id=tid),
-            **observation(raw, tkey)}
+            **observation(raw, tkey, evidence)}
 
 
 def card_rows(tkey: tuple, t: dict[str, Any], *, sids, closed: bool, synced, stale: bool, me: str,
@@ -100,6 +100,7 @@ class _Stage:
         'attest',
         'cards',
         'error',
+        'evidence',
         'historical',
         'legacy',
         'links',
@@ -171,6 +172,7 @@ def _stage(row: tuple, me: str, origin_profile: str, shared: dict | None = None)
         return st
     gw = str(gw)
     st.tkey = (gw, owner_profile, board, tid)
+    st.evidence = evidence
     st.sids = linked_sessions(t, me, origin_profile)
     st.links = link_targets(t)
     # [daveey] Release evidence reads the whole record (``record_attests_terminal`` reads origin_bindings and
@@ -495,7 +497,7 @@ def _emit(s: _State, me: str, origin_profile: str, last_ok, stale: bool, fresh: 
         record, t = _whole(st, s.tasks[tk], t)  # only a slim twin a legacy alias folded links into decodes here
         if st.historical is None:
             stats["historical"] += 1
-            st.historical = historical_fields(record, tk)
+            st.historical = historical_fields(record, tk, st.evidence)
         owner_seen = aggregates['seen'].get(gw) or None
         synced = min(owner_seen, last_ok) if (owner_seen and last_ok) else (owner_seen or last_ok)
         inputs = (t, sids, tk in s.released, synced, stale, me, origin_profile)

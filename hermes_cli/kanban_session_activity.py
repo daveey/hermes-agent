@@ -695,6 +695,7 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
     released: set[tuple[str, str | None, str, str]] = set()
     seen_at: dict[str, float] = {}
     legacy_records: dict[tuple, dict] = {}
+    observations: dict[tuple, dict] = {}
     global _replica_decoded
     previous_decoded, decoded = _replica_decoded, {}
     # (gw, key) order, which ``kanban_replica_rows`` also keeps: the answer's order never depends on the scan.
@@ -720,6 +721,7 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
                 raise ValueError('replica task identity mismatch')
             key = (str(gw), owner_profile, board, tid)
             raw[key] = t
+            observations[key] = evidence
             if _owner_attests_terminal(t, str(gw), owner_profile, board, heartbeats, now, stale, evidence,
                                        published_at=(updated or 0) / 1000.0):
                 released.add(key)
@@ -767,7 +769,7 @@ def _project_replica(path: Path, now: float, me: str, rows: list, info_rows: lis
         key = (gw, owner_profile, board, tid)
         found.update(card_rows(key, t, sids=sids, closed=key in released, synced=synced, stale=stale, me=me,
                                origin_profile=origin_profile, legacy_record=legacy_records.get(key),
-                               historical=historical_fields(raw[key], key)))
+                               historical=historical_fields(raw[key], key, observations[key])))
     return list(found.values())
 
 

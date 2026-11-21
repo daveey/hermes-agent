@@ -1,13 +1,11 @@
 """Keep a proven terminal release across transport age, never across owner changes. [daveey]"""
-from hermes_cli.kanban_origin_ledger import _owner_evidence
-
 _IDENTITY = ('key', 'session', 'gateway', 'profile', 'board', 'id', 'origin_gateway', 'origin_profile', 'via')
 
 
-def observation(task: dict, key: tuple) -> dict:
+def observation(task: dict, key: tuple, evidence: dict) -> dict:
     """A snapshot token only for an exactly qualified, hash-verified terminal publication."""
     profile = key[1]
-    evidence = _owner_evidence(task)
+
     if (profile is None or task.get('status') not in ('done', 'archived')
             or any(task.get(k) != v for k, v in zip(('gateway', 'profile', 'board', 'id'), key))
             or evidence.get('verified') is not True):
