@@ -29,6 +29,17 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_reason_comment import reason_comment
 
+    from hermes_cli.kanban_containment_connections import held
+    if held(conn, task_id):
+        from hermes_cli.kanban_db_sync import sync_state
+        if sync_state(conn):
+            from hermes_cli.kanban_containment_terminal_remote import archive
+            return archive(conn, task_id, comment=comment, precondition=precondition,
+                           via=via, event_extra=event_extra)
+        from hermes_cli.kanban_containment_terminal import archive_local
+        return archive_local(conn, task_id, comment=comment, precondition=precondition,
+                             via=via, event_extra=event_extra)
+
     with kb.write_txn(conn), reason_comment(conn, task_id, comment) as noted:
         if precondition is not None and precondition(conn):
             return False

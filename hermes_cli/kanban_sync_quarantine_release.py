@@ -92,7 +92,7 @@ class _Evidence:
 
 def _episode(change) -> str | None:
     from hermes_cli.kanban_containment_state import _payload
-    return str((_payload(change.fields) or {}).get("episode")) if change.fields.get("kind") == "containment_released" else None
+    return str((_payload(change.fields) or {}).get("episode")) if change.fields.get("kind") in ("containment_released", "containment_closed") else None
 
 
 def _live_chain(evidence: _Evidence, board: str, change) -> list[tuple[str, dict]]:
@@ -103,7 +103,8 @@ def _live_chain(evidence: _Evidence, board: str, change) -> list[tuple[str, dict
     try:
         if (episode := _episode(change)) is not None:
             stop = evidence.row_evidence(board, "task_events", episode)
-            canonical.certified_release(stop, own, board=board, task=task, episode=episode, receipt=change.uid)
+            certify = canonical.certified_closure if change.fields.get("kind") == "containment_closed" else canonical.certified_release
+            certify(stop, own, board=board, task=task, episode=episode, receipt=change.uid)
             return [(episode, stop), (change.uid, own)]
         canonical.certified_stop(own, board=board, task=task, uid=change.uid)
     except ReleaseRefused:

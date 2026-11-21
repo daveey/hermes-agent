@@ -301,7 +301,7 @@ def settle_local(conn, hub, board, result, actor) -> bool:
 
     event = hub.row_evidence(board, "task_events", result["event_uid"])
     changes = [client._row_change("task_events", event["row"])]
-    if event["row"]["kind"] == "containment_released":
+    if event["row"]["kind"] in ("containment_released", "containment_closed"):
         episode = _payload(event["row"])["episode"]
         changes.insert(
             0,

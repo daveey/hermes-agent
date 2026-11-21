@@ -50,7 +50,8 @@ def remember(conn: sqlite3.Connection, evidence: dict, *, board: str, task: str,
         row = canonical.certified_stop(evidence, board=board, task=task, uid=uid)
     else:
         episode = stop_evidence.get("uid")
-        _, row = canonical.certified_release(stop_evidence, evidence, board=board, task=task,
+        certify = canonical.certified_closure if evidence.get("row", {}).get("kind") == "containment_closed" else canonical.certified_release
+        _, row = certify(stop_evidence, evidence, board=board, task=task,
                                               episode=episode, receipt=uid)
         remember(conn, stop_evidence, board=board, task=task, uid=episode)
     install(conn)
@@ -122,7 +123,8 @@ def verified(conn: sqlite3.Connection, release: dict, stop: dict) -> bool:
     if s is None or r is None or s["board"] != r["board"] or s["board"] != _board(conn) or not _matches(stop, s) or not _matches(release, r):
         return False
     try:
-        canonical.certified_release(s, r, board=s["board"], task=stop["task_id"],
+        certify = canonical.certified_closure if release.get("kind") == "containment_closed" else canonical.certified_release
+        certify(s, r, board=s["board"], task=stop["task_id"],
                                     episode=stop["uid"], receipt=release["uid"])
     except ContainmentRefused:
         return False
@@ -136,13 +138,13 @@ def certify_page(conn: sqlite3.Connection, hub, board: str, changes) -> None:
     receipt. Stop/release events must match exact canonical bytes and origin.
     """
     for ch in changes:
-        if ch.table != "task_events" or ch.fields.get("kind") not in ("contained", "containment_released"):
+        if ch.table != "task_events" or ch.fields.get("kind") not in ("contained", "containment_released", "containment_closed"):
             continue
         if ch.op != "upsert":
             raise ContainmentRefused("protected containment history cannot be deleted")
         proof = hub.row_evidence(board, "task_events", ch.uid)
         stop = None
-        if ch.fields["kind"] == "containment_released":
+        if ch.fields["kind"] in ("containment_released", "containment_closed"):
             data = _payload(ch.fields)
             if data is None:
                 raise ContainmentRefused("invalid canonical release page")
@@ -167,7 +169,7 @@ def adopt_receipts(conn: sqlite3.Connection, source: sqlite3.Connection, changes
         task = ch.uid if ch.table == "tasks" else ch.fields.get("task_id")
         if task and held(source, task):
             raise ContainmentRefused(f"task {task} has quarantined containment evidence")
-        if ch.table != "task_events" or ch.fields.get("kind") not in ("contained", "containment_released"):
+        if ch.table != "task_events" or ch.fields.get("kind") not in ("contained", "containment_released", "containment_closed"):
             continue
         if ch.op != "upsert":
             raise ContainmentRefused("protected containment history cannot be deleted")
@@ -175,7 +177,7 @@ def adopt_receipts(conn: sqlite3.Connection, source: sqlite3.Connection, changes
         if proof is None:
             raise ContainmentRefused(f"no certified receipt for {ch.fields['kind']} event {ch.uid} in the replica")
         stop = None
-        if ch.fields["kind"] == "containment_released":
+        if ch.fields["kind"] in ("containment_released", "containment_closed"):
             data = _payload(ch.fields)
             if data is None:
                 raise ContainmentRefused("invalid canonical release event")
@@ -207,14 +209,14 @@ def task_permit(conn: sqlite3.Connection, task: str) -> int:
 
 def prepare_apply(conn: sqlite3.Connection, changes) -> None:
     relevant = any((ch.table == "tasks" and ch.fields.get("containment_episode") is not None)
-                   or (ch.table == "task_events" and ch.fields.get("kind") in ("contained", "containment_released"))
+                   or (ch.table == "task_events" and ch.fields.get("kind") in ("contained", "containment_released", "containment_closed"))
                    for ch in changes)
     if relevant or conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='containment_observations'").fetchone():
         from hermes_cli import kanban_containment_guard as guard
         from hermes_cli.kanban_containment_connections import verifier
         guard.install(conn, verify_release=lambda r, s: verifier(conn, r, s))
         for ch in changes:
-            if ch.table == "task_events" and ch.fields.get("kind") == "containment_released":
+            if ch.table == "task_events" and ch.fields.get("kind") in ("containment_released", "containment_closed"):
                 proof = _cached(conn, ch.uid)
                 if proof is not None:
                     data = _payload(proof["row"])
@@ -252,14 +254,19 @@ def restore_page(conn: sqlite3.Connection, changes) -> set[str]:
     for task in subjects - {None}:
         if not held(conn, task):
             protected_seen = any(ch.table == "task_events" and ch.fields.get("task_id") == task
-                                 and ch.fields.get("kind") in ("contained", "containment_released") for ch in changes)
+                                 and ch.fields.get("kind") in ("contained", "containment_released", "containment_closed") for ch in changes)
             if protected_seen:
                 _restore_released(conn, task)
             continue
         retained.add(task)
-        with guard.authorized_write(conn, task):
-            conn.execute("UPDATE tasks SET status='triage',current_run_id=NULL,completed_at=NULL,"
-                         "claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,worker_started_at=NULL WHERE id=?", (task,))
+        from hermes_cli.kanban_containment_terminal import closed, writer
+        terminal = closed(conn, task)
+        marker = conn.execute("SELECT MAX(episode) FROM containment_observations WHERE task_id=?", (task,)).fetchone()[0]
+        with (writer(conn, task) if terminal else guard.authorized_write(conn, task)):
+            conn.execute("UPDATE tasks SET status=?,current_run_id=NULL,completed_at=NULL,"
+                         "containment_episode=CASE WHEN ? THEN COALESCE(containment_episode,?) ELSE containment_episode END,"
+                         "claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,worker_started_at=NULL WHERE id=?",
+                         ("archived" if terminal else "triage", terminal, marker, task))
         # A pre-stop full task resend must not undo canonical containment. Keep
         # annotations and unrelated tables; discard only obsolete lifecycle fields.
         from hermes_cli.kanban_containment_outbox import strip_lifecycle

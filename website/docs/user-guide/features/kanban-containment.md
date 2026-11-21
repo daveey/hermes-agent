@@ -44,6 +44,35 @@ elapsed time do not constitute release evidence. Resumption preserves all edges,
 never restores review, and retains an independent spend hold. Otherwise the task
 returns to TODO behind unsatisfied prerequisites or READY when eligible.
 
+## Terminal non-success archive
+
+The ordinary archive operation can close a contained task without resuming it.
+Every unreleased episode must have its exact attested stop, and each frozen
+authority must be archived, or done with no producer nominated by that episode.
+A live authority, a missing authority, or a done authority with a producer refuses
+the entire archive. The target must still be unclaimed triage with no human ask
+or pending deletion.
+
+Each episode receives an immutable, authenticated `containment_closed` receipt
+bound to the frozen predicate and authority identity. This is **not a release**:
+the task remains held, its episode marker and dependency edges remain, and its
+dependents remain unsatisfied. It cannot dispatch, resume, unblock or be deleted.
+Ordinary archived tasks without containment keep their existing dependency behavior.
+
+Enrolled boards additionally require `terminal_archive: 1` in the containment
+capability advertisement. Core sends the ordinary canonical `archive` operation,
+recovers uncertain delivery with the same request ID, and reads back the exact
+closure, archived audit event and task rows (targeted context plus per-UID evidence,
+never a board snapshot) before projecting archived locally. Audit `via` / `event_extra`
+are persisted in the durable request as Board `archive_metadata`; a retry with
+different metadata is refused, and the canonical `archived` event must match it exactly.
+Missing or unauthenticated closures leave a replica in triage. A generic local
+archive precondition cannot be carried atomically by the ordinary Board operation and
+is refused before any network call. The one supported scope is the operator
+`creator_archive` (`CreatorScope`): the creator identity is immutable and checked
+locally, and the Board itself atomically requires the unclaimed triage state. Existing local stop history without durable stop attestation
+also refuses terminal archive; upgrading alone does not authenticate old evidence.
+
 ## Local and enrolled boards
 
 A genuinely local board uses one SQLite transaction for stop/release, its durable

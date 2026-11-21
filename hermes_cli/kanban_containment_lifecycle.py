@@ -50,13 +50,26 @@ def install_local(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS containment_attestations ("
                  "task_id TEXT NOT NULL, receipt_uid TEXT PRIMARY KEY, episode_uid TEXT NOT NULL, "
                  "receipt_sha256 TEXT NOT NULL, episode_sha256 TEXT NOT NULL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS containment_local_stops ("
+                 "task_id TEXT NOT NULL, uid TEXT PRIMARY KEY, sha256 TEXT NOT NULL)")
     guard.install(conn, verify_release=lambda receipt, stop: verified_release(conn, receipt, stop))
+    for op in ("UPDATE", "DELETE", "INSERT"):
+        condition = " WHEN NOT kanban_containment_write(NEW.task_id)" if op == "INSERT" else ""
+        conn.execute(f"CREATE TRIGGER IF NOT EXISTS containment_local_stop_{op.lower()} "
+                     f"BEFORE {op} ON containment_local_stops{condition} "
+                     "BEGIN SELECT RAISE(ABORT,'containment_pending'); END")
     for op in ("UPDATE", "DELETE"):
         conn.execute(f"CREATE TRIGGER IF NOT EXISTS containment_attestation_{op.lower()} "
                      f"BEFORE {op} ON containment_attestations BEGIN SELECT RAISE(ABORT,'containment_pending'); END")
-    conn.execute("CREATE TRIGGER IF NOT EXISTS containment_attestation_insert "
-                 "BEFORE INSERT ON containment_attestations WHEN NOT kanban_containment_write(NEW.task_id) "
-                 "BEGIN SELECT RAISE(ABORT,'containment_pending'); END")
+    from hermes_cli import kanban_db as kb
+    with kb.write_txn(conn, allow_nested=True):
+        prior = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='containment_attestation_insert'").fetchone()
+        if prior and 'kanban_containment_terminal' not in prior[0]:
+            conn.execute("DROP TRIGGER containment_attestation_insert")
+        conn.execute("CREATE TRIGGER IF NOT EXISTS containment_attestation_insert "
+                     "BEFORE INSERT ON containment_attestations WHEN NOT kanban_containment_write(NEW.task_id) "
+                     "AND NOT kanban_containment_terminal(NEW.task_id) "
+                     "BEGIN SELECT RAISE(ABORT,'containment_pending'); END")
 
 
 def verified_release(conn: sqlite3.Connection, receipt: Mapping[str, Any], stop: Mapping[str, Any]) -> bool:
@@ -71,7 +84,7 @@ def verified_release(conn: sqlite3.Connection, receipt: Mapping[str, Any], stop:
 
 def _events(conn: sqlite3.Connection, task: str) -> list[dict]:
     return [dict(row) for row in conn.execute("SELECT * FROM task_events WHERE task_id=? "
-                                             "AND kind IN ('contained','containment_released')", (task,))]
+                                             "AND kind IN ('contained','containment_released','containment_closed')", (task,))]
 
 
 def _actor(conn: sqlite3.Connection, task: str, run_uid: str) -> None:
@@ -200,6 +213,7 @@ def contain_local(conn: sqlite3.Connection, *, target: dict, resume_policy: dict
             conn.execute("UPDATE tasks SET status='triage',current_run_id=NULL,completed_at=NULL,"
                          "claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,worker_started_at=NULL WHERE id=?", (tid,))
             episode = _append(conn, tid, "contained", payload)
+            conn.execute("INSERT INTO containment_local_stops VALUES (?,?,?)", (tid, episode, fingerprint(payload)))
             conn.execute("UPDATE tasks SET containment_episode=? WHERE id=?", (episode, tid))
     return {"task_id": tid, "status": "triage", "episode": episode, "resume_policy": spec}
 
@@ -224,6 +238,9 @@ def resume_local(conn: sqlite3.Connection, *, target: dict, episode: str, actor_
         if hold is None or hold.unresolved or episode not in hold.episodes or stop is None:
             raise ContainmentRefused("unknown, stale or unresolved containment episode")
         frozen = _stop(stop)
+        from hermes_cli.kanban_containment_terminal import terminal_closed
+        if terminal_closed(events, verify=lambda r, s: verified_release(conn, r, s)):
+            raise ContainmentRefused("terminal containment cannot resume")
         if frozen is None or frozen["target"] != target:
             raise ContainmentRefused("containment target or frozen predicate changed")
         _nominees(conn, target, frozen["policy"])

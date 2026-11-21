@@ -131,6 +131,8 @@ def _refresh_rows(live, replica, targets, scoped) -> list[str]:
     from hermes_cli import kanban_db_sync as sync
     from hermes_cli import kanban_move_parent_evidence as evidence
     from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli.kanban_containment_terminal import parent_status_sql
+    status = parent_status_sql(replica)
 
     targets = sorted(targets)
     if not targets or not sync.has_remote_parents(live):
@@ -141,7 +143,7 @@ def _refresh_rows(live, replica, targets, scoped) -> list[str]:
         found: dict[str, str] = {}
         for part, marks in _chunks(wanted):
             found.update({r[0]: r[1] for r in replica.execute(
-                f"SELECT id, status FROM tasks WHERE id IN ({marks})", part)})
+                f"SELECT id, {status} FROM tasks WHERE id IN ({marks})", part)})
         values = {p: (evidence.payload(replica, p) if p in wanted and p in scoped else None) for p in targets}
     finally:
         replica.execute("RELEASE move_parent_snapshot")

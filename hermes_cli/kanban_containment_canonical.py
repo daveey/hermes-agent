@@ -71,6 +71,18 @@ def certified_release(stop_evidence: Any, release_evidence: Any, *, board: str, 
     return stop, release
 
 
+def certified_closure(stop_evidence: Any, close_evidence: Any, *, board: str, task: str,
+                      episode: str, receipt: str) -> tuple[dict, dict]:
+    from hermes_cli.kanban_containment_terminal import closure
+    stop = certified_stop(stop_evidence, board=board, task=task, uid=episode)
+    close = canonical_event(close_evidence, board=board, task=task, uid=receipt, kind="containment_closed")
+    proof = close_evidence["containment_v1"]
+    if (proof["episode"] != episode or proof.get("containment_sha256") != fingerprint(_stop(stop))
+            or not closure(close, stop)):
+        raise ContainmentRefused("canonical closure is not bound to this exact containment episode")
+    return stop, close
+
+
 def _schema(conn: sqlite3.Connection) -> None:
     # Host-local request custody, deliberately not in SYNCED_COLUMNS. No token or
     # free-text handoff is stored in this transport ledger.

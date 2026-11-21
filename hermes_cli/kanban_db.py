@@ -1888,7 +1888,7 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
         "WHERE task_id = ? AND kind IN ("
         "'blocked', 'block_loop_detected', 'dependency_wait', 'gave_up', 'scheduled', 'continued', 'promoted_manual', "
         "'unblocked', 'changes_requested', 'review_reopened', 'status', 'reclaimed', "
-        "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited', 'owner_restart_lost', 'contained', 'containment_released'"
+        "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited', 'owner_restart_lost', 'contained', 'containment_released', 'containment_closed'"
         ") ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
     payload = _json_dict(_row_get(row, "payload"))
@@ -1974,27 +1974,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
 PARENT_MISSING_BLOCK_SECONDS = 600
 
 
-def parent_states(
-    conn: sqlite3.Connection, task_id: str, *, remote: Optional[bool] = None,
-) -> list[tuple[str, Optional[str]]]:
-    """``(parent_id, status)`` for every direct parent, in id order: the ONE dependency view that the promoter
-    (:func:`recompute_ready`), the claim (:func:`claim_task`) and the board views read.
-
-    The status is the local card's. On a synced board a parent another gateway owns is not a local card (a primary
-    board's live file holds only this gateway's cards), so its status comes from the mirror the sync round keeps
-    from the replica (``kanban_db_sync.REMOTE_PARENTS_TABLE``), the same rows the Board's own claim check reads.
-    ``None`` = the parent is on neither: missing, and it gates (never read as satisfied). [daveey]"""
-    if remote is None:
-        remote = _sync.has_remote_parents(conn)
-    if remote:
-        sql = ("SELECT l.parent_id AS id, COALESCE(p.status, r.status) AS status FROM task_links l "
-               "LEFT JOIN tasks p ON p.id = l.parent_id "
-               f"LEFT JOIN {_sync.REMOTE_PARENTS_TABLE} r ON r.parent_id = l.parent_id "
-               "WHERE l.child_id = ? ORDER BY l.parent_id")
-    else:
-        sql = ("SELECT l.parent_id AS id, p.status AS status FROM task_links l "
-               "LEFT JOIN tasks p ON p.id = l.parent_id WHERE l.child_id = ? ORDER BY l.parent_id")
-    return [(row["id"], row["status"]) for row in conn.execute(sql, (task_id,)).fetchall()]
+from hermes_cli.kanban_db_parent_states import parent_states
 
 
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -3694,7 +3674,7 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     with write_txn(conn):
         cur = conn.execute(
             "DELETE FROM task_events WHERE created_at < ? AND kind NOT IN ('decomposed', 'origin_intent_recorded', "
-            "'contained', 'containment_released') "
+            "'contained', 'containment_released', 'containment_closed') "
             "AND task_id IN (SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)

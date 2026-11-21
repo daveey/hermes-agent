@@ -15,6 +15,20 @@ def refusal(conn, target: str, requester: str | None) -> str | None:
     return archive_scope_for(conn, target, requester)[0]
 
 
+class CreatorScope:
+    """The creator-archive precondition as data, so a Board-delivered archive can recognise (not re-run) it.
+
+    Called with a connection it is the ordinary local predicate; the contained terminal archive route
+    (:mod:`kanban_containment_terminal_remote`) accepts exactly this type and nothing else."""
+    __slots__ = ("requester", "target")
+
+    def __init__(self, target: str, requester: str | None):
+        self.target, self.requester = target, requester
+
+    def __call__(self, conn):
+        return refusal(conn, self.target, self.requester)
+
+
 def forward(conn, target: str, requester: str, run_id):
     from hermes_cli import kanban_supervisor_requests as requests
     try:
@@ -38,5 +52,5 @@ def apply(conn, payload: dict, extra: dict):
     if why:
         return "refused", why
     ok = kb.archive_task(conn, target, via="creator archive operator call", event_extra=extra,
-                         precondition=lambda c: refusal(c, target, requester))
+                         precondition=CreatorScope(target, requester))
     return ("applied", None) if ok else ("refused", "archive scope changed before application")

@@ -228,7 +228,7 @@ def wire(change) -> str:
 
 
 def protected(change) -> bool:
-    return change.table == "task_events" and change.fields.get("kind") in ("contained", "containment_released")
+    return change.table == "task_events" and change.fields.get("kind") in ("contained", "containment_released", "containment_closed")
 
 
 def certified_page(conn, hub, board: str, changes) -> list:
@@ -348,7 +348,7 @@ def restore(conn, data: dict, checkpoint: Path | None = None) -> None:
     proofs = {proof["uid"]: proof for proof in map(json.loads, data["receipts"])}
     for proof in proofs.values():
         stop = None
-        if proof["row"]["kind"] == "containment_released":
+        if proof["row"]["kind"] in ("containment_released", "containment_closed"):
             payload = json.loads(proof["row"]["payload"])
             stop = proofs[payload["episode"]]
         replica.remember(conn, proof, board=proof["board"], task=proof["row"]["task_id"], uid=proof["uid"], stop_evidence=stop)

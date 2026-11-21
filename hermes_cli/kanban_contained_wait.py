@@ -90,7 +90,7 @@ def _active_episode(conn: sqlite3.Connection, tid: str, marker: str) -> Optional
     from hermes_cli.kanban_containment_connections import verifier
     from hermes_cli.kanban_containment_state import reduce_events
     cursor = conn.execute("SELECT uid, task_id, kind, payload, created_at FROM task_events WHERE task_id = ? "
-                          "AND kind IN ('contained', 'containment_released')", (tid,))
+                          "AND kind IN ('contained', 'containment_released', 'containment_closed')", (tid,))
     names = [c[0] for c in cursor.description]
     events = [dict(zip(names, row)) for row in cursor]
     hold = reduce_events(events, verify_release=lambda r, s: verifier(conn, r, s))

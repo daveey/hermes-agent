@@ -55,7 +55,7 @@ _LIFECYCLE_KINDS = (
     "completed", "reopened", "review_requested", "review_reopened", "changes_requested", "archived",
     "scheduled", "continued", "gave_up", "block_loop_detected", "supervisor_escalated",
     "agent_block_escalated", "ask_rechecked", "dependency_wait", "reclaimed", "spawned",
-    "contained", "containment_released",
+    "contained", "containment_released", "containment_closed",
 )
 
 

@@ -217,6 +217,8 @@ def owner_wake_authority_reopen_grant(conn, worker_task_id: str, authority_id: s
         if target_id is not None and listed_id != target_id:
             continue
         target = kb.get_task(conn, listed_id)
+        if target is None or target.status != "triage":
+            continue  # terminal containment archives retain their marker, not a reopen grant
         episode = getattr(target, "containment_episode", None) if target is not None else None
         if not episode:
             continue

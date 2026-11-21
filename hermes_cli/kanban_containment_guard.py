@@ -66,6 +66,7 @@ def inert_snapshot(conn: sqlite3.Connection) -> None:
     importing board re-derives the hold from the events themselves.
     """
     for name, arity in (("kanban_containment_held", 1), ("kanban_containment_write", 1), ("kanban_containment_delete", 1),
+                        ("kanban_containment_terminal", 1),
                         ("kanban_containment_sync_task", 1), ("kanban_containment_sync_event", 4),
                         ("kanban_containment_sync_edge", 2), ("kanban_containment_cache_write", 0)):
         register_function(conn, name, arity, lambda *a: 0)
@@ -79,7 +80,7 @@ def pending(conn: sqlite3.Connection, task_id: str, *, verify_release: Callable 
     columns = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
     uid = "uid" if "uid" in columns else "NULL AS uid"
     cursor = conn.execute(f"SELECT {uid},task_id,kind,payload FROM task_events WHERE task_id=? "
-                          "AND kind IN ('contained','containment_released')", (task_id,))
+                          "AND kind IN ('contained','containment_released','containment_closed')", (task_id,))
     names = [column[0] for column in cursor.description]
     events = [dict(zip(names, row)) for row in cursor]
     # A canonical task page may precede its event page. Seeing a marker grants
@@ -108,6 +109,8 @@ def register(conn: sqlite3.Connection, *, verify_release: Callable | None = None
                          lambda task: int(conn.in_transaction and _DELETE.get() == (id(conn), task)))
     register_function(conn, "kanban_containment_write", 1,
                          lambda task: int(conn.in_transaction and _WRITE.get() == (id(conn), task)))
+    from hermes_cli.kanban_containment_terminal import permitted
+    register_function(conn, "kanban_containment_terminal", 1, lambda task: permitted(conn, task))
     from hermes_cli import kanban_containment_replica as replica
     register_function(conn, "kanban_containment_sync_task", 1, lambda task: replica.task_permit(conn, task))
     register_function(conn, "kanban_containment_sync_event", 4,
@@ -181,7 +184,7 @@ def _trigger_statements(conn: sqlite3.Connection) -> dict[str, str]:
     held = "kanban_containment_held"
     permit = "kanban_containment_write"
     fail = "SELECT RAISE(ABORT,'containment_pending');"
-    protected = "('contained','containment_released')"
+    protected = "('contained','containment_released','containment_closed')"
     columns = [r[1] for r in conn.execute("PRAGMA table_info(task_events)")]
     new_uid = "NEW.uid" if "uid" in columns else "NULL"
     statements = {
@@ -190,10 +193,15 @@ def _trigger_statements(conn: sqlite3.Connection) -> dict[str, str]:
                         "OR OLD.completed_at IS NOT NEW.completed_at OR OLD.containment_episode IS NOT NEW.containment_episode) "
                         "AND NOT kanban_containment_sync_task(OLD.id) AND ("
                         f"NOT {permit}(OLD.id) OR NEW.status != 'triage' "
-                        "OR NEW.current_run_id IS NOT NULL OR NEW.completed_at IS NOT NULL)"),
+                        "OR NEW.current_run_id IS NOT NULL OR NEW.completed_at IS NOT NULL) "
+                        "AND NOT (kanban_containment_terminal(OLD.id) AND NEW.status='archived' "
+                        "AND NEW.current_run_id IS NULL AND NEW.completed_at IS NULL "
+                        "AND NEW.containment_episode IS NOT NULL "
+                        "AND (OLD.containment_episode IS NULL OR NEW.containment_episode IS OLD.containment_episode))"),
         "task_delete": ("BEFORE DELETE ON tasks", f"{held}(OLD.id)"),
         "event_insert": ("BEFORE INSERT ON task_events",
                          f"NEW.kind IN {protected} AND NOT {permit}(NEW.task_id) "
+                         "AND NOT (NEW.kind='containment_closed' AND kanban_containment_terminal(NEW.task_id)) "
                          f"AND NOT kanban_containment_sync_event({new_uid},NEW.task_id,NEW.kind,NEW.payload)"),
         "event_delete": ("BEFORE DELETE ON task_events", f"OLD.kind IN {protected} AND NOT kanban_containment_delete(OLD.task_id)"),
     }

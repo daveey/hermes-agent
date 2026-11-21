@@ -126,6 +126,7 @@ def reduce_events(
     verifier (including an offline replica) means no releases. A raised verifier
     error propagates so callers cannot mistake an unknown result for permission.
     """
+    events = list(events)
     stops: dict[str, Mapping[str, Any]] = {}
     releases = []
     unresolved = False
@@ -144,12 +145,16 @@ def reduce_events(
         stops[uid] = event
     active = set(stops)
     if verify_release is not None:
+        from hermes_cli.kanban_containment_terminal import closure
+        closed = {uid for uid, stop in stops.items() if any(
+            event.get("kind") == "containment_closed" and closure(event, stop)
+            and verify_release(event, stop) is True for event in events)}
         for receipt in releases:
             data = _payload(receipt)
             episode = data.get("episode") if data else None
             if not isinstance(episode, str) or episode not in stops:
                 continue
             stop = stops[episode]
-            if _release(receipt, stop) and verify_release(receipt, stop) is True:
+            if episode not in closed and _release(receipt, stop) and verify_release(receipt, stop) is True:
                 active.discard(episode)
     return Hold(tuple(sorted(active)), unresolved) if active or unresolved else None
