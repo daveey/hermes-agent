@@ -89,7 +89,10 @@ async def test_profile_scan_burst_keeps_status_responsive(monkeypatch, tmp_path,
                 response = await asyncio.wait_for(client.get('/api/status'), 0.5)
                 assert response.status_code == 200
                 assert response.json() == {'ok': True}
-                assert limiter.borrowed_tokens == 1
+                # Scans run on the sessions thread lane (web_thread_lanes): none of the shared pool. [daveey]
+                from hermes_cli import web_thread_lanes
+                assert limiter.borrowed_tokens == 0
+                assert web_thread_lanes.stats()["sessions"]["in_use"] == 1
                 if route == '/api/sessions':
                     other = await asyncio.wait_for(client.get(route, params={'profile': 'other'}), 0.5)
                     assert other.status_code == 200

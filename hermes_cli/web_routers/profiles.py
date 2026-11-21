@@ -14,6 +14,7 @@ import contextlib
 import copy
 import functools
 from hermes_cli.web_read_coalescing import coalesced_read
+from hermes_cli.web_thread_lanes import lane_runner, run_in_lane
 from hermes_cli import loop_accounting as _la  # [daveey] per-route pass accounting
 from hermes_cli.web_json_response import encoded_in_thread, native_json_response, per_request_response
 import inspect
@@ -394,7 +395,9 @@ def _sidebar_singleflight_cache(func):
             return result
 
     # The HTTP path JSON-encodes in the worker thread (web_json_response), never on the loop.
-    admitted = coalesced_read(encoded_in_thread(wrapped), thread_runner=lambda func: run_in_threadpool(func))
+    # Misses read state.db per profile: the sessions lane. A fresh hit is an in-memory copy: control, so it
+    # never queues behind a slow miss. (web_thread_lanes) [daveey]
+    admitted = coalesced_read(encoded_in_thread(wrapped), thread_runner=lane_runner("sessions"))
 
     def _lookup_encoded(key):
         cached = _lookup(key)
@@ -406,7 +409,7 @@ def _sidebar_singleflight_cache(func):
         if _SIDEBAR_CACHE_TTL_SECONDS > 0:
             bound = signature.bind(*args, **kwargs)
             bound.apply_defaults()
-            cached = await run_in_threadpool(_lookup_encoded, tuple(bound.arguments.items()))
+            cached = await run_in_lane("control", _lookup_encoded, tuple(bound.arguments.items()))
             if cached is not miss:
                 return per_request_response(cached)
         return per_request_response(await admitted(*args, **kwargs))
@@ -538,7 +541,7 @@ _SESSION_STAMP_COLUMNS = ("cwd", "git_branch", "git_repo_root", "outcome", "mute
 # The body is JSON-encoded once per coalesced read, in the worker thread: FastAPI's
 # jsonable_encoder walk of a 200-row page on the loop was most of this route's CPU. [daveey]
 _profiles_sessions_admitted = coalesced_read(
-    encoded_in_thread(get_profiles_sessions), thread_runner=lambda func: run_in_threadpool(func))
+    encoded_in_thread(get_profiles_sessions), thread_runner=lane_runner("sessions"))
 
 
 @functools.wraps(_profiles_sessions_admitted)

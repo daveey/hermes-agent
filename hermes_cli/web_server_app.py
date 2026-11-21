@@ -227,6 +227,11 @@ async def standalone_lifespan(app: "FastAPI"):
 
     await asyncio.to_thread(hold_bind_for_prewarm)
 
+    # Thread-lane sizes from config.yaml, read off the loop before the first request (web_thread_lanes). [daveey]
+    from hermes_cli import web_thread_lanes
+
+    await asyncio.to_thread(web_thread_lanes.configure)
+
     try:
         yield
     finally:

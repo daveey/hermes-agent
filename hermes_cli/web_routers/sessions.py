@@ -24,6 +24,7 @@ from hermes_cli.session_listing import automated_listing_exclusion, stamp_automa
 from hermes_cli.session_list_flight import SESSION_LIST_CACHE, data_stamp
 from hermes_cli.web_deps import late
 from hermes_cli.web_read_coalescing import coalesced_read
+from hermes_cli.web_thread_lanes import lane_runner, run_in_lane
 from hermes_cli import loop_accounting as _la  # [daveey] per-route pass accounting
 from hermes_cli.web_json_response import encoded_in_thread, native_json_response, per_request_response
 from hermes_cli.kanban_session_activity import annotate_kanban_activity, session_tasks as session_kanban_tasks
@@ -194,9 +195,8 @@ def _resolve_session_id(db, session_id: str) -> Optional[str]:
             raise
 
 
-@list_router.get("/api/session-kanban-tasks")
 @_la.accounted("route/sessions.kanban_tasks")
-def get_session_kanban_tasks(ids: str = Query(..., max_length=4000)):
+def _session_kanban_tasks_read(ids: str):
     """Open, blocked and review kanban cards that any of the comma-separated
     session ``ids`` (one compression lineage) created or shepherds, across every
     board — the cards behind the sidebar row's kanban counts. Lets the desktop
@@ -204,6 +204,12 @@ def get_session_kanban_tasks(ids: str = Query(..., max_length=4000)):
     wanted = [s.strip() for s in ids.split(",") if s.strip()][:50]
     # The Desktop linked-card strip: serve the last remote-links projection rather than wait on a rebuild.
     return {"tasks": session_kanban_tasks(wanted, stale_ok=True)}
+
+
+@list_router.get("/api/session-kanban-tasks")
+async def get_session_kanban_tasks(request: Request, ids: str = Query(..., max_length=4000)):
+    # Reads every board's linked cards: on the sessions lane, so a slow board never holds the shared pool. [daveey]
+    return await run_in_lane("sessions", _session_kanban_tasks_read, ids, request=request)
 
 
 # ``le=100`` on limit: an unbounded limit lets one request drag every session
@@ -245,7 +251,8 @@ def get_sessions(
 # Queue expensive list contenders before consuming the shared HTTP worker pool.
 # The body is JSON-encoded in the worker thread (web_json_response), never on the loop. [daveey]
 _sessions_admitted = coalesced_read(
-    encoded_in_thread(get_sessions), admission_key=lambda args: args["profile"], max_concurrent=2)
+    encoded_in_thread(get_sessions), admission_key=lambda args: args["profile"], max_concurrent=2,
+    thread_runner=lane_runner("sessions"))
 
 
 def _peek_sessions(arguments):
