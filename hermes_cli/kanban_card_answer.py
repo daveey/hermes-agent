@@ -80,8 +80,20 @@ def _receipt(conn, task, operation_id, fingerprint):
     return None
 
 
+def _owner(conn, task, gateway, *, require_primary=False):
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task,)).fetchone()
+    if row is None or ('created_on' in row.keys() and row['created_on'] not in (None, '', gateway)):
+        raise AnswerRefused('owner_card_missing_or_foreign')
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_sync_state'").fetchone():
+        state = conn.execute('SELECT gateway_id,mode FROM kanban_sync_state LIMIT 1').fetchone()
+        if state is None or state['gateway_id'] != gateway or state['mode'] != 'primary':
+            raise AnswerRefused('owner_board_not_primary')
+    elif require_primary:
+        raise AnswerRefused('owner_board_not_primary')
+
+
 def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board: str,
-          verify_source: Callable[[dict], dict]) -> dict:
+          verify_source: Callable[[dict], dict], require_primary: bool = False) -> dict:
     """Apply only after independent source-operation and owner verification.
 
     ``verify_source`` is a trusted adapter callback, NOT an envelope field. It
@@ -99,6 +111,7 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
             or request["board"] != board or len(request["operationId"]) > 200
             or len(request["choice"]) > 2000 or len(request["generation"]) != 64):
         raise AnswerRefused("invalid_answer")
+    _owner(conn, request['task'], owner_gateway, require_primary=require_primary)
     fingerprint = digest(request)
     old = _receipt(conn, request["task"], request["operationId"], fingerprint)
     if old:
@@ -127,9 +140,10 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
     note = "Choice recorded in Desktop (remote): " + encoded(choices[0]) + "\nOperation: " + request["operationId"]
 
     def fence(c):
+        _owner(c, request['task'], owner_gateway, require_primary=require_primary)
         from hermes_cli.kanban_spend_decision import pending
-        row = c.execute("SELECT * FROM tasks WHERE id=?", (request["task"],)).fetchone()
-        if row is None or ("containment_episode" in row.keys() and row["containment_episode"]):
+        from hermes_cli.kanban_containment_guard import pending as containment_pending
+        if containment_pending(c, request['task']):
             return "containment_hold"
         if not archive and pending(c, request["task"]):
             return "spend_decision_pending"
