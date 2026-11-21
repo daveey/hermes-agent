@@ -88,12 +88,14 @@ def test_review_with_only_eligible_standard_route_uses_tier_fallback(board):
 
 
 def test_card_pinned_class_is_left_to_the_card(board):
-    """A card's own class selector is the creator's choice (the only per-card route spec left): the tier fallback
-    records it as unroutable here but never rewrites the card's class."""
+    """A card's class is preserved, but an unusable class refuses without a route receipt."""
     _write(board, {"enabled": True})
     with kbc.connect() as conn:
         task = kb.get_task(conn, kb.create_task(conn, title="x", assignee="default", model_override="class:deep",
                                                 provider_override="auto"))
-        reason = tier.apply_model_tier(conn, task, lane="ready")
-    assert reason == "class+unroutable:class:deep:no_eligible_routes"
+        from agent.model_routing import ModelRoutingError
+        with pytest.raises(ModelRoutingError, match='class:deep.*no_eligible_routes'):
+            tier.apply_model_tier(conn, task, lane="ready")
+        assert not [e for e in kb.list_events(conn, task.id) if e.kind in ('model_tier', 'run_route')]
+        assert kb.get_task(conn, task.id).model_override == "class:deep"
     assert task.model_override == "class:deep"

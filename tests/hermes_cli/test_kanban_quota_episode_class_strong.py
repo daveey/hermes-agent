@@ -91,10 +91,11 @@ def test_pattern_strong_class_card_takes_the_free_provider(board, monkeypatch):
     _deep_routes(monkeypatch)
     _serving(monkeypatch, {'anthropic'})
     monkeypatch.setattr(walls, 'active_walls', lambda **_k: {})
-    monkeypatch.setattr(tier, 'load_tier_config', lambda: {**CLASS_CFG, 'default_model_keep_patterns': ['security']})
+    cfg = {**CLASS_CFG, 'default_model_keep_patterns': ['security']}
+    monkeypatch.setattr(tier, 'load_tier_config', lambda: cfg)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='security work', assignee='a')
-        reap(conn, tid, admit=CLASS_CFG, **_codex_wall(clock[0] + 55 * 3600))
+        reap(conn, tid, admit=cfg, **_codex_wall(clock[0] + 55 * 3600))
         clock[0] += 301
         assert decision(conn, kb.get_task(conn, tid), lane='ready') == (None, ('claude-opus-5-5', 'anthropic'))
 

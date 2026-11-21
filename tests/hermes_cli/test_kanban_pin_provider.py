@@ -164,6 +164,8 @@ def test_class_selector_keeps_provider_auto(auto_home, monkeypatch, tmp_path):
 # --- dispatcher: legacy rows ------------------------------------------------------------------------------
 
 def test_dispatcher_binds_legacy_null_provider_row(auto_home, monkeypatch, tmp_path):
+    from tests.hermes_cli.test_kanban_quota_episode import routing
+    routing(monkeypatch)  # Real eligible class policy; legacy selector is ignored.
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="legacy", assignee="default")
         conn.execute("UPDATE tasks SET model_override=?, provider_override=NULL WHERE id=?", (OPUS, tid))

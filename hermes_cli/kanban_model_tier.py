@@ -499,14 +499,10 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
             if is_review:
                 from hermes_cli.kanban_review_model import ReviewModelUnavailable
                 raise ReviewModelUnavailable(f"Review model {model} is unroutable: {why}")
-            # A tier-chosen class this host cannot route would crash the worker at startup ("No eligible
-            # standard routes under billing/capability policy", 2026-10-27: shared config switched
-            # kanban.default_model to class:standard before the host's route registry landed). Keep the
-            # profile's own model instead; the next run re-decides once routes exist.
-            logger.warning("kanban model tier: %s is not routable on this host (%s); %s keeps its profile model",
-                           model, why, getattr(task, "id", "?"))
-            reason = f"{reason}+unroutable:{model}:{why}"
-            model = provider = None
+            # Policy may change after the preclaim check. Refuse within spawn
+            # accounting rather than silently retaining a legacy row/profile pin.
+            from agent.model_routing import ModelRoutingError
+            raise ModelRoutingError(f"Kanban model {model} is unroutable: {why}")
     # Persist the pace choice before the owner reloads its authoritative model_tier receipt. An offer that expired or
     # no longer matches raises OfferLost: the launch is refused and requeued, never started on the held route.
     from hermes_cli.kanban_pace_reroute import REASON as _PACED, take as _take_pace_move

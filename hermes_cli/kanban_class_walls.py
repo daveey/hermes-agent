@@ -26,10 +26,11 @@ def _unroutable_class(conn, task_id, *, lane):
     from hermes_cli.kanban_model_tier import class_unroutable_reason, resolve_model_tier
 
     task = kb.get_task(conn, task_id)
-    from hermes_cli.kanban_quota_episode import active
     from hermes_cli.kanban_review_model import is_review_run
-    if task is None or active(conn, task_id):
-        return None  # the existing episode owns its typed hold and reset deadline
+    if task is None:
+        return None
+    # Episodes own transient walls/deadlines, not structural eligibility: live
+    # recovery can release their hold before the episode itself is retired.
     config = _assignee_config(task.assignee)
     if not isinstance(config, dict):
         return 'config_unavailable'

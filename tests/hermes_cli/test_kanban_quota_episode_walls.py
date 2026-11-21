@@ -56,9 +56,7 @@ def test_episode_default_card_without_class_alternate_falls_back_to_strong_tier(
     nothing can move it: it holds for the reset instead of spawning into the wall."""
     clock = _clock(monkeypatch)
     config, _ = routing(monkeypatch)
-    if why == 'routing_disabled':
-        config['model_routing']['enabled'] = False
-    else:  # the only standard route is the walled codex one; the strong class has room
+    if why != 'routing_disabled':  # the only standard route is walled; the strong class has room
         _class_routes(config, standard=[('openai-codex', 'gpt-6-astra')], deep=[('anthropic', 'claude-opus-5-5')])
     _hub_tier(monkeypatch)
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
@@ -66,6 +64,8 @@ def test_episode_default_card_without_class_alternate_falls_back_to_strong_tier(
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='episode default card', assignee='a')
         reap(conn, tid, admit=HUB_CFG, **_codex_wall(reset))
+        if why == 'routing_disabled':
+            config['model_routing']['enabled'] = False
         # Only the episode knows the wall: no provider file, no live pool evidence.
         monkeypatch.setattr(walls, 'active_walls', lambda **_k: {})
         clock[0] += 301
@@ -87,7 +87,6 @@ def test_episode_fallback_never_rewrites_a_legacy_pin_row(board, monkeypatch, al
     off the card holds for the reset and the author row is retained."""
     clock = _clock(monkeypatch)
     config, _ = routing(monkeypatch)
-    config['model_routing']['enabled'] = False
     _hub_tier(monkeypatch)
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
     with kbc.connect() as conn:
@@ -95,6 +94,7 @@ def test_episode_fallback_never_rewrites_a_legacy_pin_row(board, monkeypatch, al
         conn.execute("UPDATE tasks SET model_override='gpt-6-astra', provider_override='openai-codex' WHERE id=?", (tid,))
         conn.commit()
         reap(conn, tid, admit=HUB_CFG, **_codex_wall(clock[0] + 55 * 3600))
+        config['model_routing']['enabled'] = False
         clock[0] += 301
         assert dispatch.check_respawn_guard(conn, tid) == 'subscription_quota_reset'
         persisted = kb.get_task(conn, tid)
@@ -186,6 +186,9 @@ def test_stuck_warning_names_the_episode_deadline_end_to_end(board, monkeypatch,
     """(c) Through a real tick: the held episode card's warning suffix is the episode deadline."""
     from hermes_cli.kanban_db_dispatch_clock import _iso
     clock = _clock(monkeypatch)
+    config, _ = routing(monkeypatch)
+    _class_routes(config, standard=[('anthropic', 'claude-sonnet-5-5')],
+                  deep=[('anthropic', 'claude-opus-5-5')])
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='backoff warning', assignee='a')
         for _ in range(3):
