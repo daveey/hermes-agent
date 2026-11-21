@@ -35,6 +35,11 @@ def _one(clause: str, conv=None):
     return lambda v: ([clause], [conv(v) if conv else v])
 
 
+# Unattended producers only. Not cli/acp/api_server: they also carry interactive conversations
+# (the classic CLI, editors, API clients), and this window deletes without the chat-wide opt-in.
+SOURCE_RETENTION_SOURCES: tuple[str, ...] = ("cron", "kanban", "subagent", "tool", "recovered")
+
+
 def _seconds_since(now: float, raw) -> Optional[float]:
     """Age of a state_meta timestamp; None when unset or corrupt (= no prior run)."""
     try:
@@ -613,6 +618,71 @@ class SessionMaintenanceMixin:
             # write-path generation guard does not halt this connection.
             self._record_db_file_identity()
         return optimized
+
+    def maybe_prune_source_retention(
+        self, source_days: Optional[dict], min_interval_hours: int = 24, sessions_dir: Optional[Path] = None,
+    ) -> dict[str, Any]:
+        """Per-source retention (``sessions.source_retention_days``), independent of ``auto_prune``: each
+        ``{source: days}`` entry prunes that source's ENDED sessions inactive for ``days`` and closes its
+        stale open rows (they then get a full window), at most once per ``min_interval_hours`` (own
+        throttle key). Only the unattended automation sources in :data:`SOURCE_RETENTION_SOURCES` are
+        eligible: a chat source (desktop, tui, cli, acp, api_server, slack...) or a days value that is not a whole number >= 1
+        is skipped with a warning, so a typo never deletes conversations. Pinned and mid-turn rows are
+        spared as in :meth:`maybe_auto_prune_and_vacuum`. No VACUUM: freed pages are reused by later
+        writes, which keeps the file bounded without a full rewrite. Never raises; returns
+        ``{"skipped", "pruned": {source: n}, "closed": {source: n}}`` plus ``"error"`` on failure."""
+        from hermes_state_repair import _release_auto_maintenance_lock, _try_acquire_auto_maintenance_lock
+        result: dict[str, Any] = {"skipped": False, "pruned": {}, "closed": {}}
+        plan = self._source_retention_plan(source_days)
+        if not plan:
+            result["skipped"] = True
+            return result
+        maintenance_lock = _try_acquire_auto_maintenance_lock(self.db_path)
+        if maintenance_lock is None:
+            result["skipped"] = True
+            return result
+        try:
+            now = time.time()
+            since = _seconds_since(now, self.get_meta("last_source_retention_prune"))
+            if since is not None and since < min_interval_hours * 3600:
+                result["skipped"] = True
+                return result
+            for source, days in plan:
+                report_startup_progress(900.0, phase="state_db_source_retention")
+                result["pruned"][source] = self.prune_sessions(
+                    older_than_days=days, source=source, sessions_dir=sessions_dir,
+                    exclude_active_write_guards=True)
+                result["closed"][source] = len(self.sweep_orphaned_sessions(
+                    max_idle_seconds=float(days) * 86400.0, sources=(source,), exclude_pinned=True,
+                    respect_gateway_heartbeats=False))
+            self.set_meta("last_source_retention_prune", str(now))
+            if any(result["pruned"].values()) or any(result["closed"].values()):
+                logger.info("state.db source retention: pruned %s, closed %s", result["pruned"], result["closed"])
+        except Exception as exc:
+            logger.warning("state.db source retention failed: %s", exc, exc_info=True)
+            result["error"] = str(exc)
+        finally:
+            _release_auto_maintenance_lock(maintenance_lock)
+        return result
+
+    def _source_retention_plan(self, source_days: Optional[dict]) -> list[tuple[str, int]]:
+        """Valid ``(source, days)`` pairs of ``sessions.source_retention_days``, warning once per bad entry."""
+        if not isinstance(source_days, dict):
+            if source_days:
+                logger.warning("sessions.source_retention_days must be a mapping of source: days, got %r",
+                               source_days)
+            return []
+        plan = []
+        for source, days in source_days.items():
+            if source not in SOURCE_RETENTION_SOURCES:
+                logger.warning("sessions.source_retention_days: %r skipped; only automation sources (%s) "
+                               "can have their own retention", source, ", ".join(SOURCE_RETENTION_SOURCES))
+            elif isinstance(days, bool) or not isinstance(days, int) or days < 1:
+                logger.warning("sessions.source_retention_days.%s: %r skipped; use a whole number of days >= 1",
+                               source, days)
+            else:
+                plan.append((source, days))
+        return plan
 
     def maybe_auto_prune_and_vacuum(
         self, retention_days: int = 90, min_interval_hours: int = 24, vacuum: bool = True,

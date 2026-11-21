@@ -52,26 +52,29 @@ def _run_state_db_auto_maintenance(session_db) -> None:
                 logger.info(done_msg, count)
 
         session_db.maybe_archive_empty_drafts()  # [daveey] not gated by sessions.auto_archive
-        cfg = (_load_full_config().get("sessions") or {})
-
-        # Auto-archive is independent of auto_prune: run it before prune's early return.
-        if cfg.get("auto_archive", False):
-            session_db.maybe_auto_archive(
-                idle_days=float(cfg.get("auto_archive_days", 3)),
-                min_interval_hours=int(cfg.get("min_interval_hours", 24)),
-            )
-
-        if not cfg.get("auto_prune", False):
-            return
-        session_db.maybe_auto_prune_and_vacuum(
-            retention_days=int(cfg.get("retention_days", 90)),
-            min_interval_hours=int(cfg.get("min_interval_hours", 24)),
-            min_vacuum_interval_days=int(cfg.get("min_vacuum_interval_days", 30)),
-            vacuum=bool(cfg.get("vacuum_after_prune", True)),
-            sessions_dir=_hermes_home_maint / "sessions",
-        )
+        run_sessions_retention(session_db, _load_full_config().get("sessions") or {},
+                               _hermes_home_maint / "sessions")
     except Exception as exc:
-        logger.debug("state.db auto-maintenance skipped: %s", exc)
+        logger.debug("state.db auto-maintenance skipped: %s", exc, exc_info=True)
+
+
+def run_sessions_retention(session_db, cfg: dict, sessions_dir) -> None:
+    """The ``sessions:`` retention settings on one store, shared by the CLI start and the gateway's
+    housekeeping: auto-archive, per-source retention (each independent of ``auto_prune``), then the
+    global auto-prune/VACUUM."""
+    def interval() -> int:  # read only by an enabled feature, as before this helper existed
+        return int(cfg.get("min_interval_hours", 24))
+    if cfg.get("auto_archive", False):
+        session_db.maybe_auto_archive(idle_days=float(cfg.get("auto_archive_days", 3)),
+                                      min_interval_hours=interval())
+    if cfg.get("source_retention_days"):
+        session_db.maybe_prune_source_retention(cfg["source_retention_days"], min_interval_hours=interval(),
+                                                sessions_dir=sessions_dir)
+    if cfg.get("auto_prune", False):
+        session_db.maybe_auto_prune_and_vacuum(
+            retention_days=int(cfg.get("retention_days", 90)), min_interval_hours=interval(),
+            min_vacuum_interval_days=int(cfg.get("min_vacuum_interval_days", 30)),
+            vacuum=bool(cfg.get("vacuum_after_prune", True)), sessions_dir=sessions_dir)
 
 
 def _run_checkpoint_auto_maintenance() -> None:

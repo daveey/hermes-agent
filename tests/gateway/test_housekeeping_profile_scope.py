@@ -240,6 +240,41 @@ def test_profile_scope_setup_failure_restores_the_callers_home(two_homes, monkey
     assert current_secret_scope() == scope_before
 
 
+def test_maintenance_tick_applies_source_retention_with_auto_prune_off(two_homes):
+    """``sessions.source_retention_days`` reaches the gateway's housekeeping path with ``auto_prune``
+    off: the old Kanban transcript goes, the equally old chat stays. Real store, real config."""
+    import time
+
+    from hermes_state import SessionDB
+
+    a, _ = two_homes
+    (a / "config.yaml").write_text(
+        "model:\n  provider: nous\n"
+        "sessions:\n"
+        "  auto_prune: false\n"
+        "  min_interval_hours: 0\n"
+        "  source_retention_days:\n"
+        "    kanban: 14\n",
+        encoding="utf-8")
+    old = time.time() - 400 * 86400
+    db = SessionDB(db_path=a / "state.db")
+    for sid, source in (("old-kanban", "kanban"), ("old-chat", "desktop")):
+        db.create_session(sid, source)
+        db.end_session(sid, "done")
+        db._conn.execute("UPDATE sessions SET started_at=?, last_activity_at=? WHERE id=?", (old, old, sid))
+    db._conn.commit()
+    db.close()
+
+    _run_60_ticks(SimpleNamespace(config=SimpleNamespace(multiplex_profiles=False)))
+
+    db = SessionDB(db_path=a / "state.db")
+    try:
+        assert db.get_session("old-kanban") is None
+        assert db.get_session("old-chat") is not None
+    finally:
+        db.close()
+
+
 def test_prune_unlinks_transcripts_under_the_configured_sessions_dir(two_homes, tmp_path):
     """``gateway.sessions_dir`` governs the LAUNCH profile's transcripts; others use their own home.
 

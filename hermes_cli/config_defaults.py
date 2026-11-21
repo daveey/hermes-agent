@@ -2336,13 +2336,13 @@ DEFAULT_CONFIG = {
         # auto_prune key, every surface asks once the disk holding state.db runs low
         # (hermes_cli/prune_advisor.py); either answer writes the key and ends the question.
         "auto_prune": False,
-        # Inactive days of ended-session history to keep (= `hermes sessions prune`).
-        "retention_days": 90,
+        "retention_days": 90,  # inactive days of ended-session history to keep (= `hermes sessions prune`)
+        # {source: days} for automation sources only, applied even with auto_prune off (docs: sessions.md)
+        "source_retention_days": {},
         # Auto-archive (soft-hide, never delete) sessions with no activity for auto_archive_days,
         # once per min_interval_hours. Pinned sessions are exempt.
         "auto_archive": False,
-        # Idle days before auto-archive hides a session (only when auto_archive is true).
-        "auto_archive_days": 3,
+        "auto_archive_days": 3,  # idle days before auto-archive hides a session (only when auto_archive is true)
         # List delegate_task subagent runs in session lists (desktop sidebar, dashboard, session.list),
         # nested under their parent. Off by default: they are machinery, not conversations.
         "show_subagents": False,

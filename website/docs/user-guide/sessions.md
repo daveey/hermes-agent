@@ -1258,6 +1258,27 @@ sessions:
 Installs that set any of these keys explicitly keep their values; only unset
 keys follow the defaults.
 
+**Per-source retention.** Automation transcripts usually dominate `state.db` (a Kanban
+worker writes a full transcript for every card run) while your chats are what you want to keep.
+`sessions.source_retention_days` gives an automation source its own window, and it applies even
+while `auto_prune` is off:
+
+```yaml
+sessions:
+  auto_prune: false         # chats are kept
+  source_retention_days:
+    kanban: 14              # ended Kanban card transcripts go after 14 idle days
+    cron: 30
+```
+
+Only unattended automation sources are accepted (`cron`, `kanban`, `subagent`, `tool`,
+`recovered`); `cli`, `acp` and `api_server` are refused because they also hold interactive
+conversations. Any other source, or a value that is not a whole number of days `>= 1`, is
+skipped with a warning. It shares `min_interval_hours` and the auto-prune guards
+(pinned and mid-turn sessions are kept; a stale open row is closed first and gets a full
+window), and it never runs `VACUUM`: SQLite reuses the freed pages, so the file stops growing.
+Run `hermes sessions optimize` once to give space already used back to the disk.
+
 Only **ended** sessions are ever deleted. Active sessions are never auto-pruned,
 regardless of age. Ended sessions are aged from their last activity — the
 freshest of live activity, latest message, or session start — so a long-lived
