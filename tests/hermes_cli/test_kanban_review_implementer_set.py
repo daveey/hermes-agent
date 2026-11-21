@@ -633,23 +633,23 @@ def test_legacy_mandatory_reviewer_moves_off_a_blocked_pool(board, clock, monkey
         task = kb.get_task(conn, down)
         assert _is_review(conn, task, 'ready') is True
         route = _review_route(conn, down, 'ready')
-        assert route == (GROK, 'xai-oauth', 'review_unpinned')
+        assert route == (ASTRA, 'openai-codex', 'review_unpinned')
         assert tier.resolve_dispatch_tier(conn, task, lane='ready') == route
         assert review.implementer_models(conn, task) == {ASTRA}
         assert kb.get_task(conn, down).model_override == OPUS
-        # Legacy mandatory marks must not bypass pacing or author exclusions.
+        # Legacy mandatory marks must not bypass pacing; author models remain eligible.
         monkeypatch.setattr('hermes_cli.kanban_quota_episode.alternate_route', lambda *a: (GROK, 'xai-oauth'))
         from hermes_cli import kanban_llm_pacing as lp
         cfg = lp.config_from({'providers': ['anthropic', 'openai-codex', 'xai-oauth'], 'enabled': True})
         alternate = lpd._pace_alternate_route(
             conn, task, (OPUS, 'anthropic', 'review_unpinned'), 'ready', cfg, conn,
             [{'provider': 'anthropic', 'until': clock[0] + HELD_FAR}])
-        assert alternate is not None and alternate[:2] == (GROK, 'xai-oauth')
-        assert alternate[0] not in _models(conn, down)
+        assert alternate is not None and alternate[:2] == (ASTRA, 'openai-codex')
+        assert _models(conn, down) == {ASTRA}  # audit is preserved, not an exclusion
         if block == 'held':
             moved = paced.paced_route(conn, task, (OPUS, 'anthropic', 'review_unpinned'), lane='ready',
                                        cfg=tier.load_tier_config())
-            assert moved is not None and moved[:2] == (GROK, 'xai-oauth')
+            assert moved is not None and moved[:2] == (ASTRA, 'openai-codex')
 
 
 def test_legacy_reviewer_pin_does_not_require_model_diversity(board, clock, monkeypatch):

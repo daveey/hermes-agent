@@ -15,6 +15,10 @@ def unknown_author(conn, lane):
     if lane == 'ready':
         conn.execute("UPDATE tasks SET status='ready', skills=? WHERE id=?", ('["sdlc-review"]', tid))
         conn.commit()
+    import os
+    from pathlib import Path
+    path = Path(os.environ['HERMES_HOME']) / 'profiles' / 'worker' / 'config.yaml'
+    path.write_text(path.read_text() + 'providers:\n  anthropic:\n    enabled: false\n  openai-codex:\n    enabled: false\n')
     return tid
 
 
@@ -80,6 +84,6 @@ def test_known_author_actual_dispatch_still_obeys_candidate_walls(board, monkeyp
     if blocked:
         assert outcome.clock_held[tid][0] == 'review_provider_wall'
     else:
-        assert seen[0] != 'claude-sonnet-5-5'  # authenticated actual author remains excluded
+        assert seen[0] in {'claude-opus-5-5', 'gpt-6.1-sol'}  # actual configured qualified route
     task = kb.get_task(conn, tid)
     assert task is not None and task.model_override is None and task.provider_override is None

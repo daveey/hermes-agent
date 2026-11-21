@@ -136,7 +136,10 @@ def test_dispatch_ignores_legacy_pin_without_rewriting_author_evidence(board, la
     assert kb.get_task(conn, tid).model_override == 'claude-sonnet-4-5'
     event = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
     if lane == 'review':
-        assert event['implementer_models'] == ['claude-sonnet-4-5']
+        assert event['review_independence'] == 'separate_execution'
+        assert 'implementer_models' not in event
+        from hermes_cli import kanban_review_model as review
+        assert review.implementer_models(conn, kb.get_task(conn, tid)) == {'claude-sonnet-4-5'}
 
 
 def test_dispatch_dry_run_ignores_bad_pin_without_writing(board):
@@ -240,7 +243,8 @@ def test_refused_review_override_falls_back_to_registered_independent_reviewer(b
     assert tier['reason'] == 'review_unpinned' and tier['lane'] == 'review'
     assert tier['model'] == 'claude-opus-5-5'
     assert 'requested' not in tier
-    assert tier['implementer_models'] == ['claude-sonnet-5-5']
+    assert tier['review_independence'] == 'separate_execution'
+    assert 'implementer_models' not in tier
     assert kb.get_task(conn, tid).consecutive_failures == 0
 
 
@@ -253,7 +257,7 @@ def test_refused_review_override_may_use_the_registered_model_the_author_ran(boa
     dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
     assert seen == ['claude-opus-5-5']
     event = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
-    assert event['reason'] == 'review_override_refused' and event['requested']['model'] == FABLE
+    assert event['reason'] == 'review_unpinned' and 'requested' not in event
     assert kb.get_task(conn, tid).consecutive_failures == 0
 
 
@@ -269,6 +273,9 @@ def test_refused_review_override_without_registered_reviewer_never_spawns(board)
     conn, _ = board
     tid = _hand_off_for_review(conn, {'review_model': FABLE}, pin='claude-opus-5-5')
     _disable_anthropic()
+    import os
+    path = Path(os.environ['HERMES_HOME']) / 'profiles' / 'worker' / 'config.yaml'
+    path.write_text(path.read_text() + '  openai-codex:\n    enabled: false\n')
     seen = []
     dispatch_once(conn, spawn_fn=lambda *args: seen.append(args), max_spawn=1)
     assert seen == []
@@ -276,7 +283,7 @@ def test_refused_review_override_without_registered_reviewer_never_spawns(board)
     assert task.status == 'triage' and task.claim_lock is None
     failed = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'gave_up'][-1]
     assert failed['infrastructure'] is True
-    assert FABLE in failed['error'] and 'model_pin_not_in_routing_registry' in failed['error']
+    assert 'No eligible deep or standard review route' in failed['error']
 
 
 def test_registered_review_override_is_kept(board):
@@ -400,5 +407,5 @@ def test_rerouted_pin_reviewer_is_a_registered_deep_route_whatever_ran(board, ov
     dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
     event = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
     assert seen == [event['model']] and seen[0] in ('claude-opus-5-5', 'gpt-6.1-sol')
-    assert event['reason'] == ('review_unpinned' if override is None else 'review_override_refused')
+    assert event['reason'] == 'review_unpinned'
     assert kb.get_task(conn, tid).consecutive_failures == 0

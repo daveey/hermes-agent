@@ -64,7 +64,7 @@ def _goal_body(target: str, title: str, park_id: int) -> str:
         "Investigate its judge receipt, runs and evidence with kanban_show. Diagnose and remedy "
         "the missing prerequisite using existing tools and authorized owners. Preserve the original "
         "body, acceptance criteria, dependency graph, class/tier and capability requirements, authenticated "
-        "author exclusions and subscription billing policy. Concrete model/provider restrictions are not "
+        "audit provenance, separate execution/session review and subscription billing policy. Concrete model/provider restrictions are not "
         "active routing requirements. Do not invent profiles or use paid credentials as a workaround.\n\n"
         "Only after proving the prerequisite repaired, file "
         f'kanban_supervisor_request(ops=[{{"op":"resume","task_id":"{target}"}}], '

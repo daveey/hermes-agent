@@ -192,12 +192,12 @@ def test_pinned_review_not_gated_by_default_tier(board, cfg):
 
 
 @pytest.mark.parametrize("metadata,expected", [
-    ({"review_model": SONNET}, (SONNET, "anthropic", "review_override")),
+    ({"review_model": SONNET}, (OPUS, "anthropic", "review_unpinned")),
     ({"review_model": "custom", "review_provider": "custom-provider"},
      (OPUS, "anthropic", "review_unpinned")),
     ({"review_model": "class:deep"}, (OPUS, "anthropic", "review_override")),
 ])
-def test_explicit_review_override_is_honored_even_when_it_matches_the_author(board, metadata, expected):
+def test_legacy_concrete_override_is_ignored_and_class_override_is_honored(board, metadata, expected):
     cfg = config(board)
     with kbc.connect() as conn:
         t = task(conn)
@@ -223,7 +223,7 @@ def test_concrete_or_mandatory_override_is_rejected_before_handoff(board, metada
         assert kb.get_task(conn, t.id).status == "running"
 
 
-def test_disabled_routing_keeps_legacy_pin_but_refuses_explicit_class_override(board):
+def test_disabled_routing_keeps_legacy_audit_but_refuses_explicit_class_override(board):
     from hermes_cli.kanban_review_model import ReviewModelUnavailable
     cfg = config(board, strong="")
     data = json.loads(board.joinpath("config.yaml").read_text(encoding="utf-8"))
@@ -232,7 +232,7 @@ def test_disabled_routing_keeps_legacy_pin_but_refuses_explicit_class_override(b
     with kbc.connect() as conn:
         t = task(conn, OPUS)
         assert t is not None
-        assert tier.resolve_model_tier(conn, t, lane="review", cfg=cfg) == (None, None, "pinned")
+        assert tier.resolve_model_tier(conn, t, lane="review", cfg=cfg) == ("class:deep", "auto", "review")
         kb.claim_task(conn, t.id)
         assert kb.request_review(conn, t.id, metadata={"review_model": "class:deep"})
         with pytest.raises(ReviewModelUnavailable):

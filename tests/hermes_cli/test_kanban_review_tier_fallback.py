@@ -147,9 +147,10 @@ def test_dispatch_records_fallback_in_both_route_receipts(board, monkeypatch):
         assert events["run_route"]["tier_reason"] == "review_tier_fallback"
 
 
-def test_refused_override_retains_deep_only_recovery(board, monkeypatch):
+def test_legacy_override_is_ignored_and_unavailable_deep_falls_back(board, monkeypatch):
     from types import SimpleNamespace
     cfg = fallback_config(board)
+    monkeypatch.setattr(pacing, 'held_pools', lambda *_a: {'anthropic': 9999999999})
     refusal = SimpleNamespace(code="model_pin_not_in_registry", allowed=[STANDARD])
     monkeypatch.setattr(review, "registry_refusal",
                         lambda m, p, a: None if m == STANDARD else refusal)

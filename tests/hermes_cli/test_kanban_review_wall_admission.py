@@ -76,6 +76,8 @@ def test_review_wait_boundaries(board, monkeypatch, case):
         routes.append(("gpt-6.1-sol", "openai-codex"))
     if case == "structural":
         routes = []
+        monkeypatch.setattr('hermes_cli.kanban_model_assignment._assignee_config',
+                            lambda *_a: {'model_routing': {'enabled': True}})
     monkeypatch.setattr(review, "independent_routes", lambda *_a, level="deep": iter(
         routes if level == "deep" else [("gpt-6.1-sol", "openai-codex")] if case == "standard" else []))
     monkeypatch.setattr(review, "registry_refusal", lambda *_a: "refused" if case == "registry" else None)

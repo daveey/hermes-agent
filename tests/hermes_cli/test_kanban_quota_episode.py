@@ -207,14 +207,6 @@ def test_shared_admission_preview_and_owner_route(board, monkeypatch, entry):
         if expected_reroute:
             claim = kb.claim_review_task if lane == 'review' else kb.claim_task
             task = claim(conn, tid, claimer=kb._claimer_id())
-        if lane == 'review':
-            from hermes_cli.kanban_review_model import ReviewModelUnavailable
-            with pytest.raises(ReviewModelUnavailable, match='author|implementer'):
-                tier.apply_model_tier(conn, task, lane=lane, cfg=cfg)
-            seen = []
-            dispatch.dispatch_once(conn, spawn_fn=lambda row, ws: seen.append(row.id))
-            assert seen == []
-            return
         tier.apply_model_tier(conn, task, lane=lane, cfg=cfg)
         assert tier.effective_route(task)[:2] == preview[:2]
         if expected_reroute:

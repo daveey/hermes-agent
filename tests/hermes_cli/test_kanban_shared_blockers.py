@@ -453,11 +453,12 @@ def test_scheduled_review_uses_resume_lane(kanban_home, scoped_routing):
         assert kb.claim_review_task(conn, tid)
         assert continue_task(conn, tid, checkpoint="provider unavailable", resume_after_seconds=600,
                              metadata={"blocker_id": BID, "blocker_provider": "anthropic"})["ok"]
-        # Resume lane survives even though unknown authors cannot be allocated a reviewer.
-        assert ksb.task_route(conn, tid) == (None, None, "review")
+        # Missing model attribution cannot suppress the resume lane's eligible route;
+        # the matching provider blocker still holds it with its original probe custody.
+        assert ksb.task_route(conn, tid) == ('claude-opus-4', 'anthropic', 'review')
         from hermes_cli import kanban_review_model as review
-        with pytest.raises(review.ReviewModelUnavailable, match='author is unknown'):
-            review.resolve_review_model(conn, kb.get_task(conn, tid), {})
+        assert review.resolve_review_model(conn, kb.get_task(conn, tid), {}) == (
+            'claude-opus-4', 'anthropic', 'review_unpinned')
         assert ksb.shared_blocker_guard(conn, tid, interval=1800) == ksb.GUARD_REASON
 
 

@@ -363,11 +363,8 @@ def independent_routes(pin, cfg, assignee, *, level="deep"):
     The legacy pin/author-set argument is ignored; attribution is diagnostic only.
     Read-only; an unreadable routing policy contributes no policy candidates.
     """
-    # Model diversity is retired; pin is retained for caller compatibility.
-    strong = str(cfg.get("strong_model") or "").strip()
-    if level == "deep" and strong and not is_class_selector(strong):
-        from hermes_cli.kanban_model_tier import infer_provider
-        yield strong, str(cfg.get("strong_provider") or "").strip() or infer_provider(strong)
+    # Model diversity and concrete strong-model config are retired. Registry
+    # class/capability eligibility alone orders candidates, including same-model reviews.
     from agent.model_routing_agent import class_requirements
     from hermes_cli.config import is_provider_enabled
     from hermes_cli.kanban_model_assignment import _assignee_config

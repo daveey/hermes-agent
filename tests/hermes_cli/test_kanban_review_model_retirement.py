@@ -26,12 +26,15 @@ def test_missing_author_model_does_not_deny_downstream_review(board):
         assert review.resolve_review_model(conn, task, cfg) == (helpers.OPUS, 'anthropic', 'review_unpinned')
 
 
-def test_same_model_handoff_override_is_honored(board):
+def test_class_handoff_allows_same_model_but_concrete_override_is_rejected(board):
     cfg = helpers.config(board, strong=helpers.OPUS)
     with kbc.connect() as conn:
         task = helpers.task(conn, helpers.OPUS)
         kb.claim_task(conn, task.id)
-        kb.request_review(conn, task.id, metadata={'review_model': helpers.OPUS, 'review_provider': 'anthropic'})
+        with pytest.raises(ValueError, match='model-neutral'):
+            kb.request_review(conn, task.id, metadata={'review_model': helpers.OPUS, 'review_provider': 'anthropic'})
+        assert kb.get_task(conn, task.id).status == 'running'
+        kb.request_review(conn, task.id, metadata={'review_model': 'class:deep', 'review_provider': 'auto'})
         assert review.resolve_review_model(conn, kb.get_task(conn, task.id), cfg) == (
             helpers.OPUS, 'anthropic', 'review_override')
 

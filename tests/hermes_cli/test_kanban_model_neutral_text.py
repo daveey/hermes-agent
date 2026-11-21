@@ -30,3 +30,13 @@ def test_active_named_obligations_are_rejected(text):
 ])
 def test_historical_evidence_and_author_exclusions_are_retained(text):
     validate_text(text)
+
+
+def test_shipped_kanban_guidance_requires_execution_not_model_diversity():
+    from agent.prompt_builder import KANBAN_GUIDANCE
+    from hermes_cli.kanban_resume_requester import _goal_body
+    assert 'must exclude every author model' not in KANBAN_GUIDANCE
+    assert 'separate execution/session' in KANBAN_GUIDANCE
+    guidance = _goal_body('t_fixture', 'implementation', 1)
+    assert 'authenticated author exclusions' not in guidance
+    assert 'audit provenance' in guidance

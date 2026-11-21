@@ -100,7 +100,9 @@ def test_replica_author_pin_is_ignored_without_rewriting_pin(gws, monkeypatch):
     assert review.implementer_models(worker.conn, kb.get_task(worker.conn, down)) == {AUTHOR}
     worker.tick()
     routes = pool._route(worker.conn, down)
-    assert len(routes) == 1 and routes[0]['source'] != 'pin'
+    assert len(routes) == 1 and routes[0]['model'] == pool.PIN['model']
+    payload = [e.payload for e in kb.list_events(worker.conn, down) if e.kind == 'model_tier'][-1]
+    assert payload['review_independence'] == 'separate_execution'
     assert kb.get_task(worker.conn, down).model_override == AUTHOR
 
 
@@ -261,5 +263,9 @@ def test_linked_review_without_a_replica_still_resolves_a_route(gws, monkeypatch
     assert review.implementer_models(worker.conn, task) == set()
     model, _, reason = review.resolve_review_model(worker.conn, task, {'strong_model': pool.PIN['model']})
     assert model == pool.PIN['model'] and reason == 'review_unpinned'
+    # Removing concrete strong config does not remove the profile's eligible registry.
+    assert review.resolve_review_model(worker.conn, task, {}) == (model, 'anthropic', 'review_unpinned')
+    monkeypatch.setattr('hermes_cli.kanban_model_assignment._assignee_config',
+                        lambda *_a: {'model_routing': {'enabled': True}})
     with pytest.raises(review.ReviewModelsExhausted, match='No eligible deep or standard review route'):
         review.resolve_review_model(worker.conn, task, {})
