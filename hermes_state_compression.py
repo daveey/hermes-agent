@@ -121,7 +121,7 @@ _CHAIN_CAP = 1000
 # ``hermes sessions refresh-prompts`` request and rebuilds its prompt once more after eviction.
 # ``_chat_adopted`` (``gateway.session_lifecycle.CHAT_ADOPTED_MARKER``): a delegate row the user resumed a
 # chat onto stays that chat's conversation past a rotation, or the route guard rejects the new tip.
-_CONVERSATION_MODEL_CONFIG_KEYS = ("onboarding_run", "prompt_refresh_epoch", "_chat_adopted")
+_CONVERSATION_MODEL_CONFIG_KEYS = ("onboarding_run", "prompt_refresh_epoch", "_chat_adopted", "_agent_cli")
 
 
 def _walk_compression_chain(session_id: str, step) -> list[str]:
@@ -407,6 +407,9 @@ class SessionCompressionMixin:
                 (parent["archived"] or 0) if continuation else 0,
                 (parent["auto_archived"] or 0) if continuation else 0),
         )
+        if continuation and carried.get('_agent_cli'):
+            conn.execute('UPDATE sessions SET hidden=(SELECT hidden FROM sessions WHERE id=?) WHERE id=?',
+                         (parent_session_id, child_session_id))
 
     def publish_compression_child(
         self, *, parent_session_id: str, child_session_id: str, source: str,
