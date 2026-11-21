@@ -41,10 +41,12 @@ def classify_refusal(home, key, refusal, *, install_root=None):
             return refusal
         fd = os.open(update_lock.checkout_lock_path(root), os.O_RDONLY)
         try:
+            checkout = update_lock._parse_marker(os.read(fd, 4096))
             held = not update_lock._try_shared_lock(fd)
         finally:
             os.close(fd)
-        if not held:
+        if (not held or checkout.started_at is None or checkout.pid != update.pid
+                or checkout.create_time != update.create_time):
             return refusal
         # Revalidate the writer after the update probes (no stale PID classification).
         if marker_writer_state(marker) != "alive" or read_turn_marker(home, key) != marker:

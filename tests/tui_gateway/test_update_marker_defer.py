@@ -209,6 +209,22 @@ def test_real_other_process_marker_update_defers(tmp_path, monkeypatch, admissio
         proc.communicate(timeout=10)
 
 
+@pytest.mark.parametrize("defect", ["pid", "birth", "legacy", "malformed"])
+def test_updater_must_match_held_checkout_record(custody, defect):
+    path = update_lock.checkout_lock_path(custody.install)
+    lines = path.read_text().splitlines()
+    if defect == "pid":
+        lines[0] = str(os.getpid() + 1)
+    elif defect == "birth":
+        lines[2] = f"ct:{active_sessions._own_start_time() + 1:.3f}"
+    elif defect == "legacy":
+        lines = lines[:2]
+    else:
+        lines[1] = "not a recorded update time"
+    path.write_text("\n".join(lines) + "\n")
+    assert custody.classify() is custody.refusal
+
+
 @pytest.mark.parametrize("reason", ["SESSION_COORDINATION_UNAVAILABLE", "SESSION_MOVED", None])
 def test_other_refusal_codes_do_not_probe_markers(custody, monkeypatch, reason):
     custody.refusal.reason = reason
