@@ -73,7 +73,7 @@ def test_walled_review_cards_do_not_starve_a_pinned_card(gws, monkeypatch):
     assert all(_status(worker.conn, tid) is None for tid in walled)
 
 
-def test_a_failed_review_wall_check_copies_as_before(gws, monkeypatch):
+def test_failed_wall_check_does_not_bypass_structural_review_eligibility(gws, monkeypatch):
     _wall(monkeypatch)
     hub, worker = gws
     tid = _review(hub, title="Independent exact-head review", priority=10, runs_on=PIN)
@@ -84,6 +84,11 @@ def test_a_failed_review_wall_check_copies_as_before(gws, monkeypatch):
     def boom(*a, **kw):
         raise RuntimeError("config unreadable")
     monkeypatch.setattr(admission, "pickup_hold", boom, raising=False)
+    # The deadline-check exception cannot bypass the separate structural owner:
+    # every configured reviewer is still walled, so importing would churn.
+    assert wn.pickup(worker.conn, budget=1) == []
+    assert _status(worker.conn, tid) is None
+    monkeypatch.setattr(walls, "active_walls", lambda **_kw: {})
     assert wn.pickup(worker.conn, budget=1) == [tid]
 
 

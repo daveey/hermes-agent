@@ -8,7 +8,18 @@ from hermes_cli.config import is_provider_enabled
 
 
 def unroutable_class(conn, task_id, *, lane):
-    """Refuse a proven unusable class before claiming, never fall back to a profile pin."""
+    """Fail closed per card across the entire non-allocating eligibility read."""
+    try:
+        return _unroutable_class(conn, task_id, lane=lane)
+    except Exception as exc:  # health: allow BLE001 -- no config/resolver fault may abort sibling admission
+        import logging
+        logging.getLogger(__name__).warning('kanban class eligibility unavailable for %s (%s)',
+                                            task_id, type(exc).__name__)
+        return 'config_unavailable'
+
+
+def _unroutable_class(conn, task_id, *, lane):
+    """Refuse unusable local policy; review and quota owners retain their typed gates."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_model_assignment import _assignee_config
     from hermes_cli.kanban_model_neutral import routing_view
@@ -19,27 +30,43 @@ def unroutable_class(conn, task_id, *, lane):
     from hermes_cli.kanban_review_model import is_review_run
     if task is None or active(conn, task_id):
         return None  # the existing episode owns its typed hold and reset deadline
+    config = _assignee_config(task.assignee)
+    if not isinstance(config, dict):
+        return 'config_unavailable'
+    providers = config.get('providers', {})
+    if not isinstance(providers, dict) or any(not isinstance(block, dict) for block in providers.values()):
+        return 'config_unavailable'
     if is_review_run(conn, task, lane):
-        return None  # review owns provenance refusal, bounded escalation and route eligibility
+        # Review owns candidate strength/fallback, provenance and quota walls.
+        # A disabled host policy is never permission to use the profile model.
+        policy = config.get('model_routing') or {}
+        validate_policy(policy)
+        return None if policy.get('enabled') else 'routing_disabled'
     model, _, _ = resolve_model_tier(conn, routing_view(task), lane=lane)
     if not is_class_selector(model):
         return None
-    try:
-        config = _assignee_config(task.assignee)
-    except Exception as exc:  # health: allow BLE001 -- fail closed for this card, not the whole tick
-        import logging
-        logging.getLogger(__name__).warning('kanban class eligibility: config unavailable for %s (%s)',
-                                            task.assignee, type(exc).__name__)
-        return 'config_unavailable'
-    if config is None:
-        return 'config_unavailable'
     return class_unroutable_reason(model, config)
 
 
 def pickup_refusal(replica, card):
     """Use local class eligibility on replica history before consuming pickup budget."""
-    why = unroutable_class(replica, card['id'], lane=card['status'])
-    return ('model_unroutable', f'model_unroutable:{why}') if why else None
+    try:
+        why = unroutable_class(replica, card['id'], lane=card['status'])
+        if why:
+            return 'model_unroutable', f'model_unroutable:{why}'
+        # The review owner also has structural (not only deadline) refusals.
+        # Predict those read-only so a host with no reviewer cannot churn imports.
+        from types import SimpleNamespace
+        from hermes_cli.kanban_review_admission import hold
+        result = SimpleNamespace(clock_held={}, respawn_guarded=[])
+        if hold(replica, card['id'], result, lane=card['status'], dry_run=True):
+            return 'review_model_unavailable', result.respawn_guarded[-1][1]
+        return None
+    except Exception as exc:  # health: allow BLE001 -- fail closed for this candidate, never the pickup loop
+        import logging
+        logging.getLogger(__name__).warning('kanban pickup eligibility unavailable for %s (%s)',
+                                            card['id'], type(exc).__name__)
+        return 'model_unroutable', 'model_unroutable:config_unavailable'
 
 
 def class_wall_routes(task, model, *, now, extra_walls=None):

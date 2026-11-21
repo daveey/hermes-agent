@@ -28,14 +28,14 @@ def lane_admission_refused(conn: sqlite3.Connection, task_id: str, assignee: str
     if (code := dispatch_refusal(conn, task_id, assignee, spawn_fn, dry_run=dry_run)) is not None:
         result.capsule_refused.append((task_id, code))
         return True
+    from hermes_cli.kanban_class_walls import unroutable_class
+    if why := unroutable_class(conn, task_id, lane=lane):
+        result.skipped_ineligible.append((task_id, f'model_unroutable:{why}'))
+        return True
     from hermes_cli.kanban_review_admission import hold as review_hold
     if review_hold(conn, task_id, result, lane=lane, dry_run=dry_run):
         return True
     if budget_refused(conn, task_id, result, dry_run=dry_run):
-        return True
-    from hermes_cli.kanban_class_walls import unroutable_class
-    if why := unroutable_class(conn, task_id, lane=lane):
-        result.skipped_ineligible.append((task_id, f'model_unroutable:{why}'))
         return True
     # Model-neutral class quota eligibility is checked before a claim.
     from hermes_cli.kanban_dispatch_skip import hold_pinned_quota
