@@ -149,15 +149,21 @@ def archive(conn, task, *, comment=None, precondition=None, via=None, event_extr
     from hermes_cli.kanban_containment_terminal import terminal_closed
     if conn.in_transaction:
         raise ContainmentRefused("canonical terminal archive cannot run inside a writer transaction")
-    # Retained containment still routes archived cards here. A settled local
-    # projection is not a retry: do not replay its request or reason comment.
+    # Sync can project a closure before a lost-reply request is settled. Finish
+    # that request once; only then suppress replay of its reason comment.
     from hermes_cli.kanban_containment_terminal import closed
+    canonical._schema(conn)
+    state = sync.sync_state(conn)
+    unsettled = conn.execute(
+        "SELECT 1 FROM containment_delivery WHERE board=? AND gateway=? AND confirmed=0 "
+        "AND json_extract(op_json,'$.op')='archive' AND json_extract(op_json,'$.task')=?",
+        (state["board_id"], state["gateway_id"], task),
+    ).fetchone() if state else None
     current = kb.get_task(conn, task)
-    if current is not None and current.status == "archived" and closed(conn, task):
+    if current is not None and current.status == "archived" and closed(conn, task) and not unsettled:
         return False
     _scope_refusal(conn, task, precondition)  # before any network operation
     meta = _metadata(via, event_extra)
-    state = sync.sync_state(conn)
     if state:  # a changed retry is refused from local custody alone, before any Board contact
         _find(conn, state["board_id"], state["gateway_id"], task, meta)
     hub, board = remote.enrolled(conn)
