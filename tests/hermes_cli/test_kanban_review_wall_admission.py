@@ -130,16 +130,26 @@ def test_preclaim_resolver_error_does_not_abort_dispatch(
         board, monkeypatch, all_assignees_spawnable, failure):
     from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
     board.joinpath('config.yaml').write_text(_managed_yaml())
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    assert _assignee_config('a') is None  # the home registry is not this assignee's registry
+    profile = board / 'profiles' / 'a'
     monkeypatch.setattr(tier, "load_tier_config", lambda: {"enabled": True})
     monkeypatch.setattr(review, "resolve_review_model", lambda *_a: (_ for _ in ()).throw(failure))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="Build", assignee="a")
         sibling = kb.create_task(conn, title="Ordinary implementation", assignee="a")
+        diagnostic = dispatch.dispatch_once(conn, dry_run=True)
+        assert (sibling, 'model_unroutable:config_unavailable') in diagnostic.skipped_ineligible
+        assert kb.list_runs(conn, sibling) == []
+        profile.mkdir(parents=True)
+        (profile / 'config.yaml').write_text(_managed_yaml())
+        config = _assignee_config('a')
+        assert config is not None and config['model_routing']['routes']['standard']
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
         seen = []
-        dispatch.dispatch_once(conn, spawn_fn=lambda task, _ws: seen.append(task.id))
-        assert sibling in seen
+        result = dispatch.dispatch_once(conn, spawn_fn=lambda task, _ws: seen.append(task.id))
+        assert sibling in seen, (result.skipped_ineligible, result.respawn_guarded)
         # Unexpected non-typed resolver faults retain the existing per-card failure boundary;
         # the separate typed unknown-author controls require literal zero claims.
         assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='claimed'",
