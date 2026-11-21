@@ -32,7 +32,7 @@ class Records:
         if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
                 or parsed.query or parsed.fragment):
             raise AnswerRefused('hub_endpoint_invalid')
-        self._key = (path.parent / 'gateway.key').read_text().strip()
+        self._key = (path.parent / 'gateway.key').read_text(encoding='utf-8-sig').strip()
         if not self._key or '\n' in self._key or '\r' in self._key:
             raise AnswerRefused('hub_credential_invalid')
         self._opener = urllib.request.build_opener(_NoRedirect())
