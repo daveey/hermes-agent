@@ -20,7 +20,11 @@ vi.mock('@/hermes', async importOriginal => ({
   getHermesUpdateProgress: vi.fn().mockResolvedValue({ progress: null }),
   updateHermes: (...args: unknown[]) => updateHermesSpy(...args)
 }))
-vi.mock('@/store/notifications', () => ({ dismissNotification: vi.fn(), notify: vi.fn() }))
+const dismissSpy = vi.fn()
+vi.mock('@/store/notifications', () => ({
+  dismissNotification: (...args: unknown[]) => dismissSpy(...args),
+  notify: vi.fn()
+}))
 
 const updates = await import('./updates')
 
@@ -99,12 +103,19 @@ describe('Update on a host hermes-sync manages', () => {
   })
 
   it('hands the backend Update to hermes-sync without starting hermes update', async () => {
-    forceStateSpy.mockResolvedValue(managed)
+    let stageDuringRoute = ''
+    forceStateSpy.mockImplementation(async () => {
+      stageDuringRoute = updates.$backendUpdateApply.get().stage // preparing while the request is in flight
+
+      return managed
+    })
     forceSpy.mockResolvedValue({ ok: true })
 
     const result = await updates.applyBackendUpdate()
 
     expect(forceSpy).toHaveBeenCalledWith(undefined)
+    expect(dismissSpy).toHaveBeenCalled() // the "update available" toast goes away on the hand-off too
+    expect(stageDuringRoute).toBe('prepare')
     expect(updateHermesSpy).not.toHaveBeenCalled()
     expect(result.ok).toBe(true)
     expect(updates.$backendUpdateApply.get()).toMatchObject({ applying: false, stage: 'synced' })

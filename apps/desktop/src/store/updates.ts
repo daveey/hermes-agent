@@ -842,7 +842,6 @@ async function applyOwnUpdate(
   bridge: NonNullable<NonNullable<typeof window.hermesDesktop>['updates']>,
   opts: DesktopUpdateApplyOptions
 ): Promise<DesktopUpdateApplyResult> {
-
   try {
     const result = await bridge.apply(opts)
 
@@ -1106,6 +1105,14 @@ let backendUpdateInFlight: Promise<DesktopUpdateApplyResult> | null = null
 
 /** hermes-sync's Force update on a backend it manages, else the backend's own `POST /api/hermes/update`. */
 async function routeOrRunBackendUpdate(): Promise<DesktopUpdateApplyResult> {
+  dismissNotification(UPDATE_TOAST_ID)
+  $backendUpdateApply.set({
+    ...IDLE,
+    applying: true,
+    stage: 'prepare',
+    message: translateNow('updates.applyStatus.preparing')
+  })
+
   return (await routeUpdateToHermesSync('backend')) ?? runBackendUpdate()
 }
 
