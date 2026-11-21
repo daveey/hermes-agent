@@ -197,9 +197,7 @@ def test_recorded_skip_with_a_pool_hint_keeps_both_on_every_surface(home, pool):
 
 
 def test_pinned_quota_wall_skip_keeps_its_advice_and_drops_the_pool_re_place(home, pool):
-    """PR #1835 review: ``local_words`` advised a pool re-place for a ``pinned_quota_wall`` skip, dropping "starts
-    on its own when that wall resets / re-pin". ``_pool_could_run`` never reads the pool workers' quota, and a
-    re-place keeps the walled pin, so the quota-wall advice stands and no surface offers the re-place."""
+    """Historical wall receipts suppress relocation until expiry; advice must not recreate a pin."""
     from hermes_cli import kanban_dispatch_skip as skips
     skip = {"reason": skips.PINNED_QUOTA_WALL, "detail": "claude-opus-5-5 (anthropic)"}
     place = {**_PLACE, "skip": skip, "pool_could_run": ["worker-2"], "task_id": "t_x"}
@@ -217,7 +215,8 @@ def test_pinned_quota_wall_skip_keeps_its_advice_and_drops_the_pool_re_place(hom
     assert "pool_hint" not in payload and hint is not None
     for text in (hint, cw.notice_text(payload)):
         assert "--runs-on" not in text and "pool worker(s)" not in text, text
-        assert "starts on its own when that wall resets" in text, text
+        assert "starts on its own when an eligible class route becomes available" in text, text
+        assert "set-model" not in text and "re-pin" not in text, text
 
 
 def test_unrecorded_advice_variants_share_one_fact_sentence():
@@ -292,7 +291,7 @@ def test_notices_without_pool_name_no_worker(home):
 
 @pytest.mark.parametrize("reason,detail,starts", [
     ("owner_down", "default:inactive", "Resolve that dispatcher skip reason; "),
-    ("pinned_quota_wall", "claude-opus-5-5 (anthropic)", "It starts on its own when that wall resets. "),
+    ("pinned_quota_wall", "claude-opus-5-5 (anthropic)", "It starts on its own when an eligible class route becomes available; "),
 ])
 @pytest.mark.parametrize("pooled", [True, False])
 @pytest.mark.parametrize("census", [True, False])
@@ -346,7 +345,7 @@ def test_an_expired_quota_wall_skip_offers_the_pool_re_place_on_every_surface(ho
     _assert_pool_hint(hint, tid)
 
 
-_WALL_RESETS = "starts on its own when that wall resets"
+_WALL_RESETS = "starts on its own when an eligible class route becomes available"
 
 
 @pytest.mark.parametrize("census", [True, False])

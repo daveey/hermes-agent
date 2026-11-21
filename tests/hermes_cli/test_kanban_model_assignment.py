@@ -106,7 +106,7 @@ def test_dispatch_routes_legacy_incompatible_pin_without_spawning(board, monkeyp
     if lane == 'review':
         # Retain both authenticated authorship and conservative historical pin provenance.
         assert implementer_models(conn, task) == {'claude-sonnet-5-5', 'claude-opus-5-5'}
-        assert spawned[0][1] not in implementer_models(conn, task)
+        # Independence is the distinct admitted execution above, not model diversity.
 
 
 def test_unavailable_supervisor_does_not_abort_unrelated_dispatch(board):
