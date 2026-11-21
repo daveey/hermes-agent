@@ -22,6 +22,11 @@ def home(tmp_path, monkeypatch):
     root.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(root))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(root))
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    assert not (_assignee_config("default") or {}).get("model_routing", {}).get("enabled")
+    (root / "config.yaml").write_text(_managed_yaml())
+    assert _assignee_config("default")["model_routing"]["enabled"]
     for var in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
         monkeypatch.delenv(var, raising=False)
     kb.init_db()

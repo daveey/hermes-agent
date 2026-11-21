@@ -51,6 +51,11 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
     monkeypatch.setattr(kbd, "_worker_final_output", lambda *a, **kw: "")
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: (lambda name: True))
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    for name in ("askeve-builder", "worker-ok"):
+        profile = home / "profiles" / name
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text(_managed_yaml())
     kb.init_db()
     return home
 

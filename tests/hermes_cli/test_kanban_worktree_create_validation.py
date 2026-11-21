@@ -36,8 +36,9 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     profile = home / "profiles" / "a"
     profile.mkdir(parents=True)
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
     (profile / "config.yaml").write_text(
-        "platform_toolsets:\n  cli: [terminal, file]\nterminal:\n  backend: local\n",
+        "platform_toolsets:\n  cli: [terminal, file]\nterminal:\n  backend: local\n" + _managed_yaml(),
         encoding="utf-8",
     )
     kb.init_db()

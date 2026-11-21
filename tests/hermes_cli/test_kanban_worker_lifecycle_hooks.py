@@ -37,6 +37,10 @@ def kanban_home(tmp_path, monkeypatch):
     # Crash detection acts immediately in these tests (no launch grace).
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    profile = home / "profiles" / "alice"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text(_managed_yaml())
     kb.init_db()
     return home
 

@@ -36,6 +36,10 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    profile = home / "profiles" / "worker"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text(_managed_yaml())
     kb.init_db()
     return home
 
