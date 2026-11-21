@@ -8,6 +8,7 @@ import contextlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 import logging
+import _thread
 import secrets
 import threading
 import time
@@ -263,6 +264,21 @@ def stop_review_for_update(hold, *, why="after a pause request stood its grace")
     return True
 
 
+def start_update_pause_watcher(hold):
+    """Start ``hold``'s update-pause watcher; it exits when the review ends (``end_background_review``). Called
+    from the review thread itself, so a review whose thread never runs never leaves a watcher behind. Never raises:
+    without a watcher the review still stops at its next step boundary (``review_stop_reason``)."""
+    if hold is None or getattr(hold, "root", None) is None or hold.ended.is_set():
+        return
+    try:
+        # A low-level thread: never a threading.Thread a test swapped for a synchronous fake (that would run this
+        # polling loop inline and hang the review), never local-work custody (a drain would wait on its own
+        # watcher), and it never blocks interpreter exit. Infrastructure: no profile-scoped work.
+        _thread.start_new_thread(watch_update_pause, (hold,))
+    except RuntimeError:
+        _log.warning("Background review update-pause watcher did not start", exc_info=True)
+
+
 def watch_update_pause(hold, *, poll_s=None, grace_s=None):
     """Poll ``hold.root``'s pause request until the review ends; stop the review once the request has stood
     ``grace_s``. A request that lapses resets the grace. Runs on its own daemon thread (``begin_background_review``)."""
@@ -360,15 +376,6 @@ class RetirementFence:
                 return None
             hold = BackgroundReviewHold(self._now(), pending, root, session_id)
             self._reviews.add(hold)
-        if root is not None:
-            try:
-                from agent.memory_provider import spawn_context_thread
-
-                # passive: infrastructure, never local-work custody (a drain would wait on its own watcher)
-                spawn_context_thread(watch_update_pause, args=(hold,), name="bg-review-update-pause",
-                                     passive=True).start()
-            except RuntimeError:  # the review still stops at its next step boundary (review_stop_reason)
-                _log.warning("Background review update-pause watcher did not start", exc_info=True)
         return hold
 
     def end_background_review(self, hold):

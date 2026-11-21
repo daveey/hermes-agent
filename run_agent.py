@@ -884,6 +884,8 @@ class AIAgent(
             def _target_with_requeue() -> None:
                 try:
                     try:
+                        from hermes_cli.backend_retirement import start_update_pause_watcher
+                        start_update_pause_watcher(hold)  # [daveey] exits with the review (ended)
                         target()
                     finally:
                         retirement.end_background_review(hold)

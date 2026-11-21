@@ -52,6 +52,13 @@ def queue(monkeypatch):
     return queue
 
 
+def _begin(fence, **kwargs):
+    """Admit a review and start its watcher, as the review thread does (``run_agent._target_with_requeue``)."""
+    hold = fence.begin_background_review(**kwargs)
+    backend_retirement.start_update_pause_watcher(hold)
+    return hold
+
+
 class _Fork:
     """A review fork mid provider call: ``hard_interrupt`` is what ends the call."""
 
@@ -70,7 +77,7 @@ def _ask_turns_to_pause(root, *, expires_in=60.0):
 
 
 def test_a_review_mid_call_is_interrupted_once_the_pause_request_has_stood_its_grace(root, fence, fast):
-    hold = fence.begin_background_review(session_id="20261026_235722_bef6c6")
+    hold = _begin(fence, session_id="20261026_235722_bef6c6")
     fork = _Fork()
     hold.review_agent = fork
     try:
@@ -86,7 +93,7 @@ def test_a_review_mid_call_is_interrupted_once_the_pause_request_has_stood_its_g
 
 
 def test_no_pause_request_leaves_the_review_alone(root, fence, fast):
-    hold = fence.begin_background_review()
+    hold = _begin(fence, )
     fork = _Fork()
     hold.review_agent = fork
     try:
@@ -97,7 +104,7 @@ def test_no_pause_request_leaves_the_review_alone(root, fence, fast):
 
 
 def test_a_request_that_lapses_inside_the_grace_does_not_interrupt(root, fence, fast):
-    hold = fence.begin_background_review()
+    hold = _begin(fence, )
     fork = _Fork()
     hold.review_agent = fork
     try:
@@ -108,7 +115,7 @@ def test_a_request_that_lapses_inside_the_grace_does_not_interrupt(root, fence, 
 
 
 def test_a_retirement_wind_down_keeps_its_reason_and_is_not_interrupted(root, fence, fast):
-    hold = fence.begin_background_review()
+    hold = _begin(fence, )
     fork = _Fork()
     hold.review_agent = fork
     hold.wind_down_reason = WIND_DOWN_RETIREMENT
@@ -121,19 +128,41 @@ def test_a_retirement_wind_down_keeps_its_reason_and_is_not_interrupted(root, fe
         fence.end_background_review(hold)
 
 
-def test_the_watcher_thread_exits_when_the_review_ends(root, fence, fast):
-    before = set(threading.enumerate())
-    hold = fence.begin_background_review()
-    (watcher,) = [t for t in threading.enumerate() if t not in before and t.name == "bg-review-update-pause"]
+def test_the_watcher_exits_when_the_review_ends(root, fence, fast, monkeypatch):
+    exited = threading.Event()
+    real = backend_retirement.watch_update_pause
+
+    def watch(hold, **kw):
+        try:
+            real(hold, **kw)
+        finally:
+            exited.set()
+
+    monkeypatch.setattr(backend_retirement, "watch_update_pause", watch)
+    hold = _begin(fence)
+    assert not exited.wait(0.3)  # running while the review runs
     fence.end_background_review(hold)
-    watcher.join(timeout=5)
-    assert not watcher.is_alive()
+    assert exited.wait(5), "the watcher outlived its review"
+
+
+def test_the_watcher_survives_a_synchronous_thread_fake(root, fence, fast, monkeypatch):
+    """Tests drive the review thread with synchronous threading.Thread fakes; the watcher must not run inline."""
+    class ImmediateThread:
+        def __init__(self, target=None, daemon=None, name=None):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(threading, "Thread", ImmediateThread)
+    hold = _begin(fence)  # returns: the loop runs on its own thread
+    fence.end_background_review(hold)
 
 
 def test_a_review_stopped_before_its_fork_was_built_is_interrupted_when_the_fork_links(root, fence):
     from hermes_cli.backend_retirement import stop_review_for_update
 
-    hold = fence.begin_background_review()
+    hold = _begin(fence, )
     try:
         assert stop_review_for_update(hold) is True  # no fork yet: wind-down only
         fork = _Fork()
@@ -148,7 +177,7 @@ def test_a_review_that_already_ended_is_never_relabelled_update_paused(root, fen
     """The watcher racing the review's own end: a finished review must not be requeued as update-paused."""
     from hermes_cli.backend_retirement import stop_review_for_update
 
-    hold = fence.begin_background_review()
+    hold = _begin(fence, )
     fence.end_background_review(hold)
     assert stop_review_for_update(hold) is False
     assert not hold.wind_down.is_set() and hold.wind_down_reason is None
@@ -159,7 +188,7 @@ def test_a_long_provider_call_after_a_tool_is_interrupted(root, fence, fast):
     the watcher exists to cut, never a reason to wait (re-review of 7e96ec02697)."""
     from agent import update_pause_cancel
 
-    hold = fence.begin_background_review()
+    hold = _begin(fence, )
     fork = _Fork()
     vars(fork)[update_pause_cancel._IN_FLIGHT] = {update_pause_cancel.MODEL_CALL_ID: time.monotonic(),
                                                   update_pause_cancel.COMPRESSION_CALL_ID: time.monotonic()}
@@ -178,7 +207,7 @@ def test_a_review_whose_last_call_finished_under_a_wind_down_is_not_requeued(roo
     from hermes_cli.backend_retirement import stop_review_for_update
     from agent import update_pause_cancel
 
-    hold = fence.begin_background_review()
+    hold = _begin(fence, )
     fork = _Fork()
     vars(fork)[update_pause_cancel._IN_FLIGHT] = {"call_1": time.monotonic()}
     hold.review_agent = fork
@@ -192,7 +221,7 @@ def test_a_review_whose_last_call_finished_under_a_wind_down_is_not_requeued(roo
 def test_a_running_tool_is_not_cut_the_interrupt_waits_for_it(root, fence, fast):
     from agent import update_pause_cancel
 
-    hold = fence.begin_background_review()
+    hold = _begin(fence, )
     fork = _Fork()
     vars(fork)[update_pause_cancel._IN_FLIGHT] = {"call_1": time.monotonic()}  # skill_manage is writing
     hold.review_agent = fork
