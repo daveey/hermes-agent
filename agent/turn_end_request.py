@@ -27,7 +27,9 @@ CAPABILITY = "turn-end-request-v1"
 AUTO_KINDS = frozenset((TURN_STARTING_NOTICE_KINDS - {"loop_tick"}) | {"auto_continue"})
 #: What the ending turn reports as its interrupt message.
 END_MESSAGE = "Stopped from another Hermes window."
-_AUTO_RE = re.compile(r":auto=([a-z_]+)(?::|$)")
+# Only the segment right before the LAST ``:platform=``: ``lease_holder`` puts it there, after the turn id, whose
+# session/task parts a client may choose (an ``:auto=`` inside them must not count).
+_AUTO_RE = re.compile(r":auto=([a-z_]+)$")
 
 
 def auto_token(display_kind: Any) -> str:
@@ -37,5 +39,6 @@ def auto_token(display_kind: Any) -> str:
 
 def holder_auto_kind(holder: Any) -> Optional[str]:
     """The automated kind a durable holder string names, else None (a typed turn, or an older holder)."""
-    match = _AUTO_RE.search(str(holder or ""))
+    head, sep, _platform = str(holder or "").rpartition(":platform=")
+    match = _AUTO_RE.search(head) if sep else None
     return match.group(1) if match and match.group(1) in AUTO_KINDS else None

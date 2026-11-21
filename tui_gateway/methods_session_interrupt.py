@@ -82,6 +82,8 @@ _HELD_QUEUE_KEEPING_ORIGINS = frozenset({None, "stop_button", "esc", "tile", "ti
 _BACKGROUND_STOP_ORIGINS = frozenset({"stop_button", "esc", "tile", "tile:esc", "slash", "transcript"})
 
 
+BACKGROUND_STOP_TYPED_MESSAGE = ("The turn running in this chat in another window was not started by Hermes, so "
+                                 "Stop here does not end it. Stop it in that window.")
 BACKGROUND_STOP_QUEUED_MESSAGE = ("The background turn in this chat could not be stopped from here (the gateway "
                                   "running it is older). Your message runs when that turn ends.")
 
@@ -89,8 +91,8 @@ BACKGROUND_STOP_QUEUED_MESSAGE = ("The background turn in this chat could not be
 def _stop_gateway_background_turn(rid, sid: str, session: dict) -> bool:
     """A Stop on a chat whose turn Hermes started in ANOTHER process. Only cheap checks run here (this backend runs
     no turn, the chat's newest turn is automated); the holder discovery and the end itself run on a worker
-    (``_end_background_turn``) and report by events, so Stop never blocks the RPC reader. True when the worker
-    was started; False leaves the ordinary Stop."""
+    (``_end_background_turn``) and report by events, so Stop never blocks the RPC reader. The ordinary Stop runs
+    either way; True only says the worker was started."""
     with session["history_lock"]:
         if session.get("running"):
             return False
@@ -113,8 +115,9 @@ def _end_background_turn(rid, sid: str, session: dict, queued: bool) -> str:
       gateway honours end requests (``turn_end_request.CAPABILITY``): record the request for that exact holder
       (``SessionDB.request_turn_end``, compare-and-set). Its turn ends with an ordinary interrupt and releases
       the lease, so a prompt queued behind it runs next, once. Whether or not a prompt is queued.
-    - An older gateway: with nothing queued, ``session.take_over`` (as before); with a prompt queued in its FIFO
-      a take-over would race that queue, so the chat is told the message runs when the turn ends.
+    - A capable gateway running an UNSTAMPED turn: somebody typed it; nothing is ended, the chat is told so.
+    - An older gateway (not capable): with nothing queued, ``session.take_over`` (as before); with a prompt queued
+      in its FIFO a take-over would race that queue, so the chat is told the message runs when the turn ends.
     - Anything else (no such holder any more, another holder): nothing is ended."""
     from agent.turn_end_request import CAPABILITY, holder_auto_kind
     from tui_gateway.gateway_background_holder import gateway_background_holder
@@ -127,10 +130,15 @@ def _end_background_turn(rid, sid: str, session: dict, queued: bool) -> str:
         gateway = owner = None
     holder = str((owner or {}).get("holder") or "")
     if gateway is None or not holder:
+        # The ordinary Stop already ran for this chat; there is no background turn left to end.
         logger.info("Stop in %s: no background turn of this host's gateway holds it now; nothing to end", key)
         return "no_holder"
     capable = CAPABILITY in (getattr(gateway.endpoint, "capabilities", None) or ())
-    if capable and holder_auto_kind(holder) is not None:
+    if capable and holder_auto_kind(holder) is None:
+        # A gateway that stamps automated turns ran this one unstamped: somebody typed it. Never ended from here.
+        _emit("error", sid, {"message": BACKGROUND_STOP_TYPED_MESSAGE})
+        return "typed_turn"
+    if capable:
         try:
             with _session_db(session) as db:
                 recorded = bool(db.request_turn_end(key, holder, reason="stop"))
@@ -143,7 +151,7 @@ def _end_background_turn(rid, sid: str, session: dict, queued: bool) -> str:
         _emit("error", sid, {"message": "Stop could not reach the background turn in this chat; it may have "
                                         "just ended. Try Stop again if it is still running."})
         return "end_request_failed"
-    if queued:
+    if queued:  # only an older (not capable) gateway reaches here
         _emit("error", sid, {"message": BACKGROUND_STOP_QUEUED_MESSAGE})
         return "queued_not_interrupted"
     handler = _methods.get("session.take_over")
@@ -289,9 +297,11 @@ def _(rid, params: dict) -> dict:
         keep_held = origin in _HELD_QUEUE_KEEPING_ORIGINS
         _note_user_input(session)
         _note_stop_issuer(sid, session, current_transport(), origin)
-        if origin in _BACKGROUND_STOP_ORIGINS and _stop_gateway_background_turn(rid, sid, session):
-            # Requested, not yet done: the outcome reaches the chat as events (the turn's own end, or an error).
-            return _ok(rid, {"status": "interrupted", "background_turn": True})
+        # [daveey] An ADDITION to the ordinary Stop below (which still cancels this chat's automation replays and
+        # post-turn review): a worker ends the gateway's background turn and reports by events. ``background_turn``
+        # in the answer is only a hint that it was started.
+        hint = ({"background_turn": True} if origin in _BACKGROUND_STOP_ORIGINS
+                and _stop_gateway_background_turn(rid, sid, session) else {})
         if _session_uses_compute_host(session):
             with session["history_lock"]:
                 inflight_at_interrupt = session.get("inflight_turn")
@@ -303,7 +313,7 @@ def _(rid, params: dict) -> dict:
                 logger.warning("session.interrupt: compute-host interrupt failed for %s: %s", sid, exc)
                 _recover_unreachable_compute_host_turn(sid, session, inflight_at_interrupt,
                                                        bool(outcome.get("kept_update_held_queue")))
-            return _ok(rid, {"status": "interrupted", "turn_isolation": True})
+            return _ok(rid, {"status": "interrupted", "turn_isolation": True, **hint})
         # No agent wait: a turn parked on the deferred build already honors _turn_cancel_requested. Waiting here
         # failed Stop with 5032 once the build failed or outlived 30s (and started a build for a lazy session), so
         # the Desktop, which interrupts before session.close, could not delete such a session (#133262).
@@ -318,7 +328,7 @@ def _(rid, params: dict) -> dict:
             stale_key = str(outcome.get("stale_marker_key") or "")
             if stale_key and stale_key != str(session.get("session_key") or ""):
                 clear_turn_marker(_session_home(session), stale_key)
-            return _ok(rid, {"status": "interrupted"})
+            return _ok(rid, {"status": "interrupted", **hint})
         # Retire the crash-recovery marker NOW: until the run thread's finally, a backend exit looks like a crash
         # and session.resume auto-continues the turn the user just stopped (the extra key covers compression
         # rotating session_key mid-turn).
@@ -327,7 +337,7 @@ def _(rid, params: dict) -> dict:
         with session["history_lock"]:
             active_marker_key = str(session.pop("_active_turn_marker_key", "") or "")
         _retire_turn_marker(session, active_marker_key)
-        return _ok(rid, {"status": "interrupted"})
+        return _ok(rid, {"status": "interrupted", **hint})
     finally:
         if resume_wake:
             try:

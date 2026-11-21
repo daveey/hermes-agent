@@ -218,7 +218,8 @@ def idle_chat(monkeypatch):
                "history_lock": threading.RLock(), "running": False}
     monkeypatch.setitem(server._sessions, sid, session)
     state = {"calls": [], "requests": [], "recorded": True, "events": [], "workers": [], "capable": True,
-             "holder": AUTO_HOLDER, "answer": {"result": {"status": "taken_over"}}}
+             "holder": AUTO_HOLDER, "answer": {"result": {"status": "taken_over"}}, "ordinary": []}
+    monkeypatch.setattr(server, "_interrupt_session_turn", lambda *a, **k: state["ordinary"].append(a[0]))
 
     def take_over(rid, params):
         state["calls"].append(params)
@@ -265,6 +266,7 @@ def test_stop_answers_at_once_and_asks_exactly_the_holders_turn_to_end(idle_chat
     resp = _stop(sid, "stop_button")
 
     assert resp["result"] == {"status": "interrupted", "background_turn": True}
+    assert state["ordinary"] == [sid]  # the ordinary idle Stop ran too (automation replays, post-turn review)
     assert state["requests"] == [] and len(state["workers"]) == 1  # nothing discovered on the RPC thread
     assert _run_workers(state) == ["end_requested"]
     assert state["requests"] == [(KEY, AUTO_HOLDER)] and state["calls"] == [] and state["events"] == []
@@ -320,11 +322,24 @@ def test_stop_racing_a_queued_forwarded_admission_on_an_older_gateway_never_take
 
 
 def test_a_typed_holder_is_never_asked_to_end(idle_chat):
+    """A capable gateway stamps every automated turn: an unstamped one was typed, and is neither asked to end nor
+    taken over."""
     sid, _session, state = idle_chat
-    state["holder"] = f"pid={GATEWAY}:pidns=4026531836:turn=t1:platform=tui"  # no :auto=: an older or typed turn
+    state["holder"] = f"pid={GATEWAY}:pidns=4026531836:turn=t1:platform=tui"
     _stop(sid, "stop_button")
 
-    assert _run_workers(state) == ["taken_over"] and state["requests"] == []  # the older-gateway fallback
+    assert _run_workers(state) == ["typed_turn"]
+    assert state["requests"] == [] and state["calls"] == []
+    assert state["events"][0][2]["message"] == server.BACKGROUND_STOP_TYPED_MESSAGE
+
+
+def test_an_unstamped_turn_on_an_older_gateway_is_taken_over_as_before(idle_chat):
+    sid, _session, state = idle_chat
+    state["capable"] = False
+    state["holder"] = f"pid={GATEWAY}:pidns=4026531836:turn=t1:platform=tui"  # an older core stamps nothing
+    _stop(sid, "stop_button")
+
+    assert _run_workers(state) == ["taken_over"] and state["requests"] == []
 
 
 def test_no_gateway_holder_ends_nothing(idle_chat, monkeypatch):
@@ -336,33 +351,27 @@ def test_no_gateway_holder_ends_nothing(idle_chat, monkeypatch):
 
 
 @pytest.mark.parametrize("origin", ["delete", "rewind", "plugin:x", None])
-def test_other_interrupts_run_the_ordinary_stop(idle_chat, monkeypatch, origin):
+def test_other_interrupts_run_the_ordinary_stop(idle_chat, origin):
     sid, _session, state = idle_chat
-    ordinary = []
-    monkeypatch.setattr(server, "_interrupt_session_turn", lambda *a, **k: ordinary.append(a[0]))
     resp = _stop(sid, origin)
 
-    assert resp["result"] == {"status": "interrupted"} and ordinary == [sid] and state["workers"] == []
+    assert resp["result"] == {"status": "interrupted"} and state["ordinary"] == [sid] and state["workers"] == []
 
 
-def test_stop_of_this_backends_own_turn_is_the_ordinary_stop(idle_chat, monkeypatch):
+def test_stop_of_this_backends_own_turn_is_the_ordinary_stop(idle_chat):
     sid, session, state = idle_chat
     session["running"] = True
-    ordinary = []
-    monkeypatch.setattr(server, "_interrupt_session_turn", lambda *a, **k: ordinary.append(a[0]))
     resp = _stop(sid, "stop_button")
 
-    assert resp["result"] == {"status": "interrupted"} and ordinary == [sid] and state["workers"] == []
+    assert resp["result"] == {"status": "interrupted"} and state["ordinary"] == [sid] and state["workers"] == []
 
 
 def test_stop_on_a_chat_whose_newest_turn_was_typed_is_the_ordinary_stop(idle_chat, monkeypatch):
     sid, _session, state = idle_chat
     monkeypatch.setattr(server, "_automation_holder_kind", lambda session: None)
-    ordinary = []
-    monkeypatch.setattr(server, "_interrupt_session_turn", lambda *a, **k: ordinary.append(a[0]))
     resp = _stop(sid, "stop_button")
 
-    assert resp["result"] == {"status": "interrupted"} and ordinary == [sid] and state["workers"] == []
+    assert resp["result"] == {"status": "interrupted"} and state["ordinary"] == [sid] and state["workers"] == []
 
 
 # -- the forwarded prompt's turn waits for the background turn's lease ---------------------------------------------

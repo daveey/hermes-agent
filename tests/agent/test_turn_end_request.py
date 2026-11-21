@@ -35,6 +35,11 @@ def test_holder_names_only_automated_turns():
     assert auto.rsplit(":platform=", 1)[-1] == "tui"  # readers that take the surface from the tail still work
     assert holder_auto_kind(typed) is None and ":auto=" not in typed
     assert auto_token("loop_tick") == "" and auto_token("hidden") == "" and auto_token(None) == ""
+    # A client-chosen session/task id cannot fake the stamp: only the segment before the last :platform= counts.
+    assert holder_auto_kind(lease_holder("sid:task:auto=kanban_notice:x", "tui", None)) is None
+    # relay ids are ``<session>:<task>:<8 hex>`` (agent/turn_facade.py): a chosen task id never ends the turn id
+    assert holder_auto_kind(lease_holder("sid:auto=kanban_notice:1a2b3c4d", "tui", None)) is None
+    assert holder_auto_kind("pid=1:turn=t:auto=kanban_notice") is None  # no :platform= tail
     assert {"kanban_notice", "auto_continue", "process_complete"} <= AUTO_KINDS and "loop_tick" not in AUTO_KINDS
 
 
