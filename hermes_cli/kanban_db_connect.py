@@ -52,6 +52,12 @@ _CONTENT_ADDRESSED_BACKUP = re.compile(r"\.corrupt\.[0-9a-f]{16}\.bak")
 # then proceed without the lock (in-process _INIT_LOCK + idempotent init backstop).
 _INIT_LOCK_TIMEOUT_SECONDS = 10.0
 _INIT_LOCK_POLL_SECONDS = 0.05
+# A clean full ``integrity_check`` is O(board size) (3.0 s at the hub's 700 MB) and ran once PER PROCESS, under the
+# cross-process init lock, so N concurrent ``hermes kanban`` CLIs cost N serial scans (9-20 s each, 2026-11-21).
+# A clean result is stamped next to the DB (``<db>.integrity-ok``: file identity + wall time); a fresh stamp for the
+# same file lets later processes skip the scan. A TTL of 0 (module constant) always scans.
+_INTEGRITY_STAMP_SUFFIX = ".integrity-ok"
+_INTEGRITY_STAMP_TTL_SECONDS = 6 * 3600.0
 
 
 def _resolve_busy_timeout_ms() -> int:
@@ -670,6 +676,41 @@ def _probe_for_corruption(resolved: Path) -> tuple[Optional[list[str]], Optional
     return messages, f"integrity_check returned {messages[0] if messages else '<no row>'!r}"
 
 
+def _integrity_stamp_path(resolved: Path) -> Path:
+    return resolved.with_name(resolved.name + _INTEGRITY_STAMP_SUFFIX)
+
+
+def _integrity_stamp_fresh(resolved: Path) -> bool:
+    """True when a clean full check of THIS file (same device+inode) was recorded within the TTL. Any doubt
+    (missing/unreadable/garbled stamp, replaced file, a clock step backwards) is False: the scan runs."""
+    ttl = _INTEGRITY_STAMP_TTL_SECONDS
+    if ttl <= 0:
+        return False
+    try:
+        st = resolved.stat()
+        stamp = json.loads(_integrity_stamp_path(resolved).read_text(encoding="utf-8-sig"))
+        age = time.time() - float(stamp["verified_at"])
+        return stamp["dev"] == st.st_dev and stamp["ino"] == st.st_ino and 0 <= age < ttl
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _write_integrity_stamp(resolved: Path) -> None:
+    """Best effort: a failed write only means the next process scans again."""
+    if _INTEGRITY_STAMP_TTL_SECONDS <= 0:
+        return
+    target = _integrity_stamp_path(resolved)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    try:
+        st = resolved.stat()
+        tmp.write_text(json.dumps({"dev": st.st_dev, "ino": st.st_ino, "verified_at": time.time(), "pid": os.getpid()}),
+                       encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
 def _guard_existing_db_is_healthy(path: Path) -> None:
     """Run ``PRAGMA integrity_check`` on an existing non-empty DB file.
 
@@ -680,8 +721,9 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
     the file + sidecars and raise :class:`KanbanDbCorruptError` so callers
     never recreate the schema on top of a damaged DB. ``OperationalError``
     (lock/busy) is NOT corruption and propagates raw (no spurious backup).
-    No-op for missing / zero-byte files and paths already proven healthy this
-    process. All writes are confined to the resolved path's parent.
+    No-op for missing / zero-byte files, paths already proven healthy this
+    process, and files another process fully checked within the stamp TTL.
+    All writes are confined to the resolved path's parent.
     """
     try:
         resolved = path.resolve()
@@ -689,8 +731,11 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
         return
     if _missing_or_empty(resolved) or str(resolved) in _INITIALIZED_PATHS:
         return
+    if _integrity_stamp_fresh(resolved):
+        return  # another process fully checked this very file within the TTL: no per-process O(board) scan
     messages, reason = _probe_for_corruption(resolved)
     if reason is None:
+        _write_integrity_stamp(resolved)
         return
     # The probe ran in THIS process, whose view can be stale (deleted WAL/SHM
     # generation after a sibling's close). Only an independently confirmed failure
