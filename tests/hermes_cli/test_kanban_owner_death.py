@@ -33,8 +33,9 @@ REFUSAL = "Kanban owner refused: Gateway inaccessible: service_identity_unverifi
 def board(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
-    me = os.getpid()
-    monkeypatch.setattr(kb, "_pid_alive", lambda pid: pid == me)  # every worker and the old owner are dead
+    # All recorded processes are synthetic and dead, even if a number aliases pytest's PID.
+    # The live-owner control opts into its real process explicitly below.
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
     output = {"text": REFUSAL}
     monkeypatch.setattr(kbd, "_worker_final_output", lambda *a, **kw: output["text"])
     owner_home = tmp_path / "owner"
@@ -110,9 +111,12 @@ def test_runs_lost_to_an_unclean_owner_death_requeue_uncounted(board, monkeypatc
         assert not conn.execute("SELECT 1 FROM tasks WHERE idempotency_key LIKE 'systemic-crash:%'").fetchone()
 
 
-def test_owner_pid_gone_without_a_ledger_record_requeues_too(board, monkeypatch):
+@pytest.mark.parametrize("submitter_is_pytest", [False, True], ids=["fixed-pids", "pytest-pid"])
+def test_owner_pid_gone_without_a_ledger_record_requeues_too(board, monkeypatch, submitter_is_pytest):
     with kbc.connect() as conn:
-        pids = [82001, 82002, 82003]
+        # A CI worker can itself receive one of the fixture's fixed PID numbers.
+        first = os.getpid() if submitter_is_pytest else 82001
+        pids = [first, first + 1, first + 2]
         tids = [_claim(conn, kb.create_task(conn, title=f"card {p}", assignee="default"), p, board) for p in pids]
         _reaped(monkeypatch, pids)
         assert kbd.detect_crashed_workers(conn) == []
@@ -140,10 +144,12 @@ def test_owner_still_alive_is_not_an_owner_death(board, monkeypatch):
     # Control: the admitting owner is this live process, so the refusal is not its death.
     from hermes_cli.process_identity import worker_birth
     me = os.getpid()
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: pid == me)
+    worker_pid = me + 1  # distinct from the real owner, including on busy CI hosts
     with kbc.connect() as conn:
-        tid = _claim(conn, kb.create_task(conn, title="card", assignee="default"), 83001, board,
+        tid = _claim(conn, kb.create_task(conn, title="card", assignee="default"), worker_pid, board,
                      owner_pid=me, birth=worker_birth(psutil.Process(me)))
-        _reaped(monkeypatch, [83001])
+        _reaped(monkeypatch, [worker_pid])
         assert kbd.detect_crashed_workers(conn) == [tid]
         assert _task(conn, tid).consecutive_failures == 1
         assert "owner_restart_lost" not in _kinds(conn, tid)
