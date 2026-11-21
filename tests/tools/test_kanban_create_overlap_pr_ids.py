@@ -143,3 +143,17 @@ def test_pr_refs_carry_the_repo():
 def test_not_pr_refs(title):
     assert ko.pr_refs(title) == frozenset()
     assert ko.pr_numbers(title) == frozenset()
+
+
+def test_dot_git_repo_is_the_same_pr():
+    assert not ko._different_prs("Retro review a/b.git#55 merged", "Retro review a/b#55 merged")
+    assert not ko._different_prs("see https://github.com/a/b.git/pull/55", "Retro review a/b#55 merged")
+    assert ko.pr_refs("a/b.git#55") == {("a/b", 55)}
+
+
+def test_pr_followed_by_many_spaces_is_linear():
+    import time
+    start = time.monotonic()
+    assert ko.pr_refs("pr" + " " * 20000 + "x") == frozenset()
+    assert time.monotonic() - start < 0.5
+    assert ko.pr_refs("PR #55") == {(None, 55)} and ko.pr_refs("pr # 55") == {(None, 55)}

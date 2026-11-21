@@ -246,11 +246,12 @@ def cites(card_id: str, title: str, body: str) -> bool:
 # named no PR and every retro for another PR collided with any open one: the backstop stalled from 03:41Z until state
 # PR #3876 worked around it. A ref is now (repo, N): ``owner/repo#N`` and a github.com ``.../owner/repo/pull/N`` URL
 # carry their repo (lowercased); ``#N``, ``PR N``, ``PRN``, ``PR #N`` and ``pull/N`` carry none and match any repo.
-# ``##N``, ``word#N`` and ``a/b/c#N`` stay non-refs; N is 2-6 digits.
+# ``##N``, ``word#N`` and ``a/b/c#N`` stay non-refs; N is 2-6 digits. A trailing ``.git`` on the repo is dropped.
+# ``\bpr\s*(?:#\s*)?`` (not ``\s*#?\s*``): two adjacent ``\s*`` backtracked quadratically on "pr" + many spaces.
 _PR_REF = re.compile(
     r"(?<![\w./#-])(?P<repo>[a-z0-9][a-z0-9-]{0,38}/[a-z0-9_.-]+)#(?P<rn>\d{2,6})(?!\d)"
     r"|github\.com/(?P<url>[a-z0-9][a-z0-9-]{0,38}/[a-z0-9_.-]+)/pull/(?P<un>\d{2,6})(?!\d)"
-    r"|(?:(?<![\w#])#|\bpr\s*#?\s*|\bpull/)(?P<n>\d{2,6})(?!\d)",
+    r"|(?:(?<![\w#])#|\bpr\s*(?:#\s*)?|\bpull/)(?P<n>\d{2,6})(?!\d)",
     re.IGNORECASE)
 
 PrRef = tuple[Optional[str], int]  # (lowercased "owner/repo" or None when the title does not say, PR number)
@@ -262,7 +263,8 @@ def pr_refs(title: str) -> frozenset[PrRef]:
     refs = set()
     for m in _PR_REF.finditer(title or ""):
         repo = m.group("repo") or m.group("url")
-        refs.add((repo.lower() if repo else None, int(m.group("rn") or m.group("un") or m.group("n"))))
+        repo = repo.lower().removesuffix(".git") if repo else None  # o/r.git#N is o/r#N (same PR, never "different")
+        refs.add((repo, int(m.group("rn") or m.group("un") or m.group("n"))))
     return frozenset(refs)
 
 
