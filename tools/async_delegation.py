@@ -221,7 +221,7 @@ def _persist_dispatch(record: dict[str, Any]) -> None:
     task_payload = {
         key: record.get(key)
         for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch", "task_indexes", "task_transcripts",
-                    "task_session_ids", *_ROUTING_KEYS)
+                    "task_session_ids", "slot_key", *_ROUTING_KEYS)
         if key in record}
     try:  # where the children's terminals started; lets recovery add a git-state hint
         task_payload["owner_cwd"] = os.getcwd()
@@ -1168,6 +1168,7 @@ def _dispatch_admitted(
     task_indexes: Optional[list[int]] = None,
     task_transcripts: Optional[dict[str, str]] = None,
     task_session_ids: Optional[dict[str, str]] = None,
+    _adopt_row: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Shared dispatch core for single (``goals is None``) and batch units. Capacity check +
     record insert happen under ONE lock hold so concurrent dispatches can't both pass the check
@@ -1202,6 +1203,10 @@ def _dispatch_admitted(
         "_progress_token": None, "_progress_ts": dispatched_at, "_interrupted_at": None,
         "_home": hermes_home_key(get_hermes_home())}  # the profile that dispatched it (``active_count(home=...)``)
     with _records_lock:
+        if _adopt_row is not None:
+            from tools.async_delegation_adopt import restore_owned_record
+            if not restore_owned_record(record, _adopt_row):
+                return {"status": "rejected", "error": "Delegation ownership or durable row changed"}
         if any((field, record[field]) in _refused_by for field in _FENCED_FIELDS):
             return {"status": "rejected", "error": "This session was closed (exit or /new): no new background work."}
         active_slots = {r.get("slot_key") or r["delegation_id"] for r in _records.values() if r.get("status") in _ACTIVE_STATES}
@@ -1209,15 +1214,12 @@ def _dispatch_admitted(
             return {"status": "rejected", "error": capacity_error}
         _records[delegation_id] = record
         live_units = sum(1 for r in _records.values() if r.get("status") in _LIVE_STATES)
-    _persist_dispatch(record)
+    if _adopt_row is None:
+        _persist_dispatch(record)
     # Units of one call share a slot, so live units can exceed slots: size the pool by units or a
     # unit queues behind a full pool and the stale monitor kills it before its child ever starts.
-    executor = _get_executor(max(max_async_children, live_units))
-
     from tools.approval_notify_lease import acquire, run as run_with_notify_lease
-    lease = acquire(session_key)
-    with _records_lock:
-        record["_approval_lease"] = lease
+    lease = None
 
     def _worker() -> None:
         result: dict[str, Any] = {}
@@ -1242,6 +1244,10 @@ def _dispatch_admitted(
     # reservation too: the stall monitor may finalize its registry record before it really exits.
     retirement.acquire()
     try:
+        executor = _get_executor(max(max_async_children, live_units))
+        lease = acquire(session_key)
+        with _records_lock:
+            record["_approval_lease"] = lease
         future = executor.submit(propagate_context_to_thread(_worker))
         def worker_done(completed):
             try:
@@ -1252,11 +1258,14 @@ def _dispatch_admitted(
                 retirement.release()
 
         future.add_done_callback(worker_done)
-    except Exception as exc:  # pragma: no cover — pool submit failure is rare
+    except Exception as exc:
         retirement.release()
-        lease.release()
+        if lease is not None:
+            lease.release()
         with _records_lock:
             _records.pop(delegation_id, None)
+        if _adopt_row is not None:
+            return {"status": "rejected", "error": f"Failed to schedule adopted delegation: {exc}"}
         if remote := worker_ledger():
             remote.unscheduled(delegation_id)
         else:
