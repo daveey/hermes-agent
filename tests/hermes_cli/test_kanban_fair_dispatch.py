@@ -17,17 +17,19 @@ def test_one_slot_follows_ready_age_across_lanes(board, monkeypatch, all_assigne
     now = 1_800_000_000
     monkeypatch.setattr(time, "time", lambda: now)
     fixtures.configure(home, limit=None, cap=7)
+    from tests.hermes_cli.kanban_review_fixture import completed_source
+    completed_source(conn)
     if hub:
         fixtures._enable(home)
         fixtures.advisory(home)
         fixtures.locked(monkeypatch, fixtures.fake_sample(10))
     monkeypatch.setattr(dispatch, "_memory_pressure_level", lambda: "normal")
     monkeypatch.setattr(dispatch, "review_dispatch_enabled", lambda: True)
-    older = fixtures.ready(conn, "older", priority=0, created_at=now - 3600)
-    fresh = fixtures.ready(conn, "fresh", priority=1000, created_at=now)
+    older = fixtures.ready(conn, "older", priority=0, created_at=now - 3600, review=older_lane == "review")
+    fresh = fixtures.ready(conn, "fresh", priority=1000, created_at=now, review=older_lane != "review")
     review_id = older if older_lane == "review" else fresh
-    with kb.write_txn(conn):
-        conn.execute("UPDATE tasks SET status='review' WHERE id=?", (review_id,))
+    from hermes_cli.kanban_review_model import implementer_models
+    assert implementer_models(conn, kb.get_task(conn, review_id)) == {"claude-sonnet-5-5"}
     spawned = []
     dispatch.dispatch_once(conn, spawn_fn=lambda candidate, workspace, board=None: spawned.append(candidate.id),
                            max_spawn=1, max_in_progress=7)

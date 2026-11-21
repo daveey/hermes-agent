@@ -28,7 +28,8 @@ def open_board(tmp_path, monkeypatch):
 
 
 def configure(home, limit=50, cap=None):
-    lines = ["kanban:"]
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    lines = [_managed_yaml().rstrip(), "kanban:"]
     if cap is not None:
         lines.append(f"  max_in_progress: {cap}")
     if limit is not None:
@@ -42,6 +43,9 @@ def advisory(home, pct=10.0, age_ms=0):
 
 
 def task(conn, review=False, title="gate"):
+    from tests.hermes_cli.kanban_review_fixture import SOURCE_TITLE, create_review
+    if review and conn.execute("SELECT 1 FROM tasks WHERE title=? AND status='done'", (SOURCE_TITLE,)).fetchone():
+        return create_review(conn, title, "default")
     t = kb.create_task(conn, title=title, assignee="default")
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET status=? WHERE id=?", ("review" if review else "ready", t))

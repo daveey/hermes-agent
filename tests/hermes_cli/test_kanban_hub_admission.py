@@ -371,6 +371,9 @@ def test_dispatch_follows_shared_score_for_marked_and_normal_candidates(
 ):
     from hermes_cli import kanban_db_dispatch as dispatch
     conn, home = board
+    configure(home, limit=None)
+    from tests.hermes_cli.kanban_review_fixture import completed_source
+    completed_source(conn)
     configure(home, cap=7)
     with (home / "config.yaml").open("a") as config:
         config.write("    priority_slots: 3\n")
@@ -454,6 +457,8 @@ def test_dispatch_full_regular_pool_claims_marked_with_shared_memory_budget(
     from hermes_cli import kanban_db_dispatch as dispatch
     conn, home = board
     configure(home, limit=None)
+    from tests.hermes_cli.kanban_review_fixture import completed_source
+    completed_source(conn)
     for index in range(7):
         tid = task(conn, title=f"active {index}")
         assert kb.claim_task(conn, tid)
@@ -515,6 +520,9 @@ def test_full_regular_pool_never_attempts_normal_claims(board, monkeypatch, all_
     from hermes_cli import kanban_db_dispatch as dispatch
     from hermes_cli import kanban_queue_position as kqp
     conn, home = board
+    configure(home, limit=None)
+    from tests.hermes_cli.kanban_review_fixture import completed_source
+    completed_source(conn)
     attempts, spawned, spawn = _saturate(conn, home, monkeypatch, 7)
     normal = [task(conn, review=review, title=f"normal {index}") for index in range(3)]
     result = dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=20, max_in_progress=7, reconcile_orphans=False)
@@ -1062,8 +1070,8 @@ def test_claim_inside_the_hold_budget_still_admits(board, monkeypatch):
 
 # --- Phase 2: deterministic admission score over the full replica ---------------------------------------
 
-def ready(conn, title, priority=0, created_at=None, admission_class="normal", failures=0):
-    tid = task(conn, title=title)
+def ready(conn, title, priority=0, created_at=None, admission_class="normal", failures=0, review=False):
+    tid = task(conn, title=title, review=review)
     fields = {"priority": priority}
     if admission_class != "normal":
         fields["admission_class"] = admission_class
