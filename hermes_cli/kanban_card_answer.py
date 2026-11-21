@@ -56,6 +56,15 @@ def snapshot(conn, task: str) -> dict | None:
             "generation": digest({"lifecycle": identities, "ask": ask, "status": row["status"]})}
 
 
+def validate_provenance(value: dict, task: str) -> None:
+    """Shape fence for the private comment hook; the adapter establishes truth."""
+    fields = {"ownerGateway", "ownerProfile", "board", "task", "generation", "choice", "operationId", "originGateway"}
+    if (not isinstance(value, dict) or set(value) != fields or value.get("task") != task
+            or any(not isinstance(value[k], str) or not value[k] for k in fields)
+            or len(value["generation"]) != 64):
+        raise AnswerRefused("invalid_decision_provenance")
+
+
 def _receipt(conn, task, operation_id, fingerprint):
     for row in conn.execute(
         "SELECT payload FROM task_events WHERE task_id=? AND kind IN ('unblocked','archived') ORDER BY id DESC",
@@ -118,13 +127,22 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
     note = "Choice recorded in Desktop (remote): " + encoded(choices[0]) + "\nOperation: " + request["operationId"]
 
     def fence(c):
+        from hermes_cli.kanban_spend_decision import pending
+        row = c.execute("SELECT * FROM tasks WHERE id=?", (request["task"],)).fetchone()
+        if row is None or ("containment_episode" in row.keys() and row["containment_episode"]):
+            return "containment_hold"
+        if not archive and pending(c, request["task"]):
+            return "spend_decision_pending"
         if _receipt(c, request["task"], request["operationId"], fingerprint):
             return "already_recorded"
         fresh = snapshot(c, request["task"])
         return None if fresh == current else "stale_ask"
 
     transition = kb.archive_task if archive else kb.unblock_task
-    transition(conn, request["task"], precondition=fence, comment=("user-steps", note),
+    from hermes_cli.kanban_reason_comment import RecordedDecisionComment
+    provenance = {**request, "originGateway": origin}
+    comment = RecordedDecisionComment("user-steps", note, provenance)
+    transition(conn, request["task"], precondition=fence, comment=comment,
                event_extra={FIELD: receipt})
     recorded = _receipt(conn, request["task"], request["operationId"], fingerprint)
     if not recorded:

@@ -5,11 +5,12 @@ import sqlite3
 from typing import Callable, Optional
 
 from hermes_cli.kanban_outcome_refresh import refreshes_origin_outcomes
+from hermes_cli.kanban_reason_comment import Comment
 
 
 @refreshes_origin_outcomes
 def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None, via: Optional[str] = None,
-                 event_extra: Optional[dict] = None, comment: Optional[tuple[str, str]] = None,
+                 event_extra: Optional[dict] = None, comment: Comment = None,
                  precondition: Optional[Callable[[sqlite3.Connection], Optional[str]]] = None) -> bool:
     """Archive a task; a *running* task's host-local worker is terminated.
 

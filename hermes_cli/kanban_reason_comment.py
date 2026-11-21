@@ -13,9 +13,24 @@ import contextlib
 import secrets
 import sqlite3
 import time
+from dataclasses import dataclass
 from typing import Iterator, Optional
 
-Comment = Optional[tuple[str, str]]  # (author, body)
+
+@dataclass(frozen=True)
+class RecordedDecisionComment:
+    """Internal verified-operation provenance; never a caller-supplied tool payload.
+
+    The owner adapter must verify the source operation before constructing this.
+    It marks an answer, not an operator grant or a transcript message.
+    """
+
+    author: str
+    body: str
+    provenance: dict
+
+
+Comment = Optional[tuple[str, str] | RecordedDecisionComment]  # legacy (author, body) remains valid
 
 
 class _ReasonComment:
@@ -39,7 +54,12 @@ def reason_comment(conn: sqlite3.Connection, task_id: str, comment: Comment) -> 
     from hermes_cli import kanban_db as kb
 
     state = _ReasonComment()
-    if not (comment and comment[1] and conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone()):
+    decision = comment if isinstance(comment, RecordedDecisionComment) else None
+    if isinstance(comment, RecordedDecisionComment):
+        author, body = comment.author, comment.body
+    else:
+        author, body = comment or ("", "")
+    if not (body and conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone()):
         yield state
         return
     # A savepoint, not a DELETE: on a synced board the insert triggers queue outbox rows for the
@@ -47,7 +67,8 @@ def reason_comment(conn: sqlite3.Connection, task_id: str, comment: Comment) -> 
     # block/schedule/unblock write nothing before refusing, so this undoes only the comment.
     savepoint = f"reason_comment_{secrets.token_hex(6)}"
     conn.execute(f"SAVEPOINT {savepoint}")
-    state.comment_id = kb.add_comment(conn, task_id, comment[0], comment[1])
+    extra = ({"recorded_decision": decision.provenance, "writer_kind": "agent"} if decision else {})
+    state.comment_id = kb.add_comment(conn, task_id, author, body, **extra)
     try:
         yield state
     except BaseException:

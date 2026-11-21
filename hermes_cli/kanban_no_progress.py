@@ -88,7 +88,8 @@ def progress_marker(conn: sqlite3.Connection, task_id: str, *, before: Optional[
         f"SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND created_at < ? "
         f"AND (kind IN ({_marks(CARD_PROGRESS_EVENTS)}) "
         "OR (kind = 'commented' AND (json_extract(payload, '$.writer_kind') = 'human' "
-        "OR json_extract(payload, '$.relayed_human') IS NOT NULL)))",
+        "OR json_extract(payload, '$.relayed_human') IS NOT NULL "
+        "OR json_extract(payload, '$.recorded_decision.operationId') IS NOT NULL)))",
         (task_id, cut, *CARD_PROGRESS_EVENTS),
     ).fetchone()[0]
     linked = conn.execute(

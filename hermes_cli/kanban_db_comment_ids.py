@@ -98,6 +98,7 @@ def agent_comment_ids(conn: sqlite3.Connection, task_id: str, comment_ids: list[
 def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, *,
                 origin_gateway: Optional[str] = None, writer_kind: Optional[str] = None,
                 writer_session: Optional[str] = None, relayed_human: Optional[dict] = None,
+                recorded_decision: Optional[dict] = None,
                 system: bool = False) -> int:
     """Append a comment (moved from ``kanban_db``; re-exported there). ``origin_gateway``: the gateway it came from (the hermes-hub relay passes the
     sender); default: the gateway the author spelling names, else this gateway (kanban_comment_origin). [daveey]
@@ -115,6 +116,11 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
     so the live comment bridge still delivers it to that run. [daveey]"""
     if relayed_human is not None and writer_kind != "agent":
         raise ValueError("relayed_human marks an agent's relay of the user's message; it needs writer_kind='agent'")
+    if recorded_decision is not None:
+        from hermes_cli.kanban_card_answer import validate_provenance
+        validate_provenance(recorded_decision, task_id)
+        if writer_kind != "agent" or relayed_human is not None:
+            raise ValueError("recorded decision is an agent relay, not a transcript message")
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
@@ -160,6 +166,8 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str, 
                 payload["writer_session"] = str(writer_session)
         if relayed_human:
             payload["relayed_human"] = dict(relayed_human)
+        if recorded_decision is not None:
+            payload["recorded_decision"] = dict(recorded_decision)
         _kb._append_event(conn, task_id, "commented", payload)
         return cid
 
