@@ -34,6 +34,14 @@ def gws(tmp_path, monkeypatch, svc):
     sync.consume_dispatcher_wake()
     hub = Gateway(tmp_path, HUB, svc, monkeypatch, pickup=False)
     worker = Gateway(tmp_path, WORKER, svc, monkeypatch, pickup="true")
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    for gateway in (hub, worker):
+        profile = gateway.home / "profiles" / "dev"
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text(_managed_yaml())
+        gateway.enter()
+        assert _assignee_config("dev")["model_routing"]["enabled"] is True
     yield hub, worker
     for g in (hub, worker):
         g.conn.close()

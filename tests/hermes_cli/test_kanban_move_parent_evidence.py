@@ -39,7 +39,8 @@ def moved_parent(gws, monkeypatch):
                          (json.dumps({"verdict": "approve", "reviewed_sha": "short", "pr": helpers.PR}), parent))
     hub.round()
     worker.round()
-    assert (task, "active_pr") in worker.tick().respawn_guarded
+    tick = worker.tick()
+    assert (task, "active_pr") in tick.respawn_guarded, repr(tick)
     assert evidence.result(worker.conn, task, parent)
     return hub, worker, task, parent
 

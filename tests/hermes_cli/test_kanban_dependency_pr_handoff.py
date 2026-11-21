@@ -17,6 +17,13 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban"))
     monkeypatch.setattr(prs, "pr_state", lambda _: "OPEN")
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    (tmp_path / "config.yaml").write_text(_managed_yaml())
+    profile = tmp_path / "profiles" / "dev"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text(_managed_yaml())
+    assert _assignee_config("dev")["model_routing"]["enabled"] is True
     kb.init_db()
     with kbc.connect() as conn:
         assert str(conn.execute("PRAGMA database_list").fetchone()[2]).startswith(str(tmp_path))
