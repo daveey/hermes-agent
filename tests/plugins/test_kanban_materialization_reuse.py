@@ -30,6 +30,31 @@ def test_content_only_edit_retains_history_and_visible_payload(board, monkeypatc
     assert any(t['title'] == 'new title' for col in warm['columns'] for t in col['tasks'])
 
 
+@pytest.mark.parametrize('mutation', ['append', 'delete'])
+def test_changed_event_mark_skips_exact_scan(board, monkeypatch, mutation):
+    ids, _run = helpers._seed()
+    before = helpers._stable(helpers._read(board))
+    compared = []
+    original = board_read._same_events
+    monkeypatch.setattr(board_read, '_same_events',
+                        lambda c, tid, history: compared.append(tid) or original(c, tid, history))
+    conn = kbc.connect()
+    try:
+        if mutation == 'append':
+            conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'test', '{}', 1)",
+                         (ids[0],))
+        else:
+            conn.execute('DELETE FROM task_events WHERE task_id = ?', (ids[0],))
+        conn.commit()
+    finally:
+        conn.close()
+    warm = helpers._stable(helpers._read(board))
+    assert ids[0] not in compared, 'known-changed histories must not pay an exact scan before reload'
+    assert warm != before
+    board_rows.clear()
+    assert warm == helpers._stable(helpers._read(board))
+
+
 @pytest.mark.parametrize('mutation', [
     "UPDATE task_events SET payload = 1.0 WHERE id = 1",
     "UPDATE task_events SET payload = NULL WHERE id = 1",

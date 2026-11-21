@@ -233,7 +233,8 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
     """Retain event histories independently of task/run bookkeeping. ``event_changed``
     is the trusted P2 invalidation set: it marks every event insert, update and delete
     except inserts of ``UNREAD_EVENT_KINDS`` (heartbeats), which ``_unmarked_event_marks``
-    catches with index seeks, so a trusted refresh never scans retained histories.
+    catches with index seeks. Marked tasks compare exact history only when count/max
+    cannot already prove a change; unmarked tasks retain histories without scanning.
     Legacy callers without a cursor compare whole-history count/max plus the task row and
     runs (conservative). Clock/config rules stay fresh.
     """
@@ -242,7 +243,7 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
     unmarked = _unmarked_event_marks(conn, ids)
     if trusted:  # memos built without unmarked marks fall back to whole-history marks
         marks = _event_marks(conn, [tid for tid in ids if tid in prev
-                                    and (len(prev[tid]) < 6 or prev[tid][5] is None)])
+                                    and (tid in event_changed or len(prev[tid]) < 6 or prev[tid][5] is None)])
     else:
         marks = _event_marks(conn, ids)
     runs = retained_runs(conn, ids, prev, event_changed, _rows_by_task)
@@ -253,6 +254,11 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
             return True
         if trusted:
             if tid in event_changed:
+                # An append/delete is already known to differ: avoid scanning it
+                # once for equality and again to reload. Equal marks still need
+                # the exact comparison for same-ID edits and replacements.
+                if old[2] != marks.get(tid, _NO_EVENTS):
+                    return True
                 return not _same_events(conn, tid, old[3])
             if len(old) > 5 and old[5] is not None:
                 return old[5] != unmarked.get(tid)
