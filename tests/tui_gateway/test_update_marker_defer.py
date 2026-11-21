@@ -209,6 +209,27 @@ def test_real_other_process_marker_update_defers(tmp_path, monkeypatch, admissio
         proc.communicate(timeout=10)
 
 
+@pytest.mark.parametrize("reason", ["SESSION_COORDINATION_UNAVAILABLE", "SESSION_MOVED", None])
+def test_other_refusal_codes_do_not_probe_markers(custody, monkeypatch, reason):
+    custody.refusal.reason = reason
+    monkeypatch.setattr(update_marker_owner, "read_turn_marker", lambda *a: pytest.fail("unexpected marker probe"))
+    assert custody.classify() is custody.refusal
+
+
+@pytest.mark.parametrize("pid,birth", [(True, 1), (None, 1), (-1, 1), ("123", 1),
+                                      (123, None), (123, True), (123, float("nan"))])
+def test_unknown_holder_identity_does_not_probe_markers(custody, monkeypatch, pid, birth):
+    custody.refusal.holder_pid, custody.refusal.holder_start_time = pid, birth
+    monkeypatch.setattr(update_marker_owner, "read_turn_marker", lambda *a: pytest.fail("unexpected marker probe"))
+    assert custody.classify() is custody.refusal
+
+
+def test_writer_dies_during_update_probe(custody, monkeypatch):
+    states = iter(["alive", "dead"])
+    monkeypatch.setattr(update_marker_owner, "marker_writer_state", lambda _: next(states))
+    assert custody.classify() is custody.refusal
+
+
 def test_registry_refusal_carries_original_holder_birth(tmp_path):
     first, refusal = active_sessions.try_acquire_active_session(
         session_id="marker-chat", surface="desktop", registry_home=tmp_path, config={},
