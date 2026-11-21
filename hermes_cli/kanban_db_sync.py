@@ -195,6 +195,12 @@ CREATE TABLE IF NOT EXISTS kanban_sync_outbox (
     state        TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON kanban_sync_outbox(state, created_at);
+-- One local capture descriptor per extant task, not an op ledger.
+CREATE TABLE IF NOT EXISTS kanban_sync_status_origins (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    origin TEXT,
+    status TEXT
+);
 -- First-send synthetic parents are pending transport, not a permanent receipt ledger.
 CREATE TABLE IF NOT EXISTS kanban_sync_parent_envelopes (
     task_id TEXT PRIMARY KEY,
@@ -267,6 +273,8 @@ _SYNC_COLUMN_DDL = (
     ("tasks", "workspace_custody", "workspace_custody TEXT"),
     ("kanban_sync_outbox", "retry_after", "retry_after INTEGER"),
     ("kanban_sync_outbox", "wire_json", "wire_json TEXT"),
+    ("kanban_sync_outbox", "status_origin", "status_origin TEXT"),
+    ("kanban_sync_status_origins", "status", "status TEXT"),
     # 1 once repair_ms_timestamps ran on this file (the one-time repair of rows applied before the guard).
     ("kanban_sync_state", "seconds_repaired", "seconds_repaired INTEGER NOT NULL DEFAULT 0"),
     # Wall time of the last successful feed pull into this file (replicas): readers derive staleness from it. [daveey]
@@ -537,6 +545,10 @@ def _queue_rows(conn: sqlite3.Connection, table: str, ids: list[int]) -> None:
 
 
 def drop_triggers(conn: sqlite3.Connection) -> None:
+    # Detached/downgraded writers no longer invalidate current-row provenance.
+    # Reinstallation calls this too, covering old-core removal of our triggers.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_sync_status_origins'").fetchone():
+        conn.execute("DELETE FROM kanban_sync_status_origins")
     names = [r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'kanban_sync_%'")]
     for name in names:
@@ -658,7 +670,12 @@ def _delete_trigger(table: str) -> str:
 
 def wanted_triggers(conn: sqlite3.Connection) -> dict[str, str]:
     """Trigger name -> CREATE statement, generated from the live column list."""
-    out: dict[str, str] = {}
+    out: dict[str, str] = {
+        "kanban_sync_origin_invalidate": "CREATE TRIGGER kanban_sync_origin_invalidate AFTER UPDATE OF status ON tasks "
+        "WHEN OLD.status IS NOT NEW.status BEGIN DELETE FROM kanban_sync_status_origins WHERE task_id=NEW.id; END",
+        "kanban_sync_origin_delete": "CREATE TRIGGER kanban_sync_origin_delete AFTER DELETE ON tasks "
+        "BEGIN DELETE FROM kanban_sync_status_origins WHERE task_id=OLD.id; END",
+    }
     for table in SYNCED_TABLES:
         columns = captured_columns(conn, table)
         sqls = [_insert_trigger(table, columns)]

@@ -8,6 +8,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_sync_client as client
 from tests.hermes_cli import kanban_sync_support as support
 
+GUARD_CAP = {"status_origin": 1, "frozen_replay": 1, "hlc": "0000000000000-0000-server"}
 
 @pytest.fixture
 def board(tmp_path, monkeypatch):
@@ -20,6 +21,9 @@ def board(tmp_path, monkeypatch):
 
 
 class LostReply:
+    def status_origin_capability(self, board):
+        return GUARD_CAP
+
     def __init__(self):
         self.batches = []
 

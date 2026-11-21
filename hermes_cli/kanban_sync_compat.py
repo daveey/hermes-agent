@@ -8,6 +8,15 @@ import time
 
 from hermes_cli import kanban_db_sync as sync
 
+TRANSIENT_REASONS = ("storage_error", "depends_on_rejected")
+
+
+def transient_rejection(res: dict) -> bool:
+    reason = str(res.get("reason") or "")
+    detail = str(res.get("detail") or "")
+    return (reason in TRANSIENT_REASONS or (reason == "invalid" and "unknown table" in detail)
+            or (reason == "not_found" and detail.startswith(("no task", "unknown task", "status origin pending queue full;"))))
+
 
 def rejected_parent(conn: sqlite3.Connection, parents: list[tuple[dict, str]], result: dict) -> dict | None:
     """Keep successful parent versions; persist only schema-refused synthetic verdicts."""
@@ -22,7 +31,6 @@ def rejected_parent(conn: sqlite3.Connection, parents: list[tuple[dict, str]], r
             retire_parent(conn, tid)
         if result.get("status") != "rejected":
             return None
-        from hermes_cli.kanban_sync_client import transient_rejection
         # Every explicit rejection is definitive, unlike a lost answer. Its cached
         # verdict must not poison the next synthesis after the refusal cause lifts.
         retire_parent(conn, tid)
@@ -32,9 +40,9 @@ def rejected_parent(conn: sqlite3.Connection, parents: list[tuple[dict, str]], r
             return None
         # Only recoverable/schema refusals enter the existing bounded remap path.
         conn.execute(
-            "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, hlc, created_at) "
-            "VALUES (?, 'tasks', ?, 'upsert', ?, ?, ?)",
-            (op["client_op_id"], tid, json.dumps(op["fields"]), op["hlc"], int(time.time() * 1000)))
+            "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, hlc, created_at, status_origin) "
+            "VALUES (?, 'tasks', ?, 'upsert', ?, ?, ?, ?)",
+            (op["client_op_id"], tid, json.dumps(op["fields"]), op["hlc"], int(time.time() * 1000), op.get("status_origin")))
         return dict(conn.execute("SELECT * FROM kanban_sync_outbox WHERE op_id=?", (op["client_op_id"],)).fetchone())
     return None
 
@@ -93,11 +101,11 @@ def enqueue_retry(conn: sqlite3.Connection, row: dict, wire: dict, result: dict)
     if not inserted:
         return False
     conn.execute(
-        "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at, status_origin) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (retry_id, row["table_name"], row["row_uid"],
          "compat_import" if wire.get("import") else "compat", json.dumps(reduced),
-         row.get("base_version"), wire["hlc"], row["created_at"]))
+         row.get("base_version"), wire["hlc"], row["created_at"], wire.get("status_origin")))
     return True
 
 
@@ -117,9 +125,9 @@ def _drop_virtual(conn: sqlite3.Connection, row: dict, wire: dict, dropped: list
                                  else json.loads(row["fields"])).items() if k not in dropped}
     if reduced or row["op"] != "upsert":  # an upsert of only refused fields has nothing left to say
         conn.execute(
-            "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, base_version, hlc, created_at, status_origin) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (sync.uuid7(), row["table_name"], row["row_uid"], row["op"], json.dumps(reduced),
-             row.get("base_version"), wire["hlc"], row["created_at"]))
+             row.get("base_version"), wire["hlc"], row["created_at"], row.get("status_origin")))
     conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id = ?", (row["op_id"],))
     return VIRTUAL_DROPPED

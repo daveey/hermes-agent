@@ -1684,11 +1684,13 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
         return
 
     from hermes_cli import kanban_annotation_mutation as annotation_mutation
+    from hermes_cli import kanban_sync_status_origin as status_origin
 
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
     try:
         annotation_scope = annotation_mutation.arm(conn)
         _local_status_wake.arm(conn)  # [daveey] record this txn's status changes for the awaited-card wake
+        origin_armed = status_origin.arm(conn)
         yield conn
     except Exception:
         # SQLite may already have auto-rolled-back (EIO, contention, corruption);
@@ -1699,6 +1701,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
         raise
     else:
         try:
+            status_origin.bind(conn, origin_armed)
             _execute_boundary_with_retry(conn, "COMMIT")
         except Exception:
             # COMMIT exhausted retries with the txn still open; roll back so the

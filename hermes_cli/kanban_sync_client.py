@@ -53,6 +53,7 @@ from hermes_cli import kanban_sync_refusal as refusal  # one board's Containment
 from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
+from hermes_cli.kanban_sync_compat import TRANSIENT_REASONS, transient_rejection  # re-exported compatibility seam
 from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed
 from hermes_cli.kanban_sync_client_attempt import note_attempt, raise_bounded_error, replay_after_timeout
 from hermes_cli.kanban_sync_bounded_probe import DeadlineRequests as _DeadlineRequests, schedstat, watch_written
@@ -603,7 +604,7 @@ def _full_row_if_unseen(conn: sqlite3.Connection, row: dict) -> dict:
 
 # Rejections the service lifts on its own; anything else is final. A capped number of retries keeps a real mismatch
 # (an old service that will never know the table) visible as rejected instead of retrying forever.
-TRANSIENT_REASONS = ("storage_error", "depends_on_rejected")
+
 # Backed off 2 s doubling to 5 min: 20 attempts span about an hour, longer than a Durable Object takes to pick up
 # a deploy (observed: minutes to an hour on a busy board).
 MAX_TRANSIENT_ATTEMPTS = 20
@@ -611,13 +612,6 @@ MAX_TRANSIENT_ATTEMPTS = 20
 
 def _backoff_s(attempts: int) -> int:
     return min(2 ** (attempts + 1), 300)
-
-
-def transient_rejection(res: dict) -> bool:
-    reason = str(res.get("reason") or "")
-    detail = str(res.get("detail") or "")
-    return (reason in TRANSIENT_REASONS or (reason == "invalid" and "unknown table" in detail)
-            or (reason == "not_found" and detail.startswith(("no task", "unknown task"))))  # card goes first next round
 
 
 def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -> list[tuple[dict, str]]:
@@ -710,14 +704,17 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             rows, stopped = backlog.sendable_before_head(conn, hub, board, rows, seen)
         if not rows:
             break
+        from hermes_cli.kanban_sync_status_origin import absorb_clock, capability
+        origin_cap = capability(hub, board)
         with write_txn(conn):
+            absorb_clock(conn, origin_cap)
             from hermes_cli.kanban_terminal_guard import strip_stale_push  # no wake reopens a done card [daveey]
             from hermes_cli import kanban_sync_envelope as envelopes
             envelopes.prune_parents(conn)
             rows, _wire, parents = _within_batch(conn, rows, [{} for _r in rows], gateway)
             wire = [envelopes.outbound(conn, r, lambda r=r: strip_stale_push(
-                conn, translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway)))) for r in rows]
-            parents = [(envelopes.parent(conn, tid, lambda op=op: op), tid) for op, tid in parents]
+                conn, translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway))), supported=bool(origin_cap)) for r in rows]
+            parents = [(envelopes.parent(conn, tid, lambda op=op: op, supported=bool(origin_cap)), tid) for op, tid in parents]
             wire = [op for op, _tid in parents] + wire
         try:
             resp = hub.ops(board, wire)

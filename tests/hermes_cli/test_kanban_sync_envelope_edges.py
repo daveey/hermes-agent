@@ -13,6 +13,8 @@ board = fixtures.board
 
 
 class ParentRejected:
+    status_origin_capability = fixtures.LostReply.status_origin_capability
+
     def __init__(self):
         self.batches = []
 
@@ -76,6 +78,8 @@ def test_envelopes_commit_before_io_and_ack_cleans_pending_storage(board):
     kb.create_task(conn, title="durable", assignee="worker")
 
     class Ack:
+        status_origin_capability = fixtures.LostReply.status_origin_capability
+
         def ops(self, board, wire):
             independent = kbc.connect(home / "kanban.db")
             try:

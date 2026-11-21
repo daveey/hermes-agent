@@ -1,0 +1,30 @@
+# Frozen Board row retries and capture-origin status
+
+Owner: t_01a1ef099b996747; existing publication PR3913. Worker guard must land and be verified deployed before this sender lands. Worker PR180 advertises authenticated serving-DO capability `GET /v2/boards/<board>/status-origin/capability`, JSON `status_origin:1`, `frozen_replay:1`, and its current `hlc`. Both integer protocol flags and a valid server HLC are required; the earlier status-origin-only draft is not sufficient.
+
+## Contract
+
+First send persists op identity, payload and HLC before network I/O. An uncertain retry never rebuilds or strips that envelope. Capability is read before each batch (not cached across Worker rollback). Absent capability retains legacy rebuild/strip for work not yet frozen; already frozen work fails closed until support returns. Conservative board-wide FIFO hold is intentional, including statusless saved envelopes; this is not a promise of continued push throughput during a rollback. Pulls remain independent.
+
+The serving clock is max-merged into durable hlc_last in the envelope transaction BEFORE building any new row or synthetic-parent HLC. Only a newly frozen envelope carries op-level `frozen_replay:1`. This marker selects comparisons against server stamps. Legacy envelopes retain client ordering instead of silently losing to server clocks their sender never observed. Existing frozen bytes (including marker/HLC) never change when capability clocks advance. Do not clamp a remote clock to local wall time: that would falsely acknowledge losing new sends.
+
+`status_origin` is op-level, not a writable task column: empty string means no terminal/reopen at intent capture; event UID means newest lifecycle event at capture; NULL/missing is legacy/unknown. It is bound before the outer capture transaction commits, including its own row-before-event transition evidence. Multiple status intents in one transaction, untracked autocommit and historical records are not upgraded by guessing. Connection-local temp tracking rolls back with real SQLite savepoints. One bounded current-status descriptor/task supports synthetic parents and is invalidated by status mutation/deletion on any connection and on trigger detach/reinstall.
+
+Unseen-task first-send enrichment is a full CURRENT row. Keep its current status with the current status's persisted capture descriptor (including a status equality check); never splice an old delta status into new metadata and never use merely the latest event at send. Seen-task deltas retain their own captured association. Already frozen uncertain snapshots are unchanged even after newer local edits. Explicit definitive schema/transient refusal may produce a new identity through existing bounded remap; carry status_origin into each replacement INSERT. Permanent synthetic-parent refusals neither create diagnostic fanout nor poison later synthesis with a cached refusal. A materialized retry in backoff suppresses competing parent synthesis.
+
+## Evidenced why-chain
+
+Problem: after applied_ops expires, rebuilt retries generate a new HLC and can overwrite newer edits. Immutable status retries with a future HLC could then defeat a later terminal/reopen decision.
+Root(happened): no durable first-send identity/order across receipt GC, and no capture association for lifecycle status. Root(not caught): recall/reclaim tests did not compose expiry, a competing writer and terminal/reopen origin evidence. Recurrence: explicit PR160 gap and PR3913 independent reviewer finding3.
+
+Countermeasures: first-send wire_json and synthetic-parent pending transport; authoritative Worker origin-order status arbitration, immutable uncertain retry; serving-DO capability preflight and fail-closed rollback. Original REDs and Worker real-DO GREEN evidence live on PR180 and the owning card; the historical fresh-HLC fixture remains unchanged and labelled as old-sender evidence.
+
+Additional diagnostic review found definitive compatibility INSERTs dropped status_origin and detach/reinstall left stale current-row descriptors. Actual new tests reproduced 4 failures before fix (`core-origin-repairs-red.log`); copying provenance on replacements and invalidating at trigger removal fix them. Another RED (`core-origin-snapshot-red.log`) proves the previous enrichment mixed historical ready with current completed snapshot; current-snapshot capture descriptor fixes it. Earlier test expectations preserving intermediate ready were corrected with this causal evidence, not claimed unchanged GREEN. Conservative rollback hold was reviewed as a trade-off, not removed to improve throughput.
+
+Independent Worker review of PR180 found another failure: generic server HLC stamps entered legacy client LWW without the deployed sender absorbing the server clock. Its six real-DO probes reproduce five failures at the reviewed head; gating server comparisons with frozen_replay plus new-sender clock absorption preserves Worker-first compatibility. Native clock tests cover max-merge, counter rollover, transaction rollback, synthetic parents and byte-identical retries despite newer capability clocks. Pending-origin queue capacity refusal is explicitly transient through the existing bounded retry/remap path, retaining capture provenance; its dedicated test reproduced RED before the classification correction.
+
+## Coverage boundaries
+
+- Pre-upgrade or unbound historical uncertain sends cannot recover their original envelope or origin. Legacy ambiguity after reopen remains documented; never claim universal old-client safety.
+- Once both deletion tombstones and receipts are finally collected, frozen create can still recreate a removed card. This is an OPEN safety dependency, not waived here. Creator ruling720 ordered independently reviewed contiguous processed-prefix/per-stream fencing spec AFTER bounded guard delivery; no implementation, retention change or permanent per-op ledger is smuggled into this half.
+- Unit tests and local checks do not replace independent exact-head review, required CI, canonical guarded landing or supported live deployment readback.

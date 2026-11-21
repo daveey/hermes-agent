@@ -12,6 +12,11 @@ from typing import Optional
 class HubRoutesMixin:
     """One ``_call`` per endpoint; no state of its own."""
 
+    def status_origin_capability(self, board: str) -> dict:
+        from urllib.parse import quote
+
+        return self._call("GET", f"/v2/boards/{quote(board, safe='')}/status-origin/capability")
+
     def containment_capability(self, board: str) -> dict:
         from urllib.parse import quote
 
