@@ -2098,6 +2098,50 @@ def test_main_never_runs_a_qualified_or_sent_card_locally_when_the_requeue_fails
         assert blocked and "must not run here" in blocked[-1].payload["reason"]
 
 
+def test_main_exits_nonzero_without_running_the_card_when_even_the_hold_fails(mac, monkeypatch):
+    """main(): forward, requeue and the hold's block all fail. The card stays claimed for the dispatcher's crash
+    path (exit 1); it is never exec'd here. A SCHEDULED_UNTIL= marker in the quoted error does not turn the hold
+    into a timed park. [daveey]"""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
+    from tools import kanban_tools as kt
+    with kbc.connect_closing() as conn:
+        parent = _done_parent(kb, conn)
+    child = json.loads(kt._handle_create({"title": "Fix the flaky lint", "parents": [parent]}))["task_id"]
+    real_state = kpf.state
+    monkeypatch.setattr(kpf, "state", lambda c, t: {**(real_state(c, t) or {}), "request_id": "rq-1"})
+    with kbc.connect_closing() as conn:
+        kb.recompute_ready(conn)
+        claimed = kb.claim_task(conn, child)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", child)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(claimed.current_run_id))
+
+    def boom(self, *a, **kw):
+        raise RuntimeError("hub said: retry SCHEDULED_UNTIL=2026-11-21T08:00:00Z")
+    monkeypatch.setattr(kpf.Forwarder, "run", boom)
+    monkeypatch.setattr(kpf.Forwarder, "_park_clock", boom)
+    monkeypatch.setattr(kpf.os, "execvp", lambda *a: pytest.fail("ran the card locally"))
+    # The marker alone no longer breaks the hold: it is held.
+    assert kpf.main(["--", "hermes", "worker"]) == 0
+    with kbc.connect_closing() as conn:
+        task = kb.get_task(conn, child)
+        assert task.status in ("blocked", "triage") and task.block_kind == "transient"
+        assert "SCHEDULED_UNTIL=" not in [e for e in kb.list_events(conn, child) if e.kind == "blocked"][-1].payload["reason"]
+
+    # And when the block itself fails: exit 1, still no local run.
+    child2 = json.loads(kt._handle_create({"title": "Fix the other lint", "parents": [parent]}))["task_id"]
+    with kbc.connect_closing() as conn:
+        kb.recompute_ready(conn)
+        claimed2 = kb.claim_task(conn, child2)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", child2)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(claimed2.current_run_id))
+    monkeypatch.setattr(kb, "block_task", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("board locked")))
+    assert kpf.main(["--", "hermes", "worker"]) == 1
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, child2).status == "running"
+
+
 def test_main_still_falls_back_for_an_unsent_local_card_when_cancel_fails(mac, monkeypatch):
     """Control: a card never sent and with a local fallback still runs here when the forward and its cancel fail."""
     from hermes_cli import kanban_db as kb

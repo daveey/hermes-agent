@@ -718,7 +718,9 @@ def _qualified_origin(st: Optional[dict], self_gw: Optional[str]) -> bool:
 def hold(conn: sqlite3.Connection, task_id: str, run_id: Optional[int], why: str) -> str:
     """Block the card (agent-owned, so the block sweep hands it to triage) instead of running it here. [daveey]"""
     from hermes_cli import kanban_db as kb
-    reason = (f"placement forward failed and this card must not run here ({why})"[:900]
+    # The quoted errors are data: a SCHEDULED_UNTIL= marker in them would turn this transient block into a timed park.
+    quoted = why.replace("SCHEDULED_UNTIL=", "SCHEDULED_UNTIL:")
+    reason = (f"placement forward failed and this card must not run here ({quoted})"[:900]
               + "; fix the forward or re-place the card, then unblock it.")
     try:
         ok = kb.block_task(conn, task_id, kind="transient", reason=reason, expected_run_id=run_id)
