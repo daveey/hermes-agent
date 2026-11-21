@@ -286,7 +286,8 @@ def _notif_log_failure(what: str, exc: BaseException) -> None:
 # deterministic until that owner lets go, so the poller waits (doubling backoff) instead of re-running the turn
 # on its next pass. Before, a refused completion went straight back on the queue and the poller re-ran it every
 # ~0.8 s, painting a "Your message was not answered" card each time (139 in 110 s on 2026-10-28). The first
-# refusal of a streak shows its card; later probes in the streak are silent.
+# refusal of a foreign-owner streak shows its card; later probes in the streak are silent. Gateway
+# ledger contention never shows a takeover card and retries every 30 s instead of doubling.
 _OWNER_REFUSAL_BACKOFF_S = 30.0
 _OWNER_REFUSAL_BACKOFF_MAX_S = 300.0
 _OWNER_REFUSAL_CODES = ("SESSION_NOT_OWNED", "SESSION_COORDINATION_UNAVAILABLE")
@@ -297,9 +298,13 @@ def _notif_owner_refused(session: dict) -> bool:
     return time.monotonic() < float(session.get("_notif_owner_refused_until") or 0)
 
 
-def _notif_note_owner_refusal(session: dict, reason: str) -> None:
-    delay = float(session.get("_notif_owner_refusal_delay") or _OWNER_REFUSAL_BACKOFF_S)
-    session["_notif_owner_refusal_delay"] = min(delay * 2, _OWNER_REFUSAL_BACKOFF_MAX_S)
+def _notif_note_owner_refusal(session: dict, reason: str, *, ledger_status: str | None = None) -> None:
+    from tui_gateway.owner_forward import FORWARDABLE_LEDGER_STATES
+    queue_busy = ledger_status in FORWARDABLE_LEDGER_STATES
+    delay = (_OWNER_REFUSAL_BACKOFF_S if queue_busy else
+             float(session.get("_notif_owner_refusal_delay") or _OWNER_REFUSAL_BACKOFF_S))
+    session["_notif_owner_refusal_delay"] = (
+        _OWNER_REFUSAL_BACKOFF_S if queue_busy else min(delay * 2, _OWNER_REFUSAL_BACKOFF_MAX_S))
     session["_notif_owner_refused_until"] = time.monotonic() + delay
     logger.info("automatic turn for session %s refused (%s): another owner holds the chat; next try in %.0fs",
                 session.get("session_key") or "", reason, delay)
@@ -313,7 +318,8 @@ def _notif_owner_preflight(sid: str, session: dict) -> bool:
     refusal = _ensure_active_session_slot(sid, session)
     if refusal is None:
         return True
-    _notif_note_owner_refusal(session, str(getattr(refusal, "reason", None) or "refused"))
+    _notif_note_owner_refusal(session, str(getattr(refusal, "reason", None) or "refused"),
+                             ledger_status=getattr(refusal, "ledger_status", None))
     return False
 
 
@@ -327,6 +333,7 @@ def _notif_run_submit(rid, sid, session, text, **kwargs):
         _notif_release_turn(session)
         return False
     session.pop("_turn_owner_refusal", None)
+    session.pop("_turn_owner_refusal_ledger_status", None)
     session["_synthesized_turn"] = True  # [daveey] keeps a core-update-paused marker (prompt_turn)
     try:
         with stage(session):
@@ -334,8 +341,9 @@ def _notif_run_submit(rid, sid, session, text, **kwargs):
     finally:
         session.pop("_synthesized_turn", None)
     reason = session.pop("_turn_owner_refusal", None)
+    ledger_status = session.pop("_turn_owner_refusal_ledger_status", None)
     if not accepted and reason in _OWNER_REFUSAL_CODES:
-        _notif_note_owner_refusal(session, reason)
+        _notif_note_owner_refusal(session, reason, ledger_status=ledger_status)
     return accepted
 
 

@@ -137,6 +137,7 @@ def _admit_prompt_turn(
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
+    from tui_gateway import owner_forward
     from tui_gateway.turn_admission import live_turn_holds, mark_live_turn, note_refusal, owns
     note_refusal(spared_live_turn=False)
     with session["history_lock"]:
@@ -167,10 +168,15 @@ def _admit_prompt_turn(
         # [daveey] Read by the notification poller (_notif_after_submit): a synthesized turn refused for
         # ownership backs off instead of re-running every poll (139 refusal cards in 110 s, 2026-10-28).
         session["_turn_owner_refusal"] = reason
+        session["_turn_owner_refusal_ledger_status"] = getattr(ownership_refusal, "ledger_status", None)
         note_refusal(spared_live_turn=spared)
         if spared:
             logger.info("Refused submit for session %s left the live turn's state alone",
                         session.get("session_key") or sid)
+        elif session.get("_synthesized_turn") and (
+                getattr(ownership_refusal, "ledger_status", None) in owner_forward.FORWARDABLE_LEDGER_STATES):
+            logger.info("automatic turn for %s deferred: gateway queue holds %s work",
+                        session.get("session_key") or sid, ownership_refusal.ledger_status)
         elif report_ownership_refusal:
             # [daveey] retire_marker=False: this submit wrote no marker; the one on disk is a live turn's.
             _emit_terminal_turn_error(
@@ -181,7 +187,8 @@ def _admit_prompt_turn(
         if not owns(session):
             return None
         # This process owns the chat again: any notification refusal backoff is over. [daveey]
-        for key in ("_turn_owner_refusal", "_notif_owner_refused_until", "_notif_owner_refusal_delay"):
+        for key in ("_turn_owner_refusal", "_turn_owner_refusal_ledger_status",
+                    "_notif_owner_refused_until", "_notif_owner_refusal_delay"):
             session.pop(key, None)
         if session.get("_closing") or (
             queued_prompt_generation is not None
