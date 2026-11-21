@@ -28,13 +28,25 @@ from hermes_cli import kanban_db_connect as kbc
 
 
 @pytest.fixture
-def kanban_home(tmp_path, monkeypatch):
+def kanban_home(tmp_path, monkeypatch, all_assignees_spawnable):
     """Isolated HERMES_HOME with an empty kanban DB."""
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    (home / "config.yaml").write_text(_managed_yaml())
+    for name in ("alice", "reviewer"):
+        assert _assignee_config(name) is None
+        profile = home / "profiles" / name
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text(_managed_yaml())
+        assert _assignee_config(name)["model_routing"]["enabled"] is True
+    from tests.hermes_cli.kanban_review_fixture import completed_source
+    with kbc.connect() as conn:
+        completed_source(conn)
     return home
 
 
@@ -193,9 +205,8 @@ def test_max_spawn_stays_per_board(kanban_home, all_assignees_spawnable):
 
 
 def _park_in_review(conn: sqlite3.Connection, title: str, assignee: str) -> str:
-    tid = kb.create_task(conn, title=title, assignee=assignee)
-    _set_task_status(conn, tid, "review")
-    return tid
+    from tests.hermes_cli.kanban_review_fixture import create_review
+    return create_review(conn, title, assignee)
 
 
 @pytest.mark.parametrize("review_priority,ready_priority,review_spawns", [(900, 100, True), (0, 500, False)])
