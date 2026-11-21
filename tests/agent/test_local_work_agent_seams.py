@@ -190,7 +190,9 @@ def test_idle_queue_item_reserves_at_pop_and_empty_poll_does_not(reg, monkeypatc
     assert item is not None and reg.snapshot().active == 1, 'selected item is tracked atomically with the pop'
     item.context.run(queue._dispatch, item)
     assert spawned == [1]
-    item.work.release()
+    assert item.work is None, 'dispatch settles its own reservation, not the caller'
+    assert reg.snapshot().active == 0, 'dispatch retains custody through spawn then releases'
+    item.finish()  # the outer dispatcher fallback is idempotent
     _clean(reg)
 
 
