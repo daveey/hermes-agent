@@ -86,6 +86,10 @@ def test_copy_progress_lines_parse_end_at_100_and_precede_the_check(tmp_path, jo
     home = _home(tmp_path, 20000, journal_mode)  # ~80 MB
     result, events, elapsed = _run(home, NO_CLONE)
 
+    _assert_copy_progress(result, events, elapsed)
+
+
+def _assert_copy_progress(result, events, elapsed):
     assert result["method"] == "copy"
     progress = [e for e in events if e["event"] == "backup_progress"]
     assert progress, events
@@ -99,7 +103,31 @@ def test_copy_progress_lines_parse_end_at_100_and_precede_the_check(tmp_path, jo
     assert len(progress) <= 2 * elapsed + 3, (len(progress), elapsed)
     # The check is announced after the copy, so the overlay can say so.
     assert events[-1] == {"event": "backup_check"}
-    assert events.index(final) == len(events) - 2
+    # A throttled callback can already report 100%; the forced final line may
+    # have equal values, so locate the actual final event by identity, not index().
+    assert events[-2] is final
+
+
+def test_copy_progress_order_accepts_equal_but_distinct_final_events():
+    from hermes_cli.backup_sqlite import _ProgressReporter
+
+    out = io.StringIO()
+    reporter = _ProgressReporter(out, clock=lambda: 100.0)
+    reporter.progress(1000, 1000, method="copy")
+    reporter.progress(1000, 1000, method="copy", force=True)
+    events = _events(out.getvalue())
+    assert len(events) == 2
+    assert events[0] == events[1] and events[0] is not events[1]
+    events.append({"event": "backup_check"})
+
+    _assert_copy_progress({"method": "copy", "bytes": 1000}, events, elapsed=0)
+
+    # Equal earlier values must not conceal a final progress line after the check,
+    # or an intervening event between the final progress line and the check.
+    for misplaced in (events[:1] + events[2:] + events[1:2],
+                      events[:2] + [{"event": "backup_lock_wait"}] + events[2:]):
+        with pytest.raises(AssertionError):
+            _assert_copy_progress({"method": "copy", "bytes": 1000}, misplaced, elapsed=0)
 
 
 def test_reporter_throttles_to_two_lines_a_second_and_always_writes_the_final_line():
