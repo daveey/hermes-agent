@@ -15,6 +15,7 @@ import {
 import { $kanbanObservationTick } from '@/store/kanban-observation'
 import { $liveWorkRoster, setLiveWorkRosterSource } from '@/store/live-work-roster'
 import { $projectTree } from '@/store/project-tree'
+import { $projects } from '@/store/projects'
 import {
   $cronSessions,
   $messagingSessions,
@@ -23,12 +24,14 @@ import {
   _resetSessionOwnerHintsForTests,
   setSessionOwnerHint
 } from '@/store/session'
+import { $sessionColorOverrides } from '@/store/session-color'
 import { $sessionTiles } from '@/store/session-states'
-import type { SessionInfo } from '@/types/hermes'
+import { makeCwdSession } from '@/test/session-info'
+import type { ProjectInfo, SessionInfo } from '@/types/hermes'
 
 import fixture from '../../../../../schemas/fixtures/execution-observations-v1.json'
 
-import { SessionStatusDot } from './session-status-dot'
+import { sessionDotVariant, SessionStatusDot } from './session-status-dot'
 
 vi.mock('@/i18n', async () => {
   const { enSessionRowStatus } = await import('@/i18n/en_session_row_status')
@@ -95,6 +98,57 @@ afterEach(() => {
   $projectTree.set([])
   $unlistedSessionOwnerRows.set([])
   _resetSessionOwnerHintsForTests({ storage: true })
+})
+
+describe('SessionStatusDot idle outline', () => {
+  afterEach(() => {
+    $sessionColorOverrides.set({})
+    $projects.set([])
+  })
+
+  it('stays hollow grey even for a project-coloured session', () => {
+    $projects.set([
+      {
+        id: 'p',
+        name: 'Project',
+        slug: 'p',
+        archived: false,
+        color: '#a855f7',
+        folders: [{ path: '/project', added_at: 0, is_primary: true, label: null }],
+        primary_path: '/project',
+        created_at: 0,
+        board_slug: null,
+        description: null,
+        icon: null
+      } satisfies ProjectInfo
+    ])
+    const c = dot(makeCwdSession('/project', { message_count: 4, kanban_observed_at: NOW }))
+    const circle = c.querySelector('.rounded-full') as HTMLElement
+    expect(circle.className).toContain('border-(--ui-text-quaternary)')
+    expect(circle.style.borderColor).toBe('')
+    expect(circle.style.backgroundColor).toBe('')
+  })
+
+  it('keeps the working dot filled accent at the same size', () => {
+    const working = sessionDotVariant('working')
+    expect(working.className).toBe('size-1.5 rounded-full bg-(--ui-accent)')
+    expect(working.className).not.toContain('border')
+  })
+
+  it.each([null, '#a855f7'])('keeps an active-sized hollow circle with colour %s', color => {
+    if (color) {
+      $sessionColorOverrides.set({ 'idle-outline': color })
+    }
+
+    const c = dot({ id: 'idle-outline', message_count: 4, kanban_observed_at: NOW })
+    const circle = c.querySelector('.rounded-full') as HTMLElement
+    expect(circle.classList.contains('size-1.5')).toBe(true)
+    expect(circle.classList.contains('border')).toBe(true)
+    expect(circle.className).not.toContain('bg-')
+    expect(circle.style.backgroundColor).toBe('')
+    expect(circle.style.borderColor).toBe('')
+    expect(circle.className).toContain('border-(--ui-text-quaternary)')
+  })
 })
 
 // [daveey] PR #2154 review follow-ups: the dot evaluates every store its row verdict reads, falls back to the

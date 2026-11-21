@@ -1,4 +1,5 @@
 {
+  "sidebar.row.cardsIdle": ["ar", "de", "es", "fr", "ja", "ru", "zh", "zh-hant"],
   "sidebar.row.cardColours.red": ["ar", "de", "es", "fr", "ja", "ru", "zh", "zh-hant"],
   "sidebar.row.cardColours.pink": ["ar", "de", "es", "fr", "ja", "ru", "zh", "zh-hant"],
   "sidebar.row.cardColours.amber": ["ar", "de", "es", "fr", "ja", "ru", "zh", "zh-hant"],

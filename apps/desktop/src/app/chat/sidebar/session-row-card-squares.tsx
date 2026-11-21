@@ -37,6 +37,26 @@ export function sessionCardColours(
   )
 }
 
+export function SessionRowRunSquare({ session }: { session: SessionInfo }) {
+  const { t } = useI18n()
+  const count = sessionCardColours(session, 0).find(item => item.colour === 'blue')?.count ?? 0
+  const label = count > 0 ? `${t.sidebar.row.cardColours.blue} ${count}` : t.sidebar.row.cardsIdle
+
+  return (
+    <Tip label={label} side="top">
+      <span
+        aria-label={label}
+        className={`size-[6px] shrink-0 rounded-[1.5px] ${count > 0 ? COLOURS.blue : 'border border-(--ui-text-quaternary)'}`}
+        data-run-square={count > 0 ? 'running' : 'idle'}
+        role="img"
+      />
+    </Tip>
+  )
+}
+
+const trailingColours = (session: SessionInfo, executionUnknown: number) =>
+  sessionCardColours(session, executionUnknown).filter(item => item.colour !== 'blue')
+
 export function SessionRowCardSquares({
   session,
   executionUnknown
@@ -45,7 +65,7 @@ export function SessionRowCardSquares({
   executionUnknown: number
 }) {
   const { t } = useI18n()
-  const colours = sessionCardColours(session, executionUnknown)
+  const colours = trailingColours(session, executionUnknown)
 
   if (!colours.length) {
     return null
@@ -76,7 +96,7 @@ export function SessionRowCardSquares({
 
 /** Keep the gateway marks last, and don't displace a slot-ending opt-in PR chip on empty rows. */
 export function flatRowCardMarks(session: SessionInfo, executionUnknown: number, gatewayIcon: ReactNode): ReactNode {
-  if (!gatewayIcon && !sessionCardColours(session, executionUnknown).length) {
+  if (!gatewayIcon && !trailingColours(session, executionUnknown).length) {
     return null
   }
 

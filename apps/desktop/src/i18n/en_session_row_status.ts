@@ -39,6 +39,7 @@ const watchLabel = (card: { id: string; label?: string; eta?: number }): string 
 
 // [daveey] Sidebar row status copy (kanban + process badges, outcome stripe tooltips), spread into en.ts.
 export const enSessionRowStatus = {
+  cardsIdle: 'No linked cards running',
   cardColours: {
     red: 'Needs you',
     pink: 'Held',

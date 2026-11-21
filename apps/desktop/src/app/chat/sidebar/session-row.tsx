@@ -57,7 +57,7 @@ import {
 } from './chrome'
 import { shellOwnsPress } from './reorderable-list'
 import { SessionContextMenu } from './session-actions-menu'
-import { flatRowCardMarks } from './session-row-card-squares'
+import { flatRowCardMarks, SessionRowRunSquare } from './session-row-card-squares'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
 import { RowHoverActions } from './session-row-hover-actions'
@@ -583,6 +583,7 @@ function SidebarSessionRowImpl({
               return (
                 <>
                   {leadNode}
+                  <SessionRowRunSquare session={session} />
                   <SessionRowSlot area={SESSION_ROW_AREAS.leading} sessionId={sessionPinId(session)} />
                   {handoffBadge}
                   <span className="min-w-0 flex-1 self-center">
@@ -643,6 +644,7 @@ function SidebarSessionRowImpl({
                     entire width — nothing truncates against the kebab. */}
                 <div className="flex min-w-0 items-center gap-1.5">
                   {leadNode}
+                  <SessionRowRunSquare session={session} />
                   <SessionRowSlot area={SESSION_ROW_AREAS.leading} sessionId={sessionPinId(session)} />
                   <span
                     className={cn(

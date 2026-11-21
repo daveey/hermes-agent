@@ -1,4 +1,3 @@
-import { useStore } from '@nanostores/react'
 import type { CSSProperties } from 'react'
 
 import { type Translations, useI18n } from '@/i18n'
@@ -8,7 +7,6 @@ import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { useBackgroundDotLabel, useSessionDotState } from '@/lib/use-session-dot-state'
 import { cn } from '@/lib/utils'
-import { $sessionColorById, sessionColorFor } from '@/store/session-color'
 import type { BackgroundDotLabel, SessionDotState } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
 import type { SessionOutcome } from '@/types/session-outcome'
@@ -24,7 +22,7 @@ type DotVariant = {
   title?: (r: Translations['sidebar']['row']) => string
 }
 
-// Shared base for every active dot; idle is smaller and uses its own class.
+// Shared size for every dot, including settled sessions.
 const DOT_BASE = 'size-1.5 rounded-full'
 
 // [daveey] Tailwind sky-400 / red-500, the external and external_down stripe hues.
@@ -89,24 +87,20 @@ const DOT_VARIANTS: Record<SessionDotState, DotVariant> = {
     className: `${DOT_BASE} border border-(--ui-text-quaternary)`,
     title: r => r.draftSession
   },
-  // Settled: the project color when there is one, else the faintest filled
-  // grey. Every session shows SOME mark — a row with nothing in the lead slot
-  // reads as broken next to its neighbours, so "no color" falls back to the
-  // quietest ink rather than to an invisible dot.
+  // Settled: a hollow grey circle, independent of the project's colour.
   idle: {
-    className: 'size-1 rounded-full bg-(--ui-text-quaternary)'
+    className: `${DOT_BASE} border border-(--ui-text-quaternary)`
   }
 }
 
 /** The dot a state paints, for surfaces that describe a status rather than
- *  render a session — the sidebar's status filter, say. Idle carries no color
- *  of its own (it inherits the project's), so callers supply one. */
+ *  render a session — the sidebar's status filter, say. */
 export const sessionDotClassName = (state: SessionDotState): string => DOT_VARIANTS[state].className
 
 /** [daveey] The variant a session's dot paints. Unread is emerald only for a chat that is actually done: a stored
  *  outcome that is waiting / running / unresolved / decision / muted repaints the unread dot in that outcome's stripe
  *  colour (still filled, so it still reads as new), because users read emerald as done. Every other state ignores
- *  the outcome: the live-turn states already outrank it, and idle keeps the project colour.
+ *  the outcome: the live-turn states already outrank it, and idle stays hollow grey.
  *  [daveey] `backgroundLabel`: what the `background` claim rests on. `unknown` (only unknown or unfresh work evidence)
  *  and `waiting` (only known waiting work) keep the same hollow dot but say so rather than asserting "running". */
 export const sessionDotVariant = (
@@ -164,10 +158,7 @@ export interface SessionStatusDotProps {
    *  Null on a new chat that has yet to reach the backend — no id to key by,
    *  and no turn behind it, which is the draft state by definition. */
   storedSessionId: null | string
-  /** The session row for color resolution — recents OR the project tree. Both
-   *  call sites already hold it; passing it lets the idle dot inherit the
-   *  project color even for a session older than the paginated recents page
-   *  (which has no `$sessionColorById` entry). */
+  /** The session row supplies outcome and execution evidence on every surface. */
   session?: null | SessionInfo
   /** TUI-style tree stem for a branched session (`└─ ` / `├─ `). */
   branchStem?: string
@@ -179,20 +170,13 @@ export interface SessionStatusDotProps {
 /**
  * SESSION STATUS DOT — the ONE primitive the sidebar row, the pane tabs, and
  * the session switcher render, so a session's status can never disagree
- * between surfaces. It resolves everything itself from the stored session id:
- * the live state (via `$sessionDotStateById`, already reduced to one mutually
- * exclusive answer) and the color (override → project, via `sessionColorFor`).
- * An idle session shows its project color; the active states own the dot with
- * their semantic color so an attention cue is never masked by the tint.
+ * between surfaces. It resolves the live state via `$sessionDotStateById`,
+ * already reduced to one mutually exclusive answer. Idle is hollow grey;
+ * active states own the dot with their semantic colour.
  */
 export function SessionStatusDot({ storedSessionId, session, branchStem, className }: SessionStatusDotProps) {
   const { t } = useI18n()
   const r = t.sidebar.row
-
-  // Subscribe to the shared color map for reactivity; sessionColorFor falls
-  // back to the resolver for a session outside the recents page.
-  useStore($sessionColorById)
-  const color = sessionColorFor(session) ?? null
 
   // Selector, not a plain useStore: the map is rebuilt whenever any session's
   // status changes, but a given dot only repaints when ITS OWN state flips.
@@ -226,7 +210,7 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
         // Rendered even with no color to paint: an empty dot of the same size
         // keeps every row's title on one left edge, so a session finishing
         // can't shift the list under the pointer.
-        <span aria-hidden="true" className={variant.className} style={color ? { backgroundColor: color } : undefined} />
+        <span aria-hidden="true" className={variant.className} />
       ) : (
         <span
           aria-label={aria}

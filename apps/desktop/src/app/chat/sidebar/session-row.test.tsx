@@ -27,6 +27,8 @@ import { $unavailableWorkSources } from '@/store/session-work-source'
 import type * as WindowsStore from '@/store/windows'
 import { _resetWorkSourceOwnerForTests } from '@/store/work-source-owner'
 
+import executionFixture from '../../../../../../schemas/fixtures/execution-observations-v1.json'
+
 import { ReorderableList, useSortableBindings } from './reorderable-list'
 import { SidebarSessionRow } from './session-row'
 
@@ -251,6 +253,40 @@ const renderRow = (
     />
   )
 }
+
+describe('always-on left run square', () => {
+  for (const card of [false, true]) {
+    for (const kanban_active of [0, 2]) {
+      it(`sits after the dot lead and before the title (card=${card}, active=${kanban_active})`, () => {
+        const now = Date.now() / 1000
+
+        const execution_observations = Array.from({ length: kanban_active }, (_, i) => ({
+          ...executionFixture.base,
+          identity: { ...executionFixture.base.identity, work_id: `task-${i}` },
+          observed_at: now,
+          valid_until: now + 180,
+          last_activity: now
+        }))
+
+        const { container } = renderRow(makeSession({ title: 'Run markers', kanban_active, execution_observations }), {
+          card
+        })
+
+        const square = container.querySelector('[data-run-square]')!
+        expect(square).not.toBeNull()
+        expect(square.getAttribute('data-run-square')).toBe(kanban_active ? 'running' : 'idle')
+        expect(square.className.includes('bg-sky-400')).toBe(kanban_active > 0)
+        const lead = square.previousElementSibling!
+        expect(lead.querySelector('.rounded-full')).not.toBeNull()
+        expect(lead.nextElementSibling).toBe(square)
+        const title = screen.getByText('Run markers')
+        expect(square.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+        expect(container.querySelector('[data-card-colour="blue"]')).toBeNull()
+        expect(screen.queryByTestId('session-row-card-squares')).toBeNull()
+      })
+    }
+  }
+})
 
 describe('idle sidebar authoritative source failures', () => {
   afterEach(() => $unavailableWorkSources.set({}))
