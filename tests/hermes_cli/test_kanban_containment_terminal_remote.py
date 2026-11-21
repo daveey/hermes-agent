@@ -127,6 +127,32 @@ def test_unknown_archive_recovers_same_request(synced_conn, monkeypatch):
     assert hub.posts[0] == hub.posts[1]
 
 
+@pytest.mark.parametrize("fault", ["response_request", "closure_request", "task_status"])
+def test_canonical_custody_mismatch_refuses_before_projection(synced_conn, monkeypatch, fault):
+    from hermes_cli.kanban_containment_canonical import DeliveryUnknown
+    hub = setup(synced_conn, monkeypatch)
+    real_ops = hub.ops
+
+    def mismatched(board, ops):
+        result = real_ops(board, ops)
+        if fault == "response_request":
+            result["results"][0]["client_op_id"] = sync.uuid7()
+        elif fault == "closure_request":
+            hub.source.events[hub.close_event["event_uid"]]["containment_v1"]["request"] = sync.uuid7()
+        else:
+            hub.task["status"] = "triage"
+        return result
+
+    hub.ops = mismatched
+    error = ContainmentRefused if fault == "task_status" else DeliveryUnknown
+    with pytest.raises(error):
+        kb.archive_task(synced_conn, hub.target)
+    assert hub.closed
+    assert kb.get_task(synced_conn, hub.target).status == "triage"
+    assert not synced_conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='archived'", (hub.target,)).fetchone()
+    assert not synced_conn.execute("SELECT 1 FROM containment_delivery WHERE confirmed=1").fetchone()
+
+
 def test_missing_canonical_closure_does_not_mutate_local_task(synced_conn, monkeypatch):
     hub = setup(synced_conn, monkeypatch)
     hub.no_proof = True
