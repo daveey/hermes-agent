@@ -62,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
 def _report(conn, cwd: Path, upstream: str, conflicts: list[str]) -> str:
     from hermes_cli import kanban_db as kb
 
+    from hermes_cli import update_conflict_reporting as routing
+    config = routing.configured()
+    if config is not None:
+        return routing.report(conn, config, cwd, upstream, conflicts)
     key = "upstream-merge-conflict:" + hashlib.sha256(str(cwd.resolve()).encode()).hexdigest()[:24]
     evidence = f"Upstream SHA: `{upstream}`\nConflicting paths:\n" + "\n".join(f"- `{p}`" for p in conflicts)
     # Serialize lookup + create so overlapping unattended invocations cannot create two owners.

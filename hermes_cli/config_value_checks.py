@@ -6,6 +6,23 @@ from typing import Any
 from hermes_cli.config_issues import ConfigIssue, _issue
 
 
+def _validate_startup_values(config: dict[str, Any], issues: list[ConfigIssue]) -> None:
+    _validate_voice(config, issues)
+    _validate_timezone(config, issues)
+    _validate_upstream_conflict_reporting(config, issues)
+
+
+def _validate_upstream_conflict_reporting(config: dict[str, Any], issues: list[ConfigIssue]) -> None:
+    from hermes_cli.update_conflict_reporting import parse
+    update = config.get('update', {})
+    try:
+        if not isinstance(update, dict):
+            raise ValueError('update.upstream_conflict_reporting requires an update mapping')
+        parse(update.get('upstream_conflict_reporting'))
+    except ValueError as exc:
+        _issue(issues, 'error', str(exc), 'Correct the conflict reporting mapping or unset it for legacy behavior')
+
+
 def _validate_voice(config: dict[str, Any], issues: list[ConfigIssue]) -> None:
     voice_cfg = config.get("voice")
     if not (isinstance(voice_cfg, dict) and "submit_mode" in voice_cfg):

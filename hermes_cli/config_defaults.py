@@ -1,7 +1,6 @@
 """Default configuration data for Hermes Agent: DEFAULT_CONFIG and OPTIONAL_ENV_VARS.
 
-Pure-data leaf module — must not import from hermes_cli.config. Comments are the user-facing
-docs of config.yaml.
+Pure-data leaf module: no hermes_cli.config imports. Comments document config.yaml.
 """
 
 from hermes_cli.config_defaults_auxiliary import _aux
@@ -27,6 +26,7 @@ DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
     "fallback_providers": [],
+    "update": {"upstream_conflict_reporting": None},  # None retains legacy per-checkout owners.
     # Opt-in class selectors; exact pins retain legacy behavior. Empty manifests
     # fail closed. Eligibility/funding attestations are host-specific, not keys.
     "model_routing": routing_defaults(),

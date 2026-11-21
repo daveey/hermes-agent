@@ -1061,10 +1061,9 @@ def validate_config_structure(config: Optional[dict[str, Any]] = None) -> list[C
             return [config_load_issue(exc)]
 
     from hermes_cli.config_value_checks import (
-        _validate_quoted_containers, _validate_timezone, _validate_voice, _validate_web_backends)
+        _validate_quoted_containers, _validate_startup_values, _validate_web_backends)
     issues: list[ConfigIssue] = []
-    _validate_voice(config, issues)
-    _validate_timezone(config, issues)
+    _validate_startup_values(config, issues)
     from agent.model_routing import ModelRoutingError, validate_policy
     try:
         validate_policy(config.get("model_routing", {}))

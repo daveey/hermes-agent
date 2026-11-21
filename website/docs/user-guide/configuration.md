@@ -16,6 +16,57 @@ All settings are stored in the `~/.hermes/` directory for easy access.
 Run `hermes setup --portal` — one OAuth gets you a model provider and all four Tool Gateway tools without hand-editing YAML. Portal subscribers also get 10% off token-billed providers. See [Nous Portal](../integrations/nous-portal.md).
 :::
 
+## Upstream conflict reporting
+
+`update.upstream_conflict_reporting` defaults to `null` (legacy per-checkout repair
+owner creation/reuse). Set the entire mapping atomically with the supported CLI,
+only after installing a revision that implements it:
+
+```bash
+hermes config set update.upstream_conflict_reporting '{"mode":"pointer","owner":"@task:default@integration-host/t_0123456789abcdef","repository":"https://github.com/example/core.git","owner_checkout":"/srv/core"}'
+hermes config get update.upstream_conflict_reporting
+```
+
+The mapping requires exactly these four fields:
+
+- `mode`: `inventory` or `pointer`.
+- `owner`: a canonical, gateway-qualified `@task:board@gateway/t_<16 lowercase hex>`
+  reference to an existing unattended upstream-conflict task (legacy 8-hex IDs
+  are also accepted).
+- `repository`: the reporting checkout's canonical HTTPS origin identity, ending
+  in `.git`. Equivalent `git@host:organization/repository.git` origins are accepted.
+  Credentials, aliases, and local-file remotes are not accepted.
+- `owner_checkout`: the owner's already-resolved absolute checkout path on its
+  own host. It need not equal a pointer consumer's path on another host.
+
+The repository/path pair is an explicit administrator binding: legacy task rows
+record a path hash, not repository provenance. Do not copy another project's
+binding. Each observation verifies the reporting repository, reads the exact
+owner through authenticated Board row evidence (not a cached replica), and checks
+its gateway, incident key, original task author/title/checkout and open status.
+A contained `triage` owner remains eligible for observations; reporting never
+releases containment, changes acceptance, resumes work or changes update fences.
+
+`inventory` only appends full conflict evidence to that existing owner on its own
+host and checkout. `pointer` only adds compact owner/SHA/incident pointers to
+existing nonterminal local consumers of the reporting checkout; it never sends
+file lists or creates another repair owner. Archived consumers remain untouched.
+With no open local consumer, the validated designated owner's ID is returned,
+without creating a local task. Lookup plus comment insertion is serialized; the
+same pointer is deduplicated, while a changed SHA can add a new compact pointer.
+Historic lists are not removed or redirected. Existing updater output labels the
+returned task ID as `Repair owner`; a qualified pointer in the consumer comment
+is the authoritative destination across gateways.
+
+Malformed settings, another repository, an unavailable/deleted/closed owner or
+an inventory request off the designated host fail closed with the reporter's
+visible warning. They never fall back to full inventory or replacement-owner
+creation. Board authentication and reachability are required even for inventory.
+Unset with `hermes config unset update.upstream_conflict_reporting` to restore
+legacy behavior. Do not enable on an older installed revision: it ignores the
+control. A merge alone is not deployment evidence; verify the installed revision,
+effective config and a natural updater observation on each host.
+
 ## Kanban fairness evidence capture
 
 Fairness evidence capture is opt-in and does not change scheduling or scoring.
