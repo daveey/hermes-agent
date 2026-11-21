@@ -1993,3 +1993,40 @@ def test_archived_producer_is_not_parked_on(mac, monkeypatch):
         monkeypatch.setattr(kaw, "confirm_remote", archived)
         with pytest.raises(kaw.AwaitingError):
             f.run()
+
+
+@pytest.mark.parametrize("loop", ["queued", "refused_no_fallback", "step_failed"])
+def test_placement_requeue_loops_escalate_on_the_third_requeue(mac, monkeypatch, loop):
+    """The forwarder's requeue loops park on a declared clock (``_park_clock``). Declared clocks are exempt from the
+    repeat-park escalation for agents, but these system loops pass ``count_repeats``: the third requeue goes to an
+    owner card instead of re-queueing every 10 min forever. The per-attempt detail in the why (an exception text)
+    does not split the premise. [daveey]"""
+    from hermes_cli import kanban_awaiting as kaw
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_placement_forward as kpf
+    from tools import kanban_tools as kt
+    with kbc.connect_closing() as conn:
+        parent = _done_parent(kb, conn)
+    child = json.loads(kt._handle_create({"title": "Fix the flaky lint", "parents": [parent]}))["task_id"]
+    if loop == "refused_no_fallback":  # a qualified origin's card: no local fallback, so _cancel re-parks
+        real_state = kpf.state
+        monkeypatch.setattr(kpf, "state", lambda c, t: {**(real_state(c, t) or {}), "origin_gateway": "elsewhere"})
+    actions = []
+    with kbc.connect_closing() as conn:
+        kb.recompute_ready(conn)
+        for n in range(3):
+            f = _forwarder(conn, child, mac, monkeypatch, await_tid=None)
+            if loop == "queued":
+                actions.append(f.run())
+            elif loop == "refused_no_fallback":
+                actions.append(f._cancel(f"hub refused the card: attempt {n}"))
+            else:
+                actions.append(f._park_clock(f"forward step failed (RuntimeError: timeout {n}); retrying"))
+            if n < 2:
+                assert kb.get_task(conn, child).status == "scheduled", (n, actions)
+                kb.unblock_task(conn, child)
+                kb.recompute_ready(conn)
+        kinds = [e.kind for e in kb.list_events(conn, child)]
+        assert kinds.count("scheduled") == 2 and kaw.ESCALATED_EVENT in kinds, (actions, kinds)
+        assert kb.get_task(conn, child).status == "todo"

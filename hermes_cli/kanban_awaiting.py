@@ -1085,8 +1085,12 @@ def probe_fire_reparks(conn: sqlite3.Connection, task_id: str, premise: str, pro
 
 def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optional[str],
          wake_check: Optional[str] = None, clock_only: bool = False, op: str = "schedule",
-         wake_in: Optional[int] = None, blocker_id: Optional[str] = None) -> dict:
+         wake_in: Optional[int] = None, blocker_id: Optional[str] = None, count_repeats: bool = False) -> dict:
     """``resolve`` plus re-park escalation: the record to store on the parking event.
+
+    ``count_repeats``: a system re-park loop (``kanban_placement_forward._park_clock``) whose declared clock must
+    still escalate on the third identical park, as every clock did before declared clocks were exempted; its
+    premise ignores the ``why`` (which carries the per-attempt detail), so the loop is counted as one premise.
 
     Raises ``RepeatedPark`` on the third park in a row on one premise. Card waits (their producer
     is accountable), clock waits with no wake probe (declared or a short pacing continue: a clock is its own
@@ -1099,13 +1103,15 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     record = resolve(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
                      clock_only=clock_only, op=op, wake_in=wake_in, blocker_id=blocker_id)
     if (record["kind"] == "card" or record.get("shared_blocker")
-            or (record["kind"] == "clock" and not (wake_check and str(wake_check).strip()))):
+            or (record["kind"] == "clock" and not count_repeats and not (wake_check and str(wake_check).strip()))):
         # A clock is its own producer: re-parking a recurring cooldown on a stable why is not a stuck premise.
         # A clock that also carries a wake probe keeps the probe's escalations (the fire cap catches a probe
         # looser than the worker's own check, t_f6d930b7; deadline-only wakes are a stuck premise).
         # A shared-blocker wait is ended by the blocker's own probe, which one card per interval runs.
         return record
-    record["premise"] = premise_hash(record, reason, wake_check)
+    record["premise"] = premise_hash(
+        {k: v for k, v in record.items() if k != "why"} if count_repeats and record["kind"] == "clock" else record,
+        reason, wake_check)
     if record["kind"] == RESOURCE:
         # A governor/pool hold is internal and transient: its probe resumes the card when the reading drops.
         # Escalating it made "Unstick" cards for a premise nobody can act on (bb t_01a19f5cca30ed12), and on a

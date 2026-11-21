@@ -20,6 +20,7 @@ def schedule_task(
     clear_blocker: bool = False, comment: Optional[tuple[str, str]] = None,
     blocker_id: Optional[str] = None, blocker_provider: Optional[str] = None,
     blocker_model: Optional[str] = None, blocker_lane: Optional[str] = None, watch: bool = False,
+    count_repeats: bool = False,
 ) -> bool:
     """Park in ``scheduled`` (waiting on time, not a human; not dispatchable) until its wake
     (``SCHEDULED_UNTIL=`` in the reason, else ``kanban_timed_park.DEFAULT_WAKE_SECONDS``) or an
@@ -32,6 +33,8 @@ def schedule_task(
     ``comment`` (``(author, body)``) is written in the same txn and only when the park lands
     (``kanban_reason_comment``); ``human_answer_refusal`` explains the human-answer refusal.
     ``watch`` stamps the park a watch (``kanban_watch``): it does not hold its chat open while parked.
+    ``count_repeats`` (system re-park loops only): a declared clock still escalates on its third identical park
+    (``kanban_awaiting.gate``).
     Triage parks reset the dispatcher failure streak without an intermediate dispatchable
     status; block-loop recurrence evidence is retained, as on unblock."""
     from hermes_cli.kanban_reason_comment import reason_comment
@@ -45,7 +48,8 @@ def schedule_task(
         from hermes_cli import kanban_wake_check as kwc
         try:
             record = kaw.gate(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
-                              clock_only=clock_only, op="schedule", blocker_id=blocker_id)
+                              clock_only=clock_only, op="schedule", blocker_id=blocker_id,
+                              count_repeats=count_repeats)
         except kaw.RepeatedPark as rp:
             return noted.keep(kaw.escalate(conn, task_id, record=rp.record, reason=reason,
                                            expected_run_id=expected_run_id) is not None)

@@ -703,6 +703,9 @@ class Forwarder:
         ok = kb.schedule_task(
             self.conn, self.task_id, expected_run_id=self.run_id, clock_only=True,
             awaiting={"kind": "clock", "why": f"deferred placement retry: {why}"[:600]},
+            # [daveey] A requeue loop (request still queued, refused with no local fallback, a failed forward
+            # step) is bounded by the repeat-park escalation: the third requeue goes to an owner card.
+            count_repeats=True,
             reason=f"SCHEDULED_UNTIL={_iso(self.now() + REQUEUE_SECONDS)} {why} (deferred placement)")
         return "requeued" if ok else "park-refused"
 
