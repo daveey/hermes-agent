@@ -25,8 +25,11 @@ def config(board, *, strong=OPUS, routes=None, enabled=True):
 
 
 def task(conn, model=SONNET):
-    return kb.get_task(conn, kb.create_task(conn, title="review fixture", assignee="default",
-                                          model_override=model, provider_override="anthropic"))
+    tid = kb.create_task(conn, title="review fixture", assignee="default")
+    # Historical author evidence belongs only in this isolated fixture database.
+    conn.execute("UPDATE tasks SET model_override=?, provider_override='anthropic' WHERE id=?", (model, tid))
+    conn.commit()
+    return kb.get_task(conn, tid)
 
 
 @pytest.mark.parametrize("lane,skills", [("review", []), ("ready", ["sdlc-review"])])
@@ -46,14 +49,16 @@ def test_strong_pin_may_review_on_the_same_strong_route(board):
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_ready_and_retry_preserve_pin(board, failed):
+def test_ready_and_retry_ignore_legacy_pin(board, failed):
     cfg = config(board)
     with kbc.connect() as conn:
         t = task(conn)
         if failed:
             helpers._fail_once(conn, t.id)
             t = kb.get_task(conn, t.id)
-        assert tier.resolve_model_tier(conn, t, lane="ready", cfg=cfg) == (None, None, "pinned")
+        expected = ("class:deep", "auto", "retry_after_run_crashed") if failed else (
+            "class:standard", "auto", "default")
+        assert tier.resolve_model_tier(conn, t, lane="ready", cfg=cfg) == expected
 
 
 def test_review_handoff_override_wins(board):
@@ -61,10 +66,10 @@ def test_review_handoff_override_wins(board):
     with kbc.connect() as conn:
         t = task(conn)
         kb.claim_task(conn, t.id)
-        assert kb.request_review(conn, t.id, metadata={"review_model": FABLE})
+        assert kb.request_review(conn, t.id, metadata={"review_model": "class:deep"})
         t = kb.get_task(conn, t.id)
         assert tier.resolve_model_tier(conn, t, lane="review", cfg=cfg) == (
-            FABLE, "anthropic", "review_override")
+            OPUS, "anthropic", "review_override")
 
 
 def test_dispatch_receipt_and_owner_use_review_model_without_changing_row(board):
@@ -117,10 +122,10 @@ def test_review_admission_failure_never_spawns_or_spends_retry(board, monkeypatc
         dispatch.dispatch_once(conn, dry_run=False, spawn_fn=lambda *args: seen.append(args))
         stored = kb.get_task(conn, t.id)
         assert seen == []
-        assert stored.status == ("triage" if failure == "no_route" else "review")
-        assert stored.consecutive_failures == (1 if failure == "no_route" else 0)
+        assert stored.status == ("triage" if failure in ("no_route", "bad_metadata") else "review")
+        assert stored.consecutive_failures == (1 if failure in ("no_route", "bad_metadata") else 0)
         assert stored.claim_lock is None
-        event_kind = "gave_up" if failure == "no_route" else "spawn_failed"
+        event_kind = "gave_up" if failure in ("no_route", "bad_metadata") else "spawn_failed"
         events = [e.payload for e in kb.list_events(conn, t.id) if e.kind == event_kind]
         assert events[-1]["infrastructure"] is True
 
@@ -182,7 +187,7 @@ def test_pinned_review_not_gated_by_default_tier(board, cfg):
 @pytest.mark.parametrize("metadata,expected", [
     ({"review_model": SONNET}, (SONNET, "anthropic", "review_override")),
     ({"review_model": "custom", "review_provider": "custom-provider"},
-     ("custom", "custom-provider", "review_override")),
+     (OPUS, "anthropic", "review_unpinned")),
     ({"review_model": "class:deep"}, (OPUS, "anthropic", "review_override")),
 ])
 def test_explicit_review_override_is_honored_even_when_it_matches_the_author(board, metadata, expected):
@@ -190,25 +195,25 @@ def test_explicit_review_override_is_honored_even_when_it_matches_the_author(boa
     with kbc.connect() as conn:
         t = task(conn)
         kb.claim_task(conn, t.id)
-        kb.request_review(conn, t.id, metadata=metadata)
+        kb.request_review(conn, t.id)
+        conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=?", (json.dumps(metadata), t.id))
+        conn.commit()
         assert tier.resolve_model_tier(conn, t, lane="review", cfg=cfg) == expected
-        assert tier.resolve_model_tier(conn, t, lane="ready", cfg=cfg) == (None, None, "pinned")
+        assert tier.resolve_model_tier(conn, t, lane="ready", cfg=cfg) == ("class:standard", "auto", "default")
 
 
 @pytest.mark.parametrize("metadata", [
-    {"review_model": ""}, {"review_model": 7}, {"review_model": OPUS, "review_provider": []},
-    {"review_model": "class:deep", "review_provider": "anthropic"},
+    {"review_model": OPUS}, {"review_model": "class:deep", "review_provider": "anthropic"},
+    {"review_model": "class:deep", "require_model": True},
 ])
-def test_bad_override_fails_closed(board, metadata):
-    from hermes_cli.kanban_review_model import ReviewModelUnavailable
-    cfg = config(board)
+def test_concrete_or_mandatory_override_is_rejected_before_handoff(board, metadata):
+    config(board)
     with kbc.connect() as conn:
         t = task(conn)
         kb.claim_task(conn, t.id)
-        kb.request_review(conn, t.id)
-        conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=?", (json.dumps(metadata), t.id))
-        with pytest.raises(ReviewModelUnavailable):
-            tier.apply_model_tier(conn, t, lane="review", cfg=cfg)
+        with pytest.raises(ValueError, match="model-neutral"):
+            kb.request_review(conn, t.id, metadata=metadata)
+        assert kb.get_task(conn, t.id).status == "running"
 
 
 def test_disabled_routing_keeps_legacy_pin_but_refuses_explicit_class_override(board):
@@ -244,7 +249,7 @@ def test_latest_handoff_can_remove_old_override(board):
     with kbc.connect() as conn:
         t = task(conn)
         kb.claim_task(conn, t.id)
-        kb.request_review(conn, t.id, metadata={"review_model": FABLE})
+        kb.request_review(conn, t.id, metadata={"review_model": "class:deep"})
         dispatch.dispatch_once(conn, dry_run=False, spawn_fn=lambda *args: None)
         assert kb.request_changes(conn, t.id, reason="fixture rework")
         kb.claim_task(conn, t.id)
@@ -266,7 +271,7 @@ def test_skill_review_quota_hold_never_reroutes_back_to_author(board, monkeypatc
         t = task(conn)
         if override:
             kb.claim_task(conn, t.id)
-            kb.request_review(conn, t.id, metadata={"review_model": FABLE})
+            kb.request_review(conn, t.id, metadata={"review_model": "class:deep"})
         t.skills = ["sdlc-review"]
         base = tier.resolve_model_tier(conn, t, lane="ready", cfg=cfg)
         assert quota.decision(conn, t, lane="ready", cfg=cfg, base=base, now=100) == (

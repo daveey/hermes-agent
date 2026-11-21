@@ -397,7 +397,11 @@ def _cmd_create(args: argparse.Namespace) -> int:
         return _err(body_error, 2)
 
     from hermes_cli.kanban_selfwork import SelfWorkError, contract
+    from hermes_cli.kanban_model_neutral import validate_selector, validate_text
     try:
+        validate_selector(getattr(args, "model_override", None), getattr(args, "provider_override", None),
+                          mandatory=getattr(args, "pin_mandatory", False))
+        validate_text(args.title, body)
         self_work = contract(getattr(args, "self_work", None))
         ws_kind, ws_path = _parse_workspace_flag(args.workspace)
         branch_name = _parse_branch_flag(getattr(args, "branch", None))

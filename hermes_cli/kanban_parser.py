@@ -331,15 +331,11 @@ _SPECS = [
                   f"the dispatcher's kanban.failure_limit config (default "
                   f"{kb.DEFAULT_FAILURE_LIMIT})."),
         _arg("--model", dest="model_override",
-             help="Pin the worker to this model (passed as -m <model>) without "
-                  "changing the profile's configured model. Combine with --provider "
-                  "when the model belongs to a different backend than the profile's default."),
+             help="Optional class:<tier> selector. Concrete model IDs are rejected."),
         _arg("--provider", dest="provider_override",
-             help="Provider the --model belongs to (passed as --provider <name> to "
-                  "the worker). Requires --model."),
+             help="Only auto with a class selector is accepted; concrete providers are rejected."),
         _arg("--pin-mandatory", action="store_true", dest="pin_mandatory",
-             help="The --model pin is mandatory: a far quota wall never moves it to a same-class peer. "
-                  "Requires --model."),
+             help="Deprecated and rejected: Kanban does not permit mandatory model pins."),
         _arg("--completion-contract", metavar="CONTRACT",
              help="local-only (default), OWNER/REPO for publication, or exact GitHub PR URL; required CI gates done."),
         _arg("--review-required", action="store_true", help="Require a reviewer before completion"),
@@ -409,14 +405,12 @@ _SPECS = [
          help="Assign or reassign a task"),
     _cmd("set-model", [
         _TASK_ID,
-        _arg("model", nargs="?", help="Model to pin the worker to (or 'none' to clear the override)"),
+        _arg("model", nargs="?", help="class:<tier> selector, or 'none' to clear a legacy restriction"),
         _arg("--provider",
-             help="Provider the model belongs to (worker is spawned with "
-                  "--provider <name>). Cleared together with the model."),
+             help="Only auto with a class selector is accepted. Cleared together with the selector."),
         _arg("--mandatory", action=argparse.BooleanOptionalAction, default=None,
-             help="--mandatory: a far quota wall never moves this pin to a same-class peer (the card waits "
-                  "for the reset). --no-mandatory lifts that. Omit to keep the card's setting."),
-    ], help="Set or clear a task's model/provider override (takes effect on the next dispatch)"),
+             help="--mandatory is rejected. --no-mandatory clears a legacy flag without changing a live client."),
+    ], help="Set a class selector or clear legacy routing restrictions for future dispatch"),
     _cmd("reclaim", [
         _TASK_ID, _RECLAIM_REASON,
         _arg("--urgency-source", dest="urgency_source", choices=("explicit_operator",), default=None,

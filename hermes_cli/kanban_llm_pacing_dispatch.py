@@ -174,6 +174,8 @@ def candidate_route(conn: sqlite3.Connection, task: Any, lane: str) -> tuple[Opt
     (``[]`` = unknown, the card starts). With tiers off/out of scope, use the assignee's
     own class registry; its claim-time offer is checked against that profile route."""
     from hermes_cli.kanban_model_tier import profile_route, resolve_dispatch_tier
+    from hermes_cli.kanban_model_neutral import routing_view
+    task = routing_view(task)
     model, provider, reason = resolve_dispatch_tier(conn, task, lane=lane)
     route = (model, provider, reason) if model else None
     if not model:
@@ -376,7 +378,7 @@ def _governed(conn: sqlite3.Connection, task_id: str, lane: str, cfg: lp.PacingC
     holds. [daveey] (t_01a1deaf95f5b885)"""
     from hermes_cli import kanban_db as kb
     task = kb.get_task(conn, task_id)
-    if task is None or int(getattr(task, "model_pin_mandatory", 0) or 0):
+    if task is None:
         return None
     providers = [p for p in candidate_providers(conn, task, lane) if p in cfg.providers]
     if not providers:

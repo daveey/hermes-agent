@@ -1081,29 +1081,9 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "is blocked for review. Ignored unless goal_mode is "
                 "true. Defaults to the goal-engine default (20)."
         )),
-        "model": _prop("string", (
-                "Pin the dispatched worker to this model instead of "
-                "the assignee profile's configured model. Leave this out "
-                "unless you need another tier; the name must be in this "
-                "host's model routing registry when one is enforced. Omit "
-                "to use the profile default."
-        )),
-        "provider": _prop("string", (
-                "Provider the 'model' belongs to (e.g. 'openrouter', "
-                "'anthropic', 'nous'). Set this whenever the model "
-                "is not from the assignee profile's configured "
-                "provider — a model name alone is resolved against "
-                "the profile's provider and will fail if it belongs "
-                "to a different one. Requires 'model'."
-        )),
-        "pin_mandatory": _prop("boolean", (
-                "Mark the 'model' pin mandatory. Without it, when the "
-                "pinned provider's subscription quota is out for 6 h or "
-                "more, single runs use another provider's model of the "
-                "same class until the reset (recorded on the card). Set "
-                "true only when the work must run on exactly this model. "
-                "Requires 'model'."
-        )),
+        "model": _prop("string", "Optional class:<tier> selector (for example class:deep). Concrete model IDs are rejected; omit for dynamic routing."),
+        "provider": _prop("string", "Only auto with a class selector is accepted. Concrete providers are rejected."),
+        "pin_mandatory": _prop("boolean", "Deprecated compatibility field: only false is accepted. Mandatory Kanban model pins are forbidden."),
     },
     ["title"],
 )

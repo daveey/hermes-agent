@@ -3748,22 +3748,19 @@ Any unknown (an unreadable config, a non-numeric or out-of-range value, a failed
 
 `kanban.create_overlap_check` (default `true`) makes `kanban_create` check open cards across local boards and other gateways' replicated boards before creating another owner for overlapping work. A match refuses creation with `code=create_overlap` and identifies the existing cards. For genuinely separate work, pass `distinct_from` with those card IDs and a `distinct_reason`; set this configuration key to `false` to disable the check entirely. Missing or unreadable remote replicas are skipped and logged rather than blocking creation.
 
-## Kanban strong model tier
+## Kanban model-neutral routing
 
 ```yaml
 kanban:
-  strong_model: ""      # model used for the strong tier of kanban workers (empty = profile default)
-  strong_provider: ""   # provider for strong_model (empty = inferred from the model)
+  default_model: class:standard
+  default_provider: auto
+  strong_model: class:deep
+  strong_provider: auto
 ```
 
-`kanban.strong_model` names the model dispatched for strong-tier cards; `kanban.strong_provider` optionally pins its provider, otherwise it is inferred from the model name.
+Kanban requirements select a class/tier or capability, never an exclusive concrete model or provider. `kanban_create(model="class:deep", provider="auto")` and `hermes kanban create --model class:deep --provider auto` request a class; leaving the selector unset uses dynamic default routing. Concrete IDs, concrete providers, mandatory flags, positive `require_model` directives and named-model mandates are rejected at mutation boundaries, including review handoffs. Interactive chat model selection is unchanged.
 
-```yaml
-kanban:
-  pin_quota_reroute_min_hours: 6   # a card pin walled this long runs on a same-class peer
-```
-
-A card pinned to a model (`kanban_create(model=...)`, `hermes kanban create --model`) normally runs on exactly that model. When the card's own run hits that provider's subscription quota and the reset is `kanban.pin_quota_reroute_min_hours` (default 6) or more away, each later run until the reset uses another eligible, unwalled route of the pinned model's routing class (`model_routing.routes`). The card row keeps its pin, so the first run after the reset is back on it. Every such run records a `model_reroute` event and a `pinned+pin_quota_reroute:<provider>` route reason, and the card gets one comment per quota episode. A pin whose model sits in no class (or in two) still waits, as does any review-lane run. To make a pin always wait for its reset, create the card with `pin_mandatory=true` / `--pin-mandatory`, or run `hermes kanban set-model <id> --mandatory` (`--no-mandatory` undoes it); a card body with a line `require_model: true` is treated the same way (a mere mention of the word is not).
+Legacy and synced concrete restrictions are ignored for future admission, without changing a running agent's client or rewriting its concrete execution receipts. Clear stored restrictions with `hermes kanban set-model <id> none --no-mandatory`; this affects future dispatch only. The dispatcher dynamically chooses a qualified independent reviewer excluding every authenticated author model. Missing author evidence or no eligible independent route must not be resolved by dropping exclusions or pinning another reviewer. Subscription reserve, quota, billing, capability and safety gates remain in force. A concrete chosen route in a current-run receipt is execution evidence, not a persistent card restriction.
 
 `kanban.auto_recover_corruption` (default `true`): when a board's table b-trees fail `integrity_check` (damage `REINDEX` can't fix), its dispatch pauses and the gateway dispatcher also starts `hermes kanban recover` for it in a child process (salvage, fill from the newest healthy backup, write back in place, loss report and a follow-up card). Set it to `false` to keep only the pause. `kanban.recovery_card_assignee` (default `default`) is the assignee of that follow-up card.
 

@@ -1026,16 +1026,9 @@ def _host_prefix() -> str:
 # --- Task creation / mutation ---
 
 def _validate_model_override(model: Optional[str], provider: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Strip both; a provider without a model is rejected (a bare ``--provider``
-    would re-resolve the profile's model against another backend — exactly
-    the mismatch the override exists to kill)."""
-    model = (model or "").strip() or None
-    provider = (provider or "").strip() or None
-    if provider and not model:
-        raise ValueError("provider_override requires a model_override")
-    from hermes_cli.kanban_pin_provider import reject_spaced_pin
-    reject_spaced_pin(model, provider)
-    return model, provider
+    """Validate model-neutral class routing at the common mutation boundary."""
+    from hermes_cli.kanban_model_neutral import validate_selector
+    return validate_selector(model, provider)
 
 
 def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
@@ -1225,6 +1218,9 @@ def create_task(
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
+    from hermes_cli.kanban_model_neutral import validate_selector, validate_text
+    validate_selector(model_override, provider_override, mandatory=pin_mandatory)
+    validate_text(title, body)
     native_admission.check_entry(conn, origin_intent)
     self_work = admitted_contract(conn, self_work)
     validate_admission_class(admission_class, admission_frees)
@@ -1461,9 +1457,9 @@ def set_model_override(
         from hermes_cli.kanban_model_assignment import validate_task_pin
         model, provider = validate_task_pin(conn, task_id, model, provider)
     return _set_task_override(
-        conn, task_id,  # clearing the pin clears its mandatory mark; a new pin keeps the card's mark
-        "UPDATE tasks SET model_override = ?, provider_override = ?, model_pin_mandatory = CASE WHEN ? IS NULL "
-        "THEN NULL ELSE model_pin_mandatory END WHERE id = ?", (model, provider, model),
+        conn, task_id,
+        "UPDATE tasks SET model_override = ?, provider_override = ?, model_pin_mandatory = NULL WHERE id = ?",
+        (model, provider),
         "model_override_set", {"model": model, "provider": provider},
         ("model_override", "provider_override"), archived_msg="cannot set model override",
     )
@@ -3446,6 +3442,8 @@ def specify_triage_task(
     """Update title/body/assignee (when given) and move ``triage -> todo`` in one txn; False when not in triage.
     Lands in ``todo`` (not ``ready``) so parent gating still applies; the audit comment only when a field changed.
     """
+    from hermes_cli.kanban_model_neutral import validate_text
+    validate_text(title, body)
     if title is not None and not title.strip():
         raise ValueError("title cannot be blank")
     from hermes_cli.kanban_gate_only import create_assignee

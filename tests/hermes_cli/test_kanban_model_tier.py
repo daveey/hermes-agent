@@ -31,14 +31,17 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setattr(profiles, "profile_exists", lambda name: True)
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
+    _write_cfg(home)
     return home
 
 
 def _write_cfg(home: Path, **kanban) -> None:
-    lines = ["kanban:"]
-    for k, v in kanban.items():
-        lines.append(f"  {k}: {json.dumps(v)}")
-    home.joinpath("config.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    route = {"model": OPUS, "provider": "anthropic", "weight": 1,
+             "billing": "subscription", "eligible": True, "funding_verified": True,
+             "capabilities": {"tools": True, "streaming": True}}
+    cfg = {"kanban": kanban, "model_routing": {"enabled": True,
+           "routes": {level: [route] for level in ("fast", "standard", "deep")}}}
+    home.joinpath("config.yaml").write_text(json.dumps(cfg), encoding="utf-8")
 
 
 def _dispatch(conn) -> dict[str, tuple]:
@@ -63,20 +66,20 @@ def test_dispatcher_default_applies_to_unpinned_card_and_records_event(board):
         seen = _dispatch(conn)
         events = _tier_events(conn, tid)
         row = kb.get_task(conn, tid)
-    assert seen[tid][:2] == (SONNET, "anthropic")
-    assert events and events[0]["reason"] == "default" and events[0]["model"] == SONNET
+    assert seen[tid][:2] == ("class:standard", "auto")
+    assert events and events[0]["reason"] == "default" and events[0]["model"] == "class:standard"
     # The pin is per run: the card row itself stays unpinned.
     assert row.model_override is None
 
 
-def test_dispatcher_default_off_is_upstream_behaviour(board):
+def test_missing_default_uses_standard_class(board):
     _write_cfg(board)  # no default_model
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="routine fix", assignee="default")
         seen = _dispatch(conn)
         events = _tier_events(conn, tid)
-    assert seen[tid][:2] == (None, None)
-    assert events == []
+    assert seen[tid][:2] == ("class:standard", "auto")
+    assert events[0]["reason"] == "default"
 
 
 def test_kanban_create_tool_pin_survives_default_and_unpinned_gets_default(board, monkeypatch):
@@ -84,19 +87,19 @@ def test_kanban_create_tool_pin_survives_default_and_unpinned_gets_default(board
     from hermes_cli import models_detect
     monkeypatch.setattr(models_detect, "provider_has_credentials", lambda pid: pid == "anthropic")
     from tools import kanban_tools as kt
-    pinned = json.loads(kt._handle_create({"title": "adversarial review", "assignee": "default", "model": OPUS}))
+    pinned = json.loads(kt._handle_create({"title": "adversarial review", "assignee": "default", "model": "class:deep"}))
     plain = json.loads(kt._handle_create({"title": "routine docs", "assignee": "default"}))
     assert pinned["ok"] and plain["ok"], (pinned, plain)
     with kbc.connect() as conn:
         seen = _dispatch(conn)
         pinned_events = _tier_events(conn, pinned["task_id"])
-    assert seen[pinned["task_id"]][0] == OPUS
-    assert seen[plain["task_id"]][0] == SONNET
-    assert pinned_events[0]["reason"] == "pinned" and pinned_events[0]["model"] == OPUS
-    assert pinned_events[0]["provider"] == "anthropic"  # bound at pin time, not late-bound to config
+    assert seen[pinned["task_id"]][0] == "class:deep"
+    assert seen[plain["task_id"]][0] == "class:standard"
+    assert pinned_events[0]["reason"] == "class" and pinned_events[0]["model"] == "class:deep"
+    assert pinned_events[0]["provider"] == "auto"  # class selection remains provider-neutral
 
 
-def test_review_lane_keeps_profile_model(board):
+def test_review_lane_uses_deep_class(board):
     _write_cfg(board, default_model=SONNET)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="impl", assignee="default")
@@ -105,11 +108,11 @@ def test_review_lane_keeps_profile_model(board):
         seen = _dispatch(conn)
         events = _tier_events(conn, tid)
     assert "sdlc-review" in seen[tid][2]
-    assert seen[tid][0] is None
+    assert seen[tid][0] == "class:deep"
     assert events[-1]["reason"] == "review"
 
 
-def test_retry_after_failed_run_keeps_profile_model(board):
+def test_retry_after_failed_run_uses_deep_class(board):
     _write_cfg(board, default_model=SONNET)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="flaky fix", assignee="default")
@@ -121,7 +124,7 @@ def test_retry_after_failed_run_keeps_profile_model(board):
         conn.commit()
         seen = _dispatch(conn)
         events = _tier_events(conn, tid)
-    assert seen[tid][0] is None
+    assert seen[tid][0] == "class:deep"
     assert events[-1]["reason"] == "retry_after_run_crashed"
 
 
@@ -134,7 +137,7 @@ def test_continued_run_is_not_a_failure(board):
         task = kb.get_task(conn, tid)
         task.current_run_id = None
         model, _prov, reason = tier.resolve_model_tier(conn, task, lane="ready", cfg={"default_model": SONNET})
-    assert (model, reason) == (SONNET, "default")
+    assert (model, reason) == ("class:standard", "default")
 
 
 def test_keep_patterns_and_profile_scope(board):
@@ -147,10 +150,10 @@ def test_keep_patterns_and_profile_scope(board):
         plain = kb.get_task(conn, kb.create_task(conn, title="routine", assignee="default"))
         got = {name: tier.resolve_model_tier(conn, t, lane="ready", cfg=cfg)
                for name, t in (("sec", sec), ("core", core), ("other", other), ("plain", plain))}
-    assert got["sec"][0] is None and got["sec"][2].startswith("pattern:")
-    assert got["core"][0] is None and got["core"][2] == "pattern:hermes-core-wt"
-    assert got["other"] == (None, None, "profile_out_of_scope")
-    assert got["plain"] == (SONNET, "anthropic", "default")
+    assert got["sec"][0] == "class:deep" and got["sec"][2].startswith("pattern:")
+    assert got["core"][0] == "class:deep" and got["core"][2] == "pattern:hermes-core-wt"
+    assert got["other"] == ("class:standard", "auto", "profile_out_of_scope")
+    assert got["plain"] == ("class:standard", "auto", "default")
 
 
 def test_bad_pattern_is_ignored_not_fatal(board):
@@ -158,7 +161,7 @@ def test_bad_pattern_is_ignored_not_fatal(board):
         t = kb.get_task(conn, kb.create_task(conn, title="routine", assignee="default"))
         got = tier.resolve_model_tier(conn, t, lane="ready",
                                       cfg={"default_model": SONNET, "default_model_keep_patterns": ["("]})
-    assert got == (SONNET, "anthropic", "default")
+    assert got == ("class:standard", "auto", "default")
 
 
 def test_tier_pin_reaches_owner(board):
@@ -170,10 +173,10 @@ def test_tier_pin_reaches_owner(board):
         tier.apply_model_tier(conn, t, lane="ready", cfg={"default_model": SONNET, "default_provider": "anthropic"})
         fresh = kb.get_task(conn, tid)
         assert (fresh.model_override, fresh.provider_override) == (None, None)  # never the DB row
-        assert tier.owner_model_pin(conn, fresh) == (SONNET, "anthropic")
+        assert tier.owner_model_pin(conn, fresh) == ("class:standard", "auto")
         # Another run of the same card does not inherit this run's tier decision.
         fresh.current_run_id = (fresh.current_run_id or 0) + 1000
-        assert tier.owner_model_pin(conn, fresh) == (None, None)
+        assert tier.owner_model_pin(conn, fresh) == ("class:standard", "auto")
 
 
 def test_owner_runs_class_selector_with_provider_auto(board):
@@ -182,16 +185,16 @@ def test_owner_runs_class_selector_with_provider_auto(board):
         assert tier.owner_model_pin(conn, kb.get_task(conn, tid)) == ("class:deep", "auto")
 
 
-def test_unset_default_provider_is_inferred_not_the_profiles(board):
+def test_legacy_default_model_and_provider_cannot_pin_dispatch(board):
     """default_model claude-* with no default_provider ran on the profile's provider (openai-codex after the
     profile switched to a GPT): HTTP 400 on every card. The tier now names the model's own provider."""
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="plain job", assignee="default")
         task = kb.get_task(conn, tid)
         model, prov, reason = tier.resolve_model_tier(conn, task, lane="ready", cfg={"default_model": SONNET})
-        assert (model, prov, reason) == (SONNET, "anthropic", "default")
-        # An explicit default_provider still wins.
+        assert (model, prov, reason) == ("class:standard", "auto", "default")
+        # A concrete default_provider cannot constrain the neutral default.
         _m, prov, _r = tier.resolve_model_tier(conn, task, lane="ready",
                                                cfg={"default_model": SONNET, "default_provider": "openrouter"})
-        assert prov == "openrouter"
+        assert prov == "auto"
     assert tier.infer_provider("some-unknown-model") is None

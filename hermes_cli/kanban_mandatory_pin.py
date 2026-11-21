@@ -47,12 +47,9 @@ def pin_of(item: Mapping[str, Any]) -> Optional[tuple[str, str]]:
     """``(model, provider)`` of a mandatory pin, from create args (``pin_mandatory``/``model``/``provider``) or a
     card row (``model_pin_mandatory``/``model_override``/``provider_override``); None when there is none.
     A mark without a model pins nothing (``kanban_pin_reroute.mandatory_column`` refuses it at create)."""
-    if not (item.get("pin_mandatory") or item.get("model_pin_mandatory")):
-        return None
-    model = _str(item.get("model_override")) or _str(item.get("model"))
-    if not model:
-        return None
-    return model, (_str(item.get("provider_override")) or _str(item.get("provider"))).lower()
+    # Stored/synced mandatory flags remain historical evidence, never placement
+    # authority. New flags are rejected at ingress instead of transported.
+    return None
 
 
 def requirements(item: Mapping[str, Any]) -> set[str]:
@@ -103,41 +100,8 @@ def mark(conn: Any, task_id: str) -> bool:
     (``hermes kanban set-model <id> --mandatory``), so a later mark is fenced like a create-time one (review
     5879416189 on #1622). Raises ValueError for a card without a model pin or a worker-first card
     (:func:`mark_refusal`), RuntimeError for an archived one. False when the card does not exist."""
-    import json
-    from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_db_sync as sync
-    from hermes_cli.kanban_db_connect import write_txn
-    # Read runs_on whatever this process's sync mode: a process without sync writing to an attached board must
-    # still label a pool card, or the Board would lease the mark to an old core (review 5879616348 on #1622).
-    placed = "runs_on" in sync.table_columns(conn, "tasks")
-    me = _gateway_id(conn) if placed else ""
-    fields: tuple[str, ...] = ("model_pin_mandatory",)
-    with write_txn(conn):
-        row = conn.execute("SELECT status, model_override, " + ("runs_on" if placed else "NULL") +
-                           " FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        if row is None:
-            return False
-        if row[0] == "archived":
-            raise RuntimeError(f"cannot change the model pin on archived task {task_id}")
-        if not _str(row[1]):
-            raise ValueError("--mandatory needs a model pin: set a model first")
-        if (why := mark_refusal(conn, task_id)) is not None:
-            raise ValueError(why)
-        conn.execute("UPDATE tasks SET model_pin_mandatory = 1 WHERE id = ?", (task_id,))
-        payload: dict[str, Any] = {"mandatory": True}
-        try:
-            labels = json.loads(row[2]) if row[2] else []
-        except ValueError:
-            labels = []
-        if isinstance(labels, list) and labels:
-            new = carry(labels, {"model_override": row[1], "model_pin_mandatory": 1}, me=me)
-            if new != labels:
-                conn.execute("UPDATE tasks SET runs_on = ? WHERE id = ?", (json.dumps(new), task_id))
-                payload.update(runs_on=new, previous_runs_on=labels)
-                fields = ("model_pin_mandatory", "runs_on")
-        kb._append_event(conn, task_id, "model_pin_mandatory_set", payload)
-    kb.notify_task_updated(conn, task_id, fields)
-    return True
+    from hermes_cli.kanban_model_neutral import ERROR
+    raise ValueError(ERROR)
 
 
 def _gateway_id(conn: Any) -> str:

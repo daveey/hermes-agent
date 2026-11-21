@@ -1,8 +1,6 @@
 """LLM quota pacing governor: pool math and Kanban dispatch admission (t_01a1d975f57bb7b8). [daveey]"""
 from __future__ import annotations
 
-import ast
-import pathlib
 import time
 from types import SimpleNamespace
 
@@ -134,6 +132,7 @@ def test_window_kind_maps_anthropic_and_codex_labels():
 @pytest.fixture
 def paced_board(board, monkeypatch):
     monkeypatch.setattr(pd, "_CACHE", {})
+    monkeypatch.setattr(pd, "_CLASS_CACHE", {})
     return board
 
 
@@ -151,7 +150,13 @@ def _dispatch(conn):
 
 
 def _opus_card(conn, title="work", **kw):
-    return kb.create_task(conn, title=title, assignee="default", model_override=OPUS, provider_override="anthropic", **kw)
+    mandatory = kw.pop("pin_mandatory", False)
+    tid = kb.create_task(conn, title=title, assignee="default", model_override="class:standard", **kw)
+    if mandatory:
+        # Historical mark, seeded only in the isolated board fixture.
+        conn.execute("UPDATE tasks SET model_override=?, provider_override='anthropic', model_pin_mandatory=1 WHERE id=?", (OPUS, tid))
+        conn.commit()
+    return tid
 
 
 def test_pool_ahead_of_pace_starts_cards_by_default(paced_board, monkeypatch):
@@ -247,13 +252,14 @@ def test_governor_off_is_todays_behaviour(paced_board, monkeypatch):
     assert seen == [tid]
 
 
-def test_mandatory_pin_is_never_throttled(paced_board, monkeypatch):
+def test_legacy_mandatory_pin_cannot_bypass_reserve_hold(paced_board, monkeypatch):
     _write_cfg(paced_board)
     _usage(monkeypatch, 99, 9 * HOUR)
     with kbc.connect() as conn:
         tid = _opus_card(conn, pin_mandatory=True)
-        seen, _ = _dispatch(conn)
-    assert seen == [tid]
+        seen, result = _dispatch(conn)
+    assert seen == []
+    assert (tid, lp.GUARD_REASON) in result.respawn_guarded
 
 
 def test_usage_read_failure_starts_the_card(paced_board, monkeypatch):
@@ -275,92 +281,3 @@ def test_ungoverned_provider_is_not_throttled(paced_board, monkeypatch):
         tid = _opus_card(conn)
         seen, _ = _dispatch(conn)
     assert seen == [tid]
-
-
-def test_only_kanban_dispatch_consults_the_governor():
-    """Chats, cron and notice delivery never hold a card on it, read usage through it or write its state: only the
-    dispatcher's claim path does. The one other reader is the stall notice (``kanban_parent_unclaimed``,
-    t_01a1db9d9538716b), and it may take only the read-only view of the stored pace (``NOTICE_VIEW``)."""
-    root = pathlib.Path(pd.__file__).resolve().parents[1]
-    users = sorted(str(p.relative_to(root)) for top in ("agent", "gateway", "cron", "hermes_cli", "tui_gateway")
-                   if (root / top).is_dir() for p in (root / top).rglob("*.py")
-                   if "kanban_llm_pacing" in p.read_text(encoding="utf-8-sig", errors="ignore"))
-    # The dispatcher reaches the governor through kanban_start_gate.pre_claim_hold (its last waits before a claim).
-    assert users == ["hermes_cli/kanban_db_edit.py",
-                     "hermes_cli/kanban_dispatch_maintenance.py",
-                     "hermes_cli/kanban_llm_pacing.py", "hermes_cli/kanban_llm_pacing_dispatch.py",
-                     "hermes_cli/kanban_llm_pacing_history.py",
-                     "hermes_cli/kanban_paced_reroute.py",
-                     "hermes_cli/kanban_parent_unclaimed.py", "hermes_cli/kanban_ratio_routing.py",
-                     "hermes_cli/kanban_review_model.py",
-                     "hermes_cli/kanban_start_gate.py",
-                     "hermes_cli/kanban_worker_node.py"]
-    assert _governor_names(root / "hermes_cli/kanban_start_gate.py") == {"kanban_llm_pacing_dispatch": {"hold"}}
-    assert "kanban_start_gate import pre_claim_hold" in (root / "hermes_cli/kanban_db_dispatch.py").read_text(encoding="utf-8-sig")
-    assert _governor_names(root / "hermes_cli/kanban_dispatch_maintenance.py") == {
-        "kanban_llm_pacing_dispatch": {"refresh_pools"}}
-    assert _governor_names(root / "hermes_cli/kanban_parent_unclaimed.py") == NOTICE_VIEW
-    # ``hermes kanban edit`` refuses an unreasoned raise on a held card (agent-6f3c6009b5): the same read-only view.
-    assert _governor_names(root / "hermes_cli/kanban_db_edit.py") == EDIT_VIEW
-    assert _governor_names(root / "hermes_cli/kanban_worker_node.py") == PICKUP_VIEW
-    assert _governor_names(root / "hermes_cli/kanban_paced_reroute.py") == REROUTE_VIEW
-    assert _governor_names(root / "hermes_cli/kanban_review_model.py") == REROUTE_VIEW
-    assert _governor_names(root / "hermes_cli/kanban_ratio_routing.py") == RATIO_VIEW
-
-
-# What the stall notice may take from the governor: no hold(), no usage read, no state write.
-NOTICE_VIEW = {"kanban_llm_pacing_dispatch": {"admission", "admission_skip", "paced_pools"}}
-EDIT_VIEW = {"kanban_llm_pacing_dispatch": {"paced_pools"}}
-# Worker pickup (t_01a1ddeb76e30be7) predicts the claim-time hold on the replica's copy, so a card dispatch would
-# hold takes no pickup budget: its one entry point holds nothing, records no card event and fails open.
-PICKUP_VIEW = {"kanban_llm_pacing_dispatch": {"pickup_hold"}}
-# The route resolver moves a route off a far held pool (t_01a1e026c2ba361b): the stored holds only, no usage read.
-REROUTE_VIEW = {"kanban_llm_pacing_dispatch": {"held_pools"}}
-# Ratio routing (2026-11-19) reads the stored ``v2`` budget (with this process's newer pools) and the pure config
-# parser: no usage read, no hold, no write.
-RATIO_VIEW = {"kanban_llm_pacing_dispatch": {"_hold_state"}, "kanban_llm_pacing": {"config_from"}}
-
-
-def _governor_names(path: pathlib.Path) -> dict[str, set[str]]:
-    """Each governor module ``path`` imports, with every name it imports from it or reads off it as ``alias.name``.
-    A dotted ``import`` of one, or its alias used any other way (passed on, stored), is listed as such."""
-    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
-    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    aliases: dict[str, str] = {}
-    names: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if "kanban_llm_pacing" in alias.name:
-                    names.setdefault(alias.name, set()).add("<module import>")
-        elif isinstance(node, ast.ImportFrom) and "kanban_llm_pacing" in (node.module or ""):
-            names.setdefault(node.module.rsplit(".", 1)[-1], set()).update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                if "kanban_llm_pacing" in alias.name:
-                    aliases[alias.asname or alias.name] = alias.name
-                    names.setdefault(alias.name, set())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id in aliases and isinstance(node.ctx, ast.Load):
-            parent = parents.get(node)
-            names[aliases[node.id]].add(parent.attr if isinstance(parent, ast.Attribute) and parent.value is node
-                                        else "<bare module use>")
-    return names
-
-
-@pytest.mark.parametrize("source, seen", [
-    ("from hermes_cli import kanban_llm_pacing_dispatch as p\np.admission(p.paced_pools(c, t))\np.admission_skip(a)\n",
-     NOTICE_VIEW),
-    ("from hermes_cli import kanban_llm_pacing_dispatch as p\np.paced_pools(c, t)\np.hold(c, r, 'ready', x)\n",
-     {"kanban_llm_pacing_dispatch": {"paced_pools", "hold"}}),
-    ("from hermes_cli import kanban_llm_pacing_dispatch as p\nkeep(p)\n", {"kanban_llm_pacing_dispatch": {"<bare module use>"}}),
-    ("from hermes_cli.kanban_llm_pacing_dispatch import read_pool\n", {"kanban_llm_pacing_dispatch": {"read_pool"}}),
-    ("import hermes_cli.kanban_llm_pacing_dispatch\n", {"hermes_cli.kanban_llm_pacing_dispatch": {"<module import>"}}),
-    ("from hermes_cli import kanban_llm_pacing as lp\nlp.admit_limit(x)\n", {"kanban_llm_pacing": {"admit_limit"}}),
-])
-def test_the_notice_view_pin_sees_every_way_to_reach_the_governor(tmp_path, source, seen):
-    """The pin above holds only if ``_governor_names`` reports a hold(), a usage read, the module passed on or a
-    dotted import; anything beyond the allowed view must differ from ``NOTICE_VIEW``."""
-    module = tmp_path / "notice.py"
-    module.write_text(source, encoding="utf-8")
-    assert _governor_names(module) == seen

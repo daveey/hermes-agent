@@ -50,11 +50,8 @@ def _norm(value: Any) -> str:
 
 
 def is_mandatory_pin(task: Any) -> bool:
-    """True when the card's creator said its pin must never move."""
-    from hermes_cli.kanban_provider_walls import requires_model
-    if getattr(task, "model_pin_mandatory", None):
-        return True
-    return requires_model(task)
+    """Legacy marks have no routing authority; new marks are rejected at ingress."""
+    return False
 
 
 def min_wall_seconds(cfg: Optional[dict]) -> float:
@@ -235,27 +232,24 @@ def record(conn: Any, task: Any, origin: tuple[str, str], target: tuple[str, str
     until = f"until {_pt(resets_at)}" if resets_at else "until its quota resets"
     kb.add_comment(conn, task.id, COMMENT_AUTHOR, (
         f"Quota wall: {origin[0]} ({origin[1]}) is out {until}. This card's runs use {target[0]} "
-        f"({target[1]}), the same model class, until then; the pin itself is unchanged and the first run "
-        f"after the reset uses it again. To make this card wait for its pin instead: "
-        f"`hermes kanban set-model {task.id} {origin[0]} --provider {origin[1]} --mandatory`."))
+        f"({target[1]}), selected dynamically within the required class. Kanban does not accept concrete model "
+        f"or provider pins; reserve and independent-review gates still apply."))
     return payload
 
 
 def mandatory_column(pin_mandatory: Any, model_override: Optional[str]) -> Optional[int]:
     """``tasks.model_pin_mandatory`` for a new card: 1 or NULL. A mark needs a pin to mark."""
-    if not pin_mandatory:
-        return None
-    if not _norm(model_override):
-        raise ValueError("pin_mandatory requires a model pin")
-    return 1
+    from hermes_cli.kanban_model_neutral import validate_selector
+    validate_selector(model_override, mandatory=pin_mandatory)
+    return None
 
 
 def set_pin_mandatory(conn: Any, task_id: str, mandatory: bool) -> bool:
     """Mark (or unmark) a card's model pin as mandatory: a quota wall never moves a mandatory pin."""
     from hermes_cli import kanban_db as kb
-    if mandatory:  # also fences the placed card: kanban_mandatory_pin.mark
-        from hermes_cli.kanban_mandatory_pin import mark
-        return mark(conn, task_id)
+    if mandatory:
+        from hermes_cli.kanban_model_neutral import ERROR
+        raise ValueError(ERROR)
     return kb._set_task_override(
         conn, task_id, "UPDATE tasks SET model_pin_mandatory = ? WHERE id = ?", (None,),
         "model_pin_mandatory_set", {"mandatory": False}, ("model_pin_mandatory",),
@@ -267,6 +261,8 @@ def set_model_cli(conn: Any, task_id: str, raw_model: Optional[str], model: Opti
     """``hermes kanban set-model``: ``(found, wrote_model)``. A bare ``--[no-]mandatory`` changes only the
     mark (``set-model <id>`` alone still clears the pin, as before)."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_model_neutral import validate_selector
+    validate_selector(model, provider, mandatory=bool(mandatory))
     if raw_model is None and mandatory is not None:
         return set_pin_mandatory(conn, task_id, mandatory), False
     if mandatory:  # refuse before the model write, so a refused mark changes nothing

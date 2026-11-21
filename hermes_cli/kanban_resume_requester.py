@@ -168,10 +168,12 @@ def ensure_recovery_cards(conn: sqlite3.Connection) -> list[str]:
             assignee = recovery_assignee(task) if goal else create_assignee(row['assignee'] or 'default')
             if not assignee:
                 continue
+            from hermes_cli.kanban_model_neutral import routing_view
+            route = routing_view(task)
             rec = kb.create_task(
                 conn, title=f"Recover {target}: {'goal unachievable' if goal else 'continuation budget exhausted'}"[:200],
                 body=(_goal_body if goal else _body)(target, row["title"] or "", park_id), assignee=assignee,
-                model_override=task.model_override, provider_override=task.provider_override,
+                model_override=route.model_override, provider_override=route.provider_override,
                 requires=['terminal', 'file', 'kanban'] if goal else None,
                 created_by=CREATED_BY, workspace_kind="scratch", tenant=row["tenant"],
                 idempotency_key=_key(target, history.park_identity(conn, target) or park_id),

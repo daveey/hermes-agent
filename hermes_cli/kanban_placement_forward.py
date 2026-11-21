@@ -466,6 +466,8 @@ def remote_args(conn: sqlite3.Connection, task, *, self_gw: str, board: Optional
     (default: the board ``conn`` opened), named in the footer's read target."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_placement import EVIDENCE_CLOSE, EVIDENCE_OPEN
+    from hermes_cli.kanban_model_neutral import forwarded_text, routing_view
+    task = routing_view(task)
     parents = kb.parent_ids(conn, task.id)
     summaries = kb.latest_summaries(conn, parents) if parents else {}
     lines = []
@@ -473,7 +475,7 @@ def remote_args(conn: sqlite3.Connection, task, *, self_gw: str, board: Optional
         p = kb.get_task(conn, pid)
         handoff = (summaries.get(pid) or (p.result if p else None) or "(no handoff)").strip()
         lines.append(_quoted(f"- {pid} ({p.title if p else '?'}): {handoff[:1500]}"))
-    body = _own_text((task.body or "").rstrip())
+    body = forwarded_text(_own_text((task.body or "").rstrip()))
     if lines:
         board = board or opened_board(conn)
         # Spell the tool's read call: "with cross_task @task:..." parses as an unknown explicit invocation in

@@ -68,6 +68,9 @@ def prepare(args):
 
 
 def submit(args):
+    from hermes_cli.kanban_model_neutral import validate_selector, validate_text
+    validate_selector(args.get('model'), args.get('provider'), mandatory=args.get('pin_mandatory'))
+    validate_text(args.get('title'), args.get('body'))
     home, body, request_id = prepare(args)
     return send(home, body, request_id)
 
@@ -93,6 +96,10 @@ def send(home, body, request_id):
 
 
 def cli_submit(args, *, body, workspace_kind, workspace_path, max_runtime, branch_name):
+    from hermes_cli.kanban_model_neutral import validate_selector, validate_text
+    validate_selector(getattr(args, 'model_override', None), getattr(args, 'provider_override', None),
+                      mandatory=getattr(args, 'pin_mandatory', False))
+    validate_text(getattr(args, 'title', None), body)
     if branch_name or getattr(args, 'reasoning_effort', None):
         raise SelfWorkError('self-work courier does not support branch or reasoning_effort yet')
     names = ('title', 'assignee', 'tenant', 'priority', 'admission_class', 'admission_frees',

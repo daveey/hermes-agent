@@ -1,142 +1,46 @@
-import { DropdownMenu, DropdownMenuContent, ModelCatalogMenu, type ModelMenuController } from '@hermes/plugin-sdk'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import {
-  EMPTY_OVERRIDE,
-  isInherited,
-  overrideCreateFields,
-  overrideLabel,
-  overridePatch,
-  type TaskModelOverride
-} from './model-override'
+import { EMPTY_OVERRIDE, isInherited, ModelOverrideField, overrideCreateFields, overrideLabel, overridePatch } from './model-override'
 
-// Radix calls these on open; jsdom doesn't implement them.
-beforeAll(() => {
-  Element.prototype.scrollIntoView = vi.fn()
-  Element.prototype.hasPointerCapture = vi.fn(() => false)
-  Element.prototype.releasePointerCapture = vi.fn()
-})
+vi.mock('./ui', () => ({ useKanban: () => ({ modelInherit: 'Dynamic routing' }) }))
+afterEach(cleanup)
 
-const getGlobalModelOptions = vi.fn()
-
-vi.mock('@/hermes', () => ({
-  getGlobalModelOptions: (...args: unknown[]) => getGlobalModelOptions(...args),
-  setApiRequestProfile: vi.fn()
-}))
-
-beforeEach(() => {
-  getGlobalModelOptions.mockResolvedValue({
-    providers: [{ models: ['gemini-3.1-pro', 'gemini-2.5-flash'], name: 'Google', slug: 'google' }]
-  })
-})
-
-afterEach(() => {
-  cleanup()
-  vi.clearAllMocks()
-})
-
-describe('override label', () => {
-  it('reads as inherited until something is pinned', () => {
-    expect(isInherited(EMPTY_OVERRIDE)).toBe(true)
-    expect(overrideLabel(EMPTY_OVERRIDE, 'Profile default')).toBe('Profile default')
-  })
-
-  it('a depth-only pin is still an override', () => {
-    const depthOnly: TaskModelOverride = { effort: 'ultra', model: '', provider: '' }
-
-    expect(isInherited(depthOnly)).toBe(false)
-    expect(overrideLabel(depthOnly, 'Profile default')).toBe('Profile default · Ultra')
-  })
-})
-
-// The override drives the SHARED composer menu through a controller. This is
-// the seam that keeps the two surfaces identical, so exercise the real
-// component rather than a stand-in.
-describe('the shared catalog menu, driven by an override controller', () => {
-  function renderMenu(value: TaskModelOverride = EMPTY_OVERRIDE) {
+describe('model-neutral Kanban requirements', () => {
+  it('offers classes, not a model catalog, and emits auto provider', () => {
     const onChange = vi.fn()
 
-    const controller: ModelMenuController = {
-      applyPreset: (preset, row) => onChange({ effort: preset.effort ?? '', model: row.model, provider: row.provider }),
-      current: { effort: value.effort, fast: false, model: value.model, provider: value.provider },
-      presetFor: () => ({}),
-      select: (model, provider) => onChange({ ...value, model, provider }),
-      setOptions: (patch, row) => {
-        if (patch.effort !== undefined) {
-          onChange({ effort: patch.effort, model: row.model, provider: row.provider })
-        }
-      }
-    }
+    render(<ModelOverrideField onChange={onChange} value={EMPTY_OVERRIDE} />)
+    const selector = screen.getByRole('combobox', { name: 'Dynamic routing' })
 
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-
-    render(
-      <QueryClientProvider client={client}>
-        <DropdownMenu open>
-          <DropdownMenuContent>
-            <ModelCatalogMenu controller={controller} />
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </QueryClientProvider>
-    )
-
-    return onChange
-  }
-
-  it('lists the catalog and reports a picked model', async () => {
-    const onChange = renderMenu()
-
-    // Rows render the display name; the controller receives the raw id.
-    fireEvent.click(await screen.findByText(/Gemini 3\.1 Pro/i))
-
-    const picked = onChange.mock.calls.at(-1)![0]
-
-    expect(picked.model).toBe('gemini-3.1-pro')
-    expect(picked.provider).toBe('google')
+    expect(Array.from(selector.querySelectorAll('option')).every(option => !option.value || option.value.startsWith('class:'))).toBe(true)
+    fireEvent.change(selector, { target: { value: 'class:deep' } })
+    expect(onChange).toHaveBeenLastCalledWith({ effort: '', model: 'class:deep', provider: 'auto' })
   })
 
-  it('never renders MoA presets — a preset is not a worker model', async () => {
-    getGlobalModelOptions.mockResolvedValue({
-      providers: [
-        { models: ['gemini-3.1-pro'], name: 'Google', slug: 'google' },
-        { models: ['BeastMode'], name: 'Mixture of Agents', slug: 'moa' }
-      ]
-    })
+  it('does not display or resubmit a historical concrete pin', () => {
+    const onChange = vi.fn()
 
-    renderMenu()
-    await screen.findByText(/Gemini 3\.1 Pro/i)
+    render(<ModelOverrideField onChange={onChange} value={{ effort: '', model: 'gpt-6-luna', provider: 'openai-codex' }} />)
+    const selector = screen.getByRole('combobox', { name: 'Dynamic routing' }) as HTMLSelectElement
 
-    expect(screen.queryByText(/BeastMode/)).toBeNull()
+    expect(selector.value).toBe('')
+    fireEvent.change(selector, { target: { value: 'class:fast' } })
+    expect(onChange).toHaveBeenLastCalledWith({ effort: '', model: 'class:fast', provider: 'auto' })
   })
-})
 
-// A PATCH body can't say "set to NULL" with a missing key, so clears are
-// explicit flags; a create should instead OMIT what the user never touched so
-// the backend's own defaults still apply.
-describe('REST field mapping', () => {
-  it('create omits untouched fields', () => {
+  it('retains inherited and depth-only semantics', () => {
+    expect(isInherited(EMPTY_OVERRIDE)).toBe(true)
+    expect(overrideLabel(EMPTY_OVERRIDE, 'Dynamic routing')).toBe('Dynamic routing')
+    expect(overridePatch({ effort: 'ultra', model: '', provider: '' })).toEqual({ clear_model_override: true, reasoning_effort: 'ultra' })
     expect(overrideCreateFields(EMPTY_OVERRIDE)).toEqual({})
-    expect(overrideCreateFields({ effort: 'high', model: 'm', provider: 'p' })).toEqual({
-      model_override: 'm',
-      provider_override: 'p',
-      reasoning_effort: 'high'
-    })
-  })
-
-  it('patch clears explicitly', () => {
     expect(overridePatch(EMPTY_OVERRIDE)).toEqual({ clear_model_override: true, clear_reasoning_effort: true })
   })
 
-  it('patch can pin depth alone, leaving the model to the profile', () => {
-    expect(overridePatch({ effort: 'ultra', model: '', provider: '' })).toEqual({
-      clear_model_override: true,
-      reasoning_effort: 'ultra'
-    })
-  })
-
-  it('a provider is never sent without its model', () => {
-    expect(overrideCreateFields({ effort: '', model: '', provider: 'google' })).toEqual({})
+  it.each([overridePatch, overrideCreateFields])('refuses concrete or provider-only payloads', mapper => {
+    expect(() => mapper({ effort: '', model: 'grok-4.6', provider: 'xai-oauth' })).toThrow(/dynamic class/)
+    expect(() => mapper({ effort: '', model: '', provider: 'anthropic' })).toThrow(/dynamic class/)
+    expect(() => mapper({ effort: '', model: 'class:deep', provider: 'anthropic' })).toThrow(/dynamic class/)
+    expect(mapper({ effort: 'high', model: 'class:deep', provider: '' })).toMatchObject({ model_override: 'class:deep', provider_override: 'auto', reasoning_effort: 'high' })
   })
 })

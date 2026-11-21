@@ -11,6 +11,7 @@ import functools
 import json
 
 from hermes_cli.kanban_published_worktree import publication_scope
+from tools.kanban_tools_model_neutral import model_neutral_create
 import logging
 import os
 import time
@@ -1532,6 +1533,7 @@ from hermes_cli.kanban_origin_admission import tool_create as _native_tool_creat
 
 
 @_kanban_handler("kanban_create")
+@model_neutral_create
 @publication_scope
 @_native_tool_create
 def _handle_create(args: dict, **kw) -> str:

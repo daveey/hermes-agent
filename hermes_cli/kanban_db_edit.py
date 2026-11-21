@@ -83,6 +83,8 @@ def edit_task(
     stale read can't slip past it. ``priority_reason`` lands in the ``reprioritized``
     event payload. [daveey]
     """
+    from hermes_cli.kanban_model_neutral import validate_text
+    validate_text(title, body)
     from hermes_cli.kanban_priority import bounded
     if priority_bump is not None and (priority is not None or priority_bump <= 0):
         raise ValueError("priority_bump must be positive and cannot be combined with priority")

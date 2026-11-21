@@ -274,29 +274,18 @@ def task_route(conn, task_id) -> tuple[Optional[str], Optional[str], str]:
         receipt = _run_receipt(conn, task_id, task.current_run_id)
         if receipt is not None:
             return receipt
+    from hermes_cli.kanban_model_neutral import effective_selector
     try:
-        from hermes_cli.kanban_model_assignment import _assignee_config
-        from hermes_cli.kanban_pin_provider import resolve_legacy_pin
         cfg = tier.load_tier_config()
-        model, provider, reason = tier.resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg)
+        model, provider, _reason = tier.resolve_dispatch_tier(conn, task, lane=lane, cfg=cfg)
         chosen = bool(model)
-        if reason == "pinned" and not task.provider_override:
-            task.provider_override = resolve_legacy_pin(task)[0]
-        if model:
-            task.model_override, task.provider_override = model, provider
-        model, provider = task.model_override, task.provider_override
+        if not model:
+            model, provider = effective_selector(task)
         if model and model.startswith("class:"):
             if chosen and tier.class_unroutable_reason(model):
                 model = provider = None
             else:
                 return model, None, lane
-        if not model:
-            config = _assignee_config(task.assignee) or {}
-            block = config.get("model") or {}
-            if isinstance(block, dict):
-                model, provider = block.get("default"), block.get("provider")
-        if model and model.startswith("class:"):
-            provider = None
         return _optional_text(model), _provider(provider), lane
     except Exception:  # route preview is best-effort: unknown routing stays conservative
         logger.debug("kanban shared blockers: route preview failed for %s", task_id, exc_info=True)

@@ -56,8 +56,10 @@ def _run(conn, tid, model=None, *, receipt=None, lane='ready'):
 
 
 def _card(conn, pin=None, *, title='implement it', creator=None, status='ready'):
-    tid = kb.create_task(conn, title=title, assignee='a', creator_task_id=creator,
-                         model_override=pin, provider_override=PROVIDER.get(pin))
+    tid = kb.create_task(conn, title=title, assignee='a', creator_task_id=creator)
+    # Seed pre-policy rows without weakening the create boundary.
+    conn.execute('UPDATE tasks SET model_override=?, provider_override=? WHERE id=?',
+                 (pin, PROVIDER.get(pin), tid))
     conn.execute('UPDATE tasks SET status=? WHERE id=?', (status, tid))
     conn.commit()
     return tid
@@ -564,7 +566,11 @@ def test_unpinned_astra_with_every_pool_held_has_no_reviewer_route(board, clock,
 def _override_card(conn, pin, override):
     tid = _card(conn, pin)
     assert kb.claim_task(conn, tid, claimer=kb._claimer_id()) is not None
-    assert kb.request_review(conn, tid, metadata={'review_model': override, 'review_provider': PROVIDER[override]})
+    assert kb.request_review(conn, tid)
+    import json
+    conn.execute('UPDATE task_runs SET metadata=? WHERE task_id=?',
+                 (json.dumps({'review_model': override, 'review_provider': PROVIDER[override]}), tid))
+    conn.commit()
     return tid
 
 
@@ -580,15 +586,15 @@ def test_independent_review_override_on_a_held_or_walled_pool_moves_to_the_next_
         monkeypatch.setattr(walls, 'live_quota_wall', lambda p, m: float(clock[0] + 99999) if p == 'xai-oauth' else None)
     with kbc.connect() as conn:
         tid = _override_card(conn, ASTRA, GROK)  # astra authored, the handoff asks for grok on the blocked pool
-        assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_override')
+        assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_unpinned')
 
 
-def test_independent_review_override_on_a_free_pool_is_honored(board, clock, monkeypatch):
+def test_legacy_concrete_review_override_does_not_choose_the_reviewer(board, clock, monkeypatch):
     _routing(monkeypatch)
     paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = _override_card(conn, ASTRA, GROK)
-        assert _review_route(conn, tid) == (GROK, 'xai-oauth', 'review_override')
+        assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_unpinned')
 
 
 def test_override_on_a_held_pool_moves_even_without_author_evidence(board, clock, monkeypatch):
@@ -598,7 +604,7 @@ def test_override_on_a_held_pool_moves_even_without_author_evidence(board, clock
     with kbc.connect() as conn:
         tid = _override_card(conn, None, GROK)
         assert _models(conn, tid) == set()
-        assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_override')
+        assert _review_route(conn, tid) == (OPUS, 'anthropic', 'review_unpinned')
 
 
 # --- mandatory reviewer pins never silently move to another model ---------------------------------------------------
@@ -614,7 +620,7 @@ def _mandatory_downstream(conn, *, pin=OPUS, ran=ASTRA):
 
 
 @pytest.mark.parametrize('block', ['held', 'walled', 'live_wall'])
-def test_mandatory_downstream_reviewer_pin_is_never_moved_off_its_pool(board, clock, monkeypatch, block):
+def test_legacy_mandatory_reviewer_moves_off_a_blocked_pool(board, clock, monkeypatch, block):
     _routing(monkeypatch)
     if block == 'held':
         paced_tests._pools(clock, anthropic=('held', HELD_FAR))
@@ -626,21 +632,28 @@ def test_mandatory_downstream_reviewer_pin_is_never_moved_off_its_pool(board, cl
         down = _mandatory_downstream(conn)
         task = kb.get_task(conn, down)
         assert _is_review(conn, task, 'ready') is True
-        assert _review_route(conn, down, 'ready') == (OPUS, 'anthropic', 'review_unpinned')
-        assert tier.resolve_dispatch_tier(conn, task, lane='ready') == (OPUS, 'anthropic', 'review_unpinned')
-        # the pace governor's probe is not even consulted for it
+        route = _review_route(conn, down, 'ready')
+        assert route == (GROK, 'xai-oauth', 'review_unpinned')
+        assert tier.resolve_dispatch_tier(conn, task, lane='ready') == route
+        assert review.implementer_models(conn, task) == {ASTRA}
+        assert kb.get_task(conn, down).model_override == OPUS
+        # Legacy mandatory marks must not bypass pacing or author exclusions.
         monkeypatch.setattr('hermes_cli.kanban_quota_episode.alternate_route', lambda *a: (GROK, 'xai-oauth'))
         from hermes_cli import kanban_llm_pacing as lp
         cfg = lp.config_from({'providers': ['anthropic', 'openai-codex', 'xai-oauth'], 'enabled': True})
-        assert lpd._pace_alternate_route(conn, task, (OPUS, 'anthropic', 'review_unpinned'), 'ready', cfg, conn,
-                                         [{'provider': 'anthropic', 'until': clock[0] + HELD_FAR}]) is None
-        assert paced.paced_route(conn, task, (OPUS, 'anthropic', 'review_unpinned'), lane='ready',
-                                 cfg=tier.load_tier_config()) is None
+        alternate = lpd._pace_alternate_route(
+            conn, task, (OPUS, 'anthropic', 'review_unpinned'), 'ready', cfg, conn,
+            [{'provider': 'anthropic', 'until': clock[0] + HELD_FAR}])
+        assert alternate is not None and alternate[:2] == (GROK, 'xai-oauth')
+        assert alternate[0] not in _models(conn, down)
+        if block == 'held':
+            moved = paced.paced_route(conn, task, (OPUS, 'anthropic', 'review_unpinned'), lane='ready',
+                                       cfg=tier.load_tier_config())
+            assert moved is not None and moved[:2] == (GROK, 'xai-oauth')
 
 
-def test_mandatory_downstream_reviewer_pin_that_authored_the_work_is_still_used(board, clock, monkeypatch):
-    """The mandatory pin names the implementer too (e.g. via a child card): authorship is no refusal, and the pin is
-    still never swapped for another model."""
+def test_legacy_reviewer_pin_does_not_require_model_diversity(board, clock, monkeypatch):
+    """An audited author model remains eligible; separate execution provides independence."""
     _routing(monkeypatch)
     with kbc.connect() as conn:
         down = _mandatory_downstream(conn, pin=OPUS, ran=OPUS)

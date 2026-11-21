@@ -40,8 +40,8 @@ _RETRY_RE = re.compile(r"retry[\s_-]*after[:=\s]+(\d+)\s*s", re.IGNORECASE)
 
 
 def requires_model(task: Any) -> bool:
-    """True when the card's body carries a ``require_model: true`` line: its route must never be moved."""
-    return bool(_REQUIRE_MODEL_RE.search(str(getattr(task, "body", "") or "")))
+    """Historical body directives cannot override model-neutral routing policy."""
+    return False
 
 
 def walls_path() -> Path:

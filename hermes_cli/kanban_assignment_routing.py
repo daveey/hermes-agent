@@ -233,7 +233,9 @@ def validate_repair_completion(conn, task_id, *, observation=None):
                         workspace_kind=original.workspace_kind,
                         workspace_path=original.workspace_path, skills=original.skills)
     from hermes_cli.kanban_model_assignment import validate_model_assignment
-    validate_model_assignment(original.assignee, original.model_override, original.provider_override)
+    from hermes_cli.kanban_model_neutral import routing_view
+    route = routing_view(original)
+    validate_model_assignment(original.assignee, route.model_override, route.provider_override)
 
 
 def route(conn, task, payload):

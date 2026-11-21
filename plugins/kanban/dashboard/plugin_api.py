@@ -660,8 +660,13 @@ class _StatusRejected(Exception):
 def _validate_request_entry(payload) -> None:
     """Reject ignored or mixed evidence writes before any assignment/status mutation."""
     from hermes_cli.kanban_human_request import validate_human_request
+    from hermes_cli.kanban_model_neutral import validate_selector, validate_text, validate_review
 
     with _value_error_400():
+        validate_selector(getattr(payload, "model_override", None), getattr(payload, "provider_override", None))
+        validate_text(getattr(payload, "title", None), getattr(payload, "body", None))
+        if getattr(payload, "status", None) == "review":
+            validate_review(getattr(payload, "metadata", None) or {})
         validate_human_request(payload.human_request, kind=payload.block_kind)
         if payload.metadata_only:
             allowed = {"ids", "human_request", "metadata_only", "block_reason"}
@@ -776,25 +781,12 @@ def _refusal_detail(conn, task_id: str, s: str) -> Optional[str]:
 
 
 def _patch_title_body(conn, task_id: str, payload: UpdateTaskBody, board: Optional[str]) -> None:
-    """PATCH title/body phase: one UPDATE + ``edited`` event, then the post-commit observer
-    (field names only — values never leave the DB via this payload)."""
-    with kanban_db.write_txn(conn):
-        sets, vals = [], []
-        if payload.title is not None:
-            if not payload.title.strip():
-                raise HTTPException(status_code=400, detail="title cannot be empty")
-            sets.append("title = ?")
-            vals.append(payload.title.strip())
-        if payload.body is not None:
-            sets.append("body = ?")
-            vals.append(payload.body)
-        vals.append(task_id)
-        conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals)
-        conn.execute(
-            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'edited', NULL, ?)",
-            (task_id, int(time.time())))
-    kanban_db.notify_task_updated(
-        conn, task_id, [f for f in ("title", "body") if getattr(payload, f) is not None], board=board)
+    """Use the shared mutation boundary, not a dashboard-only body writer."""
+    if payload.title is not None and not payload.title.strip():
+        raise HTTPException(status_code=400, detail="title cannot be empty")
+    with _value_error_400():
+        kanban_db.edit_task(conn, task_id, title=payload.title.strip() if payload.title is not None else None,
+                            body=payload.body, board=board)
 
 
 @router.patch("/tasks/{task_id}")

@@ -77,6 +77,7 @@ def implementer_models(conn, task) -> set[str]:
     review-only retries and missing receipts preserve the previous authors.
     Related source cards are traversed with a visited set to tolerate cyclic links.
     """
+    task = getattr(task, "_routing_source", task)
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_review_sources import source_reader
     seen = set()
@@ -251,27 +252,19 @@ def _handoff(conn, task):
 
 
 def _override(conn, task):
-    return validate_review_override(_handoff(conn, task)[1])
+    from hermes_cli.kanban_model_neutral import validate_review
+    metadata = _handoff(conn, task)[1]
+    # Historical concrete overrides are evidence, not future dispatch authority.
+    from agent.model_routing import is_class_selector
+    if not is_class_selector(str(metadata.get("review_model") or "")):
+        return None
+    return validate_review({"review_model": metadata["review_model"], "review_provider": "auto"})
 
 
 def validate_review_override(metadata):
-    """Shared ingress/dispatch contract, including legacy automatic class routing."""
-    model = metadata.get("review_model")
-    if model is None:
-        return None
-    if not isinstance(model, str) or not model.strip():
-        raise ReviewModelUnavailable("review_model must be a nonempty model identifier")
-    from hermes_cli.kanban_model_tier import infer_provider
-    provider = metadata.get("review_provider")
-    if provider is not None and (not isinstance(provider, str) or not provider.strip()):
-        raise ReviewModelUnavailable("review_provider must be a nonempty provider identifier")
-    model = model.strip()
-    provider = (provider or ("auto" if is_class_selector(model) else infer_provider(model)))
-    if is_class_selector(model):
-        if provider not in ("auto", "board-default"):
-            raise ReviewModelUnavailable("A review class requires provider auto")
-        provider = "auto"  # Historical handoffs used the board-default sentinel.
-    return model, provider, "review_override"
+    """Validate new review routing requirements before ending the author run."""
+    from hermes_cli.kanban_model_neutral import validate_review
+    return validate_review(metadata)
 
 
 def registry_refusal(model, provider, assignee):
@@ -410,8 +403,6 @@ def resolve_review_model(conn, task, cfg):
             raise ReviewModelUnavailable(f"Review model {override[0]} is unroutable: {why}")
 
     from hermes_cli.kanban_llm_pacing_dispatch import held_pools
-    from hermes_cli.kanban_model_tier import infer_provider
-    from hermes_cli.kanban_pin_reroute import is_mandatory_pin
     now = time.time()
     walls = pw.active_walls(now=now)
     holds = held_pools(cfg.get("llm_pacing"), now)
@@ -445,16 +436,9 @@ def resolve_review_model(conn, task, cfg):
         if not _unavailable(override[0], override[1]):
             return override
         override_moved = True
-    # A downstream pin names its reviewer. Mandatory pins never move: the
-    # provider governor still judges held/walled pools before launching.
-    pin = str(getattr(task, "model_override", None) or "").strip()
+    # Historical reviewer pins are audit evidence, not candidates or mandates.
+    # Authorship is diagnostic; separate execution is enforced by verdict custody.
     candidates = independent_routes(set(), cfg, assignee)
-    if _downstream(task) and pin and not is_class_selector(pin):
-        pin_route = (pin, getattr(task, "provider_override", None) or infer_provider(pin))
-        if is_mandatory_pin(task):
-            return (*pin_route, "review_unpinned")
-        from itertools import chain
-        candidates = chain([pin_route], candidates)
     independent_candidate = False
     for model, provider in candidates:
         independent_candidate = True

@@ -33,6 +33,11 @@ from hermes_cli import kanban_db_dispatch as kbd
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
+    route = {"model": "claude-opus-5-5", "provider": "anthropic", "weight": 1,
+             "billing": "subscription", "eligible": True, "funding_verified": True,
+             "capabilities": {"tools": True, "streaming": True}}
+    (home / "config.yaml").write_text(json.dumps({"model_routing": {
+        "enabled": True, "routes": {level: [route] for level in ("fast", "standard", "deep")}}}))
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
@@ -74,10 +79,10 @@ def client(kanban_home):
 
 def test_set_and_clear_model_override(conn):
     tid = kb.create_task(conn, title="t", assignee="worker")
-    assert kb.set_model_override(conn, tid, "gpt-5.6-sol", provider="openai")
+    assert kb.set_model_override(conn, tid, "class:standard", provider="auto")
     t = kb.get_task(conn, tid)
-    assert t.model_override == "gpt-5.6-sol"
-    assert t.provider_override == "openai"
+    assert t.model_override == "class:standard"
+    assert t.provider_override == "auto"
 
     # Clearing the model clears the provider too.
     assert kb.set_model_override(conn, tid, None)
@@ -86,28 +91,56 @@ def test_set_and_clear_model_override(conn):
     assert t.provider_override is None
 
 
+@pytest.mark.parametrize("model,provider", [("gpt-5.6-sol", "openai"), ("class:deep", "anthropic")])
+def test_concrete_db_selector_is_rejected_atomically(conn, model, provider):
+    tid = kb.create_task(conn, title="t", assignee="worker")
+    before = conn.execute("SELECT count(*) FROM tasks").fetchone()[0]
+    with pytest.raises(ValueError, match="model-neutral"):
+        kb.create_task(conn, title="rejected", assignee="worker", model_override=model,
+                       provider_override=provider)
+    with pytest.raises(ValueError, match="model-neutral"):
+        kb.set_model_override(conn, tid, model, provider=provider)
+    assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == before
+    stored = kb.get_task(conn, tid)
+    assert stored is not None and stored.model_override is None
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+def test_dashboard_concrete_selector_is_rejected_without_mutation(client, bulk):
+    task = _create(client)
+    body = {"model_override": "gpt-5.6-sol", "provider_override": "openai"}
+    if bulk:
+        response = client.post("/api/plugins/kanban/tasks/bulk", json={"ids": [task["id"]], **body})
+    else:
+        response = client.patch(f"/api/plugins/kanban/tasks/{task['id']}", json=body)
+    assert response.status_code == 400
+    assert "model-neutral" in response.text
+    stored = client.get(f"/api/plugins/kanban/tasks/{task['id']}").json()["task"]
+    assert stored["model_override"] is None and stored["provider_override"] is None
+
+
 def test_provider_without_model_rejected(conn):
     tid = kb.create_task(conn, title="t", assignee="worker")
     with pytest.raises(ValueError):
         kb.set_model_override(conn, tid, None, provider="openrouter")
     with pytest.raises(ValueError):
         kb.create_task(
-            conn, title="t2", assignee="worker", provider_override="openrouter",
+            conn, title="t2", assignee="worker", provider_override="auto",
         )
 
 
 def test_create_task_with_model_and_provider(conn):
     tid = kb.create_task(
         conn, title="t", assignee="worker",
-        model_override="qwen-max", provider_override="openrouter",
+        model_override="class:deep", provider_override="auto",
     )
     t = kb.get_task(conn, tid)
-    assert t.model_override == "qwen-max"
-    assert t.provider_override == "openrouter"
+    assert t.model_override == "class:deep"
+    assert t.provider_override == "auto"
     # Creation event carries the override for auditability.
     ev = next(e for e in kb.list_events(conn, tid) if e.kind == "created")
-    assert ev.payload["model_override"] == "qwen-max"
-    assert ev.payload["provider_override"] == "openrouter"
+    assert ev.payload["model_override"] == "class:deep"
+    assert ev.payload["provider_override"] == "auto"
 
 
 
@@ -120,14 +153,14 @@ def test_create_task_with_model_and_provider(conn):
 @pytest.mark.parametrize(
     "overrides, expected_model, expected_provider, expected_reasoning",
     [
-        ({"model_override": "glm-5", "provider_override": "openrouter",
-          "reasoning_effort": "high"}, "glm-5", "openrouter", "high"),
-        ({"reasoning_effort": "high"}, "profile-model", "custom", "high"),
-        ({"reasoning_effort": "none"}, "profile-model", "custom", None),
-        ({}, "profile-model", "custom", "low"),
+        ({"model_override": "class:deep", "provider_override": "auto",
+          "reasoning_effort": "high"}, "class:deep", "auto", "high"),
+        ({"reasoning_effort": "high"}, "class:standard", "auto", "high"),
+        ({"reasoning_effort": "none"}, "class:standard", "auto", None),
+        ({}, "class:standard", "auto", "medium"),
         # [daveey] The dispatcher's tier pin lives on the in-memory task and reaches the owner through
         # the run's model_tier event (owner_model_pin), never the DB row.
-        ({"_tier": {"default_model": "glm-5", "default_provider": "openrouter"}}, "glm-5", "openrouter", "low"),
+        ({"_tier": {"default_model": "class:fast", "default_provider": "auto"}}, "class:fast", "auto", "medium"),
     ],
 )
 def test_spawn_resolves_claimed_task_policy(
@@ -221,12 +254,12 @@ def test_patch_sets_model_override(client):
     task = _create(client)
     r = client.patch(
         f"/api/plugins/kanban/tasks/{task['id']}",
-        json={"model_override": "gpt-5.6-sol", "provider_override": "openai"},
+        json={"model_override": "class:standard", "provider_override": "auto"},
     )
     assert r.status_code == 200, r.text
     updated = r.json()["task"]
-    assert updated["model_override"] == "gpt-5.6-sol"
-    assert updated["provider_override"] == "openai"
+    assert updated["model_override"] == "class:standard"
+    assert updated["provider_override"] == "auto"
 
 
 def test_bulk_model_override(client):
@@ -236,16 +269,16 @@ def test_bulk_model_override(client):
         "/api/plugins/kanban/tasks/bulk",
         json={
             "ids": [t1["id"], t2["id"]],
-            "model_override": "fallback-model",
-            "provider_override": "nous",
+            "model_override": "class:fast",
+            "provider_override": "auto",
         },
     )
     assert r.status_code == 200, r.text
     assert all(entry["ok"] for entry in r.json()["results"])
     for tid in (t1["id"], t2["id"]):
         got = client.get(f"/api/plugins/kanban/tasks/{tid}").json()["task"]
-        assert got["model_override"] == "fallback-model"
-        assert got["provider_override"] == "nous"
+        assert got["model_override"] == "class:fast"
+        assert got["provider_override"] == "auto"
 
 
 def test_model_options_endpoint_shape(client, monkeypatch):
@@ -288,7 +321,7 @@ def test_reasoning_effort_survives_clearing_the_model(conn):
     not silently reset the thinking depth the operator chose."""
     tid = kb.create_task(
         conn, title="t", assignee="worker",
-        model_override="glm-5", provider_override="openrouter",
+        model_override="class:deep", provider_override="auto",
         reasoning_effort="ultra",
     )
     assert kb.set_model_override(conn, tid, None)

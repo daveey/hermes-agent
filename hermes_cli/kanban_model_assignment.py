@@ -180,7 +180,9 @@ def route_model_mismatch(conn, task, *, dry_run=False):
     from hermes_cli import kanban_db as kb
 
     try:
-        validate_model_assignment(task.assignee, task.model_override, task.provider_override)
+        from hermes_cli.kanban_model_neutral import routing_view
+        route = routing_view(task)
+        validate_model_assignment(task.assignee, route.model_override, route.provider_override)
     except ModelProviderMismatchError as exc:
         if not dry_run:
             from hermes_cli.kanban_assignment_routing import AssignmentRoutingError

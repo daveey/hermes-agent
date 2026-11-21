@@ -90,29 +90,33 @@ def resolve_model_tier(
     """``(model, provider, reason)`` for a claimed task. ``model`` is None when the worker keeps whatever it
     would have run on anyway (its own pin or the profile's model); ``reason`` names the rule that decided."""
     cfg = load_tier_config() if cfg is None else cfg
+    from agent.model_routing import is_class_selector
     default_model = _str(cfg.get("default_model"))
+    if not is_class_selector(default_model):
+        default_model = "class:standard"
     from hermes_cli.kanban_review_model import is_review_run
     if is_review_run(conn, task, lane):
         from hermes_cli.kanban_review_model import resolve_review_model
         review = resolve_review_model(conn, task, cfg)
         if review is not None:
             return review
-    if _str(getattr(task, "model_override", None)):
-        return None, None, "pinned"
+    selector = _str(getattr(task, "model_override", None))
+    if is_class_selector(selector):
+        return selector, "auto", "class"
     if not default_model:
         return None, None, "off"
     profiles = _as_list(cfg.get("default_model_profiles"))
     if profiles and _str(getattr(task, "assignee", None)) not in profiles:
-        return None, None, "profile_out_of_scope"
+        return "class:standard", "auto", "profile_out_of_scope"
     # Class defaults opt into class-preserving routing. Strong work must not
     # fall back to a profile that may itself now default to standard/fast.
     from agent.model_routing import is_class_selector
     strong_model = _str(cfg.get("strong_model"))
     strong: tuple[Optional[str], Optional[str]]
-    if strong_model:
+    if strong_model and is_class_selector(strong_model):
         # An explicit strong tier names its model, so review/retry work no longer follows whatever the
         # profile's default happens to be (a profile switch once moved 558 strong runs to a GPT).
-        strong = (strong_model, _str(cfg.get("strong_provider")) or infer_provider(strong_model))
+        strong = (strong_model, "auto")
     else:
         strong = ("class:deep", "auto") if is_class_selector(default_model) else (None, None)
     if lane == "review" or REVIEW_SKILL in (getattr(task, "skills", None) or []):
@@ -131,7 +135,7 @@ def resolve_model_tier(
                 return *strong, f"pattern:{pattern}"
         except re.error as exc:
             logger.warning("kanban model tier: bad default_model_keep_patterns entry %r (%s)", pattern, exc)
-    return default_model, _str(cfg.get("default_provider")) or infer_provider(default_model), "default"
+    return default_model, "auto", "default"
 
 
 def infer_provider(model: str) -> Optional[str]:
@@ -211,7 +215,8 @@ def owner_model_pin(conn: sqlite3.Connection, task: Any) -> tuple[Optional[str],
     ``model_tier`` event; without one the row's overrides apply. A class selector always runs with
     provider ``auto`` (:func:`worker_model_args`), so the profile's concrete provider never pins a class."""
     import json
-    model, provider = _str(getattr(task, "model_override", None)) or None, _str(getattr(task, "provider_override", None)) or None
+    from hermes_cli.kanban_model_neutral import effective_selector
+    model, provider = effective_selector(task)
     run_id = getattr(task, "current_run_id", None)
     if run_id is not None:
         row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='model_tier' "
@@ -332,6 +337,8 @@ def apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Opt
 def resolve_dispatch_tier(conn, task, *, lane, cfg=None):
     """One read-only route decision for preview and actual admission."""
     base = resolve_model_tier(conn, task, lane=lane, cfg=cfg)
+    from hermes_cli.kanban_model_neutral import routing_view
+    task = routing_view(task)
     from hermes_cli.kanban_review_model import is_review_run, mandatory_reviewer_pin
     if is_review_run(conn, task, lane) and mandatory_reviewer_pin(task):
         return base  # a mandatory reviewer pin never moves: not off a wall, an episode or a hold
@@ -506,8 +513,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
     if reason != "off":
         try:
             from hermes_cli import kanban_db as _kb
-            payload = {"reason": reason, "model": model or _str(getattr(task, "model_override", None)) or None,
-                       "provider": provider or _str(getattr(task, "provider_override", None)) or None,
+            payload = {"reason": reason, "model": model,
+                       "provider": provider,
                        "lane": lane}
             payload.update(_ratio_block(conn, task, reason))
             if is_review:
