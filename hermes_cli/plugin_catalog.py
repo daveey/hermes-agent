@@ -317,11 +317,49 @@ def resolved_removed_entries() -> list[RemovedEntry]:
     return load_removed_list() + live_removed_list()
 
 
+# [daveey] Discovery gates every plugin against the same two offline files. Keep only a
+# sweep-local memo: other homes/threads, force reloads and ordinary enable checks stay fresh.
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_removal_reads: ContextVar[Optional[dict]] = ContextVar("plugin_removal_reads", default=None)
+
+
+@contextmanager
+def removal_read_scope():
+    token = _removal_reads.set({})
+    try:
+        yield
+    finally:
+        _removal_reads.reset(token)
+
+
+def _removal_version(path: Path):
+    from utils import file_cache_version
+    try:
+        return file_cache_version(path)
+    except OSError:
+        return None
+
+
 def cached_removed_entries() -> list[RemovedEntry]:
-    """In-tree list UNION the last fetched live copy, with NO network round-trip — for the load-time and
-    ``enable`` checks that run in every process and must never block on a dead catalog host."""
-    cached = _stale_live_cache(_live_cache_path()) or {}
-    return load_removed_list() + _removed_from_list(cached.get("removed"))
+    """Offline kill list; reuse decoding during discovery, never a stale recall verdict.
+
+    Revalidate both files on every call, including replacement, deletion and profile changes.
+    Values copied out of the memo cannot mutate another plugin's removal decision.
+    """
+    memo = _removal_reads.get()
+    live, tree = _live_cache_path(), get_catalog_dir() / "removed.yaml"
+    key = (live, _removal_version(live), tree, _removal_version(tree)) if memo is not None else None
+    saved = memo.get(key) if memo is not None else None
+    if saved is not None:
+        return [RemovedEntry(*row) for row in saved]
+    cached = _stale_live_cache(live) or {}
+    entries = load_removed_list() + _removed_from_list(cached.get("removed"))
+    if memo is not None:
+        memo.clear()  # bounded even when another process rewrites the catalog during a sweep
+        memo[key] = tuple((e.name, e.repo, e.reason, e.date) for e in entries)
+    return entries
 
 
 def match_removed(

@@ -440,7 +440,9 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             # — callers swallow the exception and would be stranded on the early return above.
             self._discovered = True
             try:
-                self._discover_and_load_inner()
+                from hermes_cli.plugin_catalog import removal_read_scope
+                with removal_read_scope():
+                    self._discover_and_load_inner()
                 # Now that plugins have had their chance to re-register, dispose the ones whose plugin did
                 # not come back (disabled, removed, or omitted from this discovery pass) so e.g. a disabled
                 # auth plugin's provider does not stay live process-wide until restart. See #91701.
