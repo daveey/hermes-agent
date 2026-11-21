@@ -13,13 +13,24 @@ from agent.model_routing import is_class_selector
 ERROR = 'Kanban is model-neutral: use a class/tier or capability requirement, not a concrete model/provider or mandatory pin'
 # Match directives, not incidental named execution evidence or author exclusions.
 _REQUIRED = re.compile(r'^\s*require_model\s*:\s*(?:true|yes|1)\s*$', re.IGNORECASE | re.MULTILINE)
-_MODEL = re.compile(r'(?:\b|(?<=independent)|(?<=primary))(?:gpt-[\w.-]+|claude-[\w.-]+|grok-[\w.-]+|gemini-[\w.-]+|opus|sonnet|fable|astra|luna|sol)\b', re.IGNORECASE)
+def _model_names():
+    """Offline catalog identity, not vendor-prefix guesses or live entitlement."""
+    from hermes_cli.models_catalog_static import _PROVIDER_MODELS
+    names = {name.lower().rsplit('/', 1)[-1] for rows in _PROVIDER_MODELS.values() for name in rows}
+    # These are human shorthand for catalog families, not arbitrary claude-* tools.
+    aliases = {alias for alias in ('opus', 'sonnet', 'fable', 'astra', 'luna', 'sol')
+               if any(alias in re.split(r'[-.]', name) for name in names)}
+    return '|'.join(re.escape(name) for name in sorted(names | aliases, key=lambda name: (-len(name), name)))
+
+
+_MODEL = re.compile(r'(?:\b|(?<=independent)|(?<=primary))(?:' + _model_names() + r')(?![\w-]|\.[\w])', re.IGNORECASE)
 # Bind the obligation to the route, rather than co-occurrence with unrelated
 # words such as "required CI", "source only" or a tool-call bug report.
 _QUALIFIER = r'(?:(?:the|a|an|only|model|provider|route|reviewer|review|independent|primary|exact[- ]head|on|to|with|use|using|run|by)\s+)*'
 _ROUTE_NAME = r'(?:[\w-]+/)?' + _MODEL.pattern
 _DIRECTIVE = re.compile(
-    r'\b(?:must|require|requires|required|mandatory|use|select|choose|pin|pinned|restrict|no fallback for)\s+'
+    r'(?:\b(?:must|require|requires|required|mandatory|no fallback for)\s+'
+    r'|(?:^|:)\s*(?:[-*]\s*)?(?:use|select|choose|pin|restrict)\s+)'
     + _QUALIFIER + _ROUTE_NAME
     + r'|' + _ROUTE_NAME + r'(?:/[\w-]+)?\s+(?:(?:review\s+|is\s+)?(?:required|mandatory|only)\b|must\s+be\s+used\b)',
     re.IGNORECASE,
@@ -61,7 +72,7 @@ def validate_text(*values):
         for line in (text or '').splitlines():
             line = _active_text(line)
             if _REQUIRED.search(line):
-                raise ValueError(ERROR)
+                raise ValueError(f'{ERROR}; refused line: {line}')
             if line.lstrip().startswith('<!-- implementer-models:'):
                 continue
             for clause in re.split(r'(?<=[.!?;])\s+', line):
@@ -86,11 +97,19 @@ def validate_text(*values):
                     clause, re.IGNORECASE,
                 ):
                     continue
-                named_review = re.search(
-                    r'(?:primary|independent|exact[- ]?head)[ -]*(?:opus|sonnet|fable|astra|luna|sol)\b'
-                    r'|\breview\s*\((?:claude-|gpt-|grok-|gemini-)', clause, re.IGNORECASE)
-                if _DIRECTIVE.search(clause) or named_review:
-                    raise ValueError(ERROR)
+                # A bare requested-review title is operative; a sentence that
+                # merely attributes a completed review is not. Do not scan for
+                # "independent Opus" anywhere inside arbitrary provenance prose.
+                named_review = re.fullmatch(
+                    r'\s*(?:(?:primary|independent|exact[- ]?head)[ -]*)+'
+                    + _MODEL.pattern + r'\s+(?:exacthead\s+)?review(?:\s+required)?'
+                    r'(?:\s*[,;+].*)?[.!]?\s*', clause, re.IGNORECASE)
+                required_review = re.search(
+                    r'\b(?:needs?|requires?|must get)\s+(?:a\s+)?(?:fresh\s+)?'
+                    r'(?:independent\s+)?review\s*\(\s*' + _ROUTE_NAME,
+                    clause, re.IGNORECASE)
+                if _DIRECTIVE.search(clause) or named_review or required_review:
+                    raise ValueError(f'{ERROR}; refused line: {line}')
 
 
 def forwarded_text(text):
