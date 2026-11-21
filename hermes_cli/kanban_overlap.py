@@ -241,18 +241,45 @@ def cites(card_id: str, title: str, body: str) -> bool:
 # Template titles (t_01a1db274c88e2e3): ``hermes-core-wt ship --request-review`` files "Independent exact-head review
 # PR #N @<sha> (core-wt ship review required)", so two reviews of different PRs share ~80% of their words and only the
 # PR number tells them apart. Titles that each name PRs, and no PR in common, are different work by title.
-_PR_REF = re.compile(r"(?:(?<![\w#])#|\bpr\s*#?\s*|\bpull/)(\d{2,6})(?!\d)", re.IGNORECASE)
+# owner/repo#N (2026-11-21): core-ship-backstop files "Retro exact-head review: softmax-universe/daveey-hermes#N merged
+# without a hermes-core-wt/ship receipt". A bare ``#`` after a word character is no ref (``state#12``), so those titles
+# named no PR and every retro for another PR collided with any open one: the backstop stalled from 03:41Z until state
+# PR #3876 worked around it. A ref is now (repo, N): ``owner/repo#N`` and a github.com ``.../owner/repo/pull/N`` URL
+# carry their repo (lowercased); ``#N``, ``PR N``, ``PRN``, ``PR #N`` and ``pull/N`` carry none and match any repo.
+# ``##N``, ``word#N`` and ``a/b/c#N`` stay non-refs; N is 2-6 digits.
+_PR_REF = re.compile(
+    r"(?<![\w./#-])(?P<repo>[a-z0-9][a-z0-9-]{0,38}/[a-z0-9_.-]+)#(?P<rn>\d{2,6})(?!\d)"
+    r"|github\.com/(?P<url>[a-z0-9][a-z0-9-]{0,38}/[a-z0-9_.-]+)/pull/(?P<un>\d{2,6})(?!\d)"
+    r"|(?:(?<![\w#])#|\bpr\s*#?\s*|\bpull/)(?P<n>\d{2,6})(?!\d)",
+    re.IGNORECASE)
+
+PrRef = tuple[Optional[str], int]  # (lowercased "owner/repo" or None when the title does not say, PR number)
+
+
+def pr_refs(title: str) -> frozenset[PrRef]:
+    """PR refs a title names, as (repo or None, number): ``owner/repo#N`` and ``github.com/owner/repo/pull/N`` carry
+    their repo; ``#N``, ``PR N``, ``PRN``, ``PR #N``, ``pull/N`` do not (N of 2-6 digits)."""
+    refs = set()
+    for m in _PR_REF.finditer(title or ""):
+        repo = m.group("repo") or m.group("url")
+        refs.add((repo.lower() if repo else None, int(m.group("rn") or m.group("un") or m.group("n"))))
+    return frozenset(refs)
 
 
 def pr_numbers(title: str) -> frozenset[int]:
-    """PR numbers a title names: ``#N``, ``PR N``, ``PRN``, ``PR #N``, ``pull/N`` (N of 2-6 digits)."""
-    return frozenset(int(n) for n in _PR_REF.findall(title or ""))
+    """PR numbers a title names, whatever the repo (see ``pr_refs``)."""
+    return frozenset(n for _, n in pr_refs(title))
+
+
+def _same_pr(x: PrRef, y: PrRef) -> bool:
+    """Equal numbers in the same repo, or a side that names no repo (conservative: it may be either)."""
+    return x[1] == y[1] and (x[0] is None or y[0] is None or x[0] == y[0])
 
 
 def _different_prs(a: str, b: str) -> bool:
-    """Both titles name a PR and no PR number is common to them (repos are not told apart)."""
-    mine, theirs = pr_numbers(a), pr_numbers(b)
-    return bool(mine and theirs and not mine & theirs)
+    """Both titles name a PR and no PR is common to them (``_same_pr``: ``a/b#5`` and ``c/d#5`` differ)."""
+    mine, theirs = pr_refs(a), pr_refs(b)
+    return bool(mine and theirs) and not any(_same_pr(x, y) for x in mine for y in theirs)
 
 
 def _reasons(card: dict, new_words: set[str], title: str, body: str, target_board: str,

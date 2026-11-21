@@ -96,3 +96,50 @@ def test_shared_file_reason_does_not_join_different_prs(worker, tmp_path):
 def test_pr_numbers_forms():
     assert ko.pr_numbers("Review #2799, PR139: x, PR 173, pr #42 and pull/3050") == {2799, 139, 173, 42, 3050}
     assert ko.pr_numbers("@478094efef M9/M10 exact53e08858 #1 #1234567 state#12 spring 2026") == frozenset()
+
+
+# owner/repo#N (2026-11-21): core-ship-backstop files "Retro exact-head review: <owner>/<repo>#N merged without a
+# hermes-core-wt/ship receipt". ``state#12``'s rule (no ``#`` after a word character) read no PR in those titles, so
+# each retro for another PR collided with any open one and the backstop stalled from 03:41Z (worked around in state
+# PR #3876). A ref now carries its repo; an unqualified ref matches any repo.
+RETRO_3855 = ("Retro exact-head review: softmax-universe/daveey-hermes#3855 merged without a hermes-core-wt/ship "
+              "receipt")
+RETRO_3863 = RETRO_3855.replace("#3855", "#3863")
+
+
+def test_retro_reviews_of_different_owner_repo_prs_are_not_duplicates(worker, tmp_path):
+    remote(tmp_path, RETRO_3855)
+    assert check(RETRO_3863) is None
+    assert ko._different_prs(RETRO_3863, RETRO_3855)
+
+
+def test_same_owner_repo_pr_still_matches(worker, tmp_path):
+    remote(tmp_path, RETRO_3855)
+    assert not ko._different_prs(RETRO_3855, RETRO_3855.replace("softmax-universe", "Softmax-Universe"))
+    out = check(RETRO_3855)
+    assert out and out["code"] == "create_overlap" and "titles share" in out["matches"][0]["why"], out
+
+
+def test_same_number_in_different_repos_is_different_prs():
+    assert ko._different_prs("Retro review a/b#55 merged", "Retro review c/d#55 merged")
+
+
+def test_unqualified_ref_matches_any_repo():
+    assert not ko._different_prs("Retro review a/b#55 merged", "Retro review #55 merged")
+    assert not ko._different_prs("Retro review PR 55 merged", "Retro review c/d#55 merged")
+
+
+def test_pr_refs_carry_the_repo():
+    assert ko.pr_refs(RETRO_3855) == {("softmax-universe/daveey-hermes", 3855)}
+    assert ko.pr_refs("Owner-1/Repo_x.y#42 and #43") == {("owner-1/repo_x.y", 42), (None, 43)}
+    assert ko.pr_refs("see https://github.com/Softmax-Universe/daveey-hermes/pull/3876") == {
+        ("softmax-universe/daveey-hermes", 3876)}
+    assert ko.pr_refs("Review #2799, PR139: x, PR 173, pr #42 and pull/3050") == {
+        (None, 2799), (None, 139), (None, 173), (None, 42), (None, 3050)}
+    assert ko.pr_numbers(RETRO_3855) == {3855}
+
+
+@pytest.mark.parametrize("title", ["foo#12", "##12", "a/b#1", "a/b/c#12", "a/b#1234567", "x hermes-core-wt/ship y"])
+def test_not_pr_refs(title):
+    assert ko.pr_refs(title) == frozenset()
+    assert ko.pr_numbers(title) == frozenset()
