@@ -113,6 +113,7 @@ Every `ctx.*` API below is available inside a plugin's `register(ctx)` function.
 | Add CLI commands | `ctx.register_cli_command(name, help, setup_fn, handler_fn)` — adds `hermes <plugin> <subcommand>` |
 | Inject messages | `ctx.inject_message(content, role="user", session_key=... \| origin=...)` - see [Injecting Messages](#injecting-messages) |
 | Post and edit a status message | `handle = ctx.post_message(text)`, then `handle.edit(text)` — see [Posting a live message](#posting-a-live-message) |
+| Dispose of a path through host policy | `ctx.dispose_path(path, reason="expired cache")` — see [Guarded path disposal](#guarded-path-disposal) |
 | Ship data files | `Path(__file__).parent / "data" / "file.yaml"` |
 | Bundle skills | `ctx.register_skill(name, path)` — namespaced as `plugin:skill`, loaded via `skill_view("plugin:skill")` |
 | Gate on env vars | `requires_env: [API_KEY]` in plugin.yaml — prompted during `hermes plugins install` |
@@ -141,6 +142,30 @@ The classic CLI waits for the reply for as long as the handler runs. Ctrl+C stop
 
 See [Register slash commands](../../developer-guide/plugins/index.md#register-slash-commands).
 :::
+
+## Guarded path disposal
+
+`ctx.dispose_path(path: str, *, reason: str) -> dict` performs a one-shot,
+host-owned disposal, including when the plugin runs out of process. **disk-cleanup
+is the first intended consumer**; its migration to this seam is a separate change.
+
+The JSON result is `{"path": "<absolute checked path>", "outcome": "disposed",
+"detail": ""}`. Outcomes are `disposed`, `missing`, `refused`, or `error`; the latter
+three include an explanatory `detail`. Missing paths, policy refusals and OS errors
+are returned rather than raised. Invalid argument types or an empty/blank reason
+raise `TypeError` or `ValueError`.
+
+<!-- no-tmp: ok — documents the disposal allowlist, not scratch allocation -->
+Only paths strictly inside the active `HERMES_HOME` or a top-level `/tmp/hermes-*`
+directory are eligible (including macOS's `/private/tmp` alias). Those roots
+themselves and write-denied paths are refused. Parents are resolved before the
+scope check, but the final symlink is not followed: disposal unlinks that link,
+unlinks a file, or removes a directory tree. Every outcome logs the plugin actor,
+reason and checked path, never file contents.
+
+**A `refused` result is final. Never fall back to a plugin's own deletion or `rm`.**
+The shared host executor is `hermes_cli.path_disposal.dispose_path(path, *, actor,
+reason)`; this is where host custody policy can veto removal.
 
 ## Plugin discovery
 

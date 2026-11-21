@@ -56,6 +56,15 @@ class PluginContext(PluginCapabilityCtxMixin, PluginIdleTaskCtxMixin):
         """Return the effective registry id used for this plugin's namespaces."""
         return _facade().manifest_key(self.manifest)
 
+    def dispose_path(self, path: str, *, reason: str) -> dict:
+        """Dispose of one path through the host's scoped disposal executor.
+
+        Returns JSON path/outcome/detail data; refused is final. Callers must
+        not fall back to their own deletion, including an rm fallback.
+        """
+        from hermes_cli.path_disposal import dispose_path
+        return dispose_path(path, actor=f"plugin:{self.manifest.name}", reason=reason)
+
     def has_plugin(self, plugin_id: str) -> bool:
         """Return True when another plugin is loaded and enabled (runtime probe for advisory
         ``requires_plugins``, #64165). Matches on registry key or manifest name."""
