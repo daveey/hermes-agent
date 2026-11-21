@@ -89,7 +89,10 @@ async def test_profile_scan_burst_keeps_status_responsive(monkeypatch, tmp_path,
                 response = await asyncio.wait_for(client.get('/api/status'), 0.5)
                 assert response.status_code == 200
                 assert response.json() == {'ok': True}
-                # Scans run on the sessions thread lane (web_thread_lanes): none of the shared pool. [daveey]
+                # Cache peeks for other /api/sessions requests use the shared pool
+                # before lane admission; status completion does not drain them.
+                # A scan wrongly using that pool cannot drain while release is unset.
+                await async_wait_until(lambda: limiter.borrowed_tokens == 0, timeout=3)
                 from hermes_cli import web_thread_lanes
                 assert limiter.borrowed_tokens == 0
                 assert web_thread_lanes.stats()["sessions"]["in_use"] == 1
@@ -114,6 +117,48 @@ async def test_profile_scan_burst_keeps_status_responsive(monkeypatch, tmp_path,
     finally:
         limiter.total_tokens = previous
         sessions.SESSION_LIST_CACHE.clear()
+
+
+@pytest.mark.asyncio
+async def test_session_peek_can_outlive_status_response(monkeypatch, tmp_path):
+    """A completed status response is not a barrier for other requests' peeks."""
+    import httpx
+    from hermes_cli.web_routers import sessions
+    from tests.waiting import async_wait_until
+
+    peek_entered = threading.Event()
+    release_peek = threading.Event()
+    original_peek = sessions._peek_sessions_encoded
+    original_get = httpx.AsyncClient.get
+    original_json = httpx.Response.json
+
+    def delayed_peek(arguments):
+        if arguments['limit'] == 12:
+            peek_entered.set()
+            assert release_peek.wait(5)
+        return original_peek(arguments)
+
+    async def get(client, url, *args, **kwargs):
+        if url == '/api/status':
+            await async_wait_until(peek_entered.is_set, timeout=3)
+        return await original_get(client, url, *args, **kwargs)
+
+    def response_json(response, *args, **kwargs):
+        value = original_json(response, *args, **kwargs)
+        if response.request.url.path == '/api/status':
+            # Keep the real shared token through JSON validation. Release on the
+            # next loop turn, not before the original instantaneous assertion.
+            asyncio.get_running_loop().call_soon(release_peek.set)
+        return value
+
+    monkeypatch.setattr(sessions, '_peek_sessions_encoded', delayed_peek)
+    monkeypatch.setattr(httpx.AsyncClient, 'get', get)
+    monkeypatch.setattr(httpx.Response, 'json', response_json)
+    try:
+        await test_profile_scan_burst_keeps_status_responsive(
+            monkeypatch, tmp_path, '/api/sessions', 'limit')
+    finally:
+        release_peek.set()
 
 
 def test_session_list_peek_requires_fresh_matching_stamp():
