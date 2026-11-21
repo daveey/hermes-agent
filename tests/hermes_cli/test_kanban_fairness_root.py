@@ -127,7 +127,7 @@ def test_arm_ceiling_applies_before_database_activation(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_connect", lambda *a: pytest.fail("database activated before plan budget"))
     args = SimpleNamespace(out=str(tmp_path / "small"), db="unused", board="default", replica=False,
                            replace=False, capture_id="small", clock_error_s=0, apply_lag_s=0,
-                           unclaimed_exit="unknown")
+                           unclaimed_exit="unknown", writer_clocks=False)
     with pytest.raises(budget.BudgetExceeded):
         cli._arm(args)
     assert budget._limit(tmp_path / "small") == 64

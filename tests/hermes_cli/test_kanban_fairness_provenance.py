@@ -37,6 +37,7 @@ def test_writer_clocks_survive_later_export_and_reopen(conn, tmp_path):
     persisted = conn.execute(f"SELECT source_uid, clock_json FROM {journal.JOURNAL} ORDER BY seq").fetchall()
     assert uids == [row[0] for row in persisted]
     assert [r["mono_ns"] for r in records] == [json.loads(row[1])["mono_ns"] for row in persisted]
+    assert [r["wall_ns"] for r in records] == [json.loads(row[1])["wall_ns"] for row in persisted]
 
 
 def test_clock_observation_rolls_back_with_writer(conn):

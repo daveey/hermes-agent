@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import subprocess
 import sys
 
@@ -75,8 +76,14 @@ def _policy() -> dict:
 
 def _arm(args) -> int:
     out = Path(args.out)
-    if getattr(args, "writer_clocks", False) and not args.db:
+    if args.writer_clocks and not args.db:
         raise ValueError("writer clocks require explicit --db and exclusively controlled upgraded writers")
+    clock_error_ns = None
+    if args.writer_clocks:
+        scaled = args.clock_error_s * 1_000_000_000
+        if not math.isfinite(scaled) or not 0 <= scaled < 2**63:
+            raise ValueError("clock-error-s must yield a nonnegative signed-64-bit nanosecond bound")
+        clock_error_ns = int(scaled)
     if args.db:
         db = args.db
     else:
@@ -110,8 +117,7 @@ def _arm(args) -> int:
             armed = True  # Keep the plan unless rollback is positively established.
             try:
                 state = journal.arm(conn, args.capture_id, replace=args.replace,
-                                    clock_error_ns=int(args.clock_error_s * 1_000_000_000)
-                                    if getattr(args, "writer_clocks", False) else None)
+                                    clock_error_ns=clock_error_ns)
             except BaseException:
                 conn.rollback()  # Also discard a transaction interrupted by Ctrl-C.
                 armed = conn.execute("PRAGMA schema_version").fetchone()[0] != schema_before

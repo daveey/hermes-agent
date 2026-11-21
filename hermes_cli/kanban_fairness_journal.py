@@ -135,8 +135,8 @@ def arm(conn: sqlite3.Connection, capture_id: str, *, max_records: int = MAX_REC
     from hermes_cli.kanban_db_connect import write_txn
     from hermes_cli.kanban_fairness_clocks import register
 
-    if clock_error_ns is not None and (type(clock_error_ns) is not int or clock_error_ns < 0):
-        raise JournalError("clock_error_ns must be a nonnegative integer or None")
+    if clock_error_ns is not None and (type(clock_error_ns) is not int or not 0 <= clock_error_ns < 2**63):
+        raise JournalError("clock_error_ns must be a nonnegative signed-64-bit integer or None")
     register(conn)
     if not capture_id or not all(c.isalnum() or c in "-_." for c in capture_id):
         raise JournalError("capture id must be letters, digits, '-', '_' or '.'")
