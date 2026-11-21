@@ -29,7 +29,16 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
     with closing(connect(board='owned')) as conn:
         task_id = kb.create_task(conn, title='Owned acceptance', body='Goal criteria', assignee='default',
             workspace_kind='dir', workspace_path=str(workspace), skills=['owned-skill'], goal_mode=True,
-            goal_max_turns=3, model_override='loop-model', provider_override='custom')
+            goal_max_turns=3)
+        before = '\n'.join(conn.iterdump())
+        with pytest.raises(ValueError, match='Kanban is model-neutral'):
+            kb.create_task(conn, title='Refused concrete request', assignee='default',
+                           model_override='loop-model', provider_override='custom')
+        assert '\n'.join(conn.iterdump()) == before
+        # A historical selector remains audit evidence, not launch authority.
+        conn.execute('UPDATE tasks SET model_override=?,provider_override=? WHERE id=?',
+                     ('loop-model', 'custom', task_id))
+        conn.commit()
         kb.recompute_ready(conn)
         task = kb.claim_task(conn, task_id)
     actor = SessionActor('owner', str(tmp_path), frozenset({'session:create'}), 'transport')
@@ -41,7 +50,10 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
     policy, _secrets = build_kanban_policy(connection, params, config)
     context = json.loads(policy.kanban_json)
     assert policy.source == 'kanban' and policy.cwd == str(workspace)
-    assert policy.model == task.model_override and policy.provider == task.provider_override
+    assert (policy.model, policy.provider) == ('class:standard', 'auto')
+    with closing(connect(board='owned')) as conn:
+        historical = kb.get_task(conn, task_id)
+        assert (historical.model_override, historical.provider_override) == ('loop-model', 'custom')
     assert {'kanban', 'terminal', 'file'} <= set(policy.toolsets)
     assert context['task_id'] == task.id and context['run_id'] == task.current_run_id
     assert context['board'] == 'owned' and context['claim_lock'] == task.claim_lock

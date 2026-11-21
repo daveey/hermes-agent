@@ -134,6 +134,8 @@ def main():
     cfg = {'gateway': {'multiplex_profiles': False}, 'model': {'provider': 'custom', 'default': 'loop-model', 'base_url': url},
            'auxiliary': {'title_generation': {'enabled': False}}, 'platform_toolsets': {'cli': ['terminal', 'file']},
            'terminal': {'backend': 'local'}, 'agent': {'api_max_retries': 1}, 'kanban': {'dispatch_in_gateway': False}}
+    from tests.gateway.fixtures.kanban_loopback_routing import configure
+    candidates = configure(home, cfg, url)
     (home / 'config.yaml').write_text(json.dumps(cfg), encoding='utf-8')
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
@@ -172,6 +174,8 @@ def main():
                 task = kb.get_task(conn, tid)
                 receipt.update(run_id=task.current_run_id, claim_lock=task.claim_lock)
                 assert peer.blocked.wait(90), 'model never reached'
+                assert peer.requests[0]['model'] in candidates, peer.requests
+                assert task.model_override is None and task.provider_override is None, task
                 if peer.mid_tool:
                     _wait(peer.marker.exists, 90, 'the turn\'s terminal tool call started')
                 receipt['worker_pid'] = kb.get_task(conn, tid).worker_pid

@@ -65,6 +65,8 @@ def main():
            'model': {'provider': 'custom', 'default': 'frozen-model', 'base_url': url},
            'auxiliary': {'title_generation': {'enabled': False}},
            'platform_toolsets': {'cli': []}, 'kanban': {'dispatch_in_gateway': False}}
+    from tests.gateway.fixtures.kanban_loopback_routing import configure
+    candidates = configure(owner, cfg, url, model='frozen-model')
     (owner / 'config.yaml').write_text(json.dumps(cfg))
     # Fork: dir workspaces need terminal/file/host_repo in the assignee's profile policy; that gate
     # (hermes_cli.kanban_capabilities) is not what this recovery probe covers.
@@ -149,6 +151,8 @@ def main():
                               db=str(board_path.resolve()))
                 wait_for(lambda: peer.blocked.is_set() or any(p.poll() is not None for p in clients))
                 assert peer.blocked.is_set(), 'Owner failed to discover dispatcher board'
+                assert task.model_override is None and task.provider_override is None, task
+                assert peer.requests[0]['model'] in candidates, peer.requests
                 first = admission()
                 receipt.update(session_id=first['target_session_id'], run_id=task.current_run_id, claim_lock=task.claim_lock)
                 if mode == 'restart':
@@ -180,7 +184,8 @@ def main():
                     with closing(sqlite3.connect((owner / 'state.db').as_uri() + '?mode=ro', uri=True)) as db:
                         frozen = json.loads(db.execute('SELECT value FROM state_meta WHERE key=?',
                             ('gateway.local_policy.v1:' + first['target_session_id'],)).fetchone()[0])
-                        assert frozen['policy']['model'] == 'frozen-model', frozen
+                        frozen_config = json.loads(frozen['policy']['config_json'])
+                        assert (frozen['policy']['model'], frozen_config['model']['provider']) == ('class:standard', 'auto'), frozen
                         private = json.loads(frozen['policy']['kanban_json'])
                         assert private['db'] == str(board_path.resolve()) and private['claim_lock'] == task.claim_lock
                     # The attempt's interpreter and its spawned worker are both gone because the owner died
@@ -205,7 +210,7 @@ def main():
                     assert kb.get_task(conn, tid).consecutive_failures == 0
                 receipt['crash_requeued_once'] = True
             receipt.update(inference_calls=len(peer.requests), frozen_model=peer.requests[0]['model'])
-            assert peer.requests[0]['model'] == 'frozen-model'
+            assert peer.requests[0]['model'] in candidates
             wait_for(lambda: all(p.poll() is not None for p in clients))
             trace = (home / 'client.strace').read_text()
             writes = [line for line in trace.splitlines() if 'state.db' in line and ('O_RDWR' in line or 'O_WRONLY' in line)]

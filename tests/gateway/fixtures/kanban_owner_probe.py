@@ -86,6 +86,8 @@ def main():
         'auxiliary': {'title_generation': {'enabled': False}}, 'platform_toolsets': {'cli': ['terminal', 'file']},
         'terminal': {'backend': 'local'}, 'agent': {'api_max_retries': 1}, 'kanban': {'dispatch_in_gateway': False},
         'hooks': {'post_tool_call': [{'command': f'{shlex.quote(sys.executable)} {shlex.quote(str(hook))}'}]}}
+    from tests.gateway.fixtures.kanban_loopback_routing import configure
+    candidates = configure(home, cfg, url)
     (home / 'config.yaml').write_text(json.dumps(cfg), encoding='utf-8')
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
@@ -158,6 +160,8 @@ def main():
                     task = kb.get_task(conn, tid)
                     params = dict(task_id=tid, board='owned', run_id=task.current_run_id, claim_lock=task.claim_lock)
                     assert peer.blocked.wait(55), 'model never reached'
+                    assert peer.requests[0]['model'] in candidates, peer.requests
+                    assert task.model_override is None and task.provider_override is None, task
                     active = kb.get_task(conn, tid)
                     receipt.update(client_pid=clients[0].pid, stored_pid=active.worker_pid, run_id=task.current_run_id)
                     if peer.mode == 'timeout':
