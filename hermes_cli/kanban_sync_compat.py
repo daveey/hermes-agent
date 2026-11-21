@@ -22,9 +22,13 @@ def rejected_parent(conn: sqlite3.Connection, parents: list[tuple[dict, str]], r
             retire_parent(conn, tid)
         if result.get("status") != "rejected":
             return None
-        # A definitive refusal is not an uncertain send. Move synthetic parents
-        # into the normal bounded rejection/remap path rather than replaying a
-        # cached refusal forever under their frozen id.
+        from hermes_cli.kanban_sync_client import transient_rejection
+        if result.get("reason") != "forbidden_field" and not transient_rejection(result):
+            # Permanent refusals keep their frozen identity, as do uncertain sends.
+            # Materializing one here would add a rejected row (and live_claim event)
+            # each time pending children ask for their still-unacknowledged parent.
+            return None
+        # Only recoverable/schema refusals enter the existing bounded remap path.
         retire_parent(conn, tid)
         conn.execute(
             "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, hlc, created_at) "

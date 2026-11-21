@@ -39,6 +39,38 @@ def test_rejected_synthetic_parent_enters_bounded_retry_path(board):
     assert not conn.execute("SELECT 1 FROM kanban_sync_parent_envelopes").fetchone()
 
 
+@pytest.mark.parametrize("reason", ["live_claim", "invalid", "storage_error"])
+def test_synthetic_parent_rejection_does_not_accumulate_across_rounds(board, monkeypatch, reason):
+    from types import SimpleNamespace
+    conn, _ = board
+    tid = kb.create_task(conn, title="parent", assignee="worker")
+    with kbc.write_txn(conn):
+        conn.execute("DELETE FROM kanban_sync_outbox")
+    kb.add_comment(conn, tid, "author", "child")
+    batches = []
+
+    def ops(_board, wire):
+        batches.append(wire)
+        return {"results": [{"client_op_id": op["client_op_id"], "status": "rejected",
+                             "reason": reason if op["table"] == "tasks" else "depends_on_rejected"}
+                            for op in wire]}
+
+    now = [client.time.time()]
+    monkeypatch.setattr(client.time, "time", lambda: now[0])
+    for _ in range(8):
+        client.push(conn, SimpleNamespace(ops=ops), "default", "sender", primary=False, max_batches=1)
+        now[0] += 400
+    rows = conn.execute("SELECT state, attempts FROM kanban_sync_outbox WHERE table_name='tasks'").fetchall()
+    if reason == "storage_error":
+        assert len(rows) == 1 and rows[0]["state"] == "pending"
+        assert rows[0]["attempts"] == 8
+    else:
+        assert not rows
+        assert len({next(op["client_op_id"] for op in wire if op["table"] == "tasks") for wire in batches}) == 1
+    assert len({len(wire) for wire in batches}) == 1
+    assert not conn.execute("SELECT 1 FROM task_events WHERE kind='sync_rejected'").fetchone()
+
+
 def test_envelopes_commit_before_io_and_ack_cleans_pending_storage(board):
     conn, home = board
     kb.create_task(conn, title="durable", assignee="worker")

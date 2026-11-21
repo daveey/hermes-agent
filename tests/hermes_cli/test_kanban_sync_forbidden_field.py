@@ -89,9 +89,14 @@ def test_synthetic_parent_non_schema_rejections_use_bounded_outbox_handling(live
         return {"results": [{"client_op_id": op["client_op_id"], "status": "rejected",
                              "reason": reason, "detail": "no task missing"} for op in batch]}
     client.push(live, SimpleNamespace(ops=ops), "default", "macbook", primary=True, max_batches=1)
-    [parent] = live.execute("SELECT * FROM kanban_sync_outbox WHERE table_name='tasks'").fetchall()
-    assert parent["attempts"] == 1
-    assert parent["state"] == ("rejected" if reason == "live_claim" else "pending")
+    rows = live.execute("SELECT * FROM kanban_sync_outbox WHERE table_name='tasks'").fetchall()
+    if reason == "live_claim":
+        assert not rows  # permanent synthetic refusal must not manufacture a rejected row
+        assert live.execute("SELECT 1 FROM kanban_sync_parent_envelopes").fetchone()
+    else:
+        [parent] = rows
+        assert parent["attempts"] == 1
+        assert parent["state"] == "pending"
 
 
 @pytest.mark.parametrize("state", ["pending", "rejected"])
@@ -123,7 +128,7 @@ def test_synthetic_parent_acknowledgement_is_successful_version_only(live, statu
     parent = {"client_op_id": "parent-op", "fields": {"title": "parent acknowledgement"},
               "hlc": "0000000000001-0000-macbook"}
     queued = compat.rejected_parent(live, [(parent, tid)], result)
-    assert (queued is not None) == (status == "rejected")
+    assert queued is None  # unknown/permanent refusal must not become a retry row
     assert live.execute("SELECT sync_version FROM tasks WHERE id=?", (tid,)).fetchone()[0] == expected
 
 
