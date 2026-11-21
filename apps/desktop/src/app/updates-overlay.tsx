@@ -619,6 +619,10 @@ function backupMessage(backup: DesktopUpdateBackupProgress, u: ReturnType<typeof
     return u.backupChecking
   }
 
+  if (backup.phase === 'start') {
+    return ''
+  }
+
   const { done, total } = backupSizes(backup.doneBytes, backup.totalBytes)
 
   return u.backupProgress(done, total)
@@ -645,7 +649,7 @@ function ApplyingView({
   const recentLog = apply.log.slice(-4)
 
   const percent =
-    backup?.phase === 'check'
+    backup && backup.phase !== 'copy'
       ? null
       : typeof apply.percent === 'number' && Number.isFinite(apply.percent)
         ? Math.max(2, Math.min(100, Math.round(apply.percent)))

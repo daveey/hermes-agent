@@ -40,7 +40,7 @@ import type { UpdaterApplyResultWire, UpdaterMechanism, UpdaterStatusWire, Updat
  */
 /** The emergency state.db backup's progress, as the overlay draws it (stage `backup`). */
 export interface UpdateBackupProgress {
-  phase: 'copy' | 'check'
+  phase: 'start' | 'copy' | 'check'
   doneBytes: number
   totalBytes: number
   method: 'clone' | 'copy' | null
@@ -57,6 +57,10 @@ const GIB = 1024 ** 3
 
 /** English log text for one backup report; the renderer localizes from `backup`. */
 function backupLogMessage(backup: UpdateBackupProgress): string {
+  if (backup.phase === 'start') {
+    return 'Backing up state.db…'
+  }
+
   if (backup.phase === 'check') {
     return 'Checking the state.db backup…'
   }
@@ -83,6 +87,18 @@ export function updateProgressLogLine(merged: {
   }
 
   return `[updates] ${merged.stage}: ${merged.message || merged.error || ''}`
+}
+
+/**
+ * Run the pre-flight snapshot with its progress on the overlay (stage
+ * `backup`): an indeterminate start at once, so even a snapshot script that
+ * reports nothing (an older checkout) shows the backup, then its reports.
+ */
+export async function runStateDbPreflight(deps: CheckoutStrategyDeps): Promise<void> {
+  const start: UpdateBackupProgress = { phase: 'start', doneBytes: 0, totalBytes: 0, method: null }
+
+  deps.emitUpdateProgress({ stage: 'backup', message: backupLogMessage(start), percent: null, backup: start })
+  await deps.preflightStateDb(deps.hermesHome, deps.rememberLog, backupProgressEmitter(deps))
 }
 
 /** Forward the pre-flight snapshot's reports to the update overlay as stage `backup`. */
@@ -617,7 +633,7 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
     // anything.  Runs while the backend is still alive. Its progress shows in
     // the overlay, so "this window will close" follows it rather than sitting
     // over a backup that can take minutes.
-    await deps.preflightStateDb(deps.hermesHome, deps.rememberLog, backupProgressEmitter(deps))
+    await runStateDbPreflight(deps)
     deps.emitUpdateProgress({
       stage: 'restart',
       message:
@@ -774,7 +790,9 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
     }
 
     // ── Pre-flight state.db integrity guard (#68474) ──
-    await deps.preflightStateDb(deps.hermesHome, deps.rememberLog, backupProgressEmitter(deps))
+    await runStateDbPreflight(deps)
+    // Leave "Checking the backup…" now: the hand-off planning below takes a moment.
+    deps.emitUpdateProgress({ stage: 'prepare', message: 'Backup done. Starting the updater…', percent: null })
 
     const args: string[] = [
       ...handoff.args,

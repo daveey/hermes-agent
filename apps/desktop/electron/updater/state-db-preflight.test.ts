@@ -233,6 +233,7 @@ test('the progress parser joins lines split across chunks and ignores garbage', 
   parser.push('al_bytes": 100, "method": "copy"}\nWARNING: clone unavailable\r\n{not json}\n')
   parser.push('{"event": "something_else"}\n{"event": "backup_progress", "done_bytes": "x", "total_bytes": 1}\n')
   parser.push('{"event": "backup_progress", "done_bytes": 150, "total_bytes": 100, "method": "clone"}\n[1, 2]\n\n')
+  parser.push('{"event": "backup_lock_wait"}\n')
   parser.push('{"event": "backup_check"}')
   // The unterminated last line waits for its newline (or the end of the stream).
   assert.equal(events.length, 2)
@@ -248,7 +249,8 @@ test('the progress parser joins lines split across chunks and ignores garbage', 
     '{not json}',
     '{"event": "something_else"}',
     '{"event": "backup_progress", "done_bytes": "x", "total_bytes": 1}',
-    '[1, 2]'
+    '[1, 2]',
+    'waiting (up to 2 s) for the state.db write lock another writer holds'
   ])
 })
 
@@ -367,3 +369,49 @@ sys.exit(1)
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+test.skipIf(process.platform === 'win32')(
+  'a snapshot that ignores SIGTERM past its deadline is killed',
+  async (): Promise<void> => {
+    const home: string = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-kill-'))
+    const script = path.join(home, 'snapshot.py')
+    const pidFile = path.join(home, 'pid')
+    fs.writeFileSync(
+      script,
+      `import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open(${JSON.stringify(pidFile)}, 'w').write(str(os.getpid()))
+time.sleep(120)
+`
+    )
+    const logs: string[] = []
+    const started = Date.now()
+
+    try {
+      await assert.rejects(
+        preflightStateDb({
+          python: process.env.HERMES_PYTHON || 'python3',
+          script,
+          home,
+          log: (message: string): void => {
+            logs.push(message)
+          },
+          timeoutMs: 500,
+          killGraceMs: 300
+        }),
+        /timed out after 500 ms/
+      )
+      assert.ok(Date.now() - started < 30_000)
+      assert.ok(
+        logs.some((line: string): boolean => /ignored SIGTERM for 300 ms; killing it/.test(line)),
+        logs.join('\n')
+      )
+      const pid = Number(fs.readFileSync(pidFile, 'utf8'))
+      assert.throws((): void => {
+        process.kill(pid, 0)
+      })
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true })
+    }
+  }
+)

@@ -95,7 +95,9 @@ export function createBackupProgressParser(
   const route = (line: string): void => {
     const event = readProgressEvent(line)
 
-    if (event) {
+    if (!event && /^\s*\{\s*"event"\s*:\s*"backup_lock_wait"\s*\}\s*$/.test(line)) {
+      onLine('waiting (up to 2 s) for the state.db write lock another writer holds')
+    } else if (event) {
       onProgress(event)
     } else if (line.trim()) {
       onLine(line.replace(/\r$/, ''))
@@ -134,7 +136,13 @@ interface StateDbPreflight {
   launcher?: string | null
   /** Snapshot progress as it arrives (stderr JSON lines); other stderr lines go to `log`. */
   onProgress?: (progress: StateDbBackupProgress) => void
+  /** Deadline before SIGTERM; default from the database size (stateDbPreflightTimeoutMs). */
+  timeoutMs?: number
+  /** How long a SIGTERM'd snapshot gets to exit before SIGKILL. */
+  killGraceMs?: number
 }
+
+const KILL_GRACE_MS = 10_000
 
 interface SnapshotRun {
   stdout: string
@@ -147,6 +155,7 @@ function runSnapshot(
   args: string[],
   options: SpawnOptions,
   timeoutMs: number,
+  killGraceMs: number,
   onProgress: (progress: StateDbBackupProgress) => void,
   log: (message: string) => void
 ): Promise<SnapshotRun> {
@@ -170,11 +179,26 @@ function runSnapshot(
       }
     )
 
+    let killTimer: ReturnType<typeof setTimeout> | null = null
+
     // Same stop as execFile's timeout: SIGTERM, which the snapshot turns into its staging cleanup.
+    // A snapshot that does not exit within the grace (stuck in one long C call) gets SIGKILL.
     const timer = setTimeout((): void => {
       timedOut = true
       child.kill('SIGTERM')
+      killTimer = setTimeout((): void => {
+        log(`[updates] state.db pre-flight ignored SIGTERM for ${killGraceMs} ms; killing it`)
+        child.kill('SIGKILL')
+      }, killGraceMs)
     }, timeoutMs)
+
+    const clearTimers = (): void => {
+      clearTimeout(timer)
+
+      if (killTimer) {
+        clearTimeout(killTimer)
+      }
+    }
 
     child.stdout!.setEncoding('utf8')
     child.stderr!.setEncoding('utf8')
@@ -183,11 +207,11 @@ function runSnapshot(
     })
     child.stderr!.on('data', parser.push)
     child.on('error', (error: Error): void => {
-      clearTimeout(timer)
+      clearTimers()
       reject(error)
     })
     child.on('close', (code: number | null, signal: NodeJS.Signals | null): void => {
-      clearTimeout(timer)
+      clearTimers()
       parser.flush()
       const stderr = stderrLines.join('\n')
 
@@ -215,7 +239,9 @@ export async function preflightStateDb({
   home,
   log,
   launcher = null,
-  onProgress = (): void => {}
+  onProgress = (): void => {},
+  timeoutMs,
+  killGraceMs = KILL_GRACE_MS
 }: StateDbPreflight): Promise<void> {
   try {
     const command: string | null = launcher ?? python
@@ -242,7 +268,8 @@ export async function preflightStateDb({
         ? ['/d', '/v:off', '/s', '/c', `""${command}" ${args.map((arg: string): string => `"${arg}"`).join(' ')}"`]
         : args,
       hiddenWindowsChildOptions({ windowsVerbatimArguments: viaCmd }),
-      stateDbPreflightTimeoutMs(home),
+      timeoutMs ?? stateDbPreflightTimeoutMs(home),
+      killGraceMs,
       onProgress,
       log
     )

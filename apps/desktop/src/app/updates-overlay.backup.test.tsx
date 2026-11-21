@@ -60,6 +60,14 @@ it('shows the backup size and a determinate bar while the pre-update backup runs
     )
   })
 
+  // The start: title and an indeterminate bar before any size is known.
+  await act(async (): Promise<void> => {
+    emit(backupEvent({ phase: 'start', doneBytes: 0, totalBytes: 0, method: null }, null))
+  })
+
+  expect(screen.getAllByText(en.updates.stages.backup!).length).toBeGreaterThan(0)
+  expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBeNull()
+
   const total = 21.7 * GIB
   const done = 12.3 * GIB
 

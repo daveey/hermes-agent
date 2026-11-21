@@ -211,9 +211,12 @@ def test_clone_captures_wal_commits_made_while_it_waited_for_the_lock(clone_base
         writer.execute("INSERT INTO messages VALUES ('committed while the clone waited')")
         proc = subprocess.Popen([sys.executable, "-I", "-S", str(SCRIPT), str(home)],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        time.sleep(0.3)  # health: allow HX013 -- the lock holder must still be holding when the child asks
+        # The child says when it found the lock held and started waiting; only then commit.
+        first = proc.stderr.readline()
+        assert json.loads(first) == {"event": "backup_lock_wait"}, first
         writer.execute("COMMIT")
-        stdout, stderr = proc.communicate(timeout=60)
+        stdout, rest = proc.communicate(timeout=60)
+        stderr = first + rest
         assert proc.returncode == 0, stderr
         result = json.loads(stdout)
         # Written after the clone: must not be in the snapshot.
@@ -222,7 +225,7 @@ def test_clone_captures_wal_commits_made_while_it_waited_for_the_lock(clone_base
         writer.close()
 
     assert result["method"] == "clone", stderr
-    assert result["lock_ms"] < 2000
+    assert 0 < result["lock_wait_ms"] < 2000 and result["lock_ms"] < 2000
     snapshot = Path(result["path"])
     # One self-contained file: the clone's WAL was folded in (opening the snapshot below recreates one).
     assert not Path(f"{snapshot}-wal").exists() and not list(home.glob("*.partial*"))
@@ -231,7 +234,8 @@ def test_clone_captures_wal_commits_made_while_it_waited_for_the_lock(clone_base
     assert len(rows) == 202
     events = _events(stderr)
     # One instant 100% line, and no whole-database check on a byte-identical clone.
-    assert events == [{"event": "backup_progress", "done_bytes": result["bytes"],
+    assert events == [{"event": "backup_lock_wait"},
+                      {"event": "backup_progress", "done_bytes": result["bytes"],
                        "total_bytes": result["bytes"], "method": "clone"}]
     assert oct(snapshot.stat().st_mode & 0o777) == "0o600"
     assert _lock_is_free(db)
@@ -268,7 +272,8 @@ def test_clone_holds_the_write_lock_only_while_cloning(tmp_path, monkeypatch):
     seen: dict = {}
 
     def cp_clone(src, dst, _fd=None):
-        seen.setdefault("held_during_clone", not _lock_is_free(db))
+        if Path(src) == db:  # not the support probe, which runs before the lock
+            seen.setdefault("held_during_clone", not _lock_is_free(db))
         subprocess.run(["cp", str(src), str(dst)], check=True)
 
     real_copy = backup_sqlite._safe_copy_db
@@ -287,10 +292,16 @@ def test_clone_holds_the_write_lock_only_while_cloning(tmp_path, monkeypatch):
     def unsupported(src, dst, _fd=None):
         raise OSError(errno.EXDEV, "cross-device", str(src))
 
+    def must_not_lock(*_args):
+        raise AssertionError("took the write lock on a filesystem that cannot clone")
+
     monkeypatch.setattr(backup_sqlite, "_clone_file", unsupported)
+    monkeypatch.setattr(backup_sqlite, "_clone_snapshot", must_not_lock)
     out = io.StringIO()
     result = backup_sqlite.preflight_state_db(home, clone=True, reporter=backup_sqlite._ProgressReporter(out))
     assert result["method"] == "copy" and "cross-device" in result["clone_error"]
+    monkeypatch.undo()
+    monkeypatch.setattr(backup_sqlite, "_safe_copy_db", watching_copy)
     assert seen["free_during_copy"] is True and _lock_is_free(db)
     assert len(_snapshot_rows(result["path"])) == 50
     assert _events(out.getvalue())[-1] == {"event": "backup_check"}
@@ -336,3 +347,111 @@ def test_the_clone_never_writes_the_source_database(clone_base):
     assert result["method"] == "clone"
     assert db.read_bytes() == before
     assert _snapshot_rows(result["path"])[-1] == ("only in the WAL",)
+
+
+def test_without_python_3_12_the_clone_is_skipped_for_the_copy(tmp_path, monkeypatch):
+    """Without SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE the lock connection's close could checkpoint the WAL
+    into state.db on the main thread, where SIGTERM cannot stop it: copy instead, and say why."""
+    from hermes_cli import backup_sqlite
+
+    def must_not_clone(*_args):
+        raise AssertionError("clone attempted")
+
+    home = _home(tmp_path, 5)
+    monkeypatch.delattr(backup_sqlite.sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE", raising=False)
+    monkeypatch.setattr(backup_sqlite, "_clone_file", must_not_clone)
+    result = backup_sqlite.preflight_state_db(home, clone=True)
+    assert result["method"] == "copy"
+    assert "Python 3.12" in result["clone_error"]
+
+
+def _cp_clone(src, dst, _fd=None):
+    """A stand-in clone (another process's byte copy) so the lock-window tests run on any filesystem."""
+    subprocess.run(["cp", str(src), str(dst)], check=True)
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.skipif(not hasattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"), reason="needs Python 3.12+")
+def test_a_checkpoint_between_the_db_and_wal_clones_loses_no_committed_row(tmp_path, monkeypatch):
+    """Under the snapshot's write lock no one can commit, but a passive checkpoint may still move WAL
+    frames into state.db between the two clones. The WAL clone keeps those frames, so the snapshot
+    still holds every committed row."""
+    from hermes_cli import backup_sqlite
+
+    home = _home(tmp_path, 10)
+    db = home / "state.db"
+    writer = _wal_writer(db)
+    writer.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+    for n in range(50):
+        writer.execute("INSERT INTO messages VALUES (?)", (f"row {n}",))
+    writer.close()
+    with sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True) as reader:
+        committed = reader.execute("SELECT body FROM messages ORDER BY rowid").fetchall()
+    assert len(committed) == 60
+    seen: dict = {}
+
+    def checkpoint_between(src, dst, fd=None):
+        _cp_clone(src, dst, fd)
+        if Path(src) != db:
+            return
+        other = sqlite3.connect(db, timeout=0, isolation_level=None)
+        other.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("INSERT INTO messages VALUES ('during the clone')")
+            seen["checkpoint"] = other.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        finally:
+            other.close()
+
+    monkeypatch.setattr(backup_sqlite, "_clone_file", checkpoint_between)
+    result = backup_sqlite.preflight_state_db(home, clone=True)
+
+    busy, frames, moved = seen["checkpoint"]
+    assert busy == 0 and frames > 0 and moved == frames, seen
+    assert result["method"] == "clone", result
+    assert _snapshot_rows(result["path"]) == committed
+    with sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True) as reader:
+        assert reader.execute("SELECT body FROM messages ORDER BY rowid").fetchall() == committed
+    assert _lock_is_free(db)
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.skipif(not hasattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"), reason="needs Python 3.12+")
+def test_sigterm_during_the_clone_verify_exits_cleanly(tmp_path):
+    home = _home(tmp_path, 10)
+    db = home / "state.db"
+    writer = _wal_writer(db)
+    writer.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+    writer.execute("INSERT INTO messages VALUES ('in the WAL')")
+    writer.close()
+    driver = (
+        "import runpy, signal, subprocess, sys\n"
+        "ns = runpy.run_path(sys.argv[1], run_name='not_main')\n"
+        "signal.signal(signal.SIGTERM, ns['_on_sigterm'])\n"
+        "live = ns['_verify_clone'].__globals__  # run_path returns a copy; patch the module's own globals\n"
+        "live['_clone_file'] = lambda src, dst, fd=None: subprocess.run(['cp', str(src), str(dst)], check=True)\n"
+        "real = live['_run_interruptibly']\n"
+        "def slow(conn, work):\n"
+        "    sys.stderr.write('verifying\\n'); sys.stderr.flush()\n"
+        "    slow_sql = 'WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n) SELECT count(*) FROM n'\n"
+        "    return real(conn, lambda: (conn.execute(slow_sql).fetchall(), work())[1])\n"
+        "live['_run_interruptibly'] = slow\n"
+        "ns['preflight_state_db'](__import__('pathlib').Path(sys.argv[2]), clone=True,\n"
+        "                         reporter=ns['_ProgressReporter']())\n")
+    proc = subprocess.Popen([sys.executable, "-I", "-S", "-u", "-c", driver, str(SCRIPT), str(home)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        seen = []
+        wait_until(lambda: seen.append(proc.stderr.readline()) or seen[-1] == "verifying\n" or
+                   proc.poll() is not None, timeout=60, what="the clone verify")
+        assert proc.poll() is None, "".join(seen)
+        assert _lock_is_free(db), "the write lock must be released before the verify"
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert proc.returncode == 128 + signal.SIGTERM
+    assert sorted(p.name for p in home.glob("state.db.pre-update-emergency-*")) == []
+    assert _lock_is_free(db)

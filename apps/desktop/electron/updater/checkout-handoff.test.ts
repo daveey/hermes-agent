@@ -584,15 +584,7 @@ it('the Windows protocol-2 hand-off passes -HandoffRun with the bridged run id',
 
 // The emergency state.db backup can take minutes on a large database: its
 // progress reaches the overlay as stage `backup`, before "this window will close".
-it('forwards the pre-flight backup progress to the overlay before the hand-off', async (): Promise<void> => {
-  const { root, deps } = handoffFixture(false)
-
-  deps.preflightStateDb = (_home, _log, onProgress): void => {
-    onProgress?.({ kind: 'progress', doneBytes: 0, totalBytes: 4 * 1024 ** 3, method: 'copy' })
-    onProgress?.({ kind: 'progress', doneBytes: 1024 ** 3, totalBytes: 4 * 1024 ** 3, method: 'copy' })
-    onProgress?.({ kind: 'check' })
-  }
-
+function failingSpawn(): void {
   vi.spyOn(updaterProcess, 'spawnUpdaterProcess').mockImplementation((): updaterProcess.UpdaterChild => {
     const child: EventEmitter & updaterProcess.UpdaterChild = Object.assign(new EventEmitter(), {
       unref: (): void => {}
@@ -604,13 +596,35 @@ it('forwards the pre-flight backup progress to the overlay before the hand-off',
 
     return child
   })
+}
+
+const START = { phase: 'start', doneBytes: 0, totalBytes: 0, method: null }
+
+it('forwards the pre-flight backup progress to the overlay before the hand-off', async (): Promise<void> => {
+  const { root, deps } = handoffFixture(false)
+
+  const emitted = (): Parameters<CheckoutStrategyDeps['emitUpdateProgress']>[0][] =>
+    vi.mocked(deps.emitUpdateProgress).mock.calls.map(([payload]) => payload)
+
+  deps.preflightStateDb = (_home, _log, onProgress): void => {
+    // The indeterminate start is already on screen when the snapshot begins.
+    expect(emitted().at(-1)).toEqual(
+      expect.objectContaining({ stage: 'backup', percent: null, message: 'Backing up state.db…', backup: START })
+    )
+    onProgress?.({ kind: 'progress', doneBytes: 0, totalBytes: 4 * 1024 ** 3, method: 'copy' })
+    onProgress?.({ kind: 'progress', doneBytes: 1024 ** 3, totalBytes: 4 * 1024 ** 3, method: 'copy' })
+    onProgress?.({ kind: 'check' })
+  }
+
+  failingSpawn()
 
   try {
     await createCheckoutStrategy(deps).apply()
-    const calls = vi.mocked(deps.emitUpdateProgress).mock.calls.map(([payload]) => payload)
+    const calls = emitted()
     const backups = calls.filter(payload => payload.stage === 'backup')
 
     expect(backups).toEqual([
+      expect.objectContaining({ percent: null, backup: START }),
       expect.objectContaining({
         percent: 0,
         backup: { phase: 'copy', doneBytes: 0, totalBytes: 4 * 1024 ** 3, method: 'copy' }
@@ -625,9 +639,36 @@ it('forwards the pre-flight backup progress to the overlay before the hand-off',
         backup: { phase: 'check', doneBytes: 4 * 1024 ** 3, totalBytes: 4 * 1024 ** 3, method: 'copy' }
       })
     ])
+    const firstBackup = calls.indexOf(backups[0]!)
     const lastBackup = calls.lastIndexOf(backups.at(-1)!)
     const restart = calls.findIndex(payload => payload.stage === 'restart')
-    expect(restart === -1 || restart > lastBackup).toBe(true)
+
+    // "This window will close" comes only after the backup, never before or during it.
+    expect(restart).toBeGreaterThan(lastBackup)
+    expect(calls.slice(0, firstBackup).some(payload => payload.stage === 'restart')).toBe(false)
+    // The backup's last view is left as soon as the snapshot returns.
+    expect(calls[lastBackup + 1]).toEqual(
+      IS_WINDOWS
+        ? expect.objectContaining({ stage: 'restart' })
+        : expect.objectContaining({ stage: 'prepare', message: 'Backup done. Starting the updater…' })
+    )
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+it('shows the backup stage even when the snapshot script reports no progress', async (): Promise<void> => {
+  const { root, deps } = handoffFixture(false)
+
+  failingSpawn()
+
+  try {
+    await createCheckoutStrategy(deps).apply()
+    const calls = vi.mocked(deps.emitUpdateProgress).mock.calls.map(([payload]) => payload)
+
+    expect(calls.filter(payload => payload.stage === 'backup')).toEqual([
+      expect.objectContaining({ percent: null, backup: START })
+    ])
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

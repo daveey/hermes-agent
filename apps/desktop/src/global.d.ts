@@ -1180,7 +1180,8 @@ export type DesktopUpdateStage =
 
 /** The emergency state.db backup's progress: bytes copied (or cloned), then the backup check. */
 export interface DesktopUpdateBackupProgress {
-  phase: 'copy' | 'check'
+  /** 'start': under way, no size yet (indeterminate); 'copy': bytes so far; 'check': verifying. */
+  phase: 'start' | 'copy' | 'check'
   doneBytes: number
   totalBytes: number
   method: 'clone' | 'copy' | null

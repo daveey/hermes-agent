@@ -17,6 +17,14 @@ it('logs a backup’s start, end and check but not its twice-a-second ticks', ()
     backup: { phase: 'copy' as const, doneBytes, totalBytes: 4 * GIB, method: 'copy' as const }
   })
 
+  expect(
+    updateProgressLogLine({
+      stage: 'backup',
+      message: 'Backing up state.db…',
+      percent: null,
+      backup: { phase: 'start', doneBytes: 0, totalBytes: 0, method: null }
+    })
+  ).toBe('[updates] backup: Backing up state.db…')
   expect(updateProgressLogLine(copy(0, 0))).toBe('[updates] backup: Backing up state.db (copy): 0 of 4 GB')
   expect(updateProgressLogLine(copy(GIB, 25))).toBe('')
   expect(updateProgressLogLine(copy(4 * GIB, 100))).toBe('[updates] backup: Backing up state.db (copy): 4 of 4 GB')

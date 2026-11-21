@@ -72,6 +72,9 @@ class _ProgressReporter:
     def check(self) -> None:
         self._write({"event": "backup_check"})
 
+    def lock_wait(self) -> None:
+        self._write({"event": "backup_lock_wait"})
+
 
 class _SQLiteBackupTimeout(RuntimeError):
     """Raised when a SQLite snapshot remains busy past its deadline."""
@@ -368,7 +371,34 @@ def _clone_file(src: Path, dst: Path, src_fd: Optional[int] = None) -> None:
     raise OSError(errno.ENOTSUP, "no copy-on-write clone on this platform", str(src))
 
 
-def _clone_snapshot(source: Path, staged: Path) -> dict:
+def _clone_unavailable(home: Path, probe: Path) -> Optional[str]:
+    """Why the clone path cannot run here (None when it can), decided before any lock is taken.
+
+    Python < 3.12 cannot stop the lock connection's close from checkpointing the whole WAL into
+    state.db (on the main thread, where SIGTERM cannot interrupt it). A filesystem without
+    copy-on-write clones (ext4, NTFS, a cross-device home) answers a throwaway probe file, so it
+    never takes state.db's write lock just to fail."""
+    if os.environ.get(_CLONE_ENV, "1") == "0":
+        return f"turned off by {_CLONE_ENV}=0"
+    if not hasattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE") or not hasattr(sqlite3.Connection, "setconfig"):
+        return "needs Python 3.12+ (SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE) so closing the lock never writes state.db"
+    clone = Path(f"{probe}-clone")
+    try:
+        fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.write(fd, b"\0" * 4096)
+        finally:
+            os.close(fd)
+        _clone_file(probe, clone)
+    except OSError as exc:
+        return f"no copy-on-write clone in {home}: {exc}"
+    finally:
+        probe.unlink(missing_ok=True)
+        clone.unlink(missing_ok=True)
+    return None
+
+
+def _clone_snapshot(source: Path, staged: Path, reporter: Optional[_ProgressReporter] = None) -> dict:
     """Clone state.db (and its WAL) while holding SQLite's write lock, then release it.
 
     Under BEGIN IMMEDIATE no other connection can commit, restart or truncate the WAL, or delete it
@@ -384,31 +414,42 @@ def _clone_snapshot(source: Path, staged: Path) -> dict:
             # POSIX locks die with ANY close() of the file in this process, so the database's clone
             # source is opened before the lock connection and closed only after it is gone.
             source_fd = os.open(source, os.O_RDONLY)  # sqlite-sidecar-open: ok — opened before and closed after the lock connection
-        lock = sqlite3.connect(str(source), timeout=_CLONE_LOCK_WAIT_SECONDS, isolation_level=None,
-                               check_same_thread=False)
-        # As the last connection to close, SQLite would checkpoint the whole WAL into state.db: a
-        # write the snapshot has no business making (Python 3.12+ can turn it off).
-        if hasattr(lock, "setconfig") and hasattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"):
+        try:
+            lock = sqlite3.connect(str(source), timeout=0, isolation_level=None, check_same_thread=False)
+            # As the last connection to close, SQLite would checkpoint the whole WAL into state.db:
+            # a write the snapshot must not make (_clone_unavailable requires Python 3.12+ for this).
             lock.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
-        lock.execute("BEGIN IMMEDIATE")
-        locked_at = time.monotonic()
-        _clone_file(source, staged, source_fd)
-        if wal_mode and Path(f"{source}-wal").exists():
-            # sqlite-sidecar-open: ok — SQLite never locks the -wal itself (WAL locks live in -shm and state.db)
-            _clone_file(Path(f"{source}-wal"), Path(f"{staged}-wal"))
-        lock_ms = (time.monotonic() - locked_at) * 1000
+            waited_at = time.monotonic()
+            try:
+                lock.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError:
+                # Another writer holds it: say so, then wait a bounded while (a longer holder sends
+                # the snapshot to the page copy, which needs no write lock on a WAL database).
+                if reporter is not None:
+                    reporter.lock_wait()
+                lock.execute(f"PRAGMA busy_timeout = {int(_CLONE_LOCK_WAIT_SECONDS * 1000)}")
+                lock.execute("BEGIN IMMEDIATE")
+            locked_at = time.monotonic()
+            _clone_file(source, staged, source_fd)
+            if wal_mode and Path(f"{source}-wal").exists():
+                # sqlite-sidecar-open: ok — SQLite never locks the -wal itself (WAL locks live in -shm and state.db)
+                _clone_file(Path(f"{source}-wal"), Path(f"{staged}-wal"))
+            lock_ms = (time.monotonic() - locked_at) * 1000
+            lock_wait_ms = (locked_at - waited_at) * 1000
+        finally:
+            if lock is not None:
+                with suppress(sqlite3.Error):
+                    lock.execute("ROLLBACK")
+                lock.close()
     finally:
-        if lock is not None:
-            with suppress(sqlite3.Error):
-                lock.execute("ROLLBACK")
-            lock.close()
+        # Its own finally: it must close even when closing the lock connection raised.
         if source_fd is not None:
             os.close(source_fd)
     # A clone keeps the source's mode (never wider than state.db itself); snapshots are owner-only.
     for clone in (staged, Path(f"{staged}-wal")):
         if clone.exists():
             os.chmod(clone, 0o600)
-    return {"lock_ms": round(lock_ms, 1)}
+    return {"lock_ms": round(lock_ms, 1), "lock_wait_ms": round(lock_wait_ms, 1)}
 
 
 @contextmanager
@@ -426,8 +467,13 @@ def _closing_unless_terminated(connection: sqlite3.Connection):
 
 
 def _verify_clone(staged: Path) -> None:
-    """A clone is the source's committed bytes, so no full check: the header is SQLite's, it opens,
-    the schema reads, and its WAL folds back into the one file a snapshot is."""
+    """Light check of a clone: the header is SQLite's, it opens, the schema reads, and its WAL folds
+    back into the one file a snapshot is.
+
+    Deliberately no PRAGMA quick_check (on 21.7 GB it ran 5+ minutes): the clone is the source's
+    committed bytes taken under the write lock, so the check would only re-check state.db itself.
+    The trade-off: on this path a state.db that is already corrupt is backed up as it is instead of
+    cancelling the update, as the page copy's quick_check would."""
     with open(staged, "rb") as handle:  # sqlite-sidecar-open: ok — our own clone, before any connection to it
         if handle.read(len(_SQLITE_MAGIC)) != _SQLITE_MAGIC:
             raise RuntimeError("cloned snapshot has no SQLite header")
@@ -445,7 +491,7 @@ def _verify_clone(staged: Path) -> None:
     _discard_sidecars(staged, ("-wal", "-shm"))
 
 
-def _discard_sidecars(staged: Path, suffixes=("-wal", "-shm", "-journal")) -> None:
+def _discard_sidecars(staged: Path, suffixes=("-wal", "-shm", "-journal", "-probe", "-probe-clone")) -> None:
     for suffix in suffixes:
         Path(f"{staged}{suffix}").unlink(missing_ok=True)
 
@@ -481,13 +527,18 @@ def preflight_state_db(home: Path, *, busy_timeout_seconds: float = 10.0, clone:
     result: dict = {}
     try:
         cloned = False
-        if clone and os.environ.get(_CLONE_ENV, "1") != "0":
+        unavailable = _clone_unavailable(home, Path(f"{staged}-probe")) if clone else None
+        if unavailable:
+            logger.warning("Copy-on-write snapshot skipped, copying instead: %s", unavailable)
+            result = {"clone_error": unavailable}
+        elif clone:
             try:
-                result.update(_clone_snapshot(source, staged))
+                result.update(_clone_snapshot(source, staged, reporter))
+                # Light check only (header, open, schema_version, WAL fold): see _verify_clone.
                 _verify_clone(staged)
                 cloned = True
             except Exception as exc:
-                # EXDEV/ENOTSUP/EOPNOTSUPP (no reflink here), a held write lock, a bad clone: copy instead.
+                # A held write lock, a failed or bad clone: copy instead.
                 logger.warning("Copy-on-write snapshot unavailable, copying instead: %s", exc, exc_info=True)
                 result = {"clone_error": str(exc)}
                 staged.unlink(missing_ok=True)
