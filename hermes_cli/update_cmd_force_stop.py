@@ -173,7 +173,7 @@ def _stop_one(token: dict, entry: dict, lock: threading.Lock) -> tuple[bool, str
     """Stop *entry* within its own deadline. ``None`` when it is gone (and, if supervised, its
     supervisor is stopped), else ``(unsettled, why)``: *unsettled* when its stop is still running."""
     from hermes_cli import update_pause_record as pause_record
-    from hermes_cli.update_cmd_posix_pause import _names, _stop_at_once, _wait_gone
+    from hermes_cli.update_cmd_posix_pause import _names, _stop_job, _stop_unit, _wait_gone
     work = _live_work(entry)
     homes = _checkpoint_homes(entry)
     with lock:  # the pause record is one file shared by every entry
@@ -182,7 +182,13 @@ def _stop_one(token: dict, entry: dict, lock: threading.Lock) -> tuple[bool, str
     if entry.get("kind"):
         def _supervisor_stop() -> None:
             try:
-                _stop_at_once(entry)
+                # The waiting stops (as _disarm uses): this thread stays alive until the supervisor's stop is
+                # done, which is what the kill and StopUnsettled checks below read. A failed launchd bootout
+                # that left a respawned gateway raises PauseRefused, reported as this entry's refusal.
+                if entry.get("kind") == "systemd":
+                    _stop_unit(entry)
+                else:
+                    _stop_job(entry)
             except Exception as exc:  # health: allow BLE001 -- reported as this entry's refusal below
                 failed.append(str(exc))
         supervisor = threading.Thread(target=_supervisor_stop, name=f"force-stop-{entry['pid']}", daemon=True)
