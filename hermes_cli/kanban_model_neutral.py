@@ -6,6 +6,7 @@ Interactive sessions and the model catalog are deliberately outside this policy.
 """
 from __future__ import annotations
 
+import json
 import re
 from agent.model_routing import is_class_selector
 
@@ -14,6 +15,20 @@ ERROR = 'Kanban is model-neutral: use a class/tier or capability requirement, no
 _REQUIRED = re.compile(r'^\s*require_model\s*:\s*(?:true|yes|1)\s*$', re.IGNORECASE | re.MULTILINE)
 _MODEL = re.compile(r'(?:\b|(?<=independent)|(?<=primary))(?:gpt-[\w.-]+|claude-[\w.-]+|grok-[\w.-]+|gemini-[\w.-]+|opus|sonnet|fable|astra|luna|sol)\b', re.IGNORECASE)
 _FORCE = re.compile(r'\b(?:mandatory|required|must|only|pinned|pin|no fallback)\b', re.IGNORECASE)
+_EVIDENCE = 'Historical run instruction (superseded and not active): '
+
+
+def _active_text(line):
+    """Exclude a labelled JSON evidence string, never unquoted trailing policy."""
+    stripped = line.lstrip()
+    if stripped.startswith(_EVIDENCE):
+        try:
+            value, end = json.JSONDecoder().raw_decode(stripped[len(_EVIDENCE):])
+        except ValueError:
+            return line
+        if isinstance(value, str):
+            return stripped[len(_EVIDENCE) + end:]
+    return line
 
 
 def validate_selector(model=None, provider=None, *, mandatory=False):
@@ -35,6 +50,7 @@ def validate_text(*values):
     """
     for text in values:
         for line in (text or '').splitlines():
+            line = _active_text(line)
             if _REQUIRED.search(line):
                 raise ValueError(ERROR)
             if line.lstrip().startswith('<!-- implementer-models:'):
@@ -50,7 +66,12 @@ def validate_text(*values):
                     continue
                 if re.search(r'\b(?:differ from|not be reviewed by|other than|distinct from|not (?:the )?same as)\b', clause, re.IGNORECASE):
                     continue
-                if re.search(r'\b(?:prior|previous|historical)\s+(?:reviewer|review|run|session)', clause, re.IGNORECASE):
+                if re.fullmatch(
+                    r'\s*(?:the )?(?:old|legacy|previous|historical) '
+                    r'(?:configuration|policy|instruction|card|review|run|session) '
+                    r'(?:required|mandated|pinned)\s+' + _MODEL.pattern + r'(?:\s+only)?[.!?;]?\s*',
+                    clause, re.IGNORECASE,
+                ):
                     continue
                 named_review = re.search(
                     r'(?:primary|independent|exact[- ]?head)[ -]*(?:opus|sonnet|fable|astra|luna|sol)\b'
@@ -66,7 +87,7 @@ def forwarded_text(text):
         try:
             validate_text(line)
         except ValueError:
-            line = 'Historical run instruction (superseded and not active): ' + line
+            line = _EVIDENCE + json.dumps(line, ensure_ascii=False)
         lines.append(line)
     return '\n'.join(lines)
 

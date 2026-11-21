@@ -54,13 +54,14 @@ def class_wall_routes(task, model, *, now, extra_walls=None):
     known = dict(pw.active_walls(now=now))
     for provider, until in (extra_walls or {}).items():
         known[provider] = max(known.get(provider, 0), until)
+    provider_walls = dict(known)
     routes = []
     for route in candidates:
         provider = route['provider']
         until = pw.live_quota_wall(provider, route['model'])
         if until is not None:
+            # Observed deadlines inform holds/reroute receipts, not sibling eligibility.
             known[provider] = max(known.get(provider, 0), until)
-        if provider not in known:
+        if provider not in provider_walls and until is None:
             routes.append(route)
-    # A provider's later model probe may have revealed a provider-wide wall.
-    return [r for r in routes if r['provider'] not in known], known
+    return routes, known

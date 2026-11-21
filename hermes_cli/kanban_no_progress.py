@@ -231,15 +231,18 @@ def _repark(conn, task_id: str, park: dict, runs: int, marker: int, now: int) ->
 
 
 def _owner_body(task, runs: int, marker: int) -> str:
+    from hermes_cli.kanban_model_neutral import forwarded_text
+
+    source_title = forwarded_text(task.title)
     return (
-        f"{_note(runs, marker)}: card {task.id} ({task.title!r}). Its latest park named no usable wake condition, so the "
+        f"{_note(runs, marker)}: card {task.id}. Its latest park named no usable wake condition, so the "
         "dispatcher stopped spawning it and it now waits on this card. (A wake check that kept breaking counts as "
         "no condition: parking behind it only re-woke the card.)\n\n"
         "This is agent-owned, not a question for David. Read its runs and comments (`kanban_show`) and remove the "
         "cause once: do the missing step where the capability lives, give the card a real wake condition "
         "(`kanban_schedule` with `wake_check`), split it, or complete/archive it with a comment naming the "
         f"disposition. Do not unblock or requeue {task.id} unchanged: that restarts the same loop. Complete this "
-        f"card with the evidence; {task.id} resumes when it is done."
+        f"card with the evidence; {task.id} resumes when it is done.\n\nSource title (evidence):\n{source_title}"
     )
 
 
