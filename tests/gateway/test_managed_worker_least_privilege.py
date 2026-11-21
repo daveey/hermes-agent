@@ -27,6 +27,21 @@ def test_exec_environment_is_allowlisted_without_profile_secrets(tmp_path, monke
     assert env['HERMES_HOME'] == str(home)
 
 
+def test_logical_profile_keeps_allowlist_without_filesystem_secret_scope(monkeypatch):
+    from gateway.session_managed_worker import _worker_env
+    from gateway.session_worker_credentials import _profile_values
+    sentinel = 'synthetic-logical-owner-secret'
+    monkeypatch.setenv('UNKNOWN_OWNER_CREDENTIAL', sentinel)
+    monkeypatch.setenv('PYTHONPATH', sentinel)
+    monkeypatch.setenv('HERMES_NEMO_RELAY_PLUGINS_TOML', '/synthetic/relay.toml')
+    authority = SimpleNamespace(profile_id='owned')
+    env = _worker_env(authority)
+    assert isinstance(env, dict) and sentinel not in json.dumps(env)
+    assert 'HERMES_HOME' not in env
+    assert env['HERMES_NEMO_RELAY_PLUGINS_TOML'] == '/synthetic/relay.toml'
+    assert _profile_values(authority, SimpleNamespace(ignore_user_config=False)) == {}
+
+
 def test_bootstrap_contains_no_bound_api_key(tmp_path, monkeypatch):
     from gateway.session_managed_worker import _bootstrap
     _, args = assignment(tmp_path, monkeypatch)

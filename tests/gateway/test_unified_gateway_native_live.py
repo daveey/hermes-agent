@@ -284,7 +284,9 @@ def harness(tmp_path, peer):
         "    if type(obj) is dict and obj.get('type') == 'error' and 'reason' in obj:\n"
         "        record('worker_error', reason=obj.get('reason'), traceback=traceback.format_exc())\n"
         "    return _dumps(obj, *a, **kw)\n"
-        "_json.dumps = _dumps_witness\n", encoding='utf-8')
+        "_json.dumps = _dumps_witness\n"
+        "from tests.gateway.fixtures.managed_worker_witness import install\n"
+        "install(__file__)\n", encoding='utf-8')
     env = {k: os.environ[k] for k in _CHILD_ENV_KEYS if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONUNBUFFERED='1', PYTHONFAULTHANDLER='1',
                PYTHONPATH=os.pathsep.join([str(site), str(ROOT)]),

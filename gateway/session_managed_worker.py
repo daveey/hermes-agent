@@ -465,12 +465,13 @@ def _worker_env(authority):
     from gateway.session_worker_credentials import EXEC_ENV
     from tools.environments.local import build_subprocess_env
     home = Path(str(authority.profile_id))
-    if not home.is_absolute():
-        raise RuntimeStoreError('invalid_profile_home')
     env = build_subprocess_env(base={k: v for k, v in os.environ.items() if k in EXEC_ENV}, scrub_secrets=True)
     from gateway.session_context import _VAR_MAP
     env = {k: v for k, v in env.items() if k in EXEC_ENV or k in _VAR_MAP}
-    env['HERMES_HOME'] = str(home)
+    # Logical profile IDs used by embedded owners have no filesystem secret scope.
+    # Keep their startup allowlist, never fall back to Popen's inherited environment.
+    if home.is_absolute():
+        env['HERMES_HOME'] = str(home)
     from hermes_constants import apply_subprocess_home_env
     apply_subprocess_home_env(env)
     return env

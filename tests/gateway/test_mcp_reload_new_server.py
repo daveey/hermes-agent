@@ -50,7 +50,12 @@ def _worker_frame(authority, sid, monkeypatch):
     policy = policy_for_source(authority.runner, authority.sessions[sid].source)
     scope = {'profile_id': authority.profile_id, 'session_id': sid, 'execution_id': 'x', 'generation': 1,
              'pid': os.getpid(), 'birth': 0, 'secret': 's', 'epoch': 1}
-    return smw._bootstrap(authority, SessionRef(authority.profile_id, sid), {'payload': {'text': 'hi'}}, policy, scope)
+    frame = smw._bootstrap(authority, SessionRef(authority.profile_id, sid), {'payload': {'text': 'hi'}}, policy, scope)
+    # Bootstrap carries placeholders; discovery sees secrets only after the adopted
+    # execution resolves its private material. RPC authorization is covered separately.
+    from gateway.session_worker_credentials import hydrate_credentials, resolve_credentials
+    assert 'sekret' not in json.dumps(frame)
+    return hydrate_credentials(frame, lambda method, **params: resolve_credentials(authority, params))
 
 
 def _worker_servers(frame, monkeypatch):

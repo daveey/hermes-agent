@@ -11,7 +11,7 @@ EXEC_ENV = frozenset({
     'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
     'TMPDIR', 'TMP', 'TEMP', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT',
     'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
-    'HERMES_REAL_HOME', 'HERMES_MANAGED_HOME',
+    'HERMES_REAL_HOME', 'HERMES_MANAGED_HOME', 'HERMES_NEMO_RELAY_PLUGINS_TOML',
 })
 
 
@@ -21,6 +21,8 @@ def _profile_values(authority, policy):
     from tools.environments.local import _is_routed_home
     from tui_gateway.launch_profile_policy import launch_secret_scope
     home = Path(str(authority.profile_id))
+    if not home.is_absolute():
+        return {}
     values = {} if _is_routed_home(home) else launch_secret_scope(home)
     if not policy.ignore_user_config:
         values = {**values, **build_profile_secret_scope(home)}

@@ -150,7 +150,9 @@ def test_canonical_safe_launch_is_frozen_policy_executed_in_isolated_worker(tmp_
         "        record('open', path=path, mode=str(args[1]), **fields)\n"
         "    finally:\n"
         "        _busy.on = False\n"
-        "sys.addaudithook(witness)\n", encoding='utf-8')
+        "sys.addaudithook(witness)\n"
+        "from tests.gateway.fixtures.managed_worker_witness import install\n"
+        "install(__file__)\n", encoding='utf-8')
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ', 'TIRITH_ENABLED') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), TERM='xterm',
                PYTHONPATH=os.pathsep.join([str(site), str(root)]), OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)
