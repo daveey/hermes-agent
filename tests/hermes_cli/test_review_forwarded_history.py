@@ -12,12 +12,12 @@ def test_forwarded_history_remains_creatable(board, where, legacy):
     with kbc.connect() as conn:
         parent = kb.create_task(conn, title='source work', assignee='default')
         tid = kb.create_task(conn, title='ordinary forwarded work', assignee='default', parents=[parent])
-        if where == 'title':
-            conn.execute('UPDATE tasks SET title=? WHERE id=?', (legacy, tid))
-        elif where == 'parent_title':
-            conn.execute('UPDATE tasks SET title=? WHERE id=?', (legacy, parent))
-        elif where == 'parent_summary':
-            conn.execute('UPDATE tasks SET result=? WHERE id=?', (legacy, parent))
+        historical_fields = {'title': ('title', tid), 'parent_title': ('title', parent),
+                             'parent_summary': ('result', parent)}
+        if where in historical_fields:
+            field, source_id = historical_fields[where]
+            # Fixed fixture-only identifiers; seed legacy history, not new policy.
+            conn.execute(f'UPDATE tasks SET {field}=? WHERE id=?', (legacy, source_id))
         elif where == 'parent_handoff':
             kb.complete_task(conn, parent, summary=legacy, force=True)
         conn.commit()
