@@ -111,7 +111,7 @@ def archive_local(conn, task, *, comment=None, precondition=None, via=None, even
                 uid = life._append(conn, task, "containment_closed", payload)
                 conn.execute("INSERT INTO containment_attestations VALUES (?,?,?,?,?)",
                              (task, uid, stop["uid"], fingerprint(payload), fingerprint(_stop(stop))))
-            conn.execute("UPDATE tasks SET status='archived' WHERE id=?", (task,))
+            conn.execute("UPDATE tasks SET status='archived' WHERE id=? AND status='triage'", (task,))
             kb._append_event(conn, task, "archived", {"source_status": "triage", **({"via": via} if via else {}), **(event_extra or {})})
             noted.keep()
     kb.recompute_ready(conn)
