@@ -45,7 +45,11 @@ class BoardWatch:
         self._answers: dict[str, tuple[int, str, Any]] = {}
 
     def _conn(self, path: Path) -> Optional[tuple[sqlite3.Connection, int]]:
-        key = os.path.realpath(path)
+        # Keep the requested spelling (including symlink/.. semantics). stat
+        # follows the current target on every read; inode changes reopen it.
+        # Aliases may own separate readers, bounded by MAX, instead of walking
+        # every path component twice per unchanged query with realpath.
+        key = str(Path(path).absolute())
         try:
             st = os.stat(key)
         except OSError:
@@ -92,7 +96,7 @@ class BoardWatch:
                 if got is None:
                     return None
                 conn, gen = got
-                key = os.path.realpath(path)
+                key = str(Path(path).absolute())
                 version = conn.execute("PRAGMA data_version").fetchone()[0] if unchanged_ok else None
                 cached = self._answers.get(key)
                 if unchanged_ok and cached is not None and cached[:2] == (version, sql):
@@ -104,7 +108,7 @@ class BoardWatch:
                     self._answers[key] = (version, sql, answer)
                 return gen, answer
             except sqlite3.Error:
-                self._drop(os.path.realpath(path))
+                self._drop(str(Path(path).absolute()))
                 return None
 
     def release_gone(self) -> int:
