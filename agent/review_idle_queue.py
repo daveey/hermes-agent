@@ -304,12 +304,14 @@ def requeue_update_paused_review(agent: Any, hold: Any, session_key: str, kwargs
     """[daveey] t_01a1d521213ff881: a review a core-update pause request stopped between provider calls
     (``backend_retirement.review_stop_reason``) is queued to run again once the update's admission hold lifts,
     whatever its runtime; out of attempts, or if the queue refuses it, it is dropped and logged (a review is
-    best-effort, and the queue is in-memory: a backend the update restarts loses it). Returns whether ``hold``
+    best-effort; the queue is in-memory, so ``review_update_carry`` also records it for the session's next turn
+    after a restart). Returns whether ``hold``
     was such a stop (the caller then skips its other requeue rules). Never raises."""
     from hermes_cli.backend_retirement import WIND_DOWN_UPDATE_PAUSE
 
-    if getattr(hold, "wind_down_reason", None) != WIND_DOWN_UPDATE_PAUSE:
-        return False
+    if (getattr(hold, "wind_down_reason", None) != WIND_DOWN_UPDATE_PAUSE
+            or getattr(hold, "stopped_for_update", False) is not True):
+        return False  # not stopped for an update (a review whose last call finished is done, not requeued)
     session = session_key[-12:]
     try:
         attempts = int(kwargs.get("_requeue_attempts", 0))
@@ -317,9 +319,11 @@ def requeue_update_paused_review(agent: Any, hold: Any, session_key: str, kwargs
             logger.info("Background review stopped for a Hermes update: dropped after %d requeues (session=%s)",
                         max_attempts, session)
             return True
+        from agent import review_update_carry
+        review_update_carry.record(agent, kwargs)  # first (a dispatch clears it); the update's restart loses QUEUE
         QUEUE.enqueue(agent, session_key, dict(kwargs))
-        logger.info("Background review stopped for a Hermes update before its next provider call: requeued to "
-                    "run after the update (session=%s, attempt=%d)", session, attempts)
+        logger.info("Background review stopped for a Hermes update: requeued to run after the update "
+                    "(session=%s, attempt=%d)", session, attempts)
     except Exception:  # health: allow BLE001 -- best-effort requeue on the review thread's exit; logged with traceback
         logger.warning("Background review stopped for a Hermes update: dropped, requeue failed (session=%s)",
                        session, exc_info=True)

@@ -160,6 +160,13 @@ BACKGROUND_REVIEW_HARD_CAP_S = 900.0
 # reason is ``review_<reason>_wind_down``.
 WIND_DOWN_RETIREMENT = "retirement"
 WIND_DOWN_UPDATE_PAUSE = "update_pause"
+# [daveey] A review mid provider call reads the drain's pause request only when that call returns (minutes on
+# a long call) and holds its admission reservation meanwhile, so the update waited on it and gave up
+# (David-MBP 2026-11-20 22:54: "admission reservations busy" from one background_review, update deferred
+# 60 m). Once a live pause request has stood REVIEW_UPDATE_PAUSE_GRACE_S, the review's watcher interrupts it
+# mid-call: the calls that already ran have landed, and the spawner requeues the review for after the update.
+REVIEW_UPDATE_PAUSE_GRACE_S = 5.0
+_REVIEW_PAUSE_POLL_S = 1.0
 
 
 class BackgroundReviewHold:
@@ -175,6 +182,15 @@ class BackgroundReviewHold:
         self.reservation = reservation
         self.root = root
         self.session = session
+        self.interrupted = False
+        # The review actually stopped for an update (broke at a step boundary, or its call was interrupted), so it
+        # is requeued. A wind-down label alone is not enough: the call in flight may have been its last.
+        self.stopped_for_update = False
+        self.review_agent = None  # the review fork, once built (agent.background_review); interrupted on update
+        self.ended = threading.Event()
+        # Serializes an update stop against the review's end: a review that finished is never re-labelled
+        # update-paused (its spawner would requeue a completed review).
+        self.stop_lock = threading.Lock()
 
 
 def review_stop_reason(hold):
@@ -185,8 +201,9 @@ def review_stop_reason(hold):
     review's ``wind_down``, as a pending retirement does past BACKGROUND_REVIEW_WAIT_S. The review held its
     admission reservation for its whole run and read only the retirement signal, so hermes-sync's worker
     reclaim, which waits for every reservation, never opened while one long review ran and the update gave
-    up at its 3-minute claim hold (David-MBP 2026-11-13 05:25). Never mid-call: writes from the calls that
-    already ran have landed, and the spawner requeues the review to run after the update."""
+    up at its 3-minute claim hold (David-MBP 2026-11-13 05:25). Here only between calls; a call still in flight
+    after REVIEW_UPDATE_PAUSE_GRACE_S is interrupted by ``watch_update_pause``. Writes from the calls that already
+    ran have landed, and the spawner requeues the review to run after the update."""
     wind_down = getattr(hold, "wind_down", None)
     if wind_down is None:
         return None
@@ -200,8 +217,70 @@ def review_stop_reason(hold):
             _log.info("Background review (session=%s) stopping before its next provider call: a Hermes update "
                       "asked turns to pause", str(getattr(hold, "session", None) or "?")[-12:])
     if wind_down.is_set():
-        return getattr(hold, "wind_down_reason", None) or WIND_DOWN_RETIREMENT
+        reason = getattr(hold, "wind_down_reason", None) or WIND_DOWN_RETIREMENT
+        if reason == WIND_DOWN_UPDATE_PAUSE:
+            hold.stopped_for_update = True  # the fork breaks here, before its next provider call
+        return reason
     return None
+
+
+def stop_review_for_update(hold, *, why="after a pause request stood its grace"):
+    """Wind ``hold``'s review down for a core update; interrupt its in-flight provider call unless a tool is running
+    (a memory/skill write is short and must not be cut: the review then stops at the boundary after it). Returns
+    whether the review is (now) stopping for the update: False once it ended, or when a retirement already wound it
+    down (that path keeps its own reason and requeue rules). Never raises."""
+    with hold.stop_lock:
+        if hold.ended.is_set():
+            return False
+        if hold.wind_down.is_set() and hold.wind_down_reason != WIND_DOWN_UPDATE_PAUSE:
+            return False
+        hold.wind_down_reason = WIND_DOWN_UPDATE_PAUSE
+        hold.wind_down.set()
+    agent = hold.review_agent
+    if agent is None:  # not built yet: it stops at its first step boundary (review_stop_reason)
+        return True
+    try:
+        from agent.update_pause_cancel import COMPRESSION_CALL_ID, MODEL_CALL_ID, in_flight
+
+        # Only real tool calls wait: the model-request and compression markers are the provider calls this cuts.
+        if any(call not in (MODEL_CALL_ID, COMPRESSION_CALL_ID) for call in in_flight(agent)):
+            return True  # the watcher retries the interrupt once the tool returns
+        if getattr(hold, "interrupted", False):
+            return True
+        from agent.interrupt_compat import request_hard_interrupt
+        from agent.interrupt_control import _REASON_UPDATE_PAUSE
+
+        with hold.stop_lock:  # a review that ended meanwhile finished on its own: it is not requeued
+            if hold.ended.is_set():
+                return False
+            hold.interrupted = hold.stopped_for_update = True
+        request_hard_interrupt(agent, "stopped for a Hermes update", tool_reason=_REASON_UPDATE_PAUSE)
+    except Exception:  # health: allow BLE001 -- the wind-down above still stops it at the next boundary
+        _log.warning("Background review interrupt for a Hermes update failed", exc_info=True)
+        return True
+    _log.info("Background review (session=%s) interrupted for a Hermes update (%s); it is requeued to run after "
+              "the update", str(hold.session or "?")[-12:], why)
+    return True
+
+
+def watch_update_pause(hold, *, poll_s=None, grace_s=None):
+    """Poll ``hold.root``'s pause request until the review ends; stop the review once the request has stood
+    ``grace_s``. A request that lapses resets the grace. Runs on its own daemon thread (``begin_background_review``)."""
+    from hermes_cli.admission_fence import pause_requested
+
+    poll_s = _REVIEW_PAUSE_POLL_S if poll_s is None else poll_s
+    grace_s = REVIEW_UPDATE_PAUSE_GRACE_S if grace_s is None else grace_s
+    seen = None
+    while not hold.ended.wait(poll_s):
+        if not pause_requested(hold.root):
+            seen = None
+            continue
+        now = time.monotonic()
+        seen = now if seen is None else seen
+        if now - seen >= grace_s:
+            if not stop_review_for_update(hold) or getattr(hold, "interrupted", False):
+                return
+            # A tool was running (or the fork is not built yet): retry the interrupt on the next poll.
 
 
 class RetirementFence:
@@ -281,7 +360,16 @@ class RetirementFence:
                 return None
             hold = BackgroundReviewHold(self._now(), pending, root, session_id)
             self._reviews.add(hold)
-            return hold
+        if root is not None:
+            try:
+                from agent.memory_provider import spawn_context_thread
+
+                # passive: infrastructure, never local-work custody (a drain would wait on its own watcher)
+                spawn_context_thread(watch_update_pause, args=(hold,), name="bg-review-update-pause",
+                                     passive=True).start()
+            except RuntimeError:  # the review still stops at its next step boundary (review_stop_reason)
+                _log.warning("Background review update-pause watcher did not start", exc_info=True)
+        return hold
 
     def end_background_review(self, hold):
         if hold is None:
@@ -290,6 +378,10 @@ class RetirementFence:
         # keeps the file locked until unlink, so there is no false-idle gap.
         with self._lock:
             self._reviews.discard(hold)
+        ended = getattr(hold, "ended", None)
+        if ended is not None:
+            with hold.stop_lock:  # after this no update stop can relabel the finished review
+                ended.set()  # also stops the review's update-pause watcher
         if hold.reservation is not None:
             hold.reservation.close()
 

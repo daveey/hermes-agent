@@ -740,6 +740,15 @@ def _mirror_turn_to_memory(
     # user's task. Suppressed by skip_background_review (e.g. cron): the fork costs
     # ~30K tokens / event with no human-in-the-loop benefit. Best-effort; the review
     # clones the snapshot structurally so its sanitizers can't reach the live transcript.
+    if (final_response and not interrupted and not getattr(agent, "skip_background_review", False)
+            and getattr(agent, "_delegate_depth", 0) == 0 and getattr(agent, "_persist_disabled", False) is not True):
+        # [daveey] A review a Hermes update stopped before the restart runs on the session's next finished turn.
+        # Only the session's own agent takes it: review, /btw and plugin forks share its session id
+        # (build_cache_parity_fork sets _persist_disabled on every one of them).
+        from agent import review_update_carry
+        if carried := review_update_carry.take(agent):
+            review_memory = review_memory or carried["review_memory"]
+            review_skills = review_skills or carried["review_skills"]
     if (
         final_response
         and not interrupted

@@ -1282,6 +1282,12 @@ def _run_review_fork(
         agent, task_cfg, max_iterations=_REVIEW_MAX_ITERATIONS)
     st.review_agent._review_attended = explicit
     st.review_agent._retirement_review_hold = getattr(review_run, "retirement_hold", None)
+    if st.review_agent._retirement_review_hold is not None:  # [daveey] its update-pause watcher interrupts this fork
+        st.review_agent._retirement_review_hold.review_agent = st.review_agent
+        if st.review_agent._retirement_review_hold.wind_down.is_set():
+            from hermes_cli.backend_retirement import stop_review_for_update
+            stop_review_for_update(st.review_agent._retirement_review_hold,
+                                   why="stopped while its fork was being built")
     _track_review_fork(agent, st.review_agent, register=True)
     from hermes_cli.plugins import set_thread_tool_whitelist, clear_thread_tool_whitelist
     review_whitelist, configured_extra_tools = _review_tool_whitelist(st.review_agent, task_cfg, review_memory)

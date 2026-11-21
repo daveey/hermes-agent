@@ -851,8 +851,25 @@ class AIAgent(
         from hermes_cli.backend_retirement import retirement
         hold = retirement.begin_background_review(getattr(self, "session_id", None))
         if hold is None:
-            logger.info("Background review skipped: this backend is retiring")
             finish_background_review_run(self, review_run)
+            from agent.review_idle_queue import QUEUE, _update_admission_held
+            # [daveey] A core update's admission hold refuses the reservation: queue the review to run once the
+            # hold lifts (bounded) instead of dropping it; a retiring backend still skips it.
+            if (not retirement.retiring() and _update_admission_held()
+                    and _requeue_attempts < self._REVIEW_REQUEUE_MAX_ATTEMPTS):
+                try:
+                    from agent import review_update_carry
+                    # Record first: a dispatch right after the enqueue clears it (no orphan record).
+                    review_update_carry.record(self, dict(review_memory=review_memory, review_skills=review_skills,
+                                                          focus=focus, explicit=explicit))
+                    QUEUE.enqueue(self, _review_queue_key(self), dict(
+                        messages_snapshot=messages_snapshot, review_memory=review_memory, review_skills=review_skills,
+                        focus=focus, task_cfg=task_cfg, _requeue_attempts=_requeue_attempts + 1, explicit=explicit))
+                    logger.info("Background review queued: a Hermes update holds admission; it runs after the update")
+                except Exception:  # health: allow BLE001 -- best-effort (e.g. a drain refusing the queue lease)
+                    logger.warning("Background review under a Hermes update hold: not queued", exc_info=True)
+            else:
+                logger.info("Background review skipped: this backend is retiring")
             return
         review_run.retirement_hold = hold
         try:
@@ -890,6 +907,8 @@ class AIAgent(
 
             # Carry the active profile into the review thread so MEMORY.md / skill review writes land in the
             # right profile.
+            from agent import review_update_carry
+            review_update_carry.clear(self)  # the spawn succeeded: this review covers any one an update carried
             threading.Thread(target=propagate_context_to_thread(_target_with_requeue), daemon=True, name="bg-review").start()  # health: allow HX012 -- target already wrapped by propagate_context_to_thread
             if _work:
                 _work.clear()  # started: the thread's finally owns the token

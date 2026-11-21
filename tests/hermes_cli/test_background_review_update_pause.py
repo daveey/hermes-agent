@@ -4,8 +4,9 @@ A review holds an admission reservation for its whole run, and hermes-sync's dra
 worker reclaim only once no reservation is held. The review used to ignore the window's pause request
 (its only stop signal was process retirement, after 300 s), so one long review outlasted the drain's
 3-minute claim hold and the update gave up (David-MBP 2026-11-13 05:25, incident 51354-1794576303896).
-Now the review reads the request at every step boundary: it stops before its next provider call (never
-mid-call), releases the reservation and is requeued to run after the update.
+Now the review reads the request at every step boundary: it stops before its next provider call, releases the
+reservation and is requeued to run after the update. A call still in flight once the request has stood
+``REVIEW_UPDATE_PAUSE_GRACE_S`` is interrupted by the review's watcher (test_background_review_update_interrupt.py).
 """
 from __future__ import annotations
 
@@ -170,7 +171,7 @@ def test_gateway_review_winds_down_releases_its_reservation_and_is_requeued(root
     assert in_call.wait(30)  # provider call #1 is in flight
     assert admission_fence.state(root, details=True)["reservations"] == 1
     _drain_asks_turns_to_pause(root)
-    assert admission_fence.state(root)["reservations"] == 1  # never cut mid-call: the claim stands until it returns
+    assert admission_fence.state(root)["reservations"] == 1  # inside the grace the call is not cut: the claim stands
     finish_call.set()
     _join(thread)
     assert len(calls) == 1  # it stopped at the boundary: provider call #2 never started
