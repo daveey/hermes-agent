@@ -506,7 +506,7 @@ def _stop_job(job: dict, *, drained: bool = False) -> None:
     result = subprocess.run(["launchctl", "bootout", f"{job['domain']}/{job['label']}"],
                             capture_output=True, text=True, encoding="utf-8", errors="replace",
                    stdin=subprocess.DEVNULL, timeout=90, check=False)
-    _wait_gone([job["pid"]], 30.0)
+    _wait_gone([job["pid"]], 30.0, {job["pid"]: job.get("ct")})  # birth time: a recycled PID is not the gateway
     # KeepAlive may have respawned the drained gateway already: the job, not the old PID, decides.
     if result.returncode != 0 and (_locate_launchd_gateway_service(job["label"])[1] or 0) > 0:
         raise PauseRefused(f"launchctl bootout {job['label']} failed: {(result.stderr or '').strip()}", [job["label"]])

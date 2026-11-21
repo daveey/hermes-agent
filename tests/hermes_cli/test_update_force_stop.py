@@ -233,9 +233,12 @@ def test_force_stops_a_launchd_gateway_through_the_real_stop_job(monkeypatch, tm
     proc = _child(ignore_term=False)
     calls = []
 
+    real_run = subprocess.run
+
     def run(cmd, **kw):
+        if cmd[:1] != ["launchctl"]:
+            return real_run(cmd, **kw)  # only launchctl is stood in
         calls.append(cmd)
-        assert cmd[:2] == ["launchctl", "bootout"], cmd
         proc.terminate()
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -258,7 +261,11 @@ def test_a_failed_launchd_bootout_with_a_respawned_gateway_is_refused(monkeypatc
     from hermes_cli import gateway as gateway_mod
     proc = _child(ignore_term=False)
 
+    real_run = subprocess.run
+
     def run(cmd, **kw):
+        if cmd[:1] != ["launchctl"]:
+            return real_run(cmd, **kw)  # only launchctl is stood in
         proc.terminate()  # the old PID goes away...
         return subprocess.CompletedProcess(cmd, 5, "", "Boot-out failed: 5: Input/output error")
 
