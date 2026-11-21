@@ -450,6 +450,23 @@ class TurnLeaseAdmission:
     conversation_history: Optional[list[dict[str, Any]]] = None
 
 
+def _claim_covers(db, candidate_id: str, admitted_id: str, holder: str) -> bool:
+    """Whether ``holder``'s committed lease row is the one a flush to ``candidate_id`` is checked
+    against. The resume redirect also follows plain (non-compression) children, whose lease key is
+    their own id: moving the turn there under the admitted id's claim made the owner's first flush
+    read a missing row (SessionTurnLeaseLostError). Asked of the committed row, not of two key
+    lookups assumed equal. A read that raises ends the turn, like the transcript reload after it."""
+    if not callable(getattr(type(db), "session_turn_lease_expires_at", None)):
+        return True  # a store without the readback keeps the redirect it always had
+    if db.session_turn_lease_expires_at(candidate_id, holder) is not None:
+        return True
+    logger.warning(
+        "Turn admitted on session %s stays there: resume target %s is not covered by its turn lease",
+        admitted_id, candidate_id,
+    )
+    return False
+
+
 def _committed_lease_expiry(db, session_id: str, holder: str, floor: float) -> float:
     """The admitted row's committed ``expires_at``; when unreadable, ``floor + TTL`` (taken before
     acquisition, so never later than the real expiry). Overstating it lets a successor reclaim the
@@ -642,6 +659,8 @@ def admit_durable_turn_lease(
             # The holder may have compressed/rotated the session while we waited: reload only
             # AFTER admission; an immediate acquisition skips this (needless prompt-cache miss).
             latest_session_id = db.resolve_resume_session_id(session_id)
+            if latest_session_id and not _claim_covers(db, latest_session_id, session_id, holder):
+                latest_session_id = None  # keep the admitted id: the claimed row fences only its own key
             if latest_session_id:
                 agent.session_id = latest_session_id
                 task_context["session_id"] = latest_session_id
