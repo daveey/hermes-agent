@@ -104,7 +104,8 @@ def test_dispatch_routes_legacy_incompatible_pin_without_spawning(board, monkeyp
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
     assert conn.execute('SELECT count(*) FROM task_links').fetchone()[0] == 0
     if lane == 'review':
-        assert implementer_models(conn, task) == {'claude-sonnet-5-5'}
+        # Retain both authenticated authorship and conservative historical pin provenance.
+        assert implementer_models(conn, task) == {'claude-sonnet-5-5', 'claude-opus-5-5'}
         assert spawned[0][1] not in implementer_models(conn, task)
 
 
