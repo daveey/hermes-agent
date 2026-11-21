@@ -106,3 +106,14 @@ def test_status_provenance_invalidated_across_connections_and_task_delete(board)
     finally:
         other.close()
 
+
+def test_identity_replacement_revokes_capture_instead_of_transferring_it(board):
+    conn, _ = board
+    target = kb.create_task(conn, title="old identity")
+    replacement = kb.create_task(conn, title="replacement")
+    assert conn.execute("SELECT COUNT(*) FROM kanban_sync_status_origins").fetchone()[0] == 2
+    conn.execute("PRAGMA recursive_triggers=OFF")
+    conn.execute("UPDATE OR REPLACE tasks SET id=? WHERE id=?", (target, replacement))
+    assert conn.execute("SELECT title FROM tasks WHERE id=?", (target,)).fetchone()[0] == "replacement"
+    assert conn.execute("SELECT COUNT(*) FROM kanban_sync_status_origins").fetchone()[0] == 0
+

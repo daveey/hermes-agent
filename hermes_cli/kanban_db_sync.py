@@ -201,6 +201,12 @@ CREATE TABLE IF NOT EXISTS kanban_sync_status_origins (
     origin TEXT,
     status TEXT
 );
+-- A primary-key replacement is a different task identity, not an origin
+-- transfer. Remove the old descriptor before SQLite checks the child FK.
+CREATE TRIGGER IF NOT EXISTS kanban_status_origin_identity
+BEFORE UPDATE OF id ON tasks WHEN OLD.id IS NOT NEW.id BEGIN
+    DELETE FROM kanban_sync_status_origins WHERE task_id = OLD.id;
+END;
 -- First-send synthetic parents are pending transport, not a permanent receipt ledger.
 CREATE TABLE IF NOT EXISTS kanban_sync_parent_envelopes (
     task_id TEXT PRIMARY KEY,

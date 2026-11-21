@@ -19,7 +19,16 @@ _LIMIT = 512
 def arm(conn: sqlite3.Connection) -> bool:
     """Record new outbox status ops on this connection; savepoint rollback is native."""
     try:
-        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_sync_outbox'").fetchone():
+        cursor = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_sync_outbox'")
+        if cursor is None or not cursor.fetchone():
+            return False
+        # write_txn also serves boundary-only connection adapters and minimal
+        # revision stores. SQLite accepts invalid NEW.column trigger references
+        # at CREATE time, then breaks an unrelated later mutation: check first.
+        required = {"tasks": {"id", "status"},
+                    "kanban_sync_outbox": {"op_id", "row_uid", "table_name", "op", "fields", "status_origin"}}
+        if any(not columns <= {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+               for table, columns in required.items()):
             return False
         conn.execute(f"CREATE TEMP TABLE IF NOT EXISTS {_TABLE} (op_id TEXT PRIMARY KEY, task_id TEXT)")
         conn.execute(f"DELETE FROM temp.{_TABLE}")
