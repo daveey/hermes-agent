@@ -23,6 +23,22 @@ def worker_comment(conn, task_id, author, body):
         return _add_comment(conn, task_id, author, body)
 
 
+def configure_eligible_profile(conn, task_id, home, assignee):
+    """Prove absent-profile refusal before enabling this isolated test's real registry."""
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    diagnostic = dispatch.dispatch_once(conn, dry_run=True)
+    assert diagnostic.skipped_ineligible == [(task_id, "model_unroutable:config_unavailable")]
+    assert conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (task_id,)).fetchone()[0] == 0
+    assert _assignee_config(assignee) is None
+    profile = home / "profiles" / assignee
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text(_managed_yaml())
+    config = _assignee_config(assignee)
+    assert config is not None and config["model_routing"]["enabled"] is True
+
+
 _add_comment = kb.add_comment
 
 

@@ -527,17 +527,8 @@ def test_infrastructure_spawn_refusal_never_charges_the_card(
 
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="bus is down", assignee="a")
-        # Admission must reach the real infrastructure boundary, not stop at an absent profile registry.
-        diagnostic = kbd.dispatch_once(conn, dry_run=True)
-        assert diagnostic.skipped_ineligible == [(tid, "model_unroutable:config_unavailable")]
-        assert conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == 0
-        from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
-        from hermes_cli.kanban_model_assignment import _assignee_config
-        assert _assignee_config("a") is None
-        profile = kanban_home / "profiles" / "a"
-        profile.mkdir(parents=True)
-        (profile / "config.yaml").write_text(_managed_yaml())
-        assert _assignee_config("a")["model_routing"]["enabled"] is True
+        from tests.hermes_cli.kanban_guard_helpers import configure_eligible_profile
+        configure_eligible_profile(conn, tid, kanban_home, "a")
         for _ in range(3):
             res = kbd.dispatch_once(conn, spawn_fn=spawn_via_real_boundary, failure_limit=2)
             assert res.auto_blocked == []
@@ -565,12 +556,6 @@ def test_infrastructure_spawn_refusal_never_charges_the_card(
         assert conn.execute(
             "SELECT consecutive_failures FROM tasks WHERE id = ?", (tid,),
         ).fetchone()[0] == 1
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
