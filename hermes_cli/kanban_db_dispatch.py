@@ -1824,21 +1824,16 @@ def dispatch_once(
     resolved DB path so unrelated boards tick in parallel.
     """
     def _locked_tick() -> DispatchResult:
-        result = _dispatch_once_locked(
-            conn,
-            spawn_fn=spawn_fn,
-            ttl_seconds=ttl_seconds,
-            dry_run=dry_run,
-            max_spawn=max_spawn,
-            max_in_progress=max_in_progress,
-            failure_limit=failure_limit,
-            stale_timeout_seconds=stale_timeout_seconds,
-            board=board,
-            default_assignee=default_assignee,
-            max_in_progress_per_profile=max_in_progress_per_profile,
-            reconcile_orphans=reconcile_orphans,
-            spawn_quota=spawn_quota,
-        )
+        from hermes_cli.kanban_candidate_receipts import dispatch_pass
+        with dispatch_pass(conn, dry_run=dry_run):
+            result = _dispatch_once_locked(
+                conn, spawn_fn=spawn_fn, ttl_seconds=ttl_seconds, dry_run=dry_run,
+                max_spawn=max_spawn, max_in_progress=max_in_progress,
+                failure_limit=failure_limit, stale_timeout_seconds=stale_timeout_seconds,
+                board=board, default_assignee=default_assignee,
+                max_in_progress_per_profile=max_in_progress_per_profile,
+                reconcile_orphans=reconcile_orphans, spawn_quota=spawn_quota,
+            )
         from hermes_cli.kanban_capacity_evidence import observe_dispatch
         observe_dispatch(conn, result, board=board, dry_run=dry_run,
                          update_drain=observation_update_drain)
@@ -1919,6 +1914,8 @@ def _dispatch_lane_task(
         if deferral is not None:  # the lane decides whether this refusal permits later candidates
             result.claim_deferred.append((task_id, deferral))
         return False
+    from hermes_cli.kanban_candidate_receipts import claimed as note_claimed
+    note_claimed(task_id)
     try:  # R4b: a grant snapshot with custody or a manifest routes to the source resolver before any kind branch
         workspace, resolved_branch_name, source = _source_dispatch.resolve(conn, claimed, board=board, kbw=_kbw)
     except Exception as exc:
@@ -2099,18 +2096,8 @@ def _any_spawnable_review(
 
 
 def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
-    """``kanban.default_assignee`` when it names a real profile this home may
-    claim (``kanban.dispatch_profiles`` gated, same predicate as the spawn
-    gate). Otherwise ``None`` so an unassigned shared-board card is never
-    written to. Profiles unimportable: trust the config if no allowlist is set
-    (the downstream check still buckets a missing profile as nonspawnable),
-    else ``None`` — the fail-closed gate claims nothing (#147531)."""
-    name = (default_assignee or "").strip() or None
-    if name:
-        profile_exists = _profile_exists_fn()
-        if profile_exists is not None and not profile_exists(name):
-            return None
-    return name
+    from hermes_cli.kanban_db_dispatch_preclaim import resolve_default_assignee
+    return resolve_default_assignee(default_assignee, _profile_exists_fn)
 
 
 # The dispatch lock has been released here. Fire the tick observer strictly OUTSIDE the single-writer
@@ -2171,10 +2158,14 @@ def _dispatch_once_locked(
     from hermes_cli.kanban_gateway_drain import core_update_hold
     result.core_update_drain_hold = core_update_hold()
     if result.core_update_drain_hold is not None:  # every caller (CLI, dashboard, gateway) claims nothing
+        from hermes_cli.kanban_candidate_receipts import global_hold
+        global_hold(conn, "core update drain")
         return result
     may_spawn, spawn_budget = _tick_spawn_budget(conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress,
                                                  board=board, spawn_quota=spawn_quota)
     if not may_spawn:
+        from hermes_cli.kanban_candidate_receipts import global_hold
+        global_hold(conn, result.at_capacity or result.memory_pressure or "spawn capacity refused")
         return _kb._sync.worker_pickup_capped(conn, result, dry_run, _profile_exists_fn)  # record why cards wait
 
     result.scheduling_admitted = not dry_run
@@ -2227,10 +2218,14 @@ def _dispatch_once_locked(
     )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
-    for row in rows:
+    from hermes_cli.kanban_candidate_receipts import note, lane_refused, capacity_tail
+    for index, row in enumerate(rows):
         if spawn_budget is not None and spawned >= spawn_budget:
+            capacity_tail(rows[index:], lane_by_id, "spawn budget exhausted")
             break
         if not pool_admits(result, row):
+            note(row["id"], "capacity", "admission pool full", stage="claim",
+                 status=lane_by_id.get(row["id"], "ready"))
             continue
         lane = lane_by_id.get(row["id"], "ready")
         row_assignee = row["assignee"]
@@ -2240,11 +2235,15 @@ def _dispatch_once_locked(
                 continue
             row_assignee = _kbda.fill_default_assignee(conn, row["id"], default_assignee, result, dry_run=dry_run)
             if not row_assignee:
+                note(row["id"], "prefilter", "unassigned", stage="claim", status=lane)
                 continue
         if _dispatch_lane_task(conn, row, row_assignee, result, lane=lane, **lane_kwargs):
             spawned += pool_take(result, row)
-        elif (row["id"], "capacity") in result.claim_deferred:
-            break  # a mid-pass slot release must not reward a lower-ranked row
+        else:
+            lane_refused(row["id"], result, status=lane)
+            if (row["id"], "capacity") in result.claim_deferred:
+                capacity_tail(rows[index + 1:], lane_by_id, "earlier claim exhausted capacity")
+                break  # a mid-pass slot release must not reward a lower-ranked row
     return result
 
 

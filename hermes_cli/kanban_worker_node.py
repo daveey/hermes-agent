@@ -626,6 +626,9 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
     for card in listed:
         full = not room.admits(row_class(card))
         if full and card["id"] not in mine:
+            from hermes_cli.kanban_candidate_receipts import note
+            note(card["id"], "capacity", "pickup window full; later gates not evaluated",
+                 stage="pickup", status=card["status"])
             continue
         reason = _skip_reason(conn, card, own, reg["machines"], mode=mode, review_enabled=review_enabled,
                               profile_exists=profile_exists)
@@ -648,8 +651,11 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
         if reason is None:
             picked.append(card["id"])
             room.take(row_class(card))
-        elif reason[0] and card["id"] in mine:
-            skips[card["id"]] = reason
+        else:
+            from hermes_cli.kanban_candidate_receipts import pickup_skip
+            pickup_skip(card["id"], reason, status=card["status"])
+            if reason[0] and card["id"] in mine:
+                skips[card["id"]] = reason
     return picked, skips
 
 
@@ -788,6 +794,9 @@ def pickup(conn: sqlite3.Connection, *, budget: Any,
     skips.update({tid: ("other", "import failed") for tid in picked if tid not in imported})
     skips.update({tid: ("other", why) for tid, why in refused.items()})
     skips.update(denied)
+    from hermes_cli.kanban_candidate_receipts import pickup_skip
+    for tid, why in skips.items():
+        pickup_skip(tid, why)
     imported = [tid for tid in imported if tid not in denied]
     kph.remember({tid: sig for tid, sig in held.items() if tid in imported})
     _record_skips(conn, {tid: why for tid, why in skips.items() if tid not in imported})

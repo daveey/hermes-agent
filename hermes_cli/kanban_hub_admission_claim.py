@@ -346,6 +346,10 @@ def screened_lanes(conn: sqlite3.Connection, dry_run: bool, review_enabled: bool
     deferred = set(deferred)
     if not dry_run and board_mode(conn) == "primary":
         deferred.update(safe_screen(conn, ready + review))
+    from hermes_cli.kanban_candidate_receipts import note
+    for row in ready:
+        if row["id"] in deferred:
+            note(row["id"], "prefilter", "hub admission screen deferred", stage="screen")
     return ([row for row in ready if row["id"] not in deferred],
             [row for row in review if row["id"] not in deferred], deferred)
 

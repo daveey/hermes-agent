@@ -18,7 +18,10 @@ def order_with_remote_waiters(conn: sqlite3.Connection, rows: list[sqlite3.Row])
     try:
         from hermes_cli.kanban_admission_score import rank
 
-        return [row for row, _parts in rank(conn, rows)]
+        ranked = rank(conn, rows)
+        from hermes_cli.kanban_candidate_receipts import scores
+        scores(ranked)
+        return [row for row, _parts in ranked]
     except (sqlite3.Error, OSError, ValueError):
         _LOG.warning("could not score dispatch candidates; using priority ordering", exc_info=True)
     try:

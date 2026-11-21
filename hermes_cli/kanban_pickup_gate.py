@@ -130,6 +130,8 @@ def decide(card, conn, own, machines, *, mode, review_enabled, profile_exists, p
                                      placement=placement)
     finally:
         record(card['id'], facts)
+        from hermes_cli.kanban_candidate_receipts import pickup_facts
+        pickup_facts(card['id'], facts, status=card['status'])
 
 
 def _read_fact(name, card, conn, own, machines, *, mode, review_enabled, profile_exists, placement):

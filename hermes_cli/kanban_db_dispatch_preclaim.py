@@ -4,6 +4,20 @@ from __future__ import annotations
 import sqlite3
 
 
+def resolve_default_assignee(default_assignee, profile_exists_fn):
+    """Resolve the configured default only when this home's profile allowlist admits it.
+
+    Unimportable profiles trust config only without an allowlist; the downstream
+    spawn gate still classifies missing profiles as nonspawnable.
+    """
+    name = (default_assignee or "").strip() or None
+    if name:
+        profile_exists = profile_exists_fn()
+        if profile_exists is not None and not profile_exists(name):
+            return None
+    return name
+
+
 def note_nonspawnable(conn: sqlite3.Connection, task_id: str, assignee: str, *, dry_run: bool) -> None:
     """Per-task diagnostic so ``show``/``tail`` name the missing profile instead of leaving the card in
     ``ready`` with zero board evidence (#122422). Unlike a respawn guard the condition never expires on
@@ -40,6 +54,9 @@ def eligible_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], status: str
                 from hermes_cli.kanban_repin_owner import wait_reason
                 reason = wait_reason(conn, row["id"])
             result.skipped_ineligible.append((row["id"], reason))
+            from hermes_cli.kanban_candidate_receipts import note
+            note(row["id"], "labels" if reason == "labels_mismatch" else "prefilter", reason,
+                 stage="eligibility", status=status)
             if reason == "labels_mismatch" and getattr(result, "scheduling_admitted", False):
                 note_unplaceable(conn, row["id"])
     return kept
