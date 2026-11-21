@@ -32,6 +32,11 @@ def heartbeat_in_background():
             except Exception:
                 logger.debug('automatic worker heartbeat failed', exc_info=True)
 
-        _worker = spawn_context_thread(run, name='kanban-auto-heartbeat')
-        _worker.start()
+        try:
+            _worker = spawn_context_thread(run, name='kanban-auto-heartbeat')
+            _worker.start()
+        except Exception:
+            _worker = None
+            logger.warning('automatic worker heartbeat could not start; no fallback admitted', exc_info=True)
+            raise
         return _worker

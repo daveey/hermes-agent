@@ -125,6 +125,31 @@ def test_background_activity_reports_fenced_descendant_once(monkeypatch, tmp_pat
         conn.close()
 
 
+@pytest.mark.parametrize('failure', [RuntimeError, OSError, 'drain'])
+def test_background_start_refusal_is_logged_without_unfenced_fallback(monkeypatch, caplog, failure):
+    import logging
+    from hermes_cli.worker_drain_fence import DrainRefused
+    from tools import kanban_tools as kt
+    import tools.kanban_heartbeat_background as background
+    calls = []
+    monkeypatch.setenv('HERMES_KANBAN_TASK', 'task')
+    monkeypatch.setattr(kt, '_is_delegated_child_context', lambda: False)
+    monkeypatch.setattr(kt, '_auto_heartbeat_last_attempt', 0)
+    monkeypatch.setattr(background, '_worker', None)
+    monkeypatch.setattr(kt, 'heartbeat_current_worker_from_env', lambda: calls.append('write'))
+    error = DrainRefused if failure == 'drain' else failure
+    class RefusedThread:
+        def start(self):
+            raise error('cannot start')
+    monkeypatch.setattr(background, 'spawn_context_thread', lambda *a, **kw: RefusedThread())
+    with caplog.at_level(logging.WARNING, logger=background.__name__):
+        with pytest.raises(error):
+            background.heartbeat_in_background()
+    assert calls == []
+    assert background._worker is None
+    assert any('automatic worker heartbeat could not start' in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.parametrize('failure', ['resource', 'drain'])
 def test_activity_thread_start_failure_keeps_operator_injections(monkeypatch, failure):
     from hermes_cli.worker_drain_fence import DrainRefused
