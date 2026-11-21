@@ -96,6 +96,8 @@ def test_real_auth_error_still_blocker_auth_and_escalates(kanban_home, monkeypat
     monkeypatch.setattr(kb.time, "time", lambda: now)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="auth", assignee="a")
+        from tests.hermes_cli.kanban_guard_helpers import configure_eligible_profile
+        configure_eligible_profile(conn, tid, kanban_home, "a")
         _ended_with_error(conn, tid, "changes_requested", "401 authentication error", now - 5)
         assert kbd.check_respawn_guard(conn, tid) == "blocker_auth"
         kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: spawned.append(a) or 1)
@@ -121,6 +123,8 @@ def test_quota_hold_never_escalates_to_human_block(kanban_home, monkeypatch, all
     monkeypatch.setattr(kb.time, "time", lambda: now)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="quota hold", assignee="a")
+        from tests.hermes_cli.kanban_guard_helpers import configure_eligible_profile
+        configure_eligible_profile(conn, tid, kanban_home, "a")
         _ended_with_error(conn, tid, outcome, QUOTA_ERR, now - 5)
         for dt in (0, 300, 700, 1300):
             monkeypatch.setattr(kb.time, "time", lambda dt=dt: now + dt)

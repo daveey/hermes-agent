@@ -67,7 +67,7 @@ def _foreign_wall_card(monkeypatch):
     monkeypatch.setattr(walls, 'active_walls', lambda **_k: {})
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='opus card walled on gateway A', assignee='a')
-        conn.execute("UPDATE tasks SET model_override=?, provider_override='anthropic' WHERE id=?", (MODEL, tid))
+        conn.execute("UPDATE tasks SET model_override='class:deep', provider_override='auto' WHERE id=?", (tid,))
         conn.commit()
         _reap_wall(conn, tid, clock[0] + 5 * DAY)
         clock[0] += 301

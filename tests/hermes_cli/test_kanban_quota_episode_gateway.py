@@ -25,16 +25,27 @@ def _clock(monkeypatch, start=1_800_000_000):
     return clock
 
 
-def _reap_wall(conn, tid, reset, *, route_model='claude-opus-5-5', route_provider='anthropic', fields=None):
-    """One run admitted on ``route_model`` that exits 75 on an Anthropic Opus wall resetting at ``reset``."""
+def _reap_wall(conn, tid, reset, *, route_model='class:deep', route_provider=None, fields=None):
+    """Real class admission/allocation, followed by a simulated exact-run quota failure."""
+    from agent.model_routing import resolve_model_route
+    from agent.model_routing_agent import class_requirements
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from hermes_cli.kanban_model_tier import apply_model_tier
     task = kb.claim_task(conn, tid, claimer=kb._claimer_id())
     assert task is not None
     pid = 71001
     conn.execute('UPDATE tasks SET worker_pid=? WHERE id=?', (pid, tid))
-    kb._append_event(conn, tid, 'run_route', {'model': route_model, 'provider': route_provider, 'source': 'pin',
-                                              'tier_reason': 'default', 'lane': 'ready'}, run_id=task.current_run_id)
+    apply_model_tier(conn, task, lane='ready')
+    admitted = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'run_route'][-1]
+    assert (admitted['model'], admitted['provider'], admitted['source']) == (route_model, route_provider, 'class')
+    config = _assignee_config(task.assignee)
+    allocated = resolve_model_route(task.model_override, task.provider_override, config=config,
+                                   session_id=f'quota-fixture-{tid}-{task.current_run_id}',
+                                   requirements=class_requirements(config))
+    assert (allocated['provider'], allocated['model']) in {
+        (r['provider'], r['model']) for r in config['model_routing']['routes'][route_model.removeprefix('class:')]}
     receipt = {'failure_reason': 'rate_limit', 'failure_retryable': True, 'failure_resets_at': float(reset),
-               'route_provider': 'anthropic', 'route_model': 'claude-opus-5-5'}
+               'route_provider': allocated['provider'], 'route_model': allocated['model']}
     if fields is not None:
         receipt = fields
     kb._append_event(conn, tid, 'worker_result', {
@@ -84,7 +95,7 @@ def test_wall_recorded_on_gateway_a_admits_on_b_with_room_and_still_holds_on_a(
     seen = _pool(monkeypatch, {('anthropic', 'claude-opus-5-5')})
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='opus card walled on A', assignee='a')
-        conn.execute("UPDATE tasks SET model_override='claude-opus-5-5', provider_override='anthropic' WHERE id=?",
+        conn.execute("UPDATE tasks SET model_override='class:deep', provider_override='auto' WHERE id=?",
                      (tid,))
         conn.commit()
         _reap_wall(conn, tid, clock[0] + 5 * DAY)
@@ -98,7 +109,9 @@ def test_wall_recorded_on_gateway_a_admits_on_b_with_room_and_still_holds_on_a(
         spawned = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: spawned.append(
             (task.id, task.model_override, task.provider_override)))
-        assert spawned == [(tid, 'claude-opus-5-5', 'anthropic')]
+        assert spawned == [(tid, 'class:deep', 'auto')]
+        assert kb.get_task(conn, tid).model_override == 'class:deep'
+        assert quota.episode(conn, tid)['providers'] == ['anthropic']
 
 
 def test_wall_from_gateway_a_still_holds_on_b_when_b_pool_has_no_room(board, monkeypatch, all_assignees_spawnable):
@@ -107,7 +120,7 @@ def test_wall_from_gateway_a_still_holds_on_b_when_b_pool_has_no_room(board, mon
     _pool(monkeypatch, set())  # B's pool is walled too, or empty: no positive room
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='walled everywhere', assignee='a')
-        conn.execute("UPDATE tasks SET model_override='claude-opus-5-5', provider_override='anthropic' WHERE id=?",
+        conn.execute("UPDATE tasks SET model_override='class:deep', provider_override='auto' WHERE id=?",
                      (tid,))
         conn.commit()
         _reap_wall(conn, tid, clock[0] + 5 * DAY)
@@ -126,7 +139,7 @@ def test_own_wall_is_rechecked_against_own_pool_only_after_the_trust_window(boar
     _pool(monkeypatch, room)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='own wall', assignee='a')
-        conn.execute("UPDATE tasks SET model_override='claude-opus-5-5', provider_override='anthropic' WHERE id=?",
+        conn.execute("UPDATE tasks SET model_override='class:deep', provider_override='auto' WHERE id=?",
                      (tid,))
         conn.commit()
         _reap_wall(conn, tid, clock[0] + 5 * DAY)
