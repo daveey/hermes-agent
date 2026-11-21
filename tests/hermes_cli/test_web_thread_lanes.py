@@ -270,3 +270,44 @@ async def test_an_exception_from_the_work_releases_the_slot():
     with pytest.raises(ValueError):
         await lanes.run_in_lane("sessions", boom)
     assert lanes.stats()["sessions"]["in_use"] == 0 and _borrowed("sessions") == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turns", range(5))
+async def test_a_cancel_right_after_an_uncontended_acquire_never_leaks_the_slot(turns):
+    # Second review of #3936: with a free slot, a native cancel one loop turn after anyio's uncontended
+    # acquire raised RuntimeError and left the slot borrowed with in_use 0.
+    ran = []
+    task = asyncio.create_task(lanes.run_in_lane("probe", lambda: ran.append(1)))
+    for _ in range(turns):
+        await asyncio.sleep(0)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    await _until(lambda: lanes.stats()["probe"]["in_use"] == 0)
+    assert _borrowed("probe") == 0
+    assert await asyncio.wait_for(lanes.run_in_lane("probe", lambda: "next"), 2) == "next"
+
+
+@pytest.mark.asyncio
+async def test_work_cancelled_before_a_thread_picks_it_up_never_runs(monkeypatch):
+    picked = []
+    never = asyncio.Event()
+
+    class _SlowPool:
+        @staticmethod
+        async def run_sync(call, limiter=None):
+            picked.append(call)
+            await never.wait()  # no thread has picked it up yet
+
+    monkeypatch.setattr(lanes, "_to_thread", _SlowPool)
+    ran = []
+    task = asyncio.create_task(lanes.run_in_lane("sessions", lambda: ran.append(1)))
+    await _until(lambda: picked)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert lanes.stats()["sessions"]["in_use"] == 0 and _borrowed("sessions") == 0
+    assert picked[0]() is None and ran == []  # a late pickup does nothing

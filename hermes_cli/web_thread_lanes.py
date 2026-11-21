@@ -173,6 +173,16 @@ async def _admit(gate: anyio.CapacityLimiter, token: object, deadline: float, re
     acquired = False
     gone = False
     try:
+        # A free slot is taken without awaiting: anyio's uncontended acquire passes a shielded checkpoint, and a
+        # native cancel landing there makes it release on behalf of the wrong borrower (RuntimeError, slot
+        # leaked). Only a contended wait awaits, and that path releases correctly when cancelled.
+        try:
+            gate.acquire_on_behalf_of_nowait(token)
+            acquired = True
+        except anyio.WouldBlock:
+            pass
+        if acquired:
+            return "ok"
         with anyio.move_on_after(deadline):
             if request is None:
                 await gate.acquire_on_behalf_of(token)
@@ -194,6 +204,11 @@ async def _admit(gate: anyio.CapacityLimiter, token: object, deadline: float, re
                     await gate.acquire_on_behalf_of(token)
                     acquired = True
                     tg.cancel_scope.cancel()
+                # A native cancel of this task that the task group's own (already cancelled) scope absorbed
+                # must still reach the caller.
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise asyncio.CancelledError()
     except BaseException:
         if acquired:
             gate.release_on_behalf_of(token)
