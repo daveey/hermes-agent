@@ -29,6 +29,9 @@ from hermes_cli import web_server_skew_exit as skew
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_HOME", raising=False)
+    # pick_port probes real 127.0.0.1 ports: on a host running always-on backends (the hub) it skipped the
+    # ports FakeHost expects and the roll tests failed there only.
+    monkeypatch.setattr(ro, "_port_listening", lambda port: False)
     return tmp_path
 
 
@@ -366,6 +369,44 @@ def test_supervisor_rolls_on_a_dead_backend_and_on_confirmed_commit_drift(home):
     roller.roll = lambda reason: rolls.append(reason) or True  # type: ignore[method-assign]
     roller.supervise(max_polls=1)
     assert rolls and "not running" in rolls[0]
+
+
+def test_supervisor_rolls_an_alive_backend_only_after_it_stops_answering_for_several_polls(home):
+    # Live 2026-11-21: the active backend stayed `active` but its loop was saturated by turns for ~2 h; every
+    # Desktop call through the proxy timed out at 30 s and drift() saw no reason to roll (no health body).
+    host = FakeHost(running={9148}, commits={9148: "c" * 40})
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    rolls = []
+    roller.roll = lambda reason: rolls.append(reason) or True  # type: ignore[method-assign]
+    host.answers = False
+    assert "does not answer" in roller.drift()
+    roller.supervise(max_polls=ro.UNRESPONSIVE_CONFIRMATIONS - 1)
+    assert rolls == []  # a short stall (a few slow polls) is not a reason to roll
+    host.answers = True
+    roller.supervise(max_polls=1)
+    host.answers = False
+    roller.supervise(max_polls=ro.UNRESPONSIVE_CONFIRMATIONS - 1)
+    assert rolls == []  # one good answer resets the count
+
+
+def test_supervisor_rolls_after_consecutive_unanswered_health_polls(home):
+    host = FakeHost(running={9148}, commits={9148: "c" * 40}, answers=False)
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    rolls = []
+    roller.roll = lambda reason: rolls.append(reason) or True  # type: ignore[method-assign]
+    roller.supervise(max_polls=ro.UNRESPONSIVE_CONFIRMATIONS)
+    assert len(rolls) == 1 and "does not answer" in rolls[0]
+    assert ro.UNRESPONSIVE_CONFIRMATIONS > ro.DRIFT_CONFIRMATIONS
+
+
+def test_unanswered_health_mid_update_is_not_a_reason_to_roll(home):
+    host = FakeHost(running={9148}, commits={9148: "c" * 40}, answers=False)
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    (home / "no-marker").write_text("")
+    assert roller.drift() is None
 
 
 class FakeFence:

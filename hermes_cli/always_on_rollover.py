@@ -76,6 +76,10 @@ WARM_WORKERS = 6
 WARM_MAX_REPLAYS = 40
 SUPERVISE_POLL_S = 15.0
 DRIFT_CONFIRMATIONS = 2      # consecutive polls a commit/runtime drift must persist before it rolls
+# Consecutive polls an alive backend must miss /api/health before it rolls (~1-2 min at SUPERVISE_POLL_S). Higher
+# than DRIFT_CONFIRMATIONS: a busy backend stalls for seconds routinely, and a roll leaves the old one running.
+UNRESPONSIVE_CONFIRMATIONS = 4
+UNRESPONSIVE_REASON = "does not answer /api/health"
 FAILED_ROLL_BACKOFF_S = 300.0
 SUPERSEDED_GRACE_S = 900.0   # a superseded backend not retired by then is retired by the roller through its idle fence
 SUPERSEDED_HARD_S = 6 * 3600.0  # ... and stopped (SIGTERM, turns checkpoint) once this old, busy or not
@@ -753,6 +757,10 @@ class Roller:
         if self.update_in_progress():
             return None
         body = self.health(port)
+        if body is None:
+            # Running but not answering (a starved threadpool, 2026-11-21): every Desktop call through the proxy
+            # times out until a roll moves new connections to a fresh backend.
+            return f"active backend :{port} {UNRESPONSIVE_REASON}"
         head = self.head()
         if body and self.same_commit(body.get("commit"), head) is False:
             return f"active backend :{port} runs {str(body.get('commit'))[:10]}, checkout is at {str(head)[:10]}"
@@ -826,7 +834,8 @@ class Roller:
                 reason = self.drift()
                 dead = bool(reason) and "not running" in reason or reason == "no active backend recorded"
                 seen = seen + 1 if reason else 0
-                if reason and (dead or seen >= DRIFT_CONFIRMATIONS) and self.clock() >= retry_at:
+                need = UNRESPONSIVE_CONFIRMATIONS if reason and UNRESPONSIVE_REASON in reason else DRIFT_CONFIRMATIONS
+                if reason and (dead or seen >= need) and self.clock() >= retry_at:
                     seen = 0
                     if not self.roll(reason):
                         retry_at = self.clock() + FAILED_ROLL_BACKOFF_S
