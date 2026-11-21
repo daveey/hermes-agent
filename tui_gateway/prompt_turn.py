@@ -180,7 +180,7 @@ def _admit_prompt_turn(
         elif report_ownership_refusal:
             # [daveey] retire_marker=False: this submit wrote no marker; the one on disk is a live turn's.
             _emit_terminal_turn_error(
-                sid, session, str(ownership_refusal),
+                sid, session, ownership_refusal,
                 error_surface={"layer": "gateway", "code": reason, "retryable": False}, retire_marker=False)
         return None
     with session["history_lock"]:

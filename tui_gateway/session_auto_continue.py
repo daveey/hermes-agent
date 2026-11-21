@@ -1098,6 +1098,9 @@ def _emit_terminal_turn_error(
     if retire_marker:
         _retire_turn_marker(session)
     _emit("message.complete", sid, payload)
+    if error_surface and error_surface.get("code") == "SESSION_NOT_OWNED":
+        from tui_gateway.ownership_card_log import log_ownership_card
+        log_ownership_card(session, error)
 
 
 def _restore_agent_history_after_turn_error(session: dict, agent) -> bool:
