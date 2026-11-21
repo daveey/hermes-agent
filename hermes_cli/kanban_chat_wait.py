@@ -126,7 +126,7 @@ def notice_text(payload: Any) -> str:
 
 
 def _floor_kinds() -> str:
-    from hermes_cli.kanban_diagnostics import _READY_WAIT_FLOOR_KINDS
+    from hermes_cli.kanban_ready_events import READY_WAIT_FLOOR_KINDS as _READY_WAIT_FLOOR_KINDS
     return ", ".join(f"'{k}'" for k in sorted({*_READY_WAIT_FLOOR_KINDS, "continued"}))
 
 

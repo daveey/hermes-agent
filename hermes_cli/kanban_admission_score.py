@@ -215,7 +215,7 @@ def _descendants(tid, children):
 
 
 def _ready_since(conn: sqlite3.Connection, ids: list[str]) -> dict[str, int]:
-    from hermes_cli.kanban_diagnostics import _READY_WAIT_FLOOR_KINDS
+    from hermes_cli.kanban_ready_events import READY_WAIT_FLOOR_KINDS as _READY_WAIT_FLOOR_KINDS
 
     if not ids:
         return {}

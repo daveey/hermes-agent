@@ -723,12 +723,8 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
 # to a gateway restart (booked ``owner_restart_lost``, not ``reclaimed``: without it an 80-min
 # run read as 80 min ready, hermes-hub 2026-11-10). Other run-ending requeues are bounded by
 # the run's ``ended_at`` (``_last_run_end_ts``), never by kinds a pre-claim check may write. [daveey]
-_READY_WAIT_FLOOR_KINDS = frozenset({
-    "created", "promoted", "reclaimed", "unblocked",
-    "claimed", "spawned", "continuation_woken", "condition_met", "wake_probe_stale",
-    "wake_check_stale",
-    "owner_restart_lost",
-})
+# Compatibility export for diagnostic consumers; the registry lives outside this facade.
+from hermes_cli.kanban_ready_events import READY_WAIT_FLOOR_KINDS as _READY_WAIT_FLOOR_KINDS
 
 
 def _last_run_end_ts(runs: Iterable[Any]) -> int:
