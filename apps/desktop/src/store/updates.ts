@@ -8,6 +8,7 @@ import { atom } from 'nanostores'
 
 import { CANONICAL_GATEWAY_PROTOCOL } from '@/api/canonical-protocol'
 import { $apiRequestScope, connectionScoped, profileScoped } from '@/api/client'
+import { forceHermesUpdate, getForceUpdateState } from '@/api/system'
 import type {
   DesktopUpdateApplyOptions,
   DesktopUpdateApplyResult,
@@ -755,6 +756,64 @@ export async function setUpdateChannel(channel: SourceUpdateChannel): Promise<De
 
 const CLOUD_OWNED: DesktopUpdateApplyResult = { ok: false, error: 'cloud-managed' }
 
+/** [daveey] On a host whose core updates hermes-sync applies, Desktop's own update (`hermes update` via the detached
+ *  handoff, or the backend's POST /api/hermes/update) only pauses idle gateways and so failed whenever a chat was busy
+ *  ("Hermes couldn't finish updating ... busy or cannot acknowledge an idle pause", David-MBP 2026-11-20). Hand the
+ *  update to hermes-sync's Force-update request instead: it pauses busy chats and continues them after the update.
+ *  Null (the caller keeps its own path) when hermes-sync does not manage the host or its state cannot be read. */
+export async function routeUpdateToHermesSync(target: UpdateTarget): Promise<DesktopUpdateApplyResult | null> {
+  // The client pill hands off only where its own update is `hermes update` on this checkout: a packaged Desktop
+  // (app-installer, electron-updater, store) updates its bundle, which hermes-sync's core update does not do.
+  if (target === 'client' && $updateStatus.get()?.mechanism !== 'posix-handoff') {
+    return null
+  }
+
+  const scope = target === 'client' ? { connectionId: 'local' } : undefined
+  const apply = target === 'client' ? $updateApply : $backendUpdateApply
+  let state: Awaited<ReturnType<typeof getForceUpdateState>>
+
+  try {
+    state = await getForceUpdateState(scope)
+  } catch {
+    return null
+  }
+
+  if (!state.managed) {
+    return null
+  }
+
+  if (!state.available) {
+    const message = state.message || translateNow('shell.statusbar.forceUpdate.syncedApplying')
+    apply.set({ ...IDLE, applying: false, stage: 'synced', message })
+
+    return { ok: false, error: 'managed-by-hermes-sync', message }
+  }
+
+  try {
+    await forceHermesUpdate(scope)
+  } catch (error) {
+    // The owed update can land between the read and the request (409): say so rather than fail.
+    const after = await getForceUpdateState(scope).catch(() => null)
+
+    if (after?.managed && !after.available) {
+      const message = after.message || translateNow('shell.statusbar.forceUpdate.syncedApplying')
+      apply.set({ ...IDLE, applying: false, stage: 'synced', message })
+
+      return { ok: false, error: 'managed-by-hermes-sync', message }
+    }
+
+    const message = error instanceof Error ? error.message : String(error)
+    apply.set({ ...IDLE, applying: false, stage: 'error', message })
+
+    return { ok: false, error: 'force-request-failed', message }
+  }
+
+  const message = translateNow('shell.statusbar.forceUpdate.syncedApplying')
+  apply.set({ ...IDLE, applying: false, stage: 'synced', message })
+
+  return { ok: true, message }
+}
+
 export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promise<DesktopUpdateApplyResult> {
   if (cloudOwnsUpdates('client')) {
     return CLOUD_OWNED
@@ -774,6 +833,15 @@ export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promis
 
   dismissNotification(UPDATE_TOAST_ID)
   $updateApply.set({ ...IDLE, applying: true, stage: 'prepare', message: 'Starting update…' })
+
+  return (await routeUpdateToHermesSync('client')) ?? applyOwnUpdate(bridge, opts)
+}
+
+/** Desktop's own update (the detached `hermes update` handoff or a bundle swap): hosts hermes-sync does not manage. */
+async function applyOwnUpdate(
+  bridge: NonNullable<NonNullable<typeof window.hermesDesktop>['updates']>,
+  opts: DesktopUpdateApplyOptions
+): Promise<DesktopUpdateApplyResult> {
 
   try {
     const result = await bridge.apply(opts)
@@ -1036,6 +1104,11 @@ function legacyBackendReachedTarget(
 
 let backendUpdateInFlight: Promise<DesktopUpdateApplyResult> | null = null
 
+/** hermes-sync's Force update on a backend it manages, else the backend's own `POST /api/hermes/update`. */
+async function routeOrRunBackendUpdate(): Promise<DesktopUpdateApplyResult> {
+  return (await routeUpdateToHermesSync('backend')) ?? runBackendUpdate()
+}
+
 async function runBackendUpdate(): Promise<DesktopUpdateApplyResult> {
   dismissNotification(UPDATE_TOAST_ID)
   $backendUpdateApply.set({
@@ -1174,7 +1247,7 @@ export function applyBackendUpdate(): Promise<DesktopUpdateApplyResult> {
     return backendUpdateInFlight
   }
 
-  backendUpdateInFlight = runBackendUpdate().finally(() => {
+  backendUpdateInFlight = routeOrRunBackendUpdate().finally(() => {
     backendUpdateInFlight = null
   })
 

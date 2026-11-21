@@ -262,6 +262,12 @@ async def update_hermes():
         record_refusal_receipt(refusal)
         return response
 
+    if await asyncio.to_thread(_hermes_sync_manages_host):
+        # [daveey] A Desktop that predates the hand-off: its own update would only defer on a busy chat.
+        return _update_refused("managed_by_hermes_sync", _SYNC_MANAGED_MESSAGE
+                               + " This Desktop predates the hand-off: update it, or wait for hermes-sync.",
+                               "hermes update")
+
     existing = _ACTION_PROCS.get("hermes-update")
     if existing is not None and existing.poll() is None:
         response = {"ok": True, "pid": existing.pid, "name": "hermes-update", "already_running": True}
@@ -298,6 +304,22 @@ async def hermes_update_progress():
 
 _FORCE_UNAVAILABLE_MESSAGE = ("No background core update is pending on this host, so there is nothing to force. "
                                "Force update only applies to an update hermes-sync is waiting to apply here.")
+_SYNC_MANAGED_MESSAGE = ("hermes-sync applies Hermes updates on this host. It has no update pending yet; it checks "
+                         "for new commits every few minutes and applies them while chats keep running. If it seems "
+                         "stuck, `hermes update` in a terminal still updates by hand.")
+
+
+def _hermes_sync_manages_host() -> bool:
+    """[daveey] hermes-sync applies core updates here: it publishes a fresh window record for this host
+    (``kanban_deploy_window.read_window``). Desktop then hands updates to its Force-update request instead of
+    running its own idle-only ``hermes update``, which fails whenever a chat is busy (David-MBP 2026-11-20)."""
+    from hermes_cli.kanban_deploy_window import read_window
+
+    try:
+        return read_window(int(time.time())) is not None
+    except Exception:  # health: allow BLE001 -- an unreadable record means "not managed": the old path stays
+        _log.debug("hermes-sync window record unreadable", exc_info=True)
+        return False
 
 
 def _force_update_state() -> dict[str, Any]:
@@ -310,10 +332,11 @@ def _force_update_state() -> dict[str, Any]:
     root = get_default_hermes_root()
     available = read_progress() is not None
     # Every profile's turns under this root; None when a state.db is unreadable (the dialog says "unknown").
+    managed = _hermes_sync_manages_host()
     state: dict[str, Any] = {"available": available, "running_turns": running_turn_count(root),
-                             "pending": read_force_request(root)}
+                             "pending": read_force_request(root), "managed": managed}
     if not available:
-        state["message"] = _FORCE_UNAVAILABLE_MESSAGE
+        state["message"] = _SYNC_MANAGED_MESSAGE if managed else _FORCE_UNAVAILABLE_MESSAGE
     return state
 
 

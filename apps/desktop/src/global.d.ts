@@ -1178,6 +1178,8 @@ export type DesktopUpdateStage =
    *  changed — the user must update/reinstall the desktop app. Terminal,
    *  closeable; never claims the GUI was updated. (#45205) */
   | 'guiSkew'
+  /** [daveey] Handed to hermes-sync (it applies updates on this host): terminal, closeable; `message` says what it does. */
+  | 'synced'
   | 'error'
 
 /** The emergency state.db backup's progress: bytes copied (or cloned), then the backup check. */

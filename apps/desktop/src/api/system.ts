@@ -166,17 +166,18 @@ export function updateHermes(): Promise<ActionResponse> {
 
 /** [daveey] "Force update" on the backend version pill: whether hermes-sync owes an update on the active backend's
  *  host, how many turns forcing it would stop, and any request already pending. */
-export function getForceUpdateState(): Promise<ForceUpdateState> {
+export function getForceUpdateState(scope?: ProfileScope): Promise<ForceUpdateState> {
   return hermesApi<ForceUpdateState>({
-    ...profileScoped(),
+    // A pinned host is read passively: Update must never cold-start a local backend just to ask (remote mode).
+    ...(scope ? { ...capabilityScoped(scope), passive: true } : profileScoped()),
     path: '/api/hermes/update/force'
   })
 }
 
 /** Ask hermes-sync to apply the pending core update now: running turns stop at their next step boundary. */
-export function forceHermesUpdate(): Promise<ForceUpdateResponse> {
+export function forceHermesUpdate(scope?: ProfileScope): Promise<ForceUpdateResponse> {
   return hermesApi<ForceUpdateResponse>({
-    ...profileScoped(),
+    ...(scope ? capabilityScoped(scope) : profileScoped()),
     path: '/api/hermes/update/force',
     method: 'POST'
   })

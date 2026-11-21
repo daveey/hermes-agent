@@ -1545,6 +1545,8 @@ export interface ForceUpdateState {
   pending: ForceUpdateRequest | null
   /** Why it is unavailable (only when `available` is false). */
   message?: string
+  /** [daveey] hermes-sync applies core updates on this host: Desktop's Update hands off to it. Absent on older backends. */
+  managed?: boolean
 }
 
 /** `POST /api/hermes/update/force` (a 409 with `detail` when no update is owed). */

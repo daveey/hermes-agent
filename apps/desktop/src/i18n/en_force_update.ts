@@ -14,5 +14,8 @@ export const enForceUpdate: ForceUpdateCopy = {
   confirmLabel: 'Force update',
   cancelLabel: 'Cancel',
   requested: 'Update requested; the backend restarts within a few minutes',
-  failed: 'Could not force the backend update'
+  failed: 'Could not force the backend update',
+  syncedTitle: 'hermes-sync is updating Hermes',
+  syncedApplying:
+    'The update applies within a few minutes. Busy chats pause at their next step and continue on the new version; you can keep working. If it never lands, run `hermes update` in a terminal.'
 }

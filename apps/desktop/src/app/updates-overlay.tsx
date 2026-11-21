@@ -169,8 +169,11 @@ function UpdateChangeList({
   )
 }
 
-function overlayPhase(apply: UpdateApplyState): 'idle' | 'applying' | 'manual' | 'guiSkew' | 'error' {
-  if (apply.stage === 'manual' || apply.stage === 'guiSkew') {
+/** Terminal stages a close resets, so reopening starts from the idle view. */
+const RESET_ON_CLOSE: ReadonlySet<string> = new Set(['error', 'restart', 'manual', 'guiSkew', 'synced'])
+
+function overlayPhase(apply: UpdateApplyState): 'idle' | 'applying' | 'manual' | 'guiSkew' | 'synced' | 'error' {
+  if (apply.stage === 'manual' || apply.stage === 'guiSkew' || apply.stage === 'synced') {
     return apply.stage
   }
 
@@ -210,6 +213,7 @@ export function UpdatesOverlay() {
   const updateAvailable = status?.updateAvailable || behind > 0
 
   const phase = overlayPhase(apply)
+  const MessageView = MESSAGE_VIEWS[phase]
 
   const handleClose = (next: boolean) => {
     if (phase === 'applying') {
@@ -218,10 +222,7 @@ export function UpdatesOverlay() {
 
     setUpdateOverlayOpen(next)
 
-    if (
-      !next &&
-      (apply.stage === 'error' || apply.stage === 'restart' || apply.stage === 'manual' || apply.stage === 'guiSkew')
-    ) {
+    if (!next && RESET_ON_CLOSE.has(apply.stage)) {
       resetUpdateApplyState()
     }
   }
@@ -255,7 +256,7 @@ export function UpdatesOverlay() {
           />
         )}
 
-        {phase === 'guiSkew' && <GuiSkewView message={apply.message} onDone={() => handleClose(false)} />}
+        {MessageView && <MessageView message={apply.message} onDone={() => handleClose(false)} />}
 
         {phase === 'error' ? (
           <ErrorView
@@ -600,6 +601,32 @@ function GuiSkewView({ message, onDone }: { message?: string; onDone: () => void
     </div>
   )
 }
+
+/** [daveey] Update handed to hermes-sync, which applies it on this host while chats keep running. */
+function SyncedView({ message, onDone }: { message?: string; onDone: () => void }) {
+  const { t } = useI18n()
+  const copy = t.shell.statusbar.forceUpdate
+
+  return (
+    <div className="grid gap-5 px-6 pb-6 pt-7 pr-8">
+      <div className="flex flex-col items-center gap-3 text-center">
+        <DialogTitle className="text-center text-xl">{copy.syncedTitle}</DialogTitle>
+        <DialogDescription className="max-w-prose text-center text-sm leading-5 text-muted-foreground">
+          {message || copy.syncedApplying}
+        </DialogDescription>
+      </div>
+
+      <Button className="font-semibold" onClick={onDone} size="lg" variant="secondary">
+        {t.updates.done}
+      </Button>
+    </div>
+  )
+}
+
+/** Message-only terminal views: the dialog says what happened and closes. */
+const MESSAGE_VIEWS: Partial<
+  Record<ReturnType<typeof overlayPhase>, (props: { message?: string; onDone: () => void }) => React.ReactElement>
+> = { guiSkew: GuiSkewView, synced: SyncedView }
 
 const BYTE_UNITS: readonly [string, number][] = [
   ['GB', 1024 ** 3],

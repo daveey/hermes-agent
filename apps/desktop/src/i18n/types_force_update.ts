@@ -11,4 +11,8 @@ export interface ForceUpdateCopy {
   requested: string
   /** Toast title when the request (or the status read before it) failed. */
   failed: string
+  /** [daveey] Update dialog after Update was handed to hermes-sync (it applies updates on this host). */
+  syncedTitle: string
+  /** Body when hermes-sync took the request: busy chats pause and continue after the update. */
+  syncedApplying: string
 }

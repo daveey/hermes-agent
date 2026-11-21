@@ -128,6 +128,14 @@ def _owe_update(root):
         state="draining", state_since=now - 300, drain_bound_s=7200, last_update_at=now - 5000, writer="drainer")))
 
 
+def _sync_idle(root):
+    """hermes-sync runs here (fresh window record) but owes no update."""
+    now = int(time.time())
+    (root / "cache" / "core-update" / "window.json").write_text(json.dumps(dict(
+        version=1, host=socket.gethostname().split(".")[0], observed_at=now - 5, window_at=now + 3600,
+        state="idle", state_since=now - 300, drain_bound_s=7200, last_update_at=now - 5000, writer="drainer")))
+
+
 def _request(principal=None):
     state = types.SimpleNamespace()
     if principal:
@@ -150,7 +158,7 @@ def test_routes_when_hermes_sync_owes_an_update(root):
     _owe_update(root)
     _live_turn(root)
     state = asyncio.run(actions.hermes_update_force_state())
-    assert state == {"available": True, "running_turns": 1, "pending": None}
+    assert state == {"available": True, "running_turns": 1, "pending": None, "managed": True}
 
     result = asyncio.run(actions.hermes_update_force(_request("token:desktop")))
     assert result["ok"] is True and result["running_turns"] == 1
@@ -168,7 +176,7 @@ def test_routes_when_no_update_is_owed(root):
 
     state = asyncio.run(actions.hermes_update_force_state())
     assert state["available"] is False and state["running_turns"] == 0 and state["pending"] is None
-    assert "nothing to force" in state["message"]
+    assert state["managed"] is False and "nothing to force" in state["message"]
 
     response = asyncio.run(actions.hermes_update_force(_request("token:desktop")))
     assert response.status_code == 409
@@ -219,7 +227,40 @@ def test_app_routes_report_write_and_refuse(client, root):
     _owe_update(root)
     _live_turn(root)
     assert client.get("/api/hermes/update/force", headers=AUTH).json() == {
-        "available": True, "running_turns": 1, "pending": None}
+        "available": True, "running_turns": 1, "pending": None, "managed": True}
     posted = client.post("/api/hermes/update/force", headers=AUTH)
     assert posted.status_code == 200 and posted.json()["ok"] is True and posted.json()["running_turns"] == 1
     assert client.get("/api/hermes/update/force", headers=AUTH).json()["pending"]["by"] == "dashboard"
+
+
+# ── [daveey] Desktop hands Update to hermes-sync on a host it manages ───────────────────────────────────
+
+
+def test_a_host_hermes_sync_manages_but_owes_nothing_says_so(root):
+    from hermes_cli.web_routers import actions
+
+    _sync_idle(root)
+    state = asyncio.run(actions.hermes_update_force_state())
+    assert state["managed"] is True and state["available"] is False
+    assert "hermes-sync applies Hermes updates on this host" in state["message"]
+
+
+def test_a_stale_window_record_is_not_managed(root):
+    from hermes_cli.web_routers import actions
+
+    _sync_idle(root)
+    path = root / "cache" / "core-update" / "window.json"
+    body = json.loads(path.read_text())
+    body["observed_at"] -= 3600  # older than kanban_deploy_window.FRESH_SECONDS: hermes-sync stopped publishing
+    path.write_text(json.dumps(body))
+    assert asyncio.run(actions.hermes_update_force_state())["managed"] is False
+
+
+def test_desktops_own_update_is_refused_on_a_managed_host(root):
+    from hermes_cli.web_routers import actions
+
+    _sync_idle(root)
+    refused = asyncio.run(actions.update_hermes())
+    assert refused["ok"] is False and refused["error"] == "managed_by_hermes_sync"
+    assert refused["update_command"] == "hermes update"  # the manual way out when hermes-sync is stuck
+    assert "hermes-sync applies Hermes updates on this host" in refused["message"]
