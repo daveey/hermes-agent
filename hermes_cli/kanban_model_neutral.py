@@ -98,10 +98,10 @@ def validate_text(*values):
     exclusions and negated restrictions are deliberately not rewritten here.
     """
     for text in values:
-        for line in (text or '').splitlines():
-            line = _active_text(line)
+        for source_line in (text or '').splitlines():
+            line = _active_text(source_line)
             if _REQUIRED.search(line):
-                raise ValueError(f'{ERROR}; refused line: {line}{_TEXT_GUIDANCE}')
+                raise ValueError(f'{ERROR}; refused line: {source_line}{_TEXT_GUIDANCE}')
             # Comments carry authorship, not authority over text after their end.
             line = re.sub(r'<!-- implementer-models:.*?-->', '', line)
             # Inspect rendered inline identities, retaining the original stored bytes.
@@ -143,7 +143,7 @@ def validate_text(*values):
                     r'(?:independent\s+)?review\s*\(\s*' + _ROUTE_NAME,
                     clause, re.IGNORECASE)
                 if _DIRECTIVE.search(clause) or _PROVIDER_DIRECTIVE.search(clause) or named_review or required_review:
-                    raise ValueError(f'{ERROR}; refused line: {line}{_TEXT_GUIDANCE}')
+                    raise ValueError(f'{ERROR}; refused line: {source_line}{_TEXT_GUIDANCE}')
 
 
 def forwarded_text(text):

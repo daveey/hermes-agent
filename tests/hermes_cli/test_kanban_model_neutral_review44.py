@@ -39,7 +39,12 @@ def test_evidence_label_carries_line(board, text):
     assert kb.get_task(board, tid).body == line
 
 
-@pytest.mark.parametrize("text", [t for _n, t in REAL_ROWS] + CONTROLS)
+@pytest.mark.parametrize("text", [t for _n, t in REAL_ROWS] + CONTROLS + [
+    '  Use **claude-opus-5-5**.',
+    'Review must use `openai-codex`.',
+    '<!-- implementer-models: audit --> Use __claude-opus-5-5__.',
+    'Historical run instruction (superseded and not active): "old evidence"; Use *claude-opus-5-5*.',
+])
 def test_error_names_the_quoting_form_and_resubmission_is_lossless(board, text):
     before = board.execute('SELECT count(*) FROM tasks').fetchone()[0]
     with pytest.raises(ValueError) as err:
