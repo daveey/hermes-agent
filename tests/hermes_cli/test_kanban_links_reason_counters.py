@@ -54,6 +54,35 @@ def test_strict_expiry_is_age(harness):
     assert delta(before, "links_strict.publish") == 1
 
 
+def test_cold_and_combined_age_inputs_and_background_projection(harness):
+    state, scope = harness
+    before = runs()
+    activity._links_lookup(scope, False)
+    assert delta(before, "links_strict.miss.missing") == 1
+    state["now"] += activity._LINKS_MAX_AGE_S
+    state["fingerprint"] = (("/board.db", (2,)),)
+    activity._links_lookup(scope, False)
+    assert delta(before, "links_strict.miss.age_inputs") == 1
+    state["fingerprint"] = (("/board.db", (3,)),)
+    activity._refresh_links_scope(scope)
+    assert delta(before, "links_refresh.projection") == 1
+    assert delta(before, "links_refresh.fingerprint") == 1
+    assert delta(before, "links_strict.projection") == 2
+
+
+def test_display_stale_still_avoids_fingerprint_and_keeps_separate_lane(harness, monkeypatch):
+    state, scope = harness
+    activity._links_lookup(scope, False)
+    submitted = []
+    monkeypatch.setattr(activity, "_refresh_links_in_background", submitted.append)
+    before = runs()
+    activity._links_lookup(scope, True)
+    assert submitted == [scope] and state["builds"] == 1
+    assert delta(before, "links_display.stale") == 1
+    assert delta(before, "links_display.enter") == delta(before, "links_display.exit") == 1
+    assert delta(before, "links_strict.fingerprint") == 0
+
+
 def test_failed_strict_projection_retries_without_publish(harness):
     state, scope = harness
     state["fail"] = True
