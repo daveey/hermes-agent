@@ -82,6 +82,7 @@ DRIFT_CONFIRMATIONS = 2      # consecutive polls a commit/runtime drift must per
 # Consecutive polls an alive backend must miss /api/health before it rolls (~1-2 min at SUPERVISE_POLL_S). Higher
 # than DRIFT_CONFIRMATIONS: a busy backend stalls for seconds routinely, and a roll leaves the old one running.
 UNRESPONSIVE_CONFIRMATIONS = 4
+START_PROBE_GAP_S = 3.0      # between the start-up health probes of the active backend (Roller.start)
 UNRESPONSIVE_REASON = "does not answer /api/health"
 FAILED_ROLL_BACKOFF_S = 300.0
 SUPERSEDED_GRACE_S = 900.0   # a superseded backend not retired by then is retired by the roller through its idle fence
@@ -813,12 +814,23 @@ class Roller:
         self.demote(port)
         return True
 
+    def _never_answers(self, port: int) -> bool:
+        for i in range(UNRESPONSIVE_CONFIRMATIONS):
+            if i:
+                self.sleep(START_PROBE_GAP_S)
+            if self.health(port) is not None:
+                return False
+        return True
+
     def start(self) -> bool:
         """The roller's first roll. A starved active backend found at start (a core update restarts the roller)
-        is demoted like one supervise() rolls away from, so it is not adopted again or kept for 6 h."""
+        is demoted like one supervise() rolls away from, so it is not adopted again or kept for 6 h. Decided after
+        the update marker clears (a backend paused for the update is not starved) and only when every one of
+        UNRESPONSIVE_CONFIRMATIONS probes misses, the same bar supervise() uses."""
+        if not aod.wait_for_update_clear(self.marker, sleep=self.sleep, now=self.clock):
+            log("update marker still present; rolling anyway")
         before = read_active(self.home)
-        starved = (before is not None and self.unit_active(before["port"]) and not self.update_in_progress()
-                   and self.health(before["port"]) is None)
+        starved = before is not None and self.unit_active(before["port"]) and self._never_answers(before["port"])
         ok = self.roll("roller started")
         if ok and starved:
             self.demote_if_replaced(before["port"])

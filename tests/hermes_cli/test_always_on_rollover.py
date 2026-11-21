@@ -487,6 +487,45 @@ def test_start_demotes_a_starved_active_backend_it_replaces(home):
     assert ro.read_active()["port"] == 9149 and set(roller._load_demoted()) == {9148}
 
 
+def test_start_does_not_demote_a_backend_that_answers_one_of_its_probes(home):
+    host = FakeHost(running={9148}, commits={9148: "a" * 40})
+    ro.write_active(9148)
+    real_get = host.get
+    misses = [ro.UNRESPONSIVE_CONFIRMATIONS - 1]
+
+    def get(port, path, timeout):
+        if port == 9148 and path == "/api/health" and misses[0] > 0:
+            misses[0] -= 1
+            return None, 0.0, None  # busy for a few probes, then answers
+        return real_get(port, path, timeout)
+    roller = make_roller(home, host)
+    roller.get = get
+    assert roller.start() is True
+    assert ro.read_active()["port"] == 9149 and roller._load_demoted() == {}
+
+
+def test_start_probes_only_after_the_update_marker_clears(home):
+    host = FakeHost(running={9148}, commits={9148: "c" * 40})
+    ro.write_active(9148)
+    marker = home / "no-marker"
+    marker.write_text("")
+    probes = []
+    real_get = host.get
+
+    def get(port, path, timeout):
+        if port == 9148 and path == "/api/health":
+            probes.append(marker.exists())
+            return None, 0.0, None
+        return real_get(port, path, timeout)
+    roller = make_roller(home, host)
+    roller.get = get
+    real_sleep = roller.sleep
+    roller.sleep = lambda s: (marker.unlink(missing_ok=True), real_sleep(s))  # the update finishes while waiting
+    assert roller.start() is True
+    assert probes and not any(probes)  # never probed while the update held the marker
+    assert set(roller._load_demoted()) == {9148}
+
+
 def test_start_does_not_demote_a_healthy_active_backend(home):
     host = FakeHost(running={9148}, commits={9148: "a" * 40})
     ro.write_active(9148)
