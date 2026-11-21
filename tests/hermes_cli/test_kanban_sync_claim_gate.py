@@ -62,7 +62,7 @@ def kanban_home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def live(kanban_home, svc):
-    support.write_sync_config(kanban_home, True)
+    support.write_routed_sync_config(kanban_home, True)
     conn = kbc.connect(kanban_home / "kanban.db")
     ksc.ensure_identity(conn, BOARD, ME)
     sync.set_mode(conn, "primary")

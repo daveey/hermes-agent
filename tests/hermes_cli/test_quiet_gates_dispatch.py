@@ -40,6 +40,11 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: lambda name: name == "default")
     monkeypatch.setattr(kbd, "_memory_pressure_level", lambda: "unknown")
     monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: False)
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    assert not _assignee_config("default").get("model_routing", {}).get("enabled")
+    (tmp_path / "config.yaml").write_text(_managed_yaml())
+    assert _assignee_config("default")["model_routing"]["enabled"] is True
     spawned: list[str] = []
     monkeypatch.setattr(kbd, "_default_spawn", lambda task, ws, *, board=None: spawned.append(task.id) or None)
     with kbc.connect_closing(board="default") as conn:
@@ -80,9 +85,17 @@ def test_automatic_local_claim_deferred_then_resumes(board):
 
 def test_review_lane_claim_deferred_too(board, monkeypatch):
     monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: True)
+    assert [tid for tid, *_ in _dispatch().spawned] == [board.tid]
+    board.spawned.clear()  # observe only the later quiet review attempt
     with kbc.connect_closing(board="default") as conn:
-        assert kb.claim_task(conn, board.tid) is not None
-        assert kb.request_review(conn, board.tid, summary="r") is True
+        task = kb.get_task(conn, board.tid)
+        assert task.current_run_id is not None
+        kb._append_event(conn, board.tid, "worker_result",
+                         {"route_model": "claude-sonnet-5-5", "route_provider": "anthropic"},
+                         run_id=task.current_run_id)
+        assert kb.request_review(conn, board.tid, summary="r", expected_run_id=task.current_run_id) is True
+        from hermes_cli.kanban_review_model import implementer_models
+        assert implementer_models(conn, kb.get_task(conn, board.tid)) == {"claude-sonnet-5-5"}
     with cq.acquire(max_s=60, reason="measure") as owner:
         result = _dispatch()
     assert board.spawned == [] and result.quiet_deferred == [(board.tid, owner.lease.episode_id)]

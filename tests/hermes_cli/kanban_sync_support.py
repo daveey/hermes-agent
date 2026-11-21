@@ -19,6 +19,18 @@ def write_sync_config(home: Path, enabled: bool) -> None:
     (home / "config.yaml").write_text(f"kanban:\n  sync:\n    enabled: {'true' if enabled else 'false'}\n")
 
 
+def write_routed_sync_config(home: Path, enabled: bool) -> None:
+    """Real default route eligibility for tests driving automatic dispatch, not only sync."""
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    from hermes_cli.config_effective import load_user_config_effective
+    write_sync_config(home, enabled)
+    with (home / "config.yaml").open("a") as stream:
+        stream.write(_managed_yaml())
+    config = load_user_config_effective()
+    assert config["kanban"]["sync"]["enabled"] is enabled
+    assert config["model_routing"]["enabled"] is True
+
+
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()

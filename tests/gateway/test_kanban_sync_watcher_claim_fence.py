@@ -43,13 +43,13 @@ def kanban_home(tmp_path, monkeypatch):
 
 
 def _board(kanban_home, *, enabled):
-    support.write_sync_config(kanban_home, True)
+    support.write_routed_sync_config(kanban_home, True)
     svc = FakeService(lease_runs=True)
     conn = kbc.connect(kanban_home / "kanban.db")
     ksc.ensure_identity(conn, BOARD, ME)
     sync.set_mode(conn, "primary")
     sync.set_lease_client(ksc.HubLeaseClient(svc.hub(ME)))
-    support.write_sync_config(kanban_home, enabled)  # the switch the watcher reads at startup
+    support.write_routed_sync_config(kanban_home, enabled)  # the switch the watcher reads at startup
     return conn
 
 
