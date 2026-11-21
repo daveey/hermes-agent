@@ -21,7 +21,8 @@ def worker(tmp_path):
     # Imported here, not at module level: this conftest loads for every hermes_state test file.
     from agent.runtime_session_store import RuntimeSessionStore
     from hermes_state import SessionDB
-    from hermes_state_runtime import begin_runtime_epoch, mutate_worker_execution, register_worker_execution
+    from hermes_state_runtime import begin_runtime_epoch, register_worker_execution
+    from tests.worker_store_rpc import worker_store_rpc
 
     db = SessionDB(tmp_path / 'state.db')
     db.create_session('owned', 'cli', system_prompt='prefix')
@@ -29,7 +30,7 @@ def worker(tmp_path):
     epoch = begin_runtime_epoch(db, instance_id='fixture')
     scope = dict(epoch=epoch, execution_id='worker', session_id='owned', generation=0)
     register_worker_execution(db, **scope, kind='compute', adoption_secret='secret')
-    store = RuntimeSessionStore(lambda method, **p: mutate_worker_execution(db, **p), scope, tmp_path / 'outbox')
+    store = RuntimeSessionStore(lambda method, **p: worker_store_rpc(db, method, **p), scope, tmp_path / 'outbox')
     yield db, store
     store.failure = None
     store.journal['pending'] = []

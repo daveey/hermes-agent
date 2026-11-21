@@ -15,7 +15,8 @@ def setup_store(tmp_path):
     epoch = begin_runtime_epoch(db, instance_id='fixture')
     scope = dict(epoch=epoch, execution_id='worker', session_id='owned', generation=0)
     register_worker_execution(db, **scope, kind='compute', adoption_secret='private')
-    store = RuntimeSessionStore(lambda method, **p: mutate_worker_execution(db, **p), scope, tmp_path / 'outbox')
+    from tests.worker_store_rpc import worker_store_rpc
+    store = RuntimeSessionStore(lambda method, **p: worker_store_rpc(db, method, **p), scope, tmp_path / 'outbox')
     return db, store, scope
 
 
