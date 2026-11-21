@@ -2,7 +2,7 @@
 
 A Kanban notifier (or other producer) wake is committed to the session FIFO (``admit_route_wake``), and the
 producer takes that receipt as final: it never resends. When the chat is pinned to a route whose subscription
-wall *holds* (an explicit pin, or a wall under ``model_routing_walls.WALL_REROUTE_MIN_SECONDS``), the turn is
+wall *holds* (an explicit pin: ``model_routing_walls.may_reroute``), the turn is
 refused before the agent is built (``SubscriptionQuotaUnavailable``) and the reply tells a person to "resend
 after the reset". Nobody resends an automated notice, so it was lost until some other event woke the chat
 (hub chat local-be7f1ded…, 2026-11-14: three notifier wakes refused, none redelivered).

@@ -179,13 +179,14 @@ def test_walled_config_default_on_a_new_session_moves(home):
     assert _state(home).peek('default-opus', 'deep')['walled_from']['model'] == OPUS
 
 
-def test_wall_under_six_hours_still_holds(home):
-    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+def test_wall_under_six_hours_moves_a_default_pin_too(home):
+    """Hub Desktop chat 20261111_213321_be8afc (11-21): fable's wall resets in ~1 h; holding it for the reset
+    failed every turn with "Your request was not processed" although opus sat free in the same class."""
     _legacy_row(home, LEGACY_ECHO)
-    _wall(home, 'openai-codex', ASTRA, 2)
-    with pytest.raises(SubscriptionQuotaUnavailable):
-        _resolve(ASTRA, 'openai-codex')
-    assert _state(home).peek(SID, 'deep') == LEGACY_ECHO
+    reset = _wall(home, 'openai-codex', ASTRA, 2)
+    moved = _resolve(ASTRA, 'openai-codex')
+    assert (moved['provider'], moved['model']) == ('anthropic', OPUS)
+    assert _state(home).peek(SID, 'deep')['walled_from']['resets_at'] == pytest.approx(reset, abs=1)
 
 
 def test_kanban_card_pins_are_not_moved(home, monkeypatch):
@@ -367,9 +368,13 @@ def test_walled_pin_with_nothing_else_in_its_class_logs_no_target(home, monkeypa
     assert len(skipped) == 1 and 'reason=no-target' in skipped[0], skipped
 
 
-@pytest.mark.parametrize('hours', [1, None], ids=['short-wall', 'unknown-reset'])
-def test_a_short_or_unknown_wall_refuses_quietly(home, monkeypatch, caplog, hours):
-    assert _injected_wall_refusal(home, monkeypatch, caplog, key='***', hours=hours) == []
+def test_an_unknown_wall_refuses_quietly(home, monkeypatch, caplog):
+    assert _injected_wall_refusal(home, monkeypatch, caplog, key='***', hours=None) == []
+
+
+def test_a_short_wall_held_by_a_launch_key_names_why(home, monkeypatch, caplog):
+    skipped = _injected_wall_refusal(home, monkeypatch, caplog, key='***', hours=1)
+    assert len(skipped) == 1 and 'reason=key' in skipped[0], skipped
 
 
 # --- Desktop/TUI gateway (tui_gateway.agent_factory): the same reroute, on its own agent-build path -------------
@@ -433,10 +438,24 @@ def test_desktop_row_with_its_providers_native_endpoint_still_moves_off_the_wall
     assert agent.model_routing['walled_from']['model'] == ASTRA
 
 
-@pytest.mark.parametrize('case', ['explicit switch', 'short wall', 'no session id', 'own endpoint',
+def test_desktop_session_behind_a_short_wall_builds_on_the_next_route_in_its_class(home):
+    """The 11-21 incident on the Desktop path: a router-picked pin whose wall resets within hours is moved
+    for the turn (and the chat follows it), not refused until the reset."""
+    from tui_gateway.server import _resolve_agent_model_runtime  # agent_factory binds into the server namespace
+    _legacy_row(home, LEGACY_ECHO)
+    _wall(home, 'openai-codex', ASTRA, 1)
+    model, runtime = _resolve_agent_model_runtime(DESKTOP_ROW, None, SID)
+    notice = runtime.pop('_fallback_notice')
+    assert 'quota is out until' in notice and OPUS in notice, notice
+    agent = _desktop_agent(model, runtime)
+    assert (agent.model, agent.provider) == (OPUS, 'anthropic')
+    assert agent.model_routing['walled_from']['model'] == ASTRA
+
+
+@pytest.mark.parametrize('case', ['explicit switch', 'no session id', 'own endpoint',
                                   'other provider endpoint', 'own key'])
 def test_desktop_wall_still_refuses_when_the_pin_must_not_move(home, monkeypatch, case):
-    """Controls: David's own switch, a wall under the reroute threshold, a build with no session identity
+    """Controls: David's own switch, a build with no session identity
     (the readiness probe) and a session that overrides its endpoint or key all keep the refusal. A KNOWN
     other provider's stock endpoint (Anthropic's URL on a Codex row) is an override too, not only an unknown
     host. A refusal the session's own key or endpoint holds is logged with that reason, as the gateway does."""
@@ -447,7 +466,7 @@ def test_desktop_wall_still_refuses_when_the_pin_must_not_move(home, monkeypatch
     logged = []
     monkeypatch.setattr('agent.model_routing_walls.log_not_deferred', lambda wall, reason: logged.append(reason))
     _legacy_row(home, dict(LEGACY_ECHO, reason='explicit-switch') if case == 'explicit switch' else LEGACY_ECHO)
-    _wall(home, 'openai-codex', ASTRA, 2 if case == 'short wall' else 33)
+    _wall(home, 'openai-codex', ASTRA, 33)
     overrides = {'own endpoint': {'base_url': 'https://proxy.example/v1'},
                  'other provider endpoint': {'base_url': 'https://api.anthropic.com'},
                  'own key': {'base_url': DEFAULT_CODEX_BASE_URL, 'api_key': '***'}}.get(case, {})
@@ -581,15 +600,13 @@ def test_gateway_default_turn_moves_when_only_one_account_returns_soon(home, mon
 
 @pytest.mark.parametrize('hours', [(1.5, 2, 3, 4, 57.5, 70.5, 87.5), (1.5, 5.5), (2,)],
                          ids=['four-of-seven-soon', 'one-of-two-soon', 'sole-account'])
-def test_wall_still_holds_when_half_the_pool_returns_inside_six_hours(home, hours):
-    from agent.model_routing_unavailable import SubscriptionQuotaUnavailable
+def test_default_pin_moves_when_half_the_pool_returns_inside_six_hours(home, hours):
     from tui_gateway.server import _resolve_agent_model_runtime
     _write_anthropic_pool(home, hours)
-    with pytest.raises(SubscriptionQuotaUnavailable):
-        _resolve(OPUS, 'anthropic', session='default-opus')
-    with pytest.raises(SubscriptionQuotaUnavailable):
-        _resolve_agent_model_runtime(OPUS_ROW, None, SID)
-    assert _state(home).peek('default-opus', 'deep') is None
+    moved = _resolve(OPUS, 'anthropic', session='default-opus')
+    assert (moved['provider'], moved['model']) == ('openai-codex', ASTRA)
+    model, runtime = _resolve_agent_model_runtime(OPUS_ROW, None, SID)
+    assert model == OPUS and runtime['provider'] == 'auto' and 'quota is out until' in runtime['_fallback_notice']
 
 
 def test_explicit_pin_still_holds_when_only_one_account_returns_soon(home):

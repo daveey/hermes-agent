@@ -6,11 +6,11 @@ Codex wall then refused every turn although claude-opus-5-5 in the same class wa
 
 Policy (one place, read by the managed resolver and the gateway's pre-build lookup):
 - ``explicit`` pins (an honoured switch, a model David named, a Kanban card's pin) never move;
-- a ``default`` pin (router pick, config default, an echo of either) whose subscription wall resets
-  ``WALL_REROUTE_MIN_SECONDS`` or more away is re-selected in its class (``same-class-failover`` with
-  ``walled_from``); a shorter wall still holds, since waiting beats a provider switch. "Resets" is when
-  at least half the pool's accounts can serve again (``decision_reset``), not the nearest account: one
-  account on a 5 h window does not make a week-long wall short;
+- a ``default`` pin (router pick, config default, an echo of either) whose subscription wall has a known
+  future reset is re-selected in its class (``same-class-failover`` with ``walled_from``), however short
+  the wall: a turn refused until the reset is worse than one served by the next eligible route (hub Desktop
+  chat 20261111_213321_be8afc, 11-21: a ~1 h fable wall failed three turns while opus was free). The
+  reset in the notice is when at least half the pool's accounts can serve again (``decision_reset``);
 - once rerouted, the session follows the reroute even while its stored model still names the walled one.
 """
 from __future__ import annotations
@@ -20,8 +20,6 @@ import os
 import time
 
 logger = logging.getLogger(__name__)
-
-WALL_REROUTE_MIN_SECONDS = 6 * 3600
 
 
 def _state_path():
@@ -72,12 +70,16 @@ def decision_reset(wall):
 
 
 def may_reroute(wall, row, source, now=None):
-    """True when the quota *wall* on a pin with standing *row* / request *source* should move it."""
+    """True when the quota *wall* on a pin with standing *row* / request *source* should move it.
+
+    Any wall with a known future reset moves a non-explicit pin: a turn that fails until the reset is worse
+    than one served by the next eligible route of the pin's class (hub Desktop chat 20261111_213321_be8afc,
+    11-21: fable's wall resets in ~1 h, every turn refused, opus free)."""
     from agent.model_routing_state import is_explicit_pin
     if os.environ.get("HERMES_KANBAN_TASK"):
         return False  # card pins: t_01a19990897b9d9b (David's D1) owns their policy
     reset = decision_reset(wall)
-    if not isinstance(reset, (int, float)) or reset - (time.time() if now is None else now) < WALL_REROUTE_MIN_SECONDS:
+    if not isinstance(reset, (int, float)) or reset <= (time.time() if now is None else now):
         return False
     if row is not None:
         return not is_explicit_pin(row)
@@ -165,11 +167,11 @@ _NOT_DEFERRED_SEEN: set = set()
 def log_not_deferred(wall, reason):
     """One WARNING per wall episode and reason when the pre-build lookup keeps a far wall's refusal.
 
-    A wall under ``WALL_REROUTE_MIN_SECONDS`` is meant to hold, so it stays quiet; a far one that
-    refuses every turn names why (``key``, ``endpoint``, ``explicit``, ``no-target``, ``no-session``)."""
+    A wall with no known future reset stays quiet; any other one that refuses every turn names why (``key``,
+    ``endpoint``, ``explicit``, ``no-target``, ``no-session``)."""
     reset, held_until = getattr(wall, "resets_at", None), decision_reset(wall)
     if (not isinstance(reset, (int, float)) or not isinstance(held_until, (int, float))
-            or held_until - time.time() < WALL_REROUTE_MIN_SECONDS):
+            or held_until <= time.time()):
         return
     episode = (getattr(wall, "provider", None), getattr(wall, "model", None), int(reset), reason)
     if episode in _NOT_DEFERRED_SEEN:
