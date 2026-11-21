@@ -54,7 +54,12 @@ def _review_card_pinned_to_worker(hub, worker):
     assert tid in _spawned(worker.tick())
     worker.enter()
     run_id = worker.conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (tid,)).fetchone()[0]
+    from tests.hermes_cli.kanban_review_fixture import AUTHOR
+    from hermes_cli.kanban_review_model import implementer_models
+    kb._append_event(worker.conn, tid, "worker_result",
+                     {"route_model": AUTHOR, "route_provider": "anthropic"}, run_id=run_id)
     assert kb.request_review(worker.conn, tid, summary="implemented", expected_run_id=run_id)
+    assert implementer_models(worker.conn, kb.get_task(worker.conn, tid)) == {AUTHOR}
     worker.round()
     hub.round()
     assert kb.get_task(hub.conn, tid).status == "review"
@@ -133,8 +138,9 @@ def test_a_deferred_review_claim_hands_its_slot_to_ready_work(gws, svc):
     reserved slot goes to the next ready card instead of ending the tick."""
     hub, _ = gws
     hub.enter()
-    review = kb.create_task(hub.conn, title="needs review", assignee="default")
-    assert kb.request_review(hub.conn, review, summary="x")
+    from tests.hermes_cli.kanban_review_fixture import completed_gateway_source, create_review
+    completed_gateway_source(hub)
+    review = create_review(hub.conn, title="needs review", assignee="default")
     hub.round()
     svc.board(BOARD)["leases"][review] = {"task_id": review, "holder": "mini", "run_uid": "r-mini", "lane": "review",
                                           "expires": 9e12}
@@ -161,6 +167,7 @@ def test_unsynced_boards_are_unaffected(tmp_path, monkeypatch):
     monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: None)
     monkeypatch.setattr(kbd, "_memory_pressure_level", lambda sample=None: "normal")
     home = support.kanban_home(tmp_path, monkeypatch)
+    support.write_routed_sync_config(home, False)
     conn = kbc.connect(home / "kanban.db")
     try:
         tid = kb.create_task(conn, title="plain", assignee="default")

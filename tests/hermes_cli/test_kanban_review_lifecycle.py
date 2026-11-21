@@ -54,6 +54,24 @@ def _row(conn, tid):
     ).fetchone()
 
 
+@pytest.fixture
+def routed_home(kanban_home):
+    """Actual eligible profiles and a completed source before dispatch/cap tests."""
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from tests.hermes_cli.kanban_review_fixture import completed_source
+    (kanban_home / "config.yaml").write_text(_managed_yaml())
+    for name in ("worker", "reviewer", "dev", "closer", "builder"):
+        assert _assignee_config(name) is None
+        profile = kanban_home / "profiles" / name
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text(_managed_yaml())
+        assert _assignee_config(name)["model_routing"]["enabled"] is True
+    with kbc.connect() as conn:
+        completed_source(conn)
+    return kanban_home
+
+
 def _events(conn, tid, kind=None):
     rows = conn.execute(
         "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id",
@@ -382,7 +400,7 @@ def test_review_requested_event_is_claimable_for_wake(kanban_home: Path) -> None
 
 
 def test_review_dispatch_gate_prevents_phantom_reviewer(
-    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+    routed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With ``kanban.review_dispatch=false`` the dispatcher must NOT claim a
     task parked in ``review`` (this deployment explicitly waits for a human).
@@ -392,7 +410,9 @@ def test_review_dispatch_gate_prevents_phantom_reviewer(
     import hermes_cli.profiles as profmod
 
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="park", assignee="worker")
+        from tests.hermes_cli.kanban_review_fixture import source_id
+        tid = kb.create_task(conn, title="Independent review of park", assignee="worker",
+                             creator_task_id=source_id(conn))
         kb.claim_task(conn, tid)
         kb.request_review(
             conn, tid, summary="done",
@@ -424,7 +444,7 @@ def test_review_dispatch_gate_prevents_phantom_reviewer(
 
 
 def test_active_pr_guard_skipped_for_review_lane_but_defers_ready_lane(
-    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+    routed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """B2 regression: a fresh PR-URL comment must not block reviewer spawns.
 
@@ -446,7 +466,9 @@ def test_active_pr_guard_skipped_for_review_lane_but_defers_ready_lane(
 
     with kbc.connect() as conn:
         # Review-lane task with a fresh PR comment.
-        review_id = kb.create_task(conn, title="review me", assignee="reviewer")
+        from tests.hermes_cli.kanban_review_fixture import source_id
+        review_id = kb.create_task(conn, title="Independent review of feature", assignee="reviewer",
+                                   creator_task_id=source_id(conn))
         claimed = kb.claim_task(conn, review_id)
         assert claimed is not None
         kb.add_comment(conn, review_id, author="worker", body=pr_comment)
@@ -495,7 +517,7 @@ def _backdate_comments(conn, tid, seconds=60):
 
 
 def test_active_pr_guard_lifts_for_profile_handed_the_card_after_the_pr(
-    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+    routed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A ready card whose PR is open spawns the profile it was handed to.
 
@@ -537,7 +559,7 @@ def test_active_pr_guard_lifts_for_profile_handed_the_card_after_the_pr(
 
 
 def test_active_pr_guard_holds_through_same_profile_reassign_and_unassign(
-    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+    routed_home: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only a handoff to a DIFFERENT profile lifts ``active_pr``.
 
@@ -635,7 +657,7 @@ def test_dispatch_json_exposes_suppression_reasons(
 
 
 def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
-    kanban_home: Path, monkeypatch: pytest.MonkeyPatch
+    routed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import hermes_cli.config as cfgmod
     import hermes_cli.profiles as profmod
@@ -653,10 +675,12 @@ def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
         captured.append(list(task.skills or []))
 
     with kbc.connect() as conn:
+        from tests.hermes_cli.kanban_review_fixture import source_id
         task_id = kb.create_task(
             conn,
-            title="domain review",
+            title="Independent review of domain feature",
             assignee="reviewer",
+            creator_task_id=source_id(conn),
             skills=["domain-specific-review"],
         )
         implementation = kb.claim_task(conn, task_id)
@@ -687,7 +711,7 @@ def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
 
 
 def test_review_dispatch_honors_global_and_per_profile_caps(
-    kanban_home: Path,
+    routed_home: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import hermes_cli.config as cfgmod
@@ -706,8 +730,10 @@ def test_review_dispatch_honors_global_and_per_profile_caps(
         assert running is not None
 
         review_ids: list[str] = []
+        from tests.hermes_cli.kanban_review_fixture import source_id
         for title in ("review one", "review two"):
-            task_id = kb.create_task(conn, title=title, assignee="reviewer")
+            task_id = kb.create_task(conn, title=f"Independent review of {title}", assignee="reviewer",
+                                     creator_task_id=source_id(conn))
             implementation = kb.claim_task(conn, task_id)
             assert implementation is not None
             assert kb.request_review(
@@ -933,7 +959,7 @@ def test_synthesized_run_for_unassigned_card_keeps_null_profile(kanban_home: Pat
 
 
 def test_active_pr_guard_lifts_when_the_card_is_unblocked_after_the_pr(
-    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+    routed_home: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A worker opens its PR, blocks waiting for the merge, and is unblocked.
 

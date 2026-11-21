@@ -7,9 +7,18 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
 from hermes_cli import kanban_sync_client as client
 from tests.hermes_cli import test_kanban_runs_on_dispatch as support
+from tests.hermes_cli.kanban_review_fixture import create_review
 
-gws = support.gws
+dispatch_gws = support.gws
 svc = support.svc
+
+
+@pytest.fixture
+def gws(dispatch_gws):
+    from tests.hermes_cli.kanban_review_fixture import completed_gateway_source
+    hub, _ = dispatch_gws
+    completed_gateway_source(hub)
+    return dispatch_gws
 
 
 @pytest.mark.parametrize("lane", ["ready", "review"])
@@ -19,11 +28,10 @@ def test_capacity_release_restarts_in_priority_order(gws, monkeypatch, lane, inh
     hub.enter()
     cards = {}
     for priority in (0, 530, 150, 900, 460):
-        tid = kb.create_task(hub.conn, title=f"priority {priority}", assignee="default",
+        create = create_review if lane == "review" else kb.create_task
+        tid = create(hub.conn, title=f"priority {priority}", assignee="default",
                              priority=0 if inherited and priority == 900 else priority)
         cards[priority] = tid
-        if lane == "review":
-            assert kb.request_review(hub.conn, tid, summary="review")
     if inherited:
         kb.create_task(hub.conn, title="urgent waiter", assignee="default", priority=900, parents=[cards[900]])
     hub.round()
@@ -55,11 +63,9 @@ def test_capacity_release_restarts_in_priority_order(gws, monkeypatch, lane, inh
 def test_card_specific_refusals_do_not_fence_other_candidates(gws, monkeypatch, lane, reason):
     hub, _ = gws
     hub.enter()
-    high = kb.create_task(hub.conn, title="higher", assignee="default", priority=900)
-    low = kb.create_task(hub.conn, title="lower", assignee="default", priority=100)
-    if lane == "review":
-        for tid in (high, low):
-            assert kb.request_review(hub.conn, tid, summary="review")
+    create = create_review if lane == "review" else kb.create_task
+    high = create(hub.conn, title="higher", assignee="default", priority=900)
+    low = create(hub.conn, title="lower", assignee="default", priority=100)
     hub.round()
     acquire = client.HubLeaseClient.acquire
 
@@ -81,8 +87,7 @@ def test_capacity_fence_covers_combined_ranked_pass(gws, monkeypatch, refused_la
     hub.enter()
     ready = [kb.create_task(hub.conn, title=f"ready {p}", assignee="default", priority=p)
              for p in (900, 530, 100)]
-    review = kb.create_task(hub.conn, title="ranked review", assignee="default", priority=700)
-    assert kb.request_review(hub.conn, review, summary="review")
+    review = create_review(hub.conn, title="ranked review", assignee="default", priority=700)
     # This exercises Board capacity, not the per-tick admission budget. Pre-admit
     # the review row so all four candidates can reach the lease boundary.
     from hermes_cli import kanban_hub_admission_claim as admission

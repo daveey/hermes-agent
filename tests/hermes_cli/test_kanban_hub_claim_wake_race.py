@@ -15,7 +15,13 @@ _claim_screen_first = helpers._claim_screen_first
 
 
 def _park(hub, lane, monkeypatch):
-    tid = helpers._hub_card(hub)
+    if lane == "review":
+        from tests.hermes_cli.kanban_review_fixture import completed_gateway_source, create_review
+        completed_gateway_source(hub, runs_on=[f"machine:{hub.name}"])
+        tid = create_review(hub.conn, "refactor the dashboard table", "default",
+                            body="Portable repo work: edit, test, PR.")
+    else:
+        tid = helpers._hub_card(hub)
     now = int(time.time())
     cmd = "test -f ~/.hermes/cache/ready.flag"
     with kb.write_txn(hub.conn):
