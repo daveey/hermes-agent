@@ -117,7 +117,7 @@ def test_unchanged_outbox_does_not_query_and_commit_is_seen_next_tick(tmp_path, 
         writer.close()
 
 
-def test_checkpoint_reopens_watcher_generation(tmp_path):
+def test_checkpoint_preserves_watcher_generation(tmp_path):
     import sqlite3
     path = tmp_path / 'checkpoint.db'
     writer = sqlite3.connect(path)
@@ -137,7 +137,7 @@ def test_checkpoint_reopens_watcher_generation(tmp_path):
         assert result[0] == 0
         checkpointed = watch.query(path, 'SELECT value FROM probe', unchanged_ok=True)
         assert checkpointed[1] == (2,)
-        assert checkpointed[0] != first[0]  # a main-image change cannot certify old history
+        assert checkpointed[0] == first[0]  # pager refresh must not bypass repair windows
     finally:
         watch.reset()
         writer.close()

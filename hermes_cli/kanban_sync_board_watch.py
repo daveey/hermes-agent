@@ -63,9 +63,17 @@ class BoardWatch:
             self._drop(next(iter(self._conns)))
         conn = _kanban_lockguard.connect(f"{Path(key).as_uri()}?mode=ro", uri=True, timeout=1,
                                          check_same_thread=False)
-        self._gen += 1
-        self._conns[key] = (identity, conn, self._gen)
-        return conn, self._gen
+        # Pager freshness is not a repair-input generation: checkpoints change
+        # mtime/size without replacing the database. _drop already discarded
+        # answers; keep the generation so ordinary checkpoints respect repair
+        # windows. Replacement, reset and failed-read recovery get a new one.
+        if ent is not None and ent[0][:2] == identity[:2]:
+            gen = ent[2]
+        else:
+            self._gen += 1
+            gen = self._gen
+        self._conns[key] = (identity, conn, gen)
+        return conn, gen
 
     def _drop(self, key: str) -> None:
         self._answers.pop(key, None)
