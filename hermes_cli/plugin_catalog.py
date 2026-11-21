@@ -250,8 +250,16 @@ def load_catalog(catalog_dir: Optional[Path] = None) -> list[PluginCatalogEntry]
 
 def _read_removed_list(catalog_dir: Optional[Path] = None) -> Optional[list[RemovedEntry]]:
     """Keep failed reads distinct from a successfully empty or missing tree list."""
+    from stat import S_ISREG
+
     path = (catalog_dir or get_catalog_dir()) / "removed.yaml"
-    if not path.is_file():
+    try:
+        regular = S_ISREG(path.stat().st_mode)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+    if not regular:
         return []
     data = _read_yaml(path)
     if data is None:

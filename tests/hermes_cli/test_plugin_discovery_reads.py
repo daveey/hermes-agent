@@ -124,6 +124,38 @@ def test_failed_stat_is_not_memoized(tmp_path, monkeypatch, source):
         assert catalog._removal_reads.get() == {}
 
 
+@pytest.mark.parametrize('scoped', [False, True])
+@pytest.mark.parametrize('failure', [PermissionError, OSError])
+def test_tree_reader_stat_failure_retries(tmp_path, monkeypatch, scoped, failure):
+    from contextlib import nullcontext
+    from hermes_cli.plugins_cmd_catalog import installed_plugin_removal
+
+    tree = tmp_path / 'catalog'
+    tree.mkdir()
+    removed = tree / 'removed.yaml'
+    removed.write_text('removed: [{name: recalled}]')
+    monkeypatch.setattr(catalog, 'get_catalog_dir', lambda: tree)
+    monkeypatch.setattr(catalog, '_live_cache_path', lambda: tmp_path / 'absent.json')
+    import os
+    original = os.stat
+    calls = []
+    fail_at = 2 if scoped else 1  # after the scope's successful fingerprint stat
+
+    def flaky_stat(path, *args, **kwargs):
+        if Path(path) == removed:
+            calls.append(removed)
+            if len(calls) == fail_at:
+                raise failure('transient tree metadata failure')
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'stat', flaky_stat)
+    with catalog.removal_read_scope() if scoped else nullcontext():
+        assert installed_plugin_removal('ordinary', tmp_path) is None
+        assert len(calls) == fail_at, 'fault must be injected'
+        assert installed_plugin_removal('recalled', tmp_path) is not None
+        assert installed_plugin_removal('recalled', tmp_path) is not None
+
+
 def test_missing_catalogs_are_memoized(tmp_path, monkeypatch):
     monkeypatch.setattr(catalog, '_live_cache_path', lambda: tmp_path / 'missing.json')
     monkeypatch.setattr(catalog, 'get_catalog_dir', lambda: tmp_path)
