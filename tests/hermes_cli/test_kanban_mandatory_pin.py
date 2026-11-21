@@ -124,10 +124,7 @@ def test_a_worker_that_serves_the_pin_claims_it_and_runs_exactly_that_model(
     worker.round()
     worker.tick()
     assert svc.board(BOARD)["leases"][tid]["holder"] == WORKER
-    if review_without_evidence:
-        # Pool pickup carries the pin, but cannot turn unknown authorship into independence.
-        assert _route(worker.conn, tid) == []
-        return
+    # Missing model attribution does not block a real review; the mandatory pin still must be served exactly.
     [route] = _route(worker.conn, tid)
     assert (route["model"], route["provider"]) == ("claude-opus-5-5", "anthropic"), route
     assert kb.get_task(worker.conn, tid).model_pin_mandatory == 1
