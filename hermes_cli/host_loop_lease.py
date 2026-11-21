@@ -112,6 +112,7 @@ def retire_host_loops(key: str, reason: str) -> bool:
     with _RETIRE_MU:
         first = not _RETIRED
         _RETIRED[key] = reason
+    _publish_retiring(reason)
     if not first:
         return False
     logger.warning("host loops retired in this process (%s): releasing every host-loop lease and starting no "
@@ -141,8 +142,50 @@ def resume_host_loops(key: str) -> bool:
         had = _RETIRED.pop(key, None) is not None
         left = not _RETIRED
     if had and left:
+        _withdraw_retiring()
         logger.info("host loops resumed in this process (%s cleared)", key)
     return left
+
+
+# [daveey] Retirement is in-process state, but another process deciding what to do about a chat this one still
+# holds needs it too: a waker refused "has another live owner" by a backend that is about to restart (code skew,
+# superseded) used the long refused backoff (chat-closeout, hub 2026-11-21) although the chat frees within seconds.
+# A retiring process therefore publishes ``<lease_dir>/retiring/<pid>.json`` (pid, start time, reason) and removes it
+# when it resumes; a crashed one leaves a record that :func:`retiring_reason` ignores (dead or recycled pid).
+def _retiring_path(pid: int, home: str | Path | None = None) -> Path:
+    return lease_dir(home) / "retiring" / f"{int(pid)}.json"
+
+
+def _publish_retiring(reason: str) -> None:
+    pid = os.getpid()
+    try:
+        path = _retiring_path(pid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{pid}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps({"pid": pid, "start": _start_of(pid), "reason": str(reason)[:300], "at": time.time()}),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logger.warning("could not publish this process's host-loop retirement", exc_info=True)
+
+
+def _withdraw_retiring() -> None:
+    try:
+        _retiring_path(os.getpid()).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("could not withdraw this process's host-loop retirement record", exc_info=True)
+
+
+def retiring_reason(pid, home: str | Path | None = None) -> str | None:
+    """Why the LIVE process ``pid`` is retiring (being replaced), or None: no record, an unreadable one, or one left
+    by a process that is gone (dead, or the pid recycled with another start time). Never raises."""
+    try:
+        record = _read_json(_retiring_path(int(pid), home))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not record or record.get("pid") != int(pid) or not _alive(pid, record.get("start")):
+        return None
+    return str(record.get("reason") or "retiring")
 
 
 def lease_dir(home: str | Path | None = None) -> Path:

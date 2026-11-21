@@ -76,6 +76,43 @@ def _stop_origin(params: dict) -> str | None:
 _HELD_QUEUE_KEEPING_ORIGINS = frozenset({None, "stop_button", "esc", "tile", "tile:esc", "slash", "transcript"})
 
 
+# [daveey] A Stop gesture (never ``delete``, a rewind, a plugin or an origin-less close) on a chat whose only holder
+# is this host's gateway running a turn Hermes started (``gateway_background_holder``): a typed send there is queued
+# behind that turn (``methods_prompt._queue_behind_background_turn``), so Stop is how the user ends the turn sooner.
+_BACKGROUND_STOP_ORIGINS = frozenset({"stop_button", "esc", "tile", "tile:esc", "slash", "transcript"})
+
+
+def _stop_gateway_background_turn(rid, sid: str, session: dict) -> bool:
+    """Take the chat over from the gateway's background turn (``session.take_over``, which ends that turn), on a
+    worker thread so Stop answers at once. True when the take-over was started; False leaves the ordinary Stop."""
+    with session["history_lock"]:
+        if session.get("running"):
+            return False
+    if _automation_holder_kind(session) is None:
+        return False
+    from tui_gateway.gateway_background_holder import gateway_background_holder
+    if gateway_background_holder(session, foreign_owner=_foreign_turn_owner) is None:
+        return False
+    handler = _methods.get("session.take_over")
+    if handler is None:
+        return False
+    key = session.get("session_key") or sid
+
+    def run() -> None:
+        try:
+            answer = handler(f"{rid}-background-stop", {"session_id": sid}) or {}
+        except Exception:  # health: allow BLE001 -- worker thread boundary: logged with traceback
+            logger.warning("Stop could not take %s over from the gateway's background turn", key, exc_info=True)
+            return
+        error = answer.get("error") if isinstance(answer, dict) else None
+        logger.info("Stop of the gateway's background turn in %s: %s", key, error or "taken over")
+
+    from agent.memory_provider import spawn_context_thread
+    spawn_context_thread(run, name=f"background-stop-{str(key)[:24]}").start()
+    logger.info("Stop in %s: taking the chat over from the gateway's background turn", key)
+    return True
+
+
 def _note_stop_issuer(sid: str, session: dict, transport, origin: str | None = None) -> None:
     """Remember who stopped the running turn (and with which gesture) and log it; an idle session queues
     nothing. A Stop without an origin clears an earlier one, so a gesture never labels a later Stop."""
@@ -204,6 +241,8 @@ def _(rid, params: dict) -> dict:
         keep_held = origin in _HELD_QUEUE_KEEPING_ORIGINS
         _note_user_input(session)
         _note_stop_issuer(sid, session, current_transport(), origin)
+        if origin in _BACKGROUND_STOP_ORIGINS and _stop_gateway_background_turn(rid, sid, session):
+            return _ok(rid, {"status": "interrupted", "background_turn": True})
         if _session_uses_compute_host(session):
             with session["history_lock"]:
                 inflight_at_interrupt = session.get("inflight_turn")

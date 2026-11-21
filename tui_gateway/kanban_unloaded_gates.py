@@ -243,6 +243,9 @@ def _guarantee() -> Inputs:
                     # Admission can recover without a database revision.
                     if closeout.get('busy_attempts'):
                         return Inputs()
+                    # [daveey] An update-hold wait is due when the hold lifts, a clock no write marks either.
+                    if closeout.get('hold_wait') is True:
+                        return Inputs()
                     # Match the consumer's code-change recovery deadline; a
                     # persisted wall backoff can shorten after a new build.
                     from tui_gateway.notice_retry import effective_due

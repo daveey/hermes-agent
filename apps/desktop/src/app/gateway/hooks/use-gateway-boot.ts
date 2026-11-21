@@ -41,7 +41,6 @@ import { noteBackendDrop, noteBackendExited } from '@/store/desktop-metrics'
 import {
   $gateway,
   activeGateway,
-  activeGatewayConnectionId,
   closeLegacySecondaryGateways,
   closeSecondaryGateways,
   configureGatewayRegistry,
@@ -60,6 +59,7 @@ import {
   setPrimaryGatewayConnection
 } from '@/store/gateway'
 import { $primaryGatewayRoute } from '@/store/gateway-primary-route'
+import { primarySocketConnectionId } from '@/store/gateway-primary-socket'
 import { type GatewayReconnectOptions, reconnectGateway, registerGatewayReconnect } from '@/store/gateway-reconnect'
 import {
   $gatewaySwitching,
@@ -1257,7 +1257,9 @@ export function useGatewayBoot({
         recordConnectionWire(primaryWireSource($primaryGatewayRoute.get(), $connection.get()), gateway.sessionWire)
       }
 
-      const connectionId = activeGatewayConnectionId()
+      // The primary socket's own source, never the foregrounded one: a secondary in front made
+      // primary plugin pushes look like they came from that secondary.
+      const connectionId = primarySocketConnectionId()
       const sourceProfile = canonicalOwnerProfile(event) ?? sourceProfileNow()
 
       const scopedEvent = {

@@ -296,6 +296,24 @@ def _spawn_thread(job: Callable[[], str]) -> str:
     return "dispatched"
 
 
+def _hold_wait_metadata(verdict: str, metadata: dict) -> dict:
+    """[daveey] The passive row's metadata: a wake refused ``"busy"`` only because the core update holds admission
+    is stamped to wake as soon as the hold lifts (``notice_hold_wait``), not after the guarantee's 300 s grace."""
+    from tui_gateway.notice_hold_wait import hold_wait_closeout, update_hold_active
+    if verdict != "busy" or "closeout" in metadata or not update_hold_active():
+        return metadata
+    return {**metadata, "closeout": hold_wait_closeout()}
+
+
+def _note_hold_wait(metadata: dict) -> None:
+    from tui_gateway.notice_hold_wait import is_hold_wait, note_waiting
+    if is_hold_wait(metadata):
+        try:
+            note_waiting()
+        except Exception:  # health: allow BLE001 -- the row is durable; the sweeper's pass wakes it, just later
+            logger.warning("could not start the notice hold-wait watcher", exc_info=True)
+
+
 def _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now) -> str:
     """Run on a worker: the wake, then (unless it started) the passive row on a fresh board connection."""
     try:
@@ -315,6 +333,7 @@ def _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now)
         else:
             from hermes_cli import kanban_db_connect as _kbc
             from hermes_cli import kanban_db_notify as _kbn
+            metadata = _hold_wait_metadata(verdict, metadata)
             with contextlib.closing(_kbc.connect(board=slug)) as conn:
                 if metadata.get("event_kind") == "decision_requested":
                     _kbn.rewind_notify_cursor(conn, claimed_cursor=new, old_cursor=old, **ident)
@@ -322,6 +341,7 @@ def _wake_job(wake, session_db, slug, ident, tip, text, metadata, old, new, now)
                 if not _persist_notice(conn, _kbn, session_db, ident, tip, text, metadata, old, new):
                     return "deferred"
                 _kbn.ack_notify_claim(conn, upto=new, from_cursor=old, **ident)
+            _note_hold_wait(metadata)
         logger.info("kanban sweep wake of %s for %s/%s: %s", tip, slug, ident["task_id"],
                     "turn started" if verdict == "started" else f"{verdict}, notice row written")
         return verdict
@@ -696,8 +716,15 @@ class _RemoteWaker:
                     started()
                     outcome = "turn started"
                 else:
+                    # [daveey] ``persist`` writes this same metadata dict: a hold-refused wake is stamped in place.
+                    stamped = _hold_wait_metadata(verdict, metadata)
+                    if stamped is not metadata:
+                        metadata["closeout"] = stamped["closeout"]
                     # [daveey] Only a written row says so: persist() hands a busy chat's claim back (False).
-                    outcome = f"{verdict}, notice row written" if persist() else f"{verdict}, deferred"
+                    written = persist()
+                    if written:
+                        _note_hold_wait(metadata)
+                    outcome = f"{verdict}, notice row written" if written else f"{verdict}, deferred"
                 logger.info("remote kanban notice for %s (task=%s): %s", tip, task.get("id"), outcome)
                 return verdict
             except Exception:

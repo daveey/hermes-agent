@@ -55,6 +55,7 @@ const {
 } = await import('./gateway')
 
 const { setApiRequestConnection } = await import('@/hermes')
+const { primarySocketConnectionId } = await import('./gateway-primary-socket')
 
 function installDesktop(): void {
   ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = {
@@ -152,6 +153,34 @@ describe('primary gateway registry scope', () => {
 
     expect(activeGatewayConnectionId()).toBe('local')
     expect(setApiRequestConnection).toHaveBeenLastCalledWith('local')
+  })
+
+  // [daveey] Events read off the PRIMARY socket are tagged with the primary's own source: with a secondary
+  // (hermes-hub) in front, the active id named the hub, so plugins filtering by connectionId took the primary
+  // gateway's pushes for the hub's.
+  it('names the primary socket by its own connection while a secondary is foregrounded', async () => {
+    setPrimaryGateway({ connectionState: 'open' } as never, 'default')
+    setPrimaryGatewayConnectionId('primary-vps')
+
+    await expect(ensureGatewayForAgent('hermes-hub', 'default')).resolves.toBe(true)
+
+    expect(activeGatewayConnectionId()).toBe('hermes-hub')
+    expect(primarySocketConnectionId()).toBe('primary-vps')
+
+    await ensureGatewayForProfile('default')
+    expect(primarySocketConnectionId()).toBe('primary-vps')
+  })
+
+  it('leaves primary events untagged only when the primary has no connection of its own', async () => {
+    configureGatewayRegistry({ activeConnectionId: () => 'electron-active', onEvent: vi.fn() })
+    setPrimaryGateway({ connectionState: 'open' } as never, 'default')
+
+    // Unrecorded primary route, primary in front: Electron's active descriptor is the primary's.
+    expect(primarySocketConnectionId()).toBe('electron-active')
+
+    // A secondary in front: the active descriptor is no longer the primary's, so nothing is borrowed.
+    await expect(ensureGatewayForAgent('hermes-hub', 'default')).resolves.toBe(true)
+    expect(primarySocketConnectionId()).toBeNull()
   })
 })
 

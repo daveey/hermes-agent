@@ -701,6 +701,8 @@ class SessionInterruptResult(Result):
     status: InterruptStatus
     interrupted: bool | None = None
     turn_isolation: bool | None = None
+    # [daveey] The Stop took the chat over from this host's gateway, ending the turn Hermes started there.
+    background_turn: bool | None = None
 
 
 method("session.interrupt", params=SessionInterruptParams, result=SessionInterruptResult,

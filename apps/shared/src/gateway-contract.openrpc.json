@@ -34602,6 +34602,18 @@
             "default": null,
             "title": "Forwarded"
           },
+          "queued_behind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Queued Behind"
+          },
           "queued_reason": {
             "anyOf": [
               {
@@ -40023,6 +40035,18 @@
             ],
             "default": null,
             "title": "Turn Isolation"
+          },
+          "background_turn": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Background Turn"
           }
         },
         "required": [

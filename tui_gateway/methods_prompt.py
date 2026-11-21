@@ -813,8 +813,42 @@ def _slot_refusal(rid, sid, session, text, params, refusal, internal_hosted_subm
         # [daveey] Another window's backend holds this chat only for a turn Hermes started itself: the
         # Desktop takes it over and re-sends at once (its "Take over here" flow) instead of a card.
         if (kind := _automation_holder_kind(session)) is not None:
+            if (queued := _queue_behind_background_turn(rid, sid, session, text, params, kind)) is not None:
+                return queued
             data.update(auto_take_over=True, holder_turn_kind=kind)
     return _err(rid, 4090, str(refusal), data)
+
+
+def _queue_behind_background_turn(rid, sid, session, text, params, kind):
+    """[daveey] The chat is held only by this host's gateway, for a turn Hermes started there (a Kanban notice or
+    close-out, ``gateway_background_holder``): queue the typed prompt in that gateway's FIFO to run right after the
+    turn, instead of the Desktop taking the chat over and killing it (``session_turn_lease_lost``, three hub chats on
+    2026-11-21). The answer is the RT-37 forwarded receipt, which the Desktop shows as a queued row. None (any other
+    holder, a message the FIFO cannot take, an owner that took nothing): the caller keeps the auto take-over."""
+    from tui_gateway import owner_forward
+    from tui_gateway.gateway_background_holder import gateway_background_holder
+    if not owner_forward.prompt_forwardable(session, text, params):
+        return None
+    if gateway_background_holder(session, foreign_owner=_foreign_turn_owner) is None:
+        return None
+    key = session.get("session_key") or sid
+    try:
+        receipt = owner_forward.forward_prompt(sid, session, text)
+    except owner_forward.OwnerUnconfirmed:
+        # It may already be queued there: a take-over plus a resend could run it twice.
+        return _err(rid, 4090, "The gateway is running a turn in this chat and did not confirm your message"
+                    " in time. It may already be queued there: check the chat before sending it again.",
+                    {"reason": SESSION_OWNER_UNCONFIRMED})
+    except Exception as exc:  # refused before its write, or never sent: nothing queued, take over as before
+        logger.info("queueing the typed prompt for %s behind the gateway's %s turn failed (%s); taking over instead",
+                    key, kind, exc, exc_info=True)
+        return None
+    if receipt.get("voice_stopped") is True:
+        return _ok(rid, {"voice_stopped": True})
+    logger.info("queued the typed prompt for %s behind the gateway's %s turn: admission=%s",
+                key, kind, receipt.get("admission_id"))
+    return _ok(rid, {"status": "queued", "admission_id": receipt.get("admission_id"), "forwarded": True,
+                     "queued_behind": kind})
 
 
 def _submit_to_ledger_owner(rid, sid, session, text, params, refusal) -> dict:

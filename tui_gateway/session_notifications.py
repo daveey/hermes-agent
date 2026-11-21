@@ -1765,8 +1765,11 @@ def _wake_session_turn(session_key: str, text: str, *, display_kind: str | None 
         session["last_active"] = time.time()
         if _ensure_active_session_slot(sid, session) is not None:
             _notif_release_turn(session)
-            logger.info("%s: %s has another live owner; not waking it here", label, key)
-            return "refused"
+            from tui_gateway.gateway_background_holder import wake_past_retiring_owner
+            if (verdict := wake_past_retiring_owner(
+                    sid, session, label, key, claim_turn=_notif_claim_turn, release_turn=_notif_release_turn,
+                    claim_slot=_ensure_active_session_slot, foreign_owner=_foreign_turn_owner)) is not None:
+                return verdict
         kwargs = {k: v for k, v in (("display_kind", display_kind), ("display_metadata", display_metadata)) if v}
         if replay_delivery is not None:
             accepted = replay_delivery.submit(rid, sid, session, text, display_kind, display_metadata, label)

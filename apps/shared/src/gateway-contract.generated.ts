@@ -2924,6 +2924,7 @@ export interface PromptSubmitResult {
   turn_isolation?: boolean | null
   admission_id?: string | null
   forwarded?: boolean | null
+  queued_behind?: string | null
   queued_reason?: QueuedReason | null
   queued_started_at?: number | null
 }
@@ -3819,6 +3820,7 @@ export interface SessionInterruptResult {
   status: InterruptStatus
   interrupted?: boolean | null
   turn_isolation?: boolean | null
+  background_turn?: boolean | null
 }
 export type InterruptStatus = 'interrupted' | 'not_interrupted'
 export interface SessionTakeOverResult {

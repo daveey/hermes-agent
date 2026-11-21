@@ -38,6 +38,10 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
   final: a notice that landed while a hub core update held admission for 30 min stayed ``unresolved{notice_tail}``
   after the hold lifted (two hub chats, 2026-11-12). A ``busy`` stamp without ``busy_attempts`` (that older core's)
   within ``LOOKBACK_S`` is offered again as busy wake 2, so those rows resolve once this ships. [daveey]
+- a busy wake refused only because the core update holds admission charges no attempt: the row is stamped
+  ``closeout = {state: "deferred", hold_wait: true}``, due (without ``GRACE_S``) the moment the hold lifts, and
+  ``notice_hold_wait``'s watcher runs a pass within seconds of that. The sweep's passive rows for such wakes carry the
+  same stamp. [daveey]
 
 Ownership follows the unloaded sweeper's: a chat another live backend holds is that backend's (its own pass
 handles it); a chat with a live turn is skipped. The close-out prompt row is itself a notice, stamped as claimed,
@@ -163,6 +167,13 @@ def candidates(db: Any, now: float, only: Optional[set[str]] = None) -> list[dic
         rows = candidate_rows(db, sql)
     out = []
     from tui_gateway.notice_history import preceding_candidate, settled_notice, whole_row_settled
+    from tui_gateway.notice_hold_wait import is_hold_wait, update_hold_active
+    hold: list = []  # read once per call, only when a hold-wait row is seen
+
+    def hold_lifted() -> bool:
+        if not hold:
+            hold.append(update_hold_active())
+        return not hold[0]
 
     for row in rows:
         # Expire the effective obligation, not a settled physical tail: an older
@@ -170,13 +181,15 @@ def candidates(db: Any, now: float, only: Optional[set[str]] = None) -> list[dic
         row = preceding_candidate(db, row)
         # Cache structure, not age: a notice can become due (or expire) without a commit.
         meta = _decode(row["display_metadata"])
-        deferred_due = _deferred_due(meta, now)
+        # [daveey] A notice refused only by the update hold is due the moment the hold is gone (notice_hold_wait).
+        lifted = is_hold_wait(meta) and hold_lifted()
+        deferred_due = lifted or _deferred_due(meta, now)
         # Discovery lookback must not expire a durable retry during a long quota reset.
         if row["last_active"] is None or (row["last_active"] < now - LOOKBACK_S and not deferred_due):
             continue
         if not isinstance(row["timestamp"], (int, float)):
             continue
-        if row["timestamp"] > now - GRACE_S:
+        if row["timestamp"] > now - GRACE_S and not lifted:
             continue
         cand = {"sid": str(row["sid"]), "msg_id": int(row["msg_id"]), "content": str(row["content"] or ""),
                 "meta": meta, "raw_meta": row["display_metadata"]}
@@ -378,7 +391,15 @@ def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
         extra: dict = {}
         if verdict == "error" and early_recheck:
             attempts -= 1  # Speculative successor failure must leave the reset-time budget intact.
-        if verdict == "busy":
+        if verdict == "busy" and _held_by_update():
+            # [daveey] Refused only by the core update's admission hold: no busy attempt and no failed-wake attempt
+            # is charged; the row is due as soon as the hold lifts and the watcher wakes it then (notice_hold_wait).
+            from tui_gateway.notice_hold_wait import hold_wait_closeout, note_waiting
+            extra = {**hold_wait_closeout(), "attempts": max(0, attempts - 1), "busy_attempts": busy_attempts}
+            verdict = "deferred"
+            with contextlib.suppress(Exception):
+                note_waiting()
+        elif verdict == "busy":
             busy_attempts += 1
             extra = {"busy_attempts": busy_attempts}
             if busy_attempts < MAX_BUSY_ATTEMPTS:
@@ -404,6 +425,11 @@ def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
         return verdict
     finally:
         _wake_slots.release()
+
+
+def _held_by_update() -> bool:
+    from tui_gateway.notice_hold_wait import update_hold_active
+    return update_hold_active()
 
 
 def _refresh_key(db: Any, cand: dict, branch: str) -> tuple[str, str, int, str]:
