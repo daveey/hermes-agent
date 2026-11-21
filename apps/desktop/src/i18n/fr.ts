@@ -4265,6 +4265,7 @@ export const frOverrides = {
     stages: {
       idle: 'Préparation…',
       prepare: 'Préparation…',
+      backup: 'Sauvegarde avant la mise à jour…',
       fetch: 'Téléchargement…',
       pull: 'Presque prêt…',
       pydeps: 'Finalisation…',
@@ -4318,6 +4319,9 @@ export const frOverrides = {
     applyingBodyBackend:
       'Le backend distant applique la mise à jour et va redémarrer. Hermes se reconnecte automatiquement à son retour.',
     applyingClose: 'Cette fenêtre se fermera pendant la mise à jour, puis Hermes se rouvre seul.',
+    backupProgress: (done, total) =>
+      `Sauvegarde de votre historique de discussions avant la mise à jour : ${done} sur ${total}`,
+    backupChecking: 'Vérification de la sauvegarde…',
     errorTitle: 'Mise à jour non terminée',
     errorBody: "Pas de souci — rien n'a été perdu. Vous pouvez réessayer maintenant.",
     blockerTitle: 'Fermer les aperçus locaux pour mettre à jour Hermes ?',

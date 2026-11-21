@@ -4255,6 +4255,7 @@ export const deOverrides = {
     stages: {
       idle: 'Wird vorbereitet…',
       prepare: 'Wird vorbereitet…',
+      backup: 'Sicherung vor dem Update…',
       fetch: 'Wird heruntergeladen…',
       pull: 'Fast fertig…',
       pydeps: 'Wird abgeschlossen…',
@@ -4307,6 +4308,8 @@ export const deOverrides = {
     applyingBodyBackend:
       'Das Remote-Backend wendet das Update an und startet neu. Hermes verbindet sich automatisch wieder, wenn es zurück ist.',
     applyingClose: 'Dieses Fenster schließt sich während des Updates, dann öffnet sich Hermes von selbst wieder.',
+    backupProgress: (done, total) => `Dein Chatverlauf wird vor dem Update gesichert: ${done} von ${total}`,
+    backupChecking: 'Sicherung wird geprüft…',
     errorTitle: 'Update nicht abgeschlossen',
     errorBody: 'Keine Sorge – es ging nichts verloren. Sie können es jetzt erneut versuchen.',
     blockerTitle: 'Lokale Vorschauen schließen, um Hermes zu aktualisieren?',

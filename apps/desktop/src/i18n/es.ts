@@ -4244,6 +4244,7 @@ export const esOverrides = {
     stages: {
       idle: 'Preparando…',
       prepare: 'Preparando…',
+      backup: 'Haciendo una copia de seguridad antes de actualizar…',
       fetch: 'Descargando…',
       pull: 'Casi listo…',
       pydeps: 'Terminando…',
@@ -4297,6 +4298,8 @@ export const esOverrides = {
     applyingBodyBackend:
       'El backend remoto está aplicando la actualización y se reiniciará. Hermes se reconectará automáticamente cuando vuelva a estar disponible.',
     applyingClose: 'Hermes se cerrará para aplicar la actualización.',
+    backupProgress: (done, total) => `Copiando tu historial de chats antes de actualizar: ${done} de ${total}`,
+    backupChecking: 'Comprobando la copia de seguridad…',
     errorTitle: 'La actualización no terminó',
     errorBody: 'No pasa nada: no se perdió nada. Puedes intentarlo de nuevo ahora.',
     blockerTitle: '¿Cerrar las vistas previas locales para actualizar Hermes?',
