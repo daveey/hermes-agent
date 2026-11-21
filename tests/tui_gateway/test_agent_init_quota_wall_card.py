@@ -208,11 +208,9 @@ def _fable(reset=LUNA):
 def _real_chain(monkeypatch, pin_error, *fallbacks, target_model="gpt-6-luna"):
     """The ProviderFallbackError the TUI build's own walker raises for this pin failure and these fallbacks."""
     from hermes_cli.fallback_errors import ProviderFallbackError
-    pending = iter(error for _, _, error in fallbacks)
+    pending = iter([pin_error, *(error for _, _, error in fallbacks)])  # the walker resolves the pin first
 
     def resolve(**kwargs):
-        if kwargs.get("requested") == "openai-codex":
-            raise pin_error
         raise next(pending)
 
     monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", resolve)
@@ -349,3 +347,65 @@ def test_a_model_less_chain_pin_is_named_from_the_sessions_requested_model(tmp_p
     assert session["agent_failure"]["failure_route"]["model"] == "gpt-6-luna"
     (error,) = [f["params"]["payload"] for f in frames if f["params"]["type"] == "error"]
     assert error["message"] == CHAIN
+
+
+# --- review follow-ups: wording, parsing, folding, clocks and records ---------------------------------------------
+
+def test_a_typed_quota_pin_reads_quota_out_in_the_chain_sentence(monkeypatch, frozen_now):
+    """``agent/agent_init.py`` names its chain pin ``agent.provider or "auto"``: a typed wall there reads as quota."""
+    from hermes_cli.fallback_errors import ProviderFallbackError
+    from tui_gateway.user_messages import agent_init_failed_message
+    chain = ProviderFallbackError([("auto", "", _wall()), ("openai-codex", "gpt-6-luna", SubscriptionQuotaUnavailable(
+        "openai-codex", "gpt-6-luna", LUNA))])
+    assert agent_init_failed_message(chain) == (
+        "⚠️ anthropic/claude-fable-5-2 subscription quota is out until Fri 11-20 15:19 PT, and its fallbacks are out "
+        "too (openai-codex/gpt-6-luna until Fri 11-20 16:00 PT). This chat is pinned to it; use /model to switch, "
+        "or resend after Fri 11-20 15:19 PT.")
+
+
+def test_a_pin_wait_given_only_in_its_text_is_read(monkeypatch, frozen_now):
+    from hermes_cli.auth import AuthError
+    from hermes_cli.auth_constants import CODEX_RATE_LIMITED_CODE
+    from tui_gateway.user_messages import agent_init_failed_message
+    pin = AuthError("Codex usage limit reached; retry after 3600s", provider="openai-codex",
+                    code=CODEX_RATE_LIMITED_CODE, relogin_required=False)
+    assert agent_init_failed_message(_real_chain(monkeypatch, pin, _fable())) == CHAIN
+
+
+def test_a_fallback_repeating_the_pin_with_an_earlier_reset_names_that_quota_wall(monkeypatch, frozen_now):
+    from tui_gateway.user_messages import agent_init_failed_message
+    repeat = ("openai-codex", "gpt-6-luna", SubscriptionQuotaUnavailable("openai-codex", "gpt-6-luna", RESET - 1800))
+    message = agent_init_failed_message(_real_chain(monkeypatch, _codex_429(), _fable(), repeat))
+    assert message.startswith("⚠️ openai-codex/gpt-6-luna subscription quota is out until Fri 11-20 14:49 PT,")
+    assert message.count("gpt-6-luna") == 1
+
+
+@pytest.mark.parametrize("case", ["past-fallback-reset", "nested-rate-limited-chain"])
+def test_more_chains_that_keep_the_generic_message(monkeypatch, frozen_now, case):
+    from hermes_cli.fallback_errors import ProviderFallbackError
+    from tui_gateway.user_messages import agent_init_failed_message
+    if case == "past-fallback-reset":
+        chain = _real_chain(monkeypatch, _codex_429(), _fable(NOW - 60))
+    else:
+        inner = ProviderFallbackError([("openai-codex", "gpt-6-luna", _codex_429()),
+                                       ("openai-codex", "gpt-6", _codex_429())])
+        chain = ProviderFallbackError([("openai-codex", "gpt-6-luna", inner), _fable()])
+    assert agent_init_failed_message(chain).startswith("Hermes could not start the assistant")
+
+
+def test_the_chain_reset_is_the_clients_reset_at_and_the_replay_clock(monkeypatch, frozen_now):
+    """A pin pool's later ``reset_at`` gives way to the chain's earliest; the automation replay reads it too."""
+    from tui_gateway.automation_replay import trusted_resets_at
+    monkeypatch.setattr("tui_gateway.automation_replay.stale_code_reason", lambda: "")
+    failure = {"failure_kind": "exhausted", "reset_at": LUNA + 3600}
+    server._record_failure_route(failure, _real_chain(monkeypatch, _codex_429(), _fable(RESET - 1800)), "", NOW)
+    assert failure["reset_at"] == failure["failure_resets_at"] == RESET - 1800
+    assert trusted_resets_at(failure) == RESET - 1800
+
+
+def test_a_malformed_walls_record_keeps_the_generic_card(monkeypatch, tmp_path):
+    failure = {"failure_route": {"provider": "openai-codex", "model": "gpt-6-luna", "resets_at": RESET,
+                                 "walls": [{"provider": "openai-codex"}]}}
+    complete, _rows = _turn_on_failed_build(monkeypatch, tmp_path, failure, "chain refused")
+    (payload,) = complete
+    assert payload["error_surface"] == {"layer": "runtime", "code": "agent_init_failed", "retryable": True}

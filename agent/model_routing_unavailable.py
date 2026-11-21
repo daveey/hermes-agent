@@ -271,19 +271,25 @@ def _chain_pin(entry, pin_model, now):
     """``(provider, model, resets_at, kind)`` for a fallback chain's first entry, else None."""
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
 
+    from hermes_cli.fallback_errors import ProviderFallbackError
+
     provider, model, failure = entry
+    error = _terminal_refusal(failure)
+    if isinstance(error, ProviderFallbackError):
+        return None  # a chain nested in a chain: no raiser builds one, and its "pin" is not one route
     if (wall := quota_refusal_wall(failure)) is not None:
         reset, kind = wall[2], WALL_QUOTA
     else:
-        error = _terminal_refusal(failure)
         if not (isinstance(error, AuthError) and is_rate_limited_auth_error(error)):
             return None
         wait = _own_wait(error, now)
         if wait is None:
             return None
         reset, kind = now + wait, WALL_RATE_LIMIT
-    # The chain entry names the route that was tried; the requested model fills a model-less AuthError entry.
-    provider = (provider if isinstance(provider, str) and provider.strip() else getattr(failure, "provider", "")) or ""
+    # The chain entry names the route that was tried (``agent_init`` writes "auto" when it had none: the refusal's
+    # own provider then); the requested model fills a model-less AuthError entry.
+    if not isinstance(provider, str) or provider.strip().lower() in ("", "auto"):
+        provider = getattr(error, "provider", None) or ""
     model = model if isinstance(model, str) and model.strip() else (wall[1] if wall else pin_model) or ""
     if not (isinstance(provider, str) and provider.strip()):
         return None
@@ -301,9 +307,10 @@ def quota_refusal_walls(exc, pin_model=None, now=None):
     refusal with a finite reset (``quota_refusal_wall``). The pin is named as its chain entry gives it, with
     *pin_model* (the session's requested model) when the entry has none; with no model at all it is named by
     provider alone (model ""). Fallbacks are named as their refusal gives them; a repeat of the pin or of an
-    earlier fallback is folded into the first, keeping the earlier reset. A mixed or no-wait chain gives None
-    and keeps its own error, and so does a chain nested in a chain (unlike ``is_quota_failure``, which looks
-    inside one: no raiser nests them)."""
+    earlier fallback (provider compared case-insensitively) is folded into the first, keeping the earlier reset
+    and that reset's kind. A mixed or no-wait chain gives None and keeps its own error, and so does one whose
+    fallback reset has already passed, or a chain nested in a chain (unlike ``is_quota_failure``, which looks
+    inside one: no raiser nests them). *now* is the clock a rate-limit wait is added to (default: now)."""
     import time
 
     from hermes_cli.fallback_errors import ProviderFallbackError
@@ -314,17 +321,20 @@ def quota_refusal_walls(exc, pin_model=None, now=None):
         return None if wall is None else [(*wall, WALL_QUOTA)]
     if not error.failures:
         return None
-    pin = _chain_pin(error.failures[0], pin_model, time.time() if now is None else now)
+    now = time.time() if now is None else now
+    pin = _chain_pin(error.failures[0], pin_model, now)
     fallbacks = [quota_refusal_wall(failure) for _, _, failure in error.failures[1:]]
-    if pin is None or not fallbacks or any(w is None for w in fallbacks):
+    # A fallback whose reset has passed is not walled now: the chain did not fail on a wall alone.
+    if pin is None or not fallbacks or any(w is None or w[2] <= now for w in fallbacks):
         return None
     walls = [pin]
     for provider, model, reset in fallbacks:
-        same = next((i for i, w in enumerate(walls) if (w[0], w[1]) == (provider, model)), None)
+        same = next((i for i, w in enumerate(walls) if (w[0].lower(), w[1]) == (provider.lower(), model)), None)
         if same is None:
             walls.append((provider, model, reset, WALL_QUOTA))
         elif reset < walls[same][2]:
-            walls[same] = (*walls[same][:2], reset, walls[same][3])
+            # The route's own quota refusal opens first: it is that wall the sentence names, not a rate limit.
+            walls[same] = (*walls[same][:2], reset, WALL_QUOTA)
     return walls
 
 
