@@ -37,6 +37,9 @@ def heartbeat_in_background():
             _worker.start()
         except Exception:
             _worker = None
+            # Failed admission also consumes the window: stream chunks must not
+            # retry thread creation and emit a traceback on every activity touch.
+            kt._auto_heartbeat_last_attempt = time.monotonic()
             logger.warning('automatic worker heartbeat could not start; no fallback admitted', exc_info=True)
             raise
         return _worker
