@@ -125,17 +125,18 @@ def test_historical_reroute_records_distinct_runs_and_one_comment(board, monkeyp
     _deep(monkeypatch)
     with kbc.connect() as conn:
         tid = _pinned_card(conn)
-        kb._append_event(conn, tid, 'model_reroute', {'walled_provider': PIN[1],
-                         'resets_at': clock[0] + 55 * 3600, 'episode_id': 213})
+        kb._append_event(conn, tid, 'quota_episode', {'provider': PIN[1],
+                         'until': clock[0] + 55 * 3600, 'episode_id': 213})
         conn.commit()
         for _ in range(2):
             task = kb.claim_task(conn, tid, claimer=kb._claimer_id())
+            assert task is not None
             with kb.write_txn(conn):
                 event = pr.record(conn, task, PIN, PEER)
             assert event['run_id'] == task.current_run_id
             assert event['resets_at'] == clock[0] + 55 * 3600
             kb.reclaim_task(conn, tid, reason='test')
-        recorded = _events(conn, tid, 'model_reroute')[1:]
+        recorded = _events(conn, tid, 'model_reroute')
         assert len(recorded) == 2 and len({event['run_id'] for event in recorded}) == 2
         assert len(_comments(conn, tid)) == 1
         assert 'selected dynamically' in _comments(conn, tid)[0]
@@ -186,7 +187,8 @@ def test_preview_matches_admission_and_preserves_concrete_row(board, monkeypatch
         before = conn.total_changes
         preview = task_route(conn, tid)
         assert conn.total_changes == before
-        assert _tick(conn) == [preview[:2]] == [('class:standard', 'auto')]
+        assert preview[:2] == ('class:standard', None)  # preview has no concrete provider yet
+        assert _tick(conn) == [(preview[0], preview[1] or 'auto')] == [('class:standard', 'auto')]
         stored = kb.get_task(conn, tid)
         assert (stored.model_override, stored.provider_override) == PIN
         assert stored.model_pin_mandatory == 1

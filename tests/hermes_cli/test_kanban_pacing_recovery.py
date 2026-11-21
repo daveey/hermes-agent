@@ -46,7 +46,9 @@ def test_far_wall_reroutes_before_pacing_and_destination_limits_claims(
         seen = []
         result = dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append(
             (task.id, task.model_override, task.provider_override)))
-        assert consulted and set(consulted) == {'anthropic', 'openai-codex'}  # a class card judges every pool of its class
+        # The wall pass has already concretely selected anthropic. Pacing must judge
+        # that destination (including HELD), not spend a new claim on the known-walled source.
+        assert consulted and set(consulted) == {'anthropic'}
         if destination == lp.HELD:
             assert seen == []
             assert len(result.llm_paced) == 2

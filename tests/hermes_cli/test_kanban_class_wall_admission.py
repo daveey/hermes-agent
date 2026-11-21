@@ -1,4 +1,6 @@
 """Class selectors must not hide known provider walls at actual dispatch."""
+from types import SimpleNamespace
+
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -8,6 +10,29 @@ from hermes_cli import kanban_model_tier as tier
 from hermes_cli import kanban_provider_walls as walls
 from tests.hermes_cli.test_kanban_quota_episode import board as board, routing  # noqa: PLC0414
 from tests.hermes_cli.test_kanban_quota_episode_walls import _class_routes, _clock
+
+
+def test_class_wall_lookup_observes_sequential_assignee_registries(monkeypatch):
+    """A long-lived dispatcher must read the current registry on every call."""
+    from importlib import reload
+
+    from hermes_cli import kanban_class_walls as probe
+    from hermes_cli import kanban_model_assignment as assignment
+
+    first = {}
+    _class_routes(first, standard=[('openai-codex', 'gpt-6-astra')])
+    monkeypatch.setattr(assignment, '_assignee_config', lambda who: first)
+    reload(probe)  # first registry is present when the module is initialized
+    monkeypatch.setattr(walls, 'active_walls', lambda **kw: {})
+    monkeypatch.setattr(walls, 'live_quota_wall', lambda *args: None)
+    task = SimpleNamespace(assignee='a')
+    for provider, model in [('openai-codex', 'gpt-6-astra'), ('anthropic', 'claude-opus-5-5')]:
+        config = {}
+        _class_routes(config, standard=[(provider, model)])
+        monkeypatch.setattr(assignment, '_assignee_config', lambda who, current=config: current)
+        routes, blocked = probe.class_wall_routes(task, 'class:standard', now=1_800_000_000)
+        assert [(r['provider'], r['model']) for r in routes] == [(provider, model)]
+        assert blocked == {}
 
 
 @pytest.mark.parametrize('evidence', ['file', 'live'])

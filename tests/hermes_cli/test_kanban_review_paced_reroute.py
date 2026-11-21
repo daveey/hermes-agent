@@ -257,9 +257,9 @@ def test_only_review_receipts_carry_the_paced_block(board, clock, monkeypatch, a
     paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='default card', assignee='a')
-        assert pin_tests._tick(conn) == [('class:standard', 'auto')]
+        assert pin_tests._tick(conn) == [PEER]
         tier_event = pin_tests._events(conn, tid, 'model_tier')[-1]
-    assert tier_event['reason'] == 'default' and 'paced' not in tier_event
+    assert tier_event['reason'] == 'default+paced:openai-codex' and 'paced' not in tier_event
 
 
 @pytest.mark.parametrize('reason', ['review_unpinned', 'review_override', 'default', 'pinned+pin_quota_reroute'])
