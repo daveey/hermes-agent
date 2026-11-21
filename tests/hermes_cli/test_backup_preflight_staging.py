@@ -6,6 +6,7 @@ reporters accumulated 11.7 GB of them (#124972, #128605).
 """
 import os
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -42,8 +43,11 @@ def test_sigterm_mid_copy_removes_the_staging_copy(tmp_path):
     holder.execute("BEGIN EXCLUSIVE")
     try:
         # The child's own 10s lock deadline must not expire while a starved runner delays the SIGTERM.
+        # This fixture tests the locked page copy, not clone capability detection. Its
+        # short-lived .partial-probe is not readiness for the actual staging copy.
+        env = {**os.environ, "HERMES_PREFLIGHT_CLONE": "0"}
         proc = subprocess.Popen([sys.executable, "-I", "-S", str(SCRIPT), str(home), "600"],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         try:
             wait_until(lambda: _staging(home) or proc.poll() is not None, timeout=30, what="the staging copy")
             assert proc.poll() is None and _staging(home), "the pre-flight must still be copying"
@@ -61,6 +65,62 @@ def test_sigterm_mid_copy_removes_the_staging_copy(tmp_path):
     assert proc.returncode == 128 + signal.SIGTERM, stderr
     assert stdout == b""
     assert _staging(home) == []
+
+
+@pytest.mark.platforms("posix")
+def test_sigterm_readiness_does_not_accept_a_transient_clone_probe(tmp_path, monkeypatch):
+    """Force probe observation -> probe removal -> readiness assertion, without sleeps.
+
+    Run the real SIGTERM fixture with an owned child. The real capability check creates
+    and removes its probe; only the filesystem clone is replaced, so this works off APFS too.
+    Removing the fixture's clone opt-out must fail before it sends SIGTERM.
+    """
+    driver = """
+import errno, json, runpy, signal, socket, sys
+from pathlib import Path
+ns = runpy.run_path(sys.argv[1], run_name='not_main')
+g = ns['preflight_state_db'].__globals__
+barrier = socket.socket(fileno=int(sys.argv[3]))
+barrier.settimeout(30)
+original = g['_clone_unavailable']
+probed = False
+def clone_file(*args):
+    global probed
+    probed = True
+    assert barrier.recv(1) == b'G'
+    raise OSError(errno.ENOTSUP, 'controlled unsupported clone')
+def unavailable(*args):
+    result = original(*args)
+    if probed:
+        barrier.sendall(b'R')  # the real finally has removed the probe
+        assert barrier.recv(1) == b'G'  # keep actual staging absent for the assertion
+    return result
+g['_clone_file'] = clone_file
+g['_clone_unavailable'] = unavailable
+signal.signal(signal.SIGTERM, ns['_on_sigterm'])
+print(json.dumps(ns['preflight_state_db'](Path(sys.argv[2]), busy_timeout_seconds=600,
+                                       clone=True, reporter=ns['_ProgressReporter']())))
+"""
+    popen, staging = subprocess.Popen, _staging
+    parent, child = socket.socketpair()
+    parent.settimeout(30)
+    with parent, child:
+        def start(argv, **kwargs):
+            return popen([*argv[:3], "-c", driver, argv[3], argv[4], str(child.fileno())],
+                         pass_fds=(child.fileno(),), **kwargs)
+
+        def observe(home):
+            observed = staging(home)
+            if any(name.endswith(".partial-probe") for name in observed):
+                parent.sendall(b'G')
+                assert parent.recv(1) == b'R'
+                assert staging(home) == []
+            return observed
+
+        monkeypatch.setenv("HERMES_PREFLIGHT_CLONE", "1")
+        monkeypatch.setattr(subprocess, "Popen", start)
+        monkeypatch.setattr(sys.modules[__name__], "_staging", observe)
+        test_sigterm_mid_copy_removes_the_staging_copy(tmp_path)
 
 
 @pytest.mark.platforms("posix")
