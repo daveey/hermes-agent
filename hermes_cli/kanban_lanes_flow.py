@@ -11,6 +11,7 @@ import time
 from typing import Any, Optional
 
 from hermes_cli import kanban_lanes as lanes
+from hermes_cli.kanban_lanes_flow_evidence import Evidence
 
 WINDOWS = {"1h": 3600, "6h": 6 * 3600, "24h": 86400, "7d": 7 * 86400}
 STEPS = ("intake", "waiting", "ready", "running", "review", "ci", "merge", "deploy", "test", "done")
@@ -200,7 +201,7 @@ def _pr_snapshot(task, events, awaiting, reader=None) -> Optional[dict]:
         snap.update(merged=True, deployed=False)
     # Deployment has no provider-independent API. Accept explicit task-event observations only;
     # never turn a merge receipt or elapsed time into proof of live installation.
-    for event in events:
+    for event in events if url else ():
         meta = _payload(dict(event)).get("metadata")
         observed = meta.get("flow_pr") if isinstance(meta, dict) else None
         if isinstance(observed, dict) and url and observed.get("url") == url:
@@ -256,8 +257,8 @@ def _awaiting(task, events=()) -> Optional[dict]:
     return None
 
 
-def _card_from_row(conn, task, now: float, reader=None, pol=None) -> dict:
-    events = _events(conn, task["id"])
+def _card_from_row(conn, task, now: float, reader=None, pol=None, *, evidence=None) -> dict:
+    events = _events(conn, task["id"]) if evidence is None else evidence.events(task["id"])
     awaited = _awaiting(task, events)
     held = conn.execute(f"SELECT 1 FROM tasks WHERE id=? AND {lanes.HELD}", (task["id"],)).fetchone() is not None
     gate_reason = _gate_reason(events) if held else None
@@ -272,7 +273,8 @@ def _card_from_row(conn, task, now: float, reader=None, pol=None) -> dict:
     return {
         "id": task["id"], "title": task["title"], "status": task["status"],
         "block_kind": task["block_kind"], "human_request": human if human else None,
-        "parents_open": _parents_open(conn, task["id"]), "events": event_dicts,
+        "parents_open": (_parents_open(conn, task["id"]) if evidence is None
+                         else bool(evidence.parents(task["id"]))), "events": event_dicts,
         "awaiting": awaited, "pr": pr, "created_by": task["created_by"],
         "session_id": task["session_id"] if "session_id" in task.keys() else None,
         "project_id": task["project_id"] if "project_id" in task.keys() else None,
@@ -282,15 +284,25 @@ def _card_from_row(conn, task, now: float, reader=None, pol=None) -> dict:
     }
 
 
-def _pr_urls(conn, rows) -> list:
+def _pr_urls(conn, rows, *, evidence=None) -> list:
     out = []
     for task in rows:
+        if evidence is not None:
+            out.append(evidence.pr_url(task))
+            continue
         events = _events(conn, task["id"])
-        out.append((_pr_snapshot(task, events, _awaiting(task, events)) or {}).get("url"))
+        url = _pr_url(task, events)
+        awaited = _awaiting(task, events)
+        if not url and isinstance(awaited, dict):
+            ref = awaited.get("ref")
+            if isinstance(ref, str) and ref.startswith("https://github.com/") and "/pull/" in ref:
+                url = ref
+        out.append(url)
     return out
 
 
-def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None, reader=None) -> dict:
+def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None, reader=None,
+             evidence=None) -> dict:
     """Cards still open, plus per-lane window throughput and today's cap usage.
 
     Dashboards may inject a nonblocking published PR reader (prefetch/get). The CLI
@@ -304,15 +316,15 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None,
         pol = lanes.parse({"lanes": {"other": {}}})
     window_s = WINDOWS[window]
     usage = lanes.usage(conn, pol, window_s=window_s, now=now)
-    rows = conn.execute(
-        f"SELECT * FROM tasks WHERE status IN {_OPEN} ORDER BY created_at, id").fetchall()
+    evidence = Evidence(conn) if evidence is None else evidence
+    rows = evidence.rows
     if reader is None:
         from hermes_cli.kanban_lanes_flow_pr import Reader
         reader = Reader()
-    reader.prefetch(_pr_urls(conn, rows))
+    reader.prefetch(_pr_urls(conn, rows, evidence=evidence))
     cards = []
     for row in rows:
-        card = _card_from_row(conn, row, now, reader, pol)
+        card = _card_from_row(conn, row, now, reader, pol, evidence=evidence)
         step = classify_step(card)
         reason = classify_reason(card, step)
         source = classify_source(card)
@@ -323,7 +335,7 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None,
                       "lane": pol.lane_of(card["tenant"]), "step": step, "reason": reason,
                       "source": source, "age_h": card["age_h"], "pr": pr})
         if reason == "dep":
-            blockers = _blockers(conn, card["id"])
+            blockers = evidence.blockers(card["id"])
             cards[-1].update(blockers=blockers, blocker=blockers[0] if blockers else None)
     out_lanes = {}
     for name, spec in pol.lanes.items():
