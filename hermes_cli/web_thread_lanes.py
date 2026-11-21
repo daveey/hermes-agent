@@ -172,6 +172,8 @@ async def _admit(gate: anyio.CapacityLimiter, token: object, deadline: float, re
     was taken is ignored (the call runs; nothing leaks)."""
     acquired = False
     gone = False
+    task = asyncio.current_task()
+    cancels_before = task.cancelling() if task is not None else 0
     try:
         # A free slot is taken without awaiting: anyio's uncontended acquire passes a shielded checkpoint, and a
         # native cancel landing there makes it release on behalf of the wrong borrower (RuntimeError, slot
@@ -206,8 +208,7 @@ async def _admit(gate: anyio.CapacityLimiter, token: object, deadline: float, re
                     tg.cancel_scope.cancel()
                 # A native cancel of this task that the task group's own (already cancelled) scope absorbed
                 # must still reach the caller.
-                task = asyncio.current_task()
-                if task is not None and task.cancelling():
+                if task is not None and task.cancelling() > cancels_before:
                     raise asyncio.CancelledError()
     except BaseException:
         if acquired:
@@ -249,12 +250,12 @@ async def run_in_lane(lane: str, fn: Callable[..., Any], *args: Any, request: An
     state_lock = threading.Lock()
     state = {"entered": False, "skipped": False, "done": False}
 
-    def finish() -> None:
+    def finish(ran: bool = True) -> None:
         with state_lock:
             if state["done"]:
                 return
             state["done"] = True
-        entry._add(in_use=-1, served=1)
+        entry._add(in_use=-1, served=1 if ran else 0)  # served: calls whose work ran
         gate.release_on_behalf_of(token)
 
     def call() -> Any:
@@ -281,7 +282,9 @@ async def run_in_lane(lane: str, fn: Callable[..., Any], *args: Any, request: An
                 state["skipped"] = True
         # Not started (now never will) or already finished (fn raised): release now. Started and the caller
         # was cancelled: the thread releases when it returns.
-        if not entered or not isinstance(exc, (asyncio.CancelledError, anyio.get_cancelled_exc_class())):
+        if not entered:
+            finish(ran=False)
+        elif not isinstance(exc, (asyncio.CancelledError, anyio.get_cancelled_exc_class())):
             finish()
         raise
     finish()

@@ -212,38 +212,39 @@ async def test_a_cancel_right_after_the_hand_off_never_leaks_the_slot(turns):
     assert await asyncio.wait_for(lanes.run_in_lane("sessions", lambda: "next"), 2) == "next"
 
 
-class _GoneWhen:
-    """Disconnected once ``gone()`` is true; answers without yielding, as uvicorn does once it knows."""
-
-    def __init__(self, gone):
-        self.gone = gone
-
-    async def is_disconnected(self):
-        return self.gone()
-
-
 @pytest.mark.asyncio
-async def test_a_disconnect_seen_with_the_hand_off_never_leaks_the_slot(monkeypatch):
+@pytest.mark.parametrize("hand_off_first", [True, False], ids=["hand-off-then-poll", "poll-then-hand-off"])
+async def test_a_disconnect_seen_with_the_hand_off_never_leaks_the_slot(monkeypatch, hand_off_first):
     # Review of #3936: when the slot was handed over in the same loop turn the disconnect poll woke, the poll
-    # overwrote the acquisition with 'disconnected' and the slot was never released. The client reads as gone
-    # from the hand-off on (the gate has dequeued the waiter); repeated so both orderings come up.
-    monkeypatch.setattr(lanes, "DISCONNECT_POLL_S", 0)
+    # overwrote the acquisition with 'disconnected' and the slot was never released. Deterministic: the poll's
+    # sleep and the hand-off happen in one synchronous step, in both orders.
+    tick = asyncio.Event()
+
+    async def poll_sleep(_seconds):
+        await tick.wait()
+        tick.clear()
+
+    monkeypatch.setattr(anyio, "sleep", poll_sleep)
     gate, _runner = lanes._lane("sessions").limiters()
-    for _ in range(20):
-        work, started, release = _blocker()
-        holder = asyncio.create_task(lanes.run_in_lane("sessions", work))
-        await _until(started.is_set)
-        handed = _GoneWhen(lambda: gate.statistics().tasks_waiting == 0)
-        waiter = asyncio.create_task(lanes.run_in_lane("sessions", lambda: "ran", request=handed))
-        await _until(lambda: gate.statistics().tasks_waiting == 1)
-        release.set()
-        await holder
-        try:
-            await asyncio.wait_for(waiter, 2)
-        except lanes.LaneBusy as busy:
-            assert busy.detail["reason"] == "disconnected"
-        await _until(lambda: lanes.stats()["sessions"]["in_use"] == 0)
-        assert _borrowed("sessions") == 0
+    dummy = object()
+    await gate.acquire_on_behalf_of(dummy)
+    request = _Request()
+    ran = []
+    waiter = asyncio.create_task(lanes.run_in_lane("sessions", lambda: ran.append(1), request=request))
+    await _until(lambda: gate.statistics().tasks_waiting == 1)
+    request.gone = True
+    if hand_off_first:
+        gate.release_on_behalf_of(dummy)
+        tick.set()
+    else:
+        tick.set()
+        gate.release_on_behalf_of(dummy)
+    try:
+        await asyncio.wait_for(waiter, 2)
+    except lanes.LaneBusy as busy:
+        assert busy.detail["reason"] == "disconnected" and ran == []
+    await _until(lambda: lanes.stats()["sessions"]["in_use"] == 0)
+    assert _borrowed("sessions") == 0
 
 
 @pytest.mark.asyncio
@@ -310,4 +311,5 @@ async def test_work_cancelled_before_a_thread_picks_it_up_never_runs(monkeypatch
     with pytest.raises(asyncio.CancelledError):
         await task
     assert lanes.stats()["sessions"]["in_use"] == 0 and _borrowed("sessions") == 0
+    assert lanes.stats()["sessions"]["served"] == 0  # it never ran
     assert picked[0]() is None and ran == []  # a late pickup does nothing
