@@ -245,8 +245,10 @@ def forward_rpc(home: Path, endpoint, method: str, params: dict) -> Any:
     return asyncio.run(call())
 
 
-def forward_prompt(sid: str, session: dict, text: str, *, emit=None, home: Path | None = None) -> dict:
-    """Admit ``text`` into the owner's FIFO for this session; the owner's receipt.
+def forward_prompt(sid: str, session: dict, text: str, *, emit=None, home: Path | None = None,
+                   endpoint=None) -> dict:
+    """Admit ``text`` into the owner's FIFO for this session; the owner's receipt. ``endpoint``: the owner the
+    caller already discovered (and proved, e.g. ``gateway_background_holder``), dialled instead of a new lookup.
 
     Raises ``OwnerNotRunning`` when no gateway serves the home, ``OwnerUnavailable`` (or the
     client's refusal) when the owner did not take it, and ``OwnerUnconfirmed`` when the prompt may
@@ -257,7 +259,7 @@ def forward_prompt(sid: str, session: dict, text: str, *, emit=None, home: Path 
     if not key:
         raise OwnerUnavailable("the chat has no stored session yet")
     home = Path(home or session.get("profile_home") or server._hermes_home).resolve()
-    relay = _Relay(sid, session, key, home, discover_owner(home), text, emit or server._emit)
+    relay = _Relay(sid, session, key, home, endpoint or discover_owner(home), text, emit or server._emit)
     from agent.memory_provider import spawn_context_thread
     spawn_context_thread(relay.run, name=f"owner-forward-{key[:24]}").start()
     try:

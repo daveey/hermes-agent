@@ -829,11 +829,11 @@ def _queue_behind_background_turn(rid, sid, session, text, params, kind):
     from tui_gateway.gateway_background_holder import gateway_background_holder
     if not owner_forward.prompt_forwardable(session, text, params):
         return None
-    if gateway_background_holder(session, foreign_owner=_foreign_turn_owner) is None:
+    if (gateway := gateway_background_holder(session, foreign_owner=_foreign_turn_owner)) is None:
         return None
     key = session.get("session_key") or sid
     try:
-        receipt = owner_forward.forward_prompt(sid, session, text)
+        receipt = owner_forward.forward_prompt(sid, session, text, endpoint=gateway.endpoint)
     except owner_forward.OwnerUnconfirmed:
         # It may already be queued there: a take-over plus a resend could run it twice.
         return _err(rid, 4090, "The gateway is running a turn in this chat and did not confirm your message"

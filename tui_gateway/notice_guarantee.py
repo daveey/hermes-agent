@@ -41,7 +41,7 @@ unloaded sweeper's loop therefore looks, in every profile store, for chats whose
 - a busy wake refused only because the core update holds admission charges no attempt: the row is stamped
   ``closeout = {state: "deferred", hold_wait: true}``, due (without ``GRACE_S``) the moment the hold lifts, and
   ``notice_hold_wait``'s watcher runs a pass within seconds of that. The sweep's passive rows for such wakes carry the
-  same stamp. [daveey]
+  same stamp. A busy wake whose chat is held by a backend being replaced retries in 15 s, also uncharged. [daveey]
 
 Ownership follows the unloaded sweeper's: a chat another live backend holds is that backend's (its own pass
 handles it); a chat with a live turn is skipped. The close-out prompt row is itself a notice, stamped as claimed,
@@ -399,6 +399,11 @@ def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
             verdict = "deferred"
             with contextlib.suppress(Exception):
                 note_waiting()
+        elif verdict == "busy" and (soon := _retiring_retry_at(sid)) is not None:
+            # [daveey] The chat's owner is a backend being replaced: it lets go within seconds. A short retry, and no
+            # attempt charged (gateway_background_holder.wake_past_retiring_owner).
+            extra = {"retry_at": soon, "attempts": max(0, attempts - 1), "busy_attempts": busy_attempts}
+            verdict = "deferred"
         elif verdict == "busy":
             busy_attempts += 1
             extra = {"busy_attempts": busy_attempts}
@@ -425,6 +430,11 @@ def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
         return verdict
     finally:
         _wake_slots.release()
+
+
+def _retiring_retry_at(sid: str) -> Optional[float]:
+    from tui_gateway.gateway_background_holder import retiring_retry_at
+    return retiring_retry_at(sid)
 
 
 def _held_by_update() -> bool:

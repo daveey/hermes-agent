@@ -159,3 +159,63 @@ def test_the_drain_stops_after_its_window():
     passes = hw.watch(run_pass=lambda: [{"result": "skipped:slots"}], held=lambda: False, sleep=lambda s: None,
                       monotonic=lambda: next(clock))
     assert 1 < passes <= hw.DRAIN_S / 50 + 2
+
+
+def test_a_hold_wait_followed_by_an_ordinary_busy_keeps_the_normal_backoff(db, hold):
+    row = _notice(db, "✔ Kanban t_ddd done")
+    now = time.time()
+    _run(db, verdict="busy", now=now)  # refused by the hold
+    assert _closeout(db, row)["hold_wait"] is True
+
+    hold["held"] = False
+    _out, calls = _run(db, verdict="busy", now=now + 30)  # the hold lifted, the chat is busy for another reason
+
+    closeout = _closeout(db, row)
+    assert calls == [(CHAT, row)] and closeout["state"] == "deferred" and not closeout.get("hold_wait")
+    assert closeout["busy_attempts"] == 1 and closeout["retry_at"] >= now + ng.BUSY_RETRY_S  # stamped off the wall clock
+    assert _run(db, now=now + 90) == ([], [])  # not due again before its backoff
+
+
+def test_a_busy_wake_held_by_a_retiring_backend_retries_soon_and_charges_nothing(db, hold, monkeypatch):
+    from tui_gateway import gateway_background_holder as gbh
+    hold["held"] = False
+    row = _notice(db, "✔ Kanban t_eee done")
+    now = time.time()
+
+    def wake(sid, msg_id):
+        with gbh._retiring_mu:
+            gbh._retiring_busy[sid] = now + gbh.RETIRING_OWNER_RETRY_S
+        return "busy"
+
+    @contextlib.contextmanager
+    def opener(chat_id):
+        yield db, chat_id
+
+    ng.guarantee_pass(now=now, stores=lambda: iter([db]), holders=list, session_db=opener, wake=wake,
+                      spawn=lambda job: job())
+
+    closeout = _closeout(db, row)
+    assert closeout["state"] == "deferred" and closeout["retry_at"] == now + gbh.RETIRING_OWNER_RETRY_S
+    assert closeout.get("attempts", 0) == 0 and closeout.get("busy_attempts", 0) == 0
+    _out, calls = _run(db, now=now + gbh.RETIRING_OWNER_RETRY_S + 1)
+    assert calls == [(CHAT, row)]
+
+
+def test_a_notice_refused_while_the_watcher_decides_to_stop_is_not_lost():
+    """``note_waiting`` during the watcher's last pass makes it watch again; once it returns, ``thread`` is already
+    clear (in the same locked section), so the next ``note_waiting`` starts a new watcher."""
+    hw._reset_for_tests()
+    jobs, passes = [], []
+
+    def run_pass():
+        passes.append(1)
+        if len(passes) == 1:
+            assert hw.note_waiting(run_pass=run_pass, spawn=jobs.append) is False  # the live watcher takes it
+        return []
+
+    assert hw.note_waiting(run_pass=run_pass, held=lambda: False, sleep=lambda s: None, spawn=jobs.append)
+    jobs[0]()
+
+    assert len(passes) == 2 and len(jobs) == 1  # watched again for the late notice, no second thread
+    assert hw._state["thread"] is None
+    assert hw.note_waiting(run_pass=run_pass, held=lambda: False, sleep=lambda s: None, spawn=jobs.append) is True

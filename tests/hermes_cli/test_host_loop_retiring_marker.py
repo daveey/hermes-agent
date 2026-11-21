@@ -61,3 +61,39 @@ def test_garbage_answers_none(tmp_path):
     assert hll.retiring_reason(os.getpid()) is None
     assert hll.retiring_reason("not-a-pid") is None
     assert hll.retiring_reason(-1) is None
+
+
+def test_racing_retire_and_resume_leave_the_record_consistent():
+    """Publish and withdraw run under the retirement lock: whatever the interleaving, the record exists exactly
+    while some retirement reason is left."""
+    import threading
+
+    me = os.getpid()
+    barrier = threading.Barrier(8)
+
+    def churn(n):
+        barrier.wait()
+        for i in range(60):
+            key = f"k{n}"
+            if i % 2 == 0:
+                hll.retire_host_loops(key, f"r{n}")
+            else:
+                hll.resume_host_loops(key)
+
+    threads = [threading.Thread(target=churn, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert (hll.retiring_reason(me) is not None) == (hll.host_loops_retired() is not None)
+    for n in range(8):
+        hll.resume_host_loops(f"k{n}")
+    assert hll.host_loops_retired() is None and hll.retiring_reason(me) is None
+
+
+def test_the_record_is_withdrawn_when_the_process_exits():
+    hll.retire_host_loops("code-skew", "boot behind")
+    assert hll._EXIT_HOOK  # atexit.register(_withdraw_retiring) is in place
+    hll._withdraw_retiring()  # what the exit hook runs
+    assert hll.retiring_reason(os.getpid()) is None

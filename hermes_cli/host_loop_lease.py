@@ -112,7 +112,7 @@ def retire_host_loops(key: str, reason: str) -> bool:
     with _RETIRE_MU:
         first = not _RETIRED
         _RETIRED[key] = reason
-    _publish_retiring(reason)
+        _publish_retiring(reason)  # under the lock: a racing resume never leaves a record behind
     if not first:
         return False
     logger.warning("host loops retired in this process (%s): releasing every host-loop lease and starting no "
@@ -141,8 +141,9 @@ def resume_host_loops(key: str) -> bool:
     with _RETIRE_MU:
         had = _RETIRED.pop(key, None) is not None
         left = not _RETIRED
+        if had and left:
+            _withdraw_retiring()  # under the lock: a racing retire publishes after this, never before
     if had and left:
-        _withdraw_retiring()
         logger.info("host loops resumed in this process (%s cleared)", key)
     return left
 
@@ -156,8 +157,16 @@ def _retiring_path(pid: int, home: str | Path | None = None) -> Path:
     return lease_dir(home) / "retiring" / f"{int(pid)}.json"
 
 
+_EXIT_HOOK: list = []
+
+
 def _publish_retiring(reason: str) -> None:
+    """Caller holds ``_RETIRE_MU``. The record is also withdrawn when the process exits cleanly."""
     pid = os.getpid()
+    if not _EXIT_HOOK:
+        import atexit
+        atexit.register(_withdraw_retiring)
+        _EXIT_HOOK.append(True)
     try:
         path = _retiring_path(pid)
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,7 @@ gateway's FIFO (the RT-37 forward), and any other holder keeps the takeover.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -31,29 +32,42 @@ def _entry(pid, key=KEY):
     return {"session_id": key, "pid": pid, "lease_id": f"lease-{pid}"}
 
 
+def _plain_pids(key, owner, entries, me):
+    """``holder_pids`` with every identity taken at face value (the identity checks have their own tests)."""
+    return gbh.holder_pids(key, owner, entries, me, durable_pid=lambda h: gbh._holder_pid(h) or 0,
+                           registry_pid=lambda e: int(e.get("pid") or 0))
+
+
+def _dialed(pid):
+    return lambda session: gbh.DialedGateway(pid, "endpoint") if pid else None
+
+
 # -- who holds the chat ------------------------------------------------------------------------------------------
 
 
 def test_the_gateway_alone_holding_the_chat_is_named():
     session = {"session_key": KEY}
-    assert gbh.gateway_background_holder(session, foreign_owner=lambda s: _owner(GATEWAY),
-                                         registry=lambda: [_entry(GATEWAY), _entry(99, "other-chat")],
-                                         gateway_pid=lambda: GATEWAY) == GATEWAY
+    found = gbh.gateway_background_holder(session, foreign_owner=lambda s: _owner(GATEWAY),
+                                          registry=lambda: [_entry(GATEWAY), _entry(99, "other-chat")],
+                                          dialed=_dialed(GATEWAY), holders=_plain_pids)
+    assert found == gbh.DialedGateway(GATEWAY, "endpoint")
     # The registry lease alone (between the notice's admission and its turn lease) proves it too.
     assert gbh.gateway_background_holder(session, foreign_owner=lambda s: None, registry=lambda: [_entry(GATEWAY)],
-                                         gateway_pid=lambda: GATEWAY) == GATEWAY
+                                         dialed=_dialed(GATEWAY), holders=_plain_pids) is not None
 
 
-@pytest.mark.parametrize("owner, entries, live", [
+@pytest.mark.parametrize("owner, entries, dialed_pid", [
     (_owner(DESKTOP), [], GATEWAY),                      # another Desktop backend writes the turn
     (_owner(GATEWAY), [_entry(DESKTOP)], GATEWAY),       # the gateway AND another window hold it
-    (_owner(GATEWAY), [], None),                         # no verified live gateway
+    (_owner(GATEWAY), [], None),                         # no ready gateway for this chat's profile
+    (_owner(GATEWAY), [], 4242),                         # the forward would dial ANOTHER gateway
     ({"holder": "legacy-holder"}, [], GATEWAY),          # an unreadable holder string
     (None, [], GATEWAY),                                 # nobody else holds it
 ])
-def test_any_other_holder_keeps_the_takeover(owner, entries, live):
+def test_any_other_holder_keeps_the_takeover(owner, entries, dialed_pid):
     assert gbh.gateway_background_holder({"session_key": KEY}, foreign_owner=lambda s: owner,
-                                         registry=lambda: entries, gateway_pid=lambda: live) is None
+                                         registry=lambda: entries, dialed=_dialed(dialed_pid),
+                                         holders=_plain_pids) is None
 
 
 def test_an_unreadable_holder_keeps_the_takeover():
@@ -61,9 +75,32 @@ def test_an_unreadable_holder_keeps_the_takeover():
         raise OSError("state.db is locked")
 
     assert gbh.gateway_background_holder({"session_key": KEY}, foreign_owner=broken, registry=list,
-                                         gateway_pid=lambda: GATEWAY) is None
+                                         dialed=_dialed(GATEWAY), holders=_plain_pids) is None
     assert gbh.gateway_background_holder({"session_key": ""}, foreign_owner=lambda s: _owner(GATEWAY),
-                                         registry=list, gateway_pid=lambda: GATEWAY) is None
+                                         registry=list, dialed=_dialed(GATEWAY), holders=_plain_pids) is None
+
+
+def test_a_durable_holder_from_another_pid_namespace_is_not_that_process(monkeypatch):
+    import hermes_state_pidns
+    monkeypatch.setattr(hermes_state_pidns, "holder_pid_checkable", lambda holder: False)
+    assert gbh._durable_holder_pid(_owner(GATEWAY)["holder"]) == 0
+    monkeypatch.setattr(hermes_state_pidns, "holder_pid_checkable", lambda holder: True)
+    assert gbh._durable_holder_pid(_owner(GATEWAY)["holder"]) == GATEWAY
+    assert gbh._durable_holder_pid("legacy-holder") == 0
+
+
+def test_a_registry_lease_counts_only_for_this_hosts_live_process(monkeypatch):
+    import os
+
+    import hermes_cli.active_sessions as act
+    me = os.getpid()
+    here = act.owner_host()
+    start = act._own_start_time()
+    assert gbh._registry_pid({"pid": me, "host": here, "process_start_time": start}) == me
+    assert gbh._registry_pid({"pid": me, "host": "another-host", "process_start_time": start}) == 0
+    monkeypatch.setattr(act, "_pid_liveness", lambda pid, start=None, **kw: False)  # dead, or the pid was reused
+    assert gbh._registry_pid({"pid": me, "host": here, "process_start_time": 1.0}) == 0
+    assert gbh._registry_pid({"pid": "x"}) == 0
 
 
 # -- prompt.submit -----------------------------------------------------------------------------------------------
@@ -79,10 +116,12 @@ def background(monkeypatch):
     sent = []
     state = {"holder": GATEWAY, "receipt": {"status": "queued", "admission_id": "adm-1"}, "raise": None}
     monkeypatch.setattr(server, "_automation_holder_kind", lambda session: "kanban_notice")
-    monkeypatch.setattr(gbh, "gateway_background_holder", lambda session, **kw: state["holder"])
+    monkeypatch.setattr(gbh, "gateway_background_holder",
+                        lambda session, **kw: state["holder"] and gbh.DialedGateway(state["holder"], "endpoint"))
 
     def forward(sid, session, text, **kw):
         sent.append((sid, text))
+        state["endpoint"] = kw.get("endpoint")
         if state["raise"] is not None:
             raise state["raise"]
         return state["receipt"]
@@ -98,6 +137,7 @@ def test_a_typed_prompt_is_queued_behind_the_gateways_background_turn(background
     assert resp["result"] == {"status": "queued", "admission_id": "adm-1", "forwarded": True,
                               "queued_behind": "kanban_notice"}
     assert background["sent"] == [("s", "typed here")]
+    assert background["endpoint"] == "endpoint"  # the very gateway proved to hold the chat is dialled
 
 
 def test_an_unconfirmed_forward_is_never_taken_over(background):
@@ -159,17 +199,24 @@ def idle_chat(monkeypatch):
     session = {"agent": None, "agent_ready": threading.Event(), "session_key": KEY, "history": [],
                "history_lock": threading.RLock(), "running": False}
     monkeypatch.setitem(server._sessions, sid, session)
-    calls, done = [], threading.Event()
+    state = {"calls": [], "done": threading.Event(), "answer": {"result": {"status": "taken_over"}}, "gate": None,
+             "events": []}
 
     def take_over(rid, params):
-        calls.append(params)
-        done.set()
-        return {"result": {"status": "taken_over"}}
+        state["calls"].append(params)
+        if state["gate"] is not None:
+            state["gate"].wait(5)  # a slow take-over: held until the test has the Stop's answer
+        state["done"].set()
+        return state["answer"]
 
     monkeypatch.setitem(server._methods, "session.take_over", take_over)
     monkeypatch.setattr(server, "_automation_holder_kind", lambda session: "kanban_notice")
-    monkeypatch.setattr(gbh, "gateway_background_holder", lambda session, **kw: GATEWAY)
-    return sid, session, calls, done
+    monkeypatch.setattr(server, "_canonical_ledger_refusal", lambda session: None)
+    monkeypatch.setattr(gbh, "gateway_background_holder", lambda session, **kw: gbh.DialedGateway(GATEWAY, "ep"))
+    real_emit = server._emit
+    monkeypatch.setattr(server, "_emit", lambda kind, s, payload=None: state["events"].append((kind, s, payload))
+                        if kind == "error" else real_emit(kind, s, payload))
+    return sid, session, state
 
 
 def _stop(sid, origin):
@@ -178,37 +225,109 @@ def _stop(sid, origin):
 
 
 def test_stop_takes_the_chat_over_from_the_gateways_background_turn(idle_chat):
-    sid, _session, calls, done = idle_chat
+    sid, _session, state = idle_chat
     resp = _stop(sid, "stop_button")
 
     assert resp["result"] == {"status": "interrupted", "background_turn": True}
-    assert done.wait(5) and calls == [{"session_id": sid}]
+    assert state["done"].is_set() and state["calls"] == [{"session_id": sid}]  # answered after the take-over
+
+
+def test_a_failed_takeover_fails_the_stop(idle_chat):
+    sid, _session, state = idle_chat
+    state["answer"] = {"error": {"code": 4090, "message": "The other writer has not released this chat.",
+                                 "data": {"reason": "SESSION_NOT_OWNED"}}}
+    resp = _stop(sid, "stop_button")
+
+    assert resp["error"]["code"] == 4090 and "not released" in resp["error"]["message"]
+    assert resp["error"]["data"] == {"reason": "SESSION_NOT_OWNED"}
+
+
+def test_a_takeover_that_fails_after_the_ack_window_shows_an_error(idle_chat, monkeypatch):
+    sid, _session, state = idle_chat
+    from tests.waiting import wait_until
+    monkeypatch.setattr(server, "BACKGROUND_STOP_ACK_S", 0.05)
+    state["gate"] = threading.Event()
+    state["answer"] = {"error": {"code": 4090, "message": "writer busy"}}
+    resp = _stop(sid, "stop_button")
+
+    assert resp["result"] == {"status": "interrupted", "background_turn": True}  # still running when it answered
+    state["gate"].set()
+    wait_until(lambda: state["events"], timeout=5)
+    assert state["events"] and state["events"][0][0] == "error" and state["events"][0][1] == sid
+    assert "writer busy" in state["events"][0][2]["message"]
+
+
+def test_stop_racing_a_queued_forwarded_admission_never_takes_over(idle_chat, monkeypatch):
+    """The user's typed prompt already waits in the gateway's FIFO (its ledger holds work): a take-over now would
+    race that queue, so Stop is the ordinary one."""
+    sid, _session, state = idle_chat
+    refusal = ActiveSessionRefusal("pending work in the gateway's durable queue", SESSION_NOT_OWNED)
+    refusal.ledger_status = "queued"
+    monkeypatch.setattr(server, "_canonical_ledger_refusal", lambda session: refusal)
+    resp = _stop(sid, "stop_button")
+
+    assert resp["result"].get("background_turn") is None and state["calls"] == []
 
 
 @pytest.mark.parametrize("origin", ["delete", "rewind", "plugin:x", None])
 def test_other_interrupts_never_end_the_background_turn(idle_chat, origin):
-    sid, _session, calls, done = idle_chat
+    sid, _session, state = idle_chat
     resp = _stop(sid, origin)
 
-    assert resp["result"].get("background_turn") is None
-    assert not done.wait(0.2) and calls == []
+    assert resp["result"].get("background_turn") is None and state["calls"] == []
 
 
 def test_stop_of_this_backends_own_turn_is_the_ordinary_stop(idle_chat, monkeypatch):
-    sid, session, calls, done = idle_chat
+    sid, session, state = idle_chat
     session["running"] = True
     monkeypatch.setattr(server, "_interrupt_session_turn", lambda *a, **k: None)
     resp = _stop(sid, "stop_button")
 
-    assert resp["result"].get("background_turn") is None and not done.wait(0.2) and calls == []
+    assert resp["result"].get("background_turn") is None and state["calls"] == []
 
 
 def test_stop_with_another_holder_is_the_ordinary_stop(idle_chat, monkeypatch):
-    sid, _session, calls, _done = idle_chat
+    sid, _session, state = idle_chat
     monkeypatch.setattr(gbh, "gateway_background_holder", lambda session, **kw: None)
     resp = _stop(sid, "stop_button")
 
-    assert resp["result"].get("background_turn") is None and calls == []
+    assert resp["result"].get("background_turn") is None and state["calls"] == []
+
+
+# -- the forwarded prompt's turn waits for the background turn's lease ---------------------------------------------
+
+
+def test_a_forwarded_turn_waits_for_the_background_turns_lease_and_runs_once_after(tmp_path):
+    """The gateway runs a forwarded prompt as a gateway-hosted turn: it WAITS for a held turn lease
+    (``refuses_held_lease_at_once`` is False with ``_gateway_session_key``) instead of failing, and gets the lease
+    exactly once, right after the background turn releases it."""
+    import os
+    from types import SimpleNamespace
+
+    from agent.turn_facade_lease import refuses_held_lease_at_once
+    from hermes_state import SessionDB
+
+    assert refuses_held_lease_at_once(SimpleNamespace(_gateway_session_key="agent:main:tui"), "tui") is False
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session(KEY, "desktop")
+    background = f"pid={os.getpid()}:turn=closeout:platform=tui"
+    forwarded = f"pid={os.getpid()}:turn=forwarded:platform=tui"
+    assert db.acquire_session_turn_lease(KEY, background, ttl_seconds=60, wait_seconds=0)
+    got, waiting = [], threading.Event()
+
+    def forwarded_turn():
+        got.append(db.acquire_session_turn_lease(KEY, forwarded, ttl_seconds=60, wait_seconds=10,
+                                                 poll_interval_seconds=0.02, on_wait=lambda elapsed: waiting.set()))
+
+    worker = threading.Thread(target=forwarded_turn)
+    worker.start()
+    assert waiting.wait(5)  # it found the background turn holding the lease and waits for it
+    assert got == []
+    db.release_session_turn_lease(KEY, background)
+    worker.join(10)
+
+    assert got == [True] and db.session_turn_lease_owner(KEY)["holder"] == forwarded
+    db.close()
 
 
 # -- a wake refused by a backend that is being replaced ------------------------------------------------------------
@@ -222,54 +341,28 @@ def test_stop_with_another_holder_is_the_ordinary_stop(idle_chat, monkeypatch):
 def test_retiring_owner_reason_needs_every_other_holder_retiring(reasons, expected):
     entries = [_entry(pid) for pid in reasons]
     got = gbh.retiring_owner_reason({"session_key": KEY}, foreign_owner=lambda s: None, registry=lambda: entries,
-                                    reason_of=reasons.get)
+                                    reason_of=reasons.get, holders=_plain_pids)
     assert got == expected
 
 
-@pytest.fixture
-def wake(monkeypatch):
-    session = {"session_key": KEY}
-    state = {"free_after": 2, "tries": 0, "reason": "code-skew", "claims": 0, "releases": 0}
-    monkeypatch.setattr(gbh, "retiring_owner_reason", lambda s, **kw: state["reason"])
-    clock = {"t": 0.0}
-
-    def claim_slot(sid, s, **kw):
-        state["tries"] += 1
-        return None if state["tries"] >= state["free_after"] else _refusal()
-
-    def run():
-        return gbh.wake_past_retiring_owner(
-            "s", session, "chat-closeout", KEY,
-            claim_turn=lambda s: state.__setitem__("claims", state["claims"] + 1) or True,
-            release_turn=lambda s: state.__setitem__("releases", state["releases"] + 1),
-            claim_slot=claim_slot, foreign_owner=lambda s: None,
-            sleep=lambda dt: clock.__setitem__("t", clock["t"] + dt), monotonic=lambda: clock["t"])
-
-    return run, state, clock
+def test_a_retiring_owner_answers_busy_at_once_with_a_short_retry(monkeypatch):
+    monkeypatch.setattr(gbh, "retiring_owner_reason", lambda s, **kw: "code-skew")
+    started = time.monotonic()
+    assert gbh.wake_past_retiring_owner("s", {"session_key": KEY}, "chat-closeout", KEY,
+                                        foreign_owner=lambda s: None, now=lambda: 1000.0) == "busy"
+    assert time.monotonic() - started < 1  # never sleeps inside the caller's wake slot
+    assert gbh.retiring_retry_at(KEY) == 1000.0 + gbh.RETIRING_OWNER_RETRY_S
+    assert gbh.retiring_retry_at(KEY) is None  # consumed
 
 
-def test_a_wake_waits_out_a_retiring_owner_and_claims_the_chat(wake):
-    run, state, clock = wake
-    assert run() is None
-    assert state["tries"] == 2 and state["claims"] == 2 and state["releases"] == 1  # the last claim is kept
-    assert clock["t"] == 2 * gbh.RETIRING_OWNER_POLL_S
+def test_a_live_owner_is_still_refused(monkeypatch):
+    monkeypatch.setattr(gbh, "retiring_owner_reason", lambda s, **kw: None)
+    assert gbh.wake_past_retiring_owner("s", {"session_key": KEY}, "chat-closeout", KEY,
+                                        foreign_owner=lambda s: None) == "refused"
+    assert gbh.retiring_retry_at(KEY) is None
 
 
-def test_a_retiring_owner_that_never_lets_go_is_busy_not_refused(wake):
-    run, state, clock = wake
-    state["free_after"] = 10 ** 9
-    assert run() == "busy"
-    assert clock["t"] <= gbh.RETIRING_OWNER_WAIT_S + gbh.RETIRING_OWNER_POLL_S and state["claims"] == state["releases"]
-
-
-def test_a_live_owner_is_still_refused(wake):
-    run, state, _clock = wake
-    state["reason"] = None
-    assert run() == "refused"
-    assert state["tries"] == 0
-
-
-def test_the_wake_path_uses_the_retiring_owner_wait(monkeypatch):
+def test_the_wake_path_answers_with_the_retiring_owner_verdict(monkeypatch):
     """``_wake_session_turn`` hands a refused slot claim to ``wake_past_retiring_owner`` and returns its verdict."""
     session = {"session_key": KEY}
     import tui_gateway.automation_replay as ar
@@ -280,10 +373,11 @@ def test_the_wake_path_uses_the_retiring_owner_wait(monkeypatch):
     monkeypatch.setattr(server, "_start_agent_build", lambda *a: None)
     monkeypatch.setattr(server, "_wait_agent", lambda *a, **k: None)
     monkeypatch.setattr(server, "_notif_claim_turn", lambda s: True)
-    monkeypatch.setattr(server, "_notif_release_turn", lambda s: None)
+    released = []
+    monkeypatch.setattr(server, "_notif_release_turn", lambda s: released.append(1))
     monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *a, **k: _refusal())
     seen = []
     monkeypatch.setattr(gbh, "wake_past_retiring_owner", lambda *a, **k: seen.append(a[3]) or "busy")
 
     assert server._wake_session_turn(KEY, "notice", label="chat-closeout") == "busy"
-    assert seen == [KEY]
+    assert seen == [KEY] and released == [1]

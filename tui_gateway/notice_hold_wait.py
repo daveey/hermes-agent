@@ -71,9 +71,10 @@ def note_waiting(*, run_pass: Optional[Callable[[], list]] = None, held: Callabl
     def job() -> None:
         try:
             watch(run_pass=run_pass or _default_pass, held=held, sleep=sleep)
-        finally:
-            with _mu:
+        except BaseException:
+            with _mu:  # a normal return already cleared it, under the lock that decided to return
                 _state["thread"] = None
+            raise
 
     if spawn is None:
         from agent.memory_provider import spawn_context_thread
@@ -109,6 +110,9 @@ def watch(*, run_pass: Callable[[], list], held: Callable[[], bool], sleep: Call
             sleep(PASS_EVERY_S)
         with _mu:
             if not _state["waiting"]:
+                # Cleared in the same locked section that decides to return: a ``note_waiting`` after this
+                # starts a new watcher, one before it sets ``waiting`` and this one watches again.
+                _state["thread"] = None
                 return passes
         # Another notice was refused by a new hold meanwhile: watch again.
 
