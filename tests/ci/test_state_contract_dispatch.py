@@ -133,5 +133,5 @@ def test_workflow_wires_script_and_crons():
     assert re.search(r"- cron: '\d+ \* \* \* \*'", text), "hourly cron missing"
     assert "scripts/ci/state_contract_dispatch.sh" in text
     assert "SCHEDULE_CRON: ${{ github.event.schedule }}" in text
-    assert "group: state-contract-dispatch-${{ github.event_name }}" in text
+    assert "group: state-contract-dispatch-${{ github.event_name }}-${{ github.event.schedule }}" in text
     assert "'scripts/ci/state_contract_dispatch.sh'" in text, "script change must trigger a push dispatch"

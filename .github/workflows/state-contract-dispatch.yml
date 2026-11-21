@@ -62,9 +62,9 @@ permissions:
   contents: read
 
 concurrency:
-  # One group per event, so a scheduled or manual run never cancels a push run: ci_main_watch reads the newest
-  # push run on main, and a cancelled one with no newer push run reads as red.
-  group: state-contract-dispatch-${{ github.event_name }}
+  # Separate events and cron schedules: the hourly canary must not cancel the daily backstop.
+  # Keep push runs separate too: ci_main_watch reads a cancelled push with no newer push as red.
+  group: state-contract-dispatch-${{ github.event_name }}-${{ github.event.schedule }}
   cancel-in-progress: true
 
 jobs:
