@@ -492,7 +492,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
             reason = "pinned+provider_unresolved"
     if model:
         from agent.model_routing import is_class_selector
-        why = class_unroutable_reason(model) if is_class_selector(model) else None
+        from hermes_cli.kanban_model_assignment import _assignee_config
+        why = class_unroutable_reason(model, _assignee_config(task.assignee)) if is_class_selector(model) else None
         if why:
             if is_review:
                 from hermes_cli.kanban_review_model import ReviewModelUnavailable

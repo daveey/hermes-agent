@@ -19,6 +19,11 @@ def board(tmp_path, monkeypatch):
         (profile / 'config.yaml').write_text(
             'model:\n  default: gpt-5\n  provider: openai-codex\n'
             'platform_toolsets:\n  cli: [terminal, file, kanban]\nterminal:\n  backend: local\n')
+    # Lifecycle controls must reach actual admission on the executing profile.
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    for name in ('worker', 'supervisor'):
+        path = home / 'profiles' / name / 'config.yaml'
+        path.write_text(path.read_text() + _managed_yaml())
     kb.init_db()
     from hermes_cli.kanban_db_connect import connect_closing
     with connect_closing() as conn:
@@ -28,7 +33,7 @@ def board(tmp_path, monkeypatch):
 @pytest.mark.parametrize('provider', [None, 'openai-codex'])
 def test_create_rejects_claude_on_codex_before_inserting(board, provider):
     conn, _ = board
-    with pytest.raises(ValueError, match='model_provider_mismatch'):
+    with pytest.raises(ValueError, match='model-neutral'):
         kb.create_task(conn, title='Review', assignee='worker',
                        model_override='claude-opus-5-5', provider_override=provider)
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 0
@@ -37,10 +42,13 @@ def test_create_rejects_claude_on_codex_before_inserting(board, provider):
 @pytest.mark.parametrize('provider', ['anthropic', 'openrouter', 'custom'])
 def test_compatible_or_open_model_provider_is_preserved(board, provider):
     conn, _ = board
-    tid = kb.create_task(conn, title='Review', assignee='worker',
-                         model_override='claude-opus-5-5', provider_override=provider)
+    with pytest.raises(ValueError, match='model-neutral'):
+        kb.create_task(conn, title='Review', assignee='worker',
+                       model_override='claude-opus-5-5', provider_override=provider)
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 0
+    tid = kb.create_task(conn, title='Review', assignee='worker', model_override='class:deep')
     task = kb.get_task(conn, tid)
-    assert (task.model_override, task.provider_override) == ('claude-opus-5-5', provider)
+    assert (task.model_override, task.provider_override) == ('class:deep', 'auto')
 
 
 def test_worker_created_child_has_typed_model_rejection(board, monkeypatch):
@@ -52,48 +60,55 @@ def test_worker_created_child_has_typed_model_rejection(board, monkeypatch):
     monkeypatch.setattr(tools, '_persisted_identity', lambda: 'worker')
     result = json.loads(tools._handle_create({'title': 'Review child',
                                              'model': 'claude-opus-5-5'}))
-    assert result['code'] == 'model_provider_mismatch'
+    assert 'model-neutral' in result['error']
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
 
 
 @pytest.mark.parametrize('lane', ['ready', 'review'])
 def test_dispatch_routes_legacy_incompatible_pin_without_spawning(board, monkeypatch, lane):
-    from hermes_cli import kanban_session_activity as activity
+    """Legacy restrictions no longer create assignment-repair work; author custody still constrains review."""
+    from tests.hermes_cli.test_kanban_model_tier import _review_source
+    from hermes_cli.kanban_db_dispatch import dispatch_once
+    from hermes_cli.kanban_review_model import implementer_models
     conn, _ = board
     tid = kb.create_task(conn, title='Legacy review', assignee='worker', session_id='chat')
+    if lane == 'review':
+        _review_source(conn, tid)
+    # Historical rows remain audit evidence, not an ingress path to create pins.
     conn.execute('UPDATE tasks SET model_override=?, status=? WHERE id=?', ('claude-opus-5-5', lane, tid))
     conn.commit()
     spawned = []
-    from hermes_cli.kanban_db_dispatch import dispatch_once
-    dispatch_once(conn, spawn_fn=lambda *args: spawned.append(args), max_spawn=1)
-    assert spawned == []
+    result = dispatch_once(conn, spawn_fn=lambda task, *args: spawned.append(
+        (task.id, task.model_override, task.provider_override)), max_spawn=1)
+    expected = ('claude-opus-5-5', 'anthropic') if lane == 'review' else ('class:standard', 'auto')
+    assert spawned == [(tid, *expected)], repr(result)
     task = kb.get_task(conn, tid)
-    assert task.status == 'todo'
-    assert task.block_kind == 'assignment'
-    assert task.assignee == 'supervisor'
-    repair = conn.execute('SELECT parent_id FROM task_links WHERE child_id=?', (tid,)).fetchone()[0]
-    assert kb.get_task(conn, repair).status == 'ready'
-    assert activity._replica_bucket({'status': task.status, 'block_kind': task.block_kind}) == 'active'
-    with pytest.raises(ValueError, match='model_provider_mismatch'):
-        kb.complete_task(conn, repair, result='Not repaired yet')
-    kb.set_model_override(conn, tid, 'gpt-5', provider='openai-codex')
-    assert kb.complete_task(conn, repair, result='Repaired with subscription model')
-    kb.recompute_ready(conn)
-    assert kb.get_task(conn, tid).status == lane
+    assert task.status == 'running' and task.assignee == 'worker' and task.block_kind is None
+    assert task.model_override == 'claude-opus-5-5'  # never rewrite historical row
+    assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
+    assert conn.execute('SELECT count(*) FROM task_links').fetchone()[0] == 0
+    if lane == 'review':
+        assert implementer_models(conn, task) == {'claude-sonnet-5-5'}
+        assert spawned[0][1] not in implementer_models(conn, task)
 
 
 def test_unavailable_supervisor_does_not_abort_unrelated_dispatch(board):
     from hermes_cli.kanban_db_dispatch import dispatch_once
     conn, home = board
     (home / 'config.yaml').write_text('kanban:\n  orchestrator_profile: missing\n')
-    bad = kb.create_task(conn, title='Bad pin', assignee='worker', priority=100)
+    profile = home / 'profiles' / 'unconfigured'
+    profile.mkdir()
+    (profile / 'config.yaml').write_text('platform_toolsets:\n  cli: [terminal, file, kanban]\n')
+    bad = kb.create_task(conn, title='Bad pin', assignee='unconfigured', priority=100)
     good = kb.create_task(conn, title='Good', assignee='worker')
     conn.execute('UPDATE tasks SET model_override=? WHERE id=?', ('claude-opus-5-5', bad))
     conn.commit()
     spawned = []
-    dispatch_once(conn, spawn_fn=lambda task, *_args: spawned.append(task.id), max_spawn=1)
-    assert spawned == [good]
+    result = dispatch_once(conn, spawn_fn=lambda task, *_args: spawned.append(task.id), max_spawn=1)
+    assert spawned == [good], repr(result)
+    assert result.skipped_ineligible == [(bad, 'model_unroutable:routing_disabled')]
     assert kb.get_task(conn, bad).status == 'ready'
+    assert kb.get_task(conn, bad).current_run_id is None
     from hermes_cli.kanban_db_dispatch import guard_hold_cap_seconds
     assert guard_hold_cap_seconds('model_provider_mismatch') is None
 
@@ -106,7 +121,8 @@ def test_dry_run_reports_mismatch_without_writing(board):
     conn.commit()
     before = list(conn.iterdump())
     result = dispatch_once(conn, dry_run=True)
-    assert (tid, 'model_provider_mismatch') in result.respawn_guarded
+    assert [item[0] for item in result.spawned] == [tid], repr(result)
+    assert result.respawn_guarded == []
     assert list(conn.iterdump()) == before
 
 

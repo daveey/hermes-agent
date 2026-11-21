@@ -170,21 +170,23 @@ def test_reassigning_a_legacy_card_rechecks_its_pinned_skills(env):
 
 
 def test_check_order_declaration_then_capability_then_model(env):
-    from hermes_cli.kanban_model_assignment import ModelProviderMismatchError
-    bad = {"model_override": "gpt-5", "provider_override": "anthropic"}
+    """Neutral selectors cannot switch off declaration/capability validation."""
+    route = {"model_override": "class:standard", "provider_override": "auto"}
     with kbc.connect_closing() as conn:
         with pytest.raises(RequiresDeclarationMissing):
-            kb.create_task(conn, title="1", assignee="writer", require_declaration=True, **bad)
+            kb.create_task(conn, title="1", assignee="writer", require_declaration=True, **route)
         with pytest.raises(CapabilityMismatchError):
             kb.create_task(conn, title="2", assignee="writer", requires=["terminal"],
-                           require_declaration=True, **bad)
-        with pytest.raises(ModelProviderMismatchError):
+                           require_declaration=True, **route)
+        with pytest.raises(ValueError, match="model-neutral"):
             kb.create_task(conn, title="3", assignee="alpha", requires=["terminal"],
-                           require_declaration=True, **bad)
+                           require_declaration=True, model_override="gpt-5", provider_override="anthropic")
         assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
-        tid = kb.create_task(conn, title="4", assignee="alpha", requires=["terminal"], require_declaration=True,
-                             model_override="claude-opus-5-5", provider_override="anthropic")
-        assert kb.get_task(conn, tid).model_override == "claude-opus-5-5"
+        tid = kb.create_task(conn, title="4", assignee="alpha", requires=["terminal"],
+                             require_declaration=True, **route)
+        task = kb.get_task(conn, tid)
+        assert (task.model_override, task.provider_override) == ("class:standard", "auto")
+        assert task.requires == ["terminal"]
 
 
 def test_gate_off_keeps_legacy_behaviour(env):
