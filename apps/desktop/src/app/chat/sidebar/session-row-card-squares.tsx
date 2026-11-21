@@ -19,7 +19,7 @@ type CardColour = keyof typeof COLOURS
 
 /** Counts do not distinguish ready from running; only current card evidence can refine that fallback. */
 function queuedCards(session: SessionInfo): number {
-  const values = session.execution_observations ?? []
+  const values = Array.isArray(session.execution_observations) ? session.execution_observations : []
   const identities = new Map<string, unknown>()
 
   for (const value of values) {

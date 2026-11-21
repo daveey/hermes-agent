@@ -254,6 +254,21 @@ const renderRow = (
   )
 }
 
+it.each([['object', { a: 1 }], ['number', 7], ['boolean', true]] as const)(
+  'keeps rendering the sidebar row with non-array %s observations',
+  (_kind, value) => {
+    const { container } = renderRow(makeSession({
+      title: 'Malformed observations',
+      kanban_active: 1,
+      execution_observations: value as unknown as SessionInfo['execution_observations']
+    }))
+
+    expect(screen.getByText('Malformed observations')).not.toBeNull()
+    expect(container.querySelector('[data-run-square]')?.getAttribute('data-run-square')).toBe('running')
+    expect(container.querySelector('[data-card-colour="green"]')).toBeNull()
+  }
+)
+
 describe('always-on left run square', () => {
   for (const card of [false, true]) {
     for (const kanban_active of [0, 2]) {
