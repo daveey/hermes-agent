@@ -15,8 +15,8 @@ def _note(kind, payload):
 def test_gave_up_refusal_is_named_and_not_a_generic_failure():
     text = _note("gave_up", {"failures": 3, "effective_limit": 3, "error": REFUSAL,
                              "trigger_outcome": "crashed", "retry_status": "ready"})
-    assert "model refused the request" in text and "refusal needs review" in text
-    assert "3 of 3" in text and "alternate provider" not in text
+    assert "refused the content of run" in text and "no automatic retry" in text
+    assert "then promote it, or archive it" in text and "alternate provider" not in text
     assert "hermes kanban log t_x" in text
 
 

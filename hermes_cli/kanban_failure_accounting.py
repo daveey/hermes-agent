@@ -36,6 +36,13 @@ def _record_task_failure(
     :func:`check_respawn_guard` spaces the retries.
     """
     from hermes_cli import kanban_db_dispatch as dispatch
+    from hermes_cli import kanban_failure_summary as summary
+    import json
+
+    evidence = {"error": error, **(event_payload_extra or {}), **(diagnostic or {})}
+    refusal = summary.classify_failure(outcome, evidence) == "provider_refusal"
+    if refusal:
+        force_trip, infrastructure, block_kind = True, False, "capability"
     _kb = dispatch._kb
     if failure_limit is None:
         failure_limit = dispatch.DEFAULT_FAILURE_LIMIT
@@ -47,6 +54,20 @@ def _record_task_failure(
         ).fetchone()
         if row is None:
             return False
+        if refusal:
+            captured_run = run_id if run_id is not None else row["current_run_id"]
+            route_row = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id=? AND run_id=? "
+                "AND kind IN ('run_route','model_tier') ORDER BY id DESC LIMIT 1",
+                (task_id, captured_run),
+            ).fetchone()
+            route = json.loads(route_row[0]) if route_row else {}
+            event_payload_extra = {
+                **(event_payload_extra or {}),
+                "worker_output": str(evidence.get("worker_output") or evidence.get("error") or "")[:2000],
+                "run_number": captured_run, "provider": route.get("provider"), "model": route.get("model"),
+                "reason_code": "provider_refusal",
+            }
         # ``diagnostic`` (the classifier's event payload) is the local outcome event's
         # evidence; on a Board-primary card it rides the release to that event.
         from hermes_cli.kanban_failure_release import queue
@@ -118,7 +139,7 @@ def _record_task_failure(
         )
         payload = {
             "kind": block_kind,
-            "reason_code": "worker_failures_exhausted",
+            "reason_code": "provider_refusal" if refusal else "worker_failures_exhausted",
             "failures": failures,
             "effective_limit": effective_limit,
             "limit_source": limit_source,

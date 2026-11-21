@@ -1,12 +1,7 @@
-"""Plain-language classification of kanban ``gave_up`` / ``crashed`` events for user-facing notices.
+"""Shared failure classification and notices for Kanban run finalization.
 
-The dispatcher records every non-success worker outcome as ``crashed`` (process died, any exit code) or
-``spawn_failed`` (the launch itself failed) and then, after the failure budget, ``gave_up``. A worker that
-ran for minutes and then exited because the model refused the request is a ``crashed`` outcome with the
-refusal text in ``error`` / ``worker_output`` — it is NOT a spawn failure and the user can do nothing about it.
-
-This module only reads event payloads and words them. It never retries, re-routes providers, or touches
-safety refusals: a refusal is reported as a refusal and left to the dispatcher's normal bounded policy.
+Provider content refusals stop for review, never automatic retries or rerouting.
+This module only reads evidence; the failure accountant applies the disposition.
 """
 
 from __future__ import annotations
@@ -22,7 +17,8 @@ _REFUSAL_RE = re.compile(
     r"model declined|safety refusal|declined (?:to|the) (?:assist|help|comply|answer|request)"
     r"|refus(?:ed|al) (?:to|by the model)|(?:model|assistant) refus|stop_reason\W+refusal"
     r"|cannot (?:assist|help) with (?:that|this)|can'?t (?:assist|help) with (?:that|this)"
-    r"|violates? (?:our )?(?:usage|safety) polic",
+    r"|violates? (?:our )?(?:usage|safety) polic"
+    r"|This content was flagged for possible cybersecurity risk",
     re.IGNORECASE,
 )
 
@@ -94,6 +90,17 @@ def retry_promised(payload: Mapping[str, Any]) -> bool:
 def describe_failure(kind: str, title: str, payload: Mapping[str, Any]) -> str:
     """Notice body (everything after ``Kanban <id>``) for a ``gave_up`` or ``crashed`` event."""
     cls = classify_failure(kind, payload)
+    if cls == "provider_refusal":
+        raw = str(payload.get("worker_output") or payload.get("error") or payload.get("reason") or "")
+        message = raw.partition("Provider said:")[2].strip() if "Provider said:" in raw else raw
+        message = clean_text(message[:200], 201)
+        return (
+            f" Provider {clean_text(payload.get('provider') or 'unknown', 100)} "
+            f"({clean_text(payload.get('model') or 'unknown', 100)}) refused the content of run "
+            f"{payload.get('run_number', payload.get('run_uid', 'unknown'))}: '{message}'. "
+            "Not a worker crash; no automatic retry. Next: read what the run was doing, "
+            "rephrase or re-scope the card in neutral wording, then promote it, or archive it."
+        )
     cause = _CAUSE[cls]
     failures = _as_int(payload.get("failures"))
     limit = _as_int(payload.get("effective_limit"))

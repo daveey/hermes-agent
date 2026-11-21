@@ -21,10 +21,13 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
     heal them) trip immediately.
     """
     from hermes_cli import kanban_db_dispatch as _d
+    from hermes_cli import kanban_failure_summary as summary
     auto_blocked: list[str] = []
     fp_counts: dict[str, int] = {}
     fp_tasks: dict[str, list[str]] = {}
     for tid, _, _, dead in crash_details:
+        if summary.classify_failure("crashed", {"error": dead.error_text, **dead.event_payload}) == "provider_refusal":
+            continue  # A refusal is not a fleet crash and must not spawn an automatic fix card.
         if dead.event_payload.get("owner_death_pid") is not None:
             continue  # an owner-death repeat (crash-loop guard) is charged normally, never systemic [daveey]
         fp = _d._error_fingerprint(dead.error_text)
