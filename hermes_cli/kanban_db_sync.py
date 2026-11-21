@@ -201,12 +201,6 @@ CREATE TABLE IF NOT EXISTS kanban_sync_status_origins (
     origin TEXT,
     status TEXT
 );
--- A primary-key replacement is a different task identity, not an origin
--- transfer. Remove the old descriptor before SQLite checks the child FK.
-CREATE TRIGGER IF NOT EXISTS kanban_status_origin_identity
-BEFORE UPDATE OF id ON tasks WHEN OLD.id IS NOT NEW.id BEGIN
-    DELETE FROM kanban_sync_status_origins WHERE task_id = OLD.id;
-END;
 -- First-send synthetic parents are pending transport, not a permanent receipt ledger.
 CREATE TABLE IF NOT EXISTS kanban_sync_parent_envelopes (
     task_id TEXT PRIMARY KEY,
@@ -677,6 +671,11 @@ def _delete_trigger(table: str) -> str:
 def wanted_triggers(conn: sqlite3.Connection) -> dict[str, str]:
     """Trigger name -> CREATE statement, generated from the live column list."""
     out: dict[str, str] = {
+        # Application-table triggers belong here, not the independently usable
+        # SYNC_SCHEMA_SQL. Replacing an identity revokes rather than transfers
+        # its descriptor before the child FK is checked.
+        "kanban_sync_origin_identity": "CREATE TRIGGER kanban_sync_origin_identity BEFORE UPDATE OF id ON tasks "
+        "WHEN OLD.id IS NOT NEW.id BEGIN DELETE FROM kanban_sync_status_origins WHERE task_id=OLD.id; END",
         "kanban_sync_origin_invalidate": "CREATE TRIGGER kanban_sync_origin_invalidate AFTER UPDATE OF status ON tasks "
         "WHEN OLD.status IS NOT NEW.status BEGIN DELETE FROM kanban_sync_status_origins WHERE task_id=NEW.id; END",
         "kanban_sync_origin_delete": "CREATE TRIGGER kanban_sync_origin_delete AFTER DELETE ON tasks "

@@ -1,5 +1,6 @@
 """Capture provenance survives definitive compatibility repairs, never uncertain rewrites."""
 import json
+import sqlite3
 
 import pytest
 
@@ -11,6 +12,15 @@ from hermes_cli import kanban_sync_envelope as envelopes
 from tests.hermes_cli import test_kanban_sync_envelope as fixtures
 
 board = fixtures.board
+
+
+def test_standalone_sync_schema_needs_no_application_tables():
+    with sqlite3.connect(":memory:") as conn:
+        for _ in range(2):
+            conn.executescript(sync.SYNC_SCHEMA_SQL)
+            assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='tasks'").fetchone()
+            conn.execute("INSERT OR REPLACE INTO kanban_sync_parent_envelopes VALUES ('task', '{}')")
+        assert conn.execute("SELECT COUNT(*) FROM kanban_sync_parent_envelopes").fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("repair", ["parent", "virtual", "omission"])
