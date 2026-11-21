@@ -336,6 +336,8 @@ def words(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
         reason = LLM_PACED
     detail = skip.get("detail") or "no detail"
     text = _WORDS.get(reason, "skipped: {reason} ({detail})").format(reason=reason, detail=detail)
+    if reason == PINNED_QUOTA_WALL and str(detail).startswith('class:'):
+        text = f"held: eligible class routes {detail} quota-walled"
     if reason == "claim_deferred" and _local_gate(skip):
         text = f"skipped: this host's admission gate deferred its claim ({detail})"
     if skip.get("until"):
@@ -370,14 +372,14 @@ def advice(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
     ``now`` (default ``time.time()``) drops "starts on its own when that wall resets": :func:`pool_replace_helps`
     offers the pool re-place for it at the same ``now`` (PR #1865 review). [daveey]"""
     if _wall_passed(skip, now):
-        return ("that wall's reset has passed; the next dispatcher tick re-checks the pin. Priority changes do not "
+        return ("that wall's reset has passed; the next dispatcher tick re-checks eligible routes. Priority changes do not "
                 "clear a quota wall. Do not run its work outside the dispatcher")
     if skip.get("reason") == LLM_PACED:
         return ("it starts on its own once its provider pool is back on pace or a paced slot frees; priority changes "
                 "do not lift a pacing hold. Do not run its work outside the dispatcher")
     if skip.get("reason") == PINNED_QUOTA_WALL:
-        return ("it starts on its own when that wall resets. Re-pin it (`hermes kanban set-model <id> ...`) only if it "
-                "cannot wait; priority changes do not clear a quota wall. Do not run its work outside the dispatcher")
+        return ("it starts on its own when an eligible class route becomes available; priority changes do not clear "
+                "a quota wall. Do not run its work outside the dispatcher")
     if skip.get("reason") == "review_provider_wall":
         return ("it starts on its own when an independent reviewer is available on this host; priority changes do not "
                 "clear a reviewer wall. Do not run its work outside the dispatcher")

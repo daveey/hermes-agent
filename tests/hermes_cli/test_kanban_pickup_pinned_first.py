@@ -41,7 +41,8 @@ def imports(monkeypatch):
 def walled_model(monkeypatch):
     until = int(time.time()) + WALL_S
     monkeypatch.setattr(walls, "live_quota_wall",
-                        lambda provider, model: until if (model, provider) == MODEL else None)
+                        lambda provider, model: until if (provider, model) in {
+                            ('anthropic', 'claude-sonnet-5-5'), ('openai-codex', 'gpt-6.1-sol')} else None)
     return until
 
 
@@ -50,12 +51,22 @@ def _status(conn, tid):
     return t.status if t else None
 
 
-def test_a_mandatory_pin_on_a_walled_model_with_no_episode_is_not_copied(gws, imports, walled_model):
+def _legacy(hub, **kw):
+    hub.enter()
+    tid = kb.create_task(hub.conn, title="historical selector", assignee="default", runs_on=PIN, **kw)
+    hub.conn.execute("UPDATE tasks SET model_override=?, provider_override=?, model_pin_mandatory=1 WHERE id=?",
+                     (*MODEL, tid))
+    hub.conn.commit()
+    hub.round()
+    return tid
+
+
+def test_all_class_routes_walled_with_no_episode_is_not_copied(gws, imports, walled_model):
     hub, worker = gws
     # Both pinned to this machine, so ranking alone cannot save the eligible one: the walled card is ahead of it.
-    walled = support._hub_card(hub, title="mandatory pin, walled, never run", priority=1000, runs_on=PIN,
-                               model_override=MODEL[0], provider_override=MODEL[1], pin_mandatory=True)
-    pinned = support._hub_card(hub, title="pinned, eligible", priority=0, runs_on=PIN)
+    walled = _legacy(hub, priority=1000)
+    pinned = support._hub_card(hub, title="machine bound, deep eligible", priority=0, runs_on=PIN,
+                               model_override="class:deep", provider_override="auto")
     worker.round()
     worker.enter()
     # Parity: on a copy, the local dispatcher holds the walled card pre-claim (pinned_quota_wall).
@@ -65,7 +76,8 @@ def test_a_mandatory_pin_on_a_walled_model_with_no_episode_is_not_copied(gws, im
         assert wn.import_cards(worker.conn, replica, [walled]) == [walled]
     finally:
         replica.close()
-    assert kds.pinned_quota_hold(worker.conn, walled) == (*MODEL, float(walled_model))
+    assert kds.pinned_quota_hold(worker.conn, walled) == ('class:standard', 'auto', float(walled_model))
+    assert kb.get_task(worker.conn, walled).model_override == MODEL[0]
     assert wn.evict(worker.conn) == [walled]
     imports.clear()
     # Budget 1: the first tick copies and starts the pinned card, not the walled one.
@@ -79,17 +91,17 @@ def test_a_mandatory_pin_on_a_walled_model_with_no_episode_is_not_copied(gws, im
     assert _status(worker.conn, walled) is None
     skip = kps.latest(worker.conn, walled)
     assert skip is not None and skip["reason"] == "quota_hold"
-    assert skip["detail"].startswith("pinned_quota_wall gpt-6-astra (openai-codex) until ")
+    assert skip["detail"].startswith("pinned_quota_wall class:standard (auto) until ")
 
 
 def test_a_fresh_pin_with_no_wall_is_copied(gws, imports, monkeypatch):
     hub, worker = gws
     monkeypatch.setattr(walls, "live_quota_wall", lambda provider, model: None)
-    tid = support._hub_card(hub, title="mandatory pin, no wall", priority=10, runs_on=PIN,
-                            model_override=MODEL[0], provider_override=MODEL[1], pin_mandatory=True)
+    tid = _legacy(hub, priority=10)
     worker.round()
     worker.enter()
     assert wn.pickup(worker.conn, budget=1) == [tid]
+    assert kb.get_task(worker.conn, tid).model_override == MODEL[0]
 
 
 @pytest.mark.parametrize("age_s", [0, 3600])

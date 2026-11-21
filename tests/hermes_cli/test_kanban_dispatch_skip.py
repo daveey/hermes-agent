@@ -46,9 +46,19 @@ def _walled(monkeypatch, until=RESET):
 
     def wall(provider, model):
         calls.append((provider, model))
-        return until if (model, provider) == PIN else None
+        # Both standard-class candidates are genuinely walled; deep remains eligible.
+        return until if until is not None and until > kb.time.time() and (provider, model) in {
+            ('anthropic', 'claude-sonnet-5-5'), ('openai-codex', 'gpt-test')} else None
     monkeypatch.setattr(walls, "live_quota_wall", wall)
     return calls
+
+
+def _legacy(conn, **kw):
+    tid = kb.create_task(conn, title="historical selector", assignee="a", **kw)
+    # Disposable historical evidence, not a supported live mutation.
+    conn.execute("UPDATE tasks SET model_override=?, provider_override=? WHERE id=?", (*PIN, tid))
+    conn.commit()
+    return tid
 
 
 def _notice(conn, tid):
@@ -64,32 +74,32 @@ def test_fresh_pin_on_quota_wall_is_held_with_one_reason_and_the_notice_names_it
     calls = _walled(monkeypatch)
     monkeypatch.setattr(qp, "_running_and_limit", lambda *_a: (4, 7))
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="bb-tuner pinned", assignee="a", model_override=PIN[0],
-                             provider_override=PIN[1], session_id="chat")
-        free = kb.create_task(conn, title="unpinned sibling", assignee="a")
+        tid = _legacy(conn, session_id="chat")
+        free = kb.create_task(conn, title="security sibling", assignee="a")
         spawned = []
         for _ in range(4):
             spawned += _tick(conn)
             clock[0] += 60
         assert tid not in spawned and free in spawned  # free slots: only the walled pin is held
-        assert ("anthropic", "claude-opus-5-5") in calls
-        assert _skips(conn, tid) == [{"reason": "pinned_quota_wall", "detail": "claude-opus-5-5 (anthropic)",
-                                      "model": PIN[0], "provider": PIN[1], "until": RESET}]
+        assert {("anthropic", "claude-sonnet-5-5"), ("openai-codex", "gpt-test")} <= set(calls)
+        assert _skips(conn, tid) == [{"reason": "pinned_quota_wall", "detail": "class:standard (auto)",
+                                      "model": "class:standard", "provider": "auto", "until": RESET}]
         task = kb.get_task(conn, tid)
         assert task.status == "ready" and not task.claim_lock
         place = qp.position(conn, task)
         assert place["lane"] == "local" and place["skip"]["reason"] == "pinned_quota_wall"
         line = qp.describe(place)
-        assert "held: pinned model claude-opus-5-5 (anthropic) quota-walled until 10:00Z" in line
+        assert "held: eligible class routes class:standard (auto) quota-walled until 10:00Z" in line
         assert not any(w in line for w in PRIORITY_WORDS)
 
         clock[0] = START + 31 * 60
         assert cw.sweep(conn, now=clock[0]) == 1
         payload = _notice(conn, tid)
-        assert payload["dispatch_skip"] == {"reason": "pinned_quota_wall", "detail": "claude-opus-5-5 (anthropic)",
+        assert payload["dispatch_skip"] == {"reason": "pinned_quota_wall", "detail": "class:standard (auto)",
                                             "until": RESET}
         for text in (cw.notice_text(payload), pu.notice_text(payload), pu.ready_hint(conn, task, now=clock[0])):
-            assert "held: pinned model claude-opus-5-5 (anthropic) quota-walled until 10:00Z" in text
+            assert "held: eligible class routes class:standard (auto) quota-walled until 10:00Z" in text
+            assert "set-model" not in text and "Re-pin" not in text
             assert not any(w in text for w in PRIORITY_WORDS), text
             assert skips.UNRECORDED not in text
 
@@ -99,11 +109,13 @@ def test_walled_pin_dry_run_holds_without_writing(board, monkeypatch, all_assign
     routing(monkeypatch)
     _walled(monkeypatch)
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="pinned", assignee="a", model_override=PIN[0], provider_override=PIN[1])
+        tid = _legacy(conn)
+        before = list(conn.iterdump())
         res = dispatch.dispatch_once(conn, spawn_fn=lambda *_a: None, dry_run=True)
-        assert res.pinned_quota_held == [(tid, PIN[0], PIN[1], float(RESET))]
+        assert res.pinned_quota_held == [(tid, "class:standard", "auto", float(RESET))]
         assert res.clock_held[tid] == ("pinned_quota_wall", RESET)
         assert res.spawned == [] and _skips(conn, tid) == []
+        assert list(conn.iterdump()) == before
 
 
 @pytest.mark.parametrize("case", ["wall_cleared", "wall_past", "unpinned", "has_run"])
@@ -112,15 +124,16 @@ def test_pin_hold_only_for_a_fresh_pin_on_a_live_wall(board, monkeypatch, all_as
     routing(monkeypatch)
     _walled(monkeypatch, until={"wall_cleared": None, "wall_past": START - 1}.get(case, RESET))
     with kbc.connect() as conn:
-        pin = {} if case == "unpinned" else {"model_override": PIN[0], "provider_override": PIN[1]}
-        tid = kb.create_task(conn, title="pinned", assignee="a", **pin)
+        tid = (kb.create_task(conn, title="unrestricted", assignee="a")
+               if case == "unpinned" else _legacy(conn))
         if case == "has_run":
             assert kb.claim_task(conn, tid, claimer=kb._claimer_id()) is not None  # opens a run
             with kb.write_txn(conn):
                 conn.execute("UPDATE tasks SET status='ready', claim_lock=NULL, current_run_id=NULL WHERE id=?",
                              (tid,))
             clock[0] += 1
-        assert skips.pinned_quota_hold(conn, tid) is None
+        expected = ("class:standard", "auto", float(RESET)) if case in {"unpinned", "has_run"} else None
+        assert skips.pinned_quota_hold(conn, tid) == expected
 
 
 def test_per_profile_capped_row_gets_one_event(board, monkeypatch, all_assignees_spawnable):
@@ -229,7 +242,8 @@ def test_review_lane_is_never_pin_held(board, monkeypatch):
     _clock(monkeypatch)
     _walled(monkeypatch)
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="pinned", assignee="a", model_override=PIN[0], provider_override=PIN[1])
+        routing(monkeypatch)
+        tid = _legacy(conn)
         res = dispatch.DispatchResult()
         assert not skips.hold_pinned_quota(conn, tid, res, lane="review")
         assert skips.hold_pinned_quota(conn, tid, res, lane="ready") and res.pinned_quota_held
