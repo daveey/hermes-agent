@@ -480,6 +480,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/kanban_lane_classifier.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
   "hermes_cli/kanban_lanes_flow_pr.py": {
    "direct": 1,
    "routed": 0,
