@@ -28,6 +28,9 @@ from tests.hermes_cli.test_kanban_quota_episode import board as board  # noqa: P
 
 PIN, PEER, GROK = pin_tests.PIN, pin_tests.PEER, pin_tests.GROK
 HELD_FAR = 5 * 86400  # 11-15 16:52Z -> 11-20 22:40Z
+DEEP = ('class:deep', 'auto')  # kanban is model-neutral: default and strong tiers are class selectors
+CLASS_TIERS = {'default_model': 'class:deep', 'default_provider': 'auto', 'strong_model': 'class:deep',
+               'strong_provider': 'auto'}
 
 
 @pytest.fixture
@@ -52,7 +55,7 @@ def _pools(clock, **states):
 
 
 def _deep(monkeypatch, cfg=None, grok=False):
-    config, cfg = pin_tests._deep(monkeypatch, cfg)
+    config, cfg = pin_tests._deep(monkeypatch, {**CLASS_TIERS, **(cfg or {})})
     if grok:
         deep = config['model_routing']['routes']['deep']
         deep.append(dict(deep[0], model=GROK[0], provider=GROK[1]))
@@ -63,20 +66,32 @@ def _route(conn, tid, lane='ready'):
     return tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane=lane)
 
 
-def test_held_far_default_route_moves_to_the_unheld_class_peer(board, clock, monkeypatch, all_assignees_spawnable):
-    """The resolver keeps a default route on the held pool (no ratio pick: no pool has a known rate here); the
-    governor moves it at claim time to the class peer with room, under the same ``default+paced`` reason."""
+def test_held_far_default_class_route_starts_because_an_unheld_class_peer_has_room(board, clock, monkeypatch,
+                                                                                   all_assignees_spawnable):
+    """A default card is a class selector, so every pool of the class is a candidate: the resolver keeps
+    ``class:deep`` and, with codex held and anthropic paced (still starting), the governor starts it on the
+    class peer. Only when no peer has room does the governor hold it (next test)."""
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', HELD_FAR), anthropic=('paced', None))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='default card', assignee='a')
-        assert _route(conn, tid) == (*PIN, 'default')
-        assert lpd.candidate_providers(conn, kb.get_task(conn, tid), 'ready') == ['openai-codex']
+        assert _route(conn, tid) == (*DEEP, 'default')
+        assert lpd.candidate_providers(conn, kb.get_task(conn, tid), 'ready') == ['anthropic', 'openai-codex']
         assert pin_tests._tick(conn) == [PEER]
         receipt = pin_tests._events(conn, tid, 'run_route')[-1]
         assert (receipt['model'], receipt['provider'], receipt['tier_reason']) == (*PEER, 'default+paced:openai-codex')
         persisted = kb.get_task(conn, tid)
         assert (persisted.model_override, persisted.provider_override) == (None, None)  # the row never moves
+
+
+def test_every_candidate_pool_held_holds_the_default_class_card(board, clock, monkeypatch, all_assignees_spawnable):
+    _deep(monkeypatch)
+    _pools(clock, openai_codex=('held', HELD_FAR), anthropic=('held', HELD_FAR))
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title='default card', assignee='a')
+        assert pin_tests._tick(conn) == []
+        assert pin_tests._events(conn, tid, 'run_route') == []
+        assert kb.get_task(conn, tid).status == 'ready'
 
 
 @pytest.mark.parametrize('until', [None, HELD_FAR])
@@ -85,14 +100,14 @@ def test_pin_keeps_unknown_or_far_reset(board, clock, monkeypatch, until):
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', until))
     with kbc.connect() as conn:
-        assert _route(conn, pin_tests._pinned_card(conn)) == (None, None, 'pinned')
+        assert _route(conn, pin_tests._pinned_card(conn)) == (*DEEP, 'default')
 
 
 def test_held_near_reset_keeps_the_pinned_route(board, clock, monkeypatch):
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', 1800))
     with kbc.connect() as conn:
-        assert _route(conn, pin_tests._pinned_card(conn)) == (None, None, 'pinned')
+        assert _route(conn, pin_tests._pinned_card(conn)) == (*DEEP, 'default')
 
 
 def test_paced_route_never_moves_an_unpinned_default_route(board, clock, monkeypatch):
@@ -101,8 +116,8 @@ def test_paced_route_never_moves_an_unpinned_default_route(board, clock, monkeyp
     _pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
         task = kb.get_task(conn, kb.create_task(conn, title='d', assignee='a'))
-        assert paced.paced_route(conn, task, (*PIN, 'default'), lane='ready', cfg=tier.load_tier_config()) is None
-        assert _route(conn, task.id) == (*PIN, 'default')
+        assert paced.paced_route(conn, task, (*DEEP, 'default'), lane='ready', cfg=tier.load_tier_config()) is None
+        assert _route(conn, task.id) == (*DEEP, 'default')
 
 
 @pytest.mark.parametrize('after, until, moved', [
@@ -126,44 +141,51 @@ def test_a_pool_that_is_not_held_never_moves_the_route(board, clock, monkeypatch
     _deep(monkeypatch)
     _pools(clock, openai_codex=(state, HELD_FAR))
     with kbc.connect() as conn:
-        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*PIN, 'default')
+        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*DEEP, 'default')
 
 
-def test_non_mandatory_pin_on_a_held_provider_keeps_its_hold(board, clock, monkeypatch,
-                                                                       all_assignees_spawnable):
+def test_legacy_pin_on_a_held_provider_is_ignored_and_the_card_starts_on_its_class(board, clock, monkeypatch,
+                                                                                  all_assignees_spawnable):
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = pin_tests._pinned_card(conn)
-        assert _route(conn, tid) == (None, None, 'pinned')
-        assert pin_tests._tick(conn) == []
-        assert pin_tests._events(conn, tid, 'run_route') == []
+        seen = pin_tests._tick(conn)
+        assert seen == [PEER], (seen, pin_tests._events(conn, tid, "dispatch_skipped"))  # moved like an unpinned default
+        assert pin_tests._events(conn, tid, 'run_route')[-1]['tier_reason'] == 'default+paced:openai-codex'
         task = kb.get_task(conn, tid)
-        assert (task.model_override, task.provider_override) == PIN  # the pin itself is unchanged
-        assert task is not None and task.status == 'ready'
+        assert task is not None
+        assert (task.model_override, task.provider_override) == PIN  # the author's historical pin is retained
 
 
 @pytest.mark.parametrize('why', ['flag', 'marker'])
-def test_mandatory_pin_keeps_its_held_provider(board, clock, monkeypatch, why):
+def test_legacy_mandatory_pin_has_no_authority_over_a_held_provider(board, clock, monkeypatch, why):
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = pin_tests._pinned_card(conn, mandatory=why == 'flag',
                                      body=walls.REQUIRE_MODEL_MARKER if why == 'marker' else None)
-        assert _route(conn, tid) == (None, None, 'pinned')  # the pin runs as pinned
+        assert _route(conn, tid) == (*DEEP, 'default')  # a retired mandate routes like any default
 
 
-def test_require_model_default_card_keeps_its_held_route(board, clock, monkeypatch, all_assignees_spawnable):
-    """The marker line keeps the card on its held route (the governor holds it); prose naming it still moves."""
+def test_require_model_marker_is_refused_at_ingress_and_ignored_on_legacy_rows(board, clock, monkeypatch,
+                                                                               all_assignees_spawnable):
+    """New ``require_model`` directives are refused; an old body line has no authority, so the card routes like
+    any default and its text stays as the author wrote it."""
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title='needs astra', body=f'astra only\n{walls.REQUIRE_MODEL_MARKER}', assignee='a')
-        assert _route(conn, tid) == (*PIN, 'default')
+        with pytest.raises(ValueError):
+            kb.create_task(conn, title='needs astra', body=f'astra only\n{walls.REQUIRE_MODEL_MARKER}', assignee='a')
+        tid = kb.create_task(conn, title='needs astra', assignee='a')
+        conn.execute('UPDATE tasks SET body=? WHERE id=?', (f'astra only\n{walls.REQUIRE_MODEL_MARKER}', tid))
+        conn.commit()
+        assert _route(conn, tid) == (*DEEP, 'default')
         prose = kb.create_task(conn, title='prose', body='a card may say `require_model` in prose', assignee='a')
-        assert pin_tests._tick(conn) == [PEER]
-        assert pin_tests._events(conn, prose, 'run_route')[-1]['tier_reason'] == 'default+paced:openai-codex'
-        assert pin_tests._events(conn, tid, 'run_route') == [] and kb.get_task(conn, tid).status == 'ready'
+        assert pin_tests._tick(conn) == [PEER, PEER]
+        for card in (tid, prose):
+            assert pin_tests._events(conn, card, 'run_route')[-1]['tier_reason'] == 'default+paced:openai-codex'
+        assert walls.REQUIRE_MODEL_MARKER in (kb.get_task(conn, tid).body or '')
 
 
 @pytest.mark.parametrize('peer', ['held', 'walled', 'live_wall'])
@@ -176,8 +198,8 @@ def test_no_unheld_unwalled_peer_keeps_the_base_route(board, clock, monkeypatch,
     elif peer == 'live_wall':
         monkeypatch.setattr(walls, 'live_quota_wall', lambda p, m: float(clock[0] + 3600) if p == 'anthropic' else None)
     with kbc.connect() as conn:
-        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*PIN, 'default')
-        assert _route(conn, pin_tests._pinned_card(conn)) == (None, None, 'pinned')
+        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*DEEP, 'default')
+        assert _route(conn, pin_tests._pinned_card(conn)) == (*DEEP, 'default')
 
 
 def test_pin_is_not_substituted_regardless_of_peer_credentials(board, clock, monkeypatch):
@@ -186,9 +208,9 @@ def test_pin_is_not_substituted_regardless_of_peer_credentials(board, clock, mon
     _pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = pin_tests._pinned_card(conn)
-        assert _route(conn, tid) == (None, None, 'pinned')
+        assert _route(conn, tid) == (*DEEP, 'default')
         UNSERVED.update({'anthropic', 'xai-oauth'})
-        assert _route(conn, tid) == (None, None, 'pinned')
+        assert _route(conn, tid) == (*DEEP, 'default')
 
 
 def test_a_review_peer_with_no_live_pool_on_this_host_is_skipped(board, clock, monkeypatch):
@@ -302,15 +324,15 @@ def test_review_unpinned_with_every_reviewer_held_or_walled_is_unavailable(board
 def test_class_pins_and_other_tier_reasons_keep_their_route(board, clock, monkeypatch, card):
     """Only default, review_unpinned and concrete pins move: a ``class:*`` pin is the allocator's to place, and a
     strong-tier keep-pattern card (here on the held provider) keeps the tier its pattern chose."""
-    _deep(monkeypatch, {'strong_model': PIN[0], 'strong_provider': PIN[1], 'default_model_keep_patterns': ['security']})
+    _deep(monkeypatch, {'default_model_keep_patterns': ['security']})
     _pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
         if card == 'class_pin':
             tid = kb.create_task(conn, title='d', assignee='a', model_override='class:deep', provider_override='auto')
-            assert _route(conn, tid)[2] == 'pinned'
+            assert _route(conn, tid)[2] == 'class'
         else:
             tid = kb.create_task(conn, title='security audit', assignee='a')
-            assert _route(conn, tid) == (*PIN, 'pattern:security')
+            assert _route(conn, tid) == (*DEEP, 'pattern:security')
 
 
 def test_route_words_resolve_nothing_while_no_pool_is_held(board, clock, monkeypatch):

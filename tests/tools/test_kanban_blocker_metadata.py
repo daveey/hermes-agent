@@ -75,11 +75,13 @@ def test_invalid_scope_refused_without_transition(board, tool, field):
 
 
 def route(conn, tid):
-    """The run's real admission receipt (``apply_model_tier``): this run is on Codex."""
+    """Historical concrete run receipt (disposable-DB seed: neutral admission now records class/auto)."""
     from hermes_cli import kanban_model_tier as tier
-    task = kb.get_task(conn, tid)
-    tier.apply_model_tier(conn, task, lane="ready",
-                          cfg={"default_model": "gpt-test", "default_provider": "openai-codex"})
+    run_id = kb._current_run_id(conn, tid)
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, tier.RUN_ROUTE_EVENT,
+                         {"model": "gpt-test", "provider": "openai-codex", "lane": "ready",
+                          "source": "pin", "tier_reason": "legacy_receipt"}, run_id=run_id)
     receipt = [e.payload for e in kb.list_events(conn, tid) if e.kind == tier.RUN_ROUTE_EVENT]
     assert receipt and receipt[-1]["provider"] == "openai-codex"
 

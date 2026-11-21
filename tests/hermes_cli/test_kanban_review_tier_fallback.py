@@ -68,17 +68,18 @@ def test_standard_availability_ignores_authorship_but_respects_pool_blocks(board
             review.resolve_review_model(conn, t, cfg)
 
 
-def test_author_mandatory_pin_is_honored(board):
+def test_legacy_mandatory_pin_is_audit_only_and_author_model_is_eligible(board):
     cfg = fallback_config(board)
     with kbc.connect() as conn:
         author = author_task(conn)
         tid = kb.create_task(conn, title="Independent review of fixture", assignee="default",
-                             creator_task_id=author.id, model_override=DEEP[0],
-                             provider_override="anthropic")
+                             creator_task_id=author.id)
+        conn.execute("UPDATE tasks SET model_override=?, provider_override='anthropic' WHERE id=?", (DEEP[0], tid))
         conn.execute("UPDATE tasks SET model_pin_mandatory=1 WHERE id=?", (tid,))
         conn.commit()
         assert review.resolve_review_model(conn, kb.get_task(conn, tid), cfg) == (
             DEEP[0], "anthropic", "review_unpinned")
+        assert kb.get_task(conn, tid).model_pin_mandatory == 1
 
 
 @pytest.mark.parametrize("blocked", ["authored", "walled", "held", "live_wall", "ineligible"])
@@ -155,6 +156,8 @@ def test_refused_override_retains_deep_only_recovery(board, monkeypatch):
     with kbc.connect() as conn:
         t = author_task(conn)
         kb.claim_task(conn, t.id)
-        assert kb.request_review(conn, t.id, metadata={"review_model": "claude-refused"})
-        with pytest.raises(review.ReviewModelUnavailable, match="refused here"):
-            review.resolve_review_model(conn, t, cfg)
+        assert kb.request_review(conn, t.id)
+        conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=? AND outcome='review_requested'",
+                     ('{"review_model": "claude-refused"}', t.id))
+        assert review.resolve_review_model(conn, t, cfg) == (
+            STANDARD, "openai-codex", "review_tier_fallback")

@@ -91,26 +91,41 @@ def test_dispatch_tick_reads_class_default_and_keeps_review_deep(board, routable
 
 
 @pytest.mark.parametrize("lane", ["ready", "review"])
-def test_explicit_lane_pin_survives_class_default(board, monkeypatch, lane):
+def test_legacy_concrete_lane_pin_is_ignored_for_class_default(board, monkeypatch, lane):
+    """Concrete pins/handoff models are retired: refused at ingress, ignored if found on an old row."""
     with kbc.connect() as conn:
-        task = kb.get_task(conn, kb.create_task(conn, title="review", assignee="default",
-                            model_override="author-model" if lane == "review" else "unknown-exact-model",
-                            provider_override="custom"))
+        with pytest.raises(ValueError):
+            kb.create_task(conn, title="review", assignee="default", model_override="unknown-exact-model",
+                           provider_override="custom")
+        tid = kb.create_task(conn, title="review", assignee="default")
+        # Historical author row, seeded raw in this isolated DB; its provenance must survive dispatch.
+        conn.execute("UPDATE tasks SET model_override=?, provider_override='custom' WHERE id=?",
+                     ("author-model" if lane == "review" else "unknown-exact-model", tid))
+        conn.commit()
+        task = kb.get_task(conn, tid)
         if lane == "review":
             kb.claim_task(conn, task.id)
-            kb.request_review(conn, task.id, metadata={"review_model": "unknown-exact-model",
-                                                       "review_provider": "custom"})
+            with pytest.raises(ValueError):
+                kb.request_review(conn, task.id, metadata={"review_model": "unknown-exact-model",
+                                                           "review_provider": "custom"})
+            kb.request_review(conn, task.id, metadata={"review_model": "class:deep"})
             task = kb.claim_review_task(conn, task.id)
         tier.apply_model_tier(conn, task, lane=lane, cfg={"default_model": "class:standard"})
-        assert owner_pin(task, conn) == ("unknown-exact-model", "custom")
+        # The review class resolves to a concrete execution receipt (never the legacy author-model pin).
+        assert owner_pin(task, conn) == (("claude-opus-5-5", "anthropic") if lane == "review"
+                                         else ("class:standard", "auto"))
+        assert kb.get_task(conn, tid).provider_override == "custom"
 
 
-def test_invalid_class_provider_refused_before_launch(board, monkeypatch):
+def test_class_with_concrete_provider_is_refused_at_ingress_and_ignored_at_launch(board, monkeypatch):
     with kbc.connect() as conn:
         task = kb.get_task(conn, kb.create_task(conn, title="routine", assignee="default"))
+        with pytest.raises(ValueError):
+            kb.create_task(conn, title="bad", assignee="default", model_override="class:deep",
+                           provider_override="openrouter")
         task.model_override, task.provider_override = "class:deep", "openrouter"
-        with pytest.raises(ValueError, match="auto"):
-            owner_pin(task, conn)
+        # A stale concrete provider can never steer a class: the launch is always ``auto``.
+        assert owner_pin(task, conn) == ("class:deep", "auto")
 
 
 @pytest.mark.parametrize("exhausted", [False, True])

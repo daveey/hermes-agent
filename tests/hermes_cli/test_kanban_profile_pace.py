@@ -57,11 +57,20 @@ def test_profile_candidates_are_not_dispatcher_home_candidates(coach):
 @pytest.mark.parametrize('pin', [{'model_override': 'grok-4.6', 'provider_override': 'xai-oauth'},
                                   {'model_override': 'grok-4.6'},
                                   {'model_override': 'class:standard', 'provider_override': 'xai-oauth'}])
-def test_profile_pins_keep_the_hold(coach, pin):
+def test_legacy_profile_pins_are_ignored_and_the_card_escapes_the_held_pool(coach, pin):
+    """New concrete pins are refused at ingress; an old row carrying one routes like any default profile card."""
+    with pytest.raises(ValueError):
+        with kbc.connect() as conn:
+            kb.create_task(conn, title='routine work', assignee='coach', model_override='grok-4.6',
+                           provider_override='xai-oauth')
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title='routine work', assignee='coach', **pin)
+        tid = kb.create_task(conn, title='routine work', assignee='coach')
+        conn.execute('UPDATE tasks SET model_override=?, provider_override=? WHERE id=?',
+                     (pin['model_override'], pin.get('provider_override'), tid))
+        conn.commit()
         seen, result = _dispatch(conn)
-        assert seen == [] and tid in result.clock_held
+        assert seen == [(tid, 'claude-sonnet-5-5', 'anthropic')] and tid not in result.clock_held
+        assert kb.get_task(conn, tid).model_override == pin['model_override']  # author provenance retained
 
 
 def test_no_usable_profile_peer_keeps_hold(coach):

@@ -26,8 +26,7 @@ def _carried(gws):
     kb._append_event(hub.conn, source, 'worker_result', {'route_model': AUTHOR}, run_id=claim.current_run_id)
     assert kb.complete_task(hub.conn, source, result='implemented', expected_run_id=claim.current_run_id)
     down = kb.create_task(hub.conn, title='Independent review: cache', assignee='default',
-                          creator_task_id=source, model_override=pool.PIN['model'],
-                          provider_override='anthropic')
+                          creator_task_id=source)
     hub.conn.execute('UPDATE tasks SET model_pin_mandatory=1 WHERE id=?', (down,))
     hub.conn.commit()
     hub.round()
@@ -92,8 +91,7 @@ def test_absent_replica_remains_fail_closed(gws, monkeypatch, fault):
     assert pool._route(worker.conn, down) == []
 
 
-def test_replica_author_pin_is_used_without_rewriting_pin(gws, monkeypatch):
-    """The replica still carries the author, but a mandatory reviewer pin on the author's model is admitted as-is."""
+def test_replica_author_pin_is_ignored_without_rewriting_pin(gws, monkeypatch):
     pool._attest(monkeypatch)
     _, down, _ = _carried(gws)
     _, worker = gws
@@ -102,7 +100,7 @@ def test_replica_author_pin_is_used_without_rewriting_pin(gws, monkeypatch):
     assert review.implementer_models(worker.conn, kb.get_task(worker.conn, down)) == {AUTHOR}
     worker.tick()
     routes = pool._route(worker.conn, down)
-    assert len(routes) == 1 and routes[-1]['model'] == AUTHOR and routes[-1]['source'] == 'pin'
+    assert len(routes) == 1 and routes[0]['source'] != 'pin'
     assert kb.get_task(worker.conn, down).model_override == AUTHOR
 
 

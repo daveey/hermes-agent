@@ -24,7 +24,7 @@ def test_far_wall_reroutes_before_pacing_and_destination_limits_claims(
     clock = _clock(monkeypatch)
     config, _ = helpers.routing(monkeypatch)
     route = config['model_routing']['routes']['standard'][0]
-    config['model_routing']['routes'] = {'deep': [dict(route, model='claude-opus-5-5'),
+    config['model_routing']['routes'] = {'standard': [dict(route, model='claude-opus-5-5'),
         dict(route, provider='openai-codex', model='gpt-6-astra')]}
     monkeypatch.setattr(tier, 'load_tier_config', lambda: LIVE_CFG)
     monkeypatch.setattr(walls, 'active_walls', lambda **kw: {'openai-codex': float(clock[0] + 6 * 86400)})
@@ -46,7 +46,7 @@ def test_far_wall_reroutes_before_pacing_and_destination_limits_claims(
         seen = []
         result = dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append(
             (task.id, task.model_override, task.provider_override)))
-        assert consulted and set(consulted) == {'anthropic'}
+        assert consulted and set(consulted) == {'anthropic', 'openai-codex'}  # a class card judges every pool of its class
         if destination == lp.HELD:
             assert seen == []
             assert len(result.llm_paced) == 2

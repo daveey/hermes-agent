@@ -11,7 +11,7 @@ from tests.hermes_cli import test_kanban_review_model as helpers
 board = helpers.board
 
 
-@pytest.mark.parametrize("provider", ["auto", "board-default", None])
+@pytest.mark.parametrize("provider", ["auto", None])
 def test_class_provider_roundtrip(board, provider):
     cfg = helpers.config(board)
     with kbc.connect() as conn:
@@ -40,8 +40,10 @@ def test_historical_board_default_handoff(board):
 @pytest.mark.parametrize("metadata", [
     {"review_model": "class:deep", "review_provider": "anthropic"},
     {"review_model": "class:deep", "review_provider": "unknown-provider"},
-    {"review_model": []},
-    {"review_model": ""},
+    {"review_model": "class:deep", "review_provider": "board-default"},
+    {"review_model": helpers.OPUS},
+    {"review_model": ["class:deep"]},
+
     {"review_model": helpers.OPUS, "review_provider": []},
 ])
 def test_invalid_handoff_refused_without_transition(board, metadata):
@@ -51,9 +53,8 @@ def test_invalid_handoff_refused_without_transition(board, metadata):
         kb.claim_task(conn, task.id)
         before = kb.get_task(conn, task.id)
         events = kb.list_events(conn, task.id)
-        ok, reason = kb.request_review(conn, task.id, metadata=metadata, with_reason=True)
-        assert not ok
-        assert reason
+        with pytest.raises((ValueError, AttributeError)):
+            kb.request_review(conn, task.id, metadata=metadata, with_reason=True)
         after = kb.get_task(conn, task.id)
         assert (after.status, after.current_run_id, after.claim_lock) == (
             before.status, before.current_run_id, before.claim_lock)

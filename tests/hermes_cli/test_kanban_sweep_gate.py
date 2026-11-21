@@ -362,9 +362,10 @@ def test_scoped_blocker_probe_reruns_when_a_route_enters_its_scope_with_no_board
     from hermes_cli import kanban_timed_park as ktp
     from hermes_cli.kanban_idle_candidates import sweep_shared_blockers
 
-    profile = {"model": {"default": "gpt-5", "provider": "openai-codex"}}  # the assignee's config.yaml
-    monkeypatch.setattr(tier, "load_tier_config", dict)
-    monkeypatch.setattr(assignment, "_assignee_config", lambda _a: profile)
+    # Neutral admission leaves a next route provider-unknown (class/auto), so the externally resolved route is an
+    # isolated seam here: a provider the next admission is known to use, readable outside the board's gate key.
+    external = {"provider": "openai-codex"}
+    monkeypatch.setattr(ksb, "task_route", lambda _conn, _tid: ("route-model", external["provider"], "ready"))
     monkeypatch.setattr(ksb, "probe_interval_seconds", lambda cfg=None: 1800)
     t0 = int(time.time())
     with kbc.connect_closing() as conn:
@@ -391,7 +392,7 @@ def test_scoped_blocker_probe_reruns_when_a_route_enters_its_scope_with_no_board
         sweep_shared_blockers(conn, r)
         assert _runs("dispatch.shared_blocker_probed")[1] == skips0 + 1
 
-        profile["model"] = {"default": "claude-opus-4", "provider": "anthropic"}  # no board write
+        external["provider"] = "anthropic"  # no board write
         assert ksb.task_applies(conn, st, tid)
         assert _revision(conn) == revision
         clock["t"] = t0 + 1801 + 300  # the stated cadence (ksb.ROUTE_RECHECK_SECONDS)

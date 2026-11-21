@@ -34,11 +34,18 @@ def _review_pools(clock, **states):
 
 def _card(conn, entry, *, override=None):
     """A Claude-implemented card under review on *entry*; ``override`` = the handoff's review_model/provider."""
-    tid = kb.create_task(conn, title='review me', assignee='a', model_override=PEER[0], provider_override=PEER[1],
+    tid = kb.create_task(conn, title='review me', assignee='a',
                          skills=['sdlc-review'] if entry == 'ready_skill' else None)
+    conn.execute('UPDATE tasks SET model_override=?, provider_override=? WHERE id=?', (*PEER, tid))
+    # Ready-skill cards need stored implementation evidence rather than treating the review skill as authorship.
+    from tests.hermes_cli import test_kanban_review_implementer_set as provenance
+    provenance._run(conn, tid, model=PEER[0], receipt=PEER[0])
     if override is not None:
         kb.claim_task(conn, tid)
-        assert kb.request_review(conn, tid, metadata={'review_model': override[0], 'review_provider': override[1]})
+        assert kb.request_review(conn, tid)
+        import json
+        conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=? AND outcome='review_requested'",
+                     (json.dumps({'review_model': override[0], 'review_provider': override[1]}), tid))
     status = 'review' if entry == 'review_lane' else 'ready'
     conn.execute('UPDATE tasks SET status=? WHERE id=?', (status, tid))
     conn.commit()
@@ -128,11 +135,12 @@ def test_no_reviewer_free_of_holds_is_unavailable(
     _review_pools(clock, **pools)
     with kbc.connect() as conn:
         tid = _card(conn, entry)
+        before_routes = pin_tests._events(conn, tid, 'run_route')
         with pytest.raises(review.ReviewModelUnavailable):
             _route(conn, tid, entry)
         assert pin_tests._tick(conn) == []  # nothing spawns onto a held pool
         assert pin_tests._events(conn, tid, 'model_tier') == []
-        assert pin_tests._events(conn, tid, 'run_route') == []
+        assert pin_tests._events(conn, tid, 'run_route') == before_routes
 
 
 @pytest.mark.parametrize('entry', ENTRIES)
@@ -143,13 +151,13 @@ def test_a_held_review_override_is_not_taken_by_the_fast_return(board, clock, mo
     _review_pools(clock, openai_codex=('held', HELD_FAR), anthropic=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = _card(conn, entry, override=PIN)
-        assert tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane=_lane(entry)) == (*GROK, 'review_override')
-        assert _route(conn, tid, entry) == (*GROK, 'review_override')
+        assert tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane=_lane(entry)) == (*GROK, 'review_unpinned')
+        assert _route(conn, tid, entry) == (*GROK, 'review_unpinned')
         reason, route, tier_event, route_event = _apply(conn, tid, entry)
         stored = kb.get_task(conn, tid)
-    assert (reason, route) == ('review_override', GROK)
+    assert (reason, route) == ('review_unpinned', GROK)
     assert 'paced' not in tier_event
-    assert route_event['tier_reason'] == 'review_override'
+    assert route_event['tier_reason'] == 'review_unpinned'
     assert (stored.model_override, stored.provider_override) == PEER  # the row never moves
 
 
@@ -174,12 +182,12 @@ def test_a_review_override_on_a_held_pool_moves_only_to_a_registered_free_peer(
         if case == 'require_model':
             conn.execute('UPDATE tasks SET body=? WHERE id=?', (pin_tests.walls.REQUIRE_MODEL_MARKER, tid))
             conn.commit()
-        if case in ('no_free_peer', 'unregistered_peer'):
+        if case == 'no_free_peer':
             with pytest.raises(review.ReviewModelUnavailable):
                 _route(conn, tid, entry)
             return
-        expected = {'paced_only': (*PIN, 'review_override'), 'require_model': (*GROK, 'review_override'),
-                    'class': (*GROK, 'review_override')}[case]
+        expected = {'paced_only': (*PIN, 'review_unpinned'), 'require_model': (*GROK, 'review_unpinned'),
+                    'unregistered_peer': (*GROK, 'review_unpinned'), 'class': (*GROK, 'review_override')}[case]
         assert _route(conn, tid, entry) == expected
 
 
@@ -208,10 +216,10 @@ def test_a_held_refused_override_substitute_moves_too(board, clock, monkeypatch,
     with kbc.connect() as conn:
         tid = _card(conn, 'review_lane', override=('claude-fable-5-2', 'anthropic'))
         assert tier.resolve_model_tier(conn, kb.get_task(conn, tid), lane='review') == (
-            *GROK, 'review_override_refused')
+            *GROK, 'review_unpinned')
         reason, route, tier_event, _ = _apply(conn, tid, 'review_lane')
-    assert (reason, route) == ('review_override_refused', GROK)
-    assert tier_event['requested']['model'] == 'claude-fable-5-2'
+    assert (reason, route) == ('review_unpinned', GROK)
+    assert 'requested' not in tier_event
     assert 'paced' not in tier_event
 
 
@@ -241,14 +249,17 @@ def test_a_failed_paced_receipt_keeps_the_reroute_and_its_reason(board, clock, m
 
 
 def test_only_review_receipts_carry_the_paced_block(board, clock, monkeypatch, all_assignees_spawnable):
-    """A default route moved off the same hold keeps its existing receipt shape (``tier_reason`` only)."""
-    paced_tests._deep(monkeypatch)
+    """Class selection is deferred to the owner; a stale concrete default is not a route pin."""
+    config, _cfg = paced_tests._deep(monkeypatch)
+    config['model_routing']['routes']['standard'] = config['model_routing']['routes']['deep']
+    import json
+    (board / 'config.yaml').write_text(json.dumps(config))
     paced_tests._pools(clock, openai_codex=('held', HELD_FAR))
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='default card', assignee='a')
-        assert pin_tests._tick(conn) == [PEER]
+        assert pin_tests._tick(conn) == [('class:standard', 'auto')]
         tier_event = pin_tests._events(conn, tid, 'model_tier')[-1]
-    assert tier_event['reason'] == 'default+paced:openai-codex' and 'paced' not in tier_event
+    assert tier_event['reason'] == 'default' and 'paced' not in tier_event
 
 
 @pytest.mark.parametrize('reason', ['review_unpinned', 'review_override', 'default', 'pinned+pin_quota_reroute'])

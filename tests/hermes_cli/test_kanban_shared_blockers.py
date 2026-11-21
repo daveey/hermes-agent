@@ -247,16 +247,26 @@ def test_drifted_task_events_rebuild_keeps_the_assertion_index(kanban_home):
         conn.close()
 
 
+def _enabled_routes():
+    route = {"billing": "subscription", "weight": 1, "eligible": True, "funding_verified": True,
+             "capabilities": {"tools": True, "streaming": True}}
+    return {"model_routing": {"enabled": True, "routes": {
+        level: [dict(route, provider="anthropic", model="claude-opus-4"),
+                dict(route, provider="openai-codex", model="gpt-5")] for level in ("fast", "standard", "deep")}}}
+
+
+_ENABLED_ROUTES = _enabled_routes()
+
+
 @pytest.fixture
 def scoped_routing(monkeypatch):
     from hermes_cli import kanban_model_tier as tier
     from hermes_cli import kanban_model_assignment as assignment
     monkeypatch.setattr(tier, "load_tier_config", lambda: {
-        "default_model": "gpt-5", "default_provider": "openai-codex",
-        "strong_model": "claude-opus-4", "strong_provider": "anthropic",
-    })
-    monkeypatch.setattr(assignment, "_assignee_config", lambda _: {
-        "model": {"default": "gpt-5", "provider": "openai-codex"}})
+        "default_model": "class:standard", "strong_model": "class:deep"})
+    monkeypatch.setattr(assignment, "_assignee_config", lambda _: _ENABLED_ROUTES)
+    # The host-level routability probe reads the same isolated enabled class routes.
+    monkeypatch.setattr("hermes_cli.config_effective.load_user_config_effective", lambda *a, **k: _ENABLED_ROUTES)
 
 
 def _scope(conn, tid):
@@ -285,8 +295,7 @@ def test_finished_other_route_wall_has_no_live_owner(kanban_home, scoped_routing
         _route_run(conn, tid, "openai-codex")
         run_id = kb._current_run_id(conn, tid)
         kbd._set_worker_pid(conn, tid, os.getpid())
-        viewer = kb.create_task(conn, title="review", assignee="default",
-                                model_override="claude-opus-4", provider_override="anthropic")
+        viewer = kb.create_task(conn, title="review", assignee="default")
         assert kb.claim_task(conn, viewer)
         _route_run(conn, viewer, "anthropic")
     with monkeypatch.context() as worker:
@@ -342,8 +351,9 @@ def test_live_owner_wall_stays_open_and_renders(kanban_home, scoped_routing, sta
         _scope(conn, tid)
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, tid))
-        viewer = kb.create_task(conn, title="review", assignee="default",
-                                model_override="claude-opus-4", provider_override="anthropic")
+        viewer = kb.create_task(conn, title="review", assignee="default")
+        assert kb.claim_task(conn, viewer)
+        _route_run(conn, viewer, "anthropic")  # historical concrete receipt (neutral admission records class/auto)
         st = ksb.blocker_states(conn)[BID]
         assert st.is_open and set(st.behind) == {tid}
         assert BID in ksb.render_blocker_context(conn, viewer)
@@ -354,8 +364,9 @@ def test_live_owner_wall_stays_open_and_renders(kanban_home, scoped_routing, sta
 def test_pinned_wall_preview_matches_dispatch(kanban_home, monkeypatch, tmp_path, blocker_provider):
     from hermes_cli import kanban_model_tier as tier, kanban_provider_walls as walls
 
-    cfg = {"default_model": "claude-sonnet-4", "default_provider": "anthropic"}
+    cfg = {"default_model": "class:standard", "strong_model": "class:deep"}
     monkeypatch.setattr(tier, "load_tier_config", lambda: cfg)
+    monkeypatch.setattr("hermes_cli.config_effective.load_user_config_effective", lambda *a, **k: _ENABLED_ROUTES)
     monkeypatch.setattr(walls, "walls_path", lambda: tmp_path / "walls.json")
     walls.record_wall("openai-codex", 3600, path=tmp_path / "walls.json")
     with kbc.connect_closing() as conn:
@@ -372,10 +383,13 @@ def test_pinned_wall_preview_matches_dispatch(kanban_home, monkeypatch, tmp_path
         task = kb.get_task(conn, tid)
         assert task is not None
         tier.apply_model_tier(conn, task, lane="ready", cfg=cfg)
-        assert preview == (task.model_override, task.provider_override, "ready")
-        assert preview == ("gpt-6-astra", "openai-codex", "ready")
-        expected = ksb.GUARD_REASON if blocker_provider == "openai-codex" else None
-        assert guard == expected
+        assert preview[:2] == tier.effective_route(task)[:2]
+        # The raw legacy pin row is ignored: the next route is the neutral class, provider unknown, so either
+        # provider-scoped wall conservatively holds it; the author row is retained.
+        assert preview == ("class:standard", None, "ready")
+        assert guard == ksb.GUARD_REASON
+        row = kb.get_task(conn, tid)
+        assert (row.model_override, row.provider_override) == ("gpt-6-astra", "openai-codex")
 
 
 
@@ -386,17 +400,17 @@ def test_scoped_next_lane_and_context(kanban_home, scoped_routing):
         st = ksb.blocker_states(conn)[BID]
         assert (st.blocker_provider, st.blocker_model, st.blocker_lane) == (
             "anthropic", "claude-sonnet-4", "review")
-        assert ksb.shared_blocker_guard(conn, tid, interval=1800) is None
+        # Neutral admission leaves the next route provider-unknown (class): an anthropic-scoped wall holds it
+        # conservatively in every lane, and the context names the class and lane, never a guessed provider.
+        assert ksb.shared_blocker_guard(conn, tid, interval=1800) == ksb.GUARD_REASON
         ctx = ksb.render_blocker_context(conn, tid)
-        assert "provider=openai-codex" in ctx and "model=gpt-5" in ctx and "lane=ready" in ctx
-        assert "not applicable" in ctx and "This run is the probe" not in ctx
-        assert "later" in ctx
+        assert "model=class:standard" in ctx and "lane=ready" in ctx and "provider=openai-codex" not in ctx
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
         assert ksb.shared_blocker_guard(conn, tid, interval=1800) == ksb.GUARD_REASON
         ctx = ksb.render_blocker_context(conn, tid)
-        assert "provider=anthropic" in ctx and "model=claude-opus-4" in ctx and "lane=review" in ctx
-        assert "This run is the probe" in ctx
+        # The review lane resolves concretely from the isolated enabled class routes: this run is the probe.
+        assert "lane=review" in ctx and "This run is the probe" in ctx
 
 
 @pytest.mark.parametrize("finish", [False, True])
@@ -439,7 +453,7 @@ def test_scheduled_review_uses_resume_lane(kanban_home, scoped_routing):
         assert kb.claim_review_task(conn, tid)
         assert continue_task(conn, tid, checkpoint="provider unavailable", resume_after_seconds=600,
                              metadata={"blocker_id": BID, "blocker_provider": "anthropic"})["ok"]
-        assert ksb.task_route(conn, tid) == ("claude-opus-4", "anthropic", "review")
+        assert ksb.task_route(conn, tid) == ("class:deep", None, "review")
         assert ksb.shared_blocker_guard(conn, tid, interval=1800) == ksb.GUARD_REASON
 
 
@@ -483,6 +497,7 @@ def test_historical_route_not_replaced_by_current_pin(kanban_home, scoped_routin
                          "provider_override='anthropic' WHERE id=?", (tid,))
         st = ksb.blocker_states(conn)[BID]
         assert st.is_open and not st.probe_starts
+        # The review lane's route comes from the isolated enabled class routes, never the row's legacy pin.
         assert ksb.task_route(conn, tid) == ("claude-opus-4", "anthropic", "review")
 
 
@@ -492,8 +507,8 @@ def test_profile_default_when_tiering_off(kanban_home, scoped_routing, monkeypat
     with kbc.connect_closing() as conn:
         tid = _blocked_behind(conn, "profile")
         _scope(conn, tid)
-        assert ksb.task_route(conn, tid) == ("gpt-5", "openai-codex", "ready")
-        assert ksb.shared_blocker_guard(conn, tid) is None
+        assert ksb.task_route(conn, tid) == ("class:standard", None, "ready")  # a profile model is never the route
+        assert ksb.shared_blocker_guard(conn, tid) == ksb.GUARD_REASON
 
 
 def test_running_other_provider_before_tier_receipt_is_not_probe(kanban_home, scoped_routing):
@@ -515,7 +530,7 @@ def test_retry_uses_strong_tier_without_writing_routing(kanban_home, scoped_rout
             kb._end_run(conn, tid, outcome="crashed")
             conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
         count = conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
-        assert ksb.task_route(conn, tid) == ("claude-opus-4", "anthropic", "ready")
+        assert ksb.task_route(conn, tid) == ("class:deep", None, "ready")
         assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == count
         task = kb.get_task(conn, tid)
         assert task is not None and task.model_override is None
@@ -525,7 +540,7 @@ def test_profile_class_provider_remains_unknown(kanban_home, scoped_routing, mon
     from hermes_cli import kanban_model_tier as tier, kanban_model_assignment as assignment
     monkeypatch.setattr(tier, "load_tier_config", dict)
     monkeypatch.setattr(assignment, "_assignee_config", lambda _: {
-        "model": {"default": "class:standard", "provider": "openai-codex"}})
+        "model": {"default": "class:standard", "provider": "openai-codex"}, **_ENABLED_ROUTES})
     with kbc.connect_closing() as conn:
         tid = _blocked_behind(conn, "class")
         _scope(conn, tid)
@@ -590,15 +605,17 @@ def _receipt(conn, tid):
     return rows[-1]
 
 
-@pytest.mark.parametrize("profile_model, profile_provider, clears", [
-    ("gpt-5", "openai-codex", False),            # tier off, Codex profile default: not evidence
-    ("class:standard", "", False),               # class default: provider unknown, not evidence
-    ("claude-opus-4", "anthropic", True),        # control: matching provider clears
+@pytest.mark.parametrize("seeded, clears", [
+    (None, False),                    # real neutral admission: class receipt, provider unknown, not evidence
+    ("openai-codex", False),          # historical concrete Codex receipt: not evidence for an Anthropic wall
+    ("anthropic", True),              # control: a historical Anthropic receipt clears
 ])
-def test_admitted_route_decides_clear_evidence(kanban_home, spawns, profile_model, profile_provider, clears):
-    """A card admitted on its profile default (tier off: no model_tier event) completing must not
-    clear an Anthropic-scoped wall unless its receipt names Anthropic."""
-    _write_home_cfg(kanban_home, profile_model=profile_model, profile_provider=profile_provider)
+def test_admitted_route_decides_clear_evidence(kanban_home, spawns, monkeypatch, seeded, clears):
+    """A card's admission receipt completing must not clear an Anthropic-scoped wall unless that receipt
+    names Anthropic. Neutral admission records a provider-unknown class; concrete receipts are historical
+    seeds written into the disposable DB."""
+    _write_home_cfg(kanban_home, profile_model="class:standard")
+    monkeypatch.setattr("hermes_cli.config_effective.load_user_config_effective", lambda *a, **k: _ENABLED_ROUTES)
     _spawned, fake_spawn = spawns
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="probe card", assignee="default")
@@ -608,9 +625,12 @@ def test_admitted_route_decides_clear_evidence(kanban_home, spawns, profile_mode
         res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
         assert _spawned_ids(res) == [tid]
         receipt = _receipt(conn, tid)
-        assert receipt["model"] == profile_model and receipt["source"] == "profile_default"
-        assert receipt["provider"] == (profile_provider or None)
-        assert not [e for e in kb.list_events(conn, tid) if e.kind == "model_tier"]   # tier off
+        assert receipt["model"] == "class:standard" and receipt["source"] == "class" and receipt["provider"] is None
+        if seeded:
+            with kb.write_txn(conn):
+                kb._append_event(conn, tid, "run_route", {"model": "m", "provider": seeded, "lane": "ready",
+                                                          "source": "pin", "tier_reason": "legacy_receipt"},
+                                 run_id=kb._current_run_id(conn, tid))
         st = ksb.blocker_states(conn)[WALL]
         assert (tid in st.probe_starts) is clears
         assert kb.complete_task(conn, tid, result="done")
@@ -660,8 +680,7 @@ def test_dispatch_codex_runs_behind_anthropic_wall_and_opus_probes_after_interva
         seen[task.id] = (task.model_override, task.provider_override)
 
     with kbc.connect_closing() as conn:
-        opus = kb.create_task(conn, title="adversarial review", assignee="default",
-                              model_override="claude-opus-4", provider_override="anthropic")
+        opus = kb.create_task(conn, title="adversarial review", assignee="default")
         codex1 = kb.create_task(conn, title="impl one", assignee="default")
         codex2 = kb.create_task(conn, title="impl two", assignee="default", priority=5)
         for tid in (opus, codex1, codex2):

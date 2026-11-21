@@ -84,11 +84,12 @@ def test_review_with_only_eligible_standard_route_uses_tier_fallback(board):
 
 
 def test_card_pinned_class_is_left_to_the_card(board):
-    """An explicit card pin is the creator's choice; the tier fallback does not rewrite it."""
+    """A card's own class selector is the creator's choice (the only per-card route spec left): the tier fallback
+    records it as unroutable here but never rewrites the card's class."""
     _write(board, {"enabled": True})
     with kbc.connect() as conn:
         task = kb.get_task(conn, kb.create_task(conn, title="x", assignee="default", model_override="class:deep",
                                                 provider_override="auto"))
         reason = tier.apply_model_tier(conn, task, lane="ready")
-    assert reason == "pinned"
+    assert reason == "class+unroutable:class:deep:no_eligible_routes"
     assert task.model_override == "class:deep"

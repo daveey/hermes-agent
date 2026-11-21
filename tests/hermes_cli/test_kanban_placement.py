@@ -506,13 +506,13 @@ def test_new_client_carries_skills_goal_mode_and_pins_as_fields(mac):
     mac["result"]["help"] = NEW_HELP
     out = json.loads(kt._handle_create({
         "title": "Regenerate the plugin index", "body": "Do it.", "skills": ["x"], "goal_mode": True,
-        "goal_max_turns": 6, "model": "claude-opus-5-5", "provider": "anthropic", "max_runtime_seconds": 1800,
+        "goal_max_turns": 6, "model": "class:deep", "max_runtime_seconds": 1800,
         "priority": 3, "session_id": "20261027_183000_abc123"}))
     assert out["ok"] and out["placed"]["gateway"] == "hub", out
     assert _local_count() == 0
     argv = mac["calls"][0]
-    assert _options(argv) == {"skills": ["x"], "goal_mode": True, "goal_max_turns": 6, "model": "claude-opus-5-5",
-                              "provider": "anthropic", "max_runtime_seconds": 1800, "priority": 3}
+    assert _options(argv) == {"skills": ["x"], "goal_mode": True, "goal_max_turns": 6, "model": "class:deep",
+                              "max_runtime_seconds": 1800, "priority": 3}
     body = argv[argv.index("--body") + 1]
     assert "Skills to load first" not in body and "Runtime budget" not in body and "needs=[" in body
 

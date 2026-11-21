@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_provider_walls as walls
@@ -20,6 +22,15 @@ CODEX = "openai-codex"
 
 def _wall(board, provider=CODEX, seconds=524389):
     walls.record_wall(provider, seconds, path=board / "kanban" / "provider_walls.json")
+
+
+def _legacy(conn, tid, model=None, provider=None, body=None):
+    """Seed a historical concrete pin / ``require_model`` body raw in this isolated test DB.
+
+    Ingress refuses them now; dispatch must ignore them while the author row keeps its provenance."""
+    conn.execute("UPDATE tasks SET model_override=?, provider_override=?, body=COALESCE(?, body) WHERE id=?",
+                 (model, provider, body, tid))
+    conn.commit()
 
 
 def test_parse_retry_after_takes_largest():
@@ -46,21 +57,28 @@ def test_keep_pattern_card_preserves_strong_route_under_wall(board, monkeypatch)
     conn = kbc.connect()
     tid = kb.create_task(conn, title="security audit", assignee="default")
     seen = _dispatch(conn)
-    assert seen[tid][:2] == (None, None)
+    assert seen[tid][:2] == ("class:deep", "auto")
     assert _tier_events(conn, tid)[-1]['reason'] == 'pattern:security'
 
 
-def test_pinned_card_on_walled_provider_keeps_exact_pin(board, monkeypatch):
+def test_legacy_pinned_card_on_walled_provider_is_routed_by_class_not_its_pin(board, monkeypatch):
     _write_cfg(board, default_model=SONNET, default_provider="anthropic")
     monkeypatch.setattr(walls, "walls_path", lambda: board / "w.json")
     walls.record_wall(CODEX, 524389, path=board / "w.json")
     conn = kbc.connect()
-    a = kb.create_task(conn, title="a", assignee="default", model_override="gpt-6-astra", provider_override=CODEX)
-    b = kb.create_task(conn, title="b", body="must stay on astra\nrequire_model: true", assignee="default",
-                       model_override="gpt-6-astra", provider_override=CODEX)
+    a = kb.create_task(conn, title="a", assignee="default")
+    b = kb.create_task(conn, title="b", body="plain", assignee="default")
+    _legacy(conn, a, "gpt-6-astra", CODEX)
+    _legacy(conn, b, "gpt-6-astra", CODEX, "must stay on astra\nrequire_model: true")
+    with pytest.raises(ValueError):  # new concrete pins / mandatory directives are refused at ingress
+        kb.create_task(conn, title="c", assignee="default", model_override="gpt-6-astra", provider_override=CODEX)
     seen = _dispatch(conn)
-    assert seen[a][:2] == ("gpt-6-astra", CODEX)
-    assert seen[b][:2] == ("gpt-6-astra", CODEX)
+    # Retired restrictions are ignored at dispatch: both run on the class route, never the legacy pin.
+    assert seen[a][:2] == ("class:standard", "auto")
+    assert seen[b][:2] == ("class:standard", "auto")
+    # Author provenance is retained untouched.
+    assert (kb.get_task(conn, a).model_override, kb.get_task(conn, a).provider_override) == ("gpt-6-astra", CODEX)
+    assert "require_model: true" in kb.get_task(conn, b).body
 
 
 def test_no_wall_no_change(board, monkeypatch):
@@ -69,7 +87,7 @@ def test_no_wall_no_change(board, monkeypatch):
     monkeypatch.setattr(walls, "profile_provider", lambda: CODEX)
     conn = kbc.connect()
     tid = kb.create_task(conn, title="security audit", assignee="default")
-    assert _dispatch(conn)[tid][0] is None
+    assert _dispatch(conn)[tid][0] == "class:deep"
 
 
 def test_fallback_also_walled_leaves_task(board, monkeypatch):
@@ -149,15 +167,16 @@ def test_storm_alert_body_does_not_opt_itself_out_of_wall_reroute(board):
     assert not kanban_pin_reroute.is_mandatory_pin(task)
 
 
-def test_requires_model_needs_a_deliberate_line():
+def test_requires_model_directive_has_no_routing_authority():
     class T:
         title = "require_model"
         def __init__(self, body): self.body = body
     assert not walls.requires_model(T("cards pinned to the walled provider (`require_model`)."))
     assert not walls.requires_model(T("require_model: false"))
     assert not walls.requires_model(T(None))
-    assert walls.requires_model(T("must stay on astra\nrequire_model: true\n"))
-    assert walls.requires_model(T(f"  {walls.REQUIRE_MODEL_MARKER.upper()}  "))
+    # Even a deliberate historical line is evidence, not a mandate: model-neutral policy ignores it.
+    assert not walls.requires_model(T("must stay on astra\nrequire_model: true\n"))
+    assert not walls.requires_model(T(f"  {walls.REQUIRE_MODEL_MARKER.upper()}  "))
 
 
 def test_storm_alert_prints_wall_date_in_utc(board, monkeypatch):
@@ -187,8 +206,11 @@ def test_storm_alert_prints_wall_date_in_utc(board, monkeypatch):
     assert "openai-codex until 2099-11-18 05:59Z" in body
 
 
-def test_default_tier_on_walled_default_provider_moves_to_strong_tier(board, monkeypatch):
-    """2026-11-01: default_model was gpt-6-astra/openai-codex; a Codex wall had only Codex as fallback."""
+def test_default_tier_with_retired_concrete_config_stays_on_the_class_route_under_a_wall(board, monkeypatch):
+    """2026-11-01: default_model was gpt-6-astra/openai-codex; a Codex wall had only Codex as fallback.
+
+    Concrete default/strong names are retired: the card runs on ``class:standard``/auto and the allocator
+    (not a hard-coded provider) steps around the wall, so no concrete tuple is ever injected."""
     _write_cfg(board, default_model="gpt-6-astra", default_provider=CODEX,
                strong_model=OPUS, strong_provider="anthropic")
     monkeypatch.setattr(walls, "walls_path", lambda: board / "w.json")
@@ -196,8 +218,8 @@ def test_default_tier_on_walled_default_provider_moves_to_strong_tier(board, mon
     conn = kbc.connect()
     tid = kb.create_task(conn, title="plain card", assignee="default")
     seen = _dispatch(conn)
-    assert seen[tid][:2] == (OPUS, "anthropic")
-    assert "wall:openai-codex" in _tier_events(conn, tid)[-1]["reason"]
+    assert seen[tid][:2] == ("class:standard", "auto")
+    assert _tier_events(conn, tid)[-1]["reason"] == "default"
 
 
 def test_live_pool_exhaustion_counts_as_wall_without_a_crash(board, monkeypatch):
@@ -208,26 +230,25 @@ def test_live_pool_exhaustion_counts_as_wall_without_a_crash(board, monkeypatch)
                         lambda p, m: time.time() + 200714 if p == CODEX else None)
     conn = kbc.connect()
     tid = kb.create_task(conn, title="plain card", assignee="default")
-    pinned = kb.create_task(conn, title="pinned", assignee="default", model_override="gpt-6-astra",
-                            provider_override=CODEX)
+    pinned = kb.create_task(conn, title="pinned", assignee="default")
+    _legacy(conn, pinned, "gpt-6-astra", CODEX)
     seen = _dispatch(conn)
-    assert seen[tid][:2] == (OPUS, "anthropic")
-    # Exact pins keep their tuple: never rewritten. This fresh one has no same-class peer ("default" has no
-    # routing policy), so it is held on the live wall (kanban_dispatch_skip); with a free class peer it is
-    # rerouted instead (test_kanban_pin_reroute::test_fresh_pin_on_a_far_live_wall_reroutes_on_its_first_run).
-    assert pinned not in seen
-    assert [r[0] for r in conn.execute("SELECT kind FROM task_events WHERE task_id = ? AND kind = 'dispatch_skipped'",
-                                       (pinned,))] == ["dispatch_skipped"]
+    assert seen[tid][:2] == ("class:standard", "auto")
+    # A legacy concrete pin is ignored (no hold on the live wall, no crash) and its author row is untouched.
+    assert pinned in seen, [tuple(r) for r in conn.execute("SELECT kind, payload FROM task_events WHERE task_id=?", (pinned,))]
+    assert seen[pinned][:2] == ("class:standard", "auto")
+    assert (kb.get_task(conn, pinned).model_override, kb.get_task(conn, pinned).provider_override) == (
+        "gpt-6-astra", CODEX)
 
 
-def test_every_fallback_exhausted_leaves_task_on_its_route(board, monkeypatch):
+def test_every_fallback_exhausted_leaves_task_on_its_class_route(board, monkeypatch):
     _write_cfg(board, default_model="gpt-6-astra", default_provider=CODEX,
                strong_model=OPUS, strong_provider="anthropic")
     monkeypatch.setattr(walls, "walls_path", lambda: board / "w.json")
     monkeypatch.setattr(walls, "live_quota_wall", lambda p, m: time.time() + 3600)
     conn = kbc.connect()
     tid = kb.create_task(conn, title="plain card", assignee="default")
-    assert _dispatch(conn)[tid][:2] == ("gpt-6-astra", CODEX)
+    assert _dispatch(conn)[tid][:2] == ("class:standard", "auto")
 
 
 def test_live_quota_wall_reads_the_oauth_pool(monkeypatch):

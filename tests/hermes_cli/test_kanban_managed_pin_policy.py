@@ -34,7 +34,7 @@ def board(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setattr(Path, 'home', lambda: tmp_path)
     monkeypatch.setenv('HERMES_HOME', str(home))
-    (home / 'config.yaml').write_text('kanban:\n  orchestrator_profile: supervisor\n')
+    (home / 'config.yaml').write_text('kanban:\n  orchestrator_profile: supervisor\n' + _managed_yaml())
 
     def configure(enforce=True):
         for name in ('worker', 'supervisor'):
@@ -59,26 +59,25 @@ def _count(conn):
 @pytest.mark.parametrize('provider', [None, 'anthropic'])
 def test_create_refuses_retired_pin_under_managed_policy(board, provider):
     conn, _ = board
-    with pytest.raises(ValueError, match='model_pin_not_in_routing_registry') as info:
+    with pytest.raises(ValueError, match='model-neutral') as info:
         kb.create_task(conn, title='Check live', assignee='worker',
                        model_override='claude-sonnet-4-5', provider_override=provider)
     message = str(info.value)
-    assert 'claude-sonnet-5-5' in message and 'claude-opus-5-5' in message
-    assert 'leave model out' in message
+    assert 'class/tier' in message
     assert _count(conn) == 0
 
 
-def test_create_accepts_registered_pin(board):
+def test_create_refuses_registered_pin(board):
     conn, _ = board
-    tid = kb.create_task(conn, title='Review', assignee='worker',
-                         model_override='claude-sonnet-5-5', provider_override='anthropic')
-    task = kb.get_task(conn, tid)
-    assert (task.model_override, task.provider_override) == ('claude-sonnet-5-5', 'anthropic')
+    with pytest.raises(ValueError, match='model-neutral'):
+        kb.create_task(conn, title='Review', assignee='worker',
+                       model_override='claude-sonnet-5-5', provider_override='anthropic')
+    assert _count(conn) == 0
 
 
 def test_create_refuses_registered_model_on_unregistered_provider(board):
     conn, _ = board
-    with pytest.raises(ValueError, match='model_pin_not_in_routing_registry'):
+    with pytest.raises(ValueError, match='model-neutral'):
         kb.create_task(conn, title='Review', assignee='worker',
                        model_override='claude-sonnet-5-5', provider_override='openrouter')
 
@@ -90,18 +89,19 @@ def test_class_selector_and_unpinned_cards_are_untouched(board):
     assert _count(conn) == 2
 
 
-def test_policy_off_keeps_old_behaviour(board):
+def test_policy_off_still_rejects_concrete_restrictions(board):
     conn, configure = board
     configure(enforce=False)
-    tid = kb.create_task(conn, title='Legacy', assignee='worker',
-                         model_override='claude-sonnet-4-5', provider_override='anthropic')
-    assert kb.get_task(conn, tid).model_override == 'claude-sonnet-4-5'
+    with pytest.raises(ValueError, match='model-neutral'):
+        kb.create_task(conn, title='Legacy', assignee='worker',
+                       model_override='claude-sonnet-4-5', provider_override='anthropic')
+    assert _count(conn) == 0
 
 
 def test_set_model_override_refuses_retired_pin(board):
     conn, _ = board
     tid = kb.create_task(conn, title='Card', assignee='worker')
-    with pytest.raises(ValueError, match='model_pin_not_in_routing_registry'):
+    with pytest.raises(ValueError, match='model-neutral'):
         kb.set_model_override(conn, tid, 'claude-sonnet-4-5', provider='anthropic')
     assert kb.get_task(conn, tid).model_override is None
 
@@ -113,42 +113,41 @@ def test_kanban_create_tool_returns_typed_refusal(board, monkeypatch):
     monkeypatch.setenv('HERMES_KANBAN_TASK', parent)
     monkeypatch.setattr(tools, '_persisted_identity', lambda: 'worker')
     result = json.loads(tools._handle_create({'title': 'Child', 'model': 'claude-sonnet-4-5'}))
-    assert result['code'] == 'model_pin_not_in_routing_registry'
-    assert 'claude-sonnet-5-5' in result['error']
+    assert 'model-neutral' in result['error']
     assert _count(conn) == 1
 
 
 def test_kanban_create_tool_model_description_names_the_registry():
     from tools.kanban_tools_schemas import KANBAN_CREATE_SCHEMA
     description = KANBAN_CREATE_SCHEMA['parameters']['properties']['model']['description']
-    assert "routing registry" in description and 'leave this out' in description.lower()
+    assert 'class' in description.lower() and 'concrete' in description.lower()
 
 
 @pytest.mark.parametrize('lane', ['ready', 'review'])
-def test_dispatch_blocks_bad_pin_already_in_db_without_spawning(board, lane):
-    from hermes_cli.kanban_db_dispatch import dispatch_once, guard_hold_cap_seconds
+def test_dispatch_ignores_legacy_pin_without_rewriting_author_evidence(board, lane):
+    from hermes_cli.kanban_db_dispatch import dispatch_once
     conn, _ = board
-    tid = kb.create_task(conn, title='Legacy pin', assignee='worker', session_id='chat')
+    tid = kb.create_task(conn, title='Legacy route', assignee='worker', session_id='chat')
     conn.execute('UPDATE tasks SET model_override=?, status=? WHERE id=?', ('claude-sonnet-4-5', lane, tid))
     conn.commit()
     spawned = []
-    dispatch_once(conn, spawn_fn=lambda *args: spawned.append(args), max_spawn=1)
-    assert spawned == []
-    task = kb.get_task(conn, tid)
-    assert task.status == 'todo'
-    assert task.block_kind == 'assignment'
-    assert guard_hold_cap_seconds('model_pin_not_in_routing_registry') is None
+    dispatch_once(conn, spawn_fn=lambda item, *args: spawned.append(item.model_override), max_spawn=1)
+    assert spawned == (['class:standard'] if lane == 'ready' else ['claude-opus-5-5'])
+    assert kb.get_task(conn, tid).model_override == 'claude-sonnet-4-5'
+    event = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
+    if lane == 'review':
+        assert event['implementer_models'] == ['claude-sonnet-4-5']
 
 
-def test_dispatch_dry_run_reports_bad_pin_without_writing(board):
+def test_dispatch_dry_run_ignores_bad_pin_without_writing(board):
     from hermes_cli.kanban_db_dispatch import dispatch_once
     conn, _ = board
-    tid = kb.create_task(conn, title='Legacy pin', assignee='worker')
+    tid = kb.create_task(conn, title='Legacy route', assignee='worker')
     conn.execute('UPDATE tasks SET model_override=? WHERE id=?', ('claude-sonnet-4-5', tid))
     conn.commit()
     before = list(conn.iterdump())
     result = dispatch_once(conn, dry_run=True)
-    assert (tid, 'model_pin_not_in_routing_registry') in result.respawn_guarded
+    assert (tid, 'model_pin_not_in_routing_registry') not in result.respawn_guarded
     assert list(conn.iterdump()) == before
 
 
@@ -211,12 +210,19 @@ FABLE = 'claude-fable-5-2'
 def _hand_off_for_review(conn, metadata, *, pin=None):
     """Implementer run spawned through dispatch (so its run_route receipt exists), then a review handoff."""
     from hermes_cli.kanban_db_dispatch import dispatch_once
-    tid = kb.create_task(conn, title='Browser build', assignee='worker', model_override=pin,
-                         provider_override='anthropic' if pin else None)
+    tid = kb.create_task(conn, title='Browser build', assignee='worker')
+    if pin:
+        conn.execute("UPDATE tasks SET model_override=?, provider_override='anthropic' WHERE id=?", (pin, tid))
+        conn.commit()
     dispatch_once(conn, spawn_fn=lambda *args: None, max_spawn=1)
     assert kb.get_task(conn, tid).status == 'running'
-    assert kb.request_review(conn, tid, summary=f'reviewer-model: wanted {FABLE}, set-model refused: '
-                             'model_pin_not_in_routing_registry', metadata=metadata)
+    claimed = kb.get_task(conn, tid)
+    kb._append_event(conn, tid, 'worker_result', {'route_model': pin or 'claude-sonnet-5-5',
+                                               'route_provider': 'anthropic'}, run_id=claimed.current_run_id)
+    assert kb.request_review(conn, tid, summary='Ready for independent review')
+    conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=? AND outcome='review_requested'",
+                 (json.dumps(metadata or {}), tid))
+    conn.commit()
     return tid
 
 
@@ -231,11 +237,10 @@ def test_refused_review_override_falls_back_to_registered_independent_reviewer(b
                   max_spawn=1)
     assert seen == [('claude-opus-5-5', 'anthropic')]
     tier = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
-    assert tier['reason'] == 'review_override_refused' and tier['lane'] == 'review'
+    assert tier['reason'] == 'review_unpinned' and tier['lane'] == 'review'
     assert tier['model'] == 'claude-opus-5-5'
-    assert tier['requested']['model'] == FABLE
-    assert tier['requested']['code'] == 'model_pin_not_in_routing_registry'
-    assert 'claude-opus-5-5' in tier['requested']['allowed']
+    assert 'requested' not in tier
+    assert tier['implementer_models'] == ['claude-sonnet-5-5']
     assert kb.get_task(conn, tid).consecutive_failures == 0
 
 
@@ -281,7 +286,7 @@ def test_registered_review_override_is_kept(board):
     seen = []
     dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
     assert seen == ['claude-opus-5-5']
-    assert [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]['reason'] == 'review_override'
+    assert [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]['reason'] == 'review_unpinned'
 
 
 def _receipts(conn, tid, *, route=None, ran=None):
@@ -289,6 +294,7 @@ def _receipts(conn, tid, *, route=None, ran=None):
     run = conn.execute("SELECT id FROM task_runs WHERE task_id=? AND outcome='review_requested' "
                        "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0]
     if route:
+        conn.execute("DELETE FROM task_events WHERE task_id=? AND run_id=? AND kind='worker_result'", (tid, run))
         conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND run_id=? AND kind='run_route'",
                      (json.dumps({'model': route[0], 'provider': route[1], 'lane': 'ready',
                                   'source': 'class' if route[0].startswith('class:') else 'pin'}), tid, run))
@@ -320,7 +326,7 @@ def test_class_routed_implementer_receipts_do_not_gate_review_admission(board):
     dispatch_once(conn, spawn_fn=lambda item, *args: seen.append(item.model_override), max_spawn=1)
     assert seen == ['claude-opus-5-5']
     assert [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]['reason'] == (
-        'review_override_refused')
+        'review_unpinned')
 
 
 def test_repeated_identical_review_refusal_moves_to_a_visible_block(board, monkeypatch):

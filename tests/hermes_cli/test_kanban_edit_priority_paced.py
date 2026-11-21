@@ -21,7 +21,7 @@ from hermes_cli import kanban_llm_pacing as lp
 from hermes_cli import kanban_llm_pacing_dispatch as pd
 from hermes_cli.kanban_parser import build_parser
 from tests.hermes_cli import test_kanban_model_tier as model_tier
-from tests.hermes_cli.test_kanban_notice_pacing_admission import OPUS, _store
+from tests.hermes_cli.test_kanban_notice_pacing_admission import _store
 
 board = model_tier.board  # one unsynced gateway: every card is its own to lease
 
@@ -35,8 +35,7 @@ def _main(argv: list[str]) -> int:
 @pytest.fixture
 def paced_card(board):
     with kbc.connect_closing() as conn:
-        tid = kb.create_task(conn, title="paced", assignee="default", priority=900, model_override=OPUS,
-                             provider_override="anthropic")
+        tid = kb.create_task(conn, title="paced", assignee="default", priority=900)
     _store(("anthropic", lp.HELD))  # every candidate pool at reserve: the only state that holds a start
     with kbc.connect_closing() as conn:
         assert pd.paced_pools(conn, tid), "precondition: the governor holds the card"
@@ -81,8 +80,7 @@ def test_lowering_and_same_value_on_paced_card_unchanged(paced_card, capsys):
 
 def test_raise_on_unpaced_card_needs_no_reason(board, capsys):
     with kbc.connect_closing() as conn:
-        tid = kb.create_task(conn, title="open", assignee="default", priority=900, model_override=OPUS,
-                             provider_override="anthropic")
+        tid = kb.create_task(conn, title="open", assignee="default", priority=900)
     _store(("anthropic", lp.OPEN))
     assert _main(["edit", tid, "--priority", "1000"]) == 0, capsys.readouterr().err
     assert _state(tid)[0] == 1000

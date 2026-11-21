@@ -331,3 +331,7 @@ def test_manual_promotion_is_newest_lifecycle_phase(board):
     assert kb._resume_status_from_events(conn, tid) == 'review'
     kb._append_event(conn, tid, 'promoted_manual', {})
     assert kb._resume_status_from_events(conn, tid) == 'ready'
+
+
+def _unavailable(*args):
+    raise review.ReviewModelUnavailable('fixture: temporary reviewer admission failure')

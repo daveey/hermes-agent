@@ -518,9 +518,10 @@ def test_the_alarms_run_may_not_move_an_unlisted_card_or_back_onto_the_stalled_m
     assert place._pin(hub.conn, unlisted) == place._pin(hub.conn, a) == [f"machine:{M}"]
 
 
-def test_the_alarms_pool_move_keeps_a_mandatory_pins_label(held, monkeypatch):
-    # Review 5878972889 on #1622: the alarm may only ask for exactly [pool:worker]; the move must still carry
-    # capability:mandatory-model-pin, or an old-core pool worker leases a pin it would run on another model.
+def test_the_alarms_pool_move_ignores_a_legacy_mandatory_pins_label(held, monkeypatch):
+    # A historical mandatory-pin row (seeded straight into the disposable DB) is never placement authority
+    # now: the alarm's pool move carries only [pool:worker], with no capability:mandatory-model-pin label,
+    # even to a worker that does not attest the old refusal.
     from hermes_cli import kanban_mandatory_pin as mp
     hub, _worker_gw, _alarm, (a, _b), _unlisted = held
     with kb.write_txn(hub.conn):
@@ -530,13 +531,10 @@ def test_the_alarms_pool_move_keeps_a_mandatory_pins_label(held, monkeypatch):
     monkeypatch.setitem(support.MACHINES, X, pooled)
     hub.enter()
     out = _move(a, [POOL])  # worker-2 is on the pool but does not attest the mandatory-pin refusal
-    assert out.get("ok") is not True and mp.LABEL in out["error"], out
-    assert place._pin(hub.conn, a) == [f"machine:{M}"]
-    monkeypatch.setitem(support.MACHINES, X, {**pooled, "labels": [*pooled["labels"], mp.LABEL]})
-    hub.enter()
-    out = _move(a, [POOL])
     assert out.get("ok") is True, out
-    assert place._pin(hub.conn, a) == sorted([POOL, mp.LABEL])
+    assert place._pin(hub.conn, a) == [POOL]
+    row = hub.conn.execute("SELECT model_pin_mandatory, model_override FROM tasks WHERE id = ?", (a,)).fetchone()
+    assert tuple(row) == (1, "claude-opus-5-5")  # author provenance retained
 
 
 def test_the_alarms_run_leaves_a_card_whose_unpushed_tree_is_on_this_host(held, tmp_path, monkeypatch):

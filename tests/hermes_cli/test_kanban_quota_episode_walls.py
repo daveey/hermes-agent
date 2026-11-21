@@ -18,8 +18,7 @@ from hermes_cli.kanban_db_dispatch_clock import guard_hold_until
 from hermes_cli.kanban_quota_episode import episode
 from tests.hermes_cli.test_kanban_quota_episode import board as board, reap, routing  # noqa: PLC0414 -- the self-alias is load-bearing: it suppresses F811 for the pytest fixture parameter shadowing this import
 
-HUB_CFG = {'default_model': 'gpt-6-astra', 'default_provider': 'openai-codex',
-           'strong_model': 'claude-opus-5-5', 'strong_provider': 'anthropic'}
+HUB_CFG = {'default_model': 'class:standard', 'strong_model': 'class:deep'}
 
 
 def _codex_wall(reset) -> dict[str, Any]:
@@ -41,17 +40,26 @@ def _hub_tier(monkeypatch):
     monkeypatch.setattr(tier, 'load_tier_config', lambda: HUB_CFG)
 
 
+def _class_routes(config, **by_class):
+    """Isolated enabled class routes (``{class: [(provider, model), ...]}``), also for the host routability probe."""
+    base = dict(billing='subscription', weight=1, eligible=True, funding_verified=True,
+                capabilities={'tools': True, 'streaming': True})
+    config['model_routing'] = {'enabled': True, 'routes': {
+        level: [dict(base, provider=p, model=m) for p, m in routes] for level, routes in by_class.items()}}
+
+
 @pytest.mark.parametrize('why', ['routing_disabled', 'no_class_alternate'])
 def test_episode_default_card_without_class_alternate_falls_back_to_strong_tier(
         board, monkeypatch, all_assignees_spawnable, why):
-    """(a) Routing off (or no class peer): the episode's own wall still moves an unpinned default card
-    to the strong tier, even with no provider_walls.json entry and no live pool evidence."""
+    """(a) No class peer for the walled route: the episode's own wall still moves an unpinned default card
+    to the strong class, even with no provider_walls.json entry and no live pool evidence. With routing off
+    nothing can move it: it holds for the reset instead of spawning into the wall."""
     clock = _clock(monkeypatch)
     config, _ = routing(monkeypatch)
     if why == 'routing_disabled':
         config['model_routing']['enabled'] = False
-    else:  # gpt-6-astra belongs to no class: alternate_route cannot place it
-        config['model_routing']['routes'] = {'standard': [config['model_routing']['routes']['standard'][0]]}
+    else:  # the only standard route is the walled codex one; the strong class has room
+        _class_routes(config, standard=[('openai-codex', 'gpt-6-astra')], deep=[('anthropic', 'claude-opus-5-5')])
     _hub_tier(monkeypatch)
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
     reset = clock[0] + 55 * 3600
@@ -61,24 +69,29 @@ def test_episode_default_card_without_class_alternate_falls_back_to_strong_tier(
         # Only the episode knows the wall: no provider file, no live pool evidence.
         monkeypatch.setattr(walls, 'active_walls', lambda **_k: {})
         clock[0] += 301
-        assert dispatch.check_respawn_guard(conn, tid) is None
+        guard = dispatch.check_respawn_guard(conn, tid)
         seen = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
+        if why == 'routing_disabled':
+            assert guard == 'subscription_quota_reset' and seen == []
+            return
+        assert guard is None
         assert seen == [('claude-opus-5-5', 'anthropic')]
         route = kb._json_dict(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='run_route' "
                                            "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0])
         assert route['provider'] == 'anthropic' and 'quota_reroute' in route['tier_reason']
 
 
-def test_episode_fallback_never_reroutes_an_explicit_pin(board, monkeypatch, all_assignees_spawnable):
-    """(a) The strong-tier fallback is for unpinned default cards only; an Astra pin waits for the reset."""
+def test_episode_fallback_never_rewrites_a_legacy_pin_row(board, monkeypatch, all_assignees_spawnable):
+    """(a) A legacy Astra pin row (raw seed, dynamically ignored) neither reroutes nor is rewritten: with routing
+    off the card holds for the reset and the author row is retained."""
     clock = _clock(monkeypatch)
     config, _ = routing(monkeypatch)
     config['model_routing']['enabled'] = False
     _hub_tier(monkeypatch)
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title='astra pin', assignee='a')
+        tid = kb.create_task(conn, title='legacy row card', assignee='a')
         conn.execute("UPDATE tasks SET model_override='gpt-6-astra', provider_override='openai-codex' WHERE id=?", (tid,))
         conn.commit()
         reap(conn, tid, admit=HUB_CFG, **_codex_wall(clock[0] + 55 * 3600))
@@ -120,7 +133,7 @@ def test_episode_still_admits_a_target_with_no_wall_anywhere(board, monkeypatch,
     """(b) Control: with no wall on the default provider, the different provider is admitted as before."""
     clock = _clock(monkeypatch)
     config, _ = routing(monkeypatch)
-    config['model_routing']['enabled'] = False
+    _class_routes(config, standard=[('anthropic', 'claude-opus-5-5'), ('openai-codex', 'gpt-6-astra')])
     _hub_tier(monkeypatch)
     monkeypatch.setattr(walls, 'active_walls', lambda **_k: {})
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
@@ -191,7 +204,7 @@ def test_expired_episode_still_honours_another_cards_wall(board, monkeypatch, al
     episode is over, routing must still skip walled codex: the provider-wall reroute applies again."""
     clock = _clock(monkeypatch)
     config, _ = routing(monkeypatch)
-    config['model_routing']['enabled'] = False
+    _class_routes(config, standard=[('anthropic', 'claude-opus-5-5'), ('openai-codex', 'gpt-6-astra')])
     _hub_tier(monkeypatch)
     codex_reset = float(clock[0] + 55 * 3600)
     monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': codex_reset})
@@ -232,7 +245,8 @@ def test_review_card_waits_when_its_strong_provider_is_walled_elsewhere(board, m
     """(b) Review lane: the episode walled codex, the review route (strong tier, anthropic) is walled by
     another card's wall. Holding beats sending the review into that wall."""
     clock = _clock(monkeypatch)
-    routing(monkeypatch)
+    config, _ = routing(monkeypatch)
+    _class_routes(config, standard=[('openai-codex', 'gpt-6-astra')], deep=[('anthropic', 'claude-opus-5-5')])
     _hub_tier(monkeypatch)
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
     with kbc.connect() as conn:
@@ -250,11 +264,10 @@ def test_review_card_waits_when_its_strong_provider_is_walled_elsewhere(board, m
 
 
 def test_class_with_every_route_walled_falls_back_to_strong_tier(board, monkeypatch, all_assignees_spawnable):
-    """(a) The default model's class exists but its only route is the walled one: the strong tier takes it."""
+    """(a) The default class exists but its only route is the walled one: the strong class takes it."""
     clock = _clock(monkeypatch)
     config, _ = routing(monkeypatch)
-    codex_route = dict(config['model_routing']['routes']['standard'][1], model='gpt-6-astra')
-    config['model_routing']['routes'] = {'deep': [codex_route]}
+    _class_routes(config, standard=[('openai-codex', 'gpt-6-astra')], deep=[('anthropic', 'claude-opus-5-5')])
     _hub_tier(monkeypatch)
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
     with kbc.connect() as conn:
@@ -267,21 +280,19 @@ def test_class_with_every_route_walled_falls_back_to_strong_tier(board, monkeypa
         assert seen == [('claude-opus-5-5', 'anthropic')]
 
 
-LIVE_CFG = {'default_model': 'gpt-6-astra', 'default_provider': 'openai-codex',
-            'strong_model': 'class:deep', 'strong_provider': 'auto'}
+LIVE_CFG = {'default_model': 'class:standard', 'strong_model': 'class:deep'}
 
 
 @pytest.mark.parametrize('evidence', ['provider_file', 'live_pool'])
-def test_fresh_card_skips_a_known_wall_before_its_first_spawn(board, monkeypatch, all_assignees_spawnable, evidence):
-    """A card with no quota episode of its own, default tier on walled codex, strong tier a class selector
-    (the live MacBook config, 2026-11-10): the class alternate must place it before any worker spawns.
-    Before the fix every fresh claim spawned into the codex wall once (exit 75) and only the second claim,
-    judged by the card's own new episode, rerouted: 11 wasted rate_limited runs per hour."""
+def test_fresh_card_stays_a_provider_neutral_class_beside_a_known_wall(board, monkeypatch, all_assignees_spawnable,
+                                                                       evidence):
+    """A card with no quota episode of its own and a known codex wall (provider file or live pool): the neutral
+    default is a provider-unknown class that the worker allocates, so the dispatcher never concretely routes it
+    onto the walled provider (and, by design, no longer pre-places it on another one). Its receipt names none.
+    PRODUCTION GAP: the old pre-spawn class alternate (``_class_alternate_off_wall``) skips ``auto`` bases."""
     clock = _clock(monkeypatch)
     config, _ = routing(monkeypatch)
-    route = config['model_routing']['routes']['standard'][0]
-    config['model_routing']['routes'] = {'deep': [dict(route, model='claude-opus-5-5'),
-                                                   dict(route, provider='openai-codex', model='gpt-6-astra')]}
+    _class_routes(config, standard=[('anthropic', 'claude-opus-5-5'), ('openai-codex', 'gpt-6-astra')])
     monkeypatch.setattr(tier, 'load_tier_config', lambda: LIVE_CFG)
     codex_reset = float(clock[0] + 5000)
     if evidence == 'provider_file':
@@ -292,49 +303,43 @@ def test_fresh_card_skips_a_known_wall_before_its_first_spawn(board, monkeypatch
         monkeypatch.setattr(walls, 'live_quota_wall',
                             lambda provider, model: codex_reset if provider == 'openai-codex' else None)
     with kbc.connect() as conn:
-        pinned = kb.create_task(conn, title='needs astra', body=f'{walls.REQUIRE_MODEL_MARKER}', assignee='a')
-        assert tier.resolve_dispatch_tier(conn, kb.get_task(conn, pinned), lane='ready')[:2] == (
-            'gpt-6-astra', 'openai-codex')  # a require_model card is never moved off its model
-        conn.execute("DELETE FROM tasks WHERE id=?", (pinned,))
+        marked = kb.create_task(conn, title='needs astra card', assignee='a')
+        conn.execute("UPDATE tasks SET body=? WHERE id=?", (walls.REQUIRE_MODEL_MARKER, marked))  # raw legacy seed
+        conn.commit()
+        # The legacy require_model marker is only text now: it is never a concrete route.
+        assert tier.resolve_dispatch_tier(conn, kb.get_task(conn, marked), lane='ready')[:2] == (
+            'class:standard', 'auto')
+        conn.execute("DELETE FROM tasks WHERE id=?", (marked,))
         conn.commit()
         tid = kb.create_task(conn, title='fresh default card', assignee='a')
         seen = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
-        assert seen == [('claude-opus-5-5', 'anthropic')]
+        assert seen == [('class:standard', 'auto')]
         receipt = kb._json_dict(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='run_route' "
                                              "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0])
-        assert receipt['tier_reason'] == 'default+wall:openai-codex'
+        assert receipt['provider'] is None and 'openai-codex' not in str(receipt)
 
 
 def test_class_alternate_ignores_require_model_named_in_prose(board, monkeypatch, all_assignees_spawnable):
-    """Mutant M2f (t_01a1d00e5aa896fd): ``_class_alternate_off_wall`` must use the deliberate-line check, not a
-    substring. A default card whose prose names `require_model` (the storm alert's own body did) still moves
-    off the walled default provider before its first spawn; only the class alternate can move it here."""
-    clock = _clock(monkeypatch)
+    """The deliberate-line check (not a substring) still decides ``requires_model``: prose naming
+    `require_model` is not a marker, and neither form turns the neutral class into a concrete pin."""
     config, _ = routing(monkeypatch)
-    route = config['model_routing']['routes']['standard'][0]
-    config['model_routing']['routes'] = {'deep': [dict(route, model='claude-opus-5-5'),
-                                                   dict(route, provider='openai-codex', model='gpt-6-astra')]}
+    _class_routes(config, standard=[('anthropic', 'claude-opus-5-5'), ('openai-codex', 'gpt-6-astra')])
     monkeypatch.setattr(tier, 'load_tier_config', lambda: LIVE_CFG)
-    monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': float(clock[0] + 5000)})
-    monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='storm alert', assignee='a', body=(
             'Cards pinned to the walled provider (`require_model`) keep their route.\n'
             'require_model: false'))
         assert not walls.requires_model(kb.get_task(conn, tid))
         assert tier.resolve_dispatch_tier(conn, kb.get_task(conn, tid), lane='ready') == (
-            'claude-opus-5-5', 'anthropic', 'default+wall:openai-codex')
+            'class:standard', 'auto', 'default')
 
 
 def test_fresh_card_class_alternate_never_lands_on_another_wall(board, monkeypatch, all_assignees_spawnable):
-    """Control: the class alternate is walled too (live pool); with no usable route the card keeps its
-    default route rather than being sent into a second wall."""
+    """Both class routes walled: the neutral class card is never concretely pinned onto either wall."""
     clock = _clock(monkeypatch)
     config, _ = routing(monkeypatch)
-    route = config['model_routing']['routes']['standard'][0]
-    config['model_routing']['routes'] = {'deep': [dict(route, model='claude-opus-5-5'),
-                                                   dict(route, provider='openai-codex', model='gpt-6-astra')]}
+    _class_routes(config, standard=[('anthropic', 'claude-opus-5-5'), ('openai-codex', 'gpt-6-astra')])
     monkeypatch.setattr(tier, 'load_tier_config', lambda: LIVE_CFG)
     monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'openai-codex': float(clock[0] + 5000)})
     monkeypatch.setattr(walls, 'live_quota_wall',
@@ -343,4 +348,4 @@ def test_fresh_card_class_alternate_never_lands_on_another_wall(board, monkeypat
         kb.create_task(conn, title='both walled', assignee='a')
         seen = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
-        assert seen == [('gpt-6-astra', 'openai-codex')]
+        assert seen == [('class:standard', 'auto')]

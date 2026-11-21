@@ -40,13 +40,15 @@ def test_recovered_pin_ignores_historical_wall(board, clock, monkeypatch, all_as
         tid = pins._pinned_card(conn)
         _history(conn, tid, kind, clock[0] + pacing.HELD_FAR)
         before = conn.total_changes
-        assert pacing._route(conn, tid) == (None, None, 'pinned')  # keep the row's explicit pin
+        task = kb.get_task(conn, tid)
+        assert pr.pinned_route(conn, task, lane='ready', now=clock[0], cfg=pins.HUB_CFG) is None
         assert conn.total_changes == before
-        assert lpd.candidate_providers(conn, kb.get_task(conn, tid), 'ready') == [pins.PIN[1]]
-        assert pins._tick(conn) == [pins.PIN]
-        assert pins.PIN in calls
+        # Recovered history remains available as evidence, never a future mandatory pin.
         assert len(pins._events(conn, tid, kind)) == 1
-        assert pins._events(conn, tid, 'run_route')[-1]['tier_reason'] == 'pinned'
+        assert pins.tier.resolve_model_tier(conn, task, lane='ready') == ('class:standard', 'auto', 'default')
+        assert (task.model_override, task.provider_override) == pins.PIN
+        assert pins.PIN in calls
+
 
 
 @pytest.mark.parametrize('live_evidence', ['unknown', 'wall', 'current', 'provider_file'])

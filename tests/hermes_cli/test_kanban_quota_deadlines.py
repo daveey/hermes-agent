@@ -109,10 +109,16 @@ def test_tier_selected_quota_does_not_consume_crash_budget(conn, monkeypatch, en
     from hermes_cli.kanban_model_tier import apply_model_tier
     now = int(time.time())
     tid, task, frame = _claim(conn, 'ready')
-    cfg = {'default_model': 'claude-sonnet-5-5', 'default_provider': 'anthropic',
-           'strong_model': 'claude-opus-5-5', 'strong_provider': 'anthropic',
+    cfg = {'default_model': 'class:standard', 'strong_model': 'class:deep',
            'default_model_keep_patterns': ['security']}
+    # Isolated enabled class routes: admission only selects a class the host can route.
+    route = dict(provider='anthropic', billing='subscription', weight=1, eligible=True, funding_verified=True,
+                 capabilities={'tools': True, 'streaming': True})
+    routing_cfg = {'model_routing': {'enabled': True, 'routes': {
+        'standard': [dict(route, model='claude-sonnet-5-5')], 'deep': [dict(route, model='claude-opus-5-5')]}}}
+    monkeypatch.setattr('hermes_cli.config_effective.load_user_config_effective', lambda *a, **k: routing_cfg)
     if entry == 'pinned':
+        # Historical raw selector seed: ignored, the neutral default decides.
         task.model_override, task.provider_override = 'claude-opus-5-5', 'anthropic'
     elif entry == 'pattern':
         task.title = 'security review'
@@ -122,12 +128,12 @@ def test_tier_selected_quota_does_not_consume_crash_budget(conn, monkeypatch, en
             conn.execute("INSERT INTO task_runs (task_id, profile, started_at, ended_at, outcome, status) "
                          "VALUES (?, 'w', ?, ?, 'crashed', 'crashed')", (tid, now - 20, now - 10))
     reason = apply_model_tier(conn, task, lane='ready', cfg=cfg)
-    expected = {'pinned': 'pinned', 'pattern': 'pattern:security',
+    expected = {'pinned': 'default', 'pattern': 'pattern:security',
                 'retry': 'retry_after_run_crashed', 'standard': 'default'}
     assert reason == expected[entry]
-    assert task.model_override == ('claude-sonnet-5-5' if entry == 'standard' else 'claude-opus-5-5')
+    assert task.model_override == ('class:deep' if entry in {'pattern', 'retry'} else 'class:standard')
     session_kanban.record_start_failure(
-        frame, SubscriptionQuotaUnavailable('anthropic', task.model_override, now + 7200))
+        frame, SubscriptionQuotaUnavailable('anthropic', 'claude-sonnet-5-5', now + 7200))
     assert tid not in dispatch.detect_crashed_workers(conn)
     row = kb.get_task(conn, tid)
     assert row.status == 'ready' and not row.consecutive_failures

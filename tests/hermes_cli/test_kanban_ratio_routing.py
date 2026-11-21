@@ -28,7 +28,8 @@ from tests.hermes_cli.test_kanban_quota_episode import board as board, reap, rou
 
 FABLE, OPUS = ('claude-fable-5-2', 'anthropic'), ('claude-opus-5-5', 'anthropic')
 ASTRA, GROK = ('gpt-6-astra', 'openai-codex'), ('grok-4.7', 'xai-oauth')
-HUB_CFG = {'default_model': ASTRA[0], 'default_provider': ASTRA[1], 'strong_model': OPUS[0], 'strong_provider': OPUS[1],
+DEEP = ('class:deep', 'auto')  # kanban is model-neutral: the default tier is a class selector the worker allocates
+HUB_CFG = {'default_model': 'class:deep', 'default_provider': 'auto', 'strong_model': 'class:deep',
            'default_model_keep_patterns': ['security']}
 TARGETS = {'anthropic': 0.5, 'openai-codex': 0.3, 'xai-oauth': 0.2}
 UNSERVED: set = set()  # providers this host holds no live credential for, per test
@@ -180,7 +181,7 @@ def test_a_pick_loads_each_candidate_credential_pool_once(hub, monkeypatch):
     _budget(hub['clock'])
     with kbc.connect() as conn:
         task = kb.get_task(conn, kb.create_task(conn, title='d', assignee='a'))
-        assert ratio.pick(conn, task, (*ASTRA, 'default'), lane='ready', cfg=hub['cfg']) == (FABLE[0], 'anthropic')
+        assert ratio.pick(conn, task, (*DEEP, 'default'), lane='ready', cfg=hub['cfg']) == (FABLE[0], 'anthropic')
     assert sorted(loads) == sorted(TARGETS)
 
 
@@ -222,7 +223,7 @@ def test_a_tick_whose_ratio_memo_cannot_start_fails_open_and_still_runs(hub, mon
     monkeypatch.setattr(ratio, '_key', key)
     with kbc.connect() as conn, caplog.at_level(logging.WARNING):
         first = kb.create_task(conn, title='one', assignee='a')
-        assert pin_tests._tick(conn) == [ASTRA]
+        assert pin_tests._tick(conn) == [DEEP]
         assert pin_tests._events(conn, first, 'run_route')[-1]['tier_reason'] == 'default'
         failed = [r for r in caplog.records if 'ratio routing tick start failed' in r.getMessage()]
         assert failed and failed[0].exc_info is not None
@@ -241,7 +242,7 @@ def test_record_run_route_never_raises_when_the_ratio_memo_key_fails(hub, monkey
     monkeypatch.setattr(ratio, '_key', key)
     with kbc.connect() as conn, caplog.at_level(logging.WARNING):
         tid = kb.create_task(conn, title='d', assignee='a')
-        assert pin_tests._tick(conn) == [ASTRA]
+        assert pin_tests._tick(conn) == [DEEP]
         assert pin_tests._events(conn, tid, 'run_route')[-1]['tier_reason'] == 'default'
         task = kb.get_task(conn, tid)
         task.current_run_id = conn.execute('SELECT MAX(id) FROM task_runs').fetchone()[0]
@@ -269,7 +270,7 @@ def _corrupt(clock, case):
 def test_no_fresh_well_formed_budget_keeps_todays_route(hub, case):
     _corrupt(hub['clock'], case)
     with kbc.connect() as conn:
-        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*ASTRA, 'default')
+        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*DEEP, 'default')
 
 
 def test_a_budget_just_inside_twenty_minutes_still_routes(hub):
@@ -278,16 +279,13 @@ def test_a_budget_just_inside_twenty_minutes_still_routes(hub):
         assert _route(conn, kb.create_task(conn, title='d', assignee='a'))[2] == 'default+ratio:anthropic'
 
 
-@pytest.mark.parametrize('case', ['switch_off', 'pacing_off', 'no_class_level'])
+@pytest.mark.parametrize('case', ['switch_off', 'pacing_off'])
 def test_ratio_routing_off_keeps_todays_route(hub, case):
     _budget(hub['clock'])
     changes = {'switch_off': {'llm_pacing': {'ratio_routing': False}}, 'pacing_off': {'llm_pacing': {'enabled': False}}}
     hub['cfg'].update(changes.get(case, {}))
-    if case == 'no_class_level':
-        hub['config']['model_routing']['routes']['deep'] = [dict(r) for r in hub['config']['model_routing']['routes'][
-            'deep'] if r['model'] != ASTRA[0]]
     with kbc.connect() as conn:
-        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*ASTRA, 'default')
+        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*DEEP, 'default')
 
 
 # --- a class-selector default (``kanban.default_model: class:standard``, provider ``auto``) ------------------------
@@ -384,13 +382,13 @@ def test_a_fault_keeps_todays_route_and_is_logged_with_its_traceback(hub, monkey
         raise fault
     monkeypatch.setattr(ratio, 'count_starts', boom)
     with kbc.connect() as conn, caplog.at_level(logging.WARNING, logger=ratio.logger.name):
-        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*ASTRA, 'default')
+        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*DEEP, 'default')
     records = [r for r in caplog.records if r.name == ratio.logger.name and r.levelno == logging.WARNING]
     assert records and records[0].exc_info is not None
 
 
 def _review_card(conn):
-    tid = kb.create_task(conn, title='review me', assignee='a', model_override=OPUS[0], provider_override=OPUS[1])
+    tid = kb.create_task(conn, title='review me', assignee='a')
     conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
     conn.commit()
     return tid
@@ -403,21 +401,10 @@ def _retry_card(conn):
     return tid
 
 
-def _provider_only_card(conn):
-    """A legacy row with a provider override and no model (create refuses one now; old rows may carry it)."""
-    tid = kb.create_task(conn, title='p', assignee='a')
-    conn.execute('UPDATE tasks SET provider_override=? WHERE id=?', (ASTRA[1], tid))
-    conn.commit()
-    return tid
-
-
 CARDS = {
-    'pinned': (lambda conn: kb.create_task(conn, title='p', assignee='a', model_override=ASTRA[0],
-                                           provider_override=ASTRA[1]), 'ready', 'pinned'),
-    'provider_override': (_provider_only_card, 'ready', 'default'),
-    'require_model': (lambda conn: kb.create_task(conn, title='r', assignee='a',
-                                                  body=f'astra only\n{walls.REQUIRE_MODEL_MARKER}'), 'ready', 'default'),
-    'review': (_review_card, 'review', 'review_unpinned'),
+    'class_pin': (lambda conn: kb.create_task(conn, title='p', assignee='a', model_override='class:deep',
+                                              provider_override='auto'), 'ready', 'class'),
+    'review': (_review_card, 'review', 'review'),
     'retry': (_retry_card, 'ready', 'retry_after_changes_requested'),
     'keep_pattern': (lambda conn: kb.create_task(conn, title='security audit', assignee='a'), 'ready',
                      'pattern:security'),
@@ -426,8 +413,8 @@ CARDS = {
 
 @pytest.mark.parametrize('card', sorted(CARDS))
 def test_cards_outside_the_unpinned_default_tier_are_untouched(hub, card):
-    """Pins, provider overrides, ``require_model``, reviews and the strong tier (retries, keep-patterns) keep the
-    route they resolve to with ratio routing off."""
+    """Class pins, reviews and the strong tier (retries, keep-patterns) keep the route they resolve to with
+    ratio routing off."""
     make, lane, reason = CARDS[card]
     with kbc.connect() as conn:
         tid = make(conn)
@@ -436,6 +423,40 @@ def test_cards_outside_the_unpinned_default_tier_are_untouched(hub, card):
         ratio.begin_tick(conn)
         assert _route(conn, tid, lane) == before
     assert before[2] == reason
+
+
+def _legacy_card(conn, case):
+    """Old rows (raw, isolated DB) carrying retired restrictions: ingress refuses all of these now."""
+    tid = kb.create_task(conn, title='legacy', assignee='a')
+    row = {'concrete_pin': ('gpt-6-astra', 'openai-codex', None, None),
+           'provider_only': (None, 'openai-codex', None, None),
+           'mandatory_pin': ('gpt-6-astra', 'openai-codex', 1, None),
+           'require_model': (None, None, None, f'astra only\n{walls.REQUIRE_MODEL_MARKER}')}[case]
+    conn.execute('UPDATE tasks SET model_override=?, provider_override=?, model_pin_mandatory=?, '
+                 'body=COALESCE(?, body) WHERE id=?', (*row, tid))
+    conn.commit()
+    return tid
+
+
+@pytest.mark.parametrize('case', ['concrete_pin', 'provider_only', 'mandatory_pin', 'require_model'])
+def test_legacy_restrictions_are_ignored_and_the_card_routes_by_ratio_like_an_unpinned_default(hub, case):
+    with pytest.raises(ValueError):  # the same restrictions are refused at ingress
+        with kbc.connect() as conn:
+            kb.create_task(conn, title='new', assignee='a', model_override='gpt-6-astra', provider_override='openai-codex',
+                           pin_mandatory=True)
+    _budget(hub['clock'])
+    with kbc.connect() as conn:
+        legacy = _legacy_card(conn, case)
+        plain = kb.create_task(conn, title='plain', assignee='a')
+        ratio.begin_tick(conn)
+        assert _route(conn, legacy) == _route(conn, plain)
+        assert _route(conn, legacy)[2].startswith('default+ratio:')
+        persisted = kb.get_task(conn, legacy)  # author provenance is retained
+        assert persisted is not None
+        if case == 'require_model':
+            assert walls.REQUIRE_MODEL_MARKER in (persisted.body or '')
+        else:
+            assert persisted.provider_override == 'openai-codex'
 
 
 def test_ratio_route_models_picks_the_model_each_pool_runs(hub):

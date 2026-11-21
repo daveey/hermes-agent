@@ -33,12 +33,28 @@ from tests.hermes_cli import _placement_helpers as helpers
 from tests.hermes_cli import test_kanban_label_backlog_wait as pool_wait
 from tests.hermes_cli import test_kanban_model_tier as model_tier
 
-hub = pool_wait.hub  # a hub that cannot lease ``pool:worker`` cards: the Board registry names two pool workers
+pool_hub = pool_wait.hub  # a hub that cannot lease ``pool:worker`` cards: the Board registry names two pool workers
 board = model_tier.board  # one unsynced gateway: every card is its own to lease
 
 
 LABELS = pool_wait.LABELS
 OPUS = "claude-opus-5-5"
+ROUTE = {"model": OPUS, "provider": "anthropic", "weight": 1, "billing": "subscription", "eligible": True,
+         "funding_verified": True, "capabilities": {"tools": True, "streaming": True}}
+
+
+@pytest.fixture
+def hub(pool_hub, monkeypatch):
+    """The pool hub with an isolated class-routing policy: cards are model-neutral, so the providers a card may
+    land on come from ``model_routing`` (anthropic only here), not from a per-card model pin."""
+    pool_hub.home.joinpath("config.yaml").write_text(json.dumps({
+        "kanban": {"sync": {"enabled": True}},
+        "model_routing": {"enabled": True, "routes": {lvl: [ROUTE] for lvl in ("fast", "standard", "deep")}}}),
+        encoding="utf-8")
+    monkeypatch.setattr(pd, "_CLASS_CACHE", {})
+    return pool_hub
+
+
 DAY = 86400
 UNKNOWN = {"reason": None, "status": "unknown"}
 READ_INTERVAL = lp.PacingConfig().read_interval
@@ -58,13 +74,11 @@ def _store(*pools, age=0.0):
 
 
 def _pool_card(conn, *, age=40 * 60, labels=None, title="waits on the pool", **kw):
-    """A ready card pinned to the pool's labels and to anthropic, owned by a chat, ready for ``age`` seconds, with
-    two older same-label cards ahead of it."""
+    """A ready model-neutral card on the pool's labels (class routes: anthropic), owned by a chat, ready for ``age``
+    seconds, with two older same-label cards ahead of it."""
     now = int(time.time())
     for i in range(2):
         pool_wait._card(conn, f"older {i}", now - 3600 + i)
-    kw.setdefault("model_override", OPUS)
-    kw.setdefault("provider_override", "anthropic")
     tid = kb.create_task(conn, title=title, assignee="default", runs_on=list(labels or LABELS),
                          session_id="owner-chat", **kw)
     with kb.write_txn(conn):
@@ -234,8 +248,7 @@ def test_without_a_positive_governor_read_the_notice_is_as_before(hub, monkeypat
 def test_a_card_this_gateway_can_lease_keeps_its_own_dispatchers_words(board):
     _store(("anthropic", lp.HELD))
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="local", assignee="default", model_override=OPUS, provider_override="anthropic",
-                             session_id="owner-chat")
+        tid = kb.create_task(conn, title="local", assignee="default", session_id="owner-chat")
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET created_at = ? WHERE id = ?", (int(time.time()) - 40 * 60, tid))
             conn.execute("UPDATE task_events SET created_at = ? WHERE task_id = ?", (int(time.time()) - 40 * 60, tid))
@@ -413,10 +426,27 @@ def test_a_card_missing_from_the_shared_board_is_not_a_pacing_wait(hub):
     assert _post(hub.conn, tid, missing_shared_board=True, sync_reject_reason="rejected")["admission"] == UNKNOWN
 
 
-def test_an_ungoverned_provider_and_a_mandatory_pin_always_start_so_they_are_not_named(hub):
+def test_an_ungoverned_provider_always_starts_so_it_is_not_named(hub, monkeypatch):
+    _store(("anthropic", lp.HELD), ("zai", lp.HELD))
+    monkeypatch.setattr(pd, "candidate_providers", lambda *_a: ["zai"])  # class routes that only land on zai
+    assert _post(hub.conn, _pool_card(hub.conn))["admission"] == UNKNOWN
+
+
+def test_concrete_and_mandatory_pins_are_refused_and_legacy_ones_never_exempt_a_card_from_the_hold(hub):
+    """New pins are refused at ingress; an old pinned/mandatory row (raw, isolated DB) is judged by its class
+    routes like any other card, so the held pool is still named and the author row keeps its history."""
     _store(("anthropic", lp.HELD), ("zai", lp.HELD))
     for kw in ({"model_override": "glm-5", "provider_override": "zai"}, {"pin_mandatory": True}):
-        assert _post(hub.conn, _pool_card(hub.conn, **kw))["admission"] == UNKNOWN, kw
+        with pytest.raises(ValueError):
+            _pool_card(hub.conn, **kw)
+    tid = _pool_card(hub.conn)
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET model_override='glm-5', provider_override='zai', model_pin_mandatory=1 "
+                         "WHERE id = ?", (tid,))
+    assert _post(hub.conn, tid)["admission"]["providers"] == [{"provider": "anthropic", "state": "held"}]
+    row = hub.conn.execute("SELECT model_override, provider_override, model_pin_mandatory FROM tasks WHERE id = ?",
+                           (tid,)).fetchone()
+    assert tuple(row) == ("glm-5", "zai", 1)
 
 
 # --- the governor read itself ---------------------------------------------------------------------------------------
@@ -425,8 +455,7 @@ def test_an_ungoverned_provider_and_a_mandatory_pin_always_start_so_they_are_not
 @pytest.fixture
 def card(board):
     with kbc.connect() as conn:
-        yield conn, kb.create_task(conn, title="pinned", assignee="default", model_override=OPUS,
-                                   provider_override="anthropic")
+        yield conn, kb.create_task(conn, title="routed", assignee="default")
 
 
 def test_the_read_returns_every_candidate_pool_when_all_are_paced_or_held(card, monkeypatch):

@@ -100,7 +100,12 @@ def paced_board(board, monkeypatch):
 
 def _config(home, **extra):
     # JSON is valid YAML (the test venv may have no PyYAML).
-    home.joinpath("config.yaml").write_text(json.dumps({"kanban": {}, **extra}), encoding="utf-8")
+    # Cards are model-neutral: they route on ``class:standard`` unless the test brings its own policy, so give them
+    # an isolated Anthropic-only standard class (the pool the paced-hold assertions name).
+    default = {"model_routing": {"enabled": True, "routes": {"standard": [
+        {"provider": "anthropic", "model": OPUS, "billing": "subscription", "weight": 1, "eligible": True,
+         "funding_verified": True, "capabilities": {"tools": True, "streaming": True, "context_tokens": 1000000}}]}}}
+    home.joinpath("config.yaml").write_text(json.dumps({"kanban": {}, **default, **extra}), encoding="utf-8")
 
 
 def _held_reads(monkeypatch):
@@ -121,8 +126,8 @@ def _tick(conn):
 
 
 def _opus(conn, title, **kw):
-    return kb.create_task(conn, title=title, assignee="default", model_override=OPUS, provider_override="anthropic",
-                          **kw)
+    """A plain default card: model-neutral, it lands on the isolated ``class:standard`` Anthropic route."""
+    return kb.create_task(conn, title=title, assignee="default", **kw)
 
 
 def _skips(conn, tid):

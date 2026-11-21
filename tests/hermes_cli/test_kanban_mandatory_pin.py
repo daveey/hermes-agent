@@ -81,3 +81,57 @@ def test_legacy_pin_does_not_add_a_pickup_label(monkeypatch):
 
 def test_courier_does_not_transport_new_mandatory_directives():
     assert kp._uncarried({"title": "work", "pin_mandatory": True}, kp._Cfg({}), True) == ["pin_mandatory"]
+
+
+# Reusable replica/custody harness; legacy pin policy tests above remain independent.
+import json
+import time
+from pathlib import Path
+from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_worker_node as wn
+from tests.hermes_cli.kanban_sync_fake_board import FakeService
+from tests.hermes_cli.test_kanban_worker_node import HUB, MACHINES, WORKER, Gateway
+
+POOL = "pool:worker"
+CFG = {"worker_queue": {HUB: POOL}}
+PIN = {"model": "claude-opus-5-5", "provider": "anthropic"}
+
+
+def _attest(monkeypatch):
+    monkeypatch.setitem(MACHINES[WORKER], "labels", ["linux", POOL])
+    monkeypatch.setitem(MACHINES[WORKER], "last_seen", time.time() * 1000)
+
+
+@pytest.fixture
+def svc():
+    return FakeService(lease_runs=True, machines=MACHINES)
+
+
+@pytest.fixture
+def gws(tmp_path, monkeypatch, svc):
+    monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: None)
+    monkeypatch.setattr(kp, "config", lambda: CFG)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    sync.consume_dispatcher_wake()
+    hub = Gateway(tmp_path, HUB, svc, monkeypatch, pickup=False)
+    worker = Gateway(tmp_path, WORKER, svc, monkeypatch, pickup="true")
+    # Explicit isolated routing registry, not this machine's profile defaults.
+    policy = "\nmodel_routing:\n  enabled: true\n  routes:\n    deep:\n"
+    for model in ("claude-opus-5-5", "claude-sonnet-5-5"):
+        policy += (f"      - model: {model}\n        provider: anthropic\n        billing: subscription\n"
+                   "        weight: 1\n        eligible: true\n        funding_verified: true\n"
+                   "        capabilities: {tools: true, streaming: true}\n")
+    for gateway in (hub, worker):
+        path = gateway.home / "config.yaml"
+        path.write_text(path.read_text() + policy)
+    yield hub, worker
+    for gateway in (hub, worker):
+        gateway.conn.close()
+    sync.set_lease_client(None)
+    wn.set_registry_fetch(None)
+
+
+def _route(conn, tid):
+    return [json.loads(row[0]) for row in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='run_route' ORDER BY id", (tid,))]

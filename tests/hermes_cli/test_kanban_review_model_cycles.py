@@ -71,8 +71,10 @@ def test_refused_spawn_is_not_a_review_boundary(board, outcome):
 @pytest.mark.parametrize("pin", [None, MODELS[0]])
 def test_missing_receipt_in_mixed_epoch_retains_earlier_authors(board, pin):
     with kbc.connect() as conn:
-        task = kb.get_task(conn, kb.create_task(conn, title="mixed epoch", assignee="default",
-                                              model_override=pin, provider_override="anthropic" if pin else None))
+        task = kb.get_task(conn, kb.create_task(conn, title="mixed epoch", assignee="default"))
+        conn.execute("UPDATE tasks SET model_override=?, provider_override=? WHERE id=?",
+                     (pin, "anthropic" if pin else None, task.id))
+        task = kb.get_task(conn, task.id)
         run(conn, task.id, MODELS[0])
         run(conn, task.id, MODELS[1], "review")
         run(conn, task.id, None)
@@ -302,12 +304,14 @@ def _walled(monkeypatch):
 
 
 def test_walled_override_with_no_other_candidate_is_retryable_not_exhausted(board, monkeypatch):
-    cfg = helpers.config(board, strong=helpers.OPUS, routes=[helpers.OPUS])
+    cfg = helpers.config(board, strong=helpers.OPUS, routes=[helpers.OPUS, helpers.FABLE])
     _walled(monkeypatch)
     with kbc.connect() as conn:
         task = helpers.task(conn, helpers.OPUS)
         kb.claim_task(conn, task.id)
-        assert kb.request_review(conn, task.id, metadata={"review_model": helpers.FABLE})
+        assert kb.request_review(conn, task.id)
+        conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=? AND outcome='review_requested'",
+                     ('{"review_model": "class:deep"}', task.id))
         with pytest.raises(review.ReviewModelUnavailable) as raised:
             review.resolve_review_model(conn, kb.get_task(conn, task.id), cfg)
         assert not isinstance(raised.value, review.ReviewModelsExhausted)

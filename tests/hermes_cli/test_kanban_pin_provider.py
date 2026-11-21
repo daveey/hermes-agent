@@ -66,53 +66,53 @@ def _parser():
 
 def test_create_task_binds_anthropic_under_auto_config(auto_home, monkeypatch, tmp_path):
     with kbc.connect_closing() as conn:
-        task = kb.get_task(conn, kb.create_task(conn, title="t", assignee="default", model_override=OPUS))
-    assert (task.model_override, task.provider_override) == (OPUS, "anthropic")
-    assert _argv(monkeypatch, tmp_path, task) == (OPUS, "anthropic")
+        with pytest.raises(ValueError, match='model-neutral'):
+            kb.create_task(conn, title='t', assignee='default', model_override=OPUS)
+        assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 0
 
 
 def test_kanban_create_tool_binds_anthropic(auto_home):
     from tools import kanban_tools as tools
     out = json.loads(tools._handle_create({"title": "t", "assignee": "default", "model": OPUS}))
-    assert out.get("task_id"), out
+    assert 'model-neutral' in out['error']
     with kbc.connect_closing() as conn:
-        assert kb.get_task(conn, out["task_id"]).provider_override == "anthropic"
+        assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 0
 
 
 def test_cli_create_and_set_model_bind_anthropic(auto_home, monkeypatch):
     cli, parser = _parser()
     monkeypatch.setattr(cli, "_check_dispatcher_presence", lambda: (True, ""))
     assert cli._cmd_create(parser.parse_args(["kanban", "create", "via cli", "--assignee", "default",
-                                              "--model", OPUS])) == 0
+                                              "--model", OPUS])) == 2
     with kbc.connect_closing() as conn:
-        tid = conn.execute("SELECT id FROM tasks WHERE title='via cli'").fetchone()[0]
-        assert kb.get_task(conn, tid).provider_override == "anthropic"
+        assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
         plain = kb.create_task(conn, title="plain", assignee="default")
-    assert cli._cmd_set_model(parser.parse_args(["kanban", "set-model", plain, OPUS])) == 0
+    assert cli._cmd_set_model(parser.parse_args(["kanban", "set-model", plain, OPUS])) == 2
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, plain)
-    assert (task.model_override, task.provider_override) == (OPUS, "anthropic")
+        assert (task.model_override, task.provider_override) == (None, None)
+
 
 
 # --- refusals ---------------------------------------------------------------------------------------------
 
 def test_unknown_model_is_refused_everywhere(auto_home, monkeypatch, capsys):
     with kbc.connect_closing() as conn:
-        with pytest.raises(PinProviderUnresolvedError, match="no known provider catalog") as exc:
+        with pytest.raises(ValueError, match='model-neutral') as exc:
             kb.create_task(conn, title="t", assignee="default", model_override="no-such-model-zz9")
-        assert "provider=" in str(exc.value)
+        assert 'concrete model/provider' in str(exc.value)
         tid = kb.create_task(conn, title="keep", assignee="default")
-        with pytest.raises(PinProviderUnresolvedError):
+        with pytest.raises(ValueError, match='model-neutral'):
             kb.set_model_override(conn, tid, "no-such-model-zz9")
         assert kb.get_task(conn, tid).model_override is None
         assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
     from tools import kanban_tools as tools
     out = json.loads(tools._handle_create({"title": "t", "assignee": "default", "model": "no-such-model-zz9"}))
-    assert out["code"] == "pin_provider_unresolved", out
+    assert 'model-neutral' in out['error'], out
     cli, parser = _parser()
     monkeypatch.setattr(cli, "_check_dispatcher_presence", lambda: (True, ""))
     assert cli._cmd_create(parser.parse_args(["kanban", "create", "x", "--model", "no-such-model-zz9"])) == 2
-    assert "pin_provider_unresolved" in capsys.readouterr().err
+    assert 'model-neutral' in capsys.readouterr().err
 
 
 def test_ambiguous_model_is_refused_naming_the_providers(tmp_path, monkeypatch):
@@ -157,7 +157,7 @@ def test_explicit_provider_is_kept(auto_home):
 def test_class_selector_keeps_provider_auto(auto_home, monkeypatch, tmp_path):
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, kb.create_task(conn, title="t", assignee="default", model_override="class:deep"))
-    assert (task.model_override, task.provider_override) == ("class:deep", None)
+    assert (task.model_override, task.provider_override) == ('class:deep', 'auto')
     assert _argv(monkeypatch, tmp_path, task) == ("class:deep", "auto")
 
 
@@ -169,8 +169,8 @@ def test_dispatcher_binds_legacy_null_provider_row(auto_home, monkeypatch, tmp_p
         conn.execute("UPDATE tasks SET model_override=?, provider_override=NULL WHERE id=?", (OPUS, tid))
         conn.commit()
         task = kb.claim_task(conn, tid)
-        assert tier.apply_model_tier(conn, task, lane="ready", cfg={}) == "pinned+provider_resolved"
+        assert tier.apply_model_tier(conn, task, lane='ready', cfg={}).startswith('default')
         ev = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='model_tier'",
                           (tid,)).fetchone()
-    assert json.loads(ev[0])["provider"] == "anthropic"
-    assert _argv(monkeypatch, tmp_path, task) == (OPUS, "anthropic")
+    assert json.loads(ev[0])['reason'].startswith('default')
+    assert _argv(monkeypatch, tmp_path, task) == ('class:standard', 'auto')

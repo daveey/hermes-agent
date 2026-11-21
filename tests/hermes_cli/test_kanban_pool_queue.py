@@ -1269,24 +1269,31 @@ def test_pool_worker_keeps_a_home_marker_card_no_live_machine_can_claim(w2, monk
         "decision": "keep", "class": "gateway-test-failed", "hit": "hermes-sync"}
 
 
-def test_a_marker_card_another_reason_keeps_stays_kept(on_w2):
-    """A pool worker re-checks every other portability reason: an unattested mandatory model pin still keeps a
-    Keychain card here (no pool member carries capability:mandatory-model-pin)."""
-    out = _create(title="rotate the CI token in the Keychain", model="claude-opus-5-5", provider="anthropic",
-                  pin_mandatory=True)
-    assert _runs_on(on_w2.conn, out["task_id"]) is None, out
+def _refused_mandatory_create(conn):
+    from hermes_cli.kanban_model_neutral import ERROR
+    from tools import kanban_tools as kt
+    before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    out = json.loads(kt._handle_create({"assignee": "default", "requires": [],
+                                        "title": "rotate the CI token in the Keychain",
+                                        "model": "claude-opus-5-5", "provider": "anthropic",
+                                        "pin_mandatory": True}))
+    assert out.get("error") == ERROR and not out.get("ok"), out
+    assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before  # refused before any card or placement
 
 
-def test_a_marker_card_stays_kept_when_one_pool_member_lacks_the_pin_label(w2, monkeypatch):
-    """worker-1 alone attests the mandatory pin: one live machine holds the whole label set (cfc3d681ce), but the
-    pin is unattested across the pool (every eligible member must carry it), so the card must still stay here."""
+def test_a_marker_card_mandatory_pin_is_refused_not_kept(on_w2):
+    """Mandatory model pins are no longer a portability reason (nor a creatable one): ingress refuses the card
+    before placement, so no pool-member label attestation can matter."""
+    _refused_mandatory_create(on_w2.conn)
+
+
+def test_a_marker_card_mandatory_pin_is_refused_whatever_the_pool_attests(w2, monkeypatch):
+    """worker-1 alone attests the legacy pin label; ingress still refuses the pin, so the pool never decides."""
     from hermes_cli.kanban_mandatory_pin import LABEL
     machines = _pool_machines()
     machines["worker-1"] = {**machines["worker-1"], "labels": [*LIVE, LABEL]}
     _on(monkeypatch, "worker-2", {"worker_queue": {"worker-2": POOL}}, machines)
-    out = _create(title="rotate the CI token in the Keychain", model="claude-opus-5-5", provider="anthropic",
-                  pin_mandatory=True)
-    assert _runs_on(w2.conn, out["task_id"]) is None, out
+    _refused_mandatory_create(w2.conn)
 
 
 def test_a_worker_keeps_a_card_naming_a_non_git_directory_under_wt(on_w2, tmp_path):

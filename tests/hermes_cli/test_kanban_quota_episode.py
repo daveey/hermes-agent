@@ -163,12 +163,15 @@ def routing(monkeypatch, *, blocked=False, profile=False):
     config = {'model': {'default': 'class:standard', 'provider': 'auto'},
               'model_routing': {'enabled': True, 'routes': {'standard': [
                   route('anthropic', 'claude-sonnet-5-5'),
-                  route('openai-codex', 'gpt-test')]}},
+                  route('openai-codex', 'gpt-test')],
+                  'deep': [route('anthropic', 'claude-opus-5-5')]}},
               'providers': {'openai-codex': {'enabled': not blocked}}}
-    cfg = {} if profile else {'default_model': 'class:standard', 'strong_model': 'claude-opus-5-5',
-                              'strong_provider': 'anthropic', 'default_model_keep_patterns': ['security']}
+    cfg = {} if profile else {'default_model': 'class:standard', 'strong_model': 'class:deep',
+                              'default_model_keep_patterns': ['security']}
     monkeypatch.setattr(tier, 'load_tier_config', lambda: cfg)
     monkeypatch.setattr('hermes_cli.kanban_model_assignment._assignee_config', lambda _: config)
+    # Isolated enabled class routes for the host-level routability probe too (the home's own config is empty).
+    monkeypatch.setattr('hermes_cli.config_effective.load_user_config_effective', lambda *a, **k: config)
     return config, cfg
 
 
@@ -182,6 +185,7 @@ def test_shared_admission_preview_and_owner_route(board, monkeypatch, entry):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='security work' if entry == 'pattern' else 'quota', assignee='a')
         if entry == 'pinned':
+            # Historical raw selector seed (disposable DB): dynamically ignored, author row retained.
             conn.execute("UPDATE tasks SET model_override='claude-opus-5-5', provider_override='anthropic' WHERE id=?", (tid,))
         elif entry == 'provider_pin':
             conn.execute("UPDATE tasks SET provider_override='anthropic' WHERE id=?", (tid,))
@@ -192,8 +196,8 @@ def test_shared_admission_preview_and_owner_route(board, monkeypatch, entry):
             conn.execute("UPDATE tasks SET status='review' WHERE id=?", (tid,))
         conn.commit()
         reap(conn, tid, text='resets in ~11h', lane=lane)
-        # A real review without author attribution may use the free eligible route too.
-        expected_reroute = entry in {'default', 'profile', 'review'}
+        # Legacy selectors and missing model attribution cannot constrain review dispatch.
+        expected_reroute = entry in {'default', 'profile', 'pinned', 'provider_pin', 'review'}
         assert (dispatch.check_respawn_guard(conn, tid, lane=lane) is None) == expected_reroute
         before = conn.total_changes
         preview = task_route(conn, tid)
@@ -208,8 +212,9 @@ def test_shared_admission_preview_and_owner_route(board, monkeypatch, entry):
         if expected_reroute:
             assert preview[:2] == ('gpt-test', 'openai-codex')
             assert tier.owner_model_pin(conn, task) == ('gpt-test', 'openai-codex')
-        elif entry in {'pinned', 'review', 'pattern', 'retry'}:
-            assert preview[:2] == ('claude-opus-5-5', 'anthropic')
+        elif entry in {'review', 'pattern', 'retry'}:
+            assert preview[:2] == ('class:deep', None)
+            assert tier.owner_model_pin(conn, task) == ('class:deep', 'auto')
         persisted = kb.get_task(conn, tid)
         assert (persisted.model_override, persisted.provider_override) == original
 
@@ -220,11 +225,12 @@ def test_walled_concrete_default_model_reroutes_to_class_peer(board, monkeypatch
     clock = [1_800_000_000]
     monkeypatch.setattr(kb.time, 'time', lambda: clock[0])
     config, _ = routing(monkeypatch)
-    config['model_routing']['routes'] = {'deep': [
+    config['model_routing']['routes'] = {'standard': [
         dict(config['model_routing']['routes']['standard'][0], model='claude-opus-5-5'),
         dict(config['model_routing']['routes']['standard'][1], model='gpt-6-astra')]}
+    # A concrete default is ignored (neutral class:standard); only the legacy pin row is a raw seed.
     cfg = {'default_model': 'gpt-6-astra', 'default_provider': 'openai-codex',
-           'strong_model': 'claude-opus-5-5', 'strong_provider': 'anthropic'}
+           'strong_model': 'class:deep'}
     monkeypatch.setattr(tier, 'load_tier_config', lambda: cfg)
     reset = clock[0] + 55 * 3600
     with kbc.connect() as conn:
@@ -239,12 +245,12 @@ def test_walled_concrete_default_model_reroutes_to_class_peer(board, monkeypatch
         clock[0] += 301
         seen = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
-        # A non-mandatory pin moves within its class too (t_01a19990897b9d9b); only its reason differs.
+        # A legacy pin row is ignored: both cards move within the class on the episode's wall.
         assert seen == [('claude-opus-5-5', 'anthropic')]
         route = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='run_route' "
                              "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0]
         assert '"provider": "anthropic"' in route
-        assert ('pin_quota_reroute:openai-codex' if pinned else 'quota_reroute') in route
+        assert 'quota_reroute' in route
 
 
 def test_new_unpinned_card_created_after_a_known_wall_never_routes_to_it(board, monkeypatch, all_assignees_spawnable):
@@ -259,8 +265,7 @@ def test_new_unpinned_card_created_after_a_known_wall_never_routes_to_it(board, 
     monkeypatch.setattr(walls.time, 'time', lambda: clock[0])
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *_a, **_k: None)
     routing(monkeypatch)
-    cfg = {'default_model': 'gpt-6-astra', 'default_provider': 'openai-codex',
-           'strong_model': 'claude-opus-5-5', 'strong_provider': 'anthropic'}
+    cfg = {'default_model': 'class:standard', 'strong_model': 'class:deep'}
     monkeypatch.setattr(tier, 'load_tier_config', lambda: cfg)
     reset = clock[0] + 55 * 3600
     with kbc.connect() as conn:
@@ -278,10 +283,13 @@ def test_new_unpinned_card_created_after_a_known_wall_never_routes_to_it(board, 
         conn.commit()
         seen = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.id, task.provider_override)))
-        assert seen == [(new, 'anthropic')]
+        # Neutral admission stays a provider-unknown class (the worker allocates): the dispatcher never
+        # concretely pins the walled provider, and its receipt names no provider at all.
+        assert seen == [(new, 'auto')]
         route = kb._json_dict(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='run_route' "
                                            "ORDER BY id DESC LIMIT 1", (new,)).fetchone()[0])
-        assert route['provider'] == 'anthropic' and route['tier_reason'] == 'default+wall:openai-codex'
+        assert route['provider'] is None and route['model'] == 'class:standard'
+        assert 'openai-codex' not in str(route)
 
 
 @pytest.mark.parametrize('reroute', [False, True])
@@ -405,26 +413,27 @@ def test_reroute_applies_worker_capability_requirements(board, monkeypatch, caps
         assert dispatch.check_respawn_guard(conn, tid) == 'subscription_quota_reset'
 
 
-@pytest.mark.parametrize('repin, held', [(('gpt-test', 'openai-codex'), False), (('claude-opus-5-5', 'anthropic'), True)])
-def test_changed_explicit_pin_is_judged_by_its_own_provider(board, monkeypatch, repin, held):
+@pytest.mark.parametrize('repin', [('gpt-test', 'openai-codex'), ('claude-opus-5-5', 'anthropic')])
+def test_changed_legacy_pin_never_changes_the_runs_own_provider_judgement(board, monkeypatch, repin):
     now = 1_800_000_000
     monkeypatch.setattr(kb.time, 'time', lambda: now)
     _, cfg = routing(monkeypatch)
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title='pinned', assignee='a')
-        # Mandatory: a far wall would otherwise move this in-class pin (kanban_pin_reroute).
+        # Historical raw selector seed (disposable DB): ignored; the episode is judged by the run's receipt.
         conn.execute("UPDATE tasks SET model_override='claude-sonnet-5-5', provider_override='anthropic', "
                      "model_pin_mandatory=1 WHERE id=?", (tid,))
         conn.commit()
         reap(conn, tid, text='resets in ~11h')
-        assert dispatch.check_respawn_guard(conn, tid) == 'subscription_quota_reset'
+        before = dispatch.check_respawn_guard(conn, tid)
         conn.execute('UPDATE tasks SET model_override=?, provider_override=? WHERE id=?', (*repin, tid))
         conn.commit()
-        assert (dispatch.check_respawn_guard(conn, tid) is not None) == held
-        task = kb.claim_task(conn, tid, claimer=kb._claimer_id()) if not held else kb.get_task(conn, tid)
+        assert dispatch.check_respawn_guard(conn, tid) == before  # a changed historical row moves nothing
+        task = kb.claim_task(conn, tid, claimer=kb._claimer_id()) if before is None else kb.get_task(conn, tid)
         tier.apply_model_tier(conn, task, lane='ready', cfg=cfg)
-        # The pin is never rewritten either way.
-        assert tier.effective_route(task)[:2] == repin
+        # The author row is never rewritten, and never becomes the run's route.
+        persisted = kb.get_task(conn, tid)
+        assert (persisted.model_override, persisted.provider_override) == repin
 
 
 # --- Runtime-emitted reset phrasings: compound and minute windows are not cut short ---

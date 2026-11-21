@@ -122,11 +122,13 @@ def test_read_pool_judges_the_xai_pool_instead_of_unknown(monkeypatch):
 
 def test_a_grok_card_is_held_when_the_grok_pool_is_past_its_reserve(paced_board, monkeypatch):
     import time
-    _config(paced_board)  # no llm_pacing override: the defaults must govern xai-oauth
+    # no llm_pacing override: the defaults must govern xai-oauth; the default class resolves to the Grok pool only
+    _config(paced_board, model_routing={"enabled": True, "routes": {"standard": [
+        {"provider": "xai-oauth", "model": "grok-4.6", "billing": "subscription", "weight": 1, "eligible": True,
+         "funding_verified": True, "capabilities": {"tools": True, "streaming": True, "context_tokens": 1000000}}]}})
     _xai_pool(monkeypatch, 90.0, time.time() + DAY)
     with kbc.connect() as conn:
-        tid = kb.create_task(conn, title="grok work", assignee="default", model_override="grok-4.6",
-                             provider_override="xai-oauth")
+        tid = kb.create_task(conn, title="grok work", assignee="default")
         seen, _ = _tick(conn)
         assert tid not in seen
         events = [e.payload for e in kb.list_events(conn, tid) if e.kind == pd.EVENT_KIND]

@@ -22,7 +22,7 @@ GROK = ("grok-4.7", "xai-oauth")
 # The governor's claim-time move is judged here on its own: the resolver's far-hold move (kanban_paced_reroute, a
 # pool held with its reset more than reroute_after_s away) would otherwise move these cards first. The two composed are
 # covered by the ``resolver_first`` tests below.
-POOL_CFG = {"default_model": "gpt-6-astra", "default_provider": "openai-codex",
+POOL_CFG = {"default_model": "class:standard", "default_provider": "auto",
             "strong_model": "class:deep", "strong_provider": "auto", "llm_pacing": {"reroute_after_s": 1e12}}
 RESOLVER_CFG = {k: v for k, v in POOL_CFG.items() if k != "llm_pacing"}
 
@@ -230,17 +230,29 @@ def test_ineligible_grok_route_keeps_the_hold(pool, monkeypatch):
     assert seen == [] and result.clock_held[tid][0] == lp.GUARD_REASON
 
 
-@pytest.mark.parametrize("pin", ["override", "require_model"])
-def test_pinned_cards_still_wait_for_their_pool(pool, monkeypatch, pin):
+@pytest.mark.parametrize("pin", ["override", "require_model", "mandatory"])
+def test_legacy_pinned_cards_are_ignored_and_move_like_any_default_card(pool, monkeypatch, pin):
+    """Concrete pins / ``require_model`` are refused at ingress; an old row carrying one is judged and moved like an
+    unpinned default (the pace governor never lets a retired restriction hold a card on its pool)."""
     _pools(monkeypatch, {"anthropic": 99, "openai-codex": 99})
     with kbc.connect() as conn:
+        with pytest.raises(ValueError):
+            kb.create_task(conn, title="needs opus", assignee="a", model_override="claude-opus-5-5",
+                           provider_override="anthropic")
+        with pytest.raises(ValueError):
+            kb.create_task(conn, title="needs astra", assignee="a", body=walls.REQUIRE_MODEL_MARKER)
+        tid = kb.create_task(conn, title="legacy", assignee="a")
         if pin == "override":
-            tid = kb.create_task(conn, title="needs opus", assignee="a", model_override="claude-opus-5-5",
-                                 provider_override="anthropic")
+            conn.execute("UPDATE tasks SET model_override='claude-opus-5-5', provider_override='anthropic' WHERE id=?",
+                         (tid,))
+        elif pin == "mandatory":
+            conn.execute("UPDATE tasks SET model_override='claude-opus-5-5', provider_override='anthropic', "
+                         "model_pin_mandatory=1 WHERE id=?", (tid,))
         else:
-            tid = kb.create_task(conn, title="needs astra", assignee="a", body=walls.REQUIRE_MODEL_MARKER)
+            conn.execute("UPDATE tasks SET body=? WHERE id=?", (walls.REQUIRE_MODEL_MARKER, tid))
+        conn.commit()
         seen, result = _dispatch(conn)
-    assert seen == [] and result.clock_held[tid][0] == lp.GUARD_REASON
+    assert seen == [(tid, *GROK)] and tid not in result.clock_held
 
 
 def test_pickup_takes_a_card_the_claim_would_start_on_grok(pool, monkeypatch):
@@ -253,7 +265,7 @@ def test_pickup_takes_a_card_the_claim_would_start_on_grok(pool, monkeypatch):
     serving.discard("xai-oauth")
     monkeypatch.setattr(pd, "_CACHE", {})
     with kbc.connect() as conn:
-        assert pd.pickup_hold(conn, conn, card) == "openai-codex held"
+        assert pd.pickup_hold(conn, conn, card) == "anthropic held, openai-codex held"
 
 
 def test_alternate_probe_fault_keeps_the_hold(pool, monkeypatch):
@@ -387,9 +399,9 @@ def test_an_earlier_ticks_offer_never_steers_an_ordinary_admission(pool, monkeyp
     _pools(monkeypatch, {"anthropic": 5, "openai-codex": 5})
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="routine work", assignee="a")
-        reroute.offer(tid, ("gpt-6-astra", "openai-codex"), (*GROK, "openai-codex"))  # left by a claim that never ran
+        reroute.offer(tid, ("class:standard", "auto"), (*GROK, "openai-codex"))  # left by a claim that never ran
         seen, _ = _dispatch(conn)
-        assert seen == [(tid, "gpt-6-astra", "openai-codex")]
+        assert seen == [(tid, "class:standard", "auto")]
 
 
 @pytest.fixture
@@ -424,4 +436,4 @@ def test_resolver_first_no_grok_credential_keeps_the_hold(pool, resolver_first, 
             assert seen == [] and result.clock_held[tid][0] == lp.GUARD_REASON
         assert _route_receipt(conn, tid) is None
         card = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
-        assert pd.pickup_hold(conn, conn, card) == "openai-codex held"
+        assert pd.pickup_hold(conn, conn, card) == "anthropic held, openai-codex held"
