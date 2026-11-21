@@ -8,6 +8,7 @@ from hermes_cli import kanban_llm_pacing_dispatch as pd
 from tests.hermes_cli import test_kanban_notice_pacing_admission as helpers
 
 hub = helpers.hub
+pool_hub = helpers.pool_hub
 
 
 @pytest.mark.parametrize("path", sorted(helpers.NOTICES))

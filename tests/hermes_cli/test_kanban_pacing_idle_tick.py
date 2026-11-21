@@ -13,6 +13,7 @@ from tests.hermes_cli import test_kanban_notice_pacing_admission as notices
 
 home = helpers.home
 hub = notices.hub
+pool_hub = notices.pool_hub
 
 
 @pytest.fixture(autouse=True)

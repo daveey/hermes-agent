@@ -17,6 +17,7 @@ from tests.hermes_cli import test_kanban_edit_priority_paced as edit_paced
 from tests.hermes_cli import test_kanban_notice_pacing_admission as notices
 
 hub = notices.hub
+pool_hub = notices.pool_hub
 board = notices.board
 
 
