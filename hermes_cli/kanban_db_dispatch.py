@@ -120,11 +120,8 @@ def _env_seconds(name: str, default: int) -> int:
 
 def guard_hold_cap_seconds(reason: str) -> Optional[int]:
     """Max seconds the respawn guard may hold a card for ``reason`` (None = no cap)."""
-    if reason in _GUARD_HOLD_EXEMPT_REASONS:
-        return None
-    if reason in _GUARD_HOLD_SHORT_CAP_REASONS:
-        return _env_seconds("HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS", DEFAULT_GUARD_HOLD_CAP_SECONDS)
-    return _env_seconds("HERMES_KANBAN_GUARD_HOLD_CAP_LONG_SECONDS", DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS)
+    from hermes_cli.kanban_block_routing import guard_hold_cap_seconds as cap
+    return cap(reason)
 
 
 def _is_completion_gate_error(err: str) -> bool:

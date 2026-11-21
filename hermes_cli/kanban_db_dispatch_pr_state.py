@@ -669,10 +669,15 @@ def active_pr_reason(conn: sqlite3.Connection, task_id: str, now: int) -> Option
             if state == "REJECTED":
                 comment_rejection(conn, task_id, url, _rejections[norm_pr(url)])
         return None
+    from hermes_cli.kanban_pr_idle_green import releases
+    if releases(conn, task_id, states):
+        return None  # finish this idle owner's green bound PR; landing gates remain intact
     return "active_pr"
 
 
 def clear_cache() -> None:
+    from hermes_cli import kanban_pr_idle_green
+    kanban_pr_idle_green.clear_cache()
     _cache.clear()
     _rejections.clear()
     _heads.clear()

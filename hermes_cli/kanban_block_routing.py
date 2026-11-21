@@ -161,6 +161,18 @@ def route_block(
     return "blocked", "blocked", set_sql, (kind, recurrences), payload
 
 
+def guard_hold_cap_seconds(reason: str) -> int | None:
+    """Keep active PR publication waits below the fairness limit, with a notice first."""
+    from hermes_cli import kanban_db_dispatch as dispatch
+    if reason == "active_pr":
+        return 2100  # 35 min: existing 30-min notice precedes home-owned escalation
+    if reason in dispatch._GUARD_HOLD_EXEMPT_REASONS:
+        return None
+    if reason in dispatch._GUARD_HOLD_SHORT_CAP_REASONS:
+        return dispatch._env_seconds("HERMES_KANBAN_GUARD_HOLD_CAP_SECONDS", dispatch.DEFAULT_GUARD_HOLD_CAP_SECONDS)
+    return dispatch._env_seconds("HERMES_KANBAN_GUARD_HOLD_CAP_LONG_SECONDS", dispatch.DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS)
+
+
 def block_if_guard_hold_capped(conn, task_id: str, reason: str) -> bool:
     """Block ``task_id`` when the guard has held it for ``reason`` past the cap. [daveey]"""
     from hermes_cli import kanban_db_dispatch as dispatch

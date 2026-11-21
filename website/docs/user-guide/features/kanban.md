@@ -1624,6 +1624,20 @@ hermes kanban create "nightly backup audit" \
 
 ### Respawn guard
 
+An idle ready publisher can resume to finish its existing PRs when every holding
+PR's required exact-head checks are green (or all reported checks when none are
+required). This reuses completion acceptance; missing evidence is not green.
+A live run or registered wake probe keeps the publication hold. CI observations
+are cached for at most five minutes, so release follows on the next eligible tick
+after refresh. Observations taking over two minutes are discarded: with an
+available collection slot, the refresh grace is at most seven minutes plus a
+dispatch tick. This is not merge approval and does not bypass review or landing.
+This includes local-only cards with multiple provenance-filtered publications; no
+new PR associations are inferred. Collection runs in the background with at most
+two jobs and no backlog, never blocking the dispatch tick. Any remaining
+`active_pr` hold gets the existing 30-minute notice and reaches visible,
+home-owned supervisor triage at 35 minutes rather than silently waiting six hours.
+
 The dispatcher refuses to re-spawn a ready task when it hit an auth error (401, invalid API key, unauthorized, billing) on the previous run (`blocker_auth`), or completed a run successfully within the guard window (`recent_success`), or a recent task comment links to a GitHub PR (`active_pr`). Two cooldowns hold a card without ever counting against it: `rate_limit_cooldown` after a quota-wall requeue and `infrastructure_cooldown` after the host refused to place the worker (no restart-safe systemd scope — see [Workers and systemd cgroups](#workers-and-systemd-cgroups)); both share the `HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS` window (default 300 s). Quota / rate-limit / 429 text in `last_failure_error` always takes the `rate_limit_cooldown` path, even when a later non-failure run superseded the `rate_limited` one; once the cooldown elapses the stamp is cleared and the card retries. A quota wall is never `blocker_auth` and never escalates to a human block kind, and a legacy guard-hold block on a quota error is released automatically once another card completes after it. This prevents repeat worker storms on the same bug or task while a human catches up. See the `respawn_guarded` row in the [event reference](#event-reference).
 
 ## Project lanes
