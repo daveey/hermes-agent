@@ -51,6 +51,10 @@ def test_replica_bookkeeping_rows_do_not_repeat_plan(live, ledger, kanban_home, 
         with kbc.write_txn(replica):
             replica.execute("INSERT INTO tasks (id,title,status,created_at,created_on) "
                             "VALUES ('t_foreign','foreign','running',1,?)", (f.OTHER,))
+        # Settle schema-bootstrap WAL pages before warming the steady-state cache.
+        # Otherwise a later heartbeat can cross SQLite's auto-checkpoint boundary
+        # and correctly trigger the independent main-file rewrite invalidator.
+        replica.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         settled = f._settled(live, ledger, kanban_home, spies)
         for i in range(3):
             before = rev.read_key(replica, rev.SHADOW_TABLES)
