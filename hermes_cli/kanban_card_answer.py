@@ -65,17 +65,62 @@ def validate_provenance(value: dict, task: str) -> None:
         raise AnswerRefused("invalid_decision_provenance")
 
 
-def _receipt(conn, task, operation_id, fingerprint):
+def _payload(raw):
+    try:
+        value = json.loads(raw or "{}")
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _valid_receipt(conn, task, request, fingerprint, kind, receipt) -> bool:
+    """Every receipt field and its same-transaction decision comment, exactly."""
+    fields = set(request) | {"originGateway", "fingerprint", "destination", "executionStarted", "decisionProvenance"}
+    origin = receipt.get("originGateway")
+    if (set(receipt) != fields or any(receipt.get(k) != v for k, v in request.items())
+            or not isinstance(origin, str) or not origin or receipt["fingerprint"] != fingerprint
+            or receipt["destination"] != "kanban_ask" or receipt["executionStarted"] is not False
+            or receipt["decisionProvenance"] != "recorded_desktop_operation"
+            or (kind == "archived" and request["choice"] != "archive")):
+        return False
+    provenance = {**request, "originGateway": origin}
+    found = []
     for row in conn.execute(
-        "SELECT payload FROM task_events WHERE task_id=? AND kind IN ('unblocked','archived') ORDER BY id DESC",
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='commented' ORDER BY id", (task,),
+    ):
+        payload = _payload(row[0])
+        decision = payload.get("recorded_decision") if payload else None
+        if isinstance(decision, dict) and decision.get("operationId") == request["operationId"]:
+            found.append(payload)
+    if len(found) != 1:
+        return False
+    payload = found[0]
+    if (payload["recorded_decision"] != provenance or payload.get("writer_kind") != "agent"
+            or "relayed_human" in payload or payload.get("author") != "user-steps"):
+        return False
+    comment = conn.execute("SELECT author,body FROM task_comments WHERE id=? AND task_id=?",
+                           (payload.get("comment_id"), task)).fetchone()
+    prefix, suffix = "Choice recorded in Desktop (remote): ", "\nOperation: " + request["operationId"]
+    if comment is None or comment[0] != "user-steps" or not (comment[1].startswith(prefix) and comment[1].endswith(suffix)):
+        return False
+    chosen = _payload(comment[1][len(prefix):-len(suffix)])
+    return chosen is not None and chosen.get("value") == request["choice"]
+
+
+def _receipt(conn, request, fingerprint):
+    task, operation_id = request["task"], request["operationId"]
+    for row in conn.execute(
+        "SELECT kind,payload FROM task_events WHERE task_id=? AND kind IN ('unblocked','archived') ORDER BY id DESC",
         (task,),
     ):
-        payload = json.loads(row[0] or "{}")
-        receipt = payload.get(FIELD) if isinstance(payload, dict) else None
+        payload = _payload(row[1])
+        receipt = payload.get(FIELD) if payload else None
         if not isinstance(receipt, dict) or receipt.get("operationId") != operation_id:
             continue
         if receipt.get("fingerprint") != fingerprint:
             raise AnswerRefused("operation_conflict")
+        if not _valid_receipt(conn, task, request, fingerprint, row[0], receipt):
+            raise AnswerRefused("operation_receipt_invalid")
         return receipt
     return None
 
@@ -113,7 +158,7 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
         raise AnswerRefused("invalid_answer")
     _owner(conn, request['task'], owner_gateway, require_primary=require_primary)
     fingerprint = digest(request)
-    old = _receipt(conn, request["task"], request["operationId"], fingerprint)
+    old = _receipt(conn, request, fingerprint)
     if old:
         return old
     # Replays of committed decisions do not depend on a now-offline origin.
@@ -147,7 +192,7 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
             return "containment_hold"
         if not archive and pending(c, request["task"]):
             return "spend_decision_pending"
-        if _receipt(c, request["task"], request["operationId"], fingerprint):
+        if _receipt(c, request, fingerprint):
             return "already_recorded"
         fresh = snapshot(c, request["task"])
         return None if fresh == current else "stale_ask"
@@ -158,7 +203,7 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
     comment = RecordedDecisionComment("user-steps", note, provenance)
     transition(conn, request["task"], precondition=fence, comment=comment,
                event_extra={FIELD: receipt})
-    recorded = _receipt(conn, request["task"], request["operationId"], fingerprint)
+    recorded = _receipt(conn, request, fingerprint)
     if not recorded:
         raise AnswerRefused("ask_changed_or_held")
     return recorded

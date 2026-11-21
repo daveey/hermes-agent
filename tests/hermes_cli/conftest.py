@@ -259,3 +259,9 @@ def _reset_retired_host_loops():
     yield
     from tests._fixtures.host_loop_reset import reset_retired_host_loops
     reset_retired_host_loops()
+
+
+def pytest_addoption(parser):
+    """Explicit cross-repository input for the courier/core integration gate."""
+    parser.addoption("--card-answer-courier", default=None,
+                     help="Exact hermes-hub client source for test_card_answer_courier_integration.py")

@@ -13,7 +13,25 @@ from pathlib import Path
 from hermes_cli.kanban_card_answer import AnswerRefused
 
 
-def recorded(path: Path, *, source: dict, owner_gateway: str, request_id: str, answer: dict) -> dict:
+def recorded(path: Path, **kwargs) -> dict:
+    """Controlled boundary: a malformed/absent source store or row is a refusal.
+
+    Only genuinely transient SQLite lock/busy conditions stay retryable (OSError);
+    anything else a stored operation can do wrong becomes ``AnswerRefused``.
+    """
+    try:
+        return _recorded(path, **kwargs)
+    except AnswerRefused:
+        raise
+    except sqlite3.OperationalError as exc:
+        if any(word in str(exc).lower() for word in ('locked', 'busy')):
+            raise OSError('source_store_busy') from None
+        raise AnswerRefused('source_store_unavailable') from None
+    except (sqlite3.DatabaseError, KeyError, TypeError, ValueError, AttributeError, IndexError, UnicodeError):
+        raise AnswerRefused('source_operation_malformed') from None
+
+
+def _recorded(path: Path, *, source: dict, owner_gateway: str, request_id: str, answer: dict) -> dict:
     """Exact namespace/session operation + producer-owned remote binding.
 
     The binding's snapshot.remote contains version=1, target (the six owner/ask

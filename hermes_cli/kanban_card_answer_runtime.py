@@ -1,11 +1,31 @@
-"""Private managed-runtime entry points; IDs are hints, authenticated records are truth.
+"""Managed-runtime entry points; IDs are hints, authenticated records are truth.
 
-No public tool or CLI is registered here. The courier must run these in the exact
-receiving profile. Network evidence is read independently of its stdin envelope.
+The only entry is the module CLI (no tool or ``hermes`` subcommand is registered)::
+
+    python -m hermes_cli.kanban_card_answer_runtime owner REQUEST_ID PROOF_ID
+    python -m hermes_cli.kanban_card_answer_runtime source PROOF_ID
+
+Run it in the exact receiving profile (``HERMES_HOME``). One JSON object is printed
+to stdout. Success: exit 0, ``{"ok": true, "result": {...}}``. Controlled refusal
+(``AnswerRefused``; nothing was changed): exit 2, ``{"ok": false, "refused": CODE}``.
+Retryable unavailability (courier/store I/O): exit 3,
+``{"ok": false, "retryable": true, "error": "unavailable"}``. Any other failure:
+exit 1, ``{"ok": false, "error": "internal_error", "type": NAME}``. Bad usage: exit
+64. Network evidence is read independently of any caller-supplied envelope; there is
+no flag that supplies, skips or overrides proof.
+
+Routing coordinates: ``ownerProfile`` and the courier key ``profile/board/task`` name
+the Hermes profile whose runtime executes this transition. They are routing
+coordinates, NOT the task's assignee, which is never consulted or changed. Boards
+are shared across profiles under the trusted base Hermes root.
 """
 from __future__ import annotations
 
+import json
 import re
+import sqlite3
+import sys
+from pathlib import Path
 
 from hermes_cli.kanban_card_answer import AnswerRefused, apply
 from hermes_cli.kanban_card_answer_proof import verify
@@ -22,9 +42,31 @@ def _profile():
     return profile, get_hermes_home()
 
 
+def _board_db(board) -> Path:
+    """Canonical live board DB under the trusted base Hermes root.
+
+    ``HERMES_KANBAN_HOME`` and ``HERMES_KANBAN_DB`` (worker/test pins) are ignored:
+    only ``<base>/kanban.db`` (default) or ``<base>/kanban/boards/<slug>/kanban.db``.
+    """
+    if not isinstance(board, str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', board):
+        raise AnswerRefused('owner_board_invalid')
+    from hermes_constants import get_default_hermes_root
+    root = get_default_hermes_root().resolve()
+    if board == 'default':
+        path = (root / 'kanban.db').resolve()
+        if path.parent != root:
+            raise AnswerRefused('owner_board_invalid')
+    else:
+        path = (root / 'kanban' / 'boards' / board / 'kanban.db').resolve()
+        if not path.is_relative_to(root / 'kanban' / 'boards'):  # symlink escaping the root
+            raise AnswerRefused('owner_board_invalid')
+    if not path.is_file():
+        raise AnswerRefused('owner_board_missing')
+    return path
+
+
 def owner(request_id: str, proof_id: str) -> dict:
     """Apply an authenticated exact request only in this profile's own live board."""
-    from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect_closing
     records = Records()
     profile, _ = _profile()
@@ -34,14 +76,10 @@ def owner(request_id: str, proof_id: str) -> dict:
     if (not isinstance(answer, dict) or answer.get('ownerGateway') != records.gateway
             or answer.get('ownerProfile') != profile):
         raise AnswerRefused('owner_route_mismatch')
-    # board_own_db_path ignores a worker's HERMES_KANBAN_DB pin. Resolve only a
-    # canonical board, never a supplied file or the hub's replica database.
+    # Resolve only a canonical board under the trusted base root, never a supplied
+    # file, a worker's pinned DB, or the hub's replica database.
     board = answer.get('board')
-    if not isinstance(board, str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', board):
-        raise AnswerRefused('owner_board_invalid')
-    path = kb.board_own_db_path(board)
-    if not path.is_file():
-        raise AnswerRefused('owner_board_missing')
+    path = _board_db(board)
     # Validate the original even on receipt replay; source readback may be offline
     # only after the durable owner receipt already exists.
     if (original.get('id') != request_id or original.get('to_gw') != records.gateway
@@ -49,7 +87,7 @@ def owner(request_id: str, proof_id: str) -> dict:
             or original.get('key') != f"{profile}/{board}/{answer.get('task')}"):
         raise AnswerRefused('owner_route_mismatch')
     with connect_closing(path) as conn:
-        return apply(conn, answer, owner_gateway=records.gateway, owner_profile=profile, board=board, require_primary=True,
+        return apply(conn, answer, owner_gateway=records.gateway, owner_profile=profile, board=str(board), require_primary=True,
                      verify_source=lambda a: verify(a, request_id=request_id, proof_id=proof_id,
                                                    owner_gateway=records.gateway, read_request=records.read))
 
@@ -78,3 +116,26 @@ def source(proof_id: str) -> dict:
            read_request=lambda rid: validated if rid == proof_id else original)
     return recorded(home / 'user-steps/actions.sqlite3', source=identity,
                     owner_gateway=answer['ownerGateway'], request_id=args['requestId'], answer=answer)
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    shape = {'owner': 2, 'source': 1}
+    if not argv or argv[0] not in shape or len(argv) != shape[argv[0]] + 1:
+        print(json.dumps({'ok': False, 'error': 'usage'}))
+        return 64
+    try:
+        result = owner(*argv[1:]) if argv[0] == 'owner' else source(*argv[1:])
+        out, code = {'ok': True, 'result': result}, 0
+    except AnswerRefused as exc:
+        out, code = {'ok': False, 'refused': str(exc) or 'refused'}, 2
+    except (OSError, sqlite3.OperationalError):
+        out, code = {'ok': False, 'retryable': True, 'error': 'unavailable'}, 3
+    except (ValueError, TypeError, KeyError, RuntimeError) as exc:
+        out, code = {'ok': False, 'error': 'internal_error', 'type': type(exc).__name__}, 1
+    print(json.dumps(out, sort_keys=True, ensure_ascii=False, default=str))
+    return code
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

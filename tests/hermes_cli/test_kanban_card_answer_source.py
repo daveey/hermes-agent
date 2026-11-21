@@ -96,6 +96,6 @@ def test_unbound_operation_is_not_authority(tmp_path):
 
 def test_missing_store_never_created(tmp_path):
     path = tmp_path / 'missing.sqlite3'
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(ca.AnswerRefused, match='source_store_unavailable'):
         read(path, {}, dict(gateway='origin', profile='work', session='chat-one'))
     assert not path.exists()

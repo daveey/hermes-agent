@@ -16,6 +16,10 @@ def verify(answer: dict, *, request_id: str, proof_id: str, owner_gateway: str, 
     """
     original = read_request(request_id)
     proof = read_request(proof_id)
+    fields = {"ownerGateway", "ownerProfile", "board", "task", "generation", "choice", "operationId"}
+    if (not isinstance(answer, dict) or set(answer) != fields
+            or any(not isinstance(v, str) or not v for v in answer.values())):
+        raise AnswerRefused("source_request_invalid")
     if not isinstance(original, dict) or not isinstance(proof, dict):
         raise AnswerRefused("source_proof_unavailable")
     args = original.get("args")
