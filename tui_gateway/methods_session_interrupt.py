@@ -82,8 +82,9 @@ _HELD_QUEUE_KEEPING_ORIGINS = frozenset({None, "stop_button", "esc", "tile", "ti
 _BACKGROUND_STOP_ORIGINS = frozenset({"stop_button", "esc", "tile", "tile:esc", "slash", "transcript"})
 
 
-BACKGROUND_STOP_TYPED_MESSAGE = ("The turn running in this chat in another window was not started by Hermes, so "
-                                 "Stop here does not end it. Stop it in that window.")
+# Also the user's own forwarded prompt, caught before its user row is written: so no "not started by Hermes".
+BACKGROUND_STOP_TYPED_MESSAGE = ("The turn running in this chat wasn't started automatically, so Stop left it "
+                                 "running. Stop it from the window that started it, or wait for it to finish.")
 BACKGROUND_STOP_QUEUED_MESSAGE = ("The background turn in this chat could not be stopped from here (the gateway "
                                   "running it is older). Your message runs when that turn ends.")
 

@@ -331,6 +331,7 @@ def test_a_typed_holder_is_never_asked_to_end(idle_chat):
     assert _run_workers(state) == ["typed_turn"]
     assert state["requests"] == [] and state["calls"] == []
     assert state["events"][0][2]["message"] == server.BACKGROUND_STOP_TYPED_MESSAGE
+    assert "wasn't started automatically, so Stop left it running" in server.BACKGROUND_STOP_TYPED_MESSAGE
 
 
 def test_an_unstamped_turn_on_an_older_gateway_is_taken_over_as_before(idle_chat):
