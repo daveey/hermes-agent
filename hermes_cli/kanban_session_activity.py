@@ -411,35 +411,7 @@ def _hub_db_path() -> Path | None:
     return path if path.is_file() else None
 
 
-def replica_task_resolution(ids: list[str], now: float | None = None) -> tuple[set[str], bool]:
-    """Which ``t_<hex>`` ids exist as tasks in the hermes-hub replica of any gateway (same file ``_remote_links``
-    reads; replica keys are ``[profile/]board/<id>``, so qualified ``@task:p@gw/<id>`` refs resolve by id).
-
-    Returns ``(found, authoritative)``; False when a replica exists but can't answer (unreadable, offline, or not
-    synced within ``HUB_STALE_AFTER_S``): absent ids are *unknown*, never flagged. No replica is authoritative only
-    when ``kanban.sync`` is off; a Board-synced host (worker node: no hub sync) holds a partial board. [daveey]"""
-    path = _hub_db_path()
-    if path is None or not ids:  # sync_enabled never raises: an unreadable config reads as sync off (standalone)
-        return set(), not ids or not _board_sync_enabled()
-    try:
-        from hermes_cli.kanban_board_replica_refs import hub_tasks_found, with_reader
-
-        def read(conn: sqlite3.Connection) -> tuple:
-            conn.execute("BEGIN")  # one snapshot: the task-row probe must describe the rows the lookups read
-            try:
-                offline = _meta_float(conn, "offline_since")
-                synced = max(filter(None, (_meta_float(conn, "last_ok"), _meta_float(conn, "last_digest"))),
-                             default=None)
-                return offline, synced, hub_tasks_found(conn, path, ids)
-            finally:
-                conn.execute("ROLLBACK")
-
-        offline, synced, found = with_reader(path, read)  # kept reader: ~2 ms an open on every board GET
-    except sqlite3.Error:
-        return set(), False
-    now = time.time() if now is None else now
-    fresh = offline is None and synced is not None and now - synced <= HUB_STALE_AFTER_S
-    return found, fresh
+from hermes_cli.kanban_session_activity_replica_resolution import replica_task_resolution
 
 
 from hermes_cli.kanban_generation import open_ro as _open_ro
@@ -462,13 +434,24 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
     """A shared read-only connection to ``path``, held exclusively for the ``with`` body. Reopened when the file is
     replaced (new inode: a rebuilt replica), after any sqlite error, or when its ``-shm`` generation is gone (the
     connection is stranded on a deleted WAL index and would fail with ``disk I/O error`` or read stale rows until
-    restart; kanban-759104eb56). Raises ``sqlite3.OperationalError`` when the file is missing, like ``_open_ro``."""
-    from hermes_cli.kanban_reader_lifecycle import borrow_lock, cached_entry
+    restart; kanban-759104eb56). Raises ``sqlite3.OperationalError`` when the file is missing, like ``_open_ro``.
+    While another thread holds the shared connection past ``_RO_SHARED_WAIT_S``, the body gets a private read-only
+    connection instead (closed afterwards; the shared entry is untouched), so concurrent dashboard readers never fail
+    with "cached reader is borrowed" (hub errors.log, 2026-11-21)."""
+    from hermes_cli.kanban_reader_lifecycle import cached_entry, try_borrow
 
     started = time.monotonic()
     key, entry = cached_entry(path, busy_budget)
     conn, _ident, lock, _shm = entry
-    with borrow_lock(lock, busy_budget - (time.monotonic() - started)):
+    remaining = busy_budget - (time.monotonic() - started)
+    if not try_borrow(lock, min(remaining, _RO_SHARED_WAIT_S)):
+        with _RO_CACHE_LOCK:
+            ro_stats["private_fallbacks"] += 1
+        # Never more than the shared reader's own SQLite busy timeout, whatever budget the caller passed.
+        with _private_ro(path, min(busy_budget - (time.monotonic() - started), _RO_BUSY_TIMEOUT_S)) as private:
+            yield private
+        return
+    try:
         with _RO_CACHE_LOCK:
             if _RO_CACHE.get(key) is not entry:
                 from hermes_cli.kanban_generation import DeletedWalGenerationError
@@ -496,10 +479,28 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
                         if _RO_CACHE.get(key) is entry:
                             del _RO_CACHE[key]
                     _close_quietly(conn)
+    finally:
+        lock.release()
+
+
+@contextlib.contextmanager
+def _private_ro(path: Path, budget: float) -> Iterator[sqlite3.Connection]:
+    """A one-call read-only connection for when the shared reader is borrowed: same opener and read-only semantics
+    as the cache, SQLite busy timeout = what is left of the caller's budget, always closed afterwards."""
+    conn = _open_ro(path, timeout=max(0.0, budget))
+    try:
+        yield conn
+    finally:
+        _close_quietly(conn)
 
 
 # The cached reader's own SQLite busy timeout, set when ``kanban_reader_lifecycle`` opens it.
 _RO_BUSY_TIMEOUT_S = 0.5
+# How long a reader waits for another thread to hand back the shared connection before it opens its own. Short:
+# a private open costs ~2.5 ms, so waiting longer than a few reads only queues dashboard threads behind each other.
+_RO_SHARED_WAIT_S = 0.05
+# Private fallback opens (``cached_ro`` while the shared reader is borrowed): shows contention on a live host.
+ro_stats = {"private_fallbacks": 0}
 
 
 def _close_quietly(conn: sqlite3.Connection) -> None:

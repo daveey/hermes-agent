@@ -7,10 +7,15 @@ import threading
 from hermes_cli.kanban_generation import DeletedWalGenerationError, lifecycle_access, retry_open
 
 
+def try_borrow(lock, budget) -> bool:
+    """Acquire ``lock`` within ``budget`` seconds (never negative); False when another reader still holds it."""
+    return lock.acquire(timeout=max(0.0, budget))
+
+
 @contextlib.contextmanager
 def borrow_lock(lock, budget):
     """Python coordination is part of the reader budget, not an unbounded prelude."""
-    if not lock.acquire(timeout=max(0.0, budget)):
+    if not try_borrow(lock, budget):
         raise sqlite3.OperationalError("database is locked: cached reader is borrowed")
     try:
         yield
