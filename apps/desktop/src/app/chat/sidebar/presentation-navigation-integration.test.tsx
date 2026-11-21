@@ -218,6 +218,39 @@ it('exits a stale member scope only after the loaded catalog no longer contains 
   expect(screen.getAllByText('NAV LOCAL')).toHaveLength(1)
 })
 
+it('an entered empty primary still keeps the foreign member body instead of the empty state', async () => {
+  $projectTree.set([{ ...base, repos: [], sessionCount: 0, sessionIds: [], previewSessions: [] }])
+  $sessions.set([remote])
+  $projectScope.set(base.id)
+  mount()
+  await waitFor(() => expect(document.querySelectorAll('[data-entered-project-member]')).toHaveLength(2))
+  expect(screen.getAllByText('NAV REMOTE')).toHaveLength(1)
+  expect(screen.queryByText('No sessions yet')).toBeNull()
+  expect(screen.queryByTestId('virtual-recents')).toBeNull()
+})
+
+it('a foreign-only name enters both raw pipelines and keeps the most recent owner primary', async () => {
+  const lab = {
+    ...remote,
+    id: 'LAB',
+    title: 'NAV LAB',
+    connection_id: 'homelab',
+    cwd: '/lab/app',
+    git_repo_root: '/lab/app',
+    last_active: 200
+  }
+  $projectTree.set([])
+  $sessions.set([{ ...remote, last_active: 100 }, lab])
+  $projectScope.set(remoteId)
+  mount()
+  await waitFor(() => expect(document.querySelectorAll('[data-entered-project-member]')).toHaveLength(2))
+  expect(document.querySelector('[data-entered-project-member]')?.getAttribute('data-entered-project-member')).toBe(
+    JSON.stringify(['gateway-project', 'homelab', '/lab/app'])
+  )
+  expect(screen.getAllByText('NAV REMOTE')).toHaveLength(1)
+  expect(screen.getAllByText('NAV LAB')).toHaveLength(1)
+})
+
 it('index recents virtualization exits with grouping, never swallowing entered member content', async () => {
   $sidebarShowAllSessions.set(true)
   $sessions.set([
