@@ -483,21 +483,35 @@ class _Publications:
     data; 13 ms for 23,000 keys on the MacBook), then one keyed read per candidate record. A per-obligation
     ``key GLOB`` scanned the whole table each time (review 5965756952). Discovery does not depend on a gateway's
     announced scopes: a replacement whose owner announces no scope for the board is still found, so a re-homed
-    running card is never settled from its removed owner's old completion (review 5970563622)."""
+    running card is never settled from its removed owner's old completion (review 5970563622).
+
+    Every projection still reads the complete ordered membership. Only its pure index derivation is reused for
+    an exactly equal inventory; payloads, owner liveness and terminal evidence remain live. The bounded memo is
+    immutable and published as one generation (``kanban_publication_index``)."""
 
     def __init__(self, source: sqlite3.Connection | None, listed: frozenset):
         self.source = source
         self.listed = listed
-        self.keys: dict[tuple[str, str], list[tuple[str, str]]] | None = None
+        self.keys = None
 
-    def _index(self) -> dict[tuple[str, str], list[tuple[str, str]]]:
+    def _index(self):
         if self.keys is None:
-            self.keys = {}
-            for gw in sorted(self.listed):
-                for (key,) in self.source.execute("SELECT key FROM replica WHERE gw=? AND coll='tasks'", (gw,)):
-                    parts = str(key).split('/')
-                    if len(parts) == 3:
-                        self.keys.setdefault((parts[1], parts[2]), []).append((gw, str(key)))
+            from hermes_cli import kanban_publication_index as membership
+
+            groups = []
+            scanned = False
+            try:
+                for gw in sorted(self.listed):
+                    keys = []
+                    groups.append((gw, keys))
+                    for (key,) in self.source.execute("SELECT key FROM replica WHERE gw=? AND coll='tasks'", (gw,)):
+                        keys.append(str(key))
+                scanned = True
+            finally:
+                if not scanned:
+                    # Preserve the old partial instance after a failed read; never publish it for reuse.
+                    self.keys = membership.build(groups)
+            self.keys = membership.derive(groups)
         return self.keys
 
     def has_other(self, owner: dict, task: dict) -> bool:
