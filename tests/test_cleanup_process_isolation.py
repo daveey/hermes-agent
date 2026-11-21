@@ -93,11 +93,24 @@ def test_cleanup_census_keeps_descendant_outside_session_roots(tmp_path, tmp_pat
     monkeypatch.setattr(jobs, "_holds_workspace", observe)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    with subprocess.Popen([sys.executable, "-c", "input()"], cwd=cwd,
-                          stdin=subprocess.PIPE, text=True) as child:
+    launcher = (
+        "import subprocess, sys\n"
+        "with subprocess.Popen([sys.executable, '-c', 'input()'], stdin=subprocess.PIPE, text=True) as grandchild:\n"
+        "    try:\n"
+        "        print(grandchild.pid, flush=True)\n"
+        "        input()\n"
+        "    finally:\n"
+        "        grandchild.communicate('done\\n', timeout=10)\n"
+    )
+    with subprocess.Popen([sys.executable, "-c", launcher], cwd=cwd,
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as child:
         try:
+            assert child.stdout is not None
+            grandchild_pid = int(child.stdout.readline())
+            assert psutil.Process(grandchild_pid).ppid() == child.pid
             assert not jobs.defer_owned_job_cleanup("t_0123456789abcdef", workspace)
             assert child.pid in seen
+            assert grandchild_pid in seen
         finally:
             child.communicate("done\n", timeout=10)
 
@@ -138,6 +151,53 @@ def test_foreign_attributes_are_not_requested(monkeypatch, tmp_path):
     monkeypatch.setattr(census, "_rooted_in_session", lambda proc, roots: False)
     assert list(session_process_iter((str(tmp_path),), ["cwd", "environ"])) == []
     assert touched == []
+
+
+def test_owned_process_disappearing_during_attributes_is_skipped(monkeypatch, tmp_path):
+    from tests._fixtures import process_census as census
+
+    calls = []
+
+    def disappeared(**kwargs):
+        calls.append(kwargs)
+        raise psutil.NoSuchProcess(os.getpid())
+
+    owned = SimpleNamespace(pid=os.getpid(), as_dict=disappeared)
+    monkeypatch.setattr(census, "_PROCESS_ITER", lambda: iter([owned]))
+    assert list(session_process_iter((str(tmp_path),), ["cwd"])) == []
+    assert calls == [{"attrs": ["cwd"], "ad_value": None}]
+
+
+@pytest.mark.parametrize("holder_root", ["basetemp", "sandbox"])
+def test_fixture_canonicalizes_both_roots_and_keeps_sandbox_holder(tmp_path, monkeypatch, holder_root):
+    from tests._fixtures import process_census as census
+    from hermes_cli import kanban_workspace_jobs as jobs
+
+    roots = {}
+    for name in ("basetemp", "sandbox"):
+        target = tmp_path / (name + "-target")
+        target.mkdir()
+        alias = tmp_path / (name + "-alias")
+        alias.symlink_to(target, target_is_directory=True)
+        roots[name] = (target, alias)
+    monkeypatch.setenv("HERMES_TEST_SANDBOX_HOME", str(roots["sandbox"][1]))
+    monkeypatch.setattr(census, "_PROCESS", lambda pid: SimpleNamespace(
+        pid=pid, children=lambda recursive: []))
+    seen = set()
+    monkeypatch.setattr(jobs, "_holds_workspace", lambda proc, *args: seen.add(proc.pid) or False)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # Construct the actual autouse fixture with symlink-valued independent roots.
+    # The holder has no ancestry membership, so only canonical root matching can retain it.
+    census.isolate_process_census.__wrapped__(monkeypatch, SimpleNamespace(
+        getbasetemp=lambda: roots["basetemp"][1]))
+    with subprocess.Popen([sys.executable, "-c", "input()"], cwd=roots[holder_root][0],
+                          stdin=subprocess.PIPE, text=True) as child:
+        try:
+            assert not jobs.defer_owned_job_cleanup("t_0123456789abcdef", workspace)
+            assert child.pid in seen
+        finally:
+            child.communicate("done\n", timeout=10)
 
 
 def test_synthetic_process_census_override_still_wins(monkeypatch):
