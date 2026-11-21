@@ -2,7 +2,7 @@
  *  row's stored outcome (session-outcome contract). Part of `Translations['sidebar']['row']`. */
 export interface SessionRowStatusCopy {
   cardsIdle: string
-  cardColours: { red: string; pink: string; amber: string; blue: string; grey: string; green: string }
+  cardColours: { red: string; pink: string; amber: string; blue: string; grey: string; green: string; violet: string }
   kanbanTasks: (open: number, blocked: number) => string
   kanbanAttention: (count: number) => string
   kanbanStalled: (count: number) => string

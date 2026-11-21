@@ -963,7 +963,7 @@ describe('SidebarSessionRow kanban counts', () => {
     expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('attention')
     const squares = screen.getByTestId('session-row-card-squares')
     expect(squares.querySelector('[data-card-colour="amber"]')).not.toBeNull()
-    expect(squares.getAttribute('aria-label')).toBe('Stalled / attention 1')
+    expect(squares.getAttribute('aria-label')).toBe('Needs attention 1')
   })
 
   // [daveey] A parked card nothing has produced for over 2 h: an amber stalled count in BOTH trailing branches
@@ -989,7 +989,7 @@ describe('SidebarSessionRow kanban counts', () => {
     expect(time.compareDocumentPosition(counts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('shows the stalled count and the amber stalled glyph on a one-line row (no age)', async () => {
+  it('shows a green worker-wait square and the amber stalled glyph on a one-line row (no age)', async () => {
     const { $sidebarRowMeta } = await import('@/store/layout')
     const before = $sidebarRowMeta.get()
     act(() => $sidebarRowMeta.set([]))
@@ -1008,8 +1008,8 @@ describe('SidebarSessionRow kanban counts', () => {
 
       expect(container.querySelector('time')).toBeNull()
       const squares = screen.getByTestId('session-row-card-squares')
-      expect(squares.querySelector('[data-card-colour="amber"]')).not.toBeNull()
-      expect(squares.getAttribute('aria-label')).toBe('Stalled / attention 1')
+      expect(squares.querySelector('[data-card-colour="green"]')).not.toBeNull()
+      expect(squares.getAttribute('aria-label')).toBe('Waiting for a worker 1')
       expect(container.querySelector('[data-sidebar-stripe]')?.getAttribute('data-sidebar-stripe')).toBe('stalled')
       const glyph = container.querySelector('[data-slot="session-status-stripe"]')
       expect(glyph?.getAttribute('data-status-stripe')).toBe('stalled')

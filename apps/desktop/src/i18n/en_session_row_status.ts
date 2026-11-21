@@ -43,10 +43,11 @@ export const enSessionRowStatus = {
   cardColours: {
     red: 'Needs you',
     pink: 'Held',
-    amber: 'Stalled / attention',
+    amber: 'Needs attention',
     blue: 'Running',
     grey: 'Waiting',
-    green: 'Done'
+    green: 'Waiting for a worker',
+    violet: 'Done, not yet seen'
   },
   kanbanUnknown: count =>
     `${count} work ${count === 1 ? 'item has' : 'items have'} unknown current status: evidence is missing, expired or unverified. This does not mean done; no new check was requested.`,

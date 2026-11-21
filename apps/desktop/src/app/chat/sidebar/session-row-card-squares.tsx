@@ -3,17 +3,44 @@ import type { ReactNode } from 'react'
 import { Tip } from '@/components/ui/tooltip'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { executionIdentityKey, selectExecutionObservation } from '@/lib/execution-observations'
 
 const COLOURS = {
   red: 'bg-red-500',
   pink: 'bg-pink-500',
+  green: 'bg-emerald-500',
   amber: 'bg-amber-500',
   blue: 'bg-sky-400 dark:bg-sky-500',
   grey: 'bg-zinc-400 dark:bg-zinc-500',
-  green: 'bg-emerald-500'
+  violet: 'bg-violet-500'
 } as const
 
 type CardColour = keyof typeof COLOURS
+
+/** Counts do not distinguish ready from running; only current card evidence can refine that fallback. */
+function queuedCards(session: SessionInfo): number {
+  const values = session.execution_observations ?? []
+  const identities = new Map<string, unknown>()
+
+  for (const value of values) {
+    if (!value || typeof value !== 'object' || !('identity' in value)) {
+      continue
+    }
+
+    const identity = value.identity
+    const key = executionIdentityKey(identity)
+
+    if (key && identity && typeof identity === 'object' && 'kind' in identity && identity.kind === 'card') {
+      identities.set(key, identity)
+    }
+  }
+
+  const now = Date.now() / 1000
+
+  return [...identities.values()].filter(
+    identity => selectExecutionObservation(values, identity, now).state === 'queued'
+  ).length
+}
 
 /** One entry per distinct card colour, in urgency order. No backend reads. */
 export function sessionCardColours(
@@ -22,14 +49,17 @@ export function sessionCardColours(
 ): { colour: CardColour; count: number }[] {
   const parked = session.kanban_parked ?? 0
   const stalled = session.kanban_stalled ?? 0
+  const live = Math.max(0, (session.kanban_active ?? 0) - parked - (session.kanban_held ?? 0))
+  const queued = Math.min(live, queuedCards(session))
 
   const counts: Record<CardColour, number> = {
     red: session.needs_you?.length ?? session.kanban_blocked ?? 0,
     pink: session.kanban_held ?? 0,
-    amber: stalled + (session.kanban_attention ?? 0),
-    blue: Math.max(0, (session.kanban_active ?? 0) - parked - (session.kanban_held ?? 0)),
+    green: stalled + queued,
+    amber: session.kanban_attention ?? 0,
+    blue: live - queued,
     grey: Math.max(0, parked - stalled) + executionUnknown + Number(Boolean(session.kanban_unknown)),
-    green: session.kanban_unseen ?? 0
+    violet: session.kanban_unseen ?? 0
   }
 
   return (Object.keys(COLOURS) as CardColour[]).flatMap(colour =>

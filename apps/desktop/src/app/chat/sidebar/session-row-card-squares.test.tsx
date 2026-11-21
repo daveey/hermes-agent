@@ -36,9 +36,10 @@ describe('sessionCardColours', () => {
   it('pink counts held cards', () => {
     expect(sessionCardColours(session({ kanban_held: 2 }), 0)).toEqual([{ colour: 'pink', count: 2 }])
   })
-  it('amber combines stalled and attention', () => {
+  it('green marks worker waits while amber retains completed-card attention', () => {
     expect(sessionCardColours(session({ kanban_stalled: 2, kanban_attention: 1 }), 0)).toEqual([
-      { colour: 'amber', count: 3 }
+      { colour: 'green', count: 2 },
+      { colour: 'amber', count: 1 }
     ])
   })
   it('blue subtracts parked and held, clamps to zero, and accepts legacy missing parked', () => {
@@ -61,8 +62,45 @@ describe('sessionCardColours', () => {
       count: 1
     })
   })
-  it('green counts unseen results', () => {
-    expect(sessionCardColours(session({ kanban_unseen: 2 }), 0)).toEqual([{ colour: 'green', count: 2 }])
+  it('violet counts unseen results, never worker waits', () => {
+    expect(sessionCardColours(session({ kanban_unseen: 2 }), 0)).toEqual([{ colour: 'violet', count: 2 }])
+  })
+  it.each(['run_id', 'generation'] as const)('refines live counts using current queued-card %s evidence', attempt => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1000 * 1000)
+
+    const queued = {
+      version: 1,
+      identity: { gateway: 'edge', profile: 'work', board: 'tasks', kind: 'card', work_id: 'card-a', [attempt]: 7 },
+      owner: { gateway: 'edge', profile: 'work' },
+      state: 'queued',
+      source: 'kanban.card',
+      source_revision: 'event:42',
+      observed_at: 1000,
+      valid_until: 1180,
+      evidence_refs: ['event:42']
+    }
+
+    const row = session({
+      kanban_active: 3,
+      execution_observations: [
+        queued,
+        queued,
+        null,
+        { ...queued, identity: { ...queued.identity, kind: 'turn', session: 'chat' } }
+      ]
+    })
+
+    expect(sessionCardColours(row, 0)).toEqual([
+      { colour: 'green', count: 1 },
+      { colour: 'blue', count: 2 }
+    ])
+    expect(sessionCardColours(session({ ...row, kanban_active: 0 }), 0)).toEqual([])
+    expect(
+      sessionCardColours(session({ ...row, execution_observations: [queued, { ...queued, state: 'running' }] }), 0)
+    ).toEqual([{ colour: 'blue', count: 3 }])
+    vi.setSystemTime(1180 * 1000)
+    expect(sessionCardColours(row, 0)).toEqual([{ colour: 'blue', count: 3 }])
   })
   it('keeps urgency order regardless of input property order', () => {
     expect(
@@ -77,7 +115,7 @@ describe('sessionCardColours', () => {
         }),
         0
       ).map(item => item.colour)
-    ).toEqual(['red', 'pink', 'amber', 'blue', 'grey', 'green'])
+    ).toEqual(['red', 'pink', 'green', 'blue', 'grey', 'violet'])
   })
 })
 
@@ -123,6 +161,20 @@ it.each([
     vi.advanceTimersByTime(700)
   })
   expect(screen.getByRole('tooltip').textContent).toBe(label)
+})
+
+it('renders worker waits and unseen completions with distinct colours and copy', () => {
+  vi.useFakeTimers()
+  const { container } = draw({ kanban_active: 2, kanban_parked: 2, kanban_stalled: 2, kanban_unseen: 1 })
+  expect(container.querySelector('[data-card-colour="green"]')?.className).toContain('bg-emerald-500')
+  expect(container.querySelector('[data-card-colour="violet"]')?.className).toContain('bg-violet-500')
+  const squares = screen.getByTestId('session-row-card-squares')
+  expect(squares.getAttribute('aria-label')).toBe('Waiting for a worker 2 · Done, not yet seen 1')
+  act(() => {
+    fireEvent.pointerMove(squares, { pointerType: 'mouse' })
+    vi.advanceTimersByTime(700)
+  })
+  expect(screen.getByRole('tooltip').textContent).toBe(squares.getAttribute('aria-label'))
 })
 
 it('renders nothing without card fields or unknown execution', () => {
