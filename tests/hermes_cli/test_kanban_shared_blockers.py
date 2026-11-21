@@ -674,11 +674,41 @@ def test_assertion_scope_union(kanban_home, providers, expected):
         assert ksb.blocker_states(conn)[WALL].blocker_provider == expected
 
 
-def test_dispatch_codex_runs_behind_anthropic_wall_and_opus_probes_after_interval(kanban_home, spawns):
-    """End to end on dispatch_once, no human unblock: Codex cards behind an Anthropic-scoped wall
-    spawn, the Opus card is held within the probe interval, and neither a Codex completion nor a
-    fresh Codex run delays or replaces the real Opus probe once the interval has passed."""
-    _write_home_cfg(kanban_home, profile_model="gpt-5", profile_provider="openai-codex")
+def test_dispatch_codex_runs_behind_anthropic_wall_and_opus_probes_after_interval(kanban_home, spawns, monkeypatch):
+    """Dispatch consumes real allocator decisions, never profile-model guesses or stored pins.
+
+    This composes the allocator and dispatcher at the tier-resolution seam; credential/provider
+    calls remain outside this isolated test. Unknown allocation is held conservatively first.
+    """
+    from agent.model_routing import resolve_model_route
+    from agent.model_routing_state import RoutingState
+    from hermes_cli import kanban_model_tier as tier
+
+    _write_home_cfg(kanban_home, profile_model="class:standard")
+    state_path = kanban_home / "provider-proof.sqlite3"
+    allocated = {}
+    # Exercise real subscription/capability filtering and durable weighted allocation. Keep both
+    # providers eligible: discover the resulting routes rather than request a concrete model.
+    for index in range(6):
+        sid = f"provider-proof-{index}"
+        route = resolve_model_route("class:standard", "auto", config=_ENABLED_ROUTES,
+                                    session_id=sid, requirements={"tools": True, "streaming": True},
+                                    state_path=state_path)
+        metadata = RoutingState(state_path).peek(sid, "standard")
+        assert metadata is not None
+        assert metadata == route["metadata"] and not metadata.get("exact_pin")
+        allocated.setdefault(route["provider"], []).append(route)
+    assert len(allocated["openai-codex"]) >= 2 and allocated["anthropic"]
+    decisions = {}
+    original_resolve = tier.resolve_dispatch_tier
+
+    def allocated_tier(conn, task, *, lane, cfg=None):
+        base = original_resolve(conn, task, lane=lane, cfg=cfg)
+        if task.id not in decisions:
+            return base
+        route = decisions[task.id]
+        return route["model"], route["provider"], "class+allocated"
+
     seen: dict[str, tuple] = {}
 
     def spawn(task, workspace, board=None):
@@ -692,7 +722,18 @@ def test_dispatch_codex_runs_behind_anthropic_wall_and_opus_probes_after_interva
             assert kb.claim_task(conn, tid)
             _park_behind(conn, tid)
 
-        # Within the interval: both Codex cards spawn, Opus is held.
+        # Before allocation establishes a concrete provider, all three routes are unknown:
+        # no claims, no new runs and no provider launch are permitted within the interval.
+        runs_before = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+        unknown = kbd.dispatch_once(conn, spawn_fn=spawn)
+        assert _spawned_ids(unknown) == [] and seen == {}
+        assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == runs_before
+        assert {tid for tid, why in unknown.respawn_guarded if why == ksb.GUARD_REASON} == {opus, codex1, codex2}
+        decisions.update({opus: allocated["anthropic"][0], codex1: allocated["openai-codex"][0],
+                          codex2: allocated["openai-codex"][1]})
+        monkeypatch.setattr(tier, "resolve_dispatch_tier", allocated_tier)
+
+        # Within the interval: both dynamically allocated Codex cards spawn, Anthropic is held.
         res = kbd.dispatch_once(conn, spawn_fn=spawn)
         assert sorted(_spawned_ids(res)) == sorted([codex1, codex2])
         assert (opus, ksb.GUARD_REASON) in res.respawn_guarded
@@ -724,6 +765,13 @@ def test_dispatch_codex_runs_behind_anthropic_wall_and_opus_probes_after_interva
         st = ksb.blocker_states(conn)[WALL]
         assert st.is_open and opus in st.probe_starts
         assert not any(e.kind == "unblocked" for e in kb.list_events(conn, opus))
+        # A live matching-provider probe owns custody: no duplicate launch on another tick.
+        assert _spawned_ids(kbd.dispatch_once(conn, spawn_fn=spawn)) == []
+        for tid in (opus, codex1, codex2):
+            stored = kb.get_task(conn, tid)
+            assert stored is not None
+            assert stored.model_override is None and stored.provider_override is None
+            assert not stored.model_pin_mandatory
 
 
 def continue_task_ok(conn, tid):

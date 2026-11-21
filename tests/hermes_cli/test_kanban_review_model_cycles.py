@@ -254,8 +254,13 @@ def test_structural_exhaustion_blocks_once_without_spawn_retry_loop(board, monke
         task = helpers.task(conn, helpers.OPUS)
         kb.claim_task(conn, task.id)
         kb.request_review(conn, task.id)
+        runs_before = kb.list_runs(conn, task.id)
+        claims_before = len([e for e in kb.list_events(conn, task.id) if e.kind == 'claimed'])
         result = dispatch.dispatch_once(conn, spawn_fn=lambda *args: spawned.append(args))
         stored = kb.get_task(conn, task.id)
+        assert kb.list_runs(conn, task.id) == runs_before
+        assert len([e for e in kb.list_events(conn, task.id) if e.kind == 'claimed']) == claims_before
+        assert stored.consecutive_failures == 0
         # Canonical non-human infrastructure block is sticky triage, never a David ask.
         assert stored.status == "triage"
         assert result.auto_blocked == [task.id]
@@ -265,7 +270,8 @@ def test_structural_exhaustion_blocks_once_without_spawn_retry_loop(board, monke
         gave_up = [e.payload for e in events if e.kind == "gave_up"]
         assert len(gave_up) == 1
         assert gave_up[0]["infrastructure"] is True
-        assert gave_up[0]["admission_refusal"] == "review_models_exhausted"
+        assert gave_up[0]["admission_refusal"] == "review_model_unavailable"
+        assert gave_up[0]["preclaim"] is True
         assert gave_up[0]["sticky"] is True
         runs = len(kb.list_runs(conn, task.id))
         for _ in range(4):

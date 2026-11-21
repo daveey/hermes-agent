@@ -89,7 +89,10 @@ def test_review_wait_boundaries(board, monkeypatch, case):
         tid = kb.create_task(conn, title="Build", assignee="a")
         result = dispatch.DispatchResult()
         held = admission.hold(conn, tid, result, lane="review", dry_run=case == "dry_run")
-        assert held == (case in ("dry_run", "race", "earliest"))
+        assert held == (case in ("dry_run", "race", "earliest", "structural", "registry"))
+        if case in ("structural", "registry"):
+            assert result.respawn_guarded == [(tid, "review_model_unavailable")]
+            assert kb.list_runs(conn, tid) == []
         events = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind=?",
                               (tid, admission.EVENT)).fetchall()
         assert bool(events) == (case in ("race", "earliest"))
@@ -125,6 +128,8 @@ def test_unknown_or_elapsed_pacing_reset_is_not_a_deferral_deadline(
 @pytest.mark.parametrize("failure", [ValueError("invalid review metadata"), RuntimeError("policy read failed")])
 def test_preclaim_resolver_error_does_not_abort_dispatch(
         board, monkeypatch, all_assignees_spawnable, failure):
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    board.joinpath('config.yaml').write_text(_managed_yaml())
     monkeypatch.setattr(tier, "load_tier_config", lambda: {"enabled": True})
     monkeypatch.setattr(review, "resolve_review_model", lambda *_a: (_ for _ in ()).throw(failure))
     with kbc.connect() as conn:
@@ -135,8 +140,11 @@ def test_preclaim_resolver_error_does_not_abort_dispatch(
         seen = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, _ws: seen.append(task.id))
         assert sibling in seen
+        # Unexpected non-typed resolver faults retain the existing per-card failure boundary;
+        # the separate typed unknown-author controls require literal zero claims.
         assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='claimed'",
                             (tid,)).fetchone()[0] == 1
+        assert tid not in seen
         assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='review_route_deferred'",
                             (tid,)).fetchone()[0] == 0
 

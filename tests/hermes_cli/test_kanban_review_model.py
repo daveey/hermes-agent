@@ -119,14 +119,21 @@ def test_review_admission_failure_never_spawns_or_spends_retry(board, monkeypatc
             conn.execute("UPDATE task_runs SET metadata=? WHERE task_id=?", (
                 json.dumps({"review_model": "class:deep"}), t.id))
             conn.commit()
+        runs_before = kb.list_runs(conn, t.id)
+        claims_before = len([e for e in kb.list_events(conn, t.id) if e.kind == 'claimed'])
         dispatch.dispatch_once(conn, dry_run=False, spawn_fn=lambda *args: seen.append(args))
         stored = kb.get_task(conn, t.id)
         assert seen == []
         assert stored.status == ("triage" if failure in ("no_route", "bad_metadata") else "review")
-        assert stored.consecutive_failures == (1 if failure in ("no_route", "bad_metadata") else 0)
+        assert stored.consecutive_failures == 0
         assert stored.claim_lock is None
-        event_kind = "gave_up" if failure in ("no_route", "bad_metadata") else "spawn_failed"
-        events = [e.payload for e in kb.list_events(conn, t.id) if e.kind == event_kind]
+        if failure != 'receipt_write':
+            assert kb.list_runs(conn, t.id) == runs_before
+            assert len([e for e in kb.list_events(conn, t.id) if e.kind == 'claimed']) == claims_before
+            events = [e.payload for e in kb.list_events(conn, t.id) if e.kind == 'review_admission_refused']
+            assert events[-1]['preclaim'] is True
+        else:
+            events = [e.payload for e in kb.list_events(conn, t.id) if e.kind == 'spawn_failed']
         assert events[-1]["infrastructure"] is True
 
 
