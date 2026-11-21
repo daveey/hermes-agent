@@ -139,3 +139,44 @@ def test_unknown_registry_flags_nothing(hub):
 def test_a_worker_may_reroute_the_stranded_card(hub):
     tid = _ready_macos_card(hub)
     assert kcr.stranded_refusal(hub.conn, tid) is None
+
+
+def _alarms(conn):
+    return [r[0] for r in conn.execute("SELECT id FROM tasks WHERE idempotency_key LIKE 'pickup-stall:hub:"
+                                       "unclaimable-ready:%'")]
+
+
+def test_the_dispatcher_tick_runs_the_sweep(hub):
+    from hermes_cli import kanban_parent_unclaimed as pu
+    tid = _ready_macos_card(hub)
+    pu.safe_sweep(hub.conn)
+    assert len(_events(hub.conn, tid, "chat_wait_unclaimed")) == 1 and len(_alarms(hub.conn)) == 1
+
+
+def test_queue_note_names_the_card_and_each_refusal_not_a_wait_for_the_mac(hub):
+    from hermes_cli import kanban_queue_position as kqp
+    tid = _ready_macos_card(hub)
+    place = kqp.placement(hub.conn, tid)
+    assert place and place["lane"] == "unplaceable" and place["task_id"] == tid
+    note = kqp._describe_lane(place)
+    assert f"NO MACHINE CAN CLAIM {tid}" in note and "<id>" not in note
+    assert "macbook: pinned_only" in note and "cross-gateway create" in note and "waiting for macbook" not in note
+
+
+def test_a_closed_alarm_is_not_reopened_on_the_next_sweep(hub):
+    tid = _ready_macos_card(hub)
+    ur.sweep(hub.conn)
+    (alarm,) = _alarms(hub.conn)
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (alarm,))
+    ur.sweep(hub.conn)
+    assert _alarms(hub.conn) == [alarm]  # no immediate re-fire
+    ur.sweep(hub.conn, now=__import__("time").time() + ur.REFIRE_S + 60)
+    assert len(_alarms(hub.conn)) == 2 and tid  # after the interval the stranded card is raised again
+
+
+def test_only_the_operator_lane_files_the_alarm(hub, monkeypatch):
+    tid = _ready_macos_card(hub)
+    from hermes_cli import kanban_pickup_stall as kps
+    monkeypatch.setattr(kps, "OPERATOR_LANE", "not-this-gateway")
+    assert ur.sweep(hub.conn) == [tid] and _alarms(hub.conn) == []

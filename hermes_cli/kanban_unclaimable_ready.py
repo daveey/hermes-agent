@@ -22,9 +22,10 @@ from typing import Any, Optional
 _log = logging.getLogger(__name__)
 
 KEY = "unclaimable-ready:"
+REFIRE_S = 6 * 3600  # a closed alarm is not reopened sooner than this while its cards stay stranded
 HOWTO = (
     "Each listed card is ready but no enrolled machine can ever claim it, so waiting will not start it. For each: "
-    "if its work needs a Mac, create a new card on that Mac's own gateway (cross-gateway create, "
+    "if its work needs the named machine, create a new card on that machine's own gateway (cross-gateway create, "
     "placement='<machine>') and archive the stranded one with a comment naming the replacement; otherwise "
     "`kanban_move` it to labels an active pool worker carries. Do not change Mac policy (pinned_only) to make it "
     "claimable. Comment on this alarm with what you did for each card.")
@@ -68,6 +69,11 @@ def _alarm(conn, cards: list[dict[str, Any]], own: str, now_ms: int) -> Optional
         seen = {r[0] for r in conn.execute("SELECT body FROM task_comments WHERE task_id = ?", (existing,))}
         if all(c["id"] in body or any(c["id"] in s for s in seen if s) for c in cards):
             return existing  # every card is already on the open alarm: one alarm, no repeat comments
+    since = int(now_ms / 1000) - REFIRE_S
+    if not existing and conn.execute(
+            "SELECT 1 FROM tasks WHERE created_by = ? AND idempotency_key >= ? AND idempotency_key < ? "
+            "AND created_at > ? LIMIT 1", (kps.DETECTOR, key, key + "\U0010ffff", since)).fetchone():
+        return None  # an alarm for this class closed recently: no immediate re-fire loop
     listed = "\n".join(f"- {c['id']} ({c['title']}): " + kc.stranded_text(c["id"], c["runs_on"], c["why"])
                        for c in cards)
     body = (f"{len(cards)} ready card(s) on {own} that no enrolled machine can ever claim (structural, not a wait):"

@@ -142,7 +142,7 @@ def placement(conn: sqlite3.Connection, task_id: str, *, backlog: bool = True) -
     every = set().union(*carried.values())
     refused = kc.refusals(labels, machines, str(me))
     return {"lane": "unplaceable", "runs_on": labels, "missing": [lb for lb in labels if lb not in every],
-            "machines": sorted(machines), **({"refused": refused} if refused else {})}
+            "machines": sorted(machines), "task_id": task_id, **({"refused": refused} if refused else {})}
 
 
 def recorded_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]:

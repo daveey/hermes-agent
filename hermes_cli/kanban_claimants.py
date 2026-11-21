@@ -63,6 +63,6 @@ def stranded_text(task_id: str, labels: list[str], why: Mapping[str, str]) -> st
     ``why`` is :func:`refusals` (empty: no machine carries the labels at all)."""
     named = ", ".join(f"{n}: {r}" for n, r in sorted(why.items())) or "no machine carries these labels"
     return (f"NO MACHINE CAN CLAIM {task_id} (runs_on {labels}): {named}. Waiting will not start it. Remedy: "
-            + (f"re-create it on the Mac's own gateway (cross-gateway create, placement='{sorted(why)[0]}'), "
+            + (f"re-create it on {sorted(why)[0]}'s own gateway (cross-gateway create, placement='{sorted(why)[0]}'), "
                if why else "re-place it onto labels a machine carries (`kanban_move`), ")
             + "or drop the label.")
