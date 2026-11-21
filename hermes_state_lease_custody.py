@@ -17,6 +17,7 @@ import hashlib
 import logging
 import os
 import sqlite3
+import sys
 import threading
 from typing import NoReturn
 
@@ -35,6 +36,27 @@ def _txn() -> str:
 
 
 
+def _caller() -> str:
+    """Bounded code locations only; never inspect locals, arguments or source text."""
+    frame = sys._getframe(1)
+    locations = []
+    try:
+        for _ in range(12):
+            if frame is None:
+                break
+            code = frame.f_code
+            # Strip directory names and restrict log delimiters, including dynamic code names.
+            filename = os.path.basename(code.co_filename)
+            if filename != "hermes_state_lease_custody.py":
+                def clean(s):
+                    return "".join(c if c.isascii() and (c.isalnum() or c in "._-") else "_" for c in s[:80])
+                locations.append(f"{clean(filename)}:{clean(code.co_name)}:{frame.f_lineno}")
+            frame = frame.f_back
+        return ">".join(locations) or "-"
+    finally:
+        del frame
+
+
 def observe(op: str, key, holder, *, store=None, changed=None, row_holder=None, session_id=None, why=None) -> None:
     """One custody event from inside a transaction. ``changed`` is the statement's SQL rowcount."""
     try:
@@ -45,11 +67,11 @@ def observe(op: str, key, holder, *, store=None, changed=None, row_holder=None, 
         _LOG.log(
             level,
             "turn_lease_custody phase=txn op=%s txn=%s store=%s key=%s session=%s root_is_session=%s "
-            "holder=%s row_holder=%s changed=%s why=%s sqlite=%s",
+            "holder=%s row_holder=%s changed=%s why=%s sqlite=%s caller=%s",
             op, _txn(), tag(store), tag(key), tag(session_id),
             "-" if session_id is None else int(session_id == key),
             tag(holder), tag(row_holder), changed if type(changed) is int else "-", why or "-",
-            sqlite3.sqlite_version,
+            sqlite3.sqlite_version, _caller(),
         )
     except Exception:  # health: allow BLE001 -- optional diagnostics cannot change fencing
         return

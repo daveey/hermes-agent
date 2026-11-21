@@ -919,10 +919,13 @@ class SessionCompressionMixin:
         expires_at = time.time() + max(0.1, float(ttl_seconds))
         def _do(conn):
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
-            return conn.execute(
+            changed = conn.execute(
                 "UPDATE session_turn_leases SET expires_at = ? "
                 "WHERE conversation_id = ? AND holder = ?", (expires_at, conversation_id, holder),
-            ).rowcount > 0
+            ).rowcount
+            _custody.observe("refresh", conversation_id, holder, store=getattr(self, "db_path", None),
+                             session_id=session_id, changed=changed)
+            return changed > 0
         return bool(self._execute_write(_do, patience_s=patience_s))
 
     def release_session_turn_lease(
