@@ -291,8 +291,15 @@ def probe_lock(path: Path):
 
 
 def content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:
-    with probe_lock(path):
+    lock = probe_lock(path)
+    if not lock.acquire(blocking=False):
+        # Speculative keys must never queue behind another probe. Unknown keys
+        # are deliberately unequal, so they cannot certify a cached answer.
+        return ("stat", file_stat(path), object())
+    try:
         return _content_key(path, tables, open_ro)
+    finally:
+        lock.release()
 
 
 def _content_key(path: Path, tables: Iterable[str], open_ro: Callable) -> tuple:

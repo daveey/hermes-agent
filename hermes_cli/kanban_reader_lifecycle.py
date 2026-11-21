@@ -1,9 +1,21 @@
 """Prepare cached board readers without holding a global lock across SQLite I/O."""
+import contextlib
 import os
 import sqlite3
 import threading
 
 from hermes_cli.kanban_generation import DeletedWalGenerationError, lifecycle_access, retry_open
+
+
+@contextlib.contextmanager
+def borrow_lock(lock, budget):
+    """Python coordination is part of the reader budget, not an unbounded prelude."""
+    if not lock.acquire(timeout=max(0.0, budget)):
+        raise sqlite3.OperationalError("database is locked: cached reader is borrowed")
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def cached_entry(path, busy_budget=0.5):

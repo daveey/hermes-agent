@@ -5,6 +5,8 @@ make each key read wait out the reader's busy budget before the real read waits 
 """
 
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -93,3 +95,42 @@ def test_cached_reader_budget_restored_after_non_sqlite_error(busy_board):
     with activity.cached_ro(board) as again:
         assert again is conn  # still cached: only sqlite errors evict
         assert again.execute("PRAGMA busy_timeout").fetchone()[0] == 500
+
+
+def _during_hold(lock, call):
+    """Release only after observing completion; old unbounded waits fail, not hang."""
+    finished = threading.Event()
+
+    def run():
+        try:
+            return call()
+        finally:
+            finished.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with lock:
+            future = pool.submit(run)
+            returned_while_held = finished.wait(1)
+        result = future.result(timeout=5)
+    assert returned_while_held, "advisory read waited for another reader's Python lock"
+    return result
+
+
+def test_content_key_does_not_queue_behind_probe_lock(busy_board):
+    board, _ = busy_board
+    first = _during_hold(activity._revision.probe_lock(board), lambda: activity._board_content_key(board))
+    second = _during_hold(activity._revision.probe_lock(board), lambda: activity._board_content_key(board))
+    assert first[0] == second[0] == "stat"
+    assert first != second  # contended probes cannot certify unchanged content
+    assert activity._board_content_key(board)  # retry after contention still works
+
+
+def test_zero_budget_content_key_does_not_queue_behind_borrowed_reader(busy_board):
+    board, _ = busy_board
+    with activity.cached_ro(board):
+        pass
+    lock = activity._RO_CACHE[str(board)][2]
+    key = _during_hold(lock, lambda: activity._board_content_key(board))
+    assert key[0] == "stat"
+    with activity.cached_ro(board) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM marker").fetchone()[0] == 0

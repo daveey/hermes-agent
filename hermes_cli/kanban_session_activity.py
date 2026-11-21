@@ -463,11 +463,12 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
     replaced (new inode: a rebuilt replica), after any sqlite error, or when its ``-shm`` generation is gone (the
     connection is stranded on a deleted WAL index and would fail with ``disk I/O error`` or read stale rows until
     restart; kanban-759104eb56). Raises ``sqlite3.OperationalError`` when the file is missing, like ``_open_ro``."""
-    from hermes_cli.kanban_reader_lifecycle import cached_entry
+    from hermes_cli.kanban_reader_lifecycle import borrow_lock, cached_entry
 
+    started = time.monotonic()
     key, entry = cached_entry(path, busy_budget)
     conn, _ident, lock, _shm = entry
-    with lock:  # bodies read every result they start: an unfinished cursor would pin a WAL snapshot
+    with borrow_lock(lock, busy_budget - (time.monotonic() - started)):
         with _RO_CACHE_LOCK:
             if _RO_CACHE.get(key) is not entry:
                 from hermes_cli.kanban_generation import DeletedWalGenerationError
