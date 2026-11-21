@@ -288,6 +288,11 @@ def test_host_notice_dedups_across_cards_and_reappears_next_window(home, monkeyp
         assert all(kb.get_task(conn, t).status == "ready" for t in cards)
         (notice,) = _notices(conn)
         assert cards[0] in notice["body"] or cards[1] in notice["body"]
+        from hermes_cli.kanban_model_neutral import validate_text
+        validate_text(notice["body"])
+        assert "anthropic/claude-opus-5-5" in notice["body"]  # observed route, not a new restriction
+        row = kb.get_task(conn, notice["id"])
+        assert (row.model_override, row.provider_override, row.model_pin_mandatory) == (None, None, None)
         assert _notice_comments(conn, notice["id"]) == []
 
         tid, frame = _admitted_run(conn, submitter=75003)  # same window: still one notice, no comment

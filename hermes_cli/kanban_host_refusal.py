@@ -162,8 +162,8 @@ def _cause(proof: dict, task_id: Optional[str] = None) -> str:
         claim = f"card {task_id}'s claim" if task_id else "the claim"
         return (f"the profile owner kept refusing {claim} with capsule_observation_missing (no live run-bound "
                 "capsule transport, or a profile policy it could not read made it require one)")
-    pin = "/".join(p for p in (proof.get("provider"), proof.get("model")) if p) or "its pin"
-    return f"the host's model-routing registry served no subscription pin when {whose} worker started ({pin})"
+    route = "/".join(p for p in (proof.get("provider"), proof.get("model")) if p) or "the selected route"
+    return f"the host's model-routing registry served no subscription route when {whose} worker started ({route})"
 
 
 def _host() -> str:
