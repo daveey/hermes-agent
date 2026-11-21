@@ -2383,6 +2383,8 @@
   "shell.statusbar.forceUpdate.confirmBody": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "shell.statusbar.forceUpdate.confirmLabel": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "shell.statusbar.forceUpdate.cancelLabel": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.forceUpdate.syncedTitle": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
+  "shell.statusbar.forceUpdate.syncedApplying": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "shell.statusbar.forceUpdate.requested": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "shell.statusbar.forceUpdate.failed": ["ar","de","es","fr","ja","ru","zh","zh-hant"],
   "assistant.thread.errorCodes.core_update_forced_stop.body": ["ar","de","es","fr","ja","ru","zh","zh-hant"],

@@ -4709,6 +4709,8 @@
     "shell.statusbar.forceUpdate.failed",
     "shell.statusbar.forceUpdate.menuItem",
     "shell.statusbar.forceUpdate.requested",
+    "shell.statusbar.forceUpdate.syncedApplying",
+    "shell.statusbar.forceUpdate.syncedTitle",
     "shell.statusbar.gateway",
     "shell.statusbar.gatewayChecking",
     "shell.statusbar.gatewayConnecting",
