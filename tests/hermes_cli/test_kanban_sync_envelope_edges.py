@@ -66,7 +66,7 @@ def test_synthetic_parent_rejection_does_not_accumulate_across_rounds(board, mon
         assert rows[0]["attempts"] == 8
     else:
         assert not rows
-        assert len({next(op["client_op_id"] for op in wire if op["table"] == "tasks") for wire in batches}) == 1
+        assert len({next(op["client_op_id"] for op in wire if op["table"] == "tasks") for wire in batches}) == 8
     assert len({len(wire) for wire in batches}) == 1
     assert not conn.execute("SELECT 1 FROM task_events WHERE kind='sync_rejected'").fetchone()
 

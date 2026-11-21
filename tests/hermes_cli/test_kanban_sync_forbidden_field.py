@@ -92,7 +92,7 @@ def test_synthetic_parent_non_schema_rejections_use_bounded_outbox_handling(live
     rows = live.execute("SELECT * FROM kanban_sync_outbox WHERE table_name='tasks'").fetchall()
     if reason == "live_claim":
         assert not rows  # permanent synthetic refusal must not manufacture a rejected row
-        assert live.execute("SELECT 1 FROM kanban_sync_parent_envelopes").fetchone()
+        assert not live.execute("SELECT 1 FROM kanban_sync_parent_envelopes").fetchone()
     else:
         [parent] = rows
         assert parent["attempts"] == 1
@@ -100,7 +100,7 @@ def test_synthetic_parent_non_schema_rejections_use_bounded_outbox_handling(live
 
 
 @pytest.mark.parametrize("state", ["pending", "rejected"])
-def test_ordinary_parent_outside_batch_does_not_suppress_prepend(live, svc, state):
+def test_pending_parent_owns_backoff_but_rejected_parent_can_be_synthesized(live, svc, state):
     tid = kb.create_task(live, title="parent outside batch", assignee="worker")
     live.execute("UPDATE kanban_sync_outbox SET state=?,retry_after=9999999999 WHERE table_name='tasks'", (state,))
     live.commit()
@@ -110,6 +110,14 @@ def test_ordinary_parent_outside_batch_does_not_suppress_prepend(live, svc, stat
         calls.extend(copy.deepcopy(batch))
         return hub.ops(board, batch)
     client.push(live, SimpleNamespace(ops=ops), "default", "macbook", primary=True, max_batches=1)
+    if state == "pending":
+        assert not any(op["table"] == "tasks" for op in calls)
+        assert len(live.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name='tasks'").fetchall()) == 1
+        assert tid not in svc.board("default")["rows"].get("tasks", {})
+        live.execute("UPDATE kanban_sync_outbox SET retry_after=0")
+        live.commit()
+        calls.clear()
+        client.push(live, SimpleNamespace(ops=ops), "default", "macbook", primary=True, max_batches=1)
     assert calls[0]["table"] == "tasks" and calls[0]["uid"] == tid
     assert tid in svc.board("default")["rows"]["tasks"]
 

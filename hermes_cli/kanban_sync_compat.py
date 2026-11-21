@@ -23,13 +23,14 @@ def rejected_parent(conn: sqlite3.Connection, parents: list[tuple[dict, str]], r
         if result.get("status") != "rejected":
             return None
         from hermes_cli.kanban_sync_client import transient_rejection
+        # Every explicit rejection is definitive, unlike a lost answer. Its cached
+        # verdict must not poison the next synthesis after the refusal cause lifts.
+        retire_parent(conn, tid)
         if result.get("reason") != "forbidden_field" and not transient_rejection(result):
-            # Permanent refusals keep their frozen identity, as do uncertain sends.
-            # Materializing one here would add a rejected row (and live_claim event)
-            # each time pending children ask for their still-unacknowledged parent.
+            # Do not materialize permanent refusals as rejected rows/diagnostic
+            # children: that grows one new row per pending-child round.
             return None
         # Only recoverable/schema refusals enter the existing bounded remap path.
-        retire_parent(conn, tid)
         conn.execute(
             "INSERT INTO kanban_sync_outbox (op_id, table_name, row_uid, op, fields, hlc, created_at) "
             "VALUES (?, 'tasks', ?, 'upsert', ?, ?, ?)",

@@ -627,7 +627,10 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
     if not any(r["table_name"] != "tasks" for r in rows):
         return []
     in_batch = {r["row_uid"] for r in rows if r["table_name"] == "tasks"}
-    # Only omission custody suppresses resynthesis; ordinary parent backoff retains its old path.
+    # A materialized parent owns its retry even during backoff. New children must
+    # not synthesize a competing full-row upsert while that retry is pending.
+    in_batch.update(r[0] for r in conn.execute(
+        "SELECT row_uid FROM kanban_sync_outbox WHERE table_name='tasks' AND state='pending' AND op!='release'"))
     in_batch.update(r[0] for r in conn.execute(
         "SELECT row_uid FROM kanban_sync_omissions WHERE table_name='tasks' AND state!='delivered'"))
     from hermes_cli.kanban_sync_reserved_key import replacement_children
