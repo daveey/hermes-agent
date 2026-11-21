@@ -28,6 +28,7 @@ import sqlite3
 from typing import Optional
 
 from hermes_cli import kanban_recovery_history as history
+from hermes_cli.kanban_model_neutral import forwarded_text
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,8 @@ def _key(target: str, park_id) -> str:
 
 def _body(target: str, title: str, park_id: int) -> str:
     return (
-        f"Card {target} ({title!r}) used up its consecutive-continuation budget and the kernel parked it "
+        f"Source title (historical evidence):\n{forwarded_text(title)}\n\n"
+        f"Card {target} used up its consecutive-continuation budget and the kernel parked it "
         f"(continuation_exhausted, park event {park_id}). It has no run, and no worker can unblock it. "
         "This card was created by the kernel for that park, so it is the one card allowed to ask for a "
         "supervisor resume of it.\n\n"
@@ -60,7 +62,8 @@ def _body(target: str, title: str, park_id: int) -> str:
 
 def _goal_body(target: str, title: str, park_id: int) -> str:
     return (
-        f"The kernel judged {target} ({title!r}) goal_unachievable (park event {park_id}). "
+        f"Source title (historical evidence):\n{forwarded_text(title)}\n\n"
+        f"The kernel judged {target} goal_unachievable (park event {park_id}). "
         "Investigate its judge receipt, runs and evidence with kanban_show. Diagnose and remedy "
         "the missing prerequisite using existing tools and authorized owners. Preserve the original "
         "body, acceptance criteria, dependency graph, class/tier and capability requirements, authenticated "
