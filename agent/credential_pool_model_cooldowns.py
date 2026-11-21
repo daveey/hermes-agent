@@ -8,11 +8,14 @@ auth, billing and payment failures keep benching the whole credential with.
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Dict, Iterable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agent.credential_pool import PooledCredential
+
+logger = logging.getLogger(__name__)
 
 # A Codex ChatGPT-account model entitlement 400 is a plan property, not a window: bench the
 # (credential, model) pair until an explicit ``hermes auth reset`` clears model_cooldowns (#71970).
@@ -20,6 +23,31 @@ MODEL_ENTITLEMENT_BENCH_SECONDS = 365 * 24 * 60 * 60
 # A usage-window plan limit: this model is refused until the allowance resets; every other model
 # (a Free or non-Large one) stays usable on the same credential.
 FAILURE_REASON_USAGE_WINDOW = "usage_window"
+
+
+# Anthropic 429 ``details.error_code`` when a model's included subscription allowance is spent (Fable).
+# The body carries no reset, and the allowance does not come back with the 5-hour window, so the model
+# is benched until the account's weekly window reopens. [daveey] MacBook 2026-11-20: a one-hour default
+# bench made a Fable-pinned chat report "out until 17:19" and retry an account with no Fable left.
+CREDITS_REQUIRED = "credits_required"
+
+
+def _weekly_reset(provider: str, entry: PooledCredential) -> Optional[float]:
+    """Epoch of *entry*'s account-wide weekly window reset from the in-process usage cache, or None.
+
+    A stale snapshot still counts: the weekly reset is a fixed point that only moves when the window
+    rolls over, and a reset already past loses to the error's own reset in the caller's ``max``.
+    Model-scoped windows (Opus/Sonnet week) are not the account's week and are skipped."""
+    try:
+        from agent.account_usage_cache import _identity_id_for, cached_account_usage
+        snapshot = cached_account_usage(provider, identity_id=_identity_id_for(provider, entry))
+    except Exception:  # an unreadable cache proves nothing: the error's own bench stands
+        logger.debug("weekly reset unavailable for %s", provider, exc_info=True)
+        return None
+    for window in (snapshot.windows if snapshot else ()):
+        if window.scope == "account" and "week" in str(window.label or "").lower() and window.reset_at:
+            return window.reset_at.timestamp()
+    return None
 
 
 def pool_failure_reason(reason: Any, error_context: Optional[dict[str, Any]], billing_unverified: bool) -> str:
@@ -122,6 +150,8 @@ class CredentialPoolModelCooldownMixin:
             until = _normalize_error_context(error_context).get("reset_at") or (
                 time.time() + _exhausted_ttl(429, sole_credential=self._is_sole_credential())
             )
+            if (error_context or {}).get("error_code") == CREDITS_REQUIRED and self.provider == "anthropic":
+                until = max(until, _weekly_reset(self.provider, entry) or 0.0)
         failed_key = entry.runtime_api_key
         for scoped in list(self._entries):
             if scoped.id != entry.id and not (failed_key and scoped.runtime_api_key == failed_key):
