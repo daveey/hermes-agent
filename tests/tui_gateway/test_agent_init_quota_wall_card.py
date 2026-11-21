@@ -240,11 +240,11 @@ def test_a_model_less_pin_takes_the_requested_model_or_is_named_by_provider_alon
     assert agent_init_failed_message(chain).startswith("⚠️ openai-codex is rate-limited until Fri 11-20 15:19 PT,")
 
 
-def test_a_fallback_that_repeats_a_route_is_listed_once_with_its_earlier_reset(monkeypatch, frozen_now):
+def test_a_fallback_that_repeats_a_route_is_listed_once_with_its_later_reset(monkeypatch, frozen_now):
+    """One route refused twice serves again only once both refusals clear."""
     from tui_gateway.user_messages import agent_init_failed_message
-    message = agent_init_failed_message(_real_chain(monkeypatch, _codex_429(), _fable(), _fable(RESET - 1800)))
-    assert message.count("anthropic/claude-fable-5-2") == 1
-    assert "(anthropic/claude-fable-5-2 until Fri 11-20 14:49 PT)" in message
+    message = agent_init_failed_message(_real_chain(monkeypatch, _codex_429(), _fable(RESET - 1800), _fable()))
+    assert message == CHAIN
 
 
 @pytest.mark.parametrize("pin_error, fallback", [
@@ -372,12 +372,35 @@ def test_a_pin_wait_given_only_in_its_text_is_read(monkeypatch, frozen_now):
     assert agent_init_failed_message(_real_chain(monkeypatch, pin, _fable())) == CHAIN
 
 
-def test_a_fallback_repeating_the_pin_with_an_earlier_reset_names_that_quota_wall(monkeypatch, frozen_now):
+@pytest.mark.parametrize("repeat_reset, opening", [
+    (RESET - 1800, "⚠️ openai-codex/gpt-6-luna is rate-limited until Fri 11-20 15:19 PT,"),  # the wait is later
+    (RESET + 1800, "⚠️ openai-codex/gpt-6-luna subscription quota is out until Fri 11-20 15:49 PT,"),  # the wall is
+], ids=["earlier-wall", "later-wall"])
+def test_a_fallback_repeating_the_pin_names_the_later_of_its_two_refusals(monkeypatch, frozen_now, repeat_reset,
+                                                                          opening):
     from tui_gateway.user_messages import agent_init_failed_message
-    repeat = ("openai-codex", "gpt-6-luna", SubscriptionQuotaUnavailable("openai-codex", "gpt-6-luna", RESET - 1800))
+    repeat = ("openai-codex", "gpt-6-luna", SubscriptionQuotaUnavailable("openai-codex", "gpt-6-luna", repeat_reset))
     message = agent_init_failed_message(_real_chain(monkeypatch, _codex_429(), _fable(), repeat))
-    assert message.startswith("⚠️ openai-codex/gpt-6-luna subscription quota is out until Fri 11-20 14:49 PT,")
+    assert message.startswith(opening)
     assert message.count("gpt-6-luna") == 1
+
+
+def test_a_typed_quota_pin_whose_reset_has_passed_keeps_the_generic_message(monkeypatch, frozen_now):
+    from hermes_cli.fallback_errors import ProviderFallbackError
+    from tui_gateway.user_messages import agent_init_failed_message
+    past = SubscriptionQuotaUnavailable("anthropic", "claude-fable-5-2", NOW - 60)
+    chain = ProviderFallbackError([("auto", "", past), ("openai-codex", "gpt-6-luna", SubscriptionQuotaUnavailable(
+        "openai-codex", "gpt-6-luna", LUNA))])
+    assert agent_init_failed_message(chain).startswith("Hermes could not start the assistant")
+
+
+def test_a_chain_folded_into_its_pin_still_sets_the_replay_clock(monkeypatch, frozen_now):
+    from hermes_cli.fallback_errors import ProviderFallbackError
+    failure = {}
+    chain = ProviderFallbackError([("auto", "", _wall()), ("anthropic", "claude-fable-5-2", _wall())])
+    server._record_failure_route(failure, chain, "", NOW)
+    assert failure["failure_resets_at"] == RESET
+    assert [w["model"] for w in failure["failure_route"]["walls"]] == ["claude-fable-5-2"]
 
 
 @pytest.mark.parametrize("case", ["past-fallback-reset", "nested-rate-limited-chain"])

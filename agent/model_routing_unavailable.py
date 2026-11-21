@@ -279,6 +279,8 @@ def _chain_pin(entry, pin_model, now):
         return None  # a chain nested in a chain: no raiser builds one, and its "pin" is not one route
     if (wall := quota_refusal_wall(failure)) is not None:
         reset, kind = wall[2], WALL_QUOTA
+        if reset <= now:
+            return None  # a wall that has already reset did not refuse this build on its own
     else:
         if not (isinstance(error, AuthError) and is_rate_limited_auth_error(error)):
             return None
@@ -307,8 +309,8 @@ def quota_refusal_walls(exc, pin_model=None, now=None):
     refusal with a finite reset (``quota_refusal_wall``). The pin is named as its chain entry gives it, with
     *pin_model* (the session's requested model) when the entry has none; with no model at all it is named by
     provider alone (model ""). Fallbacks are named as their refusal gives them; a repeat of the pin or of an
-    earlier fallback (provider compared case-insensitively) is folded into the first, keeping the earlier reset
-    and that reset's kind. A mixed or no-wait chain gives None and keeps its own error, and so does one whose
+    earlier fallback (provider compared case-insensitively) is folded into the first, keeping the later reset
+    and that reset's kind (the route serves again only once both refusals clear). A mixed or no-wait chain gives None and keeps its own error, and so does one whose
     fallback reset has already passed, or a chain nested in a chain (unlike ``is_quota_failure``, which looks
     inside one: no raiser nests them). *now* is the clock a rate-limit wait is added to (default: now)."""
     import time
@@ -332,8 +334,8 @@ def quota_refusal_walls(exc, pin_model=None, now=None):
         same = next((i for i, w in enumerate(walls) if (w[0].lower(), w[1]) == (provider.lower(), model)), None)
         if same is None:
             walls.append((provider, model, reset, WALL_QUOTA))
-        elif reset < walls[same][2]:
-            # The route's own quota refusal opens first: it is that wall the sentence names, not a rate limit.
+        elif reset > walls[same][2]:
+            # One route refused twice serves again only once both refusals clear: the later one names it.
             walls[same] = (*walls[same][:2], reset, WALL_QUOTA)
     return walls
 

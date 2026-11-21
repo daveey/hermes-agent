@@ -261,10 +261,12 @@ def _record_failure_route(failure: dict, error: BaseException, pin_model: str = 
         return
     if walls is None:
         return
-    from agent.model_routing_unavailable import WALL_QUOTA
-    (provider, model, _, kind), earliest = walls[0], min(w[2] for w in walls)
+    from agent.model_routing_unavailable import _terminal_refusal
+    from hermes_cli.fallback_errors import ProviderFallbackError
+    (provider, model, _, _), earliest = walls[0], min(w[2] for w in walls)
     failure["failure_route"] = {"provider": provider, "model": model, "resets_at": earliest}
-    if len(walls) > 1 or kind != WALL_QUOTA:  # a fallback chain (``quota_refusal_walls`` reads only chains so)
+    # A fallback chain, wrapped or not, even one whose routes all folded into the pin.
+    if isinstance(_terminal_refusal(error), ProviderFallbackError):
         failure["failure_route"]["walls"] = [
             {"provider": p, "model": m, "resets_at": r, "kind": k} for p, m, r, k in walls]
         failure.setdefault("failure_resets_at", earliest)
