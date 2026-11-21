@@ -33,6 +33,14 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    assert _assignee_config("alice") is None
+    profile = home / "profiles" / "alice"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text(_managed_yaml())
+    config = _assignee_config("alice")
+    assert config is not None and config["model_routing"]["enabled"]
     kb.init_db()
     return home
 

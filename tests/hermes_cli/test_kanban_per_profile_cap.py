@@ -19,10 +19,11 @@ import pytest
 def isolated_kanban_home_with_profiles(monkeypatch):
     """Spin up a fresh HERMES_HOME with kanban DB + alpha/beta profiles."""
     test_home = tempfile.mkdtemp(prefix="kanban_per_profile_cap_test_")
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
     for prof in ("alpha", "beta", "default"):
         os.makedirs(os.path.join(test_home, "profiles", prof), exist_ok=True)
         with open(os.path.join(test_home, "profiles", prof, "config.yaml"), "w") as fh:
-            fh.write("{}\n")  # identity marker: a bare dir is not a profile
+            fh.write(_managed_yaml())  # real class eligibility as well as profile identity
     monkeypatch.setenv("HERMES_HOME", test_home)
     # Same restore as isolated_kanban_home: a wipe that is not undone poisons
     # every later file in the process (they patch one module object, code runs another).
@@ -34,6 +35,10 @@ def isolated_kanban_home_with_profiles(monkeypatch):
         del sys.modules[name]
     try:
         from hermes_cli import kanban_db
+        from hermes_cli.kanban_model_assignment import _assignee_config
+        for prof in ("alpha", "beta"):
+            config = _assignee_config(prof)
+            assert config is not None and config["model_routing"]["enabled"]
         # conftest guard patches _system_memory_sample only on the module object
         # imported before the purge above; dispatch uses the reimported module,
         # which would read live host memory and flake under pressure.
