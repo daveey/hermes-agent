@@ -100,6 +100,13 @@ def _sample(path: Path) -> Optional[tuple[str, float]]:
     if not Path(path).exists():
         return None
     try:
+        # Only an empty structural answer is reusable. A positive answer still
+        # follows the original clock/backlog/sendability path below.
+        from hermes_cli.kanban_sync_client import _WATCH
+        empty = _WATCH.query(path, "SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' LIMIT 1",
+                             unchanged_ok=True)
+        if empty is not None and empty[1] is None:
+            return None
         with kbc.connect_closing(path) as conn:
             conn.row_factory = sqlite3.Row
             rows = [dict(r) for r in conn.execute(

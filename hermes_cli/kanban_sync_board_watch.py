@@ -40,7 +40,7 @@ class BoardWatch:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._conns: dict[str, tuple[tuple[int, int], sqlite3.Connection, int]] = {}
+        self._conns: dict[str, tuple[tuple[int, int, int, int], sqlite3.Connection, int]] = {}
         self._gen = 0
         self._answers: dict[str, tuple[int, str, Any]] = {}
 
@@ -51,8 +51,12 @@ class BoardWatch:
         except OSError:
             self._drop(key)
             return None
+        # A same-inode restore can retain SQLite's header counter while changing
+        # the contents. Reopen the pager, not just its answer memo, on main-file
+        # movement; ordinary WAL commits still use data_version below.
+        identity = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
         ent = self._conns.get(key)
-        if ent is not None and ent[0] == (st.st_dev, st.st_ino):
+        if ent is not None and ent[0] == identity:
             return ent[1], ent[2]
         self._drop(key)
         if len(self._conns) >= self.MAX:
@@ -60,7 +64,7 @@ class BoardWatch:
         conn = _kanban_lockguard.connect(f"{Path(key).as_uri()}?mode=ro", uri=True, timeout=1,
                                          check_same_thread=False)
         self._gen += 1
-        self._conns[key] = ((st.st_dev, st.st_ino), conn, self._gen)
+        self._conns[key] = (identity, conn, self._gen)
         return conn, self._gen
 
     def _drop(self, key: str) -> None:
