@@ -76,13 +76,17 @@ def _local(board, title, body="", status=None, session="other-chat"):
 
 def _tool(args):
     from tools import kanban_tools as kt
-    keep = ("title", "body", "assignee", "distinct_from", "distinct_reason", "idempotency_key")
+    keep = ("title", "body", "assignee", "distinct_from", "distinct_reason", "idempotency_key", "model", "provider")
     return json.loads(kt._handle_create({"requires": [], **{k: v for k, v in args.items() if k in keep}}))
 
 
-def _cli(argv, monkeypatch):
-    """The producer's exact argv, minus ``--skill`` pairs: the isolated test home has no skills installed, and the
-    skill gate would refuse before the overlap check this replays."""
+def _cli(argv, monkeypatch, *, neutral=True):
+    """Replay original non-routing input; the old selector pair is no longer admissible.
+
+    Keep the historical argv fixture intact, and explicitly migrate only its model/provider
+    fields to a class route. Skill pairs are omitted because this home has no skills.
+    ``neutral=False`` exercises the original pin's pre-write refusal separately.
+    """
     import argparse
     from hermes_cli import kanban as kc
     monkeypatch.setattr(kc, "_check_dispatcher_presence", lambda **kw: (True, ""))
@@ -94,6 +98,10 @@ def _cli(argv, monkeypatch):
             next(it)
             continue
         args.append(a)
+        if neutral and a in ('--model', '--provider'):
+            original = next(it)
+            assert original == SELFHEAL['args'][a[2:]]
+            args.append('class:deep' if a == '--model' else 'auto')
     return kc._cmd_create(root.parse_args(args))
 
 
@@ -153,6 +161,20 @@ def test_original_stage_b_duplicate_campaign_is_still_refused(home):
 
 # --- 2. self-heal recovery of a crashed card vs that card (CLI, hub; source on mini/bb) ---
 
+def test_original_selfheal_pin_is_rejected_without_mutating_home_or_replica(home, tmp_path, monkeypatch, capsys):
+    from hermes_cli.kanban_db_connect import connect_closing
+
+    _replica(tmp_path, [SELFHEAL['source']])
+    replica = (tmp_path / 'hub-state' / 'hub.db').read_bytes()
+    with connect_closing() as conn:
+        before = tuple(conn.iterdump())
+    assert _cli(SELFHEAL['argv'], monkeypatch, neutral=False) == 2
+    assert 'model-neutral' in capsys.readouterr().err
+    with connect_closing() as conn:
+        assert tuple(conn.iterdump()) == before
+    assert (tmp_path / 'hub-state' / 'hub.db').read_bytes() == replica
+
+
 def test_selfheal_recovery_card_is_not_refused_by_its_source_card(home, tmp_path, monkeypatch, capsys):
     _replica(tmp_path, [SELFHEAL["source"]])
     rc = _cli(SELFHEAL["argv"], monkeypatch)
@@ -164,7 +186,7 @@ def test_selfheal_recovery_card_is_not_refused_by_its_source_card(home, tmp_path
 
 def test_selfheal_recovery_card_is_not_refused_by_its_source_card_via_the_tool(home, tmp_path):
     _replica(tmp_path, [SELFHEAL["source"]])
-    out = _tool(SELFHEAL["args"])
+    out = _tool(dict(SELFHEAL["args"], model='class:deep', provider='auto'))
     assert out.get("ok") is True, out
 
 

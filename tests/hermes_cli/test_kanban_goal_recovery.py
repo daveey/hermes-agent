@@ -88,7 +88,7 @@ def test_goal_loop_blocked_callback_parks(board, monkeypatch, surface):
     assert rx.exhaustion_refusal(conn, tid) is None
 
 
-def test_goal_recovery_pins_and_no_triage_cycle_after_two_resumes(board, monkeypatch):
+def test_goal_recovery_neutral_child_preserves_source_and_no_cycle_after_two_resumes(board, monkeypatch):
     from hermes_cli.kanban_goal_recovery import park
     from hermes_cli import kanban_supervisor_requests as ksr
     conn, tid, task = board
@@ -103,8 +103,15 @@ def test_goal_recovery_pins_and_no_triage_cycle_after_two_resumes(board, monkeyp
             assert ts.sweep_stale_triage(conn, now=10**10) == []
             break
         rec = kb.get_task(conn, cards[0])
-        assert (rec.model_override, rec.provider_override) == ('gpt-5', 'openai-codex')
+        assert (rec.model_override, rec.provider_override, rec.model_pin_mandatory) == (None, None, None)
+        source = kb.get_task(conn, tid)
+        assert (source.model_override, source.provider_override) == ('gpt-5', 'openai-codex')
+        assert source.body == task.body
+        created = next(e for e in kb.list_events(conn, rec.id) if e.kind == 'created')
+        assert created.payload['creator_task_id'] == tid
         assert 'prerequisite' in rec.body and 'acceptance' in rec.body
+        assert 'mandatory model/provider pins' not in rec.body
+        assert 'class/tier and capability requirements' in rec.body
         assert rx.refusal(conn, rec.id, tid) is None
         assert kb.claim_task(conn, rec.id)
         monkeypatch.setenv('HERMES_KANBAN_TASK', rec.id)

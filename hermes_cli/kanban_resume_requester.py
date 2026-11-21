@@ -63,13 +63,14 @@ def _goal_body(target: str, title: str, park_id: int) -> str:
         f"The kernel judged {target} ({title!r}) goal_unachievable (park event {park_id}). "
         "Investigate its judge receipt, runs and evidence with kanban_show. Diagnose and remedy "
         "the missing prerequisite using existing tools and authorized owners. Preserve the original "
-        "body, acceptance criteria, dependency graph, mandatory model/provider pins and subscription "
-        "billing policy. Do not invent profiles or use paid credentials as a workaround.\n\n"
+        "body, acceptance criteria, dependency graph, class/tier and capability requirements, authenticated "
+        "author exclusions and subscription billing policy. Concrete model/provider restrictions are not "
+        "active routing requirements. Do not invent profiles or use paid credentials as a workaround.\n\n"
         "Only after proving the prerequisite repaired, file "
         f'kanban_supervisor_request(ops=[{{"op":"resume","task_id":"{target}"}}], '
         'reason="<repair evidence>"). The non-worker executor rechecks ownership, freshness, human '
         "gates and the two-resume lifetime bound. Read back its receipt and the target status. "
-        "Never use raw board mutations, edit model pins, weaken acceptance, or complete/archive "
+        "Never use raw board mutations, weaken acceptance, or complete/archive "
         "the original. If not repaired, leave it parked and record the concrete unresolved cause; "
         "do not resume speculatively or create another recovery loop. Complete this recovery card "
         "only with the investigation/remediation evidence and resume receipt (or why it remains parked)."
