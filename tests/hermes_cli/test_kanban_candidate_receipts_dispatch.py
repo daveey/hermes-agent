@@ -45,6 +45,9 @@ def test_score_tap_does_not_rerank(monkeypatch):
 
 
 def test_pool_nonpinned_prefilter_and_capacity(monkeypatch):
+    from hermes_cli import kanban_class_walls as walls
+    # This receipt seam deliberately has no replica; real admission is covered with two gateways.
+    monkeypatch.setattr(walls, 'pickup_refusal', lambda *a: None)
     from hermes_cli import kanban_db_dispatch as dispatch
     from hermes_cli import kanban_dispatch_priority as priority
     from hermes_cli import kanban_pickup_held as held

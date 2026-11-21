@@ -26,11 +26,20 @@ def unroutable_class(conn, task_id, *, lane):
         return None
     try:
         config = _assignee_config(task.assignee)
-    except ImportError:
-        return 'config_unavailable'  # missing profile machinery is unknown eligibility, not a tick-wide fault
+    except Exception as exc:  # health: allow BLE001 -- fail closed for this card, not the whole tick
+        import logging
+        logging.getLogger(__name__).warning('kanban class eligibility: config unavailable for %s (%s)',
+                                            task.assignee, type(exc).__name__)
+        return 'config_unavailable'
     if config is None:
         return 'config_unavailable'
     return class_unroutable_reason(model, config)
+
+
+def pickup_refusal(replica, card):
+    """Use local class eligibility on replica history before consuming pickup budget."""
+    why = unroutable_class(replica, card['id'], lane=card['status'])
+    return ('model_unroutable', f'model_unroutable:{why}') if why else None
 
 
 def class_wall_routes(task, model, *, now, extra_walls=None):

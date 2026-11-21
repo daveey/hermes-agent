@@ -641,6 +641,9 @@ def _evaluate(conn: sqlite3.Connection, replica: sqlite3.Connection, own: str, *
             reason = _review_walled(replica, card)
         if reason is None:
             reason = _paced(conn, replica, card)
+        if reason is None:
+            from hermes_cli.kanban_class_walls import pickup_refusal
+            reason = pickup_refusal(replica, card)
         hold = kph.board_hold(replica, card) if reason is None else None
         if hold is not None:
             if held is not None and free < kph.FREE_PER_TICK and not kph.recently_copied(card["id"], hold[1]):

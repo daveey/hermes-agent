@@ -12,6 +12,9 @@ def test_pickup_refusal_preserves_lane(monkeypatch, status, stage):
     from hermes_cli import kanban_replica_lag as lag
     from hermes_cli import kanban_db_dispatch as dispatch
     from hermes_cli import kanban_dispatch_priority as priority
+    from hermes_cli import kanban_class_walls as walls
+    # Receipt-only replay uses a Mock replica; real class admission has its own integration tests.
+    monkeypatch.setattr(walls, 'pickup_refusal', lambda *a: None)
     card = dict(id='review-card', status=status, assignee='missing', runs_on=['pool:worker'])
     monkeypatch.setattr(node, 'pickup_mode', lambda: 'pool')
     monkeypatch.setattr(node.sync, 'board_mode', lambda _: 'primary')
