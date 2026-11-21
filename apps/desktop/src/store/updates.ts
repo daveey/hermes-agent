@@ -11,6 +11,7 @@ import { $apiRequestScope, connectionScoped, profileScoped } from '@/api/client'
 import type {
   DesktopUpdateApplyOptions,
   DesktopUpdateApplyResult,
+  DesktopUpdateBackupProgress,
   DesktopUpdateProgress,
   DesktopUpdateStage,
   DesktopUpdateStatus,
@@ -42,6 +43,8 @@ export interface UpdateApplyState {
   /** When the stage is 'manual': the exact command the user should run
    *  (CLI install with no staged updater). */
   command: string | null
+  /** The emergency state.db backup's progress while stage is 'backup'. */
+  backup?: DesktopUpdateBackupProgress | null
 
   log: readonly { stage: DesktopUpdateStage; message: string; at: number }[]
 }
@@ -1345,7 +1348,10 @@ async function runEverythingUpdate(): Promise<void> {
 function ingestProgress(payload: DesktopUpdateProgress): void {
   const current = $updateApply.get()
   const entry = { stage: payload.stage, message: payload.message, at: payload.at }
-  const log = [...current.log, entry].slice(-UPDATE_LOG_LINES)
+  // Backup progress ticks twice a second: each replaces the previous tick instead of flooding the log.
+  const previous = current.log.at(-1)
+  const kept = payload.stage === 'backup' && previous?.stage === 'backup' ? current.log.slice(0, -1) : current.log
+  const log = [...kept, entry].slice(-UPDATE_LOG_LINES)
 
   const terminal =
     payload.stage === 'error' ||
@@ -1363,6 +1369,7 @@ function ingestProgress(payload: DesktopUpdateProgress): void {
     error: payload.error,
     // 'manual' carries the command to run in its message field.
     command: payload.stage === 'manual' ? payload.message : current.command,
+    backup: payload.stage === 'backup' ? (payload.backup ?? null) : null,
     log
   })
 }

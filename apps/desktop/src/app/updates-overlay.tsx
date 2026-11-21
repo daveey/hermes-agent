@@ -21,6 +21,7 @@ import { Progress } from '@/components/ui/progress'
 import { UpdateStatusCard, VersionHero } from '@/components/update-status'
 import { VersionDetails } from '@/components/version-details'
 import type {
+  DesktopUpdateBackupProgress,
   DesktopUpdateCommit,
   DesktopUpdateStage,
   DesktopUpdateStatus,
@@ -600,6 +601,29 @@ function GuiSkewView({ message, onDone }: { message?: string; onDone: () => void
   )
 }
 
+const BYTE_UNITS: readonly [string, number][] = [
+  ['GB', 1024 ** 3],
+  ['MB', 1024 ** 2],
+  ['KB', 1024]
+]
+
+/** "12.3" and "21.7 GB": both sizes in the total's unit, one decimal. */
+export function backupSizes(doneBytes: number, totalBytes: number): { done: string; total: string } {
+  const [unit, size] = BYTE_UNITS.find(([, bytes]) => totalBytes >= bytes) ?? BYTE_UNITS[BYTE_UNITS.length - 1]!
+
+  return { done: (doneBytes / size).toFixed(1), total: `${(totalBytes / size).toFixed(1)} ${unit}` }
+}
+
+function backupMessage(backup: DesktopUpdateBackupProgress, u: ReturnType<typeof useI18n>['t']['updates']): string {
+  if (backup.phase === 'check') {
+    return u.backupChecking
+  }
+
+  const { done, total } = backupSizes(backup.doneBytes, backup.totalBytes)
+
+  return u.backupProgress(done, total)
+}
+
 function ApplyingView({
   apply,
   isBackend,
@@ -616,13 +640,16 @@ function ApplyingView({
 
   const body = isWindowsPackage ? u.applyingBodyAppInstaller : isBackend ? u.applyingBodyBackend : u.applyingBody
 
-  const currentMessage = apply.message.trim()
+  const backup = apply.stage === 'backup' ? apply.backup : null
+  const currentMessage = backup ? backupMessage(backup, u) : apply.message.trim()
   const recentLog = apply.log.slice(-4)
 
   const percent =
-    typeof apply.percent === 'number' && Number.isFinite(apply.percent)
-      ? Math.max(2, Math.min(100, Math.round(apply.percent)))
-      : null
+    backup?.phase === 'check'
+      ? null
+      : typeof apply.percent === 'number' && Number.isFinite(apply.percent)
+        ? Math.max(2, Math.min(100, Math.round(apply.percent)))
+        : null
 
   return (
     <div className="grid gap-5 px-6 pb-6 pt-7">

@@ -685,7 +685,7 @@ import {
   type RelaunchRegistration
 } from './updater/relaunch'
 import { startUpdateRelaunchWaiter } from './updater/relaunch-waiter'
-import { preflightStateDb } from './updater/state-db-preflight'
+import { preflightStateDb, type StateDbBackupProgress } from './updater/state-db-preflight'
 import { createStoreStrategy } from './updater/store-client'
 import { filenameFromUrl } from './url-filename'
 import { isExternalVenvHolder, isHermesOwnedVenvDaemon } from './venv-holder-select'
@@ -3427,7 +3427,15 @@ function resolveUpdateRoot() {
 
 function emitUpdateProgress(payload) {
   const merged = { stage: 'idle', message: '', percent: null, error: null, ...payload, at: Date.now() }
-  rememberLog(`[updates] ${merged.stage}: ${merged.message || merged.error || ''}`)
+
+  // Backup progress arrives twice a second for minutes; the log keeps its start, end and check.
+  const backupTick =
+    merged.stage === 'backup' && merged.backup?.phase === 'copy' && merged.percent !== 100 && merged.percent !== 0
+
+  if (!backupTick) {
+    rememberLog(`[updates] ${merged.stage}: ${merged.message || merged.error || ''}`)
+  }
+
   desktopMetrics.noteUpdateProgress(merged.stage)
 
   for (const window of BrowserWindow.getAllWindows()) {
@@ -3648,7 +3656,11 @@ function resolveCheckoutUpdateStrategy(): CheckoutStrategy {
     startHermes,
     stopBackendsForUpdate,
     repairMacUpdaterHelper: updater => repairMacUpdaterHelper(updater, { isMac: IS_MAC, log: rememberLog }),
-    preflightStateDb: async (home: string, log: (message: string) => void): Promise<void> => {
+    preflightStateDb: async (
+      home: string,
+      log: (message: string) => void,
+      onProgress?: (progress: StateDbBackupProgress) => void
+    ): Promise<void> => {
       const root: string = resolveUpdateRoot()
 
       // `updates.pre_update_backup: off` is the CLI's opt-out for the whole
@@ -3686,7 +3698,8 @@ function resolveCheckoutUpdateStrategy(): CheckoutStrategy {
         launcher,
         script: path.join(root, 'hermes_cli', 'backup_sqlite.py'),
         home,
-        log
+        log,
+        onProgress
       })
     },
     runningAppBundle,

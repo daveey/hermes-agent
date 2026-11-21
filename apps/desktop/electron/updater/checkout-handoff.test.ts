@@ -581,3 +581,54 @@ it('the Windows protocol-2 hand-off passes -HandoffRun with the bridged run id',
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+// The emergency state.db backup can take minutes on a large database: its
+// progress reaches the overlay as stage `backup`, before "this window will close".
+it('forwards the pre-flight backup progress to the overlay before the hand-off', async (): Promise<void> => {
+  const { root, deps } = handoffFixture(false)
+
+  deps.preflightStateDb = (_home, _log, onProgress): void => {
+    onProgress?.({ kind: 'progress', doneBytes: 0, totalBytes: 4 * 1024 ** 3, method: 'copy' })
+    onProgress?.({ kind: 'progress', doneBytes: 1024 ** 3, totalBytes: 4 * 1024 ** 3, method: 'copy' })
+    onProgress?.({ kind: 'check' })
+  }
+
+  vi.spyOn(updaterProcess, 'spawnUpdaterProcess').mockImplementation((): updaterProcess.UpdaterChild => {
+    const child: EventEmitter & updaterProcess.UpdaterChild = Object.assign(new EventEmitter(), {
+      unref: (): void => {}
+    })
+
+    queueMicrotask((): void => {
+      child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }))
+    })
+
+    return child
+  })
+
+  try {
+    await createCheckoutStrategy(deps).apply()
+    const calls = vi.mocked(deps.emitUpdateProgress).mock.calls.map(([payload]) => payload)
+    const backups = calls.filter(payload => payload.stage === 'backup')
+
+    expect(backups).toEqual([
+      expect.objectContaining({
+        percent: 0,
+        backup: { phase: 'copy', doneBytes: 0, totalBytes: 4 * 1024 ** 3, method: 'copy' }
+      }),
+      expect.objectContaining({
+        percent: 25,
+        message: 'Backing up state.db (copy): 1.0 of 4.0 GB',
+        backup: { phase: 'copy', doneBytes: 1024 ** 3, totalBytes: 4 * 1024 ** 3, method: 'copy' }
+      }),
+      expect.objectContaining({
+        percent: null,
+        backup: { phase: 'check', doneBytes: 4 * 1024 ** 3, totalBytes: 4 * 1024 ** 3, method: 'copy' }
+      })
+    ])
+    const lastBackup = calls.lastIndexOf(backups.at(-1)!)
+    const restart = calls.findIndex(payload => payload.stage === 'restart')
+    expect(restart === -1 || restart > lastBackup).toBe(true)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

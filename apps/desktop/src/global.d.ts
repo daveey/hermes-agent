@@ -1162,6 +1162,8 @@ export interface DesktopUpdateApplyResult {
 export type DesktopUpdateStage =
   | 'idle'
   | 'prepare'
+  /** The emergency state.db backup before the update (progress in `backup`). */
+  | 'backup'
   | 'fetch'
   | 'pull'
   | 'pydeps'
@@ -1176,12 +1178,22 @@ export type DesktopUpdateStage =
   | 'guiSkew'
   | 'error'
 
+/** The emergency state.db backup's progress: bytes copied (or cloned), then the backup check. */
+export interface DesktopUpdateBackupProgress {
+  phase: 'copy' | 'check'
+  doneBytes: number
+  totalBytes: number
+  method: 'clone' | 'copy' | null
+}
+
 export interface DesktopUpdateProgress {
   stage: DesktopUpdateStage
   message: string
   percent: number | null
   error: string | null
   at: number
+  /** Present on stage 'backup'. */
+  backup?: DesktopUpdateBackupProgress
 }
 
 export interface DesktopPluginProfileRoute {

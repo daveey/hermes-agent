@@ -109,15 +109,17 @@ def test_sigterm_interrupts_a_one_step_wal_copy(tmp_path):
         db.commit()
         db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     argv = [sys.executable, "-I", "-S", str(SCRIPT), str(home)]
+    # The page copy is under test: a copy-on-write clone (APFS) would finish before any signal.
+    env = {**os.environ, "HERMES_PREFLIGHT_CLONE": "0"}
     started = time.monotonic()
-    subprocess.run(argv, capture_output=True, timeout=300, check=True)
+    subprocess.run(argv, capture_output=True, timeout=300, check=True, env=env)
     full_run = time.monotonic() - started
     for snapshot in home.glob("state.db.pre-update-emergency-*"):
         snapshot.unlink()
     if full_run < 0.3:
         pytest.skip(f"a {full_run:.2f}s copy is too short to stop mid-way on this disk")
 
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     try:
         # Mid-copy: the staging file is already receiving pages (it exists, empty, before the copy).
         wait_until(lambda: _staged_bytes(home) > 32 << 20 or proc.poll() is not None, timeout=60,

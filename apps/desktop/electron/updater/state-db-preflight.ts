@@ -1,13 +1,11 @@
-import { execFile } from 'node:child_process'
+import { spawn, type SpawnOptions } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { promisify } from 'node:util'
 
 import { hiddenWindowsChildOptions } from '../windows-child-options'
 
 const DEFAULT_TIMEOUT_MS = 5 * 60_000
 const MAX_TIMEOUT_MS = 30 * 60_000
-const execFileAsync = promisify(execFile)
 const COPY_RATE_BYTES_PER_SECOND = 5 * 1024 * 1024
 const TIMEOUT_SLACK_MS = 60_000
 
@@ -28,6 +26,100 @@ export function stateDbPreflightTimeoutMs(home: string): number {
   )
 }
 
+/** One progress report from `hermes_cli/backup_sqlite.py` (a JSON object per stderr line). */
+export type StateDbBackupProgress =
+  { kind: 'progress'; doneBytes: number; totalBytes: number; method: 'clone' | 'copy' } | { kind: 'check' }
+
+function readProgressEvent(line: string): StateDbBackupProgress | null {
+  const text = line.trim()
+
+  if (!text.startsWith('{')) {
+    return null
+  }
+
+  let value: unknown
+
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return null
+  }
+
+  if (typeof value !== 'object' || value === null) {
+    return null
+  }
+
+  const event = value as Record<string, unknown>
+
+  if (event.event === 'backup_check') {
+    return { kind: 'check' }
+  }
+
+  if (event.event !== 'backup_progress') {
+    return null
+  }
+
+  const done = event.done_bytes
+  const total = event.total_bytes
+
+  if (
+    typeof done !== 'number' ||
+    typeof total !== 'number' ||
+    !Number.isFinite(done) ||
+    !Number.isFinite(total) ||
+    done < 0 ||
+    total < 0
+  ) {
+    return null
+  }
+
+  return {
+    kind: 'progress',
+    doneBytes: Math.min(done, total),
+    totalBytes: total,
+    method: event.method === 'clone' ? 'clone' : 'copy'
+  }
+}
+
+/**
+ * Splits the snapshot's stderr into lines as chunks arrive (a line may span
+ * chunks) and routes each one: progress events to `onProgress`, everything
+ * else (warnings, tracebacks) to `onLine`. `flush()` ends a final unterminated line.
+ */
+export function createBackupProgressParser(
+  onProgress: (progress: StateDbBackupProgress) => void,
+  onLine: (line: string) => void
+): { push: (chunk: string) => void; flush: () => void } {
+  let pending = ''
+
+  const route = (line: string): void => {
+    const event = readProgressEvent(line)
+
+    if (event) {
+      onProgress(event)
+    } else if (line.trim()) {
+      onLine(line.replace(/\r$/, ''))
+    }
+  }
+
+  return {
+    push: (chunk: string): void => {
+      pending += chunk
+      const lines = pending.split('\n')
+      pending = lines.pop() ?? ''
+      lines.forEach(route)
+    },
+    flush: (): void => {
+      const rest = pending
+      pending = ''
+
+      if (rest) {
+        route(rest)
+      }
+    }
+  }
+}
+
 interface StateDbPreflight {
   python: string | null
   script: string
@@ -40,6 +132,80 @@ interface StateDbPreflight {
    * it exactly like the update check does (`readSourceUpdate`).
    */
   launcher?: string | null
+  /** Snapshot progress as it arrives (stderr JSON lines); other stderr lines go to `log`. */
+  onProgress?: (progress: StateDbBackupProgress) => void
+}
+
+interface SnapshotRun {
+  stdout: string
+  /** Non-progress stderr lines, for the failure message. */
+  stderr: string
+}
+
+function runSnapshot(
+  command: string,
+  args: string[],
+  options: SpawnOptions,
+  timeoutMs: number,
+  onProgress: (progress: StateDbBackupProgress) => void,
+  log: (message: string) => void
+): Promise<SnapshotRun> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] })
+    const stderrLines: string[] = []
+    let stdout = ''
+    let timedOut = false
+
+    const parser = createBackupProgressParser(
+      (progress: StateDbBackupProgress): void => {
+        try {
+          onProgress(progress)
+        } catch (error: unknown) {
+          log(`[updates] state.db pre-flight progress handler failed: ${String(error)}`)
+        }
+      },
+      (line: string): void => {
+        stderrLines.push(line)
+        log(`[updates] state.db pre-flight: ${line}`)
+      }
+    )
+
+    // Same stop as execFile's timeout: SIGTERM, which the snapshot turns into its staging cleanup.
+    const timer = setTimeout((): void => {
+      timedOut = true
+      child.kill('SIGTERM')
+    }, timeoutMs)
+
+    child.stdout!.setEncoding('utf8')
+    child.stderr!.setEncoding('utf8')
+    child.stdout!.on('data', (chunk: string): void => {
+      stdout += chunk
+    })
+    child.stderr!.on('data', parser.push)
+    child.on('error', (error: Error): void => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null): void => {
+      clearTimeout(timer)
+      parser.flush()
+      const stderr = stderrLines.join('\n')
+
+      if (code === 0) {
+        resolve({ stdout, stderr })
+
+        return
+      }
+
+      const reason = timedOut
+        ? `timed out after ${timeoutMs} ms`
+        : signal
+          ? `killed by ${signal}`
+          : `exited with code ${code}`
+
+      reject(new Error(`Command failed (${reason}): ${[command, ...args].join(' ')}${stderr ? `\n${stderr}` : ''}`))
+    })
+  })
 }
 
 // Await completion before stopping the backend, while keeping Electron responsive.
@@ -48,7 +214,8 @@ export async function preflightStateDb({
   script,
   home,
   log,
-  launcher = null
+  launcher = null,
+  onProgress = (): void => {}
 }: StateDbPreflight): Promise<void> {
   try {
     const command: string | null = launcher ?? python
@@ -69,16 +236,15 @@ export async function preflightStateDb({
       throw new Error('The pre-flight snapshot contains an unsafe Windows command argument.')
     }
 
-    const { stdout } = await execFileAsync(
+    const { stdout } = await runSnapshot(
       viaCmd ? (process.env.ComSpec ?? 'cmd.exe') : command,
       viaCmd
         ? ['/d', '/v:off', '/s', '/c', `""${command}" ${args.map((arg: string): string => `"${arg}"`).join(' ')}"`]
         : args,
-      hiddenWindowsChildOptions({
-        encoding: 'utf8',
-        timeout: stateDbPreflightTimeoutMs(home),
-        windowsVerbatimArguments: viaCmd
-      })
+      hiddenWindowsChildOptions({ windowsVerbatimArguments: viaCmd }),
+      stateDbPreflightTimeoutMs(home),
+      onProgress,
+      log
     )
 
     log(`[updates] state.db pre-flight: ${stdout.trim()}`)

@@ -2,7 +2,13 @@
 
 Desktop invokes this file before stopping its backend, even when application
 imports cannot load. Full and quick backups use the same SQLite copy operation.
+
+Run as a script, the pre-update snapshot first tries a copy-on-write clone of
+state.db (and its WAL) under SQLite's write lock, and falls back to the page
+copy. Progress goes to stderr as one JSON object per line (``backup_progress``,
+``backup_check``); stdout carries only the final result object.
 """
+import errno
 import json
 import logging
 import os
@@ -11,10 +17,10 @@ import sqlite3
 import sys
 import threading
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone, UTC
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +41,36 @@ def _on_sigterm(signum: int, _frame) -> None:
 def _raise_if_terminated() -> None:
     if _terminate_signal is not None:
         raise SystemExit(128 + _terminate_signal)
+
+
+# At most two progress lines a second; the final 100% line is always written.
+_PROGRESS_INTERVAL_SECONDS = 0.5
+
+
+class _ProgressReporter:
+    """Machine-readable snapshot progress, one JSON object per line, for the Desktop's update overlay."""
+
+    def __init__(self, stream=None, *, interval: float = _PROGRESS_INTERVAL_SECONDS,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._stream, self._interval, self._clock = stream, interval, clock
+        self._last: Optional[float] = None
+
+    def _write(self, event: dict) -> None:
+        stream = self._stream if self._stream is not None else sys.stderr
+        stream.write(json.dumps(event) + "\n")
+        stream.flush()
+
+    def progress(self, done_bytes: int, total_bytes: int, *, method: str, force: bool = False) -> None:
+        now = self._clock()
+        if not force and self._last is not None and now - self._last < self._interval:
+            return
+        self._last = now
+        total = max(0, int(total_bytes))
+        self._write({"event": "backup_progress", "done_bytes": min(max(0, int(done_bytes)), total),
+                     "total_bytes": total, "method": method})
+
+    def check(self) -> None:
+        self._write({"event": "backup_check"})
 
 
 class _SQLiteBackupTimeout(RuntimeError):
@@ -153,10 +189,12 @@ class _OffThreadCopy:
         except BaseException as exc:  # health: allow BLE001 -- handed to the waiting main thread, which re-raises it
             self._error = exc
 
-    def run(self) -> None:
+    def run(self, on_wait: Optional[Callable[[], None]] = None) -> None:
         self.thread.start()
         while self.thread.is_alive():
             _raise_if_terminated()
+            if on_wait is not None:
+                on_wait()
             self.thread.join(0.05)
         if self._error is not None:
             raise self._error
@@ -165,10 +203,28 @@ class _OffThreadCopy:
         return self.thread.is_alive()
 
 
-def _safe_copy_db(src: Path, dst: Path, *, timeout_seconds: float = 10.0) -> bool:
+def _run_interruptibly(conn: sqlite3.Connection, work):
+    """Run one long SQLite call off the main thread so SIGTERM stops it (see _OffThreadCopy).
+
+    A whole-database check is a single blocking statement; the main thread waits in short joins,
+    and on termination interrupts the statement and exits instead of waiting it out."""
+    result: list = []
+    copier = _OffThreadCopy(lambda: result.append(work()))
+    try:
+        copier.run()
+    except SystemExit:
+        with suppress(Exception):
+            conn.interrupt()
+        raise
+    return result[0]
+
+
+def _safe_copy_db(src: Path, dst: Path, *, timeout_seconds: float = 10.0,
+                  progress: Optional[Callable[[int, int], None]] = None) -> bool:
     """Copy a SQLite database with the backup() API (WAL-safe consistent snapshot).
 
     Fails closed when no consistent snapshot can be made: copying only the main file loses WAL data.
+    ``progress(done_bytes, total_bytes)`` is called as the copy advances (unthrottled).
     """
     conn = backup_conn = None
     copier: Optional[_OffThreadCopy] = None
@@ -202,8 +258,11 @@ def _safe_copy_db(src: Path, dst: Path, *, timeout_seconds: float = 10.0) -> boo
         backup_conn = sqlite3.connect(str(dst), check_same_thread=False)
         busy_deadline = time.monotonic() + max(0.0, timeout_seconds)
         _raise_if_terminated()
+        page_size = 0
+        if progress is not None:
+            page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
 
-        def _check_backup_progress(status: int, _remaining: int, _total: int) -> None:
+        def _check_backup_progress(status: int, remaining: int, total: int) -> None:
             nonlocal busy_deadline
             _raise_if_terminated()
             now = time.monotonic()
@@ -212,14 +271,25 @@ def _safe_copy_db(src: Path, dst: Path, *, timeout_seconds: float = 10.0) -> boo
                     raise _SQLiteBackupTimeout(f"database remained locked for {timeout_seconds:g} seconds")
             else:
                 busy_deadline = now + max(0.0, timeout_seconds)
+                if progress is not None and total > 0:
+                    progress((total - remaining) * page_size, total * page_size)
 
         if _uses_wal(src):
             # One step: SQLite restarts a multi-step backup whenever another connection writes the
             # source, and a WAL reader never blocks a writer however long the copy takes.
             # Run off the main thread so a SIGTERM is serviced during the copy (_OffThreadCopy).
+            on_wait = None
+            if progress is not None:
+                # A one-step copy calls back only when it is done; the destination file grows as
+                # pages land, so its size against the source's logical size is the progress.
+                total_bytes = int(conn.execute("PRAGMA page_count").fetchone()[0]) * page_size
+
+                def on_wait() -> None:
+                    with suppress(OSError):
+                        progress(min(dst.stat().st_size, total_bytes), total_bytes)
             copier = _OffThreadCopy(lambda: conn.backup(
                 backup_conn, pages=-1, progress=_check_backup_progress, sleep=0.1))
-            copier.run()
+            copier.run(on_wait)
         else:
             _stepped_rollback_journal_copy(conn, backup_conn, _check_backup_progress)
         return True
@@ -254,8 +324,145 @@ def _reclaim_abandoned_staging(home: Path, prefix: str) -> None:
                 staged.unlink()
 
 
-def preflight_state_db(home: Path, *, busy_timeout_seconds: float = 10.0) -> dict:
-    """Publish an emergency snapshot; do not prune recovery files on failure."""
+# How long the clone path waits for SQLite's write lock. Short on purpose: a writer that keeps it
+# longer sends the snapshot to the page copy, which needs no write lock on a WAL database.
+_CLONE_LOCK_WAIT_SECONDS = 2.0
+# "0" turns the clone path off (the page copy then runs as before).
+_CLONE_ENV = "HERMES_PREFLIGHT_CLONE"
+_FICLONE = 0x40049409  # Linux _IOW(0x94, 9, int): reflink on btrfs/xfs; ext4 refuses with EOPNOTSUPP
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def _clone_file(src: Path, dst: Path, src_fd: Optional[int] = None) -> None:
+    """Copy-on-write clone of ``src`` to the new file ``dst``; OSError when the filesystem cannot.
+
+    macOS: clonefile(2) (APFS). Linux: ioctl(FICLONE) from ``src_fd``. Elsewhere: ENOTSUP."""
+    if sys.platform == "darwin":
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        clonefile = libc.clonefile
+        clonefile.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32)
+        clonefile.restype = ctypes.c_int
+        if clonefile(os.fsencode(src), os.fsencode(dst), 0) != 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err), str(src))
+        return
+    if sys.platform.startswith("linux"):
+        import fcntl
+        owned = src_fd is None
+        if owned:
+            src_fd = os.open(src, os.O_RDONLY)  # sqlite-sidecar-open: ok — only the -wal, which SQLite never locks
+        try:
+            dst_fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            try:
+                fcntl.ioctl(dst_fd, _FICLONE, src_fd)
+            except BaseException:
+                os.close(dst_fd)
+                dst.unlink(missing_ok=True)
+                raise
+            os.close(dst_fd)
+        finally:
+            if owned:
+                os.close(src_fd)
+        return
+    raise OSError(errno.ENOTSUP, "no copy-on-write clone on this platform", str(src))
+
+
+def _clone_snapshot(source: Path, staged: Path) -> dict:
+    """Clone state.db (and its WAL) while holding SQLite's write lock, then release it.
+
+    Under BEGIN IMMEDIATE no other connection can commit, restart or truncate the WAL, or delete it
+    on close; a concurrent passive checkpoint only copies frames that stay in the WAL, which the
+    clone replays when it is opened. So the two clones together are one committed state, however
+    long apart they are taken. Only the clone itself runs under the lock."""
+    _raise_if_terminated()
+    wal_mode = _uses_wal(source)
+    source_fd: Optional[int] = None
+    lock: Optional[sqlite3.Connection] = None
+    try:
+        if sys.platform.startswith("linux"):
+            # POSIX locks die with ANY close() of the file in this process, so the database's clone
+            # source is opened before the lock connection and closed only after it is gone.
+            source_fd = os.open(source, os.O_RDONLY)  # sqlite-sidecar-open: ok — opened before and closed after the lock connection
+        lock = sqlite3.connect(str(source), timeout=_CLONE_LOCK_WAIT_SECONDS, isolation_level=None,
+                               check_same_thread=False)
+        lock.execute("BEGIN IMMEDIATE")
+        locked_at = time.monotonic()
+        _clone_file(source, staged, source_fd)
+        if wal_mode and Path(f"{source}-wal").exists():
+            _clone_file(Path(f"{source}-wal"), Path(f"{staged}-wal"))
+        lock_ms = (time.monotonic() - locked_at) * 1000
+    finally:
+        if lock is not None:
+            with suppress(sqlite3.Error):
+                lock.execute("ROLLBACK")
+            lock.close()
+        if source_fd is not None:
+            os.close(source_fd)
+    # A clone keeps the source's mode (never wider than state.db itself); snapshots are owner-only.
+    for clone in (staged, Path(f"{staged}-wal")):
+        if clone.exists():
+            os.chmod(clone, 0o600)
+    return {"lock_ms": round(lock_ms, 1)}
+
+
+@contextmanager
+def _closing_unless_terminated(connection: sqlite3.Connection):
+    """Close the connection, except when SIGTERM interrupted it: its worker thread may still be
+    inside the statement, close() would wait for it, and the process is exiting anyway."""
+    try:
+        yield connection
+    except SystemExit:
+        raise
+    except BaseException:
+        connection.close()
+        raise
+    connection.close()
+
+
+def _verify_clone(staged: Path) -> None:
+    """A clone is the source's committed bytes, so no full check: the header is SQLite's, it opens,
+    the schema reads, and its WAL folds back into the one file a snapshot is."""
+    with open(staged, "rb") as handle:  # sqlite-sidecar-open: ok — our own clone, before any connection to it
+        if handle.read(len(_SQLITE_MAGIC)) != _SQLITE_MAGIC:
+            raise RuntimeError("cloned snapshot has no SQLite header")
+    connection = sqlite3.connect(str(staged), check_same_thread=False)  # health: allow HX015 -- staged clone written by this function
+    with _closing_unless_terminated(connection):
+        connection.execute("PRAGMA schema_version").fetchone()
+        if Path(f"{staged}-wal").exists():
+            busy, _log, _done = _run_interruptibly(
+                connection, lambda: connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone())
+            if busy:
+                raise RuntimeError("cloned snapshot's WAL could not be checkpointed")
+    wal = Path(f"{staged}-wal")
+    if wal.exists() and wal.stat().st_size:
+        raise RuntimeError("cloned snapshot kept a non-empty WAL")
+    _discard_sidecars(staged, ("-wal", "-shm"))
+
+
+def _discard_sidecars(staged: Path, suffixes=("-wal", "-shm", "-journal")) -> None:
+    for suffix in suffixes:
+        Path(f"{staged}{suffix}").unlink(missing_ok=True)
+
+
+def _quick_check(staged: Path, reporter: Optional[_ProgressReporter]) -> None:
+    if reporter is not None:
+        reporter.check()
+    connection = sqlite3.connect(str(staged), check_same_thread=False)  # health: allow HX015 -- staged copy written by this function
+    with _closing_unless_terminated(connection):
+        # A whole-database check is one long statement: off the main thread, so SIGTERM stops it.
+        result = _run_interruptibly(connection, lambda: connection.execute("PRAGMA quick_check").fetchall())
+    if result != [("ok",)]:
+        raise RuntimeError(f"SQLite snapshot integrity check failed: {result}")
+
+
+def preflight_state_db(home: Path, *, busy_timeout_seconds: float = 10.0, clone: bool = False,
+                       reporter: Optional[_ProgressReporter] = None) -> dict:
+    """Publish an emergency snapshot; do not prune recovery files on failure.
+
+    ``clone`` tries a copy-on-write clone first. Only the standalone script passes it: on Linux the
+    clone opens state.db directly, which is safe only where no other connection to it lives in this
+    process. ``reporter`` receives the progress events."""
     source = home / "state.db"
     if not source.exists():
         return {"path": None, "message": "state.db not found (fresh install?)"}
@@ -266,28 +473,48 @@ def preflight_state_db(home: Path, *, busy_timeout_seconds: float = 10.0) -> dic
     # Named before it exists, so a SIGTERM at any point after creation reaches the
     # cleanup below; _safe_copy_db creates it owner-only and refuses a symlink.
     staged = home / f"{prefix}{stamp}-{os.getpid()}.partial"
+    result: dict = {}
     try:
-        if not _safe_copy_db(source, staged, timeout_seconds=busy_timeout_seconds):
-            raise RuntimeError("SQLite safe copy failed; previous emergency snapshots were retained")
-        connection = sqlite3.connect(str(staged))  # health: allow HX015 -- staged copy written by this function
-        try:
-            result = connection.execute("PRAGMA quick_check").fetchall()
-            if result != [("ok",)]:
-                raise RuntimeError(f"SQLite snapshot integrity check failed: {result}")
-        finally:
-            connection.close()
-        size = staged.stat().st_size
+        cloned = False
+        if clone and os.environ.get(_CLONE_ENV, "1") != "0":
+            try:
+                result.update(_clone_snapshot(source, staged))
+                _verify_clone(staged)
+                cloned = True
+            except Exception as exc:
+                # EXDEV/ENOTSUP/EOPNOTSUPP (no reflink here), a held write lock, a bad clone: copy instead.
+                logger.warning("Copy-on-write snapshot unavailable, copying instead: %s", exc, exc_info=True)
+                result = {"clone_error": str(exc)}
+                staged.unlink(missing_ok=True)
+                _discard_sidecars(staged)
+        if cloned:
+            size = staged.stat().st_size
+            result["method"] = "clone"
+            if reporter is not None:
+                reporter.progress(size, size, method="clone", force=True)
+        else:
+            progress = None
+            if reporter is not None:
+                def progress(done: int, total: int) -> None:
+                    reporter.progress(done, total, method="copy")
+            if not _safe_copy_db(source, staged, timeout_seconds=busy_timeout_seconds, progress=progress):
+                raise RuntimeError("SQLite safe copy failed; previous emergency snapshots were retained")
+            size = staged.stat().st_size
+            result["method"] = "copy"
+            if reporter is not None:
+                reporter.progress(size, size, method="copy", force=True)
+            _quick_check(staged, reporter)
         os.replace(staged, destination)
     finally:
         staged.unlink(missing_ok=True)
-        # A copy stopped mid-write leaves the staging copy's rollback journal behind too.
-        Path(f"{staged}-journal").unlink(missing_ok=True)
+        # A copy stopped mid-write leaves the staging copy's rollback journal (or a clone's WAL) behind too.
+        _discard_sidecars(staged)
     for old in sorted(home.glob(f"{prefix}*.bak"), reverse=True)[2:]:
         try:
             old.unlink()
         except OSError as exc:
             logger.warning("Could not prune emergency snapshot %s: %s", old, exc)
-    return {"path": str(destination), "bytes": size}
+    return {"path": str(destination), "bytes": size, **result}
 
 
 if __name__ == "__main__":
@@ -296,4 +523,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _on_sigterm)
     # Optional argv[2]: tests hold the source locked as a barrier and need the lock wait to outlast a starved runner.
     _busy = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
-    print(json.dumps(preflight_state_db(Path(sys.argv[1]), busy_timeout_seconds=_busy)))
+    print(json.dumps(preflight_state_db(Path(sys.argv[1]), busy_timeout_seconds=_busy, clone=True,
+                                        reporter=_ProgressReporter())))

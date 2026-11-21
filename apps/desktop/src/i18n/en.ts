@@ -3758,6 +3758,7 @@ export const en: Translations = {
     stages: {
       idle: 'Getting ready…',
       prepare: 'Getting ready…',
+      backup: 'Backing up before updating…',
       fetch: 'Downloading…',
       pull: 'Almost there…',
       pydeps: 'Finishing up…',
@@ -3810,6 +3811,8 @@ export const en: Translations = {
     applyingBodyBackend:
       'The remote backend is applying the update and will restart. Hermes reconnects automatically when it’s back.',
     applyingClose: 'This window will close while the update runs, then Hermes reopens on its own.',
+    backupProgress: (done, total) => `Backing up your chat history before updating: ${done} of ${total}`,
+    backupChecking: 'Checking the backup…',
     applyingBodyAppInstaller:
       'Hermes will close and Windows will finish the update. Hermes will reopen when it’s done — you don’t need to do anything.',
     applyingCloseAppInstaller: 'This window will close, Windows finishes the update, and Hermes reopens on its own.',

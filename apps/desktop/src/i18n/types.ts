@@ -3263,6 +3263,8 @@ export interface Translations extends NoticeTranslations {
     applyingBody: string
     applyingBodyBackend: string
     applyingClose: string
+    backupProgress: (done: string, total: string) => string
+    backupChecking: string
     applyingBodyAppInstaller: string
     applyingCloseAppInstaller: string
     checkUnknownTitleAppInstaller: string

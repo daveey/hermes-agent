@@ -30,6 +30,7 @@ import {
 
 import { type SourceUpdate, sourceUpdateEnvironment } from './checkout-source'
 import { type MarkerHelperOp, type MarkerHelperVerdict, readHandoffProtocol, runMarkerHelper } from './marker-helper'
+import type { StateDbBackupProgress } from './state-db-preflight'
 
 import type { UpdaterApplyResultWire, UpdaterMechanism, UpdaterStatusWire, UpdaterStrategy } from './index'
 
@@ -37,6 +38,63 @@ import type { UpdaterApplyResultWire, UpdaterMechanism, UpdaterStatusWire, Updat
  * Everything the checkout flow needs from the app shell. These are the
  * impure edges only — all update logic lives here.
  */
+/** The emergency state.db backup's progress, as the overlay draws it (stage `backup`). */
+export interface UpdateBackupProgress {
+  phase: 'copy' | 'check'
+  doneBytes: number
+  totalBytes: number
+  method: 'clone' | 'copy' | null
+}
+
+export interface UpdateProgressPayload {
+  stage: string
+  message: string
+  percent: number | null
+  backup?: UpdateBackupProgress
+}
+
+const GIB = 1024 ** 3
+
+/** English log text for one backup report; the renderer localizes from `backup`. */
+function backupLogMessage(backup: UpdateBackupProgress): string {
+  if (backup.phase === 'check') {
+    return 'Checking the state.db backup…'
+  }
+
+  const gb = (bytes: number): string => (bytes / GIB).toFixed(1)
+
+  return `Backing up state.db (${backup.method}): ${gb(backup.doneBytes)} of ${gb(backup.totalBytes)} GB`
+}
+
+/** Forward the pre-flight snapshot's reports to the update overlay as stage `backup`. */
+export function backupProgressEmitter(
+  deps: Pick<CheckoutStrategyDeps, 'emitUpdateProgress'>
+): (progress: StateDbBackupProgress) => void {
+  let last: UpdateBackupProgress | null = null
+
+  return (progress: StateDbBackupProgress): void => {
+    const backup: UpdateBackupProgress =
+      progress.kind === 'check'
+        ? {
+            phase: 'check',
+            doneBytes: last?.totalBytes ?? 0,
+            totalBytes: last?.totalBytes ?? 0,
+            method: last?.method ?? null
+          }
+        : { phase: 'copy', doneBytes: progress.doneBytes, totalBytes: progress.totalBytes, method: progress.method }
+
+    last = backup
+
+    deps.emitUpdateProgress({
+      stage: 'backup',
+      message: backupLogMessage(backup),
+      percent:
+        backup.phase === 'check' ? null : backup.totalBytes > 0 ? (backup.doneBytes / backup.totalBytes) * 100 : 100,
+      backup
+    })
+  }
+}
+
 export interface CheckoutStrategyDeps {
   resolveUpdateRoot: () => string
   readSourceUpdate: (
@@ -59,12 +117,16 @@ export interface CheckoutStrategyDeps {
    */
   remoteGatewayActive: () => boolean
 
-  emitUpdateProgress: (payload: { stage: string; message: string; percent: number | null }) => void
+  emitUpdateProgress: (payload: UpdateProgressPayload) => void
   rememberLog: (chunk: unknown) => void
   startHermes: () => Promise<unknown>
   stopBackendsForUpdate: () => Promise<void>
   repairMacUpdaterHelper: (updater: string) => void | Promise<void>
-  preflightStateDb: (hermesHome: string, rememberLog: (chunk: string) => void) => void | Promise<void>
+  preflightStateDb: (
+    hermesHome: string,
+    rememberLog: (chunk: string) => void,
+    onProgress?: (progress: StateDbBackupProgress) => void
+  ) => void | Promise<void>
   runningAppBundle: () => string | null
   markQuittingForHandoff: () => void
   quit: () => void
@@ -521,12 +583,6 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
       return { ok: false, error: 'update-already-running', message: handoffConflict.message }
     }
 
-    deps.emitUpdateProgress({
-      stage: 'restart',
-      message:
-        'Updating Hermes — this window will close and the updater will open. Don’t reopen Hermes yourself; it restarts automatically when the update finishes.',
-      percent: 100
-    })
     deps.repairMacUpdaterHelper(updater)
 
     const updateRoot = deps.resolveUpdateRoot()
@@ -539,8 +595,16 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
 
     // ── Pre-flight state.db integrity guard (#68474) ─────────────────
     // Emergency backup and header verification before the update touches
-    // anything.  Runs while the backend is still alive.
-    await deps.preflightStateDb(deps.hermesHome, deps.rememberLog)
+    // anything.  Runs while the backend is still alive. Its progress shows in
+    // the overlay, so "this window will close" follows it rather than sitting
+    // over a backup that can take minutes.
+    await deps.preflightStateDb(deps.hermesHome, deps.rememberLog, backupProgressEmitter(deps))
+    deps.emitUpdateProgress({
+      stage: 'restart',
+      message:
+        'Updating Hermes — this window will close and the updater will open. Don’t reopen Hermes yourself; it restarts automatically when the update finishes.',
+      percent: 100
+    })
 
     if (deps.isWindows && resolveUpdateScriptHandoff(updateRoot)) {
       const message = windowsUpdatePrerequisiteError(updateRoot, deps.hermesHome)
@@ -691,7 +755,7 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
     }
 
     // ── Pre-flight state.db integrity guard (#68474) ──
-    await deps.preflightStateDb(deps.hermesHome, deps.rememberLog)
+    await deps.preflightStateDb(deps.hermesHome, deps.rememberLog, backupProgressEmitter(deps))
 
     const args: string[] = [
       ...handoff.args,

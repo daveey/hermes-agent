@@ -8,7 +8,12 @@ import { fileURLToPath } from 'node:url'
 
 import { test } from 'vitest'
 
-import { preflightStateDb, stateDbPreflightTimeoutMs } from './state-db-preflight'
+import {
+  createBackupProgressParser,
+  preflightStateDb,
+  type StateDbBackupProgress,
+  stateDbPreflightTimeoutMs
+} from './state-db-preflight'
 
 test('the desktop preflight publishes committed WAL rows before its caller can stop the backend', async (): Promise<void> => {
   const home: string = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-db-'))
@@ -207,6 +212,158 @@ print('snapshot finished')
     await preflightStateDb({ python: process.env.HERMES_PYTHON || 'python3', script, home, log: (): void => {} })
   } finally {
     clearTimeout(timer)
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('the progress parser joins lines split across chunks and ignores garbage', (): void => {
+  const events: StateDbBackupProgress[] = []
+  const lines: string[] = []
+
+  const parser = createBackupProgressParser(
+    (event: StateDbBackupProgress): void => {
+      events.push(event)
+    },
+    (line: string): void => {
+      lines.push(line)
+    }
+  )
+
+  parser.push('{"event": "backup_progress", "done_bytes": 10, "tot')
+  parser.push('al_bytes": 100, "method": "copy"}\nWARNING: clone unavailable\r\n{not json}\n')
+  parser.push('{"event": "something_else"}\n{"event": "backup_progress", "done_bytes": "x", "total_bytes": 1}\n')
+  parser.push('{"event": "backup_progress", "done_bytes": 150, "total_bytes": 100, "method": "clone"}\n[1, 2]\n\n')
+  parser.push('{"event": "backup_check"}')
+  // The unterminated last line waits for its newline (or the end of the stream).
+  assert.equal(events.length, 2)
+  parser.flush()
+
+  assert.deepEqual(events, [
+    { kind: 'progress', doneBytes: 10, totalBytes: 100, method: 'copy' },
+    { kind: 'progress', doneBytes: 100, totalBytes: 100, method: 'clone' },
+    { kind: 'check' }
+  ])
+  assert.deepEqual(lines, [
+    'WARNING: clone unavailable',
+    '{not json}',
+    '{"event": "something_else"}',
+    '{"event": "backup_progress", "done_bytes": "x", "total_bytes": 1}',
+    '[1, 2]'
+  ])
+})
+
+test('a real snapshot streams its progress while non-progress stderr goes to the log', async (): Promise<void> => {
+  const home: string = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-progress-'))
+  const python: string = process.env.HERMES_PYTHON || 'python3'
+  const script: string = fileURLToPath(new URL('../../../../hermes_cli/backup_sqlite.py', import.meta.url))
+  const previous = process.env.HERMES_PREFLIGHT_CLONE
+
+  const created = spawnSync(
+    python,
+    [
+      '-I',
+      '-S',
+      '-c',
+      `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute('PRAGMA journal_mode=WAL')
+c.execute('CREATE TABLE t (x BLOB)')
+c.executemany('INSERT INTO t VALUES (randomblob(4000))', [()] * 2000)
+c.commit()
+c.close()
+`,
+      path.join(home, 'state.db')
+    ],
+    { encoding: 'utf8' }
+  )
+
+  assert.equal(created.status, 0, created.stderr)
+
+  try {
+    for (const clone of ['0', '1']) {
+      process.env.HERMES_PREFLIGHT_CLONE = clone
+      const events: StateDbBackupProgress[] = []
+      const logs: string[] = []
+
+      await preflightStateDb({
+        python,
+        script,
+        home,
+        log: (message: string): void => {
+          logs.push(message)
+        },
+        onProgress: (event: StateDbBackupProgress): void => {
+          events.push(event)
+        }
+      })
+
+      const progress = events.filter(
+        (event: StateDbBackupProgress): event is Extract<StateDbBackupProgress, { kind: 'progress' }> =>
+          event.kind === 'progress'
+      )
+
+      const last = progress.at(-1)!
+      assert.ok(last.totalBytes > 0 && last.doneBytes === last.totalBytes, JSON.stringify(events))
+      // No progress JSON reaches the log; the final result line still does.
+      assert.ok(!logs.some((line: string): boolean => line.includes('"backup_progress"')), logs.join('\n'))
+      assert.ok(
+        logs.some((line: string): boolean => line.includes('"path"')),
+        logs.join('\n')
+      )
+
+      if (clone === '0') {
+        assert.equal(last.method, 'copy')
+        assert.deepEqual(events.at(-1), { kind: 'check' })
+      } else if (process.platform === 'darwin') {
+        // APFS clones: one instant 100% line and no whole-database check.
+        assert.deepEqual(events, [
+          { kind: 'progress', doneBytes: last.totalBytes, totalBytes: last.totalBytes, method: 'clone' }
+        ])
+      }
+    }
+  } finally {
+    if (previous === undefined) {
+      delete process.env.HERMES_PREFLIGHT_CLONE
+    } else {
+      process.env.HERMES_PREFLIGHT_CLONE = previous
+    }
+
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a failing snapshot names its stderr in the error, without progress lines', async (): Promise<void> => {
+  const home: string = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-fail-'))
+  const script = path.join(home, 'snapshot.py')
+  fs.writeFileSync(
+    script,
+    `import sys
+sys.stderr.write('{"event": "backup_progress", "done_bytes": 1, "total_bytes": 2, "method": "copy"}\\n')
+sys.stderr.write('RuntimeError: disk full\\n')
+sys.exit(1)
+`
+  )
+  const events: StateDbBackupProgress[] = []
+
+  try {
+    await assert.rejects(
+      preflightStateDb({
+        python: process.env.HERMES_PYTHON || 'python3',
+        script,
+        home,
+        log: (): void => {},
+        onProgress: (event: StateDbBackupProgress): void => {
+          events.push(event)
+        }
+      }),
+      (error: Error): boolean =>
+        /pre-flight failed/.test(error.message) &&
+        /disk full/.test(error.message) &&
+        !error.message.includes('backup_progress')
+    )
+    assert.deepEqual(events, [{ kind: 'progress', doneBytes: 1, totalBytes: 2, method: 'copy' }])
+  } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
