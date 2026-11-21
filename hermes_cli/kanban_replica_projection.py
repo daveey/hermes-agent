@@ -54,8 +54,10 @@ def linked_sessions(task: dict[str, Any], me: str, origin_profile: str) -> tuple
 
 def historical_fields(raw: dict[str, Any], tkey: tuple) -> dict[str, Any]:
     from hermes_cli.kanban_completion_receipt_projection import remote_fields
+    from hermes_cli.kanban_terminal_release_snapshot import observation
     gw, owner_profile, board, tid = tkey
-    return remote_fields(raw, gateway=gw, profile=owner_profile, board=board, task_id=tid)
+    return {**remote_fields(raw, gateway=gw, profile=owner_profile, board=board, task_id=tid),
+            **observation(raw, tkey)}
 
 
 def card_rows(tkey: tuple, t: dict[str, Any], *, sids, closed: bool, synced, stale: bool, me: str,

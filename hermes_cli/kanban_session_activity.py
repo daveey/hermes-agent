@@ -1105,6 +1105,8 @@ def _legacy_remote_links() -> list[dict[str, Any]]:
             return []
         _log.warning("hermes-hub replica read failed, keeping last known remote cards (stale): %s", exc)
         return reconcile_carry([{**c, "stale": True} for c in previous])
+    from hermes_cli.kanban_terminal_release_snapshot import preserve
+    cards = preserve(cards, previous)
     # A folded legacy alias (``legacy_key``) is present under its qualified key: its last-known
     # unqualified row must not be resurrected as a stale obligation.
     present = {(c["session"], k) for c in cards for k in (c["key"], c.get("legacy_key")) if k}
