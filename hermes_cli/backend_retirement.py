@@ -281,7 +281,7 @@ def start_update_pause_watcher(hold):
 
 def watch_update_pause(hold, *, poll_s=None, grace_s=None):
     """Poll ``hold.root``'s pause request until the review ends; stop the review once the request has stood
-    ``grace_s``. A request that lapses resets the grace. Runs on its own daemon thread (``begin_background_review``)."""
+    ``grace_s``. A request that lapses resets the grace. Runs on its own low-level thread (``start_update_pause_watcher``, from the review thread)."""
     from hermes_cli.admission_fence import pause_requested
 
     poll_s = _REVIEW_PAUSE_POLL_S if poll_s is None else poll_s
