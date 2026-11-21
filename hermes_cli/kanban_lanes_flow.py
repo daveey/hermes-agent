@@ -290,8 +290,12 @@ def _pr_urls(conn, rows) -> list:
     return out
 
 
-def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None) -> dict:
-    """Cards still open, plus per-lane window throughput and today's cap usage."""
+def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None, reader=None) -> dict:
+    """Cards still open, plus per-lane window throughput and today's cap usage.
+
+    Dashboards may inject a nonblocking published PR reader (prefetch/get). The CLI
+    default still takes fresh, bounded network observations for every report.
+    """
     if window not in WINDOWS:
         raise ValueError(f"window must be one of {', '.join(WINDOWS)}")
     now = time.time() if now is None else now
@@ -302,8 +306,9 @@ def snapshot(conn, *, window: str = "6h", now: Optional[float] = None, pol=None)
     usage = lanes.usage(conn, pol, window_s=window_s, now=now)
     rows = conn.execute(
         f"SELECT * FROM tasks WHERE status IN {_OPEN} ORDER BY created_at, id").fetchall()
-    from hermes_cli.kanban_lanes_flow_pr import Reader
-    reader = Reader()
+    if reader is None:
+        from hermes_cli.kanban_lanes_flow_pr import Reader
+        reader = Reader()
     reader.prefetch(_pr_urls(conn, rows))
     cards = []
     for row in rows:

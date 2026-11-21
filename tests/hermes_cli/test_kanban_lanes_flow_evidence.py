@@ -60,6 +60,30 @@ def test_report_uses_pr_observation(conn, configured, monkeypatch, observation, 
     assert card(conn, tid)["step"] == step
 
 
+def test_injected_reader_avoids_network_and_preserves_classification(conn, configured, monkeypatch):
+    tid = base._ready_in(conn, "babybear", "observed landing")
+    kb._append_event(conn, tid, "review_requested", {"metadata": {"pr": URL}})
+    kb._append_event(conn, tid, "changes_requested", {})
+    conn.commit()
+    seen = []
+
+    class Published:
+        def prefetch(self, urls):
+            seen.extend(urls)
+
+        def get(self, url):
+            assert url == URL
+            return {"merged": False, "approved": True, "checks": "green"}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("injected snapshot constructed a network Reader")
+
+    monkeypatch.setattr(prs, "Reader", forbidden)
+    snapshot = flow.snapshot(conn, reader=Published())
+    assert URL in seen
+    assert next(c for c in snapshot["cards"] if c["id"] == tid)["step"] == "merge"
+
+
 def test_live_verification_requires_explicit_deploy_readback(conn, configured):
     tid = base._ready_in(conn, "babybear", "verify")
     conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (tid,))
