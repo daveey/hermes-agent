@@ -13,8 +13,11 @@ unless the discovered owner proves both:
 
 * it advertises ``CAPABILITY`` in its control identity (only a core carrying the capsule gates publishes
   it), and
-* its ``code_sha`` equals this submitter's own code identity: the dispatcher pinned the submitter's core,
-  and the owner must run that same core.
+* its ``code_sha`` equals this submitter's own code identity, OR it names a strict
+  full revision and advertises the reviewed ``CONTRACT_CAPABILITY``. The latter
+  contract requires the owner and its managed child to enforce clean boot/disk
+  identity and installed provenance at each capsule startup boundary. Legacy owners
+  remain exact-revision only; an unknown submitter identity is always refused.
 
 Ordinary cards (no ``host_repo`` need, or an assignee whose own policy grants ``host_repo``) are not
 affected. The requirement is derived from the board row exactly as the owner derives it; an unreadable
@@ -29,6 +32,9 @@ from pathlib import Path
 from hermes_cli.gateway_client import GatewayUnavailableError
 
 CAPABILITY = 'kanban-capsule-transport-v1'
+# Owners advertise this only with launch-time code-identity enforcement. A legacy
+# owner remains usable only by its own exact-revision submitter.
+CONTRACT_CAPABILITY = 'kanban-capsule-contract-v2'
 REFUSED = 'kanban_capsule_owner_unsupported'
 
 
@@ -75,6 +81,10 @@ def owner_check(required: bool):
         if expected is None:
             raise CapsuleOwnerRefused('submitter code identity unknown')
         actual = getattr(endpoint, 'code_sha', None)
+        if (isinstance(actual, str) and len(actual) == 40
+                and all(ch in '0123456789abcdef' for ch in actual)
+                and CONTRACT_CAPABILITY in capabilities):
+            return
         if actual != expected:
             raise CapsuleOwnerRefused(f'owner code {str(actual)[:12] or "unknown"} != submitter {expected[:12]}')
     return check

@@ -171,6 +171,23 @@ def required(tmp_path, monkeypatch):
     policy = _policy(tmp_path, monkeypatch, local=False)
     assert json.loads(policy.kanban_json)['capsule']['required'] is True
     monkeypatch.setattr('gateway.session_kanban_scope.resolve_run_scope', lambda p: None)
+    # Exercise the production prelaunch check against an actually clean boot tree.
+    from hermes_cli import git_fingerprint
+    core = tmp_path / 'owner-core'
+    core.mkdir()
+    subprocess.run(['git', 'init', '-q', str(core)], check=True)
+    (core / 'owner.py').write_text('VALUE = 1\n')
+    subprocess.run(['git', '-C', str(core), 'add', '.'], check=True)
+    subprocess.run(['git', '-C', str(core), '-c', 'user.name=Fixture',
+                    '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'owner'], check=True)
+    git_fingerprint.record_process_boot_fingerprint(core)
+    git_fingerprint.record_capsule_boot_identity(core)
+    monkeypatch.setattr('gateway.capsule_contract.CORE_ROOT', core)
+    # This fixture proves rendezvous, not native owner bootstrap provenance.
+    # Keep the real disk check; scope the installed-ledger boundary explicitly.
+    monkeypatch.setattr('hermes_cli.code_attestation.integrity_observation', lambda: {
+        'core_root': str(core), 'boot_sha': git_fingerprint.capsule_code_sha(core),
+        'route': 'managed-stub', 'unknowns': ()})
     return policy
 
 
@@ -227,6 +244,86 @@ def _gone(process):
     return process.returncode is not None
 
 
+def test_owner_prehello_error_records_loss_and_consumed_rendezvous(required, acceptors, monkeypatch):
+    """Real owner execute + rendezvous; tiny child supplies the native refusal frame.
+
+    Native unmodified child refusal is independently covered in its subprocess suite.
+    A separate real submitter stand-in exits after loss; native dispatch then books
+    the attempt crashed. This is not a full submitter/private-observer E2E.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from gateway import session_managed_worker as managed
+    from gateway.session_contract import SessionRef
+    from hermes_state_runtime import RuntimeStoreError
+    from hermes_cli.kanban_db_connect import connect_closing
+    acceptor = _acceptor(acceptors, required)
+    context = json.loads(required.kanban_json)
+    original = subprocess.Popen
+    spawned = []
+    class RefusingChild(original):
+        def __init__(self, argv, **kwargs):
+            managed_child = len(argv) > 3 and argv[1:3] == ['-I', '-c']
+            if managed_child:
+                argv = [sys.executable, '-c',
+                    'import sys;print(\'{"type":"error","reason":"managed_worker_failed"}\',flush=True);sys.stdin.read()']
+            super().__init__(argv, **kwargs)
+            if managed_child:
+                spawned.append(self)
+    monkeypatch.setattr(managed.subprocess, 'Popen', RefusingChild)
+    monkeypatch.setattr(managed, '_worker_env', lambda authority: None)
+    monkeypatch.setattr('gateway.session_managed_worker_log.worker_log_path', lambda profile: None)
+    authority = SimpleNamespace(profile_id='fixture', pending_results={}, waiters={},
+        adopt_agent=lambda *args: None, _require_admission_open=lambda: None)
+    row = {'admission_id': 'adm', 'principal_id': 'owner', 'generation': 1, 'payload': {'text': 'go'}}
+    async def scenario():
+        with pytest.raises(RuntimeStoreError):
+            await managed.execute_managed(authority, SessionRef('fixture', 's'), row, required)
+        tasks = list(getattr(authority, '_mutation_tasks', ()))
+        if tasks:
+            await asyncio.gather(*tasks)
+    # A real stand-in submitter has its own native spawn receipt; the claim
+    # fixture alone has no submitted process, so no death can be inferred from it.
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from pathlib import Path
+    submitter = original(['/usr/bin/cat'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    try:
+        with connect_closing(db_path=Path(context['db'])) as conn:
+            dispatch._set_worker_pid(conn, context['task_id'], submitter.pid,
+                                     run_id=context['run_id'], claim_lock=context['claim_lock'])
+        asyncio.run(scenario())
+    finally:
+        submitter.stdin.close()
+        submitter.wait(timeout=5)
+    assert authority._managed_workers == {} and authority._managed_spawning == {}
+    assert authority.pending_results == {}  # no successful/interrupt outcome fabricated
+    assert len(spawned) == 1 and spawned[0].poll() is not None
+    assert spawned[0].stdin.closed and spawned[0].stdout.closed
+    assert (acceptor.dir / f"{context['run_id']}.consumed").exists()
+    from gateway.session_kanban_capsule import _live_transport_ready
+    assert _live_transport_ready(context) is False  # consumed once, never reusable
+    with connect_closing(db_path=Path(context['db'])) as conn:
+        events = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='worker_lost'",
+                              (context['task_id'],)).fetchall()
+    assert len(events) == 1
+    assert json.loads(events[0][0])['bound'] is False
+    # Replay the real dispatcher, not a hand-written terminal row. A prehello
+    # refusal is a failed attempt and must never be mistaken for successful work.
+    monkeypatch.setenv('HERMES_KANBAN_CRASH_GRACE_SECONDS', '0')
+    with connect_closing(db_path=Path(context['db'])) as conn:
+        result = dispatch.dispatch_once(conn, max_spawn=0, stale_timeout_seconds=0, failure_limit=2,
+                                        dispatcher_id=TEST_DISPATCH_OWNER)
+        assert not result.skipped_owned, result
+        run = conn.execute('SELECT status,outcome,error FROM task_runs WHERE id=?',
+                           (context['run_id'],)).fetchone()
+        task = conn.execute('SELECT status,current_run_id,consecutive_failures FROM tasks WHERE id=?',
+                            (context['task_id'],)).fetchone()
+    assert run['status'] == 'crashed' and run['outcome'] == 'crashed'
+    assert 'managed worker lost:' in run['error']
+    assert task['status'] == 'ready' and task['current_run_id'] is None
+    assert task['consecutive_failures'] == 1
+
+
 def test_authenticated_listener_receives_fd_and_child_gets_start(required, acceptors):
     acceptor = _acceptor(acceptors, required)
     recorder, run = _spawn(required)
@@ -248,12 +345,16 @@ def test_authenticated_listener_receives_fd_and_child_gets_start(required, accep
     assert acceptor.hellos[-1]['op'] == 'attach'
     assert acceptor.hellos[-1]['owner_pid'] == os.getpid()
     [(args, kwargs)] = recorder.calls
-    assert args[0][:2] == [sys.executable, '-c'] and args[0][-2] == '--observation-fd'
-    assert kwargs['pass_fds'] == (int(args[0][-1]),)
+    from gateway.capsule_contract import CORE_ROOT, WORKER_FLAG
+    from hermes_cli.git_fingerprint import capsule_code_sha
+    assert args[0][:2] == [sys.executable, '-c']
+    assert args[0][-4] == '--observation-fd'
+    assert args[0][-2:] == [WORKER_FLAG, capsule_code_sha(CORE_ROOT)]
+    assert kwargs['pass_fds'] == (int(args[0][-3]),)
     # The owner keeps no copy of either end once brokered. Compare socket identities, not fd numbers:
     # the freed child-end number is reused by the next allocation in this process (the acceptor's
     # recv_fds, any other thread), which made a number-based check flaky.
-    child_end = recorder.passed[int(args[0][-1])]
+    child_end = recorder.passed[int(args[0][-3])]
     [channel] = acceptor.fds
     parent_end = _socket_link(channel.fileno())
     links = _open_links()

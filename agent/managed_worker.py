@@ -329,6 +329,8 @@ def tool_frame(call_id, name, args, *result):
 
 
 def execute(frame, channel):
+    from gateway.capsule_contract import check_worker_identity
+    check_worker_identity()
     # The owner RPC below imports gateway/config modules (hermes_cli.config, providers,
     # hermes_cli.plugins) transitively; the policy must already be frozen when they load.
     bind_worker_policy(frame)
@@ -344,42 +346,38 @@ def execute(frame, channel):
     if adopted['owner_epoch'] != scope['epoch']:
         raise RuntimeError('stale_epoch')
     store = RuntimeSessionStore(rpc, scope, outbox_dir(frame['home'], scope['execution_id']), adopted)
-    from gateway.session_kanban import bind_worker_context
-    origin_custody = bind_worker_context(frame)
-    # [daveey] Capsule-required cards: bind the owner-brokered capsule now, before checkpoint recovery,
-    # hooks, MCP and AIAgent import any tool (no-op without an owner-installed channel; raises otherwise).
     from agent.observation_bind import observation_bind, observation_finish, observation_revoke
-    observation_bind(frame)
-    # Background processes a previous admission of this session started outlive that worker
-    # (F24); adopt them so process_manage in this turn can poll and kill them. Only this session's:
-    # another chat's orphan (a Desktop job whose backend just rolled over) would finish in this
-    # per-turn process, whose completion queue nobody reads, and its notice was lost. So a managed
-    # worker no longer adopts keyless orphans or orphans of other worker routes either. A keyed
-    # orphan waits for a later run of its own route or for its owner's keeper (gateway keeper for
-    # messaging keys, Desktop/TUI keeper for Desktop session ids). A keyless one waits for a gateway
-    # restart only: the Desktop keeper never takes keyless entries (owner_accepts), so a host with
-    # no gateway never re-adopts it. [daveey]
-    from tools.process_registry import process_registry
-    process_registry.recover_from_checkpoint(session_keys=(frame['route'], scope['session_id']))
-    # Store construction binds the delegation ledger before tool discovery.
-    from gateway.session_policy import restore_policy, policy_scope, register_worker_hooks, surface_label
-    policy = restore_policy(frame['policy'])
-    register_worker_hooks(policy)
-    discover_profile_mcp(policy)
-    from run_agent import AIAgent
     from tools.approval import register_gateway_notify, unregister_gateway_notify
-    from tools.approval_context import set_current_session_key
-    set_current_session_key(frame['route'])
-    os.environ['HERMES_GATEWAY_SESSION'] = '1'
-    from gateway.session_worker_construct import checkpoint_agent_kwargs, construct_kwargs, routing_agent_kwargs
-    construct = {'ephemeral_system_prompt': policy.skills_prompt, **construct_kwargs(frame)}
-    controls = WorkerControls(channel, frame['route'])
-    register_gateway_notify(frame['route'], controls.approval)
     agent = None
     completed = False
     try:
+        from gateway.session_kanban import bind_worker_context
+        origin_custody = bind_worker_context(frame)
+        # [daveey] Capsule-required cards: bind before checkpoint recovery, hooks, MCP and tools.
+        # Cleanup also covers startup failures after adoption, not only constructed agents.
+        check_worker_identity()
+        observation_bind(frame)
+        # Adopt only this session's surviving processes; unrelated or keyless orphans stay
+        # with their gateway/route keeper, just as in the in-process turn path.
+        from tools.process_registry import process_registry
+        process_registry.recover_from_checkpoint(session_keys=(frame['route'], scope['session_id']))
+        check_worker_identity()
+        # Store construction binds the delegation ledger before tool discovery.
+        from gateway.session_policy import restore_policy, policy_scope, register_worker_hooks, surface_label
+        policy = restore_policy(frame['policy'])
+        register_worker_hooks(policy)
+        discover_profile_mcp(policy)
+        from run_agent import AIAgent
+        from tools.approval_context import set_current_session_key
+        set_current_session_key(frame['route'])
+        os.environ['HERMES_GATEWAY_SESSION'] = '1'
+        from gateway.session_worker_construct import checkpoint_agent_kwargs, construct_kwargs, routing_agent_kwargs
+        construct = {'ephemeral_system_prompt': policy.skills_prompt, **construct_kwargs(frame)}
+        controls = WorkerControls(channel, frame['route'])
+        register_gateway_notify(frame['route'], controls.approval)
         from hermes_cli.kanban_fairness_activation import serving
         with policy_scope(policy, home=frame['home']), serving(home=frame['home']):
+            check_worker_identity()
             agent = _construct_agent(frame, AIAgent, policy, model=policy.model, provider=policy.provider, base_url=policy.base_url,
                 api_key=frame['api_key'], session_db=store, session_id=scope['session_id'],
                 # delegate_task stays offered: each child is reserved by the owner under this
@@ -409,6 +407,7 @@ def execute(frame, channel):
             if controls.stopped.is_set():
                 from agent.interrupt_compat import request_hard_interrupt
                 request_hard_interrupt(agent)
+            check_worker_identity()
             channel.send('ready', pid=os.getpid())
             history = store.get_messages_as_conversation(scope['session_id'])
             from gateway.session_kanban import run_worker_turns
@@ -423,6 +422,7 @@ def execute(frame, channel):
             before = (getattr(agent, 'session_prompt_tokens', 0) or 0,
                       getattr(agent, 'session_completion_tokens', 0) or 0)
             # Most failed results name no provider or model; the owner's error card needs the agent's.
+            check_worker_identity()
             result = {'provider': getattr(agent, 'provider', None), 'model': getattr(agent, 'model', None),
                       **run_worker_turns(agent, frame, history)}
             result['_turn_input_tokens'] = max(0, (getattr(agent, 'session_prompt_tokens', 0) or 0) - before[0])
@@ -502,7 +502,8 @@ def main():
     try:
         # [daveey] The owner-only ``--observation-fd`` flag (capsule cards); any other argv is refused.
         from agent.observation_bind import install_from_argv
-        install_from_argv(sys.argv[1:])
+        from gateway.capsule_contract import install_worker_contract
+        install_from_argv(install_worker_contract(sys.argv[1:]))
         channel.send('hello', **hello())
         frame = validate_bootstrap(read_frame(sys.stdin.buffer))
         execute(frame, channel)

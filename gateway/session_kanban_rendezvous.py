@@ -369,7 +369,7 @@ def attach(context: dict) -> Rendezvous:
     return Rendezvous(ident, sock, reg)
 
 
-def observing_spawn(spawn, rendezvous):
+def observing_spawn(spawn, rendezvous, *, owner_sha=None):
     """``spawn`` that hands the child its end of a fresh socketpair (``pass_fds`` + argv flag).
 
     ``rendezvous`` None (ordinary card) returns ``spawn`` itself: the launch is byte-identical. The owner's
@@ -380,6 +380,9 @@ def observing_spawn(spawn, rendezvous):
 
     def run(argv, *args, **kwargs):
         child_end, argv, kwargs = rendezvous.prepare(argv, kwargs)
+        if owner_sha is not None:
+            from gateway.capsule_contract import WORKER_FLAG
+            argv = [*argv, WORKER_FLAG, owner_sha]
         try:
             return spawn(argv, *args, **kwargs)
         except BaseException:

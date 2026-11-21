@@ -746,12 +746,15 @@ def publish_gateway_runtime_ready(runner):
         raise RuntimeError('gateway stopped before session API readiness')
     # [daveey] kanban-capsule-transport-v1: this core holds the capsule owner gates
     # (gateway.session_kanban_capsule); a capsule card's submitter refuses any owner without it.
-    from hermes_cli.kanban_capsule_owner import CAPABILITY as _CAPSULE_CAPABILITY
+    from hermes_cli.kanban_capsule_owner import CAPABILITY as _CAPSULE_CAPABILITY, CONTRACT_CAPABILITY
+    # v2 names the implemented behavioral ABI, not permission by itself. Identify
+    # filters it through the installed ledger/clean boot checks on every read;
+    # placement and the fresh child independently repeat uncached checks.
     # [daveey] turn-end-request-v1: this core's turns honour another window's Stop (agent/turn_end_request.py).
     from agent.turn_end_request import CAPABILITY as _TURN_END_CAPABILITY
     descriptor.update(state='ready', capabilities=[
         'session-authority-v1', 'durable-admission-v1', 'event-replay-v1', _CAPSULE_CAPABILITY,
-        _TURN_END_CAPABILITY])
+        CONTRACT_CAPABILITY, _TURN_END_CAPABILITY])
     from gateway.session_hosted_service import start_ready_hosted_services
     start_ready_hosted_services(runner)
 

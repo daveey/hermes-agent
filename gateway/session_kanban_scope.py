@@ -138,7 +138,8 @@ def placing_spawn(spawn, policy):
         # [daveey] run27: a missing transport refuses first (non-consuming probe), then the run scope is
         # resolved, and only then is the single-use rendezvous consumed, so a scope failure (stale claim,
         # scope not ready) refuses without burning the run.
-        check_capsule_transport(policy)
+        from gateway.capsule_contract import owner_launch_sha
+        owner_sha = owner_launch_sha(check_capsule_transport(policy))
         target = resolve_run_scope(policy)  # validated before anything is spawned or consumed
         from hermes_cli.worker_compute_capacity import managed_target, lower_priority
         compute = managed_target(policy, target)
@@ -148,7 +149,7 @@ def placing_spawn(spawn, policy):
             kwargs['env'] = env
         rendezvous = attach_capsule_transport(policy)
         try:
-            process = observing_spawn(spawn, rendezvous)(*args, **kwargs)
+            process = observing_spawn(spawn, rendezvous, owner_sha=owner_sha)(*args, **kwargs)
         except BaseException:
             if rendezvous is not None:
                 rendezvous.close()

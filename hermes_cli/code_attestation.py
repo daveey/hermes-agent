@@ -41,7 +41,8 @@ ROUTE_MANAGED_STUB = "managed-stub"
 ROUTE_CONSOLE = "console-main-first"
 # A ``venv_sync.relaunch_command`` child of the managed stub (the MacBook gateway).
 ROUTE_MANAGED_STUB_RELAUNCH = "managed-stub-relaunch"
-STUB_ROUTES = (ROUTE_MANAGED_STUB, ROUTE_MANAGED_STUB_RELAUNCH)
+ROUTE_MANAGED_WORKER_STUB = "managed-worker-stub"
+STUB_ROUTES = (ROUTE_MANAGED_STUB, ROUTE_MANAGED_STUB_RELAUNCH, ROUTE_MANAGED_WORKER_STUB)
 # Seed for the relaunch route ONLY: the stdlib modules its prefix imports before the hook.
 RELAUNCH_PREFIX_MODULES = ("runpy", "importlib.util", "pathlib")
 # Reviewed launcher-head digests (sha256 of the script before the pin marker with the
@@ -390,17 +391,19 @@ def _detect_route(core_root, template, own_file):
     script = orig[3]
     if argv[:1] != ["-c"] or argv[1:] != orig[4:]:
         raise _Refuse("unsupported-route:argv-mismatch")
-    head, tail, head_digest, current_digest = _check_stub_script(core_root, template, script, argv)
+    head, tail, head_digest, current_digest = _check_stub_script(core_root, template, script, argv, allow_worker=True)
     if "hermes_cli.main" in sys.modules:
         raise _Refuse("unexpected-prehook:hermes_cli.main")
     frame = _verify_frame_chain(core_root, own_file, script, head)
-    return {"route": ROUTE_MANAGED_STUB, "stub_head_digest": head_digest,
+    worker = script == template.render(str(core_root), "agent.managed_worker", "main")
+    return {"route": ROUTE_MANAGED_WORKER_STUB if worker else ROUTE_MANAGED_STUB,
+            "stub_head_digest": head_digest,
             "head_sha256": head_digest, "tail_sha256": _sha(tail.encode()),
             "script_sha256": _sha(script.encode()), "launcher_argv0": orig[0],
             "current_template_head_digest": current_digest, "code": frame.f_code}
 
 
-def _check_stub_script(core_root, template, script, argv):
+def _check_stub_script(core_root, template, script, argv, *, allow_worker=False):
     """The managed stub script's identity, shared unchanged by both stub routes: argv
     refusals, pin marker, byte-exact tail, root literal, reviewed head digest."""
     if argv[1:2] == ["--run-module"]:
@@ -417,7 +420,10 @@ def _check_stub_script(core_root, template, script, argv):
     head, tail = parts
     current_digest, template_tail = _template_parts(template)
     if tail != template_tail:
-        raise _Refuse("unsupported-route:stub-tail")
+        # Only this entire current fixed worker script is admitted, not an
+        # arbitrary module tail or a worker variant of a historical launcher.
+        if not allow_worker or script != template.render(str(core_root), "agent.managed_worker", "main"):
+            raise _Refuse("unsupported-route:stub-tail")
     root = str(core_root)
     if repr(root) not in head:
         raise _Refuse("unsupported-stub-root")
@@ -1413,6 +1419,18 @@ class Attestation:
             self._inventory_modules()
             return tuple(sorted(self._unknown))
 
+    def integrity_observation(self):
+        """One locked inventory with its process-bound identity and unfiltered unknowns.
+
+        Consumers must reject pending/unsupported provenance, not manufacture a
+        ledger after startup or filter observational unknowns into permission.
+        """
+        with self._lock:
+            self._inventory_modules()
+            return {"core_root": str(self.core_root), "boot_sha": self.boot_sha,
+                    "route": self.route, "generation": self._generation,
+                    "unknowns": tuple(sorted(self._unknown))}
+
     def latched_unknowns(self):
         """The latched unknowns without a module inventory (cheap: polled while measuring)."""
         with self._lock:
@@ -1478,6 +1496,11 @@ def register_dependency_environment(site_dir):
     if _installed is None:
         return False
     return _installed.register_dependency_environment(site_dir)
+
+
+def integrity_observation():
+    """Observe only the ledger installed at bootstrap; missing installation refuses."""
+    return _ledger().integrity_observation()
 
 
 def unknowns():

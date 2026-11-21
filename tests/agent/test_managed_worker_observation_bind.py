@@ -195,7 +195,10 @@ def _kanban_frame(tmp_path, monkeypatch, context):
     return frame
 
 
-def _execute(tmp_path, monkeypatch, events, context, *, start=None, agent_error=None):
+def _execute(tmp_path, monkeypatch, events, context, *, start=None, agent_error=None, recovery_error=None):
+    # In-process observer unit fixture: argv/identity are proved by native lifecycle tests.
+    monkeypatch.setattr('gateway.capsule_contract._worker_expected_sha', 'unit-owner')
+    monkeypatch.setattr('gateway.capsule_contract._verified_sha', lambda **kwargs: 'unit-owner')
     from agent import managed_worker as worker
     from agent import observation_bind as ob
 
@@ -245,8 +248,11 @@ def _execute(tmp_path, monkeypatch, events, context, *, start=None, agent_error=
     monkeypatch.setattr('gateway.session_policy.register_worker_hooks', lambda policy: events.append('hooks'))
     monkeypatch.setattr('agent.runtime_session_store.WorkerRPC', RPC)
     monkeypatch.setattr('agent.runtime_session_store.RuntimeSessionStore', Store)
-    monkeypatch.setattr('tools.process_registry.process_registry.recover_from_checkpoint',
-                        lambda **_k: events.append('recover'))
+    def recover(**kwargs):
+        events.append('recover')
+        if recovery_error is not None:
+            raise recovery_error
+    monkeypatch.setattr('tools.process_registry.process_registry.recover_from_checkpoint', recover)
     monkeypatch.setattr('run_agent.AIAgent', Agent)
     monkeypatch.setattr('tools.capsule_workspace.bind_worker_workspace', bind_workspace)
     # In-process the socketpair's creator is this pid, not an ancestor; the real ancestry check is
@@ -276,12 +282,24 @@ def test_execute_binds_workspace_after_context_before_recovery_hooks_and_mcp(tmp
     assert 'revoke' in names[names.index('agent'):]  # revoked in execute's finally
 
 
+def test_execute_checkpoint_failure_revokes_and_closes_before_discovery(tmp_path, monkeypatch):
+    context = _context(tmp_path)
+    events = []
+    with pytest.raises(RuntimeError, match='checkpoint_failed'):
+        _execute(tmp_path, monkeypatch, events, context, start=_start(context),
+                 recovery_error=RuntimeError('checkpoint_failed'))
+    names = [e[0] if isinstance(e, tuple) else e for e in events]
+    # Observer failure-finalization and unconditional revocation both tombstone
+    # the idempotent binding; neither may bypass store/RPC cleanup.
+    assert names == ['bind_context', 'bind_workspace', 'recover', 'revoke', 'revoke', 'store.close', 'rpc.close']
+
+
 def test_execute_start_never_arrives_raises_before_tool_discovery(tmp_path, monkeypatch):
     context = _context(tmp_path)
     events = []
     with pytest.raises(RuntimeError, match='capsule_observation_start_missing'):
         _execute(tmp_path, monkeypatch, events, context, start=None)
-    assert events == ['bind_context']
+    assert events == ['bind_context', 'store.close', 'rpc.close']
 
 
 def test_execute_malformed_start_raises_before_tool_discovery(tmp_path, monkeypatch):
@@ -289,7 +307,7 @@ def test_execute_malformed_start_raises_before_tool_discovery(tmp_path, monkeypa
     events = []
     with pytest.raises(RuntimeError, match='capsule_observation_start_malformed'):
         _execute(tmp_path, monkeypatch, events, context, start=b'{"v":1}\n')
-    assert events == ['bind_context']
+    assert events == ['bind_context', 'store.close', 'rpc.close']
 
 
 def test_main_refuses_bad_observation_argv_before_hello():

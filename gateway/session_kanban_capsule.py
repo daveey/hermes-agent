@@ -98,7 +98,7 @@ def require_capsule_transport(policy) -> None:
         raise RuntimeStoreError(MISSING)
 
 
-def check_capsule_transport(policy) -> None:
+def check_capsule_transport(policy) -> bool | None:
     """Launch preflight: ``capsule_observation_missing`` (cause: the precise rendezvous refusal) unless a required
     card's rendezvous is live for this attempt. Never consumes; ordinary cards return unchanged."""
     context = _required_context(policy)
@@ -109,6 +109,7 @@ def check_capsule_transport(policy) -> None:
         check(context)
     except RendezvousError as exc:
         raise RuntimeStoreError(MISSING) from exc
+    return True
 
 
 def attach_capsule_transport(policy):

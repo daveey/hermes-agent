@@ -473,7 +473,10 @@ def in_process(tmp_path, monkeypatch):
     sys.modules.update(saved)
 
 
-def _execute(tmp_path, monkeypatch, events, *, fail):
+def _execute(tmp_path, monkeypatch, events, *, fail, setup=None):
+    # In-process observer unit fixture: argv/identity are proved by native lifecycle tests.
+    monkeypatch.setattr('gateway.capsule_contract._worker_expected_sha', 'unit-owner')
+    monkeypatch.setattr('gateway.capsule_contract._verified_sha', lambda **kwargs: 'unit-owner')
     from agent import managed_worker as worker
     from agent import observation_bind as ob
     from tests.gateway.test_managed_turn_contract import assignment
@@ -547,6 +550,8 @@ def _execute(tmp_path, monkeypatch, events, *, fail):
     ob.install_from_argv(['--observation-fd', str(child_end.detach())])
     real_finish = ob.observation_finish
     monkeypatch.setattr(ob, 'observation_finish', lambda ok: events.append(('finish', ok)) or real_finish(ok))
+    if setup is not None:
+        setup(worker, Store)
     try:
         worker.execute(frame, SimpleNamespace(send=lambda kind, **payload: events.append(kind)))
     finally:
@@ -559,6 +564,47 @@ def _execute(tmp_path, monkeypatch, events, *, fail):
             pass
         owner.close()
         events.append(('wire', [json.loads(x)['op'] for x in received.split(b'\n') if x]))
+
+
+@pytest.mark.parametrize('boundary', ['checkpoint', 'hooks', 'construct', 'history'])
+def test_execute_refuses_drift_at_each_late_boundary(tmp_path, monkeypatch, in_process, boundary):
+    """Distinct effects expose each late gate; earlier checks still see clean identity."""
+    events = []
+
+    def setup(worker, store):
+        def drift(*args, **kwargs):
+            events.append('drift')
+            monkeypatch.setattr('gateway.capsule_contract._verified_sha', lambda **kwargs: None)
+            return []
+        if boundary == 'checkpoint':
+            monkeypatch.setattr('tools.process_registry.process_registry.recover_from_checkpoint', drift)
+            monkeypatch.setattr('gateway.session_policy.register_worker_hooks', lambda policy: events.append('hooks'))
+        elif boundary == 'hooks':
+            monkeypatch.setattr('gateway.session_policy.register_worker_hooks', drift)
+        elif boundary == 'construct':
+            original = worker._construct_agent
+            def construct(*args, **kwargs):
+                result = original(*args, **kwargs)
+                drift()
+                return result
+            monkeypatch.setattr(worker, '_construct_agent', construct)
+        else:
+            monkeypatch.setattr(store, 'get_messages_as_conversation', drift)
+        monkeypatch.setattr('gateway.session_kanban.run_worker_turns',
+                            lambda *args: events.append('turns') or {'final_response': 'ok'})
+
+    with pytest.raises(RuntimeError, match='^capsule_worker_code_unverified$'):
+        _execute(tmp_path, monkeypatch, events, fail=False, setup=setup)
+    assert events.count('drift') == 1
+    assert 'hooks' not in events
+    assert 'turns' not in events
+    if boundary != 'history':
+        assert 'ready' not in events
+    if boundary in ('checkpoint', 'hooks'):
+        assert 'agent' not in events
+    assert 'store.close' in events and 'rpc.close' in events
+    assert ('finish', False) in events
+    assert events[-1] == ('wire', ['bound'])
 
 
 def test_execute_success_seals_before_revoke(tmp_path, monkeypatch, in_process):

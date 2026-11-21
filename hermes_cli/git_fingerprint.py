@@ -94,3 +94,69 @@ def record_process_boot_fingerprint(root) -> str | None:
 def process_boot_fingerprint(root) -> str | None:
     """The revision ``record_process_boot_fingerprint`` read at process start, else None."""
     return _process_boot.get(_key(root))
+
+
+# Capsule compatibility is stricter than the ordinary restart-ignore heuristic.
+# A missing/dirty initial observation is sticky for this process, never adopted late.
+_capsule_boot: dict[str, str | None] = {}
+
+
+def _capsule_clean_sha(root) -> str | None:
+    """Known, clean, quiescent Git revision, or unknown; no positive-result cache.
+
+    Bracket the bounded status read with HEAD reads. This is an operational update
+    fence, not protection against a same-uid attacker rewriting and restoring code.
+    """
+    import re
+    import subprocess
+    import threading
+
+    root = Path(_key(root))
+    before = read_git_revision_fingerprint(root)
+    sha = (before or '').rsplit(':', 1)[-1]
+    if re.fullmatch(r'[0-9a-f]{40}', sha) is None:
+        return None
+    try:
+        git_dir = root / '.git'
+        if git_dir.is_file():
+            text = git_dir.read_text(encoding='utf-8-sig').strip()
+            if not text.startswith('gitdir: '):
+                return None
+            git_dir = (root / text[len('gitdir: '):]).resolve()
+        if any((git_dir / name).exists() for name in (
+                'index.lock', 'HEAD.lock', 'MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD')):
+            return None
+        # Read at most one byte: any output means dirty. A timer bounds even a
+        # Git process which never closes stdout; no arbitrary status buffer.
+        with subprocess.Popen(
+                ['git', '-C', str(root), 'status', '--porcelain=v1', '-z', '--untracked-files=normal'],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env={'PATH': os.defpath, 'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_LAZY_FETCH': '1',
+                     'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull}) as process:
+            timer = threading.Timer(2, process.kill)
+            timer.start()
+            try:
+                dirty = process.stdout.read(1)
+                if dirty:
+                    process.kill()
+                code = process.wait(timeout=2)
+            finally:
+                timer.cancel()
+        return sha if not dirty and code == 0 and read_git_revision_fingerprint(root) == before else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def record_capsule_boot_identity(root) -> None:
+    """Bootstrap-only capture; repeated calls cannot repair an unknown/dirty boot."""
+    key = _key(root)
+    if key not in _capsule_boot:
+        fingerprint = process_boot_fingerprint(root)
+        sha = _capsule_clean_sha(root)
+        _capsule_boot[key] = sha if fingerprint and fingerprint.rsplit(':', 1)[-1] == sha else None
+
+
+def capsule_code_sha(root) -> str | None:
+    """Strict boot/disk identity for capsule launches; absence is not proof."""
+    boot = _capsule_boot.get(_key(root))
+    return boot if boot and _capsule_clean_sha(root) == boot else None
