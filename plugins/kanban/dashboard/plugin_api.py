@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_review_contract as _review_contract  # a dashboard "done" is never a worker run
+from hermes_cli import kanban_queue_position as kqp
 from hermes_cli import kanban_workflow
 from hermes_cli import loop_accounting as _la  # [daveey] per-route pass accounting
 from hermes_cli.web_read_coalescing import coalesced_read
@@ -394,7 +395,6 @@ def get_task(
         task = kanban_db.get_task(conn, task_id)
         if task is not None:
             out = _task_detail(conn, task, run_state_type, run_state_name)
-            from hermes_cli import kanban_queue_position as kqp
             out.update(kqp.detail_fields(conn, task, board))
             return {**out, "source": "live", "wait_observation": owner_proof(conn, task)}
         live_file = kbc._main_db_file(conn)
@@ -409,14 +409,6 @@ def get_task(
     raise HTTPException(status_code=404, detail=f"task {task_id} not found")
 
 
-def _ready_since(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
-    """When the card last became ready (ms, the Board's synced column); None on a board without it."""
-    if "ready_since" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
-        return None
-    row = conn.execute("SELECT ready_since FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    return row[0] if row else None
-
-
 def _task_detail(conn: sqlite3.Connection, task: kanban_db.Task, run_state_type: Optional[str],
                  run_state_name: Optional[str]) -> dict[str, Any]:
     """The GET /tasks/:id payload for ``task`` read from ``conn`` (the live file or the board replica)."""
@@ -425,7 +417,7 @@ def _task_detail(conn: sqlite3.Connection, task: kanban_db.Task, run_state_type:
     task_d = _task_dict(
         task, latest_summary=kanban_db.latest_summary(conn, task_id),
         current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id))
-    task_d["ready_since"] = _ready_since(conn, task_id)
+    task_d["ready_since"] = kqp.ready_since(conn, task_id)
     links = _links_for(conn, task_id)
     child_summaries = kanban_db.latest_summaries(conn, links["children"])
     children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))
@@ -435,6 +427,7 @@ def _task_detail(conn: sqlite3.Connection, task: kanban_db.Task, run_state_type:
     from hermes_cli.kanban_artifact_receipt import latest_receipt
     return {
         "task": task_d,
+        **kqp.fields(kqp.recorded_pacing(conn, task)),
         **latest_receipt(kanban_db.list_events(conn, task_id)),
         "comments": [asdict(c) for c in kanban_db.list_comments(conn, task_id)],
         "events": [asdict(e) for e in kanban_db.list_events(conn, task_id)],

@@ -205,6 +205,23 @@ def reroute_prefix(place: Optional[dict[str, Any]]) -> str:
     return f"{rerouted}; " if str(rerouted).startswith(NOTE_PREFIX) else f"next run rerouted: {rerouted}; "
 
 
+def recorded_pacing(conn: sqlite3.Connection, task) -> Optional[dict[str, Any]]:
+    """Recorded-only queue projection, safe on replicas: never probe local placement or live pools."""
+    from hermes_cli import kanban_dispatch_skip as skips
+    if task is None or task.status != "ready" or getattr(task, "claim_lock", None):
+        return None
+    skip = skips.latest(conn, task.id)
+    return {"lane": "llm_pacing", "skip": skip} if skip and skip.get("reason") in (skips.LLM_PACED, "llm_pacing") else None
+
+
+def ready_since(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    """The Board's synced ready timestamp (ms), absent on older schemas."""
+    if "ready_since" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+        return None
+    row = conn.execute("SELECT ready_since FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return row[0] if row else None
+
+
 def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:
     if task is None or task.status != "ready":
         return None
@@ -216,10 +233,6 @@ def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Op
     from hermes_cli.kanban_sync_quarantine import refusal as quarantine_refusal
     if held := quarantine_refusal(conn, task.id):  # the dispatcher drops it (drop_held): say why and how [daveey]
         return {"lane": "sync_quarantine", "reason": held}
-    from hermes_cli import kanban_dispatch_skip as skips
-    skip = skips.latest(conn, task.id)
-    if skip and skip.get("reason") in (skips.LLM_PACED, "llm_pacing"):
-        return {"lane": "llm_pacing", "skip": skip}
     guard = recorded_guard(conn, task.id)
     if guard:
         return {"lane": "respawn_guard", "reason": guard}
@@ -454,7 +467,10 @@ def pool_words(place: dict[str, Any], *, advice: bool = True) -> str:
 def read(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Optional[dict[str, Any]]:
     """:func:`position` for card reads (``kanban_show``, ``hermes kanban show``): advisory, never fails the read."""
     try:
-        return position(conn, task, board)
+        place = position(conn, task, board)
+        if place and place.get("lane") in ("leftover_claim", "sync_quarantine"):
+            return place
+        return recorded_pacing(conn, task) or place
     except Exception:  # health: allow BLE001 -- an advisory queue place must never fail the read
         _log.debug("kanban queue position: unavailable for %s", getattr(task, "id", None), exc_info=True)
         return None
