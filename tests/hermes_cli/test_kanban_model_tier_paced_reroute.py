@@ -189,7 +189,7 @@ def test_require_model_marker_is_refused_at_ingress_and_ignored_on_legacy_rows(b
 
 
 @pytest.mark.parametrize('peer', ['held', 'walled', 'live_wall'])
-def test_no_unheld_unwalled_peer_keeps_the_base_route(board, clock, monkeypatch, peer):
+def test_no_unheld_unwalled_peer_keeps_the_base_route(board, clock, monkeypatch, peer, all_assignees_spawnable):
     """Never onto another held or walled pool: with no free peer the governor holds the card as before."""
     _deep(monkeypatch)
     _pools(clock, openai_codex=('held', HELD_FAR), anthropic=('held', 600) if peer == 'held' else ('paced', None))
@@ -198,8 +198,16 @@ def test_no_unheld_unwalled_peer_keeps_the_base_route(board, clock, monkeypatch,
     elif peer == 'live_wall':
         monkeypatch.setattr(walls, 'live_quota_wall', lambda p, m: float(clock[0] + 3600) if p == 'anthropic' else None)
     with kbc.connect() as conn:
-        assert _route(conn, kb.create_task(conn, title='d', assignee='a')) == (*DEEP, 'default')
-        assert _route(conn, pin_tests._pinned_card(conn)) == (*DEEP, 'default')
+        tids = [kb.create_task(conn, title='d', assignee='a'), pin_tests._pinned_card(conn)]
+        from hermes_cli import kanban_db_dispatch as dispatch
+        launched = []
+        result = dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: launched.append(task.id))
+        assert launched == []
+        for tid in tids:
+            assert conn.execute('SELECT COUNT(*) FROM task_runs WHERE task_id=?', (tid,)).fetchone()[0] == 0
+            assert pin_tests._events(conn, tid, 'run_route') == []
+            assert kb.get_task(conn, tid).status == 'ready'
+        assert result.llm_paced or result.clock_held
 
 
 def test_pin_is_not_substituted_regardless_of_peer_credentials(board, clock, monkeypatch):

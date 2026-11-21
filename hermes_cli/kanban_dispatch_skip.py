@@ -260,15 +260,12 @@ def record_tick(conn: sqlite3.Connection, result: Any, *, dry_run: bool = False)
 
 
 def pinned_quota_hold(conn: sqlite3.Connection, task_id: str) -> Optional[tuple[str, str, float]]:
-    """``(model, provider, reset)`` when ``task_id`` has no run yet, an explicit concrete pin, that pin's
-    provider pool is quota-walled for the model right now, and no same-class reroute applies; else None.
+    """``(class, auto, reset)`` when every eligible class route is quota-walled.
 
-    Only a fresh card: once a run hit the wall its quota episode (``kanban_quota_episode``) decides. A fresh
-    card the in-class reroute can move (non-mandatory pin, far wall, a free peer: ``kanban_pin_reroute``,
-    which reads the same live wall for a fresh card) is left to the claim, which routes it to the peer.
-    Any other fresh pin would only spawn a worker into the wall."""
+    Legacy concrete selectors are historical evidence, never an admission gate.
+    Existing run quota episodes retain their own admission checks.
+    """
     from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_pin_reroute import fresh_live_wall, pin, pinned_route
     task = kb.get_task(conn, task_id)
     if task is not None:
         from hermes_cli.kanban_class_walls import class_wall_routes
@@ -281,18 +278,7 @@ def pinned_quota_hold(conn: sqlite3.Connection, task_id: str) -> Optional[tuple[
             routes, known = class_wall_routes(neutral, model, now=time.time())
             if known and not routes:
                 return model, provider or 'auto', min(known.values())
-    pinned = pin(task) if task is not None and getattr(task, "current_run_id", None) is None else None
-    if pinned is None or not (walls := fresh_live_wall(conn, task, pinned=pinned)):
-        return None
-    try:
-        from hermes_cli.kanban_model_tier import load_tier_config
-        if pinned_route(conn, task, lane="ready", now=time.time(), cfg=load_tier_config(), current=walls):
-            return None
-    except sqlite3.Error:
-        raise
-    except Exception:  # health: allow BLE001 -- like the quota episode, an unreadable policy holds, never guesses
-        _log.warning("kanban dispatch: pin reroute probe failed for %s; holding on the wall", task_id, exc_info=True)
-    return pinned[0], pinned[1], walls[pinned[1]]
+    return None
 
 
 def hold_pinned_quota(conn: sqlite3.Connection, task_id: str, result: Any, *, lane: str) -> bool:

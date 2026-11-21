@@ -57,11 +57,15 @@ def _tick(monkeypatch):
 ])
 def test_unroutable_class_tier_keeps_profile_model(board, monkeypatch, routing, providers, why):
     _write(board, routing, providers)
-    (override, pin), events = _tick(monkeypatch)
-    assert override is None
-    assert pin == (None, None)  # the worker runs on its profile's model, not a dead class
-    assert events[-1]["reason"] == f"default+unroutable:class:standard:{why}"
-    assert events[-1]["model"] is None
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="routine", assignee="default")
+        launched = []
+        result = dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: launched.append(task.id))
+        assert launched == []
+        assert conn.execute('SELECT COUNT(*) FROM task_runs WHERE task_id=?', (tid,)).fetchone()[0] == 0
+        assert kb.get_task(conn, tid).status == 'ready'
+        assert result.skipped_ineligible == [(tid, f'model_unroutable:{why}')]
+        assert not [e for e in kb.list_events(conn, tid) if e.kind in ('claimed', 'run_route')]
 
 
 def test_routable_class_tier_is_kept(board, monkeypatch):

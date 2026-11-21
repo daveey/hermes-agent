@@ -33,7 +33,11 @@ def lane_admission_refused(conn: sqlite3.Connection, task_id: str, assignee: str
         return True
     if budget_refused(conn, task_id, result, dry_run=dry_run):
         return True
-    # A fresh card pinned to a quota-walled model would only spawn into the wall (kanban_dispatch_skip). [daveey]
+    from hermes_cli.kanban_class_walls import unroutable_class
+    if why := unroutable_class(conn, task_id, lane=lane):
+        result.skipped_ineligible.append((task_id, f'model_unroutable:{why}'))
+        return True
+    # Model-neutral class quota eligibility is checked before a claim.
     from hermes_cli.kanban_dispatch_skip import hold_pinned_quota
     return hold_pinned_quota(conn, task_id, result, lane=lane)
 

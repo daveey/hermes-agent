@@ -7,6 +7,26 @@ from agent.model_routing_agent import class_requirements
 from hermes_cli.config import is_provider_enabled
 
 
+def unroutable_class(conn, task_id, *, lane):
+    """Refuse a proven unusable class before claiming, never fall back to a profile pin."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from hermes_cli.kanban_model_neutral import routing_view
+    from hermes_cli.kanban_model_tier import class_unroutable_reason, resolve_model_tier
+
+    task = kb.get_task(conn, task_id)
+    from hermes_cli.kanban_quota_episode import active
+    if task is None or active(conn, task_id):
+        return None  # the existing episode owns its typed hold and reset deadline
+    model, _, _ = resolve_model_tier(conn, routing_view(task), lane=lane)
+    if not is_class_selector(model):
+        return None
+    config = _assignee_config(task.assignee)
+    if config is None:
+        return 'config_unavailable'
+    return class_unroutable_reason(model, config)
+
+
 def class_wall_routes(task, model, *, now, extra_walls=None):
     """Return (eligible unwalled routes, observed walls) for an assignee class.
 

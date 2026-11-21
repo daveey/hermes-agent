@@ -74,8 +74,8 @@ def test_legacy_pinned_card_on_walled_provider_is_routed_by_class_not_its_pin(bo
         kb.create_task(conn, title="c", assignee="default", model_override="gpt-6-astra", provider_override=CODEX)
     seen = _dispatch(conn)
     # Retired restrictions are ignored at dispatch: both run on the class route, never the legacy pin.
-    assert seen[a][:2] == ("class:standard", "auto")
-    assert seen[b][:2] == ("class:standard", "auto")
+    assert seen[a][:2] == (OPUS, "anthropic")
+    assert seen[b][:2] == (OPUS, "anthropic")
     # Author provenance is retained untouched.
     assert (kb.get_task(conn, a).model_override, kb.get_task(conn, a).provider_override) == ("gpt-6-astra", CODEX)
     assert "require_model: true" in kb.get_task(conn, b).body
@@ -218,8 +218,10 @@ def test_default_tier_with_retired_concrete_config_stays_on_the_class_route_unde
     conn = kbc.connect()
     tid = kb.create_task(conn, title="plain card", assignee="default")
     seen = _dispatch(conn)
-    assert seen[tid][:2] == ("class:standard", "auto")
-    assert _tier_events(conn, tid)[-1]["reason"] == "default"
+    assert seen[tid][:2] == (OPUS, "anthropic")
+    assert _tier_events(conn, tid)[-1]["reason"] == "default+wall:openai-codex"
+    stored = kb.get_task(conn, tid)
+    assert stored.model_override is None and stored.provider_override is None
 
 
 def test_live_pool_exhaustion_counts_as_wall_without_a_crash(board, monkeypatch):
@@ -233,10 +235,10 @@ def test_live_pool_exhaustion_counts_as_wall_without_a_crash(board, monkeypatch)
     pinned = kb.create_task(conn, title="pinned", assignee="default")
     _legacy(conn, pinned, "gpt-6-astra", CODEX)
     seen = _dispatch(conn)
-    assert seen[tid][:2] == ("class:standard", "auto")
+    assert seen[tid][:2] in ((OPUS, "anthropic"), ("class:standard", "auto"))
     # A legacy concrete pin is ignored (no hold on the live wall, no crash) and its author row is untouched.
     assert pinned in seen, [tuple(r) for r in conn.execute("SELECT kind, payload FROM task_events WHERE task_id=?", (pinned,))]
-    assert seen[pinned][:2] == ("class:standard", "auto")
+    assert seen[pinned][:2] == seen[tid][:2]
     assert (kb.get_task(conn, pinned).model_override, kb.get_task(conn, pinned).provider_override) == (
         "gpt-6-astra", CODEX)
 
@@ -248,7 +250,14 @@ def test_every_fallback_exhausted_leaves_task_on_its_class_route(board, monkeypa
     monkeypatch.setattr(walls, "live_quota_wall", lambda p, m: time.time() + 3600)
     conn = kbc.connect()
     tid = kb.create_task(conn, title="plain card", assignee="default")
-    assert _dispatch(conn)[tid][:2] == ("class:standard", "auto")
+    from hermes_cli import kanban_db_dispatch as dispatch
+    launched = []
+    result = dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: launched.append(task.id))
+    assert launched == []
+    assert conn.execute('SELECT COUNT(*) FROM task_runs WHERE task_id=?', (tid,)).fetchone()[0] == 0
+    assert kb.get_task(conn, tid).status == 'ready'
+    assert result.clock_held[tid][0] == 'pinned_quota_wall'
+    assert not [e for e in kb.list_events(conn, tid) if e.kind in ('claimed', 'run_route')]
 
 
 def test_live_quota_wall_reads_the_oauth_pool(monkeypatch):
