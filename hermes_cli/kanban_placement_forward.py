@@ -710,6 +710,58 @@ class Forwarder:
         return "requeued" if ok else "park-refused"
 
 
+def _qualified_origin(st: Optional[dict], self_gw: Optional[str]) -> bool:
+    """A card forwarded here from a qualified origin: it has no local fallback and must never run here."""
+    return bool(st and st.get("origin_gateway") and st["origin_gateway"] != self_gw)
+
+
+def hold(conn: sqlite3.Connection, task_id: str, run_id: Optional[int], why: str) -> str:
+    """Block the card (agent-owned, so the block sweep hands it to triage) instead of running it here. [daveey]"""
+    from hermes_cli import kanban_db as kb
+    reason = (f"placement forward failed and this card must not run here ({why})"[:900]
+              + "; fix the forward or re-place the card, then unblock it.")
+    try:
+        ok = kb.block_task(conn, task_id, kind="transient", reason=reason, expected_run_id=run_id)
+    except Exception as exc:  # the card stays claimed; the dispatcher's crash path reclaims it, never a local run
+        print(f"placement forward: could not block {task_id}: {exc!r}", flush=True)
+        return "hold-failed"
+    return "held" if ok else "hold-failed"
+
+
+def recover(conn: sqlite3.Connection, task_id: str, run_id: Optional[int], fwd: Optional[Forwarder],
+            exc: BaseException) -> str:
+    """The action after a forward step raised. A local run (``fallback``) only for a card that was never sent and
+    has a local fallback; a sent or qualified-origin card is re-queued, and if even that raises (a hub refusal text
+    the park refused, a broken board) it is held, never run here. [daveey]"""
+    try:
+        st = state(conn, task_id)
+    except Exception:
+        st = None
+        unknown = True
+    else:
+        unknown = False
+    if fwd is not None:
+        self_gw = fwd.self_gw
+    else:
+        from hermes_cli import kanban_capability_registry as reg
+        self_gw = reg.self_gateway() or "local"
+    sent = bool(st and (st.get("request_id") or st.get("remote_task_id")))
+    local_ok = not unknown and not sent and not _qualified_origin(st, self_gw)
+    try:
+        if fwd is None:
+            raise exc
+        if sent:
+            # Already sent: a local run would duplicate it. Retry the forward later.
+            return fwd._park_clock(f"forward step failed ({type(exc).__name__}: {str(exc)[:160]}); retrying")
+        return fwd._cancel(f"forward failed: {exc!r}"[:400])
+    except Exception as again:
+        print(f"placement forward recovery failed: {again!r}", flush=True)
+        if local_ok:
+            return "fallback"
+        return hold(conn, task_id, run_id, f"{type(exc).__name__}: {str(exc)[:200]}; then "
+                                          f"{type(again).__name__}: {str(again)[:200]}")
+
+
 def main(argv: Optional[list] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     worker_cmd = argv[argv.index("--") + 1:] if "--" in argv else []
@@ -719,24 +771,21 @@ def main(argv: Optional[list] = None) -> int:
     try:
         from hermes_cli import kanban_db_connect as kbc
         with kbc.connect_closing() as conn:
-            fwd = Forwarder(conn, task_id, int(run_raw) if run_raw else None)
+            run_id = int(run_raw) if run_raw else None
+            fwd = None
             try:
+                fwd = Forwarder(conn, task_id, run_id)
                 action = fwd.run()
-            except Exception as exc:  # before the target accepted it: run it here instead
+            except Exception as exc:  # before the target accepted it: run it here only if that is allowed
                 print(f"placement forward failed: {exc!r}", flush=True)
-                st = state(conn, task_id)
-                if st and (st.get("request_id") or st.get("remote_task_id")):
-                    # Already sent: a local run would duplicate it. Retry the forward later.
-                    action = fwd._park_clock(f"forward step failed ({type(exc).__name__}: {str(exc)[:160]}); retrying")
-                else:
-                    action = fwd._cancel(f"forward failed: {exc!r}"[:400])
+                action = recover(conn, task_id, run_id, fwd, exc)
     except Exception as exc:
         print(f"placement forward could not open the board: {exc!r}", flush=True)
         action = "fallback"
     print(f"placement forward {task_id}: {action}", flush=True)
     if action == "fallback" and worker_cmd:
         os.execvp(worker_cmd[0], worker_cmd)
-    return 0 if action != "fallback" else 1
+    return 0 if action not in ("fallback", "hold-failed") else 1
 
 
 if __name__ == "__main__":

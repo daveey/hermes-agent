@@ -751,13 +751,23 @@ def wall_error(task_id: str, wall: tuple[str, str], text: str, *, named: Optiona
 
 def resolve(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optional[str],
             wake_check: Optional[str] = None, clock_only: bool = False, op: str = "schedule",
-            wake_in: Optional[int] = None, blocker_id: Optional[str] = None) -> dict:
+            wake_in: Optional[int] = None, blocker_id: Optional[str] = None, system: bool = False) -> dict:
     """The ``awaiting`` record for a park, or ``AwaitingError``. Read-only. ``blocker_id``: the shared blocker the
-    park stays behind, its wake reason when nothing else names one (``_infer``)."""
+    park stays behind, its wake reason when nothing else names one (``_infer``).
+
+    ``system``: a kernel re-park (``gate(count_repeats=True)``) whose reason/why carry another system's text as
+    data (a hub refusal, an exception). The prose checks (``text_wall``, ``soak_wait``) judge an agent's own words
+    and are skipped; the declared clock still needs its why."""
     # [daveey] A probe that matches comment authors misses relayed replies (hub:gw:<gw>): author_probe.
     from hermes_cli.kanban_comment_origin import check_park
     check_park(conn, task_id, wake_check)
     declared = normalize(awaiting)
+    if system and declared is not None and declared["kind"] == "clock":
+        # [daveey] A hub refusal quoted in a placement requeue ("permission denied", "waiting for approval")
+        # failed the wall check, and main()'s retry fell through to running a qualified-origin card locally.
+        if not declared.get("why"):
+            _check_clock(conn, task_id, declared, "")  # raises: a clock needs its why
+        return declared
     from hermes_cli import kanban_soak_wait
     if declared is None:
         inferred = _infer(conn, task_id, reason=reason, wake_check=wake_check, clock_only=clock_only,
@@ -1090,7 +1100,8 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
 
     ``count_repeats``: a system re-park loop (``kanban_placement_forward._park_clock``) whose declared clock must
     still escalate on the third identical park, as every clock did before declared clocks were exempted; its
-    premise ignores the ``why`` (which carries the per-attempt detail), so the loop is counted as one premise.
+    premise ignores the ``why`` (which carries the per-attempt detail), so the loop is counted as one premise, and
+    its text is not judged as agent prose (``resolve(system=True)``).
 
     Raises ``RepeatedPark`` on the third park in a row on one premise. Card waits (their producer
     is accountable), clock waits with no wake probe (declared or a short pacing continue: a clock is its own
@@ -1101,7 +1112,7 @@ def gate(conn: sqlite3.Connection, task_id: str, *, awaiting: Any, reason: Optio
     evidence lands on the record as ``deploy_window`` for the caller's wake floor."""
     from hermes_cli import kanban_deploy_window as kdw
     record = resolve(conn, task_id, awaiting=awaiting, reason=reason, wake_check=wake_check,
-                     clock_only=clock_only, op=op, wake_in=wake_in, blocker_id=blocker_id)
+                     clock_only=clock_only, op=op, wake_in=wake_in, blocker_id=blocker_id, system=count_repeats)
     if (record["kind"] == "card" or record.get("shared_blocker")
             or (record["kind"] == "clock" and not count_repeats and not (wake_check and str(wake_check).strip()))):
         # A clock is its own producer: re-parking a recurring cooldown on a stable why is not a stuck premise.
