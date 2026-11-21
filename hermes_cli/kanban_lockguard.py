@@ -188,13 +188,26 @@ def guard(conn: sqlite3.Connection, *, strict=False) -> bool:
 def connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
     """Drop-in ``sqlite3.connect`` for Kanban board files: same arguments, guarded result."""
     from hermes_cli.kanban_generation import lifecycle_access, prepare_connection, recover, retry_open
-    timeout = args[0] if args else kwargs.get("timeout", 5.0)
-    kwargs["factory"] = lifecycle_factory(guarded_factory(kwargs.get("factory", sqlite3.Connection)))
+    from hermes_cli.sqlite_safe_read import _tracking_factory, connect_tracked
+
+    # Preserve sqlite3's legacy positional arguments before composing factories.
+    names = ("timeout", "detect_types", "isolation_level", "check_same_thread", "factory", "cached_statements", "uri")
+    if len(args) > len(names):
+        raise TypeError("connect() takes at most 8 positional arguments")
+    for name, value in zip(names, args):
+        if name in kwargs:
+            raise TypeError(f"connect() got multiple values for argument '{name}'")
+        kwargs[name] = value
+    database = os.fsdecode(os.fspath(database))
+    timeout = kwargs.get("timeout", 5.0)
+    kwargs["factory"] = lifecycle_factory(guarded_factory(_tracking_factory(kwargs.get("factory", sqlite3.Connection))))
 
     def open_once(remaining):
         with lifecycle_access(database, remaining) as lock:
             recover(database)
-            conn = sqlite3.connect(database, *args, **kwargs)
+            # Readers must join the same lifetime/reservation authority as writers.
+            # Never wait for that registry while holding the board lifecycle lock.
+            conn = connect_tracked(database, wait_for_tracking=False, **kwargs)
             conn._hermes_lifecycle_lock = lock
             try:
                 prepare_connection(conn, timeout)

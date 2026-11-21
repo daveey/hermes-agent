@@ -656,7 +656,17 @@ def _import_db_member_exclusive(
                 f"{', '.join(str(pid) for pid in sorted(holders))}; publishing a new file would "
                 "leave them writing an invisible database. Stop those processes and re-run the import."
             )
-        _extract_member_atomically(zf, member, target, new_file_mode)
+        from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
+
+        try:
+            with offline_file_access(target, what="publish imported database at"):
+                # A missing main file can still have an old WAL/journal. Never
+                # replay that deleted generation over the imported snapshot.
+                for suffix in ("-wal", "-shm", "-journal"):
+                    target.with_name(target.name + suffix).unlink(missing_ok=True)
+                _extract_member_atomically(zf, member, target, new_file_mode)
+        except LiveConnectionError as exc:
+            raise OSError(str(exc)) from exc
         return
 
     # The database keeps its own mode/ownership: the bytes come from the
