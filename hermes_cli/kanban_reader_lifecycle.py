@@ -27,6 +27,14 @@ def cached_entry(path, busy_budget=0.5):
     return retry_open(lambda remaining: _cached_entry_once(path, remaining), busy_budget)
 
 
+def is_shared_reader(path, conn) -> bool:
+    """Whether this borrowed connection has retained custody (not a private fallback)."""
+    from hermes_cli import kanban_session_activity as activity
+    with activity._RO_CACHE_LOCK:
+        entry = activity._RO_CACHE.get(str(path))
+        return entry is not None and entry[0] is conn
+
+
 def _cached_entry_once(path, remaining):
     from hermes_cli import kanban_session_activity as activity
     from hermes_cli.kanban_lockguard import shm_identity

@@ -4,8 +4,8 @@ they are made of.
 ``notification_idle.board_signature`` runs once per board commit for every chat poller in the process. The hub's
 main board moved ``data_version`` 92 times a minute and its activity revision 9 times (heartbeats, claims and run
 stamps are bookkeeping), so re-reading every tui subscription row (2.1k rows, 3 ms) on each commit was most of the
-serve's poll. The rows are now reused while the activity revision (its triggers cover every read column) and the
-in-flight marks (the one bookkeeping column a chat's poll acts on) are unchanged. Every input change is still seen
+serve's poll. The rows are now reused while the independent subscription revision (including the in-flight mark)
+is unchanged. The annotation's activity revision is global, not table-local. Every input change is still seen
 on the next call, and a chat with a claim in flight is polled every tick, so a claim that goes stale on the clock
 is recovered with no other change.
 """
@@ -92,7 +92,7 @@ def test_a_new_and_a_removed_subscription_are_seen(board):
 
 
 def test_an_in_flight_mark_alone_is_seen(board):
-    """inflight_* are bookkeeping columns: they do not move the activity revision, so the key reads them itself."""
+    """inflight_from moves the notify counter even though annotation bookkeeping excludes it."""
     path, tasks = board
     before = idle.board_signature(path, CHAT)
     _write("UPDATE kanban_notify_subs SET inflight_from = 0, inflight_pid = 4242 WHERE task_id = ? AND chat_id = ?",
@@ -105,10 +105,11 @@ def test_an_in_flight_mark_alone_is_seen(board):
 
 def test_without_the_counter_triggers_the_rows_are_read_on_every_commit(board):
     """An older writer that dropped the triggers: the revision cannot vouch for the rows."""
-    from hermes_cli.kanban_activity_revision import drop_triggers
+    from hermes_cli.kanban_notify_revision import TRIGGERS
     path, tasks = board
     with contextlib.closing(sqlite3.connect(path)) as raw:  # a plain writer: nothing reinstalls the triggers
-        drop_triggers(raw)
+        for name in TRIGGERS:
+            raw.execute(f"DROP TRIGGER {name}")
         raw.commit()
     before = idle.board_signature(path, CHAT)
     with _subs_reads(path) as reads:

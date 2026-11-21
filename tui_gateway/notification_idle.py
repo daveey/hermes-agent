@@ -72,23 +72,17 @@ _SIGS_LOCK = threading.Lock()
 _SIGS_MAX = 64
 _SUBS_SQL = ("SELECT chat_id, task_id, platform, thread_id, last_event_id, inflight_from "
              "FROM kanban_notify_subs WHERE LOWER(platform) = 'tui' ORDER BY chat_id, task_id, platform, thread_id")
-# Card J (t_01a1d563324d7e8e): re-reading every tui subscription row (2.1k on the hub) on each of those commits was
-# most of the serve's kanban poll. The rows are keyed instead on the activity revision, whose triggers move on every
-# insert, delete and update of a read column of kanban_notify_subs (cursor, identity), plus the in-flight marks (the
-# one bookkeeping column read here; ``kanban_activity_revision.BOOKKEEPING_COLUMNS``), read in the rows' snapshot.
-_INFLIGHT_SQL = ("SELECT chat_id, task_id, platform, thread_id, inflight_from FROM kanban_notify_subs "
-                 "WHERE inflight_from IS NOT NULL AND LOWER(platform) = 'tui' "
-                 "ORDER BY chat_id, task_id, platform, thread_id")
+# The annotation revision is global, even for one table's coverage. Use a
+# subscription-only counter, including inflight_from, in the rows' snapshot.
+
 
 
 def _subs_revision(conn, path):
-    """``(dev, ino, revision, schema_version)`` when the activity counter covers ``kanban_notify_subs``, else None
-    (an older writer without the triggers: the rows are read on every commit, as before)."""
+    """Subscription revision in the caller's snapshot; absent coverage reads literally."""
     import os
-    from hermes_cli.kanban_activity_revision import covered_revision
+    from hermes_cli.kanban_notify_revision import read_revision
     st = os.stat(path)
-    revision = covered_revision(conn, Path(path), (st.st_dev, st.st_ino), ("kanban_notify_subs",))
-    return None if revision is None else (st.st_dev, st.st_ino, *revision)
+    return read_revision(conn, (str(path), st.st_dev, st.st_ino))
 
 
 def _notify_content(conn, version, held, path=None):
@@ -97,12 +91,12 @@ def _notify_content(conn, version, held, path=None):
                                           "('task_events', 'kanban_notify_subs')")}
     if len(present) != 2:
         return None  # not a board (yet): fall back to the commit revision
-    revision = None
-    if path is not None:
-        with contextlib.suppress(Exception):  # unknown coverage: read the rows
-            revision = _subs_revision(conn, path)  # before the snapshot: a commit in between only re-reads next time
     conn.execute("BEGIN")  # one snapshot for the event scan and the subscription rows
     try:
+        revision = None
+        if path is not None:
+            with contextlib.suppress(Exception):  # unknown coverage: read the rows
+                revision = _subs_revision(conn, path)
         top = int(conn.execute("SELECT MAX(id) FROM task_events").fetchone()[0] or 0)
         start, newest = (held[2], held[3]) if held is not None and held[2] <= top else (0, 0)
         if top > start:
@@ -110,7 +104,7 @@ def _notify_content(conn, version, held, path=None):
             row = conn.execute(f"SELECT MAX(id) FROM task_events WHERE id > ? AND id <= ? AND kind IN ({marks})",
                                (start, top, *_KANBAN_NOTIFY_KINDS)).fetchone()
             newest = max(newest, int(row[0] or 0))
-        subs_key = None if revision is None else (revision, tuple(conn.execute(_INFLIGHT_SQL).fetchall()))
+        subs_key = revision  # includes inflight_from; no per-commit subscription scan
         by_chat = held[4] if subs_key is not None and held is not None and held[5] == subs_key else None
         rows = conn.execute(_SUBS_SQL).fetchall() if by_chat is None else ()
     finally:
@@ -128,6 +122,7 @@ def board_signature(path, chat_id=None):
     change to that chat's subscription rows, so a bookkeeping commit (heartbeat, claim of another card, run
     stamps) keeps it. A board without the notify tables keys on its commit revision. Raises like any read."""
     from hermes_cli.kanban_session_activity import cached_ro
+    from hermes_cli.kanban_reader_lifecycle import is_shared_reader
     key = str(path)
     with cached_ro(Path(path)) as conn:
         version = conn.execute("PRAGMA data_version").fetchone()[0]
@@ -139,10 +134,11 @@ def board_signature(path, chat_id=None):
             held = _notify_content(conn, version, held, path)
             if held is None:
                 return conn, version
-            with _SIGS_LOCK:
-                if len(_SIGS) >= _SIGS_MAX:
-                    _SIGS.clear()
-                _SIGS[key] = held
+            if is_shared_reader(path, conn):
+                with _SIGS_LOCK:
+                    if len(_SIGS) >= _SIGS_MAX:
+                        _SIGS.clear()
+                    _SIGS[key] = held
     subs = held[4] if chat_id is None else held[4].get(chat_id, ())
     return "notify", held[3], subs
 
