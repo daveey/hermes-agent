@@ -130,6 +130,26 @@ def test_sweep_ignores_claimable_and_unready_cards(hub):
     assert not _events(hub.conn, ok, "chat_wait_unclaimed")
 
 
+@pytest.mark.parametrize("field,value", [("claim_lock", "claimed"), ("lease_holder", "worker-1"),
+                                        ("current_run_id", 1)])
+def test_sweep_does_not_flag_a_ready_row_with_live_custody(hub, field, value):
+    tid = _ready_macos_card(hub)
+    with kb.write_txn(hub.conn):
+        hub.conn.execute(f"UPDATE tasks SET {field} = ? WHERE id = ?", (value, tid))
+    assert ur.sweep(hub.conn) == []
+    assert not _events(hub.conn, tid, "chat_wait_unclaimed") and _alarms(hub.conn) == []
+
+
+def test_move_check_uses_card_home_not_the_gateway_issuing_the_move(hub):
+    tid = _ready_macos_card(hub, ["linux"])
+    # A Mac issuing a move of a hub-owned row is not the Mac's own card exemption.
+    with kb.write_txn(hub.conn):
+        hub.conn.execute("UPDATE tasks SET created_on = ? WHERE id = ?", (HUB, tid))
+    with pytest.raises(km.MoveRefused, match="no active, unheld machine") as err:
+        km.check(hub.conn, tid, ["macos"], machines=MACHINES, me="macbook")
+    assert err.value.code == "no_machine" and "cross-gateway create" in str(err.value)
+
+
 def test_unknown_registry_flags_nothing(hub):
     _ready_macos_card(hub)
     wn.set_registry_fetch(lambda: (_ for _ in ()).throw(OSError("board down")))
