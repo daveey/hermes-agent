@@ -466,16 +466,23 @@ def remote_args(conn: sqlite3.Connection, task, *, self_gw: str, board: Optional
     (default: the board ``conn`` opened), named in the footer's read target."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_placement import EVIDENCE_CLOSE, EVIDENCE_OPEN
-    from hermes_cli.kanban_model_neutral import forwarded_text, routing_view
+    from hermes_cli.kanban_model_neutral import forwarded_text, routing_view, validate_text
     task = routing_view(task)
+    title = task.title
+    title_evidence = ''
+    try:
+        validate_text(title)
+    except ValueError:
+        title = f"Continue forwarded work {task.id}"
+        title_evidence = '\n\nHistorical source title:\n' + forwarded_text(task.title)
     parents = kb.parent_ids(conn, task.id)
     summaries = kb.latest_summaries(conn, parents) if parents else {}
     lines = []
     for pid in parents:
         p = kb.get_task(conn, pid)
         handoff = (summaries.get(pid) or (p.result if p else None) or "(no handoff)").strip()
-        lines.append(_quoted(f"- {pid} ({p.title if p else '?'}): {handoff[:1500]}"))
-    body = forwarded_text(_own_text((task.body or "").rstrip()))
+        lines.append(forwarded_text(_quoted(f"- {pid} ({p.title if p else '?'}): {handoff[:1500]}")))
+    body = forwarded_text(_own_text((task.body or "").rstrip())) + title_evidence
     if lines:
         board = board or opened_board(conn)
         # Spell the tool's read call: "with cross_task @task:..." parses as an unknown explicit invocation in
@@ -489,7 +496,7 @@ def remote_args(conn: sqlite3.Connection, task, *, self_gw: str, board: Optional
                  f"{EVIDENCE_OPEN}\n" + "\n".join(lines) + f"\n{EVIDENCE_CLOSE}")
     body += f"\n\nThis card was {self_gw} card {task.id}; it completes there when this one is done."
     return {
-        "title": task.title, "body": body, "assignee": task.assignee or "default",
+        "title": title, "body": body, "assignee": task.assignee or "default",
         "skills": task.skills or None, "requires": task.requires or None,
         "max_runtime_seconds": task.max_runtime_seconds, "priority": task.priority or None,
         "model": task.model_override, "provider": task.provider_override if task.model_override else None,
