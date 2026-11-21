@@ -329,14 +329,41 @@ def test_class_routed_implementer_receipts_do_not_gate_review_admission(board):
         'review_unpinned')
 
 
-def test_repeated_identical_review_refusal_moves_to_a_visible_block(board, monkeypatch):
-    """An unroutable review class (its registry pool unavailable) defers, and the third identical refusal stops
-    deferring silently."""
+@pytest.mark.parametrize('lane', ['review', 'ready'])
+def test_review_owned_preclaim_does_not_resolve_generic_class(board, monkeypatch, lane):
+    """Review lanes and skill-classified ready retries retain review-owned refusal accounting."""
+    from hermes_cli.kanban_class_walls import unroutable_class
+    from hermes_cli import kanban_model_tier as tier
+    from hermes_cli.kanban_review_model import is_review_run
+    conn, _ = board
+    tid = _hand_off_for_review(conn, {'review_model': FABLE})
+    _receipts(conn, tid, route=('class:deep', None))
+    if lane == 'ready':
+        conn.execute("UPDATE tasks SET status='ready', skills=? WHERE id=?", ('["sdlc-review"]', tid))
+        conn.commit()
+    assert is_review_run(conn, kb.get_task(conn, tid), lane)
+    before = list(conn.iterdump())
+
+    def generic_resolution_forbidden(*args, **kwargs):
+        pytest.fail('generic preclaim must not resolve a review route')
+
+    monkeypatch.setattr(tier, 'resolve_model_tier', generic_resolution_forbidden)
+    assert unroutable_class(conn, tid, lane=lane) is None
+    assert list(conn.iterdump()) == before  # no claim, run, receipt or author changes
+
+
+@pytest.mark.parametrize('lane', ['review', 'ready'])
+def test_repeated_identical_review_refusal_moves_to_a_visible_block(board, monkeypatch, lane):
+    """With no eligible class route, the third identical refusal stops deferring silently."""
     from hermes_cli.kanban_db_dispatch import dispatch_once
     DEFERRAL_LIMIT = 3  # hermes_cli.kanban_review_model.DEFERRAL_LIMIT
     monkeypatch.setenv('HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS', '0')
     conn, _ = board
     tid = _hand_off_for_review(conn, {'review_model': 'class:deep'})
+    _receipts(conn, tid, route=('class:deep', None))
+    if lane == 'ready':
+        conn.execute("UPDATE tasks SET status='ready', skills=? WHERE id=?", ('["sdlc-review"]', tid))
+        conn.commit()
     _disable_anthropic()
     seen = []
     for attempt in range(1, DEFERRAL_LIMIT + 1):

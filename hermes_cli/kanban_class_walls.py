@@ -16,8 +16,11 @@ def unroutable_class(conn, task_id, *, lane):
 
     task = kb.get_task(conn, task_id)
     from hermes_cli.kanban_quota_episode import active
+    from hermes_cli.kanban_review_model import is_review_run
     if task is None or active(conn, task_id):
         return None  # the existing episode owns its typed hold and reset deadline
+    if is_review_run(conn, task, lane):
+        return None  # review owns provenance refusal, bounded escalation and route eligibility
     model, _, _ = resolve_model_tier(conn, routing_view(task), lane=lane)
     if not is_class_selector(model):
         return None
