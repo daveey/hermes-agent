@@ -86,3 +86,18 @@ def test_native_sampling_serializes_scope_close(monkeypatch):
         thread.join(10)
     assert closed.is_set()
     assert not thread.is_alive()
+
+
+@pytest.mark.platforms("linux")
+def test_failed_precise_clock_keeps_raw_stats_but_invalidates_open_boundary(monkeypatch):
+    def unavailable(_clock):
+        raise OSError("synthetic native-clock failure")
+
+    monkeypatch.setattr(la.time, "clock_gettime", unavailable)
+    with la.scope("thread/no_native_clock"):
+        snap = la.snapshot()
+        assert snap["open_accounting_complete"] is False
+        row = next(t for t in snap["threads"] if t["tid"] == threading.get_native_id())
+        assert row["cpu_sample_precise"] is False
+        assert row["cpu_s"] == row["cpu_stat_s"]
+        assert row["open_accounting"]["available"] is False

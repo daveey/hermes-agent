@@ -519,12 +519,15 @@ def _thread_cpu_locked() -> list[dict[str, Any]]:
         if got is None:
             continue
         comm, user, system = got
+        precise = True
         try:
             cpu = time.clock_gettime((~tid << 3) | 6)  # Linux numeric TID CPUCLOCK_SCHED, not a pthread pointer
         except (OSError, ValueError):
             cpu = user + system
+            precise = False
         out.append({"tid": tid, "name": names.get(tid, comm), "cpu_s": round(cpu, 6),
                     "cpu_stat_s": round(user + system, 3),
+                    "cpu_sample_precise": precise,
                     "user_s": round(user, 3), "system_s": round(system, 3),
                     "accounted_cpu_s": round(accounted_by.get(tid, 0.0), 6)})
     if not tids and sys.platform == "darwin":
@@ -556,7 +559,10 @@ def snapshot() -> dict[str, Any]:
 
     Thread totals include the unbooked part of the oldest open interval (its
     nested completed work is subtracted). ``open_accounting`` names that part;
-    completed loop counters are unchanged. Callback hooks remain best-effort.
+    completed loop counters are unchanged. ``open_accounting_complete`` is false
+    if an open interval lacks a precise native reading or its pending CPU would
+    be negative; consumers must reject that boundary, not infer savings from it.
+    Callback hooks remain best-effort.
     Linux cpu_s uses the numeric-TID high-resolution clock; cpu_stat_s retains
     the tick-granular user/system sum. Diagnostic metadata is read afterwards.
     """
@@ -609,6 +615,7 @@ def _snapshot_locked() -> dict[str, Any]:
             "unaccounted_live_cpu_s": round(max(0.0, live - accounted_live), 3) if procfs else None,
         },
         "threads": threads,
+        "open_accounting_complete": _open_intervals.complete(threads),
         "residual": _residual(threads, process_cpu, accounted_total, procfs),
         "loops": counters(),
     }

@@ -43,11 +43,21 @@ class OpenIntervals:
 
     def apply(self, row: dict[str, Any]) -> None:
         entries = self.by_tid.get(row["tid"])
-        if not entries or row["cpu_s"] is None:
+        if not entries:
             return
         # Context managers are nested on one native thread. The oldest interval
         # covers the union; subtract closed inner intervals, never count them twice.
         name, cpu0, acc0 = next(iter(entries.values()))
+        row["open_accounting"] = {"name": name, "cpu_s": None, "depth": len(entries), "available": False}
+        if row["cpu_s"] is None or not row.get("cpu_sample_precise", True):
+            return
         pending = row["cpu_s"] - cpu0 - (row["accounted_cpu_s"] - acc0)
-        row["open_accounting"] = {"name": name, "cpu_s": round(pending, 6), "depth": len(entries)}
+        row["open_accounting"]["cpu_s"] = round(pending, 6)
+        if pending < 0:
+            return  # inconsistent sample, not permission to reduce completed accounting
+        row["open_accounting"]["available"] = True
         row["accounted_cpu_s"] = round(row["accounted_cpu_s"] + pending, 6)
+
+    def complete(self, rows: list[dict[str, Any]]) -> bool:
+        sampled = {row["tid"] for row in rows if row.get("open_accounting", {}).get("available")}
+        return self.by_tid.keys() <= sampled

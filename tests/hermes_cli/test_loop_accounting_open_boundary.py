@@ -116,3 +116,28 @@ def test_child_open_scope_uses_child_clock_and_discards_foreign_threads(cpu_cloc
         assert inside["process"]["accounted_cpu_s"] == pytest.approx(0.01)
     assert la.counters()["inherited"]["cpu_s"] == pytest.approx(0.01)
     assert not la._open_intervals.by_tid
+
+
+@pytest.mark.parametrize("sample", ["missing", "imprecise", "overbooked"])
+def test_incomplete_open_boundary_is_explicit_and_does_not_erase_booked_cpu(cpu_clock, monkeypatch, sample):
+    with la.scope("thread/incomplete"):
+        cpu_clock[0] = 1.08
+        if sample == "missing":
+            monkeypatch.setattr(la, "_darwin_thread_cpu", list)
+        elif sample == "imprecise":
+            monkeypatch.setattr(la, "_thread_cpu_locked", lambda: [{
+                "tid": la._native_id(), "name": "pool_0", "cpu_s": 1.08,
+                "accounted_cpu_s": 0.0, "cpu_sample_precise": False,
+            }])
+        else:
+            la.record("invalid.caller", cpu_s=0.2)
+        snap = la.snapshot()
+        assert snap["open_accounting_complete"] is False
+        if sample == "overbooked":
+            assert snap["process"]["accounted_cpu_s"] == pytest.approx(0.2)
+
+
+def test_complete_open_boundary_is_explicit(cpu_clock):
+    with la.scope("thread/complete"):
+        cpu_clock[0] = 1.08
+        assert la.snapshot()["open_accounting_complete"] is True
