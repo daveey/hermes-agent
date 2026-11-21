@@ -4,6 +4,7 @@ commit (clock, config, profiles on disk, hub replica) and runs on every refresh.
 
 from __future__ import annotations
 
+import marshal
 import sqlite3
 import time
 from dataclasses import asdict
@@ -207,6 +208,26 @@ def _diag_memo(rows, events_by_task, runs_by_task, marks, unmarked=None) -> dict
                       None if unmarked is None else unmarked.get(r["id"])) for r in rows}
 
 
+def _same_events(conn, tid, history) -> bool:
+    """Exact same-snapshot comparison for task-wide P2 false positives.
+
+    Count/max cannot certify same-ID edits. Compare every ordered scalar, including
+    column names and storage types, before retaining immutable history reductions.
+    This still scans SQL history; it avoids rebuilding/reducing it and the broad
+    diagnostic loader's duplicate run/graph reads on task/comment/link edits.
+    """
+    cur = conn.cursor()
+    cur.row_factory = None
+    try:
+        rows = cur.execute("SELECT * FROM task_events WHERE task_id = ? ORDER BY id", (tid,)).fetchall()
+        keys = tuple(d[0] for d in cur.description)
+        if history and tuple(history[0].keys()) != keys:
+            return False
+        return marshal.dumps(tuple(rows), 2) == marshal.dumps(_raw(history), 2)
+    finally:
+        cur.close()
+
+
 def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_inputs: Callable, *,
                              graphs=None, event_changed=None) -> tuple:
     """Retain event histories independently of task/run bookkeeping. ``event_changed``
@@ -232,7 +253,7 @@ def _incremental_diag_inputs(conn, diag_rows: list, prev: dict, diagnostic_input
             return True
         if trusted:
             if tid in event_changed:
-                return True
+                return not _same_events(conn, tid, old[3])
             if len(old) > 5 and old[5] is not None:
                 return old[5] != unmarked.get(tid)
             return old[2] is None or old[2] != marks.get(tid, _NO_EVENTS)

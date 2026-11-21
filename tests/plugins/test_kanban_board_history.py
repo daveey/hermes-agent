@@ -123,8 +123,10 @@ def test_history_mutations_match_cold_projection(board, monkeypatch, mutation):
         warm = helpers._stable(helpers._read(board))
         warm_loaded = list(loaded)
         assert warm == helpers._cold(board)
-        if mutation == "heartbeat":
+        if mutation in {"heartbeat", "run_update"}:
             assert not [v for v in warm_loaded if v[0] == "task_events"]
+            if mutation == "run_update":
+                assert any(table == "task_runs" and tid in touched for table, touched in warm_loaded)
         else:
             assert any(table == "task_events" and tid in touched for table, touched in warm_loaded)
         assert kb.get_task(conn, tid) is not None
