@@ -64,11 +64,14 @@ def test_still_failed_store_is_coordination_failure_with_self_provenance(orphan,
     assert server._durable_owner_refusal(orphan.session) is None
 
 
-def test_different_holder_even_in_same_process_stays_fenced(orphan):
+def test_different_holder_even_in_same_process_stays_fenced(orphan, monkeypatch):
     orphan.release('root', orphan.holder)
     foreign = f'pid={os.getpid()}{holder_namespace_token()}:turn=foreign:platform=desktop'
     assert orphan.db.try_acquire_session_turn_lease('root', foreign)
+    calls = []
+    monkeypatch.setattr(orphan.db, 'release_session_turn_lease', lambda *args: calls.append(args))
     refusal = server._durable_owner_refusal(orphan.session)
+    assert calls == []
     assert refusal.reason == 'SESSION_NOT_OWNED'
     assert refusal.ownership_cause == 'lease_foreign'
     assert getattr(refusal, 'holder_pid', None) is None
@@ -132,6 +135,16 @@ def test_unreadable_store_does_not_use_receipt_as_admission(orphan, monkeypatch)
     monkeypatch.setattr(orphan.db, 'session_turn_lease_owner', orphan.fail)
     assert server._durable_owner_refusal(orphan.session) is not None
     assert orphan.agent._failed_turn_release is not None
+
+
+def test_unknown_store_release_failure_does_not_create_receipt():
+    def unavailable(*args):
+        raise sqlite3.DatabaseError('injected unavailable database')
+    db = SimpleNamespace(db_path=None, release_session_turn_lease=unavailable)
+    agent = SimpleNamespace(_active_session_turn_lease_holder='holder')
+    DurableTurnLease(agent, db, 'root', 'holder').release()
+    assert getattr(agent, '_failed_turn_release', None) is None
+    assert agent._active_session_turn_lease_holder is None
 
 
 def test_successful_release_never_creates_recovery_authority(tmp_path):
