@@ -14,7 +14,13 @@ def claim_check(conn, task_id):
     from hermes_cli import kanban_spend_decision as decision
     from hermes_cli import kanban_spend_pr_owner as owner
 
-    board = budget.limits()
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+
+    try:
+        board = budget.limits()
+    except ConfigBackendUnavailable:
+        # A missing policy cannot authorize spending; do not crash the dispatcher either.
+        return lambda: True
     pr = None
     if not decision.pending(conn, task_id):
         lim = budget.card_limits(conn, task_id, board)

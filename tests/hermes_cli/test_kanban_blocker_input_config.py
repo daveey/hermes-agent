@@ -219,7 +219,11 @@ def test_hold_decision_falls_back_when_config_backend_is_unavailable(kanban_home
         assert outcome(blockers.shared_blocker_guard, conn, tids[1], now=now) == blockers.GUARD_REASON
         assert outcome(blockers._hold_config) is None
         # Checks cannot be listed either, so a registered wall's operator-release exemption does not apply.
-        assert helpers.kb.unblock_task(conn, tids[0]) and helpers.kb.claim_task(conn, tids[0])
+        assert helpers.kb.unblock_task(conn, tids[0])
+        # Claim admission itself requires a readable spend policy, independently of hold fallback.
+        monkeypatch.setattr('hermes_cli.config.load_config', lambda: healthy)
+        assert helpers.kb.claim_task(conn, tids[0])
+        _backend_down(monkeypatch)
         assert helpers.kb.unblock_task(conn, tids[1])
         assert outcome(blockers._shared_blocker_hold, conn, tids[1], now=now + 1) == ('test-wall', tids[0], 0)
         _counting_config(monkeypatch, healthy)

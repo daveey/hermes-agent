@@ -30,6 +30,10 @@ DAY = 24 * 3600  # the healthy-exemption bound (kanban_deploy_window.HEALTHY_MAX
 
 @pytest.fixture
 def board(tmp_path, monkeypatch):
+    from hermes_cli import kanban_spend_budget as budget
+
+    # Exercise the deploy-wait clock/escalation policy independently of spend admission.
+    monkeypatch.setattr(budget, "limits", lambda: budget.Limits(0, 0))
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: tmp_path)

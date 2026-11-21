@@ -10,6 +10,7 @@ from tests.hermes_cli import test_kanban_spend_pr_owner as helpers
 
 kanban_home = helpers.kanban_home
 github = helpers.github
+_REAL_LIMITS = budget.limits
 
 
 @pytest.mark.parametrize("lane", ["ready", "review"])
@@ -39,6 +40,26 @@ def test_publication_observation_never_runs_under_claim_write_lock(kanban_home, 
         tid = helpers.owner(conn)
         assert kb.claim_task(conn, tid) is not None
         assert calls == [tid]
+
+
+@pytest.mark.parametrize("lane", ["ready", "review"])
+def test_config_outage_refuses_claim_without_escaping(kanban_home, monkeypatch, lane):
+    from hermes_cli.config_backend import ConfigBackendUnavailable
+
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="config outage claim", assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", (lane, tid))
+
+        def down():
+            raise ConfigBackendUnavailable("down")
+
+        monkeypatch.setattr(budget, "limits", _REAL_LIMITS)
+        monkeypatch.setattr("hermes_cli.config.load_config", down)
+        claim = kb.claim_task if lane == "ready" else kb.claim_review_task
+        assert claim(conn, tid) is None
+        assert conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()[0] == lane
+        assert conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == 0
 
 
 def test_transaction_rechecks_override_and_publication_identity(kanban_home, github):
