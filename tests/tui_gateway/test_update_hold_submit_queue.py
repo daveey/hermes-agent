@@ -206,7 +206,7 @@ def test_startup_sweep_retries_hold_prompts_past_the_turn_freshness_window(held)
     rows = startup_resume.pending_resumes(held.home, cfg, log_skips=False)
     # The writer is this (live) test process, so the boot sweep holds it back until the old writer is gone,
     # but keeps retrying: the hold-queue reason is in the update-recovery retry set and within its age bound.
-    assert rows == [] and startup_resume._paused_markers_remain(held.home, cfg)
+    assert rows == [] and startup_resume._markers_remain(held.home, cfg)
 
 
 def _desktop_lease_replay(db, admitted):

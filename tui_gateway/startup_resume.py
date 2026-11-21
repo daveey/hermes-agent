@@ -9,9 +9,9 @@ sessions run detached until a client attaches; opening one later reuses the live
 
 All the existing auto-continue guards still apply inside ``session.resume`` (freshness window, ``max_attempts``
 crash-loop breaker, live-writer ownership, hosted-room exclusion); this module only pre-filters to avoid resuming
-sessions that would not continue anyway. After boot a passive observer keeps checking update-paused turns:
-blue/green predecessors can publish a new pause long after the initial marker scan becomes empty. Ordinary
-crash markers remain boot-only; recovery still enters the normal session.resume admission path.
+sessions that would not continue anyway. After boot a passive observer keeps checking interrupted turns:
+writers can exit or publish new markers long after the initial marker scan becomes empty. Recovery still
+enters the normal session.resume admission path.
 """
 
 from __future__ import annotations
@@ -165,23 +165,23 @@ def resume_interrupted_sessions(resume: Callable[[str, dict], Any], home: Path, 
     return results
 
 
-def _paused_markers_remain(home: Path, cfg: dict | None) -> bool:
+def _markers_remain(home: Path, cfg: dict | None) -> bool:
     # Include live writers: they can still be retiring during the first boot sweep.
     _, fresh, max_attempts, _ = _settings(cfg)
     now = time.time()
-    return any(entry.get("reason") in _RETRY_REASONS and entry.get("auto_continue", True)
+    return any(entry.get("auto_continue", True)
                and now - freshness_since(entry) <= _max_age(entry, fresh)
                and int(entry.get("attempts") or 0) < max_attempts
                for _, h in _homes(home) for key in _load(_marker_path(h))
                if (entry := read_turn_marker(h, key)) is not None)
 
 
-def _observe_pauses(handler: Callable, home: Path, cfg: dict, stopped: threading.Event) -> None:
+def _observe_markers(handler: Callable, home: Path, cfg: dict, stopped: threading.Event) -> None:
     """Passive lifetime observer; refusals back off, but never retire the observer."""
     retry_delay = 5.0
     while not stopped.is_set():
         try:
-            wait = retry_delay if _paused_markers_remain(home, cfg) else 30.0
+            wait = retry_delay if _markers_remain(home, cfg) else 30.0
         except Exception:
             logger.exception("startup resume observer iteration failed")
             wait = 30.0
@@ -201,10 +201,10 @@ def _observe_pauses(handler: Callable, home: Path, cfg: dict, stopped: threading
             if not _settings(cfg)[0] or detect_code_skew() is not None:
                 retry_delay = 30.0
                 continue
-            done = resume_interrupted_sessions(handler, home, cfg, paused_only=True)
+            done = resume_interrupted_sessions(handler, home, cfg)
             if any(not row.get("scheduled") and not row.get("deleted") for row in done):
                 retry_delay = min(300.0, retry_delay * 2)
-                logger.warning("startup resume: paused turns remain unscheduled; retry in %.0fs", retry_delay)
+                logger.warning("startup resume: interrupted turns remain unscheduled; retry in %.0fs", retry_delay)
             else:
                 retry_delay = 5.0
         except Exception:
@@ -245,11 +245,11 @@ def start_startup_resume_sweep(*, stop: threading.Event | None = None) -> thread
                 logger.info("startup resume: %d interrupted session(s) processed", len(done))
             # A warm successor may boot before the old writer continues and pauses again.
             # An empty scan (or a fixed boot deadline) is not a completed handoff.
-            # Keep observing PAUSES only; ordinary crash recovery remains boot-only.
+            # Keep observing every eligible marker, including ordinary interrupted turns.
         except Exception:
             logger.exception("startup resume sweep failed")
         if handler is not None:
-            _observe_pauses(handler, home, cfg, stop or threading.Event())
+            _observe_markers(handler, home, cfg, stop or threading.Event())
 
     from agent.memory_provider import spawn_context_thread
     t = spawn_context_thread(_run, name="startup-resume-sweep", passive=True)

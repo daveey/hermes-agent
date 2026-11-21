@@ -356,7 +356,7 @@ def test_observer_redrives_all_profiles_before_skew_deferral(tmp_path, monkeypat
     stopped = threading.Event()
     homes = [(None, tmp_path), ("named", tmp_path / "profiles" / "named")]
     monkeypatch.setattr(startup_resume, "_homes", lambda home: homes)
-    monkeypatch.setattr(startup_resume, "_paused_markers_remain", lambda *a: True)
+    monkeypatch.setattr(startup_resume, "_markers_remain", lambda *a: True)
     monkeypatch.setattr(startup_resume.time, "sleep", lambda *a: None)
     monkeypatch.setattr(config, "load_config", dict)
     calls = []
@@ -368,7 +368,7 @@ def test_observer_redrives_all_profiles_before_skew_deferral(tmp_path, monkeypat
 
     monkeypatch.setattr(code_skew, "detect_code_skew", skew)
     monkeypatch.setattr(startup_resume, "resume_interrupted_sessions", lambda *a, **k: pytest.fail("skewed backend replayed"))
-    startup_resume._observe_pauses(None, tmp_path, {}, stopped)
+    startup_resume._observe_markers(None, tmp_path, {}, stopped)
     assert calls == [home for _, home in homes]
 
 

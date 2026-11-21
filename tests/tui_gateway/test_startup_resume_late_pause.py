@@ -77,5 +77,5 @@ def test_boot_observer_recovers_late_pause_after_writer_exit(tmp_path, monkeypat
 
     monkeypatch.setattr(memory_provider, "spawn_context_thread", spawn)
     sr.start_startup_resume_sweep(stop=stop)
-    assert waits[:2] == [5.0, 30.0], "idle observation must back off without terminating"
-    assert resumed == (["chat"] if disposition == "pause" else [])
+    assert waits[:2] == [5.0, 5.0], "live writers remain eligible for observation, not adoption"
+    assert resumed == (["chat"] if disposition in {"pause", "crash"} else [])

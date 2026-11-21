@@ -76,6 +76,40 @@ def test_one_failure_does_not_stop_the_sweep(tmp_path):
     assert [r["ok"] for r in out] == [False, False]
 
 
+def test_lifetime_observer_retries_an_ordinary_interrupted_marker(tmp_path, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    from gateway import code_skew
+    from hermes_cli import config
+
+    stop = threading.Event()
+    calls = []
+    waits = []
+    _write(tmp_path, {"ordinary": _entry(pid=os.getpid())})
+    assert sr.pending_resumes(tmp_path, CFG) == [], "boot scan must leave the live writer alone"
+
+    def sleep(seconds):
+        waits.append(seconds)
+        if len(waits) == 1:
+            _write(tmp_path, {"ordinary": _entry()})
+        else:
+            stop.set()
+
+    def resume(rid, params):
+        calls.append(params)
+        sr.clear_turn_marker(tmp_path, params["session_id"])
+        return {"result": {"auto_continue": {"attempt": 1}}}
+
+    monkeypatch.setattr(sr, "time", SimpleNamespace(sleep=sleep, time=time.time))
+    monkeypatch.setattr(config, "load_config", lambda: CFG)
+    monkeypatch.setattr(code_skew, "detect_code_skew", lambda: None)
+    sr._observe_markers(resume, tmp_path, CFG, stop)
+    assert calls == [{"session_id": "ordinary", "omit_messages": True, "source_from_store": True}]
+    assert waits == [5.0, 30.0]
+    assert _markers(tmp_path) == set()
+
+
 def test_start_is_noop_when_disabled(monkeypatch):
     from hermes_cli import config
     monkeypatch.setattr(config, "load_config", lambda: {"desktop": {"auto_continue": {"resume_on_startup": False}}})

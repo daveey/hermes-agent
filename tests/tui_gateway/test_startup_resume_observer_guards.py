@@ -34,16 +34,16 @@ def test_observer_refreshes_guards_and_recovers(tmp_path, monkeypatch, caplog, m
         return True
 
     def resume(*args, **kwargs):
-        assert kwargs == {"paused_only": True}
+        assert kwargs == {}
         calls.append(tick[0])
         return [{"ok": False, "scheduled": False}] if mode == "refused" else []
 
     monkeypatch.setattr(sr, "time", SimpleNamespace(sleep=sleep))
     monkeypatch.setattr(config, "load_config", load)
     monkeypatch.setattr(code_skew, "detect_code_skew", lambda: object() if mode == "skew" and tick[0] < 3 else None)
-    monkeypatch.setattr(sr, "_paused_markers_remain", pending)
+    monkeypatch.setattr(sr, "_markers_remain", pending)
     monkeypatch.setattr(sr, "resume_interrupted_sessions", resume)
-    sr._observe_pauses(lambda *a: None, tmp_path, {}, stop)
+    sr._observe_markers(lambda *a: None, tmp_path, {}, stop)
     assert calls and calls[-1] == 7
     if mode in {"skew", "disabled"}:
         assert min(calls) >= 3
@@ -88,10 +88,10 @@ def test_observer_recovers_to_fast_cadence(tmp_path, monkeypatch, failure):
     monkeypatch.setattr(sr, "time", SimpleNamespace(sleep=sleep))
     monkeypatch.setattr(config, "load_config", dict)
     monkeypatch.setattr(code_skew, "detect_code_skew", lambda: None)
-    monkeypatch.setattr(sr, "_paused_markers_remain", lambda *a: True)
+    monkeypatch.setattr(sr, "_markers_remain", lambda *a: True)
     monkeypatch.setattr(sr, "resume_interrupted_sessions", resume)
     monkeypatch.setattr(builtins, "__import__", importing)
-    sr._observe_pauses(lambda *a: None, tmp_path, {}, stop)
+    sr._observe_markers(lambda *a: None, tmp_path, {}, stop)
     assert waits == [5, {"import": 30, "refused": 10, "deleted": 5}[failure], 5, 5]
     assert calls == ([2, 3] if failure == "import" else [1, 2, 3])
 
@@ -114,7 +114,7 @@ def test_boot_scan_failure_still_starts_observer(tmp_path, monkeypatch):
         raise OSError("boot marker scan failed")
 
     monkeypatch.setattr(sr, "resume_interrupted_sessions", fail)
-    monkeypatch.setattr(sr, "_observe_pauses", lambda *a: observed.append(a))
+    monkeypatch.setattr(sr, "_observe_markers", lambda *a: observed.append(a))
     thread = sr.start_startup_resume_sweep(stop=stop)
     assert thread is not None
     thread.join(5)
