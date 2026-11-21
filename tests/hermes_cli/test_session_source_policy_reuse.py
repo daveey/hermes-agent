@@ -63,6 +63,27 @@ def test_fresh_policies_observe_file_env_and_root_edits(monkeypatch, tmp_path):
     assert not listing.automated_session_sources(named)
 
 
+def test_unreadable_config_fails_open_for_single_and_multi_key(monkeypatch, tmp_path):
+    prior_home = get_hermes_home()
+    root = tmp_path / "home"
+    named = root / "profiles" / "bot"
+    named.mkdir(parents=True)
+
+    def broken():
+        raise RuntimeError("probe: unreadable config")
+
+    monkeypatch.setattr(config, "load_config_readonly", broken)
+    assert listing._sessions_source_list(root, "interactive_sources") == []
+    assert listing._sessions_source_list(root, ("automated_sources", "sidebar_profiles")) == ([], [])
+    for home in (root, named):
+        policy = listing.automated_session_sources(home)
+        assert isinstance(policy, listing.AutomatedSourcePolicy)
+        assert not policy and list(policy) == [] and policy.interactive == []
+    rows = listing.stamp_automated([{"id": "a", "source": "eval"}], root)
+    assert rows == [{"id": "a", "source": "eval", "automated": False}]
+    assert get_hermes_home() == prior_home
+
+
 def test_errors_restore_home_and_do_not_memoize_fallback(monkeypatch, tmp_path):
     from hermes_cli.config_backend import ConfigBackendUnavailable
 
