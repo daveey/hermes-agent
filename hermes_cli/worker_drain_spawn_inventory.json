@@ -920,6 +920,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/update_conflict_reporting.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
   "hermes_cli/update_lock.py": {
    "direct": 2,
    "routed": 0,

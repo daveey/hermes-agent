@@ -466,6 +466,9 @@ _UPDATE_DEPENDENCIES = (
     "agent/deadline.py",  # bounded probes' process-tree timeout cleanup
     "hermes_cli/kanban_db.py",  # update_upstream_conflict files the conflict card
     "hermes_cli/kanban_db_connect.py",
+    "hermes_cli/kanban_db_sync.py",  # conflict reporting validates the inventory board
+    "hermes_cli/kanban_sync_client.py",  # authoritative conflict-owner evidence
+    "hermes_cli/config_effective.py",  # fail-closed conflict reporting configuration
     "hermes_cli/kanban_schema_owner.py",  # post_update reports a board schema only the installed core may migrate
     "hermes_cli/kanban_capability_routing.py",  # update_pause_siblings names this host's Board gateway
     "hermes_cli/kanban_foreign_card.py",  # update_pause_siblings reads sibling alarms in the Board replica
