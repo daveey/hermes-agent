@@ -370,6 +370,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/git_fingerprint.py": {
+   "direct": 1,
+   "routed": 0,
+   "status": "pending"
+  },
   "hermes_cli/github_api.py": {
    "direct": 1,
    "routed": 0,
