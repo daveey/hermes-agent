@@ -171,16 +171,30 @@ def _route_providers(model: Optional[str], provider: Optional[str]) -> list[str]
 
 def candidate_route(conn: sqlite3.Connection, task: Any, lane: str) -> tuple[Optional[tuple], list[str]]:
     """``((model, provider, reason), providers)``: the card's next-run route and the providers it may land on
-    (``[]`` = unknown, the card starts). The route is None when the tier resolver chose none (tier off, a profile
-    outside its scope): the card then launches on its own pin or profile route, which the route applier never
-    rewrites, so no pace move can apply to it (review 5912306106). [daveey]"""
+    (``[]`` = unknown, the card starts). With tiers off/out of scope, use the assignee's
+    own class registry; its claim-time offer is checked against that profile route."""
     from hermes_cli.kanban_model_tier import profile_route, resolve_dispatch_tier
     model, provider, reason = resolve_dispatch_tier(conn, task, lane=lane)
     route = (model, provider, reason) if model else None
     if not model:
         model, provider = getattr(task, "model_override", None), getattr(task, "provider_override", None)
     if not model:
-        model, provider = profile_route(getattr(task, "assignee", None))
+        model, profile_provider = profile_route(getattr(task, "assignee", None))
+        provider = provider or profile_provider
+    pinned_provider = getattr(task, "provider_override", None)
+    if pinned_provider and str(pinned_provider).strip().lower() != "auto" and reason == "pinned":
+        return route, [str(pinned_provider).strip().lower()]
+    if route is None and model:
+        from agent.model_routing import eligible_routes, is_class_selector
+        from agent.model_routing_agent import class_requirements
+        from hermes_cli.kanban_model_assignment import _assignee_config
+        if is_class_selector(model):
+            config = _assignee_config(task.assignee) or {}
+            policy = config.get("model_routing") or {}
+            providers = sorted({str(r["provider"]).strip().lower() for r in
+                                eligible_routes(policy, model.removeprefix("class:"), class_requirements(config))}) \
+                if policy.get("enabled") else []
+            return route, providers
     return route, _route_providers(model, provider)
 
 
@@ -388,7 +402,14 @@ def _pace_alternate(conn: sqlite3.Connection, task: Any, lane: str, cfg: lp.Paci
     try:
         route = candidate_route(conn, task, lane)[0]
         if route is None:
-            return None  # a pin/profile fallback route is launched as is: holding is the only safe answer
+            from hermes_cli.kanban_model_tier import profile_route, resolve_model_tier
+            reason = resolve_model_tier(conn, task, lane=lane)[2]
+            if task.model_override or task.provider_override or reason not in {"off", "profile_out_of_scope"}:
+                return None
+            model, provider = profile_route(task.assignee)
+            if not model:
+                return None
+            route = (model, provider, reason)
         return _pace_alternate_route(conn, task, route, lane, cfg, host, verdicts)
     except Exception as exc:  # health: allow BLE001 -- a failed probe keeps today's hold, never starts a paced card
         _warn("alternate", "kanban pacing: pace alternate probe failed (%s: %s); holding", type(exc).__name__, exc)

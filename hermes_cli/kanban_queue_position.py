@@ -216,6 +216,10 @@ def _position(conn: sqlite3.Connection, task, board: Optional[str] = None) -> Op
     from hermes_cli.kanban_sync_quarantine import refusal as quarantine_refusal
     if held := quarantine_refusal(conn, task.id):  # the dispatcher drops it (drop_held): say why and how [daveey]
         return {"lane": "sync_quarantine", "reason": held}
+    from hermes_cli import kanban_dispatch_skip as skips
+    skip = skips.latest(conn, task.id)
+    if skip and skip.get("reason") in (skips.LLM_PACED, "llm_pacing"):
+        return {"lane": "llm_pacing", "skip": skip}
     guard = recorded_guard(conn, task.id)
     if guard:
         return {"lane": "respawn_guard", "reason": guard}
@@ -338,6 +342,9 @@ def _describe_lane(place: Optional[dict[str, Any]]) -> Optional[str]:
     if not place:
         return None
     lane = place.get("lane")
+    if lane == "llm_pacing":
+        from hermes_cli.kanban_dispatch_skip import words
+        return "last dispatcher skip: " + words(place["skip"])
     if lane == "sync_quarantine":
         return place.get("reason")
     if lane == "respawn_guard":

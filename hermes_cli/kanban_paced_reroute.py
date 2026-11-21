@@ -11,9 +11,8 @@ Rule (:func:`paced_route`); anything else keeps the route, as before:
    ``kanban_llm_pacing_dispatch.held_pools``, no usage read here) and its ``until`` is more than
    ``kanban.llm_pacing.reroute_after_s`` (default 3600) away, or unknown. A ``paced`` pool (limit >= 1) never moves a
    route;
-2. the route is a ``review_unpinned`` reviewer, an explicit handoff ``review_model``
-   (``review_override``/``review_override_refused``), or a non-mandatory concrete pin (the far-wall rule of
-   ``kanban_pin_reroute``). Mandatory pins, class selectors and ``require_model: true`` cards keep their route.
+2. the route is a ``review_unpinned`` reviewer or an explicit handoff ``review_model``
+   (``review_override``/``review_override_refused``). Explicit task pins keep their route.
    An unpinned ``default`` route is no longer moved here (2026-11-19): ratio routing (``kanban_ratio_routing``)
    starts it on a pool under its budget share and never on one at reserve, and the governor's claim-time pace move
    (``kanban_pace_reroute``) still moves one that resolves onto a held pool (ratio routing off or failing open);
@@ -92,24 +91,12 @@ def _review_peer(conn, task, cfg, held, now, *, registered=False):
     return None
 
 
-def _pinned_peer(task, model, held, now):
-    from hermes_cli.kanban_pin_reroute import is_mandatory_pin, peer_route
-    from hermes_cli.kanban_provider_walls import active_walls
-    if is_mandatory_pin(task):
-        return None
-    return peer_route(task, model, {**active_walls(now=now), **held})
-
-
 def _probe(conn, task, base, cfg, now):
     """``(model, provider, held provider)`` per the module rule, else None."""
     from hermes_cli import kanban_provider_walls as pw
     reason = base[2]
     if reason == "pinned":
-        from hermes_cli.kanban_pin_reroute import pin
-        pinned = pin(task)
-        if pinned is None:
-            return None
-        model, provider = pinned
+        return None  # quota pacing must not substitute an explicitly pinned model/provider
     elif reason in REVIEW_REASONS:
         model, provider = base[0], pw._norm(base[1])
         if not model or not provider or pw.requires_model(task):
@@ -124,10 +111,7 @@ def _probe(conn, task, base, cfg, now):
     # provider, so the walk is bounded. (t_01a1deaf95f5b885)
     excluded = dict(held)
     for _ in range(_MAX_PEER_PROBES):
-        if reason == "pinned":
-            moved = _pinned_peer(task, model, excluded, now)
-        else:
-            moved = _review_peer(conn, task, cfg or {}, excluded, now, registered=reason != "review_unpinned")
+        moved = _review_peer(conn, task, cfg or {}, excluded, now, registered=reason != "review_unpinned")
         if not moved:
             return None
         target = pw._norm(moved[1])

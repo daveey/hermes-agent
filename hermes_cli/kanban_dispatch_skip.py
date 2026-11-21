@@ -332,6 +332,8 @@ def _local_gate(skip: dict[str, Any]) -> bool:
 def words(skip: dict[str, Any], *, now: Optional[float] = None) -> str:
     """The skip as one clause, e.g. ``held: pinned model claude-opus-5-5 (anthropic) quota-walled until 01:59Z``."""
     reason = str(skip.get("reason") or "unknown")
+    if reason == "llm_pacing":
+        reason = LLM_PACED
     detail = skip.get("detail") or "no detail"
     text = _WORDS.get(reason, "skipped: {reason} ({detail})").format(reason=reason, detail=detail)
     if reason == "claim_deferred" and _local_gate(skip):

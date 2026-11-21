@@ -502,7 +502,8 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
     # Persist the pace choice before the owner reloads its authoritative model_tier receipt. An offer that expired or
     # no longer matches raises OfferLost: the launch is refused and requeued, never started on the held route.
     from hermes_cli.kanban_pace_reroute import REASON as _PACED, take as _take_pace_move
-    moved = _take_pace_move(getattr(task, "id", ""), (model, provider))
+    resolved = (model, provider) if model else effective_route(task)[:2]
+    moved = _take_pace_move(getattr(task, "id", ""), resolved)
     if moved:
         validate_pace_offer(moved[0], excluded)
         model, provider = moved[0], moved[1]
