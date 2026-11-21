@@ -9079,6 +9079,11 @@
             "title": "Hidden",
             "type": "boolean"
           },
+          "agent_cli": {
+            "default": false,
+            "title": "Agent Cli",
+            "type": "boolean"
+          },
           "follow_profile_config": {
             "anyOf": [
               {

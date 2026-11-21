@@ -39,7 +39,7 @@ class Owner:
         if method in self.refuse:
             raise self.refuse[method]
         if method == "runtime.describe":
-            return {"session_create": {"sources": ["cli", "oneshot"], "parameters": ["cwd", "request_id", "source"]}}
+            return {"session_create": {"sources": ["cli", "oneshot"], "parameters": ["agent_cli", "hidden", "cwd", "request_id", "source"]}}
         if method in ("session.create", "session.resume"):
             return {"stored_session_id": self.session, "execution_generation": 1, "pending": [], "prompts": []}
         if method == "prompt.submit":

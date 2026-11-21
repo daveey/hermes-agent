@@ -21,7 +21,7 @@ async def test_gateway_oneshot_preserves_empty_pick(monkeypatch, tmp_path, value
         async def rpc(self, method, **params):
             if method == 'runtime.describe':
                 return {'session_create': {'sources': ['oneshot'],
-                        'parameters': ['source', 'cwd', 'toolsets']}}
+                        'parameters': ['agent_cli', 'hidden', 'source', 'cwd', 'toolsets']}}
             assert method == 'session.create'
             captured.update(params)
             policy = build_policy(params, {'platform_toolsets': {'cli': ['web']}}, profile_terminal=False)

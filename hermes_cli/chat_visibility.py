@@ -20,7 +20,7 @@ def hide_classic_session(db, session_id):
         return  # gateway create already committed the visibility with its immutable receipt
     flags = creation_visibility()
     if flags['agent_cli']:
-        db.patch_session_model_config(session_id, {'_agent_cli': True})
+        db.seed_session_model_config(session_id, {'_agent_cli': True})
     if flags['hidden']:
         db.set_session_hidden(session_id, True)
 

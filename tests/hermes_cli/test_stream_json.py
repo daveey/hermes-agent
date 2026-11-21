@@ -65,7 +65,7 @@ def _run_stream_json_chat(monkeypatch, capsys, run_turn, credentials_ok=True):
 
         async def rpc(self, method, **params):
             if method == "runtime.describe":
-                return {"session_create": {"sources": ["cli"], "parameters": ["cwd", "model", "request_id", "source"]}}
+                return {"session_create": {"sources": ["cli"], "parameters": ["agent_cli", "hidden", "cwd", "model", "request_id", "source"]}}
             if method == "session.create":
                 return {"stored_session_id": "session-123", "info": {"model": "test-model"}}
             if method == "prompt.receipt":  # the settled result the exit code is judged from

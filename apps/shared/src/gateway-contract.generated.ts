@@ -5312,6 +5312,7 @@ export interface CanonicalCreateParams {
   editor?: Record<string, unknown> | null
   title?: string | null
   hidden?: boolean
+  agent_cli?: boolean
   follow_profile_config?: boolean | null
   service_tier?: string | null
   cwd_explicit?: boolean | null
