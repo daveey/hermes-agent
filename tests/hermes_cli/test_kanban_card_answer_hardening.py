@@ -331,7 +331,7 @@ def test_cli_real_owner_refusal_leaves_card_untouched(kanban_home, monkeypatch, 
 
 
 def test_cli_real_source_malformed_store_is_refusal(monkeypatch, capsys, tmp_path):
-    answer, rows = rt.proof_helpers.records()
+    _answer, rows = rt.proof_helpers.records()
     rows['proof'].pop('result')
     rows['proof']['state'] = 'pending'
 
@@ -349,6 +349,6 @@ def test_module_entry_point_subprocess(tmp_path):
     env = {k: v for k, v in os.environ.items() if not k.startswith('HERMES_')}
     env.update(HERMES_HOME=str(tmp_path / 'home'), HOME=str(tmp_path), PYTHONPATH=str(REPO))
     done = subprocess.run([sys.executable, '-m', 'hermes_cli.kanban_card_answer_runtime', 'owner', 'only-one'],
-                          cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+                          cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120, check=False)
     assert done.returncode == 64
     assert json.loads(done.stdout) == {'ok': False, 'error': 'usage'}
