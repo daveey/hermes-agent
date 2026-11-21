@@ -83,31 +83,27 @@ def test_cli_runs_on_remote_only_assignee(gws, monkeypatch, capsys, remote):
 
 @pytest.mark.parametrize("remote", [True, False])
 def test_set_model_override_uses_execution_host_policy(gws, monkeypatch, remote):
-    from hermes_cli.kanban_model_assignment import ModelPinNotInRegistryError, ModelProviderMismatchError
-    from hermes_cli.kanban_pin_provider import PinProviderUnresolvedError
-    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
     hub, _ = gws
-    with open(hub.home / "config.yaml", "a") as fh:
-        fh.write("model:\n  default: claude-sonnet-5-5\n  provider: anthropic\n" + _managed_yaml())
+    # Gateway already supplies a real registry. Do not append duplicate YAML keys:
+    # strict readers would drop the sync/capability policy before reaching ingress.
+    from hermes_cli.config_effective import load_profile_config_effective
+    policy = load_profile_config_effective(hub.home / "config.yaml", fail_closed=True)
+    assert policy["kanban"]["sync"]["enabled"] and policy["model_routing"]["enabled"]
     hub.enter()
     _publish(monkeypatch, {WORKER: {"default": set(NEEDS)}})
     tid = kb.create_task(hub.conn, title="repin", assignee="default", requires=NEEDS,
                          runs_on=[f"machine:{WORKER if remote else HUB}"])
-    if not remote:
-        with pytest.raises(ModelPinNotInRegistryError):
-            kb.set_model_override(hub.conn, tid, "claude-sonnet-4-5", "anthropic")
-        assert kb.get_task(hub.conn, tid).model_override is None
-        return
-    assert kb.set_model_override(hub.conn, tid, "claude-sonnet-4-5", "anthropic")
-    task = kb.get_task(hub.conn, tid)
-    assert (task.model_override, task.provider_override) == ("claude-sonnet-4-5", "anthropic")
-    with pytest.raises(ModelProviderMismatchError):
-        kb.set_model_override(hub.conn, tid, "gpt-5", "anthropic")
-    monkeypatch.setattr("hermes_cli.models_detect.provider_has_credentials", lambda p: p == "anthropic")
-    with pytest.raises(PinProviderUnresolvedError):
-        kb.set_model_override(hub.conn, tid, "claude-opus-5-5")
-    assert kb.get_task(hub.conn, tid).model_override == "claude-sonnet-4-5"
+    before = tuple(hub.conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone())
+    events = [tuple(row) for row in hub.conn.execute("SELECT * FROM task_events ORDER BY id")]
+    for model, provider in [("claude-sonnet-4-5", "anthropic"), ("gpt-5", "anthropic"),
+                            ("claude-opus-5-5", None)]:
+        with pytest.raises(ValueError, match="model-neutral"):
+            kb.set_model_override(hub.conn, tid, model, provider)
+        assert tuple(hub.conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()) == before
+        assert [tuple(row) for row in hub.conn.execute("SELECT * FROM task_events ORDER BY id")] == events
     assert kb.set_model_override(hub.conn, tid, "class:deep")
-    assert kb.get_task(hub.conn, tid).provider_override is None
+    task = kb.get_task(hub.conn, tid)
+    assert (task.model_override, task.provider_override) == ("class:deep", "auto")
     assert kb.set_model_override(hub.conn, tid, None)
-    assert kb.get_task(hub.conn, tid).model_override is None
+    task = kb.get_task(hub.conn, tid)
+    assert (task.model_override, task.provider_override) == (None, None)
