@@ -5,7 +5,7 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 
@@ -42,7 +42,7 @@ class BoardWatch:
         self._lock = threading.Lock()
         self._conns: dict[str, tuple[tuple[int, int, int, int], sqlite3.Connection, int]] = {}
         self._gen = 0
-        self._answers: dict[str, tuple[int, str, Any]] = {}
+        self._answers: dict[str, dict[str, tuple[Any, Any]]] = {}  # path -> tag -> (data_version, answer)
 
     def _conn(self, path: Path) -> Optional[tuple[sqlite3.Connection, int]]:
         # Keep the requested spelling (including symlink/.. semantics). stat
@@ -90,25 +90,37 @@ class BoardWatch:
 
     def query(self, path: Path, sql: str, *, unchanged_ok: bool = False) -> Optional[tuple[int, Any]]:
         """(generation, first row) or None when the file cannot be read."""
+        return self.read(path, sql, lambda conn: conn.execute(sql).fetchone(), unchanged_ok=unchanged_ok)
+
+    def read(self, path: Path, tag: str, compute: Callable[[sqlite3.Connection], Any], *,
+             unchanged_ok: bool = False) -> Optional[tuple[int, Any]]:
+        """(generation, ``compute(conn)``) on the kept connection, or None when the file cannot be read.
+
+        ``unchanged_ok``: the answer stored under *tag* is reused while this connection's ``data_version`` has
+        not moved (no other connection committed) and the kept reader was not reopened. Each tag has its own
+        answer, so two questions about one board never evict each other. ``compute`` must be a pure function
+        of the database content (no clock, config or process state) and must leave no transaction open: it
+        runs under the watch lock on a connection other readers share. A SQLite error drops the reader and
+        every answer for the path; any other exception propagates and stores nothing."""
         with self._lock:
+            key = str(Path(path).absolute())
             try:
                 got = self._conn(path)
                 if got is None:
                     return None
                 conn, gen = got
-                key = str(Path(path).absolute())
                 version = conn.execute("PRAGMA data_version").fetchone()[0] if unchanged_ok else None
-                cached = self._answers.get(key)
-                if unchanged_ok and cached is not None and cached[:2] == (version, sql):
-                    return gen, cached[2]
-                answer = conn.execute(sql).fetchone()
+                cached = self._answers.get(key, {}).get(tag)
+                if unchanged_ok and cached is not None and cached[0] == version:
+                    return gen, cached[1]
+                answer = compute(conn)
                 if unchanged_ok:
                     # Version is read BEFORE the query: a concurrent commit may cause
                     # one extra read, but cannot publish a stale answer as current.
-                    self._answers[key] = (version, sql, answer)
+                    self._answers.setdefault(key, {})[tag] = (version, answer)
                 return gen, answer
             except sqlite3.Error:
-                self._drop(str(Path(path).absolute()))
+                self._drop(key)
                 return None
 
     def release_gone(self) -> int:

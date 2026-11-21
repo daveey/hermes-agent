@@ -211,6 +211,11 @@ def active_card_runs(exclude=None, detail: Optional[dict] = None, *, owner_outpu
         return None
 
 
+# The sync loop's Reporter names its census (machine_report_census: kept readers, reused while a board's
+# data_version is unchanged) for the collect() it runs on this thread; every other caller reads fresh connections.
+_REPORT = threading.local()
+
+
 def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
     """``{cpu_load1, cpus, mem_used_pct, disk_free_gb, disk_total_gb}`` plus the throughput counters
     (``machine_throughput_metrics``); a value that cannot be read is left out."""
@@ -231,7 +236,7 @@ def collect(disk_path: Optional[Path] = None) -> dict[str, Any]:
         except Exception:  # health: allow BLE001 -- malformed worker observations must report unknown capacity
             out = {"active_card_runs": None}
     else:
-        out = machine_admission_metrics.collect(active_card_runs)
+        out = machine_admission_metrics.collect(getattr(_REPORT, "census", None) or active_card_runs)
     from hermes_cli import machine_persistent_jobs
     out.update(machine_persistent_jobs.collect())
     out.update(machine_drain_metrics.collect())
@@ -314,6 +319,7 @@ class Reporter:
         self.cpu_wait_fn: Optional[Callable[[float], Any]] = None
         self.sent_at: Optional[float] = None  # the latest report actually sent (either path)
         self.suppressed = 0  # CPU-less reports withheld while the gate was on
+        self.census_fn: Optional[Callable[..., Optional[int]]] = None  # the loop's kept-reader census, else fresh
 
     def _sample(self, sample: dict, measured: Optional[dict]) -> dict:
         from hermes_cli import kanban_sync_timing as timing
@@ -375,7 +381,11 @@ class Reporter:
             from hermes_cli import machine_cpu_metrics as cpu
             from hermes_cli.machine_drain_metrics import send_compatible
             with timing.span("collect"):
-                sample = dict((self.collect_fn or collect)())
+                _REPORT.census = self.census_fn
+                try:
+                    sample = dict((self.collect_fn or collect)())
+                finally:
+                    _REPORT.census = None
             with timing.span("limit"):
                 state, limit = (self.cpu_limit_fn or cpu.root_limit)()
             measured = None

@@ -1506,6 +1506,8 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     links = _LINKS_RUNNER = LinksPass(ident.gateway)
     from hermes_cli.machine_metrics import Reporter
     metrics = Reporter(hub.report_metrics)
+    from hermes_cli.machine_report_census import census  # unchanged boards are not re-read per report [daveey]
+    metrics.census_fn = census(_WATCH)
     # Hub CPU advisory: measured on its own thread, so a slow sync round can neither void nor delay it. [daveey]
     from hermes_cli.machine_cpu_sampler import AdvisorySampler
     sampler = AdvisorySampler()
