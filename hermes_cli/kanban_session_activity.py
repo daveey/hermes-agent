@@ -1044,8 +1044,7 @@ def _project_remote_links() -> list[dict[str, Any]]:
                 tips[sid] = None
         return tips[sid]
 
-    # [daveey] Both tests below need an exact identity match, so index the receipt rows by it: scanning every
-    # row per legacy card was ~2.4k x ~200 ``supersedes`` calls (~45 ms) per projection.
+    # [daveey] Index exact receipt identities: scanning all rows per legacy card cost ~45 ms per projection.
     by_origin: dict[tuple, list[dict[str, Any]]] = {}
     by_key: dict[tuple, list[dict[str, Any]]] = {}
     if legacy:
@@ -1057,7 +1056,8 @@ def _project_remote_links() -> list[dict[str, Any]]:
     def superseded(card: dict[str, Any]) -> bool:
         from hermes_cli.kanban_origin_legacy import supersedes
         origin = (card.get('gateway'), card.get('origin_gateway'), card.get('origin_profile'), card.get('session'))
-        if any(supersedes(card, row) for row in by_origin.get(origin, ())):
+        bucket = by_origin.get(origin, ())  # preserve lookup errors; supersedes rejects qualified cards below
+        if card.get('profile') is None and any(supersedes(card, row) for row in bucket):
             return True
         for row in by_key.get((card.get('key'), card.get('origin_gateway'), card.get('origin_profile')), ()):
             aliases = (row['origin_session'], row['session'])
