@@ -293,8 +293,9 @@ def _list_sessions_payload(
             include_subagents, exclude_list = subagent_listing_scope(
                 Path(db.db_path).parent, source=source or None, sources=source_list or None,
                 exclude_sources=_csv(exclude_sources) or None)
+            excluded_pairs = None
             if automated == "exclude":
-                skip, automated_sources = automated_listing_exclusion(Path(db.db_path).parent, db)
+                skip, automated_sources, excluded_pairs = automated_listing_exclusion(Path(db.db_path).parent, db)
                 if skip:
                     skipped = profile_name or _cron_default_profile()
                     return {"sessions": [], "total": 0, "limit": limit, "offset": offset, "storage": (
@@ -305,6 +306,8 @@ def _list_sessions_payload(
                 exclude_sources=exclude_list or None, cwd_prefix=(cwd_prefix or None),
                 min_message_count=min_message_count, include_archived=include_archived,
                 archived_only=archived_only, include_subagents=include_subagents)
+            if excluded_pairs:
+                scope["exclude_source_pairs"] = excluded_pairs
             sessions = db.list_sessions_rich(
                 limit=limit,
                 offset=offset,

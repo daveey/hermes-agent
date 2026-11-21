@@ -102,6 +102,7 @@ def _session_filter_where(
     min_message_count: int = 0, archived_only: bool = False, include_archived: bool = False,
     include_subagents: bool = False, local_created_sources: Sequence[str] | None = None,
     workspace_key: str | None = None,
+    exclude_source_pairs: list[tuple[str, str]] | None = None,
 ) -> tuple[list[str], list[Any]]:
     """Shared ``sessions s`` WHERE builder so counts line up with listed rows. ``exclude_children``
     hides sub-agent runs and compression continuations but keeps branch/reset children
@@ -126,6 +127,10 @@ def _session_filter_where(
         if values:
             where.append(clause)
             params.extend(values)
+    if exclude_source_pairs:
+        where.append("(COALESCE(s.source, ''), COALESCE(s.created_source, '')) NOT IN (" +
+                     ",".join("(?,?)" for _ in exclude_source_pairs) + ")")
+        params.extend(value for pair in exclude_source_pairs for value in pair)
     if archived_only:
         where.append("s.archived = 1")
     elif not include_archived:
@@ -1325,6 +1330,7 @@ class SessionSessionsMixin:
         include_pinned: bool = False, session_key: str | None = None, include_hidden: bool = False,
         include_subagents: bool = False, local_created_sources: Sequence[str] | None = None,
         workspace_key: str | None = None,
+        exclude_source_pairs: list[tuple[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
         """List sessions with preview and ``last_active`` in one query. ``order_by_last_active`` sorts
         by the chain TIP via a recursive CTE (the only path honouring ``id_query`` / ``search_query``);
@@ -1341,6 +1347,7 @@ class SessionSessionsMixin:
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
             archived_only=archived_only, include_archived=include_archived, include_subagents=include_subagents,
             local_created_sources=local_created_sources, workspace_key=workspace_key,
+            exclude_source_pairs=exclude_source_pairs,
         )
         # The archived-only view is the recovery surface for rows that dropped out of every
         # default list: a session that is archived AND hidden (Bot Mode marks its sessions
@@ -1394,6 +1401,7 @@ class SessionSessionsMixin:
                 min_message_count=min_message_count, archived_only=False, include_archived=True,
                 include_subagents=include_subagents, local_created_sources=local_created_sources,
                 workspace_key=workspace_key,
+                exclude_source_pairs=exclude_source_pairs,
             )
             if not include_hidden and not archived_only:
                 pinned_clauses.append("s.hidden = 0")
@@ -1543,6 +1551,7 @@ class SessionSessionsMixin:
         min_message_count: int = 0, include_archived: bool = False, archived_only: bool = False,
         exclude_children: bool = False, exclude_sources: list[str] | None = None, include_subagents: bool = False,
         local_created_sources: Sequence[str] | None = None,
+        exclude_source_pairs: list[tuple[str, str]] | None = None,
     ) -> int:
         """Count sessions with list_sessions_rich's filters so a paired "load more" total matches."""
         where_clauses, params = _session_filter_where(
@@ -1550,6 +1559,7 @@ class SessionSessionsMixin:
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
             archived_only=archived_only, include_archived=include_archived, include_subagents=include_subagents,
             local_created_sources=local_created_sources,
+            exclude_source_pairs=exclude_source_pairs,
         )
         if exclude_children:
             from hermes_state_local import exclude_superseded_segments

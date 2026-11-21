@@ -354,7 +354,7 @@ def _project_tree_row(r: dict, automated_sources: list[str] | None = None) -> di
             "message_count", "tool_call_count", "input_tokens", "output_tokens")},
         **{k: r.get(k) for k in ("actual_cost_usd", "estimated_cost_usd", "model")},
         is_active=False, **{k: r.get(k) for k in ("cwd", "git_branch", "git_repo_root")},
-        automated=is_automated_source(r.get("source"), automated_sources or []),
+        automated=is_automated_source(r.get("source"), automated_sources or [], created_source=r.get("created_source")),
         # [daveey] The stored outcome + mute, as list_sessions_rich stamped them on the list rows. Without them a
         # tree row painted green from idleness while the list row painted amber (`unresolved`), and the sidebar
         # stripe flapped done<->attention on every refresh depending on which source wrote last.

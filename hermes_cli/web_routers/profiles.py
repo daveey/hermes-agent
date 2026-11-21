@@ -486,11 +486,13 @@ def get_profiles_sessions(
 
         def _read(db, scoped=scoped, home=home, policy=policy):
             if policy is not None:
-                skip, automated_sources = automated_listing_exclusion(home, db, policy)
+                skip, automated_sources, excluded_pairs = automated_listing_exclusion(home, db, policy)
                 if skip:
                     return [], 0
                 scoped = {**scoped, "exclude_sources": sorted(
                     {*(scoped["exclude_sources"] or []), *automated_sources}) or None}
+                if excluded_pairs:
+                    scoped["exclude_source_pairs"] = excluded_pairs
             rows = db.list_sessions_rich(
                 limit=per_profile, offset=0, order_by_last_active=order == "recent",
                 # Same SQL-level blob skip as /api/sessions.

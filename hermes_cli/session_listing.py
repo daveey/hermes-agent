@@ -180,7 +180,7 @@ def automated_session_sources(hermes_home: str | Path) -> AutomatedSourcePolicy:
     return policy
 
 
-def is_automated_source(source: Any, automated_sources: list[str] | None) -> bool:
+def is_automated_source(source: Any, automated_sources: list[str] | None, *, created_source: Any = None) -> bool:
     """Whether a row with *source* is automated under *automated_sources* (``"*"`` = all). When it
     is an :class:`AutomatedSourcePolicy` with ``interactive`` sources, a non-empty source outside
     that allowlist is automated too. A row with no source at all (legacy) is never flagged by the
@@ -190,8 +190,18 @@ def is_automated_source(source: Any, automated_sources: list[str] | None) -> boo
     src = str(source or "").strip().lower()
     if AUTOMATED_ALL_SOURCES in automated_sources or (src and src in automated_sources):
         return True
+    # Routing source is not creation provenance. Only the canonical local human surfaces
+    # may stand in for local; never let a bot/eval label borrow an unrelated creator.
+    if src == "gui":
+        src = "desktop"
+    elif src == "local" and created_source in {"desktop", "cli", "tui", "acp"}:
+        src = created_source
+    automated = {"desktop" if value == "gui" else value for value in automated_sources}
+    if src in automated:
+        return True
     interactive = getattr(automated_sources, "interactive", None)
-    return bool(interactive) and bool(src) and src not in interactive
+    allowed = {"desktop" if value == "gui" else value for value in (interactive or ())}
+    return bool(allowed) and bool(src) and src not in allowed
 
 
 def stamp_automated(
@@ -204,7 +214,7 @@ def stamp_automated(
     if automated_sources is None:
         automated_sources = automated_session_sources(hermes_home) if hermes_home is not None else []
     for row in rows:
-        row["automated"] = is_automated_source(row.get("source"), automated_sources)
+        row["automated"] = is_automated_source(row.get("source"), automated_sources, created_source=row.get("created_source"))
     return rows
 
 
@@ -216,23 +226,31 @@ def automated_policy_key(policy: AutomatedSourcePolicy) -> tuple[tuple[str, ...]
 
 def automated_listing_exclusion(
     hermes_home: str | Path, db: Any, policy: AutomatedSourcePolicy | None = None,
-) -> tuple[bool, list[str]]:
-    """``(skip_store, exclude_sources)`` for a list that leaves automated rows out in SQL, so they
-    neither fill its pages nor count in its total [daveey]. ``skip_store``: the policy marks every
-    session automated (``"*"``), the store contributes nothing. Otherwise every source spelling the
-    store holds that :func:`is_automated_source` flags, so the SQL filter and the ``automated``
-    stamp agree row for row (the stamp folds case, ``NOT IN`` does not). A row with no source is
-    kept, as the stamp keeps it. Pinned rows are not exempt: the pin back-fill obeys the filter.
-    Why: 2026-11-17, 15,432 auto-archived bot rows in two profiles sat between a user's own
-    archived chats, 34 pages deep."""
+) -> tuple[bool, list[str], list[tuple[str, str]]]:
+    """``(skip_store, exclude_sources, exclude_source_pairs)`` for SQL list/count filtering.
+    Whole-source exclusions handle ordinary producer labels; mixed local routing rows use
+    exact (source, created_source) pairs so human surfaces do not admit bot/eval traffic.
+    Both filters apply before LIMIT/OFFSET and to pinned backfill. The classifier keeps
+    legacy rows with no source, and explicit ``*`` excludes the entire store.
+    """
     if policy is None:
         policy = automated_session_sources(hermes_home)
     if not policy:
-        return False, []
+        return False, [], []
     if AUTOMATED_ALL_SOURCES in policy:
-        return True, []
-    held = db.session_count_by_source(include_archived=True)
-    return False, sorted(src for src in held if is_automated_source(src, policy))
+        return True, [], []
+    # A routing class can hold both human and machine sessions. Exclude its individual
+    # provenance classes in SQL, before paging/counting; never exclude all local rows.
+    with db._read_ctx() as conn:
+        held = conn.execute("SELECT DISTINCT source, COALESCE(created_source, '') FROM sessions").fetchall()
+    sources, pairs = set(), []
+    for source, created in held:
+        if is_automated_source(source, policy, created_source=created):
+            if str(source or "").strip().lower() == "local":
+                pairs.append((source, created))
+            else:
+                sources.add(source)
+    return False, sorted(sources), pairs
 
 
 def subagent_listing_scope(
