@@ -178,6 +178,7 @@ import {
 } from './projects'
 import { WorktreeDialog } from './projects/worktree-dialog'
 import { mergeSearchResults } from './search-results'
+import { SidebarSearchEmpty, SidebarSearchFailure } from './search-states'
 import {
   hasSessionArea,
   SidebarBlankState,
@@ -464,7 +465,12 @@ export function ChatSidebar({
   // (same rule as the overview overlay), so filtering to Home keeps Home's rows.
   const hiddenGatewayIds = useStore($hiddenGatewayIds)
   const gatewayRegistry = useStore($connectionsRegistry)
-  const executionRows = useMemo(() => [sessions, messagingSessions, projectTree], [sessions, messagingSessions, projectTree])
+
+  const executionRows = useMemo(
+    () => [sessions, messagingSessions, projectTree],
+    [sessions, messagingSessions, projectTree]
+  )
+
   const executionNow = useExecutionObservationClock(executionRows)
 
   const sessionMatchesFilters = useCallback(
@@ -637,7 +643,7 @@ export function ChatSidebar({
     [isPinnedSession, filtersNarrow, sessionMatchesFilters]
   )
 
-  const { searchPending, serverMatches } = useServerSessionSearch(trimmedQuery, profileScope)
+  const { searchPending, serverMatches, searchFailed, retrySearch } = useServerSessionSearch(trimmedQuery, profileScope)
 
   const searchResults = useMemo(
     () => mergeSearchResults(sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending),
@@ -1641,19 +1647,12 @@ export function ChatSidebar({
             data-sessions-mode={sessionsMode}
             data-sessions-project={inProject ? (enteredProjectId ?? undefined) : undefined}
           >
+            <SidebarSearchFailure label={s.searchFailedRetry} retry={retrySearch} visible={searchFailed} />
             {trimmedQuery && (
               <SidebarSessionsSection
                 activeSessionId={activeSidebarSessionId}
                 contentClassName={cn('flex min-h-0 flex-1 flex-col gap-px pb-1.75', SCROLL_Y)}
-                emptyState={
-                  searchPending ? (
-                    <SidebarSessionSkeletons />
-                  ) : (
-                    <div className="wrap-anywhere grid min-h-24 place-items-center rounded-lg px-2 text-center text-xs text-(--ui-text-tertiary)">
-                      {s.noMatch(trimmedQuery)}
-                    </div>
-                  )
-                }
+                emptyState={<SidebarSearchEmpty label={s.noMatch(trimmedQuery)} pending={searchPending} />}
                 label={s.results}
                 onArchiveSession={onArchiveSession}
                 onBranchSession={onBranchSession}

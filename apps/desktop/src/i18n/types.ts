@@ -2850,6 +2850,7 @@ export interface Translations extends NoticeTranslations {
     searchAria: string
     searchPlaceholder: string
     clearSearch: string
+    searchFailedRetry: string
     noMatch: (query: string) => string
     results: string
     pinned: string

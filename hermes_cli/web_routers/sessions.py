@@ -391,7 +391,7 @@ def _is_compression_edge(child: dict, parent: dict) -> bool:
 async def search_sessions(
     q: str = "", limit: int = 20, profile: Optional[str] = None, source: str | None = None,
     sources: str | None = None, exclude_sources: str | None = None):
-    """Search sessions by ID (first) plus FTS5 message content.
+    """Search sessions by ID (first), title, then FTS5 message content.
 
     Results are deduped by compression lineage, not raw ``session_id``:
     auto-compression rotates a chat onto a fresh id and leaves the old segment
@@ -516,25 +516,7 @@ async def search_sessions(
                 snippet = preview or f"Session ID: {sid}"
                 add_lineage_result(sid, hit_payload(row, snippet, None, row.get("started_at")))
 
-            # Prefix wildcards so partial words match ("nimb" -> "nimb*");
-            # quoted phrases and existing wildcards are kept as-is.
-            prefix_query = " ".join(
-                tok if tok.startswith('"') or tok.endswith("*") else tok + "*"
-                for tok in re.findall(r'"[^"]*"|\S+', q.strip()))
-            # Over-fetch so lineage dedup can still surface `limit` distinct
-            # conversations when several hits collapse onto one root.
-            matches = db.search_messages(
-                query=prefix_query, source_filter=include_sources,
-                exclude_sources=exclude_list or None, limit=max(safe_limit * 5, 50),
-                fields=("session_id", "role", "snippet", "source", "model", "session_started"))
-            for m in matches:
-                if len(seen) >= safe_limit:
-                    break
-                add_lineage_result(
-                    m["session_id"],
-                    hit_payload(m, m.get("snippet", ""), m.get("role"), m.get("session_started")))
-
-            # Title matches fill any remaining slots (#66242): the FTS index
+            # Title matches precede content hits (#66242): the FTS index
             # only covers message content, so a term that lives solely in a
             # manually-set sessions.title would otherwise return nothing. The
             # DB layer already knows how to LIKE-match titles across the whole
@@ -561,6 +543,24 @@ async def search_sessions(
                     add_lineage_result(
                         sid, hit_payload(row, preview or f"Session title matched: {q.strip()}",
                                          None, row.get("started_at")))
+            # Prefix wildcards so partial words match ("nimb" -> "nimb*");
+            # quoted phrases and existing wildcards are kept as-is.
+            prefix_query = " ".join(
+                tok if tok.startswith('"') or tok.endswith("*") else tok + "*"
+                for tok in re.findall(r'"[^"]*"|\S+', q.strip()))
+            # Over-fetch so lineage dedup can still surface `limit` distinct
+            # conversations when several hits collapse onto one root.
+            matches = db.search_messages(
+                query=prefix_query, source_filter=include_sources,
+                exclude_sources=exclude_list or None, limit=max(safe_limit * 5, 50),
+                fields=("session_id", "role", "snippet", "source", "model", "session_started"))
+            for m in matches:
+                if len(seen) >= safe_limit:
+                    break
+                add_lineage_result(
+                    m["session_id"],
+                    hit_payload(m, m.get("snippet", ""), m.get("role"), m.get("session_started")))
+
             return {"results": list(seen.values())}
 
         # FTS over a large state.db is the slowest read here; keep it off the loop (#60747).

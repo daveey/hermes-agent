@@ -3680,6 +3680,7 @@ export const esOverrides = {
     searchAria: 'Buscar sesiones',
     searchPlaceholder: 'Buscar sesiones…',
     clearSearch: 'Limpiar búsqueda',
+    searchFailedRetry: 'Búsqueda fallida, reintentar',
     noMatch: query => `Ninguna sesión coincide con “${query}”.`,
     results: 'Resultados',
     pinned: 'Fijadas',

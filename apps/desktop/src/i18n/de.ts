@@ -3692,6 +3692,7 @@ export const deOverrides = {
     searchAria: 'Sessions durchsuchen',
     searchPlaceholder: 'Sessions durchsuchen…',
     clearSearch: 'Suche löschen',
+    searchFailedRetry: 'Suche fehlgeschlagen, erneut versuchen',
     noMatch: query => `Keine Sessions passen zu “${query}”.`,
     results: 'Ergebnisse',
     pinned: 'Angepinnt',

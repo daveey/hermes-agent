@@ -3259,6 +3259,7 @@ export const en: Translations = {
     searchAria: 'Search sessions',
     searchPlaceholder: 'Search sessions…',
     clearSearch: 'Clear search',
+    searchFailedRetry: 'Search failed, retry',
     noMatch: query => `No sessions match “${query}”.`,
     results: 'Results',
     pinned: 'Pinned',

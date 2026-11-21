@@ -3700,6 +3700,7 @@ export const frOverrides = {
     searchAria: 'Rechercher des sessions',
     searchPlaceholder: 'Rechercher des sessions…',
     clearSearch: 'Effacer la recherche',
+    searchFailedRetry: 'Échec de la recherche, réessayer',
     noMatch: query => `Aucune session ne correspond à « ${query} ».`,
     results: 'Résultats',
     pinned: 'Épinglées',

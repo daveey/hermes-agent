@@ -6,8 +6,8 @@ message content), so a term that lived solely in a manually-set
 ``sessions.title`` returned zero results. The DB layer already had title
 matching — ``list_sessions_rich(search_query=...)`` LIKE-matches titles across
 the whole compression chain — and the endpoint never called it. The fix
-backfills remaining result slots through that existing helper via the same
-add_lineage_result dedup path (content hits keep BM25 priority).
+searches titles before content through that existing helper via the same
+add_lineage_result dedup path (ID hits retain first priority).
 
 These tests drive the real SessionDB through the real route handler (no fake
 DB) so the title lane is exercised end to end, including the SQLite
@@ -53,6 +53,27 @@ def db_path_for_profile(real_db, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("with_id_match", [False, True])
+def test_search_title_precedes_crowded_content_hits(real_db, db_path_for_profile, with_id_match):
+    real_db.create_session(session_id="title_only", source="cli", model="m")
+    real_db.set_session_title("title_only", "Face")
+    real_db.append_message("title_only", role="user", content="hello world")
+    if with_id_match:
+        real_db.create_session(session_id="Face-id", source="cli", model="m")
+        real_db.append_message("Face-id", role="user", content="direct match")
+    for index in range(30):
+        sid = f"content-{index}"
+        real_db.create_session(session_id=sid, source="cli", model="m")
+        real_db.append_message(sid, role="user", content="face in the crowd")
+
+    response = asyncio.run(_rt_sessions.search_sessions(q="Face", limit=20))
+    ids = [row["session_id"] for row in response["results"]]
+    assert len(ids) == len(set(ids)) == 20
+    expected_prefix = ["Face-id", "title_only"] if with_id_match else ["title_only"]
+    assert ids[:len(expected_prefix)] == expected_prefix
+    assert all(sid.startswith("content-") for sid in ids[len(expected_prefix):])
+
+
 def test_search_finds_session_by_partial_title(db_path_for_profile):
     """A term that appears ONLY in the title is findable (#66242); the snippet
     falls back to the session preview, and rows carry the same shape as id hits."""
@@ -64,13 +85,12 @@ def test_search_finds_session_by_partial_title(db_path_for_profile):
     assert row["title"] == "Building the Modpack Server"
 
 
-def test_search_title_lane_keeps_content_hits_priority(db_path_for_profile):
-    """Content hits keep their BM25 priority; the title lane only fills
-    remaining slots and dedupes by lineage root against earlier lanes."""
+def test_search_title_lane_precedes_content_hits(db_path_for_profile):
+    """Title hits outrank content-only hits; all lanes share lineage dedup."""
     response = asyncio.run(_rt_sessions.search_sessions(q="modpack", limit=20))
     ids = [row["session_id"] for row in response["results"]]
     assert set(ids) == {"content_session", "titled_session"}
-    assert ids[0] == "content_session"  # FTS content hit outranks the title backfill
+    assert ids[0] == "titled_session"  # Title hit outranks content-only hits
     assert "other_session" not in ids
 
 

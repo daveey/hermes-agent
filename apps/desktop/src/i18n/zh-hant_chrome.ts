@@ -96,6 +96,7 @@ export const zhHantChrome = {
     searchAria: '搜尋工作階段',
     searchPlaceholder: '搜尋工作階段…',
     clearSearch: '清除搜尋',
+    searchFailedRetry: '搜尋失敗，重試',
     noMatch: query => `沒有工作階段符合「${query}」。`,
     results: '結果',
     pinned: '已釘選',

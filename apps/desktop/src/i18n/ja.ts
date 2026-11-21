@@ -2224,6 +2224,7 @@ export const jaOverrides = {
     searchAria: 'セッションを検索',
     searchPlaceholder: 'セッションを検索…',
     clearSearch: '検索をクリア',
+    searchFailedRetry: '検索に失敗しました。再試行',
     noMatch: query => `"${query}" に一致するセッションがありません。`,
     results: '結果',
     pinned: 'ピン留め',

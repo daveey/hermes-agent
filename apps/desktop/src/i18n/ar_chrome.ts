@@ -215,6 +215,7 @@ export const arChrome = {
     searchAria: 'البحث في الجلسات',
     searchPlaceholder: 'البحث في الجلسات...',
     clearSearch: 'مسح البحث',
+    searchFailedRetry: 'فشل البحث، أعد المحاولة',
     noMatch: query => `لا توجد جلسات تطابق "${query}"`,
     results: 'النتائج',
     pinned: 'المثبتة',

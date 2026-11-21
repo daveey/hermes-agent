@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 import { searchSessions, type SessionSearchResult } from '@/hermes'
 import { ALL_PROFILES, normalizeProfileKey } from '@/store/profile'
@@ -8,6 +8,8 @@ const SEARCH_DEBOUNCE_MS = 200
 export interface ServerSessionSearch {
   serverMatches: SessionSearchResult[]
   searchPending: boolean
+  searchFailed: boolean
+  retrySearch: () => void
 }
 
 /**
@@ -19,11 +21,16 @@ export interface ServerSessionSearch {
 export function useServerSessionSearch(query: string, profileScope: string): ServerSessionSearch {
   const [serverMatches, setServerMatches] = useState<SessionSearchResult[]>([])
   const [searchPending, setSearchPending] = useState(false)
+  const [searchFailed, setSearchFailed] = useState(false)
+  const [retryAttempt, setRetryAttempt] = useState(0)
+  const retrySearch = useCallback(() => setRetryAttempt(attempt => attempt + 1), [])
   const profile = profileScope === ALL_PROFILES ? null : normalizeProfileKey(profileScope)
 
   useEffect(() => {
+    setSearchFailed(false)
+    setServerMatches([])
+
     if (!query) {
-      setServerMatches([])
       setSearchPending(false)
 
       return
@@ -40,7 +47,12 @@ export function useServerSessionSearch(query: string, profileScope: string): Ser
             setServerMatches(res.results)
           }
         })
-        .catch(() => undefined)
+        .catch(() => {
+          if (!cancelled) {
+            setSearchFailed(true)
+            setServerMatches([])
+          }
+        })
         .finally(() => {
           if (!cancelled) {
             setSearchPending(false)
@@ -52,7 +64,7 @@ export function useServerSessionSearch(query: string, profileScope: string): Ser
       cancelled = true
       window.clearTimeout(id)
     }
-  }, [query, profile])
+  }, [query, profile, retryAttempt])
 
-  return { searchPending, serverMatches }
+  return { searchPending, serverMatches, searchFailed, retrySearch }
 }

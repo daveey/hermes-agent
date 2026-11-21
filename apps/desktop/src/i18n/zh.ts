@@ -3098,6 +3098,7 @@ export const zhOverrides = {
     searchAria: '搜索会话',
     searchPlaceholder: '搜索会话…',
     clearSearch: '清除搜索',
+    searchFailedRetry: '搜索失败，重试',
     noMatch: query => `没有会话匹配"${query}"。`,
     results: '结果',
     pinned: '已置顶',

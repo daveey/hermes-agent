@@ -2492,6 +2492,7 @@ export const ruOverrides = {
     searchAria: 'Поиск сеансов',
     searchPlaceholder: 'Поиск сеансов…',
     clearSearch: 'Очистить поиск',
+    searchFailedRetry: 'Поиск не удался, повторить',
     noMatch: query => `Нет сеансов по запросу «${query}».`,
     results: 'Результаты',
     pinned: 'Закреплённые',
