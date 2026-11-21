@@ -13,9 +13,9 @@ Guards:
   this machine, while a queued card may target it (``machine:<x>`` for an unregistered x never is);
 * ``machine:<x>`` needs x to advertise pickup (``placement_unavailable`` otherwise: x would never copy the card,
   :func:`hermes_cli.kanban_worker_node.check_machine_pins`);
-* ``kanban.move.max_moves`` (default 3) moves per card, except a queued card's move off a retired ``machine:<x>`` pin
-  (:func:`dead_pin`: x absent from, or revoked in, a successful registry read); that move still counts, and its
-  event carries ``dead_pin``;
+* ``kanban.move.max_moves`` (default 3) moves per card, except a queued card's move off a retired or held
+  ``machine:<x>`` pin backed by a successful registry read. That move still counts, and its event carries
+  ``dead_pin`` or ``held_pin`` respectively; holds remain unchanged;
 * moving back to a machine the card already left is ping-pong: refused unless ``force``, and it still counts;
 * ``dir`` workspaces exist only on their creator, so those cards never move; a ``worktree`` card moves only with
   portable workspace_source custody (published branch, :mod:`hermes_cli.kanban_source_move`);
@@ -249,15 +249,21 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
 
 def _spend_budget(conn: sqlite3.Connection, task_id: str, row: Any, pool: Mapping[str, Mapping[str, Any]], *,
                   me: str, cfg: Optional[dict], host: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """The card's move history and event fields, or ``move_limit``. A queued card pinned to a retired machine can
-    never be leased again: moving it off is not a bounce, and the cap must not strand it (t_01a1a1dea9c64d6a on
-    worker-6). That move still counts, so later moves stay capped."""
+    """History and audit fields, or ``move_limit``. A queued card pinned to a retired or held machine
+    cannot be leased there: moving it off is not a bounce, and the cap must not strand it.
+    That move still counts, so later moves stay capped; this does not change the source's hold."""
     from hermes_cli import kanban_worker_node as wn
     past = history(conn, task_id)
     limit = max_moves(cfg)
     if len(past) < limit:
         return past, host
-    dead = None if row["status"] == "running" else dead_pin(wn._parse(row["runs_on"]), pool, me=me)
+    previous = wn._parse(row["runs_on"])
+    dead = None if row["status"] == "running" else dead_pin(previous, pool, me=me)
+    pins = [label.removeprefix("machine:") for label in previous or [] if label.startswith("machine:")]
+    held = (pins[0] if row["status"] != "running" and len(pins) == 1
+            and pool.get(pins[0], {}).get("hold") is True else None)
+    if held is not None:
+        return past, {**host, "held_pin": held}
     if dead is None:
         raise MoveRefused("move_limit", f"card already moved {len(past)} time(s) (kanban.move.max_moves {limit}); "
                                         "finish it here or block it")

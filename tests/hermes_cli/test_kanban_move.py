@@ -221,10 +221,9 @@ def test_dead_pin_budget_requires_nonfailed_registry_read(gws, monkeypatch, outa
 
 
 @pytest.mark.parametrize("entry", [
-    {"state": "active", "hold": True},  # held: drains and comes back
     {"state": "active", "hold": False, "last_seen": 1},  # stale telemetry: maybe asleep, not retired
     {"state": "active", "hold": False, "max_card_runs": 1},  # busy: a queue, not a dead pin
-], ids=["held", "stale", "busy"])
+], ids=["stale", "busy"])
 def test_a_capped_move_off_a_live_pinned_machine_is_still_refused(gws, entry):
     hub, _ = gws
     tid = _capped_card_pinned_to(hub, "worker-6")
