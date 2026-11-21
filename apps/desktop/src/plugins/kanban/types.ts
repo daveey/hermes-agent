@@ -12,6 +12,8 @@ export interface KanbanTask {
   priority?: number
   tenant?: null | string
   created_at?: number
+  /** Profile that created the card (not necessarily a user-visible chat). */
+  created_by?: null | string
   latest_summary?: null | string
   comment_count?: number
   link_counts?: { parents: number; children: number }

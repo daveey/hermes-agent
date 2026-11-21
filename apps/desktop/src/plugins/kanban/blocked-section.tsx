@@ -36,6 +36,7 @@ export interface BlockedGroup {
   /** Managing chat's live stored id; null = no session owns these cards. */
   sessionId: null | string
   title: null | string
+  creator?: null | string
   gateway?: string
   /** Hermes profile the session lives in on its gateway. */
   profile: null | string
@@ -68,11 +69,16 @@ export function groupBlockedTasks(tasks: readonly BlockedTask[]): BlockedGroup[]
 
   for (const task of tasks) {
     const sessionId = task.manager?.id ?? null
-    const key = sessionId ? `${task.gateway ?? ''}:${sessionId}` : `${task.gateway ?? ''}:`
+
+    const key = sessionId
+      ? `${task.gateway ?? ''}:${sessionId}`
+      : JSON.stringify([task.gateway ?? '', 'creator', task.creator ?? null])
+
     let group = groups.get(key)
 
     if (!group) {
       group = {
+        creator: task.creator,
         gateway: task.gateway,
         key,
         profile: task.manager?.profile ?? null,
@@ -136,7 +142,12 @@ export function BlockedTasksSection() {
 
         const shown = group.tasks.slice(0, budget)
         budget -= shown.length
-        const title = group.sessionId ? group.title || k.sidebar.untitledSession : k.sidebar.noSession
+
+        const creatorTitle = group.creator
+          ? [group.creator, group.gateway].filter(Boolean).join(' · ')
+          : k.sidebar.noSession
+
+        const title = group.sessionId ? group.title || k.sidebar.untitledSession : creatorTitle
         const sessionId = group.sessionId
 
         return (

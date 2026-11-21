@@ -139,7 +139,7 @@ describe('fetchBlockedTasks', () => {
     expect(taskGateway('mini-b')).toBe('mini')
   })
 
-  it('resolves each managing session to its live tip and title on the card\'s gateway', async () => {
+  it("resolves each managing session to its live tip and title on the card's gateway", async () => {
     registry('local')
     await bind(call => {
       if (call.path === '/boards') {
@@ -174,6 +174,35 @@ describe('fetchBlockedTasks', () => {
       b: { id: 'creator', profile: 'bb', title: null },
       c: null
     })
+  })
+
+  it('treats omitted manager ids as creator-owned cards, retaining the creator', async () => {
+    registry('local')
+    await bind(call => {
+      if (call.path === '/boards') {
+        return { boards: [{ counts: { blocked: 2 }, slug: 'bb' }], current: 'bb' }
+      }
+
+      if (call.path === '/board?board=bb') {
+        return board({
+          blocked: ['internal-a', 'internal-b'].map(session_id =>
+            task(session_id, { created_by: 'bb-dev', session_id, status: 'blocked' })
+          )
+        })
+      }
+
+      if (call.path.startsWith('/session-labels?')) {
+        return { profile: 'default', sessions: {} }
+      }
+
+      return new Error(`unexpected ${call.path}`)
+    })
+
+    const tasks = await fetchBlockedTasks()
+    expect(tasks.map(t => [t.manager, t.creator])).toEqual([
+      [null, 'bb-dev'],
+      [null, 'bb-dev']
+    ])
   })
 
   it('an older backend without /session-labels still groups by the raw id', async () => {

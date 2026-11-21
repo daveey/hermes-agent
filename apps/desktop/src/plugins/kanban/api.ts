@@ -1158,6 +1158,8 @@ export function mergeBoardLists(parts: Array<{ gateway: string; boards: BoardsRe
 /** A blocked card plus the board it lives on (the drawer opens it there). */
 export interface BlockedTask extends KanbanTask {
   board: string
+  /** Creating profile, used when no visible chat manages this card. */
+  creator?: null | string
   /** The chat managing the card, resolved to its live compression tip and
    *  title on the card's own gateway; null when no session owns it. */
   manager: null | { id: string; profile: null | string; title: null | string }
@@ -1210,12 +1212,14 @@ export async function fetchBlockedTasks(): Promise<BlockedTask[]> {
       const ids = [...new Set(found.map(managerId).filter((id): id is string => Boolean(id)))]
       let labels: SessionLabels['sessions'] = {}
       let profile: null | string = null
+      let labelsAnswered = false
 
       if (ids.length) {
         try {
           const answer = await read<SessionLabels>(`/session-labels?ids=${encodeURIComponent(ids.join(','))}`)
           labels = answer.sessions ?? {}
           profile = answer.profile?.trim() || null
+          labelsAnswered = true
         } catch {
           // Older backend without the endpoint: group by the raw id, untitled.
         }
@@ -1227,8 +1231,12 @@ export async function fetchBlockedTasks(): Promise<BlockedTask[]> {
 
         return {
           ...task,
+          creator: task.created_by,
           gateway: task.gateway ?? (gateways.length > 1 ? gateway : undefined),
-          manager: id ? { id: label?.tip_id || id, profile, title: label?.title?.trim() || null } : null
+          manager:
+            id && (!labelsAnswered || label)
+              ? { id: label?.tip_id || id, profile, title: label?.title?.trim() || null }
+              : null
         }
       })
     })
