@@ -259,14 +259,17 @@ def record_tick(conn: sqlite3.Connection, result: Any, *, dry_run: bool = False)
 # --- fresh card on a quota-walled explicit pin --------------------------------------------------------------
 
 
-def pinned_quota_hold(conn: sqlite3.Connection, task_id: str) -> Optional[tuple[str, str, float]]:
+def pinned_quota_hold(conn: sqlite3.Connection, task_id: str, *, lane: str = 'ready') -> Optional[tuple[str, str, float]]:
     """``(class, auto, reset)`` when every eligible class route is quota-walled.
 
     Legacy concrete selectors are historical evidence, never an admission gate.
     Existing run quota episodes retain their own admission checks.
     """
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_review_model import is_review_run
     task = kb.get_task(conn, task_id)
+    if task is not None and is_review_run(conn, task, lane):
+        return None  # reviewer provenance and candidate walls belong to review admission
     if task is not None:
         from hermes_cli.kanban_class_walls import class_wall_routes
         from hermes_cli.kanban_model_tier import resolve_model_tier

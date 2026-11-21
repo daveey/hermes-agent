@@ -333,6 +333,7 @@ def test_class_routed_implementer_receipts_do_not_gate_review_admission(board):
 def test_review_owned_preclaim_does_not_resolve_generic_class(board, monkeypatch, lane):
     """Review lanes and skill-classified ready retries retain review-owned refusal accounting."""
     from hermes_cli.kanban_class_walls import unroutable_class
+    from hermes_cli.kanban_dispatch_skip import pinned_quota_hold
     from hermes_cli import kanban_model_tier as tier
     from hermes_cli.kanban_review_model import is_review_run
     conn, _ = board
@@ -349,6 +350,7 @@ def test_review_owned_preclaim_does_not_resolve_generic_class(board, monkeypatch
 
     monkeypatch.setattr(tier, 'resolve_model_tier', generic_resolution_forbidden)
     assert unroutable_class(conn, tid, lane=lane) is None
+    assert pinned_quota_hold(conn, tid, lane=lane) is None
     assert list(conn.iterdump()) == before  # no claim, run, receipt or author changes
 
 
@@ -366,11 +368,16 @@ def test_repeated_identical_review_refusal_moves_to_a_visible_block(board, monke
         conn.commit()
     _disable_anthropic()
     seen = []
+    runs_before = [tuple(r) for r in conn.execute('SELECT * FROM task_runs WHERE task_id=?', (tid,))]
+    claims_before = [e.id for e in kb.list_events(conn, tid) if e.kind == 'claimed']
     for attempt in range(1, DEFERRAL_LIMIT + 1):
         dispatch_once(conn, spawn_fn=lambda *args: seen.append(args), max_spawn=1)
         task = kb.get_task(conn, tid)
+        assert [tuple(r) for r in conn.execute('SELECT * FROM task_runs WHERE task_id=?', (tid,))] == runs_before
+        assert [e.id for e in kb.list_events(conn, tid) if e.kind == 'claimed'] == claims_before
+        assert task.claim_lock is None
         if attempt < DEFERRAL_LIMIT:
-            assert (task.status, task.consecutive_failures) == ('review', 0), attempt
+            assert (task.status, task.consecutive_failures) == (lane, 0), attempt
     assert seen == []
     assert task.status == 'triage'
     gave_up = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'gave_up'][-1]
