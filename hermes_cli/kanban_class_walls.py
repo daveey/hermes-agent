@@ -24,7 +24,10 @@ def unroutable_class(conn, task_id, *, lane):
     model, _, _ = resolve_model_tier(conn, routing_view(task), lane=lane)
     if not is_class_selector(model):
         return None
-    config = _assignee_config(task.assignee)
+    try:
+        config = _assignee_config(task.assignee)
+    except ImportError:
+        return 'config_unavailable'  # missing profile machinery is unknown eligibility, not a tick-wide fault
     if config is None:
         return 'config_unavailable'
     return class_unroutable_reason(model, config)
