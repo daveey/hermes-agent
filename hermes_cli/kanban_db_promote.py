@@ -45,7 +45,7 @@ def promote_task(
             return False, f"task {task_id} spend decision changed during promotion"
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready' "
-            "WHERE id = ? AND status = ?", (task_id, cur_status),
+            "WHERE id = ? AND status IN ('todo', 'blocked', 'triage', 'scheduled') AND status = ?", (task_id, cur_status),
         )
         if upd.rowcount != 1:
             return False, f"task {task_id} status changed during promotion"

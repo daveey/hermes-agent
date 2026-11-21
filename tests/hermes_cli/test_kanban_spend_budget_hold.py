@@ -193,7 +193,7 @@ def test_scheduled_spend_decision_can_be_promoted(kanban_home, held):
         assert kb.get_task(conn, tid).status == "ready"
 
 
-@pytest.mark.parametrize("changed", ["decision", "status"])
+@pytest.mark.parametrize("changed", ["decision", "running", "triage"])
 def test_scheduled_promotion_rechecks_under_writer(kanban_home, changed):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="Promotion race", assignee="default")
@@ -204,10 +204,10 @@ def test_scheduled_promotion_rechecks_under_writer(kanban_home, changed):
             if changed == "decision":
                 kb._append_event(c, tid, "promoted_manual", {"actor": "other"})
             else:
-                c.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+                c.execute("UPDATE tasks SET status=? WHERE id=?", (changed, tid))
         ok, why = kb.promote_task(conn, tid, actor="operator", precondition=racing)
         assert not ok and why and "changed during promotion" in why
-        assert kb.get_task(conn, tid).status == ("scheduled" if changed == "decision" else "running")
+        assert kb.get_task(conn, tid).status == ("scheduled" if changed == "decision" else changed)
         assert len(helpers._events(conn, tid, "promoted_manual")) == int(changed == "decision")
 
 
