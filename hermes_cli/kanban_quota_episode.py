@@ -184,6 +184,8 @@ def _strong_fallback(task, base, walls, cfg, now):
     from copy import copy
     from hermes_cli.kanban_model_tier import load_tier_config
     from hermes_cli.kanban_provider_walls import retier_for_walls
+    from hermes_cli.kanban_model_neutral import routing_view
+    task = routing_view(task)
     if task.model_override or task.provider_override or base[2] != 'default' or not base[0]:
         return None
     probe = copy(task)
@@ -246,8 +248,7 @@ def alternate_route(conn, task, walls, base, now):
     from hermes_cli.kanban_provider_walls import active_walls, live_pool_serving
     model, _provider, reason = base
     strong = _strong_class(base)
-    if (task.model_override or task.provider_override
-            or (reason not in {'default', 'off', 'profile_out_of_scope'} and not strong) or not walls):
+    if ((reason not in {'default', 'off', 'profile_out_of_scope', 'class'} and not strong) or not walls):
         return None
     config = _assignee_config(task.assignee) or {}
     policy = config.get('model_routing') or {}
@@ -334,6 +335,8 @@ def _served_here(conn, task, wall, now):
 def decision(conn, task, *, lane='ready', cfg=None, base=None, now=None):
     """Return (guard reason, alternate route); never writes or allocates quota."""
     from hermes_cli.kanban_model_tier import resolve_model_tier
+    from hermes_cli.kanban_model_neutral import routing_view
+    task = routing_view(task)
     state = episode(conn, task.id)
     now = time.time() if now is None else now
     if not state:

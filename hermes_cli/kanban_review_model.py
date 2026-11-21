@@ -401,7 +401,7 @@ def resolve_review_model(conn, task, cfg):
         why = class_unroutable_reason(override[0], _assignee_config(assignee) or {})
         if why:
             raise ReviewModelUnavailable(f"Review model {override[0]} is unroutable: {why}")
-
+    # Model attribution is audit-only; distinct execution is enforced by verdict custody.
     from hermes_cli.kanban_llm_pacing_dispatch import held_pools
     now = time.time()
     walls = pw.active_walls(now=now)

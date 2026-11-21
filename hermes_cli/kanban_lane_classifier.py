@@ -37,8 +37,15 @@ def create_origin(conn, intent, options):
     from hermes_cli.kanban_lanes import prepare_classification
     from hermes_cli.kanban_origin_creation import create_with_origin
 
-    options = {key: value for key, value in options.items()
-               if key not in ("conn", "origin_intent", "creation_receipt", "create_origin")}
+    # Explicit wire fields: locals() also contains implementation imports. Never
+    # forward those into the origin receipt or recursive create_task invocation.
+    fields = """title body assignee created_by workspace_kind workspace_path branch_name tenant priority
+        parents triage idempotency_key max_runtime_seconds skills max_retries model_override provider_override
+        reasoning_effort pin_mandatory goal_mode goal_max_turns initial_status session_id board project_id
+        project_source_task_id creator_task_id completion_contract review_required validate_workspace validate_skills
+        human_request chat_origin native_origin requires lint_blocked runs_on require_declaration placement_policy
+        placement_checked insert_guard placement_audit admission_class admission_frees self_work""".split()
+    options = {key: options[key] for key in fields if key in options}
     options["parents"] = tuple(options["parents"])
     result = prepare_classification(conn, options["parents"], options["initial_status"],
                                     options["triage"], options["tenant"], options)

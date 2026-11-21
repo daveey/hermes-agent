@@ -186,17 +186,20 @@ def candidate_route(conn: sqlite3.Connection, task: Any, lane: str) -> tuple[Opt
     pinned_provider = getattr(task, "provider_override", None)
     if pinned_provider and str(pinned_provider).strip().lower() != "auto" and reason == "pinned":
         return route, [str(pinned_provider).strip().lower()]
-    if route is None and model:
+    if model:
         from agent.model_routing import eligible_routes, is_class_selector
         from agent.model_routing_agent import class_requirements
+        from hermes_cli.config import is_provider_enabled
         from hermes_cli.kanban_model_assignment import _assignee_config
         if is_class_selector(model):
             config = _assignee_config(task.assignee) or {}
             policy = config.get("model_routing") or {}
-            providers = sorted({str(r["provider"]).strip().lower() for r in
-                                eligible_routes(policy, model.removeprefix("class:"), class_requirements(config))}) \
-                if policy.get("enabled") else []
-            return route, providers
+            providers = config.get("providers") or {}
+            def allowed(route):
+                return is_provider_enabled(providers.get(route["provider"], {}))
+            candidates = eligible_routes(policy, model.removeprefix("class:"), class_requirements(config),
+                                         eligible=allowed) if policy.get("enabled") else []
+            return route, sorted({str(r["provider"]).strip().lower() for r in candidates})
     return route, _route_providers(model, provider)
 
 
@@ -377,9 +380,11 @@ def _governed(conn: sqlite3.Connection, task_id: str, lane: str, cfg: lp.PacingC
     it (:func:`_verdicts`), :func:`_pace_alternate` moves it to a pool of its class with room that serves here, or it
     holds. [daveey] (t_01a1deaf95f5b885)"""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_model_neutral import routing_view
     task = kb.get_task(conn, task_id)
     if task is None:
         return None
+    task = routing_view(task)
     providers = [p for p in candidate_providers(conn, task, lane) if p in cfg.providers]
     if not providers:
         return None
