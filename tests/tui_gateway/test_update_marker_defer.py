@@ -246,6 +246,30 @@ def test_writer_dies_during_update_probe(custody, monkeypatch):
     assert custody.classify() is custody.refusal
 
 
+def test_platform_without_positive_lock_proof_keeps_refusal(custody, monkeypatch):
+    monkeypatch.setattr(update_marker_owner, "os", SimpleNamespace(
+        name="nt", open=os.open, read=os.read, close=os.close, O_RDONLY=os.O_RDONLY))
+    assert custody.classify() is custody.refusal
+
+
+@pytest.mark.parametrize("birth_known", [True, False])
+def test_registry_unknown_incarnation_keeps_unknown_cause(tmp_path, monkeypatch, birth_known):
+    if not birth_known:
+        monkeypatch.setattr(active_sessions, "_own_start_time", lambda: None)
+    lease, _ = active_sessions.try_acquire_active_session(session_id="marker-chat", surface="desktop",
+        registry_home=tmp_path, config={}, metadata={"live_session_id": "first"})
+    try:
+        if birth_known:
+            states = iter([True, None])  # known while pruning, unavailable at cause classification
+            monkeypatch.setattr(active_sessions, "_pid_liveness", lambda *a, **kw: next(states, True))
+        _, refusal = active_sessions.try_acquire_active_session(session_id="marker-chat", surface="desktop",
+            registry_home=tmp_path, config={}, metadata={"live_session_id": "second"})
+        assert refusal.reason == active_sessions.SESSION_NOT_OWNED
+        assert getattr(refusal, "ownership_cause", "unknown") == "unknown"
+    finally:
+        lease.release()
+
+
 def test_registry_refusal_carries_original_holder_birth(tmp_path):
     first, refusal = active_sessions.try_acquire_active_session(
         session_id="marker-chat", surface="desktop", registry_home=tmp_path, config={},
