@@ -4,6 +4,19 @@ from __future__ import annotations
 import json
 
 
+def select_pending(conn, hub, board, seen, *, now: int, limit: int, before_head: bool):
+    """Dependency selection and the existing pre-head fence share one batch."""
+    from hermes_cli import kanban_sync_backlog as backlog
+    from hermes_cli.kanban_sync_quarantine import pending_rows
+
+    rows = selected = parent_first(conn, pending_rows(conn, now), now, limit)
+    stopped = False
+    if before_head:
+        rows, stopped = backlog.sendable_before_head(conn, hub, board, rows, seen)
+        rows = parent_first(conn, rows, now, limit, allowed={r['op_id'] for r in rows})
+    return rows, selected, stopped
+
+
 def parent_first(conn, rows, now: int, limit: int, *, allowed: set[str] | None = None) -> list[dict]:
     """Promote the existing FIFO parent, never synthesize a competing retry identity.
 
