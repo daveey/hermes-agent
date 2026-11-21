@@ -675,11 +675,18 @@ def try_acquire_active_session(
                     entries[index] = entry
                     _write_entries(state_path, entries)
                     return lease, None
-                return refuse(
+                _, refusal = refuse(
                     session_already_owned_message(key, existing), SESSION_NOT_OWNED,
                     "Refused active session %s: already held by pid=%s surface=%s",
                     key, existing.get("pid"), existing.get("surface"),
                 )
+                # Carry the recorded incarnation, never a newly observed birth for a bare PID.
+                refusal.holder_pid = existing.get("pid")
+                refusal.holder_start_time = existing.get("process_start_time")
+                if (refusal.holder_start_time is not None
+                        and _pid_liveness(refusal.holder_pid, refusal.holder_start_time) is True):
+                    refusal.ownership_cause = "lease_foreign"
+                return None, refusal
 
         # Capacity second, and only when an operator asked for one.
         if max_sessions is not None and len(entries) >= max_sessions:

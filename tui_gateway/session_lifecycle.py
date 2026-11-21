@@ -229,7 +229,8 @@ def _ensure_active_session_slot(sid: str, session: dict, *, allow_takeover: bool
     if (allow_takeover and getattr(limit_message, "reason", None) == SESSION_NOT_OWNED
             and _take_over_detached_runtime_lease(sid, session, key, idle_only=takeover_idle_only)):
         return None
-    return limit_message
+    from tui_gateway.update_marker_owner import classify_refusal
+    return classify_refusal(_session_home(session), key, limit_message)
 
 
 # Whether an id has a non-terminal ledger row (existence only: ``LIMIT 1`` returns an arbitrary row, so a status is
