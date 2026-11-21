@@ -174,3 +174,17 @@ def test_a_failed_hub_db_read_is_not_remembered(hub, monkeypatch):
     assert kanban_origin.gateway_name() == "hub"
     assert kanban_origin.gateway_name() == "hub"
     assert len(calls) == 2
+
+
+def test_an_empty_name_is_not_remembered(hub, monkeypatch):
+    """hermes-hub writes meta.gateway only after its first sync: an empty answer must not stick for 10 min."""
+    db, state, _ = hub
+    db.execute("UPDATE meta SET v = '' WHERE k = 'gateway'")  # an empty meta row (and no mail config)
+    db.commit()
+    _settle(state / "hub.db", state / "hub.db-wal")
+    assert kanban_origin.gateway_name() == ""
+    assert kanban_origin._name_memo is None
+    db.execute("UPDATE meta SET v = 'hub' WHERE k = 'gateway'")  # the first sync lands, same hub.db file
+    db.commit()
+    _settle(state / "hub.db", state / "hub.db-wal")
+    assert kanban_origin.gateway_name() == "hub"

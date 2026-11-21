@@ -154,7 +154,9 @@ def gateway_name() -> str:
     2026-11-20). Gateways are never renamed in place; re-enrolling replaces hub.db (a new inode), which busts the
     memo, as does any change to the mail config. A miss reads only the hub.db ``meta`` row (a primary-key lookup)
     and the mail config, never the ``replica`` scan. ``gateway_names`` (the known set, which does change) keeps its
-    short memo. [daveey]"""
+    short memo. So after an in-place ``meta.gateway`` change (never done on purpose) ``gateway_name()`` may lag
+    ``gateway_names()[0]`` for up to 10 min; that is intended. An empty name is never kept: hermes-hub writes
+    ``meta.gateway`` only after its first sync, and an empty answer must not stick for 10 min. [daveey]"""
     global _name_memo
     path, cfg = _hub_db(), _mail_config()
     memo, now = _names_memo, time.monotonic()
@@ -166,11 +168,11 @@ def gateway_name() -> str:
         return own[2]
     failed: list[sqlite3.Error] = []
     me = _read_gateway_names(path, cfg, failed, names=False)[0]
-    # A failed hub.db read (locked, mid-replace) or a mail config written within the timestamp granularity is
-    # not kept: the next caller reads again.
+    # A failed hub.db read (locked, mid-replace), an empty name (hub not synced yet) or a mail config written
+    # within the timestamp granularity is not kept: the next caller reads again.
     cfg_sig = key[-1]
     racy = isinstance(cfg_sig, tuple) and cfg_sig[1] >= time.time_ns() - _NAMES_RACY_NS
-    _name_memo = None if failed or racy else (key, now, me)
+    _name_memo = None if failed or racy or not me else (key, now, me)
     return me
 
 

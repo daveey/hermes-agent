@@ -28,8 +28,10 @@ class _Batch:
         self.thread = threading.get_ident()
         self.conns: dict[str, sqlite3.Connection] = {}
         self.borrowed: set[str] = set()
+        self.closed = False
 
     def close(self) -> None:
+        self.closed = True  # a context copied inside the batch and run later on this thread must not reuse it
         conns, self.conns = self.conns, {}
         for conn in conns.values():
             try:
@@ -89,7 +91,7 @@ def batch() -> Iterator[None]:
     A batch inherited from another thread (a background refresh started with ``copy_context()`` inside a batched
     read) is not joined: its connections belong to that thread. This block opens its own."""
     outer = _active.get()
-    if outer is not None and outer.thread == threading.get_ident():
+    if outer is not None and not outer.closed and outer.thread == threading.get_ident():
         yield
         return
     current = _Batch()
@@ -101,15 +103,29 @@ def batch() -> Iterator[None]:
         current.close()
 
 
+def _usable(conn: sqlite3.Connection) -> bool:
+    """False once something closed the idle shared connection behind the batch's back: opening another handle to
+    the same board runs ``kanban_generation.recover``, which closes this process's handles on a replaced WAL/SHM
+    generation."""
+    try:
+        _ = conn.total_changes  # raises ProgrammingError on a closed connection
+    except sqlite3.ProgrammingError:
+        return False
+    return True
+
+
 def open_ro(path: Any, opener: Callable[[Any], sqlite3.Connection]) -> sqlite3.Connection:
     """``opener(path)``, or a borrow of this batch's connection to ``path`` (opened by ``opener`` once)."""
     current = _active.get()
-    if current is None or current.thread != threading.get_ident():
+    if current is None or current.closed or current.thread != threading.get_ident():
         return opener(path)
     key = str(path)
     if key in current.borrowed:
         return opener(path)
     conn = current.conns.get(key)
+    if conn is not None and not _usable(conn):
+        del current.conns[key]
+        conn = None
     if conn is None:
         conn = current.conns[key] = opener(path)
     current.borrowed.add(key)

@@ -266,3 +266,93 @@ def test_preserve_origin_obligations_returns_what_the_old_filter_did(monkeypatch
             want = _reference(selected, ledger, placeholder=placeholder, machine=machine, **kw)
             assert got == want
             assert len(want) > len(selected) or ids == [] or statuses == ("done",)
+
+
+def test_a_shared_connection_closed_behind_the_batch_is_reopened(db_file):
+    """Opening another handle to a board can run ``kanban_generation.recover``, which closes this process's idle
+    handles on a replaced WAL/SHM generation; the next borrow must not hand out the closed one."""
+    with ro_batch.batch():
+        first = kanban_origin._ro(db_file)
+        stale = object.__getattribute__(first, "_conn")
+        first.close()
+        stale.close()  # what recover() does to an idle handle
+        second = kanban_origin._ro(db_file)
+        fresh = object.__getattribute__(second, "_conn")
+        assert fresh is not stale
+        assert second.execute("SELECT v FROM t").fetchone()[0] == 1
+        second.close()
+        third = kanban_origin._ro(db_file)
+        assert object.__getattribute__(third, "_conn") is fresh  # the reopened one is shared again
+        third.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        fresh.execute("SELECT 1")
+
+
+def test_a_closed_batch_is_never_lent_from_a_context_run_later(db_file):
+    import contextvars
+    with ro_batch.batch():
+        ctx = contextvars.copy_context()  # e.g. a callback scheduled inside the batch, run after it ended
+    results = {}
+
+    def later():
+        conn = kanban_origin._ro(db_file)
+        results["plain"] = not isinstance(conn, ro_batch._Borrowed)
+        results["value"] = conn.execute("SELECT v FROM t").fetchone()[0]
+        conn.close()
+        with ro_batch.batch():  # a new block does not join the closed batch
+            a = kanban_origin._ro(db_file)
+            results["own_batch"] = isinstance(a, ro_batch._Borrowed)
+            a.close()
+
+    ctx.run(later)
+    assert results == {"plain": True, "value": 1, "own_batch": True}
+
+
+def test_the_batch_closes_when_session_tasks_raises(two_boards_and_a_hub, monkeypatch):
+    from hermes_cli import kanban_session_outcome_tasks as outcome
+    hub_db = str(two_boards_and_a_hub)
+    opened, _asked = _count_opens(monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("remote cards failed")
+
+    monkeypatch.setattr(outcome, "append_remote_listed_cards", boom)
+    with pytest.raises(RuntimeError):
+        ksa.session_tasks(["s1"])
+    assert [p for p, _ in opened].count(hub_db) == 1, "the local boards never asked hub.db: the test proves nothing"
+    for _, conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+    assert ro_batch._active.get() is None
+
+
+def test_the_links_projection_opens_each_file_once(tmp_path, monkeypatch, db_file):
+    import hermes_constants
+    from hermes_cli import kanban_origin_adapter as adapter, kanban_origin_ledger as ledger, profiles
+    (tmp_path / "kanban").mkdir()
+    (tmp_path / "kanban" / "origin-ledger.db").touch()
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(adapter, "_gateway", lambda _: "origin")
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(ksa, "_hub_db_path", lambda: None)
+    monkeypatch.setattr(ksa, "_board_db_paths", list)
+    monkeypatch.setattr(ksa, "_legacy_remote_links", list)
+    reads = []
+
+    def project(*args, **kwargs):  # one read per ledger card, as observe_local_binding does
+        for _ in range(5):
+            conn = kanban_origin._ro(db_file)
+            reads.append(conn.execute("SELECT v FROM t").fetchone()[0])
+            conn.close()
+        return []
+
+    monkeypatch.setattr(ledger, "project", project)
+    opened, asked = _count_opens(monkeypatch)
+    ksa._reset_cache_for_tests()
+    ksa._project_remote_links()
+    assert reads == [1] * 5
+    assert asked.count(str(db_file)) == 5
+    assert [p for p, _ in opened].count(str(db_file)) == 1
+    for _, conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
