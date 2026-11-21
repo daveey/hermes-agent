@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 def heartbeat_in_background():
-    """Schedule at most one automatic heartbeat; return its thread for bounded teardown."""
+    """Schedule at most one automatic heartbeat; return the thread for observers."""
     global _worker
     from tools import kanban_tools as kt
-    if not os.environ.get('HERMES_KANBAN_TASK') or not kt._is_dispatcher_owned_worker():
+    if not os.environ.get('HERMES_KANBAN_TASK') or kt._is_delegated_child_context():
         return None
     with _lock:
         if _worker is not None and _worker.is_alive():

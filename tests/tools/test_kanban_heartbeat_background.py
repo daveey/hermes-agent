@@ -1,5 +1,6 @@
 """Auto liveness I/O must not block the agent's first user message."""
 import contextvars
+import pytest
 import threading
 
 
@@ -12,7 +13,7 @@ def test_auto_heartbeat_does_not_wait_and_keeps_run_context(monkeypatch):
     token = scope.set(('profile', 'task', 'run', 'owner'))
     calls = []
     monkeypatch.setenv('HERMES_KANBAN_TASK', 'task')
-    monkeypatch.setattr(kt, '_is_dispatcher_owned_worker', lambda: True)
+    monkeypatch.setattr(kt, '_is_delegated_child_context', lambda: False)
     monkeypatch.setattr(kt, '_auto_heartbeat_last_attempt', 0)
 
     def heartbeat():
@@ -45,10 +46,10 @@ def test_delegates_and_rate_limited_activity_schedule_nothing(monkeypatch):
     from tools import kanban_tools as kt
     from tools.kanban_heartbeat_background import heartbeat_in_background
     monkeypatch.setenv('HERMES_KANBAN_TASK', 'task')
-    monkeypatch.setattr(kt, '_is_dispatcher_owned_worker', lambda: False)
+    monkeypatch.setattr(kt, '_is_delegated_child_context', lambda: True)
     monkeypatch.setattr(kt, 'heartbeat_current_worker_from_env', lambda: (_ for _ in ()).throw(AssertionError('not owner')))
     assert heartbeat_in_background() is None
-    monkeypatch.setattr(kt, '_is_dispatcher_owned_worker', lambda: True)
+    monkeypatch.setattr(kt, '_is_delegated_child_context', lambda: False)
     monkeypatch.setattr(kt, '_auto_heartbeat_last_attempt', time.monotonic())
     assert heartbeat_in_background() is None
     monkeypatch.delenv('HERMES_KANBAN_TASK')
@@ -70,3 +71,72 @@ def test_activity_calls_background_bridge_and_keeps_operator_injection(monkeypat
     ActivityTrackingMixin._touch_activity(agent, 'starting')
     assert calls == ['background', 'comments', 'deadline', 'activity']
     assert agent._last_activity_desc == 'starting'
+
+
+def test_background_cron_activity_retains_original_heartbeat_scope(monkeypatch):
+    from agent.delegation_context import non_dispatcher_owned_context
+    from tools import kanban_tools as kt
+    from tools.kanban_heartbeat_background import heartbeat_in_background
+    calls = []
+    monkeypatch.setenv('HERMES_KANBAN_TASK', 'task')
+    monkeypatch.setattr(kt, '_auto_heartbeat_last_attempt', 0)
+    monkeypatch.setattr(kt, 'heartbeat_current_worker_from_env', lambda: calls.append('heartbeat'))
+    with non_dispatcher_owned_context():
+        worker = heartbeat_in_background()
+        assert worker is not None
+        worker.join(5)
+    assert calls == ['heartbeat']
+
+
+def test_background_activity_reports_fenced_descendant_once(monkeypatch, tmp_path, caplog):
+    from types import SimpleNamespace
+    from agent.activity_tracking import ActivityTrackingMixin
+    from tools import kanban_tools as kt
+    import tools.kanban_heartbeat_background as background
+    from tests.tools.test_delegate_kanban_isolation import _make_running_kanban_task
+    import logging
+    kb, tid, _, _ = _make_running_kanban_task(monkeypatch, tmp_path)
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect()
+    try:
+        before = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+        monkeypatch.setenv('HERMES_DELEGATED_CHILD_CONTEXT', str(tmp_path / '.hermes'))
+        monkeypatch.setattr(kt, '_auto_heartbeat_last_attempt', 0)
+        monkeypatch.setattr(kt, '_auto_heartbeat_fence_warned', False)
+        monkeypatch.setattr(kt, 'inject_new_comments_from_env', lambda agent: None)
+        monkeypatch.setattr(kt, 'inject_soft_deadline_from_env', lambda agent: None)
+        agent = SimpleNamespace(_persist_session_activity_if_due=lambda: None)
+        with caplog.at_level(logging.WARNING, logger='tools.kanban_tools'):
+            for _ in range(2):
+                monkeypatch.setattr(kt, '_auto_heartbeat_last_attempt', 0)
+                ActivityTrackingMixin._touch_activity(agent, 'starting')
+                worker = background._worker
+                assert worker is not None
+                worker.join(5)
+                assert not worker.is_alive()
+        warnings = [r for r in caplog.records if 'HERMES_DELEGATED_CHILD_CONTEXT' in r.getMessage()]
+        assert len(warnings) == 1
+        after = kb.get_task(conn, tid)
+        assert after.claim_expires == before.claim_expires
+        assert after.last_heartbeat_at == before.last_heartbeat_at
+        assert kb.list_events(conn, tid) == events
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize('failure', ['resource', 'drain'])
+def test_activity_thread_start_failure_keeps_operator_injections(monkeypatch, failure):
+    from hermes_cli.worker_drain_fence import DrainRefused
+    from types import SimpleNamespace
+    from agent.activity_tracking import ActivityTrackingMixin
+    calls = []
+    monkeypatch.setenv('HERMES_KANBAN_TASK', 'task')
+    def unavailable():
+        raise DrainRefused('draining') if failure == 'drain' else RuntimeError('cannot start thread')
+    monkeypatch.setattr('tools.kanban_heartbeat_background.heartbeat_in_background', unavailable)
+    monkeypatch.setattr('tools.kanban_tools.inject_new_comments_from_env', lambda agent: calls.append('comments'))
+    monkeypatch.setattr('tools.kanban_tools.inject_soft_deadline_from_env', lambda agent: calls.append('deadline'))
+    agent = SimpleNamespace(_persist_session_activity_if_due=lambda: calls.append('activity'))
+    ActivityTrackingMixin._touch_activity(agent, 'starting')
+    assert calls == ['comments', 'deadline', 'activity']

@@ -50,7 +50,7 @@ def test_agent_prefetch_uses_final_route_before_tools(monkeypatch):
     calls = []
     monkeypatch.setattr('hermes_cli.config.load_config_readonly', dict)
     monkeypatch.setattr('agent.model_metadata_codex_prefetch.prefetch',
-                        lambda token, base: calls.append((token, base)))
+                        lambda token, base, model=None: calls.append((token, base)))
     prefetch_agent(agent)
     assert calls == [(agent.api_key, agent.base_url)]
     # Keep source-order coverage behavioral: the real constructor must reach tool
@@ -64,6 +64,8 @@ def test_real_constructor_overlaps_catalog_with_tools(monkeypatch):
 
     entered, release = threading.Event(), threading.Event()
     calls = []
+    saved = []
+    monkeypatch.setattr(mm, 'save_context_length', lambda *args: saved.append(args))
     monkeypatch.setattr(mm, '_codex_catalog_probe_allowed', lambda *_: True)
     monkeypatch.setattr(mm, '_codex_oauth_context_cache', {})
     monkeypatch.setattr(mm, '_codex_oauth_max_context_cache', {})
@@ -76,12 +78,21 @@ def test_real_constructor_overlaps_catalog_with_tools(monkeypatch):
         return SimpleNamespace(status_code=200, json=lambda: {'models': [
             {'slug': 'gpt-5.5', 'context_window': 123456, 'max_context_window': 234567}]})
 
+    from agent import model_metadata_codex_prefetch as prefetch_module
+    original_prefetch = prefetch_module.prefetch_agent
+    futures = []
+    def track_prefetch(agent):
+        future = original_prefetch(agent)
+        futures.append(future)
+        return future
+    monkeypatch.setattr(prefetch_module, 'prefetch_agent', track_prefetch)
     overlap = []
     def tools(*args, **kwargs):
         try:
             overlap.append(entered.wait(5))
         finally:
             release.set()
+        futures[0].result(5)  # Force completed-prefetch, not just concurrent-join coverage.
         return []
 
     monkeypatch.setattr(mm.model_metadata_http, 'get', get)
@@ -98,6 +109,7 @@ def test_real_constructor_overlaps_catalog_with_tools(monkeypatch):
             assert agent.api_key == 'selected-account'
             assert overlap == [True], 'tools did not overlap the live catalog request'
             assert calls == ['Bearer selected-account']
+            assert saved == [('gpt-5.5', 'https://chatgpt.com/backend-api/codex', 123456)]
         finally:
             release.set()
 

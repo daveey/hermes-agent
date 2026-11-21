@@ -2112,7 +2112,7 @@ def init_agent(
     check_model_matches_provider(agent)
     _init_fallback_chain(agent, fallback_model)
     from agent.model_metadata_codex_prefetch import prefetch_agent
-    prefetch_agent(agent)
+    catalog_prefetch = prefetch_agent(agent)
     _load_tools(agent, enabled_toolsets, disabled_toolsets)
     _init_session_state(
         agent, session_id, session_db, parent_session_id, reasoning_config, max_tokens,
@@ -2139,6 +2139,9 @@ def init_agent(
     _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=memory_manager)
     _apply_agent_section(agent, _agent_cfg)
     cs = _parse_compression_config(agent, _agent_cfg)
+    if catalog_prefetch is not None:
+        with suppress(Exception):  # failed optional overlap retries on the normal path
+            catalog_prefetch.result()
     _config_context_length, _custom_providers, _effective_context_length, _model_cfg = _resolve_context_length(
         agent, _agent_cfg, base_url
     )

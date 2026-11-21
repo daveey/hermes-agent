@@ -616,8 +616,8 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str, *, conn=None):
 # — that tool stays available for workers that want to attach a note or pre-emptively extend a claim across
 # a known-long op. Constraints: - Best-effort: never raise. The agent loop must not care if the bridge fails
 # (board missing, DB locked, etc.). - Rate-limited to one DB write per 60s per-process; runtime activity can
-# tick on every chunk/tool result and we don't need that resolution. - No-op outside dispatcher-spawned
-# worker context (no ``HERMES_KANBAN_TASK``). - No durable note on these auto-heartbeats; that's reserved
+# tick on every chunk/tool result; heartbeat_in_background schedules this writer off the turn thread.
+# No-op without worker context (no ``HERMES_KANBAN_TASK``). No durable note; that's reserved
 # for the explicit tool which carries a model-supplied note.
 _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 _auto_heartbeat_last_attempt: float = 0.0

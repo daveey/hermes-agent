@@ -16,7 +16,7 @@ The isolation is a **ContextVar**, deliberately not an ``os.environ`` clear:
 ``os.environ`` is process-global and shared with
 
   * the worker's own claim heartbeat (``run_agent._touch_activity`` ->
-    ``heartbeat_current_worker_from_env``), which would starve and let the
+    ``heartbeat_in_background`` -> ``heartbeat_current_worker_from_env``), which would starve and let the
     dispatcher reclaim a task whose worker is still alive;
   * the gateway's kanban watchers, which do their own board save/restore;
   * concurrent cron jobs on the parallel pool, which take a *shared* read lock

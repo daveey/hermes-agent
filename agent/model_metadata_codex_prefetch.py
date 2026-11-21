@@ -85,14 +85,19 @@ def resolve(token, base_url, fetch):
                 del _inflight[key]
 
 
-def prefetch(token, base_url):
+def prefetch(token, base_url, model=None):
     """Start one daemon request with this caller's profile, TLS and secret scope."""
     result = Future()
 
     def run():
-        from agent.model_metadata import _fetch_codex_oauth_context_lengths_with_source
+        from agent import model_metadata as mm
         try:
-            result.set_result(_fetch_codex_oauth_context_lengths_with_source(token, base_url))
+            # Use the ordinary resolver for agent boots so the fresh request's owner
+            # also performs its existing authoritative persistent-context write.
+            value = (mm.get_model_context_length(model, base_url=base_url, api_key=token,
+                                                provider='openai-codex') if model else
+                     mm._fetch_codex_oauth_context_lengths_with_source(token, base_url))
+            result.set_result(value)
         except BaseException as exc:
             logger.debug('catalog prefetch failed', exc_info=True)
             result.set_exception(exc)
@@ -115,7 +120,7 @@ def prefetch_agent(agent):
         logger.debug('catalog prefetch configuration unavailable', exc_info=True)
         return  # This is optional overlap, never a new startup failure.
     try:
-        return prefetch(agent.api_key, agent.base_url)
+        return prefetch(agent.api_key, agent.base_url, getattr(agent, 'model', None))
     except (RuntimeError, OSError) as exc:
         from hermes_cli.worker_drain_fence import DrainRefused
         if isinstance(exc, DrainRefused):
