@@ -61,6 +61,24 @@ def test_authority_terminal_policy(board, authority_status, producer, allowed):
     assert kb.get_task(board, consumer).status == "todo"
 
 
+def test_gc_preserves_closed_history_without_stopping_other_events(board, monkeypatch):
+    relay, _, authority, target, spec = lifecycle.setup(board)
+    lifecycle.contain(board, relay, target, spec)
+    assert kb.archive_task(board, authority)
+    assert kb.archive_task(board, relay)
+    held_ids = [r[0] for r in board.execute("SELECT uid FROM task_events WHERE task_id=?", (relay,))]
+    normal = kb.create_task(board, title="Ordinary archived card", assignee="default")
+    assert kb.archive_task(board, normal)
+    assert board.execute("SELECT 1 FROM task_events WHERE task_id=?", (normal,)).fetchone()
+    future = kb.time.time() + 31 * 24 * 3600
+    monkeypatch.setattr(kb.time, "time", lambda: future)
+    assert kb.gc_events(board) > 0
+    assert not board.execute("SELECT 1 FROM task_events WHERE task_id=?", (normal,)).fetchone()
+    assert [r[0] for r in board.execute("SELECT uid FROM task_events WHERE task_id=?", (relay,))] == held_ids
+    assert connections.held(board, relay)
+    assert kb.get_task(board, relay).status == "archived"
+
+
 def test_terminal_writer_does_not_grant_ready_permission(board):
     from hermes_cli.kanban_containment_terminal import writer
     relay, _, _, target, spec = lifecycle.setup(board)

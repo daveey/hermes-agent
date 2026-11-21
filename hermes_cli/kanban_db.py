@@ -3670,12 +3670,13 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     ``older_than_seconds=0`` means everything older than now; the CLI maps
     ``--event-retention-days 0`` to "disabled" before calling this.
     """
+    from hermes_cli.kanban_containment_terminal import parent_status_sql
     cutoff = int(time.time()) - _retention_seconds(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
             "DELETE FROM task_events WHERE created_at < ? AND kind NOT IN ('decomposed', 'origin_intent_recorded', "
             "'contained', 'containment_released', 'containment_closed') "
-            "AND task_id IN (SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
+            f"AND task_id IN (SELECT id FROM tasks WHERE {parent_status_sql(conn)} IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)
 
