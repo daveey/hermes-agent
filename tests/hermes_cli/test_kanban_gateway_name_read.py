@@ -23,6 +23,7 @@ def hub(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HUB_STATE", str(state))
     monkeypatch.setenv("HERMES_MAIL_CONFIG", str(tmp_path / "mail.json"))
     monkeypatch.setattr(kanban_origin, "_names_memo", None)
+    monkeypatch.setattr(kanban_origin, "_name_memo", None)
     monkeypatch.setattr(kanban_db_sync, "sync_config", dict)  # no kanban.sync.gateway: the hub path is live
     db = sqlite3.connect(state / "hub.db")
     db.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
@@ -67,6 +68,7 @@ def test_gateway_name_matches_gateway_names_in_every_branch(hub, monkeypatch):
 
     def both():
         monkeypatch.setattr(kanban_origin, "_names_memo", None)
+        monkeypatch.setattr(kanban_origin, "_name_memo", None)
         name = kanban_origin.gateway_name()
         monkeypatch.setattr(kanban_origin, "_names_memo", None)
         return name, kanban_origin.gateway_names()[0]
@@ -105,24 +107,70 @@ def test_a_valid_gateway_names_memo_answers_without_a_read(hub, monkeypatch):
     assert seen == []
 
 
-def test_a_meta_change_is_seen_on_the_next_call(hub, monkeypatch):
+def test_the_name_is_kept_across_hub_db_writes_and_dropped_when_hub_db_is_replaced(hub, monkeypatch):
+    """Gateways are never renamed in place: the WAL/mtime the hub writes all the time must not bust the memo, and a
+    re-enrollment (a new hub.db file) must."""
     db, state, _ = hub
-    kanban_origin.gateway_names()  # a remembered answer for the old inputs
     assert kanban_origin.gateway_name() == "hub"
-    db.execute("UPDATE meta SET v = 'renamed' WHERE k = 'gateway'")
+    seen = _statements(monkeypatch)
+    for i in range(20):  # the hub's continuous writes: WAL and main file change size/mtime
+        db.execute("INSERT INTO replica VALUES ('mini', 'tasks', ?)", (f"w{i}",))
+        db.commit()
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    db.execute("UPDATE meta SET v = 'in-place' WHERE k = 'gateway'")
     db.commit()
-    _settle(state / "hub.db", state / "hub.db-wal")  # even a settled write changes the size/identity key
-    assert kanban_origin.gateway_name() == "renamed"
+    _settle(state / "hub.db", state / "hub.db-wal")
+    assert kanban_origin.gateway_name() == "hub"
+    assert seen == [], "hub.db was reopened although its file identity did not change"
+    db.close()
+    fresh = state / "hub.db.new"  # re-enrollment: a new file renamed over the old one (a new inode)
+    new = sqlite3.connect(fresh)
+    new.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
+    new.execute("INSERT INTO meta VALUES ('gateway', 're-enrolled')")
+    new.commit()
+    new.close()
+    os.replace(fresh, state / "hub.db")
+    _settle(state / "hub.db")
+    assert kanban_origin.gateway_name() == "re-enrolled"
 
 
-def test_unchanged_inputs_are_reread_once_the_age_bound_passes(hub, monkeypatch):
+def test_a_mail_config_change_is_seen_on_the_next_call(hub, monkeypatch):
+    db, _state, mail = hub
+    db.execute("DELETE FROM meta")
+    db.commit()
+    mail.write_text(json.dumps({"gateway": "one"}), encoding="utf-8")
+    _settle(mail)
+    assert kanban_origin.gateway_name() == "one"
+    mail.write_text(json.dumps({"gateway": "two!"}), encoding="utf-8")
+    _settle(mail)
+    assert kanban_origin.gateway_name() == "two!"
+
+
+def test_unchanged_inputs_are_reread_once_the_ten_minute_bound_passes(hub, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(kanban_origin.time, "monotonic", lambda: clock[0])
-    kanban_origin.gateway_names()
+    assert kanban_origin._NAME_MAX_AGE_S == 600.0
+    kanban_origin.gateway_name()
     seen = _statements(monkeypatch)
-    clock[0] += kanban_origin._NAMES_MAX_AGE_S - 0.1
+    clock[0] += kanban_origin._NAME_MAX_AGE_S - 0.1
     kanban_origin.gateway_name()
     assert seen == [], "re-read before the age bound"
     clock[0] += 0.2  # time alone, no input change
     kanban_origin.gateway_name()
     assert seen, "not re-read after the age bound"
+
+
+def test_a_failed_hub_db_read_is_not_remembered(hub, monkeypatch):
+    real, calls = kanban_origin._ro, []
+
+    def flaky(path):
+        calls.append(str(path))
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(path)
+
+    monkeypatch.setattr(kanban_origin, "_ro", flaky)
+    assert kanban_origin.gateway_name() == ""  # no mail config to fall back on
+    assert kanban_origin.gateway_name() == "hub"
+    assert kanban_origin.gateway_name() == "hub"
+    assert len(calls) == 2

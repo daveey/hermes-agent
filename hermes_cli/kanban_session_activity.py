@@ -15,6 +15,7 @@ seconds because the sidebar polls.
 from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
+from hermes_cli.kanban_ro_batch import batch as _ro_batch
 from hermes_cli import kanban_activity_identity as _identity
 from hermes_cli import kanban_annotation_disk as _annotation_copy
 from hermes_cli import kanban_annotation_host as _host_copy
@@ -994,6 +995,7 @@ def _refresh_links_scope(scope: tuple) -> None:
 _links_refresher = ScopeRefresher(lambda scope: _refresh_links_scope(scope), _LINKS_SCOPE_CAP)
 
 
+@_ro_batch()
 def _project_remote_links() -> list[dict[str, Any]]:
     from hermes_constants import get_hermes_home
     from hermes_cli.kanban_origin_adapter import _gateway
@@ -1609,6 +1611,7 @@ def _remote_cards(ids: list[str] | None, statuses: tuple[str, ...], stale_ok: bo
     return _remote_links(stale_ok=True) if stale_ok else _remote_links()
 
 
+@_ro_batch()  # one read-only connection per file for the whole list, not one per card
 def session_tasks(session_ids: Iterable[str], statuses: tuple[str, ...] = LISTED_STATUSES, *,
                   stale_ok: bool = False) -> list[dict[str, Any]]:
     """Every open/blocked/review task across all boards that the given session

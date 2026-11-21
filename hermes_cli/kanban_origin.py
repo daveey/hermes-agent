@@ -20,6 +20,7 @@ Binding is not handoff: the result says ``readback: pending`` until gateway A ha
 from __future__ import annotations
 
 from hermes_cli import kanban_lockguard as _kanban_lockguard
+from hermes_cli import kanban_ro_batch as _kanban_ro_batch
 import json
 import os
 import re
@@ -87,6 +88,11 @@ def _hub_db() -> Optional[Path]:
 
 
 def _ro(path: Path) -> sqlite3.Connection:
+    """A read-only connection to ``path``; inside ``kanban_ro_batch.batch()`` a borrow of the pass's shared one."""
+    return _kanban_ro_batch.open_ro(path, _open_ro)
+
+
+def _open_ro(path: Path) -> sqlite3.Connection:
     try:
         conn = _kanban_lockguard.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
         conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
@@ -100,6 +106,8 @@ def _ro(path: Path) -> sqlite3.Connection:
 _NAMES_MAX_AGE_S = 5.0
 _NAMES_RACY_NS = 100_000_000
 _names_memo: Optional[tuple[tuple, float, str, frozenset]] = None
+_NAME_MAX_AGE_S = 600.0  # ``gateway_name``'s own memo: see its docstring
+_name_memo: Optional[tuple[tuple, float, str]] = None
 
 
 def _stat_sig(path: Path) -> Optional[tuple[int, int, int]]:
@@ -139,14 +147,43 @@ def gateway_names() -> tuple[str, set[str]]:
 def gateway_name() -> str:
     """This gateway's own name: exactly ``gateway_names()[0]``, without the known-gateway set.
 
-    A still-valid ``gateway_names`` memo answers; otherwise only the hub.db ``meta`` row (a primary-key lookup) and
-    the mail config are read, never the ``replica`` scan whose cost grows with replica rows. Not memoized itself:
-    the hub writes hub.db's WAL continuously, so a memo keyed on it would almost never be kept. [daveey]"""
+    A still-valid ``gateway_names`` memo answers first. Otherwise the name is remembered for ``_NAME_MAX_AGE_S``
+    (10 min), keyed on hub.db's identity (path, device, inode) and the mail config's signature, never on hub.db's
+    WAL or mtime: the hub writes those continuously, so a memo keyed on them would almost never be kept, and every
+    card in a task list asked again (an open + close of hub.db each, 70% of ``session_tasks`` CPU on the hub,
+    2026-11-20). Gateways are never renamed in place; re-enrolling replaces hub.db (a new inode), which busts the
+    memo, as does any change to the mail config. A miss reads only the hub.db ``meta`` row (a primary-key lookup)
+    and the mail config, never the ``replica`` scan. ``gateway_names`` (the known set, which does change) keeps its
+    short memo. [daveey]"""
+    global _name_memo
     path, cfg = _hub_db(), _mail_config()
-    memo = _names_memo
-    if memo is not None and time.monotonic() - memo[1] < _NAMES_MAX_AGE_S and memo[0] == _names_key(path, cfg):
+    memo, now = _names_memo, time.monotonic()
+    if memo is not None and now - memo[1] < _NAMES_MAX_AGE_S and memo[0] == _names_key(path, cfg):
         return memo[2]
-    return _read_gateway_names(path, cfg, names=False)[0]
+    key = _name_key(path, cfg)
+    own = _name_memo
+    if own is not None and own[0] == key and now - own[1] < _NAME_MAX_AGE_S:
+        return own[2]
+    failed: list[sqlite3.Error] = []
+    me = _read_gateway_names(path, cfg, failed, names=False)[0]
+    # A failed hub.db read (locked, mid-replace) or a mail config written within the timestamp granularity is
+    # not kept: the next caller reads again.
+    cfg_sig = key[-1]
+    racy = isinstance(cfg_sig, tuple) and cfg_sig[1] >= time.time_ns() - _NAMES_RACY_NS
+    _name_memo = None if failed or racy else (key, now, me)
+    return me
+
+
+def _name_key(path: Optional[Path], cfg: Path) -> tuple:
+    """Identity of ``gateway_name``'s inputs: hub.db's file identity (not its contents) and the mail config."""
+    ident = None
+    if path is not None:
+        try:
+            st = path.stat()
+            ident = (st.st_dev, st.st_ino)
+        except OSError:
+            ident = None
+    return str(path), ident, str(cfg), _stat_sig(cfg)
 
 
 def _names_key(path: Optional[Path], cfg: Path) -> tuple:

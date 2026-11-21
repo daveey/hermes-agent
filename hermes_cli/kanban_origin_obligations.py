@@ -35,13 +35,15 @@ def preserve_origin_obligations(selected: list[dict[str, Any]], ledger: Iterable
 
     out = list(selected)
     seen = {(c.get("session"), c.get("gateway"), c.get("profile"), c.get("board"), c.get("id")) for c in out}
+    fields = ("session", "gateway", "profile", "board", "id")
     for card in ledger:
-        if card.get("origin_gateway") != gateway or card.get("origin_profile") != profile:
+        # Cheapest, most selective filters first: most ledger rows are released or finished, and the five-field
+        # check below cost ~20 ms a call on the hub (~3.5k rows) when it ran for all of them. Every filter is a pure
+        # ``continue``, so their order does not change the result.
+        if (card.get("origin_gateway") != gateway or card.get("origin_profile") != profile
+                or card.get("released") or not card.get("unfinished") or card.get("gateway") == gateway):
             continue
-        fields = ("session", "gateway", "profile", "board", "id")
         if not all(isinstance(card.get(k), str) and card[k].strip() for k in fields):
-            continue
-        if card["gateway"] == gateway or card.get("released") or not card.get("unfinished"):
             continue
         if ids is not None and card["session"] not in ids and card.get("origin_session") not in ids:
             continue
