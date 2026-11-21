@@ -37,7 +37,8 @@ def counted(conn):
     return real(conn)
 
 kbc._run_integrity_check = counted
-kbc._INTEGRITY_STAMP_TTL_SECONDS = float(os.environ.get("CHECK_TTL_S", kbc._INTEGRITY_STAMP_TTL_SECONDS))
+if "CHECK_TTL_S" in os.environ:
+    kbc._INTEGRITY_STAMP_TTL_SECONDS = float(os.environ["CHECK_TTL_S"])
 kbc.connect(Path(sys.argv[1])).close()
 """
 
@@ -68,9 +69,15 @@ def _spawn(tmp_path, board_path, n, **extra):
     env = _env(tmp_path, board_path, **extra)
     procs = [subprocess.Popen([sys.executable, "-c", CHILD, str(board_path)], env=env, cwd=REPO,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(n)]
-    for p in procs:
-        _out, err = p.communicate(timeout=120)
-        assert p.returncode == 0, err[-2000:]
+    try:
+        for p in procs:
+            _out, err = p.communicate(timeout=120)
+            assert p.returncode == 0, err[-2000:]
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+            p.communicate(timeout=10)
     log = tmp_path / "checks.log"
     return log.read_text().split() if log.exists() else []
 
@@ -98,7 +105,7 @@ def test_an_expired_stamp_forces_a_fresh_full_check(tmp_path, board):
     stamp = json.loads(_stamp(board).read_text())
     stamp["verified_at"] -= 7 * 3600
     _stamp(board).write_text(json.dumps(stamp))
-    assert len(_spawn(tmp_path, board, 1)) == 2
+    assert len(_spawn(tmp_path, board, 6, CHECK_SLEEP_S="0.4")) == 2
 
 
 def test_a_stamp_for_a_replaced_file_is_ignored(tmp_path, board):

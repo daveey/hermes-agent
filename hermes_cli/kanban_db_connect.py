@@ -54,8 +54,10 @@ _INIT_LOCK_TIMEOUT_SECONDS = 10.0
 _INIT_LOCK_POLL_SECONDS = 0.05
 # A clean full ``integrity_check`` is O(board size) (3.0 s at the hub's 700 MB) and ran once PER PROCESS, under the
 # cross-process init lock, so N concurrent ``hermes kanban`` CLIs cost N serial scans (9-20 s each, 2026-11-21).
-# A clean result is stamped next to the DB (``<db>.integrity-ok``: file identity + wall time); a fresh stamp for the
-# same file lets later processes skip the scan. A TTL of 0 (module constant) always scans.
+# A clean result is stamped only for an unchanged DB+WAL metadata generation. Ordinary writes,
+# replacements and recovery/checkpoint side effects invalidate it; continuous writers may get no hits.
+# This is not a media-integrity certificate: unchanged metadata can conceal silent storage corruption.
+# The six-hour TTL bounds reuse even without a visible write. A TTL of 0 always scans.
 _INTEGRITY_STAMP_SUFFIX = ".integrity-ok"
 _INTEGRITY_STAMP_TTL_SECONDS = 6 * 3600.0
 
@@ -680,31 +682,70 @@ def _integrity_stamp_path(resolved: Path) -> Path:
     return resolved.with_name(resolved.name + _INTEGRITY_STAMP_SUFFIX)
 
 
+def _integrity_generation(resolved: Path) -> Optional[dict]:
+    """Conservative change detector, not a content hash or a media-integrity guarantee.
+
+    WAL contains committed pages absent from the main file. SHM contains coordination,
+    not persistent pages. A rollback journal may need recovery: never cache that case.
+    ctime also invalidates ordinary in-place writes that restore the old mtime.
+    """
+    try:
+        try:
+            Path(str(resolved) + "-journal").stat()
+        except FileNotFoundError:
+            pass
+        else:
+            return None
+        generation = {}
+        for suffix in ("", "-wal"):
+            try:
+                st = Path(str(resolved) + suffix).stat()
+            except FileNotFoundError:
+                if not suffix:
+                    return None
+                generation[suffix] = None
+            else:
+                generation[suffix] = [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+        return generation
+    except OSError:
+        return None
+
+
 def _integrity_stamp_fresh(resolved: Path) -> bool:
-    """True when a clean full check of THIS file (same device+inode) was recorded within the TTL. Any doubt
-    (missing/unreadable/garbled stamp, replaced file, a clock step backwards) is False: the scan runs."""
+    """Reuse only a clean check of an unchanged DB/WAL generation within the TTL."""
     ttl = _INTEGRITY_STAMP_TTL_SECONDS
     if ttl <= 0:
         return False
     try:
-        st = resolved.stat()
+        generation = _integrity_generation(resolved)
         stamp = json.loads(_integrity_stamp_path(resolved).read_text(encoding="utf-8-sig"))
         age = time.time() - float(stamp["verified_at"])
-        return stamp["dev"] == st.st_dev and stamp["ino"] == st.st_ino and 0 <= age < ttl
+        return (generation is not None and stamp["version"] == 2
+                and stamp["generation"] == generation and 0 <= age < ttl)
     except (OSError, ValueError, KeyError, TypeError):
         return False
 
 
-def _write_integrity_stamp(resolved: Path) -> None:
-    """Best effort: a failed write only means the next process scans again."""
-    if _INTEGRITY_STAMP_TTL_SECONDS <= 0:
+def _invalidate_integrity_stamp(resolved: Path) -> None:
+    with contextlib.suppress(OSError):
+        _integrity_stamp_path(resolved).unlink(missing_ok=True)
+
+
+def _write_integrity_stamp(resolved: Path, generation: Optional[dict]) -> None:
+    """Publish only the generation sampled BEFORE the check, if unchanged after close.
+
+    Probe recovery/checkpoint, schema writes and active WAL writers can prevent reuse.
+    A racing write after this comparison invalidates the captured generation on use.
+    """
+    if _INTEGRITY_STAMP_TTL_SECONDS <= 0 or generation is None:
         return
     target = _integrity_stamp_path(resolved)
     tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     try:
-        st = resolved.stat()
-        tmp.write_text(json.dumps({"dev": st.st_dev, "ino": st.st_ino, "verified_at": time.time(), "pid": os.getpid()}),
-                       encoding="utf-8")
+        if generation != _integrity_generation(resolved):
+            return
+        tmp.write_text(json.dumps({"version": 2, "generation": generation,
+                                  "verified_at": time.time(), "pid": os.getpid()}), encoding="utf-8")
         os.replace(tmp, target)
     except OSError:
         with contextlib.suppress(OSError):
@@ -732,10 +773,12 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
     if _missing_or_empty(resolved) or str(resolved) in _INITIALIZED_PATHS:
         return
     if _integrity_stamp_fresh(resolved):
-        return  # another process fully checked this very file within the TTL: no per-process O(board) scan
+        return
+    generation = _integrity_generation(resolved)
+    _invalidate_integrity_stamp(resolved)
     messages, reason = _probe_for_corruption(resolved)
     if reason is None:
-        _write_integrity_stamp(resolved)
+        _write_integrity_stamp(resolved, generation)
         return
     # The probe ran in THIS process, whose view can be stale (deleted WAL/SHM
     # generation after a sibling's close). Only an independently confirmed failure
@@ -798,6 +841,7 @@ def repair_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) ->
         return RepairResult(status="missing", db_path=resolved)
 
     with _cross_process_init_lock(resolved):
+        _invalidate_integrity_stamp(resolved)
         messages, reason = _probe_for_corruption(resolved)
         if reason is not None:
             messages, reason = _confirm_corruption(resolved, messages, reason)
