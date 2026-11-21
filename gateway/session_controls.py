@@ -246,6 +246,7 @@ class AuthorityConnection:
                     'cron.submit': self.cron_submit, 'cron.status': self.cron_status,
                     'cron.cancel': self.cron_cancel, 'cron.recover': self.cron_recover,
                     'worker.register': self.worker_register, 'worker.adopt': self.worker_adopt,
+                    'worker.credentials': self.worker_credentials,
                     'worker.persist': self.worker_persist, 'worker.turnLease': self.worker_turn_lease,
                     'worker.nativeOrigin': self.worker_native_origin,
                     'worker.sessionContext': self.worker_session_context,
@@ -476,6 +477,10 @@ class AuthorityConnection:
     async def worker_adopt(self, ref, params):
         from gateway.session_worker import worker_request
         return await worker_request(self, ref, params, operation='adopt')
+
+    async def worker_credentials(self, ref, params):
+        from gateway.session_worker import worker_request
+        return await worker_request(self, ref, params, operation='credentials')
 
     async def worker_persist(self, ref, params):
         from gateway.session_worker import worker_request

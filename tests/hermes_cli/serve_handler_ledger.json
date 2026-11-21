@@ -682,6 +682,7 @@
   {"current_path": "legacy fallback; standalone: legacy server.dispatch", "decision": "undecided", "handler": "wake.status", "kind": "rpc", "ref": "D3"},
   {"current_path": "legacy fallback; standalone: legacy server.dispatch", "decision": "undecided", "handler": "wake.stop", "kind": "rpc", "ref": "D3"},
   {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "worker.adopt", "kind": "rpc", "ref": ""},
+  {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "worker.credentials", "kind": "rpc", "ref": ""},
   {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "worker.nativeOrigin", "kind": "rpc", "ref": ""},
   {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "worker.persist", "kind": "rpc", "ref": ""},
   {"current_path": "authority; standalone: unknown method", "decision": "authority", "handler": "worker.register", "kind": "rpc", "ref": ""},

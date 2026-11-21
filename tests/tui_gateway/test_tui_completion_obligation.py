@@ -309,11 +309,9 @@ def test_orderly_exit_journal_takes_custody_and_delivers_once(home, registry, ba
 
 def test_managed_worker_of_a_desktop_chat_owes_its_finished_notice_to_the_desktop_keeper(home, registry, backend,
                                                                                           monkeypatch):
-    """Intended: a single-profile managed worker inherits the Desktop backend's env byte-for-byte (``_worker_env``
-    returns None), so ``is_desktop_owned_backend()`` holds inside it too. The worker is a per-turn interpreter
-    whose completion queue nobody reads after its turn, so a Desktop chat's notify job that finishes there leaves
-    an owner:"tui" obligation stamped with the WORKER's pid. The Desktop keeper leaves it while the worker lives
-    and re-arms it once the worker is gone: the chat gets the notice exactly once."""
+    """A managed worker's Desktop completion queue dies with its turn; the Desktop keeper
+    retains and re-arms its notice obligation. Exec no longer inherits the Desktop token;
+    the explicit identity fixture here exercises keeper recovery, not env propagation."""
     from agent import runtime_session_store
     from gateway.session_managed_worker import _worker_env
     from tools.process_registry_readopt import _checkpoint_keeper_tick
@@ -323,7 +321,8 @@ def test_managed_worker_of_a_desktop_chat_owes_its_finished_notice_to_the_deskto
     monkeypatch.setenv("HERMES_DESKTOP", "1")
     monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "desktop-spawn-token")
     monkeypatch.setattr(runtime_session_store, "_worker_process", True)
-    assert _worker_env(types.SimpleNamespace(profile_id=str(home))) is None, "single-profile workers inherit env"
+    child_env = _worker_env(types.SimpleNamespace(profile_id=str(home)))
+    assert 'HERMES_DASHBOARD_SESSION_TOKEN' not in child_env
     assert process_identity.is_desktop_owned_backend() is True
 
     worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])

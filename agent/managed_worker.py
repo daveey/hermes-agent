@@ -118,7 +118,7 @@ def validate_bootstrap(frame):
             or any(not isinstance(frame[k], str) for k in ('text', 'route', 'user_id', 'chat_id'))
             or type(frame['safe_mode']) is not bool or type(frame['ignore_user_config']) is not bool
             or (frame['safe_mode'] and not frame['ignore_user_config'])
-            or (frame['api_key'] is not None and not isinstance(frame['api_key'], str))):
+            or frame['api_key'] is not None):
         raise ValueError('invalid_managed_worker_bootstrap')
     from agent.turn_author import parse_turn_author
     if frame['turn_author'] is not None and (not isinstance(frame['turn_author'], dict)
@@ -351,6 +351,12 @@ def execute(frame, channel):
     agent = None
     completed = False
     try:
+        from gateway.session_worker_credentials import hydrate_credentials
+        hydrated = hydrate_credentials(frame, rpc)
+        if hydrated is not frame:
+            from agent.safe_worker_policy import _hydrate_worker_config
+            _hydrate_worker_config(json.loads(hydrated['policy']['config_json']))
+            frame = hydrated
         from gateway.session_kanban import bind_worker_context
         origin_custody = bind_worker_context(frame)
         # [daveey] Capsule-required cards: bind before checkpoint recovery, hooks, MCP and tools.

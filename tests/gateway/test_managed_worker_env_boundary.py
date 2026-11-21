@@ -28,13 +28,12 @@ def test_secondary_profile_worker_gets_no_launch_credentials(tmp_path, monkeypat
     finally:
         secret_scope.set_multiplex_active(False)
     # The scrub follows the worker's OWNING profile, not the process-wide multiplex flag.
-    assert env is not None and env["OPENROUTER_API_KEY"] == "SEC-or"
+    assert env is not None and "OPENROUTER_API_KEY" not in env
     assert sorted(k for k, v in env.items() if "LAUNCH" in str(v)) == []
-    if not multiplex:
-        assert own is None  # single-profile: the launch profile's own worker inherits byte-for-byte
+    assert own is not None and "OPENROUTER_API_KEY" not in own
 
 
-def test_launch_profile_worker_keeps_env_only_tool_credentials_under_multiplex(tmp_path, monkeypatch):
+def test_launch_profile_worker_drops_undeclared_tool_credentials_under_multiplex(tmp_path, monkeypatch):
     """Under multiplex the launch profile's own worker resolves what its owner resolves for that
     profile (``launch_secret_scope``): a tool key injected only into the launch environment
     (systemd ``Environment=``, ``op run``) reaches it, while a secondary's worker never sees it."""
@@ -58,9 +57,9 @@ def test_launch_profile_worker_keeps_env_only_tool_credentials_under_multiplex(t
         other = _worker_env(SimpleNamespace(profile_id=str(sec)))
     finally:
         set_multiplex_active(False)
-    assert own["FIRECRAWL_API_KEY"] == "ENVONLY-fc" and own["OPENROUTER_API_KEY"] == "LAUNCH-or"
+    assert "FIRECRAWL_API_KEY" not in own and "OPENROUTER_API_KEY" not in own
     assert "AUXILIARY_VISION_API_KEY" not in own  # Hermes-internal secrets never reach a child
-    assert "FIRECRAWL_API_KEY" not in other and other["OPENROUTER_API_KEY"] == "SEC-or"
+    assert "FIRECRAWL_API_KEY" not in other and "OPENROUTER_API_KEY" not in other
     assert sorted(k for k, v in other.items() if "ENVONLY" in str(v) or "LAUNCH" in str(v)) == []
 
 

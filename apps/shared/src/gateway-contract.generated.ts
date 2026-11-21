@@ -5222,6 +5222,21 @@ export interface WorkerScopeParams {
   birth: number
   secret: string
 }
+export interface WorkerCredentialsParams {
+  profile_id: string
+  session_id: string
+  execution_id: string
+  generation: number
+  pid: number
+  birth: number
+  secret: string
+  epoch: number
+}
+export interface WorkerCredentialsResult {
+  api_key: string | null
+  environment: Record<string, string>
+  entries: unknown[][]
+}
 export interface WorkerSessionContextParams {
   profile_id: string
   session_id: string
@@ -7412,6 +7427,8 @@ export interface CanonicalRpcMethods {
   'shell.exec': { params: CanonicalShellExecParams; result: ShellExecResult }
   /** Adopt a registered execution after verifying the live producer claim. */
   'worker.adopt': { params: WorkerScopeParams; result: WorkerExecution }
+  /** Resolve private launch material for the live exact adopted execution. */
+  'worker.credentials': { params: WorkerCredentialsParams; result: WorkerCredentialsResult }
   /** Fresh owner-fenced lease, consistent creation source and execution publication lineage. */
   'worker.nativeOrigin': { params: WorkerNativeOriginParams; result: WorkerNativeOriginResult }
   /** Sequence-fenced typed persistence write from an adopted worker. */
@@ -7476,6 +7493,7 @@ export const CANONICAL_RPC_METHODS = [
   'session.transcript',
   'shell.exec',
   'worker.adopt',
+  'worker.credentials',
   'worker.nativeOrigin',
   'worker.persist',
   'worker.register',

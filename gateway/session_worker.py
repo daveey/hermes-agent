@@ -123,7 +123,7 @@ async def _worker_request(connection, ref, params, *, operation):
         return await worker_child_request(connection, ref, params)
     extra = {'register': {'kind'}, 'adopt': set(), 'persist': {'epoch', 'sequence', 'operation', 'payload'},
              'turnLease': {'epoch', 'holder'}, 'nativeOrigin': {'epoch', 'holder'},
-             'sessionContext': {'epoch', 'target'}}[operation]
+             'sessionContext': {'epoch', 'target'}, 'credentials': {'epoch'}}[operation]
     if set(params) != _SCOPE | extra:
         raise RuntimeStoreError('invalid_params')
     claim = _claim(connection, ref, params)
@@ -148,6 +148,16 @@ async def _worker_request(connection, ref, params, *, operation):
             raise RuntimeStoreError('stale_epoch')
         return await asyncio.to_thread(worker_session_context, authority.db, epoch=authority.epoch,
                                        **scope, target=params['target'])
+    if operation == 'credentials':
+        if type(params['epoch']) is not int or params['epoch'] != authority.epoch:
+            raise RuntimeStoreError('stale_epoch')
+        with authority.db._read_ctx() as conn:
+            row = conn.execute('SELECT status, owner_epoch FROM worker_executions WHERE execution_id=?',
+                               (params['execution_id'],)).fetchone()
+        if row is None or row['status'] != 'running' or row['owner_epoch'] != authority.epoch:
+            raise RuntimeStoreError('stale_generation')
+        from gateway.session_worker_credentials import resolve_credentials
+        return resolve_credentials(authority, params)
     if operation in ('turnLease', 'nativeOrigin'):
         from hermes_state_runtime import worker_turn_lease
         if type(params['epoch']) is not int or params['epoch'] != authority.epoch:

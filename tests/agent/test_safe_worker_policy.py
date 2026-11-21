@@ -28,6 +28,34 @@ def run_worker(tmp_path, body, mode="safe"):
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+@pytest.mark.parametrize('mode', ['safe', 'config', 'ordinary'])
+def test_adopted_credentials_only_fill_frozen_placeholders(tmp_path, mode):
+    result = run_worker(tmp_path, '''
+        import json
+        from agent.safe_worker_policy import (
+            _bind_worker_config, _bind_safe_worker_policy, _hydrate_worker_config, worker_config_snapshot)
+        frozen = {'model': {'provider': 'custom', 'api_key': None}, 'agent': {'max_turns': 3}}
+        if __import__('os').environ['PROBE_MODE'] == 'ordinary':
+            _bind_worker_config(frozen)
+        else:
+            _bind_safe_worker_policy(safe_mode=__import__('os').environ['PROBE_MODE'] == 'safe',
+                                     ignore_user_config=True, config=frozen)
+        hydrated = {'model': {'provider': 'custom', 'api_key': 'synthetic-adopted-key'}, 'agent': {'max_turns': 3}}
+        invalid = {**hydrated, 'agent': {'max_turns': 99}}
+        try:
+            _hydrate_worker_config(invalid)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('credential hydration reshaped the frozen policy')
+        assert worker_config_snapshot() == frozen
+        _hydrate_worker_config(hydrated)
+        assert worker_config_snapshot() == hydrated
+        print(json.dumps({'credential': worker_config_snapshot()['model']['api_key']}))
+    ''', mode)
+    assert result == {'credential': 'synthetic-adopted-key'}
+
+
 @pytest.mark.parametrize("mode", ["safe", "config", "ordinary"])
 def test_worker_config_is_frozen_before_any_profile_read(tmp_path, mode):
     result = run_worker(tmp_path, '''

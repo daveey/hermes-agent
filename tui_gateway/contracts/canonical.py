@@ -531,6 +531,20 @@ canonical_method("worker.adopt", params=WorkerScopeParams, result=WorkerExecutio
                  doc="Adopt a registered execution after verifying the live producer claim.")
 
 
+class WorkerCredentialsParams(WorkerScopeParams):
+    epoch: int
+
+
+class WorkerCredentialsResult(Result):
+    api_key: str | None
+    environment: dict[str, str]
+    entries: list[list[JsonValue]]
+
+
+canonical_method("worker.credentials", params=WorkerCredentialsParams, result=WorkerCredentialsResult,
+                 doc="Resolve private launch material for the live exact adopted execution.")
+
+
 class WorkerTurnLeaseParams(WorkerScopeParams):
     epoch: int
     holder: str

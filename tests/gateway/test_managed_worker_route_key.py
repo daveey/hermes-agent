@@ -96,6 +96,14 @@ def test_keyless_worker_reads_its_own_profile_home_not_the_default(tmp_path, mon
     monkeypatch.setenv(KEY_ENV, other)
     env = _worker_env(SimpleNamespace(profile_id=str(profile)))
     assert env is not None and env['HERMES_HOME'] == str(profile)
+    assert KEY_ENV not in env
+    from gateway.session_worker_credentials import route_environment
+    config = {'model': {'provider': 'custom:minimax', 'base_url': BASE_URL},
+              'custom_providers': [{'name': 'minimax', 'base_url': BASE_URL, 'key_env': KEY_ENV}]}
+    credentials = route_environment(SimpleNamespace(profile_id=str(profile)),
+                                    SimpleNamespace(ignore_user_config=False), config)
+    assert credentials == {KEY_ENV: own}
+    env.update(credentials)
     for name in list(os.environ):
         monkeypatch.delenv(name)
     for name, value in env.items():

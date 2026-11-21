@@ -73,13 +73,24 @@ async def test_reserved_process_uses_existing_authenticated_adoption_and_persist
         actor = SimpleNamespace(subject='human', profile_id=str(tmp_path), capabilities={'worker:adopt'})
         connection = SimpleNamespace(authority=authority, actor=actor)
         identity = {k: v for k, v in scope.items() if k != 'epoch'}
+        material = {'api_key': 'synthetic-exact-worker-key', 'entries': [], 'environment': {}}
+        authority._managed_credentials = {scope['execution_id']: (dict(scope), material)}
+        with pytest.raises(Exception, match='stale_generation'):
+            await worker_request(connection, None, scope, operation='credentials')
         with pytest.raises(Exception, match='permission_denied'):
             await worker_request(connection, None, identity | {'secret': 'wrong-secret-for-reservation'}, operation='adopt')
         receipt = await worker_request(connection, None, identity, operation='adopt')
         assert receipt['execution_id'] == scope['execution_id']
+        assert await worker_request(connection, None, scope, operation='credentials') == material
+        with pytest.raises(Exception, match='permission_denied'):
+            await worker_request(connection, None, scope | {'secret': 'synthetic-wrong-secret'}, operation='credentials')
+        with pytest.raises(Exception, match='stale_epoch'):
+            await worker_request(connection, None, scope | {'epoch': epoch + 1}, operation='credentials')
         params = scope | {'sequence': 1, 'operation': 'execution.finish', 'payload': {}}
         result = await worker_request(connection, None, params, operation='persist')
         assert result['status'] == 'terminal'
+        with pytest.raises(Exception, match='stale_generation'):
+            await worker_request(connection, None, scope, operation='credentials')
         with pytest.raises(Exception, match='stale_generation'):
             await worker_request(connection, None, params | {'sequence': 2}, operation='persist')
     finally:

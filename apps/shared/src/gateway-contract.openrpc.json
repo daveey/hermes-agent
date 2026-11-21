@@ -51000,6 +51000,93 @@
         "title": "WakeStopResult",
         "type": "object"
       },
+      "WorkerCredentialsParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "execution_id": {
+            "title": "Execution Id",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "pid": {
+            "title": "Pid",
+            "type": "integer"
+          },
+          "birth": {
+            "title": "Birth",
+            "type": "number"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          },
+          "epoch": {
+            "title": "Epoch",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "profile_id",
+          "session_id",
+          "execution_id",
+          "generation",
+          "pid",
+          "birth",
+          "secret",
+          "epoch"
+        ],
+        "title": "WorkerCredentialsParams",
+        "type": "object"
+      },
+      "WorkerCredentialsResult": {
+        "additionalProperties": false,
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "environment": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Environment",
+            "type": "object"
+          },
+          "entries": {
+            "items": {
+              "items": {},
+              "type": "array"
+            },
+            "title": "Entries",
+            "type": "array"
+          }
+        },
+        "required": [
+          "api_key",
+          "environment",
+          "entries"
+        ],
+        "title": "WorkerCredentialsResult",
+        "type": "object"
+      },
       "WorkerExecution": {
         "additionalProperties": true,
         "description": "A ``worker_executions`` row without its adoption digest.",
@@ -52417,6 +52504,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/WorkerExecution"
+        }
+      }
+    },
+    {
+      "name": "worker.credentials",
+      "summary": "Resolve private launch material for the live exact adopted execution.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/WorkerCredentialsParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/WorkerCredentialsResult"
         }
       }
     },

@@ -62,7 +62,6 @@ def policy_if_managed(policy):
 
 def _bootstrap(authority, ref, row, policy, scope, text=None):
     from gateway.session_ingress import row_turn_author
-    from gateway.session_policy import route_launch_key
     from gateway.session_policy_credentials import recover_config_secrets
     terminal = json.loads(policy.terminal_json)
     if policy.config_secret_ref:
@@ -85,10 +84,14 @@ def _bootstrap(authority, ref, row, policy, scope, text=None):
     config = _worker_config(authority, policy, config=config)
     from gateway.session_profile_selection import commit_selection
     commit_selection(authority, ref, policy, config, model, scope['generation'], ended=ended)
+    from gateway.session_worker_credentials import stage_credentials
+    config, terminal, request, credentials = stage_credentials(authority, scope, policy, config, terminal, request)
+    if credentials:
+        request['credentials_v1'] = True
     hydrated = replace(policy, model=model, config_json=json.dumps(config), request_json=json.dumps(request),
                        terminal_json=json.dumps(terminal), credential_ref=None, config_secret_ref=None)
     return {'version': 1, 'home': authority.profile_id, 'scope': scope,
-            'policy': asdict(hydrated), 'api_key': route_launch_key(authority, policy, config),
+            'policy': asdict(hydrated), 'api_key': None,
             'text': row['payload']['text'] if text is None else text, 'route': live.route,
             **({'attachments_v1': row['payload']['attachments_v1']} if 'attachments_v1' in row['payload'] else {}),
             'user_id': live.source.user_id, 'chat_id': live.source.chat_id,
@@ -454,37 +457,19 @@ def _prompt_frame(authority, ref, row, worker, frame):
 
 
 def _worker_env(authority):
-    """Child env for the OWNING profile under multiplex: its HERMES_HOME plus its ``.env``
-    secrets over a scrubbed base, never the launch profile's process environment (the same
-    rule MCP stdio children and shell hooks follow) — except for the launch profile's own
-    worker, whose scope legitimately includes its frozen launch env. Single-profile gateways
-    inherit the process env byte-for-byte, exactly as before."""
-    from pathlib import Path
-    from agent.secret_scope import is_multiplex_active
-    from tools.environments.local import _is_routed_home
+    """Explicit startup-only allowlist, identical for launch and routed profiles.
+
+    Credentials are resolved after authenticated adoption, never inherited by exec.
+    Arbitrary settings (including unknown secret names) are not startup inputs.
+    """
+    from gateway.session_worker_credentials import EXEC_ENV
+    from tools.environments.local import build_subprocess_env
     home = Path(str(authority.profile_id))
     if not home.is_absolute():
-        return None
-    # Keyed on the worker's OWNING profile, not only the process-wide multiplex flag: a worker for
-    # another profile must never inherit the launch environ even when that flag reads False.
-    routed = _is_routed_home(home)
-    if not routed and not is_multiplex_active():
-        return None
-    from agent.secret_scope import build_profile_secret_scope
-    from tools.environments.local import _scrub_credentials, build_subprocess_env, strip_launch_profile_env
-    # The scrub removes credentials, not settings: the launch profile's TERMINAL_* policy and
-    # its ``.env`` settings would otherwise reach the secondary's worker (cron/kanban rule).
-    # Strip the RAW environ before the constructor injects this turn's own session/bridge context:
-    # a launch ``.env`` name (HERMES_SESSION_ID...) must not erase a value derived for this turn.
-    env = build_subprocess_env(base=strip_launch_profile_env(os.environ.copy(), home), scrub_secrets=True)
-    secrets = build_profile_secret_scope(home)
-    if routed:
-        # Same rule as served_profile_child_env: env_passthrough / first-party carve-outs must not
-        # forward launch-process provider credentials that no .env or source snapshot recorded.
-        _scrub_credentials(env, inherit_credentials=False)
-    else:
-        secrets = {**_launch_env_only_credentials(home, env), **secrets}
-    env.update({k: v for k, v in secrets.items() if v is not None})
+        raise RuntimeStoreError('invalid_profile_home')
+    env = build_subprocess_env(base={k: v for k, v in os.environ.items() if k in EXEC_ENV}, scrub_secrets=True)
+    from gateway.session_context import _VAR_MAP
+    env = {k: v for k, v in env.items() if k in EXEC_ENV or k in _VAR_MAP}
     env['HERMES_HOME'] = str(home)
     from hermes_constants import apply_subprocess_home_env
     apply_subprocess_home_env(env)
@@ -866,5 +851,7 @@ async def execute_managed(authority, ref, row, policy):
         # committed unknown row deliberately pauses every accepted follower.
         raise ManagedExecutionUnknown('managed_worker_unknown') from exc
     finally:
+        from gateway.session_worker_credentials import release_credentials
+        release_credentials(authority, scope)
         workers.pop(ref.session_id, None)
         await asyncio.to_thread(close_quietly, close_worker)

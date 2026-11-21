@@ -74,6 +74,20 @@ def safe_worker_enabled() -> bool:
     return policy is not None and policy.safe_mode
 
 
+def _hydrate_worker_config(config: dict) -> None:
+    """Fill secret placeholders after authenticated adoption, never reshape policy."""
+    from dataclasses import replace
+    from gateway.session_policy import _extract_config_secrets
+    sanitized = json.loads(json.dumps(config, allow_nan=False))
+    _extract_config_secrets(sanitized, {})
+    global _policy
+    with _bind_lock:
+        policy = _current_policy()
+        if policy is None or sanitized != json.loads(policy.config_json):
+            raise RuntimeError('worker credential hydration changed policy')
+        _policy = replace(policy, config_json=json.dumps(config, allow_nan=False))
+
+
 def worker_config_snapshot() -> dict | None:
     """Return detached explicit config; None means the ordinary loader owns it."""
     policy = _current_policy()

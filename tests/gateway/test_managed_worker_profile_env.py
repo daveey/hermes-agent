@@ -32,7 +32,7 @@ def test_secondary_worker_env_drops_launch_terminal_policy_and_env_settings(tmp_
     finally:
         set_multiplex_active(False)
     assert env['HERMES_HOME'] == str(beta)
-    assert env['BETA_ONLY_TOKEN'] == 'beta-secret'
+    assert 'BETA_ONLY_TOKEN' not in env
     assert not {k for k in env if k.startswith('TERMINAL_')}, env
     assert 'HERMES_MODEL' not in env
 
@@ -94,5 +94,5 @@ def test_launch_scrub_runs_before_the_turn_context_is_injected(tmp_path, monkeyp
         set_multiplex_active(False)
     assert env['HERMES_SESSION_ID'] == 'owned-session'
     assert 'LAUNCH_ONLY' not in env
-    assert env['BETA_ONLY_TOKEN'] == 'beta-secret'
+    assert 'BETA_ONLY_TOKEN' not in env
     assert dict(os.environ) == before
