@@ -630,8 +630,10 @@ class Roller:
                 return port, False
         return None, False
 
-    def roll(self, reason: str) -> bool:
-        if not aod.wait_for_update_clear(self.marker, sleep=self.sleep, now=self.clock):
+    def roll(self, reason: str, *, marker_waited: bool = False) -> bool:
+        """*marker_waited*: the caller already waited out the update marker (Roller.start), so a stale marker
+        does not hold the roll for a second UPDATE_WAIT_S."""
+        if not marker_waited and not aod.wait_for_update_clear(self.marker, sleep=self.sleep, now=self.clock):
             log("update marker still present; rolling anyway")
         record = read_active(self.home)
         active_port = record["port"] if record and self.unit_active(record["port"]) else None
@@ -831,7 +833,7 @@ class Roller:
             log("update marker still present; rolling anyway")
         before = read_active(self.home)
         starved = before is not None and self.unit_active(before["port"]) and self._never_answers(before["port"])
-        ok = self.roll("roller started")
+        ok = self.roll("roller started", marker_waited=True)
         if ok and starved:
             self.demote_if_replaced(before["port"])
         return ok

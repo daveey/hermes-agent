@@ -526,6 +526,17 @@ def test_start_probes_only_after_the_update_marker_clears(home):
     assert set(roller._load_demoted()) == {9148}
 
 
+def test_start_waits_out_a_stale_update_marker_once(home):
+    host = FakeHost(running={9148}, commits={9148: "a" * 40})
+    ro.write_active(9148)
+    (home / "no-marker").write_text("")  # stale: never cleared
+    roller = make_roller(home, host)
+    t0 = roller.clock()
+    assert roller.start() is True
+    waited = roller.clock() - t0
+    assert ro.aod.UPDATE_WAIT_S <= waited < 2 * ro.aod.UPDATE_WAIT_S  # one wait, not start()'s plus roll()'s
+
+
 def test_start_does_not_demote_a_healthy_active_backend(home):
     host = FakeHost(running={9148}, commits={9148: "a" * 40})
     ro.write_active(9148)
