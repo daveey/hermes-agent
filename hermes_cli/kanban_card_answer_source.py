@@ -59,7 +59,7 @@ def _recorded(path: Path, *, source: dict, owner_gateway: str, request_id: str, 
             raise AnswerRefused('source_binding_missing')
         frozen = json.loads(bound['request'])
         remote = json.loads(bound['snapshot']).get('remote')
-        target = {k: v for k, v in answer.items() if k not in ('choice', 'operationId')}
+        target = {k: v for k, v in answer.items() if k not in ('choice', 'operationId', 'mode')}
         if (not isinstance(remote, dict) or type(remote.get('version')) is not int or remote['version'] != 1
                 or remote.get('target') != target or target['ownerGateway'] != owner_gateway
                 or bound['board'] != target['board'] or bound['task'] != target['task']):
@@ -70,6 +70,14 @@ def _recorded(path: Path, *, source: dict, owner_gateway: str, request_id: str, 
             raise AnswerRefused('source_revision_mismatch')
         choices = [ch for ch in frozen['choices'] if ch['id'] == decision.get('choiceId')]
         values = remote.get('choiceValues')
+        if answer.get('mode') == 'comment':
+            if (decision.get('choiceId') != 'answer-text'
+                    or op.get('provenance') != dict(type='kanban_other', version=1)
+                    or intent.get('effect') != 'answer' or intent.get('revisionText') != answer['choice']
+                    or decision.get('revisionText') != answer['choice']
+                    or intent.get('executionAuthorized') is not False or intent.get('permissionGrants') != []):
+                raise AnswerRefused('source_comment_mismatch')
+            return dict(answer=answer, source=source, requestId=request_id, gateway=source['gateway'], recorded=True)
         if (len(choices) != 1 or choices[0].get('effect') != 'answer'
                 or not isinstance(values, dict) or values.get(decision.get('choiceId')) != answer['choice']
                 or intent.get('effect') != 'answer' or intent.get('revisionText') != choices[0]['label']

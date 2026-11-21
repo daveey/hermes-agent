@@ -17,6 +17,8 @@ def verify(answer: dict, *, request_id: str, proof_id: str, owner_gateway: str, 
     original = read_request(request_id)
     proof = read_request(proof_id)
     fields = {"ownerGateway", "ownerProfile", "board", "task", "generation", "choice", "operationId"}
+    if isinstance(answer, dict) and answer.get('mode') == 'comment':
+        fields.add('mode')
     if (not isinstance(answer, dict) or set(answer) != fields
             or any(not isinstance(v, str) or not v for v in answer.values())):
         raise AnswerRefused("source_request_invalid")

@@ -59,6 +59,8 @@ def snapshot(conn, task: str) -> dict | None:
 def validate_provenance(value: dict, task: str) -> None:
     """Shape fence for the private comment hook; the adapter establishes truth."""
     fields = {"ownerGateway", "ownerProfile", "board", "task", "generation", "choice", "operationId", "originGateway"}
+    if isinstance(value, dict) and value.get('mode') == 'comment':
+        fields.add('mode')
     if (not isinstance(value, dict) or set(value) != fields or value.get("task") != task
             or any(not isinstance(value[k], str) or not value[k] for k in fields)
             or len(value["generation"]) != 64):
@@ -81,6 +83,7 @@ def _valid_receipt(conn, task, request, fingerprint, kind, receipt) -> bool:
             or not isinstance(origin, str) or not origin or receipt["fingerprint"] != fingerprint
             or receipt["destination"] != "kanban_ask" or receipt["executionStarted"] is not False
             or receipt["decisionProvenance"] != "recorded_desktop_operation"
+            or (request.get('mode') == 'comment') != (kind == 'card_answer_recorded')
             or (kind == "archived" and request["choice"] != "archive")):
         return False
     provenance = {**request, "originGateway": origin}
@@ -110,7 +113,7 @@ def _valid_receipt(conn, task, request, fingerprint, kind, receipt) -> bool:
 def _receipt(conn, request, fingerprint):
     task, operation_id = request["task"], request["operationId"]
     for row in conn.execute(
-        "SELECT kind,payload FROM task_events WHERE task_id=? AND kind IN ('unblocked','archived') ORDER BY id DESC",
+        "SELECT kind,payload FROM task_events WHERE task_id=? AND kind IN ('unblocked','archived','card_answer_recorded') ORDER BY id DESC",
         (task,),
     ):
         payload = _payload(row[1])
@@ -148,6 +151,8 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
     The transition API owns its transaction and post-commit archive cleanup.
     """
     fields = {"ownerGateway", "ownerProfile", "board", "task", "generation", "choice", "operationId"}
+    if isinstance(request, dict) and request.get('mode') == 'comment':
+        fields.add('mode')
     if not isinstance(request, dict) or set(request) != fields:
         raise AnswerRefused("invalid_answer")
     if any(not isinstance(request[k], str) or not request[k] for k in fields):
@@ -176,9 +181,12 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
         {"label": "Unblock", "value": "unblock"}, {"label": "Archive", "value": "archive"},
     ]
     choices = [ch for ch in options if isinstance(ch, dict) and ch.get("value") == request["choice"]]
-    if len(choices) != 1:
+    informational = request.get('mode') == 'comment'
+    if informational:
+        choices = [dict(label='Other (user-relayed comment; does not resume)', value=request['choice'])]
+    elif len(choices) != 1:
         raise AnswerRefused("unknown_choice")
-    archive = not current["ask"].get("choices") and request["choice"] == "archive"
+    archive = not informational and not current["ask"].get("choices") and request["choice"] == "archive"
     receipt = {**request, "originGateway": origin, "fingerprint": fingerprint,
                "destination": "kanban_ask", "executionStarted": False,
                "decisionProvenance": "recorded_desktop_operation"}
@@ -190,7 +198,7 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
         from hermes_cli.kanban_containment_guard import pending as containment_pending
         if containment_pending(c, request['task']):
             return "containment_hold"
-        if not archive and pending(c, request["task"]):
+        if not archive and not informational and pending(c, request["task"]):
             return "spend_decision_pending"
         if _receipt(c, request, fingerprint):
             return "already_recorded"
@@ -201,6 +209,15 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
     from hermes_cli.kanban_reason_comment import RecordedDecisionComment
     provenance = {**request, "originGateway": origin}
     comment = RecordedDecisionComment("user-steps", note, provenance)
+    if informational:
+        with kb.write_txn(conn):
+            error = fence(conn)
+            if error:
+                raise AnswerRefused(error)
+            kb.add_comment(conn, request['task'], comment.author, comment.body,
+                           writer_kind='agent', recorded_decision=provenance)
+            kb._append_event(conn, request['task'], 'card_answer_recorded', {FIELD: receipt})
+        return _receipt(conn, request, fingerprint)
     transition(conn, request["task"], precondition=fence, comment=comment,
                event_extra={FIELD: receipt})
     recorded = _receipt(conn, request, fingerprint)
