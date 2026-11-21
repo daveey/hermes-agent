@@ -1,4 +1,9 @@
 """Startup must not decode the same catalog/config once per enabled plugin."""
+import json
+from pathlib import Path
+
+import pytest
+
 from hermes_cli import plugin_catalog as catalog
 from hermes_cli import plugins
 
@@ -69,3 +74,68 @@ def test_scope_restores_on_exception_and_nested_profiles(tmp_path, monkeypatch):
     assert catalog._removal_reads.get() is None
     (other / 'removed.yaml').write_text('removed: [{name: fresh}]')
     assert catalog.cached_removed_entries()[0].name == 'fresh'
+
+
+@pytest.mark.parametrize('source', ['live', 'tree'])
+def test_failed_read_retried_within_scope(tmp_path, monkeypatch, source):
+    from hermes_cli.plugins_cmd_catalog import installed_plugin_removal
+
+    tree = tmp_path / 'catalog'
+    tree.mkdir()
+    live = tmp_path / 'live.json'
+    removed = tree / 'removed.yaml'
+    live.write_text(json.dumps({'removed': [{'name': 'recalled'}] if source == 'live' else []}))
+    removed.write_text('removed: [{name: recalled}]' if source == 'tree' else 'removed: []')
+    monkeypatch.setattr(catalog, '_live_cache_path', lambda: live)
+    monkeypatch.setattr(catalog, 'get_catalog_dir', lambda: tree)
+    target = live if source == 'live' else removed
+    original = Path.read_text
+    failures = []
+
+    def flaky_read(path, *args, **kwargs):
+        if path == target and not failures:
+            failures.append(path)
+            raise OSError('transient catalog read failure')
+        return original(path, *args, **kwargs)
+
+    # Hold the generation constant: recovery need not rewrite the file.
+    monkeypatch.setattr(catalog, '_removal_version', lambda path: ('unchanged',))
+    monkeypatch.setattr(Path, 'read_text', flaky_read)
+    with catalog.removal_read_scope():
+        assert installed_plugin_removal('ordinary', tmp_path) is None
+        assert installed_plugin_removal('recalled', tmp_path) is not None
+        assert installed_plugin_removal('recalled', tmp_path) is not None
+    assert failures == [target]
+
+
+@pytest.mark.parametrize('source', ['live', 'tree'])
+def test_failed_stat_is_not_memoized(tmp_path, monkeypatch, source):
+    live = tmp_path / 'live.json'
+    tree = tmp_path / 'tree'
+    tree.mkdir()
+    live.write_text(json.dumps({'removed': []}))
+    (tree / 'removed.yaml').write_text('removed: []')
+    monkeypatch.setattr(catalog, '_live_cache_path', lambda: live)
+    monkeypatch.setattr(catalog, 'get_catalog_dir', lambda: tree)
+    target = live if source == 'live' else tree / 'removed.yaml'
+    monkeypatch.setattr(catalog, '_removal_version', lambda path: None if path == target else ('stable',))
+    with catalog.removal_read_scope():
+        assert catalog.cached_removed_entries() == []
+        assert catalog._removal_reads.get() == {}
+
+
+def test_missing_catalogs_are_memoized(tmp_path, monkeypatch):
+    monkeypatch.setattr(catalog, '_live_cache_path', lambda: tmp_path / 'missing.json')
+    monkeypatch.setattr(catalog, 'get_catalog_dir', lambda: tmp_path)
+    original = catalog._stale_live_cache
+    reads = []
+
+    def read(path):
+        reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(catalog, '_stale_live_cache', read)
+    with catalog.removal_read_scope():
+        assert catalog.cached_removed_entries() == []
+        assert catalog.cached_removed_entries() == []
+    assert len(reads) == 1

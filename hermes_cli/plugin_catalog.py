@@ -248,11 +248,20 @@ def load_catalog(catalog_dir: Optional[Path] = None) -> list[PluginCatalogEntry]
     return entries
 
 
+def _read_removed_list(catalog_dir: Optional[Path] = None) -> Optional[list[RemovedEntry]]:
+    """Keep failed reads distinct from a successfully empty or missing tree list."""
+    path = (catalog_dir or get_catalog_dir()) / "removed.yaml"
+    if not path.is_file():
+        return []
+    data = _read_yaml(path)
+    if data is None:
+        return None
+    return _removed_from_list(data.get("removed")) if isinstance(data, dict) else []
+
+
 def load_removed_list(catalog_dir: Optional[Path] = None) -> list[RemovedEntry]:
     """``removed.yaml``'s ``removed:`` list; missing/malformed → empty."""
-    path = (catalog_dir or get_catalog_dir()) / "removed.yaml"
-    data = _read_yaml(path) if path.is_file() else None
-    return _removed_from_list(data.get("removed")) if isinstance(data, dict) else []
+    return _read_removed_list(catalog_dir) or []
 
 
 def get_catalog_entry(name: str, catalog_dir: Optional[Path] = None) -> Optional[PluginCatalogEntry]:
@@ -338,6 +347,8 @@ def _removal_version(path: Path):
     from utils import file_cache_version
     try:
         return file_cache_version(path)
+    except FileNotFoundError:
+        return ()
     except OSError:
         return None
 
@@ -354,11 +365,15 @@ def cached_removed_entries() -> list[RemovedEntry]:
     saved = memo.get(key) if memo is not None else None
     if saved is not None:
         return [RemovedEntry(*row) for row in saved]
-    cached = _stale_live_cache(live) or {}
-    entries = load_removed_list() + _removed_from_list(cached.get("removed"))
-    if memo is not None:
+    cached = _stale_live_cache(live)
+    tree_entries = _read_removed_list() if memo is not None else load_removed_list()
+    entries = (tree_entries or []) + _removed_from_list((cached or {}).get("removed"))
+    if memo is not None and key is not None:
         memo.clear()  # bounded even when another process rewrites the catalog during a sweep
-        memo[key] = tuple((e.name, e.repo, e.reason, e.date) for e in entries)
+        # A missing live file is cacheable; a failed read/stat must retry next lookup.
+        if (key[1] is not None and key[3] is not None and tree_entries is not None
+                and (cached is not None or key[1] == ())):
+            memo[key] = tuple((e.name, e.repo, e.reason, e.date) for e in entries)
     return entries
 
 
