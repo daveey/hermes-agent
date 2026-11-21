@@ -8,6 +8,7 @@ card details and ``add_cards``.
 
 from __future__ import annotations
 
+from contextlib import closing
 import logging
 import sqlite3
 from pathlib import Path
@@ -77,10 +78,13 @@ def append_remote_listed_cards(out: list[dict[str, Any]], ids: list[str], status
 
 
 def _read_lean_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -> list[dict[str, Any]]:
-    from hermes_cli.kanban_session_activity import _board_slug, _execution_transaction, cached_ro
+    from hermes_cli.kanban_session_activity import _board_slug, _execution_transaction, _open_ro
     from hermes_cli.kanban_session_wait_rows import _local_wait_info
 
-    with cached_ro(path) as conn, _execution_transaction(conn):
+    # Outcome evidence must not queue behind sidebar enrichment on the shared
+    # reader. Own this short transaction and close through the generation guard;
+    # real SQLite/lifecycle contention still uses the existing bounded retry.
+    with closing(_open_ro(path, timeout=0.5)) as conn, _execution_transaction(conn):
         conn.row_factory = sqlite3.Row
         found = select_listed_local_tasks(conn, ids, statuses)
         try:

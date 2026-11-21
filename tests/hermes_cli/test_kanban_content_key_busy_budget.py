@@ -125,6 +125,19 @@ def test_content_key_does_not_queue_behind_probe_lock(busy_board):
     assert activity._board_content_key(board)  # retry after contention still works
 
 
+def test_cached_reader_borrow_exhaustion_is_retryable_busy(busy_board):
+    from hermes_cli.kanban_generation import is_busy
+
+    board, _ = busy_board
+    _key, entry = lifecycle.cached_entry(board)
+    with entry[2], pytest.raises(sqlite3.OperationalError) as raised:
+        with activity.cached_ro(board, busy_budget=0):
+            pytest.fail("borrowed reader was used concurrently")
+    assert is_busy(raised.value), "Python lock exhaustion bypasses busy retry/last-good fallback"
+    with activity.cached_ro(board) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM marker").fetchone()[0] == 0
+
+
 def test_zero_budget_content_key_does_not_queue_behind_borrowed_reader(busy_board):
     board, _ = busy_board
     with activity.cached_ro(board):

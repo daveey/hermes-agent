@@ -79,6 +79,34 @@ def _items(ids):
     return so._card_items(list(ids))
 
 
+@pytest.mark.parametrize("status", ["running", "blocked"])
+def test_outcome_reads_current_cards_while_sidebar_reader_is_borrowed(kanban_root, monkeypatch, status):
+    from hermes_cli.kanban_reader_lifecycle import cached_entry
+
+    path = kanban_root / "kanban.db"
+    conn = _connect(path)
+    _insert_task(conn, "t_live", status, "s1", block_kind="needs_input" if status == "blocked" else None,
+                 request=HUMAN_REQUEST if status == "blocked" else None)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(ksa, "_board_db_paths", lambda: [path])
+    monkeypatch.setattr(ksa, "_remote_cards", lambda *a, **k: [])
+    monkeypatch.setattr(so, "_provider_items", lambda sid: ([], []))
+    monkeypatch.setattr(so, "_process_items", lambda *a: [])
+    monkeypatch.setattr(so, "_subagent_items", lambda *a: [])
+    monkeypatch.setattr(so, "_goal_items", lambda *a: [])
+    _key, entry = cached_entry(path)
+    # Hold the real sidebar borrower through the entire outcome read. No timer
+    # releases it; successful decisions/waits must come from an independent reader.
+    with entry[2]:
+        decisions, waits, failed = so._live_work(None, "s1", ["s1"])
+    assert not failed, "ordinary shared-reader contention became card_read_failed"
+    if status == "blocked":
+        assert [d["card_id"] for d in decisions] == ["t_live"]
+    else:
+        assert [w["id"] for w in waits] == ["t_live"]
+
+
 def test_outcome_reader_is_not_the_sidebar_session_tasks():
     assert getattr(ksa, "session_outcome_tasks", ksa.session_tasks) is not ksa.session_tasks
 
