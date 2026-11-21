@@ -103,7 +103,24 @@ NON_ENTRY_WRITER_EVENTS = {
     "archive_worker_termination", "archived", "request_withdrawn", "claimed",
     "agent_block_escalated", "timed_out", "stale", "reconciled", "parent_found",
     "parent_missing", "status_healed",
+    # Preclaim observation; exhaustion moves to triage, never releases to ready.
+    "review_admission_refused",
 }
+
+
+def test_review_admission_refusal_does_not_reset_ready_age(conn):
+    tid = kb.create_task(conn, title="review refusal observation", assignee="default")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET created_at=100 WHERE id=?", (tid,))
+        conn.execute("UPDATE task_events SET created_at=100 WHERE task_id=?", (tid,))
+        kb._append_event(conn, tid, "review_admission_refused", {"preclaim": True})
+        conn.execute(
+            "UPDATE task_events SET created_at=200 WHERE task_id=? AND kind=?",
+            (tid, "review_admission_refused"),
+        )
+    assert pu.ready_since(conn, tid, 100) == 100
+    assert score._ready_since(conn, [tid])[tid] == 100
+    assert "'review_admission_refused'" not in cw._floor_kinds()
 
 
 def _writer_events(source):
