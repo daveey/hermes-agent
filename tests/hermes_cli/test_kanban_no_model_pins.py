@@ -31,11 +31,15 @@ def test_mutations_refuse_atomically(board, entry):
         if entry=='review': kb.claim_task(conn,tid)
         before=tuple(conn.execute('SELECT * FROM tasks WHERE id=?',(tid,)).fetchone())
         events=conn.execute('SELECT count(*) FROM task_events').fetchone()[0]
-        with pytest.raises(ValueError,match='model-neutral'):
-            if entry=='set-model': kb.set_model_override(conn,tid,'gpt-6.1-sol',provider='openai-codex')
-            elif entry=='mandatory': pins.set_pin_mandatory(conn,tid,True)
-            elif entry=='edit': kb.edit_task(conn,tid,body='require_model: true',priority=1)
-            else: kb.request_review(conn,tid,summary='review',metadata={'review_model':'gpt-6.1-sol','review_provider':'openai-codex'})
+        if entry == 'review':
+            ok, reason = kb.request_review(conn,tid,summary='review',metadata={
+                'review_model':'gpt-6.1-sol','review_provider':'openai-codex'}, with_reason=True)
+            assert not ok and 'model-neutral' in reason
+        else:
+            with pytest.raises(ValueError,match='model-neutral'):
+                if entry=='set-model': kb.set_model_override(conn,tid,'gpt-6.1-sol',provider='openai-codex')
+                elif entry=='mandatory': pins.set_pin_mandatory(conn,tid,True)
+                elif entry=='edit': kb.edit_task(conn,tid,body='require_model: true',priority=1)
         assert tuple(conn.execute('SELECT * FROM tasks WHERE id=?',(tid,)).fetchone())==before
         assert conn.execute('SELECT count(*) FROM task_events').fetchone()[0]==events
 

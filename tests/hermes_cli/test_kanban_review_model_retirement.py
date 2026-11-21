@@ -31,8 +31,9 @@ def test_class_handoff_allows_same_model_but_concrete_override_is_rejected(board
     with kbc.connect() as conn:
         task = helpers.task(conn, helpers.OPUS)
         kb.claim_task(conn, task.id)
-        with pytest.raises(ValueError, match='model-neutral'):
-            kb.request_review(conn, task.id, metadata={'review_model': helpers.OPUS, 'review_provider': 'anthropic'})
+        ok, reason = kb.request_review(conn, task.id, metadata={
+            'review_model': helpers.OPUS, 'review_provider': 'anthropic'}, with_reason=True)
+        assert not ok and 'model-neutral' in reason
         assert kb.get_task(conn, task.id).status == 'running'
         kb.request_review(conn, task.id, metadata={'review_model': 'class:deep', 'review_provider': 'auto'})
         assert review.resolve_review_model(conn, kb.get_task(conn, task.id), cfg) == (

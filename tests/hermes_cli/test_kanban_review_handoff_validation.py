@@ -53,8 +53,8 @@ def test_invalid_handoff_refused_without_transition(board, metadata):
         kb.claim_task(conn, task.id)
         before = kb.get_task(conn, task.id)
         events = kb.list_events(conn, task.id)
-        with pytest.raises((ValueError, AttributeError)):
-            kb.request_review(conn, task.id, metadata=metadata, with_reason=True)
+        ok, reason = kb.request_review(conn, task.id, metadata=metadata, with_reason=True)
+        assert not ok and 'model-neutral' in reason
         after = kb.get_task(conn, task.id)
         assert (after.status, after.current_run_id, after.claim_lock) == (
             before.status, before.current_run_id, before.claim_lock)

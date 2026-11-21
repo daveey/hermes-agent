@@ -66,6 +66,8 @@ def _active_text(line):
 
 def validate_selector(model=None, provider=None, *, mandatory=False):
     """Validate newly supplied selectors without consulting quota or credentials."""
+    if any(value is not None and not isinstance(value, str) for value in (model, provider)):
+        raise ValueError(ERROR)
     model = (model or '').strip() or None
     provider = (provider or '').strip() or None
     if mandatory or (model and not is_class_selector(model)) or (provider and provider != 'auto'):
@@ -97,14 +99,15 @@ def validate_text(*values):
                                 'Observed unavailable route', clause, flags=re.IGNORECASE)
                 if not _MODEL.search(clause):
                     continue
-                # Negation applies to the directive, not any unrelated safety
-                # sentence elsewhere on the same line.
-                if re.search(r'\b(?:never|do not|must not)\s+(?:pin|require|restrict)', clause, re.IGNORECASE):
-                    continue
-                if re.search(r'\b(?:implementer models|forbidden overlaps|excluded models|exclude)\s*:', clause, re.IGNORECASE):
-                    continue
-                if re.search(r'\b(?:differ from|not be reviewed by|other than|distinct from|not (?:the )?same as)\b', clause, re.IGNORECASE):
-                    continue
+                # Mask only negative/exclusion wording up to a new positive
+                # obligation, never the rest of a clause containing that mandate.
+                clause = re.sub(
+                    r'\b(?:(?:never|do not|must not)\s+(?:pin|require|restrict)'
+                    r'|(?:implementer models|forbidden overlaps|excluded models|exclude)\s*:'
+                    r'|differ from|not be reviewed by|other than|distinct from|not (?:the )?same as)'
+                    r'.*?(?=\b(?:must(?!\s+not)|requires?|required|mandatory|'
+                    r'no fallback for|(?:use|select|choose|pin|restrict)\s+(?:only\s+)?)\b|$)',
+                    ' ', clause, flags=re.IGNORECASE)
                 if re.fullmatch(
                     r'\s*(?:the )?(?:old|legacy|previous|historical) '
                     r'(?:configuration|policy|instruction|card|review|run|session) '

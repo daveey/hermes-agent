@@ -118,9 +118,9 @@ def test_legacy_concrete_lane_pin_is_ignored_for_class_default(board, monkeypatc
         task = kb.get_task(conn, tid)
         if lane == "review":
             kb.claim_task(conn, task.id)
-            with pytest.raises(ValueError):
-                kb.request_review(conn, task.id, metadata={"review_model": "unknown-exact-model",
-                                                           "review_provider": "custom"})
+            ok, reason = kb.request_review(conn, task.id, metadata={
+                "review_model": "unknown-exact-model", "review_provider": "custom"}, with_reason=True)
+            assert not ok and 'model-neutral' in reason
             kb.request_review(conn, task.id, metadata={"review_model": "class:deep"})
             task = kb.claim_review_task(conn, task.id)
         tier.apply_model_tier(conn, task, lane=lane, cfg={"default_model": "class:standard"})

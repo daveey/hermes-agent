@@ -41,7 +41,14 @@ def _unroutable_class(conn, task_id, *, lane):
         # A disabled host policy is never permission to use the profile model.
         policy = config.get('model_routing') or {}
         validate_policy(policy)
-        return None if policy.get('enabled') else 'routing_disabled'
+        if not policy.get('enabled'):
+            return 'routing_disabled'
+        # Exercise the exact construction capability filter inside the per-card
+        # boundary; the review owner still judges candidates, walls and fallback.
+        for level in ('deep', 'standard'):
+            eligible_routes(policy, level, class_requirements(config),
+                            eligible=lambda r: is_provider_enabled(providers.get(r['provider'], {})))
+        return None
     model, _, _ = resolve_model_tier(conn, routing_view(task), lane=lane)
     if not is_class_selector(model):
         return None

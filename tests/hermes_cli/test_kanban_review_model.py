@@ -218,8 +218,8 @@ def test_concrete_or_mandatory_override_is_rejected_before_handoff(board, metada
     with kbc.connect() as conn:
         t = task(conn)
         kb.claim_task(conn, t.id)
-        with pytest.raises(ValueError, match="model-neutral"):
-            kb.request_review(conn, t.id, metadata=metadata)
+        ok, reason = kb.request_review(conn, t.id, metadata=metadata, with_reason=True)
+        assert not ok and 'model-neutral' in reason
         assert kb.get_task(conn, t.id).status == "running"
 
 

@@ -264,7 +264,12 @@ def _override(conn, task):
 def validate_review_override(metadata):
     """Validate new review routing requirements before ending the author run."""
     from hermes_cli.kanban_model_neutral import validate_review
-    return validate_review(metadata)
+    if not isinstance(metadata, dict):
+        raise ReviewModelUnavailable('Review handoff metadata must be a mapping')
+    try:
+        return validate_review(metadata)
+    except ValueError as exc:
+        raise ReviewModelUnavailable(str(exc)) from exc
 
 
 def registry_refusal(model, provider, assignee):

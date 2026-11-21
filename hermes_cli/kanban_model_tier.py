@@ -185,7 +185,8 @@ def class_unroutable_reason(model: str, config: Optional[dict[str, Any]] = None)
         block = providers.get(route["provider"], {}) if isinstance(providers, dict) else {}
         return is_provider_enabled(block if isinstance(block, dict) else {})
 
-    if not eligible_routes(policy, level, eligible=enabled):
+    from agent.model_routing_agent import class_requirements
+    if not eligible_routes(policy, level, class_requirements(config), eligible=enabled):
         return "no_eligible_routes"
     return None
 
