@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from agent.model_routing import is_class_selector
+from hermes_cli.models_catalog_static import _PROVIDER_MODELS
 
 ERROR = 'Kanban is model-neutral: use a class/tier or capability requirement, not a concrete model/provider or mandatory pin'
 # Match directives, not incidental named execution evidence or author exclusions.
@@ -36,6 +37,19 @@ _DIRECTIVE = re.compile(
     r'|(?:^|:)\s*(?:[-*]\s*)?(?:use|select|choose|pin|restrict)\s+)'
     + _QUALIFIER + _ROUTE_NAME
     + r'|' + _ROUTE_NAME + r'(?:/[\w-]+)?\s+(?:(?:review\s+|is\s+)?(?:required|mandatory|only)\b|must\s+be\s+used\b)',
+    re.IGNORECASE,
+)
+# Provider identities are routing restrictions only in an obligation's route slot,
+# not incidental provider/API implementation work.
+_PROVIDER_NAME = r'\b(?:' + '|'.join(re.escape(p) for p in sorted(_PROVIDER_MODELS, key=lambda p: (-len(p), p))) + r')\b'
+_PROVIDER_DIRECTIVE = re.compile(
+    r'(?:\b(?:must|require|requires|required|mandatory|no fallback for)\s+'
+    r'|(?:^|:)\s*(?:[-*]\s*)?(?:use|pin|restrict|select only|choose only)\s+)'
+    + _QUALIFIER + _PROVIDER_NAME
+    + r'(?:\s+(?:provider|route|reviewer))?(?=\s*(?:[.!?;,]|$|for (?:this|the) (?:review|task|card|run)\b))'
+    + r'|(?:^|:)\s*' + _PROVIDER_NAME + r'\s+(?:(?:provider|route|reviewer)\s+)?'
+    r'(?:(?:is\s+)?(?:required|mandatory|only)|must\s+be\s+used)'
+    r'(?=\s*(?:[.!?;,]|$|for (?:this|the) (?:review|task|card|run)\b))',
     re.IGNORECASE,
 )
 _EVIDENCE = 'Historical run instruction (superseded and not active): '
@@ -88,8 +102,10 @@ def validate_text(*values):
             line = _active_text(line)
             if _REQUIRED.search(line):
                 raise ValueError(f'{ERROR}; refused line: {line}{_TEXT_GUIDANCE}')
-            if line.lstrip().startswith('<!-- implementer-models:'):
-                continue
+            # Comments carry authorship, not authority over text after their end.
+            line = re.sub(r'<!-- implementer-models:.*?-->', '', line)
+            # Inspect rendered inline identities, retaining the original stored bytes.
+            line = re.sub(r'(`+|\*\*|__|\*|_)(.+?)\1', r'\2', line)
             for clause in re.split(r'(?<=[.!?;])\s+', line):
                 clause = _NEGATED_OBLIGATION.sub('optional', clause)
                 clause = _REMOVED_OBLIGATION.sub(r'\1mentions', clause)
@@ -97,7 +113,7 @@ def validate_text(*values):
                 # mandate ("...unavailable; use only <model>" still refuses).
                 clause = re.sub(r'\bPinned route\s+' + _ROUTE_NAME + r'\s+is unavailable\b',
                                 'Observed unavailable route', clause, flags=re.IGNORECASE)
-                if not _MODEL.search(clause):
+                if not (_MODEL.search(clause) or _PROVIDER_DIRECTIVE.search(clause)):
                     continue
                 # Mask only negative/exclusion wording up to a new positive
                 # obligation, never the rest of a clause containing that mandate.
@@ -126,7 +142,7 @@ def validate_text(*values):
                     r'\b(?:needs?|requires?|must get)\s+(?:a\s+)?(?:fresh\s+)?'
                     r'(?:independent\s+)?review\s*\(\s*' + _ROUTE_NAME,
                     clause, re.IGNORECASE)
-                if _DIRECTIVE.search(clause) or named_review or required_review:
+                if _DIRECTIVE.search(clause) or _PROVIDER_DIRECTIVE.search(clause) or named_review or required_review:
                     raise ValueError(f'{ERROR}; refused line: {line}{_TEXT_GUIDANCE}')
 
 
