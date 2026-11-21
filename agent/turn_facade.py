@@ -82,7 +82,7 @@ class TurnFacadeMixin:
             _review_queue.note_turn_started()
             admission = admit_durable_turn_lease(
                 self, session_id=session_id, relay_turn_id=relay_turn_id, task_context=task_context,
-                conversation_history=conversation_history,
+                conversation_history=conversation_history, auto_kind=persist_user_display_kind,
             )
             if admission.early_result is not None:
                 carry_unadmitted_user_message(

@@ -184,7 +184,7 @@ def test_a_busy_wake_held_by_a_retiring_backend_retries_soon_and_charges_nothing
 
     def wake(sid, msg_id):
         with gbh._retiring_mu:
-            gbh._retiring_busy[sid] = now + gbh.RETIRING_OWNER_RETRY_S
+            gbh._retiring_busy[sid] = (now + gbh.RETIRING_OWNER_RETRY_S, time.time())
         return "busy"
 
     @contextlib.contextmanager
@@ -219,3 +219,32 @@ def test_a_notice_refused_while_the_watcher_decides_to_stop_is_not_lost():
     assert len(passes) == 2 and len(jobs) == 1  # watched again for the late notice, no second thread
     assert hw._state["thread"] is None
     assert hw.note_waiting(run_pass=run_pass, held=lambda: False, sleep=lambda s: None, spawn=jobs.append) is True
+
+
+def test_retiring_retries_stop_at_their_ceiling_then_count_as_busy(db, hold):
+    from tui_gateway import gateway_background_holder as gbh
+    hold["held"] = False
+    row = _notice(db, "✔ Kanban t_fff done")
+    now = time.time()
+
+    def wake(sid, msg_id):
+        with gbh._retiring_mu:
+            gbh._retiring_busy[sid] = (time.time() + gbh.RETIRING_OWNER_RETRY_S, time.time())
+        return "busy"
+
+    @contextlib.contextmanager
+    def opener(chat_id):
+        yield db, chat_id
+
+    wakes = 0
+    for _ in range(ng.MAX_RETIRING_RETRIES + 1):
+        out = ng.guarantee_pass(now=now, stores=lambda: iter([db]), holders=list, session_db=opener, wake=wake,
+                                spawn=lambda job: job())
+        wakes += len(out)
+        now = max(now, _closeout(db, row)["retry_at"]) + 1
+
+    closeout = _closeout(db, row)
+    assert wakes == ng.MAX_RETIRING_RETRIES + 1
+    assert closeout["retiring_attempts"] == ng.MAX_RETIRING_RETRIES  # the short retries were capped ...
+    assert closeout["busy_attempts"] == 1  # ... and the next busy wake was ordinary busy accounting
+    assert closeout["retry_at"] >= time.time() + ng.BUSY_RETRY_S - 5

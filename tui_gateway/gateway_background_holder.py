@@ -162,7 +162,9 @@ def retiring_owner_reason(session: dict, *, foreign_owner: Callable[[dict], Opti
 # lets the chat go, where "refused" sent the waker (chat-closeout) to its long backoff. The wake answers "busy" at
 # once (it never sleeps inside a caller's wake slot) and :func:`retiring_retry_at` gives the short retry time.
 RETIRING_OWNER_RETRY_S = 15.0
-_retiring_busy: dict[str, float] = {}  # chat key -> retry time (Unix seconds) of its last retiring-owner refusal
+# A recorded retry older than this is from an earlier wake (its caller never asked): ignored, never reused.
+RETIRING_RECORD_MAX_AGE_S = 30.0
+_retiring_busy: dict[str, tuple[float, float]] = {}  # chat key -> (retry_at, written_at) of its last refusal
 _retiring_mu = threading.Lock()
 
 
@@ -177,15 +179,19 @@ def wake_past_retiring_owner(sid: str, session: dict, label: str, key: str, *,
     if reason is None:
         logger.info("%s: %s has another live owner; not waking it here", label, key)
         return "refused"
-    retry_at = now() + RETIRING_OWNER_RETRY_S
+    written = now()
     with _retiring_mu:
-        _retiring_busy[str(key)] = retry_at
+        _retiring_busy[str(key)] = (written + RETIRING_OWNER_RETRY_S, written)
     logger.info("%s: %s is held by a backend being replaced (%s); busy, retry in %.0fs",
                 label, key, reason, RETIRING_OWNER_RETRY_S)
     return "busy"
 
 
-def retiring_retry_at(key: str) -> Optional[float]:
-    """The short retry time of ``key``'s latest busy-because-retiring wake (consumed: one answer per wake)."""
+def retiring_retry_at(key: str, *, now: Callable[[], float] = time.time) -> Optional[float]:
+    """The short retry time of ``key``'s latest busy-because-retiring wake, consumed (one answer per wake); None
+    when there is none or it was written more than ``RETIRING_RECORD_MAX_AGE_S`` ago (another wake's)."""
     with _retiring_mu:
-        return _retiring_busy.pop(str(key), None)
+        record = _retiring_busy.pop(str(key), None)
+    if record is None or now() - record[1] > RETIRING_RECORD_MAX_AGE_S:
+        return None
+    return record[0]

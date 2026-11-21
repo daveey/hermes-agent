@@ -192,30 +192,62 @@ def test_prompt_submit_answers_the_queued_receipt(background, monkeypatch):
 
 # -- Stop ----------------------------------------------------------------------------------------------------------
 
+AUTO_HOLDER = f"pid={GATEWAY}:pidns=4026531836:turn=t1:auto=kanban_notice:platform=tui"
+
+
+class _Endpoint:
+    def __init__(self, capable=True):
+        from agent.turn_end_request import CAPABILITY
+        self.capabilities = frozenset({"session-authority-v1", *([CAPABILITY] if capable else [])})
+
+
+class _DB:
+    def __init__(self, state):
+        self.state = state
+
+    def request_turn_end(self, key, holder, reason=""):
+        self.state["requests"].append((key, holder))
+        return self.state["recorded"]
+
 
 @pytest.fixture
 def idle_chat(monkeypatch):
+    import contextlib
     sid = "rt-background-stop"
     session = {"agent": None, "agent_ready": threading.Event(), "session_key": KEY, "history": [],
                "history_lock": threading.RLock(), "running": False}
     monkeypatch.setitem(server._sessions, sid, session)
-    state = {"calls": [], "done": threading.Event(), "answer": {"result": {"status": "taken_over"}}, "gate": None,
-             "events": []}
+    state = {"calls": [], "requests": [], "recorded": True, "events": [], "workers": [], "capable": True,
+             "holder": AUTO_HOLDER, "answer": {"result": {"status": "taken_over"}}}
 
     def take_over(rid, params):
         state["calls"].append(params)
-        if state["gate"] is not None:
-            state["gate"].wait(5)  # a slow take-over: held until the test has the Stop's answer
-        state["done"].set()
         return state["answer"]
+
+    @contextlib.contextmanager
+    def session_db(s):
+        yield _DB(state)
 
     monkeypatch.setitem(server._methods, "session.take_over", take_over)
     monkeypatch.setattr(server, "_automation_holder_kind", lambda session: "kanban_notice")
     monkeypatch.setattr(server, "_canonical_ledger_refusal", lambda session: None)
-    monkeypatch.setattr(gbh, "gateway_background_holder", lambda session, **kw: gbh.DialedGateway(GATEWAY, "ep"))
+    monkeypatch.setattr(server, "_foreign_turn_owner", lambda session: {"holder": state["holder"]})
+    monkeypatch.setattr(server, "_session_db", session_db)
+    monkeypatch.setattr(gbh, "gateway_background_holder",
+                        lambda session, **kw: gbh.DialedGateway(GATEWAY, _Endpoint(state["capable"])))
     real_emit = server._emit
     monkeypatch.setattr(server, "_emit", lambda kind, s, payload=None: state["events"].append((kind, s, payload))
                         if kind == "error" else real_emit(kind, s, payload))
+    import agent.memory_provider as mp
+
+    class _Deferred:  # the worker runs when the test says so: Stop must answer without it
+        def __init__(self, target, name=None):
+            self.target = target
+
+        def start(self):
+            state["workers"].append(self.target)
+
+    monkeypatch.setattr(mp, "spawn_context_thread", lambda target, name=None: _Deferred(target, name))
     return sid, session, state
 
 
@@ -224,74 +256,113 @@ def _stop(sid, origin):
     return server.handle_request({"id": "1", "method": "session.interrupt", "params": params})
 
 
-def test_stop_takes_the_chat_over_from_the_gateways_background_turn(idle_chat):
+def _run_workers(state):
+    return [job() for job in state.pop("workers")]
+
+
+def test_stop_answers_at_once_and_asks_exactly_the_holders_turn_to_end(idle_chat):
     sid, _session, state = idle_chat
     resp = _stop(sid, "stop_button")
 
     assert resp["result"] == {"status": "interrupted", "background_turn": True}
-    assert state["done"].is_set() and state["calls"] == [{"session_id": sid}]  # answered after the take-over
+    assert state["requests"] == [] and len(state["workers"]) == 1  # nothing discovered on the RPC thread
+    assert _run_workers(state) == ["end_requested"]
+    assert state["requests"] == [(KEY, AUTO_HOLDER)] and state["calls"] == [] and state["events"] == []
 
 
-def test_a_failed_takeover_fails_the_stop(idle_chat):
+def test_stop_asks_for_the_end_even_with_a_prompt_queued(idle_chat, monkeypatch):
     sid, _session, state = idle_chat
-    state["answer"] = {"error": {"code": 4090, "message": "The other writer has not released this chat.",
-                                 "data": {"reason": "SESSION_NOT_OWNED"}}}
-    resp = _stop(sid, "stop_button")
+    monkeypatch.setattr(server, "_canonical_ledger_refusal", lambda session: object())
+    _stop(sid, "stop_button")
 
-    assert resp["error"]["code"] == 4090 and "not released" in resp["error"]["message"]
-    assert resp["error"]["data"] == {"reason": "SESSION_NOT_OWNED"}
+    assert _run_workers(state) == ["end_requested"] and state["calls"] == []
 
 
-def test_a_takeover_that_fails_after_the_ack_window_shows_an_error(idle_chat, monkeypatch):
+def test_a_lost_compare_and_set_is_told_to_the_chat(idle_chat):
     sid, _session, state = idle_chat
-    from tests.waiting import wait_until
-    monkeypatch.setattr(server, "BACKGROUND_STOP_ACK_S", 0.05)
-    state["gate"] = threading.Event()
+    state["recorded"] = False  # the holder changed between discovery and the request
+    _stop(sid, "stop_button")
+
+    assert _run_workers(state) == ["end_request_failed"]
+    assert state["events"] and state["events"][0][0] == "error" and state["calls"] == []
+
+
+def test_an_older_gateway_with_nothing_queued_is_taken_over(idle_chat):
+    sid, _session, state = idle_chat
+    state["capable"] = False
+    _stop(sid, "stop_button")
+
+    assert _run_workers(state) == ["taken_over"]
+    assert state["calls"] == [{"session_id": sid}] and state["requests"] == []
+
+
+def test_an_older_gateway_takeover_failure_is_told_to_the_chat(idle_chat):
+    sid, _session, state = idle_chat
+    state["capable"] = False
     state["answer"] = {"error": {"code": 4090, "message": "writer busy"}}
-    resp = _stop(sid, "stop_button")
+    _stop(sid, "stop_button")
 
-    assert resp["result"] == {"status": "interrupted", "background_turn": True}  # still running when it answered
-    state["gate"].set()
-    wait_until(lambda: state["events"], timeout=5)
-    assert state["events"] and state["events"][0][0] == "error" and state["events"][0][1] == sid
+    assert _run_workers(state) == ["takeover_failed"]
     assert "writer busy" in state["events"][0][2]["message"]
 
 
-def test_stop_racing_a_queued_forwarded_admission_never_takes_over(idle_chat, monkeypatch):
-    """The user's typed prompt already waits in the gateway's FIFO (its ledger holds work): a take-over now would
-    race that queue, so Stop is the ordinary one."""
+def test_stop_racing_a_queued_forwarded_admission_on_an_older_gateway_never_takes_over(idle_chat, monkeypatch):
+    """The typed prompt already waits in an older gateway's FIFO: a take-over would race that queue, so nothing is
+    ended and the chat is told the message runs when the background turn ends."""
     sid, _session, state = idle_chat
-    refusal = ActiveSessionRefusal("pending work in the gateway's durable queue", SESSION_NOT_OWNED)
-    refusal.ledger_status = "queued"
-    monkeypatch.setattr(server, "_canonical_ledger_refusal", lambda session: refusal)
-    resp = _stop(sid, "stop_button")
+    state["capable"] = False
+    monkeypatch.setattr(server, "_canonical_ledger_refusal", lambda session: object())
+    _stop(sid, "stop_button")
 
-    assert resp["result"].get("background_turn") is None and state["calls"] == []
+    assert _run_workers(state) == ["queued_not_interrupted"]
+    assert state["calls"] == [] and state["requests"] == []
+    assert state["events"][0][2]["message"] == server.BACKGROUND_STOP_QUEUED_MESSAGE
+
+
+def test_a_typed_holder_is_never_asked_to_end(idle_chat):
+    sid, _session, state = idle_chat
+    state["holder"] = f"pid={GATEWAY}:pidns=4026531836:turn=t1:platform=tui"  # no :auto=: an older or typed turn
+    _stop(sid, "stop_button")
+
+    assert _run_workers(state) == ["taken_over"] and state["requests"] == []  # the older-gateway fallback
+
+
+def test_no_gateway_holder_ends_nothing(idle_chat, monkeypatch):
+    sid, _session, state = idle_chat
+    monkeypatch.setattr(gbh, "gateway_background_holder", lambda session, **kw: None)
+    _stop(sid, "stop_button")
+
+    assert _run_workers(state) == ["no_holder"] and state["calls"] == state["requests"] == []
 
 
 @pytest.mark.parametrize("origin", ["delete", "rewind", "plugin:x", None])
-def test_other_interrupts_never_end_the_background_turn(idle_chat, origin):
+def test_other_interrupts_run_the_ordinary_stop(idle_chat, monkeypatch, origin):
     sid, _session, state = idle_chat
+    ordinary = []
+    monkeypatch.setattr(server, "_interrupt_session_turn", lambda *a, **k: ordinary.append(a[0]))
     resp = _stop(sid, origin)
 
-    assert resp["result"].get("background_turn") is None and state["calls"] == []
+    assert resp["result"] == {"status": "interrupted"} and ordinary == [sid] and state["workers"] == []
 
 
 def test_stop_of_this_backends_own_turn_is_the_ordinary_stop(idle_chat, monkeypatch):
     sid, session, state = idle_chat
     session["running"] = True
-    monkeypatch.setattr(server, "_interrupt_session_turn", lambda *a, **k: None)
+    ordinary = []
+    monkeypatch.setattr(server, "_interrupt_session_turn", lambda *a, **k: ordinary.append(a[0]))
     resp = _stop(sid, "stop_button")
 
-    assert resp["result"].get("background_turn") is None and state["calls"] == []
+    assert resp["result"] == {"status": "interrupted"} and ordinary == [sid] and state["workers"] == []
 
 
-def test_stop_with_another_holder_is_the_ordinary_stop(idle_chat, monkeypatch):
+def test_stop_on_a_chat_whose_newest_turn_was_typed_is_the_ordinary_stop(idle_chat, monkeypatch):
     sid, _session, state = idle_chat
-    monkeypatch.setattr(gbh, "gateway_background_holder", lambda session, **kw: None)
+    monkeypatch.setattr(server, "_automation_holder_kind", lambda session: None)
+    ordinary = []
+    monkeypatch.setattr(server, "_interrupt_session_turn", lambda *a, **k: ordinary.append(a[0]))
     resp = _stop(sid, "stop_button")
 
-    assert resp["result"].get("background_turn") is None and state["calls"] == []
+    assert resp["result"] == {"status": "interrupted"} and ordinary == [sid] and state["workers"] == []
 
 
 # -- the forwarded prompt's turn waits for the background turn's lease ---------------------------------------------
@@ -351,8 +422,15 @@ def test_a_retiring_owner_answers_busy_at_once_with_a_short_retry(monkeypatch):
     assert gbh.wake_past_retiring_owner("s", {"session_key": KEY}, "chat-closeout", KEY,
                                         foreign_owner=lambda s: None, now=lambda: 1000.0) == "busy"
     assert time.monotonic() - started < 1  # never sleeps inside the caller's wake slot
-    assert gbh.retiring_retry_at(KEY) == 1000.0 + gbh.RETIRING_OWNER_RETRY_S
+    assert gbh.retiring_retry_at(KEY, now=lambda: 1001.0) == 1000.0 + gbh.RETIRING_OWNER_RETRY_S
     assert gbh.retiring_retry_at(KEY) is None  # consumed
+
+
+def test_a_stale_retiring_record_is_ignored(monkeypatch):
+    monkeypatch.setattr(gbh, "retiring_owner_reason", lambda s, **kw: "code-skew")
+    gbh.wake_past_retiring_owner("s", {"session_key": KEY}, "chat-closeout", KEY, foreign_owner=lambda s: None,
+                                 now=lambda: 1000.0)
+    assert gbh.retiring_retry_at(KEY, now=lambda: 1000.0 + gbh.RETIRING_RECORD_MAX_AGE_S + 1) is None
 
 
 def test_a_live_owner_is_still_refused(monkeypatch):

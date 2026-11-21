@@ -86,6 +86,8 @@ DEFER_SLACK_S = 600.0
 BUSY_RETRY_S = 300.0
 BUSY_RETRY_MAX_S = 3600.0
 MAX_BUSY_ATTEMPTS = 8
+# [daveey] Short retries of a wake whose chat a backend being replaced holds; past them, ordinary busy accounting.
+MAX_RETIRING_RETRIES = 10
 LOOKBACK_S = 3 * 86400.0
 MAX_PARALLEL_WAKES = 2
 CLOSEOUT_TEXT = (
@@ -235,9 +237,11 @@ def _busy_attempts(meta: Any) -> int:
 
 def _claim(db: Any, cand: dict, now: float) -> bool:
     busy = _busy_attempts(cand["meta"])
+    retiring = _attempts(cand["meta"], "retiring_attempts")
     meta = {**cand["meta"], "closeout": {"state": "claimed", "at": now, "pid": os.getpid(),
                                          "attempts": _attempts(cand["meta"]) + 1,
-                                         **({"busy_attempts": busy} if busy else {})}}
+                                         **({"busy_attempts": busy} if busy else {}),
+                                         **({"retiring_attempts": retiring} if retiring else {})}}
     with notice_writer(db) as wdb:
         return wdb._write_rowcount("UPDATE messages SET display_metadata = ? WHERE id = ? AND display_metadata IS ?",
                                    (json.dumps(meta, ensure_ascii=False), cand["msg_id"], cand["raw_meta"])) == 1
@@ -379,7 +383,7 @@ def _retry_at(sid: str, now: float) -> float:
 
 def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
                   retry_at: Optional[Callable[[str, float], float]] = None, busy_attempts: int = 0,
-                  early_recheck: bool = False) -> str:
+                  early_recheck: bool = False, retiring_attempts: int = 0) -> str:
     """Worker: the wake, then the verdict on the claimed row; a wake that did not start refreshes the outcome.
     A failed (``"error"``) or busy wake with attempts left is stamped ``deferred`` for a later pass (module doc)."""
     try:
@@ -399,10 +403,12 @@ def _closeout_job(session_db, wake, sid: str, msg_id: int, attempts: int = 1,
             verdict = "deferred"
             with contextlib.suppress(Exception):
                 note_waiting()
-        elif verdict == "busy" and (soon := _retiring_retry_at(sid)) is not None:
+        elif (verdict == "busy" and (soon := _retiring_retry_at(sid)) is not None
+              and retiring_attempts < MAX_RETIRING_RETRIES):
             # [daveey] The chat's owner is a backend being replaced: it lets go within seconds. A short retry, and no
-            # attempt charged (gateway_background_holder.wake_past_retiring_owner).
-            extra = {"retry_at": soon, "attempts": max(0, attempts - 1), "busy_attempts": busy_attempts}
+            # attempt charged (gateway_background_holder.wake_past_retiring_owner), up to MAX_RETIRING_RETRIES.
+            extra = {"retry_at": soon, "attempts": max(0, attempts - 1), "busy_attempts": busy_attempts,
+                     "retiring_attempts": retiring_attempts + 1}
             verdict = "deferred"
         elif verdict == "busy":
             busy_attempts += 1
@@ -503,8 +509,9 @@ def _handle(db, cand: dict, now: float, *, holders, session_db, wake, spawn, see
         busy = _busy_attempts(cand["meta"])
         from tui_gateway.notice_retry import early_recheck
         early = early_recheck(cand["meta"], now)
+        retiring = _attempts(cand["meta"], "retiring_attempts")
         spawn(lambda: _closeout_job(session_db, wake, sid, cand["msg_id"], attempts=attempts,
-                                   busy_attempts=busy, early_recheck=early))
+                                   busy_attempts=busy, early_recheck=early, retiring_attempts=retiring))
     except Exception:
         _wake_slots.release()
         _stamp(db, cand["msg_id"], "error")

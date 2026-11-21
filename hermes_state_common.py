@@ -759,6 +759,15 @@ CREATE TABLE IF NOT EXISTS session_turn_leases (
     expires_at REAL NOT NULL
 );
 
+-- [daveey] One end request per conversation, naming the exact turn-lease holder it is for
+-- (agent/turn_end_request.py): the holding process ends that turn with an ordinary interrupt.
+CREATE TABLE IF NOT EXISTS session_turn_end_requests (
+    conversation_id TEXT PRIMARY KEY,
+    holder TEXT NOT NULL,
+    requested_at REAL NOT NULL,
+    reason TEXT
+);
+
 CREATE TABLE IF NOT EXISTS async_delegations (
     delegation_id TEXT PRIMARY KEY,
     origin_session TEXT NOT NULL,

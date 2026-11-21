@@ -870,6 +870,34 @@ class SessionCompressionMixin:
         # not mistake expiry for acknowledgement.
         return dict(row)
 
+    def request_turn_end(self, session_id: str, holder: str, *, reason: str = "") -> bool:
+        """[daveey] Ask the turn holding this session's lease AS ``holder`` to end (agent/turn_end_request.py).
+        Compare-and-set: recorded only while ``holder`` holds the lease row, so it can never reach another turn;
+        True when recorded. One request per conversation (a later one replaces it)."""
+        if not session_id or not holder:
+            return False
+
+        def _do(conn):
+            key = self._session_turn_lease_key_on_conn(conn, session_id)
+            return conn.execute(
+                "INSERT OR REPLACE INTO session_turn_end_requests (conversation_id, holder, requested_at, reason) "
+                "SELECT conversation_id, holder, ?, ? FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
+                (time.time(), str(reason or "")[:200], key, holder)).rowcount > 0
+        return bool(self._execute_write(_do))
+
+    def turn_end_requested(self, session_id: str, holder: str) -> bool:
+        """Whether an end request names ``holder`` for this session. A store without the table answers False."""
+        if not session_id or not holder:
+            return False
+        try:
+            with self._read_ctx() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM session_turn_end_requests WHERE conversation_id = ? AND holder = ?",
+                    (self._session_turn_lease_key_on_conn(conn, session_id), holder)).fetchone()
+        except sqlite3.OperationalError:
+            return False
+        return row is not None
+
     def session_turn_lease_expires_at(self, session_id: str, holder: str) -> Optional[float]:
         """Committed ``expires_at`` of ``holder``'s turn lease, or None when it does not hold it."""
         if not session_id or not holder:

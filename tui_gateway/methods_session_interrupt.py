@@ -82,59 +82,83 @@ _HELD_QUEUE_KEEPING_ORIGINS = frozenset({None, "stop_button", "esc", "tile", "ti
 _BACKGROUND_STOP_ORIGINS = frozenset({"stop_button", "esc", "tile", "tile:esc", "slash", "transcript"})
 
 
-#: How long Stop waits for the take-over's answer before it reports; a later failure is still shown (an error event).
-BACKGROUND_STOP_ACK_S = 5.0
+BACKGROUND_STOP_QUEUED_MESSAGE = ("The background turn in this chat could not be stopped from here (the gateway "
+                                  "running it is older). Your message runs when that turn ends.")
 
 
-def _stop_gateway_background_turn(rid, sid: str, session: dict):
-    """Take the chat over from the gateway's background turn (``session.take_over``, which ends that turn).
-
-    Returns None to leave the ordinary Stop (this backend runs the turn, another holder, or the gateway's durable
-    ledger holds work for the chat: a typed prompt already queued there, whose FIFO a take-over must not race),
-    True when the take-over succeeded or is still running after ``BACKGROUND_STOP_ACK_S`` (a later failure then
-    emits an ``error`` event the Desktop shows), or the take-over's error dict when it failed within that time."""
-    import threading
+def _stop_gateway_background_turn(rid, sid: str, session: dict) -> bool:
+    """A Stop on a chat whose turn Hermes started in ANOTHER process. Only cheap checks run here (this backend runs
+    no turn, the chat's newest turn is automated); the holder discovery and the end itself run on a worker
+    (``_end_background_turn``) and report by events, so Stop never blocks the RPC reader. True when the worker
+    was started; False leaves the ordinary Stop."""
     with session["history_lock"]:
         if session.get("running"):
-            return None
-    if _automation_holder_kind(session) is None or _canonical_ledger_refusal(session) is not None:
-        return None
-    from tui_gateway.gateway_background_holder import gateway_background_holder
-    if gateway_background_holder(session, foreign_owner=_foreign_turn_owner) is None:
-        return None
-    handler = _methods.get("session.take_over")
-    if handler is None:
-        return None
-    key = session.get("session_key") or sid
-    outcome: dict = {}
-    mu, done = threading.Lock(), threading.Event()
-
-    def run() -> None:
-        error = None
-        try:
-            answer = handler(f"{rid}-background-stop", {"session_id": sid}) or {}
-            error = answer.get("error") if isinstance(answer, dict) else None
-        except Exception as exc:  # health: allow BLE001 -- worker thread boundary: logged with traceback
-            logger.warning("Stop could not take %s over from the gateway's background turn", key, exc_info=True)
-            error = {"message": f"Stop could not end the background turn: {type(exc).__name__}"}
-        logger.info("Stop of the gateway's background turn in %s: %s", key, error or "taken over")
-        with mu:
-            outcome["error"] = error
-            late = outcome.get("late", False)
-            done.set()
-        if late and error:
-            message = (error.get("message") if isinstance(error, dict) else None) or str(error)
-            _emit("error", sid, {"message": f"Stop could not end the background turn in this chat: {message}"})
-
+            return False
+    if _automation_holder_kind(session) is None:
+        return False
+    queued = _canonical_ledger_refusal(session) is not None  # a typed prompt already waits in the gateway's FIFO
     from agent.memory_provider import spawn_context_thread
-    spawn_context_thread(run, name=f"background-stop-{str(key)[:24]}").start()
-    logger.info("Stop in %s: taking the chat over from the gateway's background turn", key)
-    done.wait(BACKGROUND_STOP_ACK_S)
-    with mu:
-        if not done.is_set():
-            outcome["late"] = True
-            return True
-    return outcome.get("error") or True
+    key = session.get("session_key") or sid
+    spawn_context_thread(lambda: _end_background_turn(rid, sid, session, queued),
+                         name=f"background-stop-{str(key)[:24]}").start()
+    logger.info("Stop in %s: ending the gateway's background turn off the RPC thread", key)
+    return True
+
+
+def _end_background_turn(rid, sid: str, session: dict, queued: bool) -> str:
+    """Worker: end exactly the holder's turn. Returns what it did (tests); every failure reaches the chat as an
+    ``error`` event.
+
+    - The holder is the gateway the chat's forward dials, running an automated turn (``:auto=`` holder), and that
+      gateway honours end requests (``turn_end_request.CAPABILITY``): record the request for that exact holder
+      (``SessionDB.request_turn_end``, compare-and-set). Its turn ends with an ordinary interrupt and releases
+      the lease, so a prompt queued behind it runs next, once. Whether or not a prompt is queued.
+    - An older gateway: with nothing queued, ``session.take_over`` (as before); with a prompt queued in its FIFO
+      a take-over would race that queue, so the chat is told the message runs when the turn ends.
+    - Anything else (no such holder any more, another holder): nothing is ended."""
+    from agent.turn_end_request import CAPABILITY, holder_auto_kind
+    from tui_gateway.gateway_background_holder import gateway_background_holder
+    key = str(session.get("session_key") or sid)
+    try:
+        gateway = gateway_background_holder(session, foreign_owner=_foreign_turn_owner)
+        owner = _foreign_turn_owner(session) if gateway is not None else None
+    except Exception:  # health: allow BLE001 -- worker thread boundary: logged with traceback, told to the chat
+        logger.warning("Stop: could not find who runs %s", key, exc_info=True)
+        gateway = owner = None
+    holder = str((owner or {}).get("holder") or "")
+    if gateway is None or not holder:
+        logger.info("Stop in %s: no background turn of this host's gateway holds it now; nothing to end", key)
+        return "no_holder"
+    capable = CAPABILITY in (getattr(gateway.endpoint, "capabilities", None) or ())
+    if capable and holder_auto_kind(holder) is not None:
+        try:
+            with _session_db(session) as db:
+                recorded = bool(db.request_turn_end(key, holder, reason="stop"))
+        except Exception:  # health: allow BLE001 -- worker thread boundary: logged with traceback, told to the chat
+            logger.warning("Stop: could not record the end request for %s", key, exc_info=True)
+            recorded = False
+        if recorded:
+            logger.info("Stop in %s: asked the gateway's background turn to end (holder %s)", key, holder)
+            return "end_requested"
+        _emit("error", sid, {"message": "Stop could not reach the background turn in this chat; it may have "
+                                        "just ended. Try Stop again if it is still running."})
+        return "end_request_failed"
+    if queued:
+        _emit("error", sid, {"message": BACKGROUND_STOP_QUEUED_MESSAGE})
+        return "queued_not_interrupted"
+    handler = _methods.get("session.take_over")
+    try:
+        answer = handler(f"{rid}-background-stop", {"session_id": sid}) if handler else None
+    except Exception:  # health: allow BLE001 -- worker thread boundary: logged with traceback, told to the chat
+        logger.warning("Stop could not take %s over from the gateway's background turn", key, exc_info=True)
+        answer = {"error": {"message": "the take-over failed"}}
+    error = answer.get("error") if isinstance(answer, dict) else {"message": "no take-over handler"}
+    if error:
+        message = (error.get("message") if isinstance(error, dict) else None) or str(error)
+        _emit("error", sid, {"message": f"Stop could not end the background turn in this chat: {message}"})
+        return "takeover_failed"
+    logger.info("Stop in %s: took the chat over from an older gateway's background turn", key)
+    return "taken_over"
 
 
 def _note_stop_issuer(sid: str, session: dict, transport, origin: str | None = None) -> None:
@@ -265,11 +289,8 @@ def _(rid, params: dict) -> dict:
         keep_held = origin in _HELD_QUEUE_KEEPING_ORIGINS
         _note_user_input(session)
         _note_stop_issuer(sid, session, current_transport(), origin)
-        if origin in _BACKGROUND_STOP_ORIGINS and (stopped := _stop_gateway_background_turn(rid, sid, session)):
-            if isinstance(stopped, dict):
-                data = stopped.get("data") if isinstance(stopped.get("data"), dict) else None
-                return _err(rid, 4090, str(stopped.get("message") or "Stop could not end the background turn"),
-                            data)
+        if origin in _BACKGROUND_STOP_ORIGINS and _stop_gateway_background_turn(rid, sid, session):
+            # Requested, not yet done: the outcome reaches the chat as events (the turn's own end, or an error).
             return _ok(rid, {"status": "interrupted", "background_turn": True})
         if _session_uses_compute_host(session):
             with session["history_lock"]:

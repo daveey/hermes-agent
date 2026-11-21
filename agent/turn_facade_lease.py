@@ -97,6 +97,7 @@ class DurableTurnLease:
         self.refresh_interval = float(getattr(agent, "_session_turn_lease_refresh_interval", 60.0))
         self._lock = threading.Lock()
         self.turn_active = False
+        self._end_request_honoured = False
         self.interrupt_message: Optional[str] = None
         self.watchdog = None  # TurnLivenessWatchdog when configured
         self.timer_handles: list = []  # periodic_scheduler handles, cancelled in join_threads
@@ -153,7 +154,36 @@ class DurableTurnLease:
         if find_takeover_of(self.holder, registry_home=Path(self.db.db_path).parent):
             self._interrupt_turn("This chat was taken over by another Hermes window.", taken_over=True)
             return False
+        if self._end_requested():
+            self._end_on_request()
         return None
+
+    def _end_requested(self) -> bool:
+        """[daveey] An end request for this exact holder (agent/turn_end_request.py). Only an automated turn's
+        holder can be named, and a read error is "no": the turn keeps running."""
+        from agent.turn_end_request import holder_auto_kind
+        if self._end_request_honoured or holder_auto_kind(self.holder) is None:
+            return False
+        checker = getattr(self.db, "turn_end_requested", None)
+        try:
+            return bool(checker(self._current_session_id(), self.holder)) if callable(checker) else False
+        except Exception:
+            logger.debug("turn end request read failed", exc_info=True)
+            return False
+
+    def _end_on_request(self) -> None:
+        """End the turn with the agent's ordinary interrupt: a Stop, not a lease loss. The lease stays held and
+        renewed until the turn unwinds and releases it, so a prompt queued behind it runs next."""
+        from agent.turn_end_request import END_MESSAGE
+        with self._lock:
+            if self.stop.is_set() or not self.turn_active or self._end_request_honoured:
+                return
+            self._end_request_honoured = True
+        logger.info("Ending turn %s on another window's Stop", self._current_session_id())
+        try:
+            self.agent.interrupt(END_MESSAGE)
+        except Exception:
+            logger.warning("turn end request: interrupt failed", exc_info=True)
 
     def stop_refresher(self) -> None:
         """Stop renewal and deactivate the turn. Also the watchdog's deactivate callback: a wedge the
@@ -494,9 +524,18 @@ def refuses_held_lease_at_once(agent, platform) -> bool:
     return not getattr(agent, "_gateway_session_key", None)
 
 
+def lease_holder(relay_turn_id: str, platform: Any, auto_kind: Optional[str] = None) -> str:
+    """The durable holder string of one turn. pidns stamp: see hermes_state_pidns. ``:auto=<kind>`` (before
+    ``:platform=``, which readers take as the string's tail) marks a turn Hermes started itself, the only kind
+    another window's Stop may ask to end (agent/turn_end_request.py)."""
+    from agent.turn_end_request import auto_token
+    return (f"pid={os.getpid()}{holder_namespace_token()}:turn={relay_turn_id}{auto_token(auto_kind)}"
+            f":platform={platform or 'unknown'}")
+
+
 def admit_durable_turn_lease(
     agent, *, session_id: str, relay_turn_id: str, task_context: dict[str, Any],
-    conversation_history: Optional[list[dict[str, Any]]],
+    conversation_history: Optional[list[dict[str, Any]]], auto_kind: Optional[str] = None,
 ) -> TurnLeaseAdmission:
     """Acquire the session turn lease (the row need not exist yet); build (not start) its threads.
 
@@ -530,10 +569,7 @@ def admit_durable_turn_lease(
     # process-unique, and the first turn creates the row mid-turn, so a second writer would
     # otherwise find the row, take an unheld lease and interleave its turn into this one.
     # pidns stamp: see hermes_state_pidns.
-    holder = (
-        f"pid={os.getpid()}{holder_namespace_token()}:turn={relay_turn_id}"
-        f":platform={task_context['platform'] or 'unknown'}"
-    )
+    holder = lease_holder(relay_turn_id, task_context['platform'], auto_kind)
     reload_needed = announced = False
 
     def _on_contended() -> None:
