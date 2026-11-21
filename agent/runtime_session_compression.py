@@ -27,7 +27,8 @@ class RuntimeSessionCompressionMixin:
 
     def get_session(self, session_id):
         from agent.runtime_session_store import (
-            WorkerPersistenceError, is_retryable_owner_error, _RETRYABLE_ATTEMPTS, _retryable_owner_errors,
+            WorkerPersistenceError, exhausted_resend_code, is_retryable_owner_error,
+            _RETRYABLE_ATTEMPTS, _retryable_owner_errors,
         )
         with self.lock:
             # A read may not overtake an unacknowledged write or hide its sticky failure.
@@ -46,8 +47,11 @@ class RuntimeSessionCompressionMixin:
                         self._legacy_session_context = True
                         break
                     except _retryable_owner_errors() as exc:
-                        if not is_retryable_owner_error(exc) or attempt + 1 == _RETRYABLE_ATTEMPTS:
+                        if not is_retryable_owner_error(exc):
                             raise
+                        if attempt + 1 == _RETRYABLE_ATTEMPTS:
+                            # Preserve owner-fault booking without poisoning this read-only store.
+                            raise WorkerPersistenceError(exhausted_resend_code(exc)) from exc
             # Old owners journal reads; reject foreign targets before enqueueing one.
             if session_id != self.scope['session_id']:
                 ids = self._apply('compression.lineage', {'target': self.scope['session_id']})['readable_ids']

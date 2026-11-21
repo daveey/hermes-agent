@@ -65,9 +65,20 @@ def test_context_failed_read_never_falls_back_to_a_write(tmp_path, kind):
     store = RuntimeSessionStore(rpc, {'session_id': 'owned'}, tmp_path / 'outbox')
     before = store.path.read_bytes()
     try:
-        with pytest.raises(type(error)) as caught:
+        expected_type = TimeoutError if kind == 'other_timeout' else WorkerPersistenceError
+        with pytest.raises(expected_type) as caught:
             store.get_session('owned')
-        assert caught.value is error
+        if kind == 'other_timeout':
+            assert caught.value is error
+        else:
+            expected_code = 'worker_receipt_timeout' if kind == 'timeout' else 'owner_link_closed'
+            assert str(caught.value) == expected_code
+            assert caught.value.__cause__ is error
+            from hermes_cli.kanban_owner_storage_refusal import _proof
+            envelope = f'Worker failed: {type(caught.value).__name__}: {caught.value}'
+            assert _proof({'exit_code': 1, 'last_output': envelope}) == {
+                'kind': 'owner_unreachable', 'phase': 'midrun', 'reason': expected_code,
+            }
         assert calls == ['worker.sessionContext'] * (1 if kind == 'other_timeout' else 2)
         assert store.path.read_bytes() == before
         assert store.failure is None
