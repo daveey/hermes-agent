@@ -76,10 +76,13 @@ def discover_owner(home: Path):
 
 
 @contextlib.asynccontextmanager
-async def connect_owner(home: Path, endpoint, *, scope=None, max_size: int = 2 ** 20):
+async def connect_owner(home: Path, endpoint, *, scope=None, max_size: int | None = None):
     """A ``GatewayClient`` on ``endpoint``, the ready gateway serving ``home``; ``scope``: the
     ticket's profile scope (``"host"``: the one native Desktop holds); ``max_size``: the largest
-    answer frame accepted (websockets' 1 MiB default)."""
+    answer frame accepted. [daveey] Uncapped by default: the relay's ``session.resume`` answer carries
+    the chat's whole history (1.2-1.75 MB on long hub chats), and websockets' 1 MiB default closed the
+    socket (1009), so every Desktop send to that busy chat was refused. The owner is this host's own
+    loopback gateway."""
     from hermes_cli.gateway_client import GATEWAY_WS_PROTOCOL, GatewayClient, _session_ticket, gateway_ws_target
     from websockets.asyncio.client import connect
 
