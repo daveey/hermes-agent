@@ -880,10 +880,14 @@ moves. As the worker:
    or schedule; register with heartbeat first in that case. This does not add
    CLI registration or a `source_path` argument to `kanban_request_changes`.
 4. Optionally carry up to 32 files that are not in Git with
-   `kanban_heartbeat(artifacts=[...])` (or `artifacts` on the ending call). Each
-   call replaces the selection with byte snapshots taken at that moment; `[]`
-   clears it. Symlinks, special files and secret-looking names or bytes are
-   refused.
+   `kanban_heartbeat(artifacts=[...])` or `kanban_continue(artifacts=[...])`.
+   Continue may also supply `source_path` for the first registration; attachment
+   and byte snapshots precede its source-publication preflight. Omitting
+   `artifacts` preserves the selection; `[]` clears it. Selection requires the
+   bound worker's protocol-2 source, and is not chat delivery or checkpoint
+   metadata. Completion and review also accept `artifacts` for delivery.
+   A refused continuation retains successfully staged snapshots for replay.
+   Symlinks, special files and secret-looking names or bytes are refused.
 
 Endings then publish the branch exactly as for worktree cards, and the selected
 artifacts are verified by digest when another machine picks the card up. Until

@@ -57,6 +57,17 @@ def register_for_ending(conn, task_id, args, *, worker_task, expected_run_id):
                      worker_task=worker_task, expected_run_id=expected_run_id)
 
 
+def stage_continuation(conn, task_id, args, *, worker_task, expected_run_id):
+    """Attach explicitly and select portable snapshots before continuation preflight."""
+    if "artifacts" in args and (not isinstance(args["artifacts"], list)
+                               or not all(isinstance(p, str) for p in args["artifacts"])):
+        raise ValueError("artifacts must be a list of paths")
+    bound = {"worker_task": worker_task, "expected_run_id": expected_run_id}
+    register_for_ending(conn, task_id, args, **bound)
+    if "artifacts" in args:
+        heartbeat_source(conn, task_id, {"artifacts": args["artifacts"]}, **bound)
+
+
 def stage_completion(conn, task_id, metadata, *, expected_run_id):
     """Called after worker ownership, foreign-card and completion gates.
 

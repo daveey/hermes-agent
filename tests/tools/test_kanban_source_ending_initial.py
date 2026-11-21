@@ -31,7 +31,7 @@ ENDINGS = {
     "schedule": ("_handle_schedule", {"reason": _PARK, "clock_only": True, "awaiting": {"kind": "clock", "why": "test window"}},
                  "hermes_cli.kanban_db", "schedule_task", "scheduled", False),
     "continue": ("_handle_continue", {"checkpoint": "done so far; resume later"},
-                 "hermes_cli.kanban_continuation", "continue_task", "ready", False),
+                 "hermes_cli.kanban_continuation", "continue_task", "ready", True),
     "move": ("_handle_move", {"runs_on": ["pool:worker"], "reason": "needs another machine",
                               "checkpoint": "resume elsewhere"},
              "hermes_cli.kanban_move", "move_task", "ready", False),
@@ -41,7 +41,7 @@ ENDINGS = {
 @pytest.mark.parametrize("ending", list(ENDINGS))
 @pytest.mark.parametrize("prior_state", ["none", "attached", "published"])
 def test_ending_registers_initial_source_before_ending_preflight(ending, prior_state, setup, tmp_path, monkeypatch):
-    handler, base_args, core_mod, core_attr, landed, with_artifacts = ENDINGS[ending]
+    _handler, base_args, core_mod, core_attr, landed, with_artifacts = ENDINGS[ending]
     conn, boundary, tid, source, scratch, _home, clone = setup
     from hermes_cli import kanban_sync_client as client
     client.ensure_identity(conn, "default", "worker")
@@ -108,7 +108,7 @@ def test_ending_registers_initial_source_before_ending_preflight(ending, prior_s
             if with_artifacts:
                 stage_completion(conn, tid, {"artifacts": [str(report)]}, expected_run_id=run_id)
             assert preflight.compute_receipt(conn, tid, prior)["state"] == "published"
-    out = json.loads(getattr(kt, handler)(args))
+    out = json.loads(kt.registry.dispatch(f"kanban_{ending}", args))
     heartbeat.assert_not_called()
     assert out.get("ok") is True, out
     assert kb.get_task(conn, tid).status == landed

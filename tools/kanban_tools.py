@@ -1210,9 +1210,9 @@ def _handle_continue(args: dict, **kw) -> str:
         wake = _wake_check_args(args, conn=conn, tid=tid)
         awaiting, wake = _awaiting_arg(args, wake)
         _park_guard(conn, tid, "continue", wake, resume_after=int(raw_after or 0))
-        from tools.kanban_tools_source import register_for_ending
-        register_for_ending(conn, tid, args, worker_task=os.environ.get("HERMES_KANBAN_TASK"),
-                            expected_run_id=_worker_run_id(tid))
+        from tools.kanban_tools_source import stage_continuation
+        stage_continuation(conn, tid, args, worker_task=os.environ.get("HERMES_KANBAN_TASK"),
+                           expected_run_id=_worker_run_id(tid))
         res = continue_task(conn, tid, checkpoint=checkpoint, resume_after_seconds=int(raw_after or 0),
                             expected_run_id=_worker_run_id(tid), metadata=metadata, awaiting=awaiting,
                             wake_check=wake[0], check_every=wake[1], clock_only=wake[2],

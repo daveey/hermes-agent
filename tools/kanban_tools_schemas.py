@@ -629,6 +629,11 @@ KANBAN_CONTINUE_SCHEMA = _schema(
     ),
     {
         **_ENDING_SOURCE_PATH,
+        "artifacts": {"type": "array", "items": {"type": "string"}, "description": (
+            "Optional absolute file paths to carry with this run's attached source (max 32). "
+            "Snapshots are staged before continuation publication; [] clears selection, omission preserves it. "
+            "Requires this task's bound worker and protocol-2 source. Not chat delivery."
+        )},
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "checkpoint": _prop("string", (
             "Everything the next run needs to resume without re-deriving it: "
