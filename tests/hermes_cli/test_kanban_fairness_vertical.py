@@ -33,9 +33,20 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    (home / "config.yaml").write_text("kanban:\n  dispatch_profiles: [worker-a]\n", encoding="utf-8")
+    _configure(home)
     kb.init_db()
     return home
+
+
+def _configure(home):
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    (home / "config.yaml").write_text("kanban:\n  dispatch_profiles: [worker-a]\n", encoding="utf-8")
+    profile = home / "profiles" / "worker-a"
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "config.yaml").write_text(_managed_yaml(), encoding="utf-8")
+    config = _assignee_config("worker-a")
+    assert config is not None and config["model_routing"]["enabled"] is True
 
 
 def _spawn(task, _workspace):
@@ -127,7 +138,7 @@ def test_capture_does_not_change_what_the_dispatcher_does(
         kanban_home, all_assignees_spawnable, tmp_path, monkeypatch):
     def run(home, armed):
         monkeypatch.setenv("HERMES_HOME", str(home))
-        (home / "config.yaml").write_text("kanban:\n  dispatch_profiles: [worker-a]\n", encoding="utf-8")
+        _configure(home)
         kb.init_db()
         with kbc.connect_closing() as conn:
             if armed:

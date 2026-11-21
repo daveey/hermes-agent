@@ -17,11 +17,12 @@ def test_updater_hold_records_each_unclaimed_card_and_recovers(gws, monkeypatch,
 
     hub, worker = gws
     hub.enter()
-    ids = [kb.create_task(hub.conn, title=f'held {n}', assignee='default',
-                          runs_on=['machine:worker-1']) for n in range(3)]
+    from tests.hermes_cli.kanban_review_fixture import completed_gateway_source, create_review
     if lane == 'review':
-        for tid in ids:
-            assert kb.request_review(hub.conn, tid, summary='ready for review')
+        completed_gateway_source(hub)
+    create = create_review if lane == 'review' else kb.create_task
+    ids = [create(hub.conn, title=f'held {n}', assignee='default',
+                          runs_on=['machine:worker-1']) for n in range(3)]
     hub.round()
     worker.round()
     worker.enter()
