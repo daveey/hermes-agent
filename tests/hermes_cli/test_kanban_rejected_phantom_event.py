@@ -12,44 +12,47 @@ svc = child.svc
 gws = child.gws
 
 
-def test_normal_round_retires_fenced_event_and_keeps_audit_and_tombstone(gws, svc):
+@pytest.mark.parametrize('table', ['task_events', 'task_runs'])
+def test_normal_round_retires_fenced_event_and_keeps_audit_and_tombstone(gws, svc, table):
     hub, worker = gws
     tid = _running_on_worker(hub, worker, svc)
-    child._old_core_complete(hub.conn, tid)
-    op = dict(hub.conn.execute("SELECT * FROM kanban_sync_outbox WHERE table_name='task_events' "
-                               "AND json_extract(fields,'$.kind')='completed'").fetchone())
+    child._old_core_complete(hub.conn, tid, phantom=table == 'task_runs')
+    op = dict(hub.conn.execute("SELECT * FROM kanban_sync_outbox WHERE table_name=? "
+                               "AND (?='task_runs' OR json_extract(fields,'$.kind')='completed')",
+                               (table, table)).fetchone())
     hub.round()
     uid = op['row_uid']
-    tomb = tuple(hub.conn.execute("SELECT * FROM kanban_sync_tombstones WHERE table_name='task_events' "
-                                  "AND row_uid=?", (uid,)).fetchone())
+    tomb = tuple(hub.conn.execute("SELECT * FROM kanban_sync_tombstones WHERE table_name=? "
+                                  "AND row_uid=?", (table, uid)).fetchone())
     audits = [tuple(r) for r in hub.conn.execute("SELECT uid,payload FROM task_events WHERE kind='sync_rejected'")
               if json.loads(r['payload']).get('op_id') == op['op_id']]
     assert len(audits) == 1
     hub.round()
     assert hub.conn.execute("SELECT 1 FROM kanban_sync_outbox WHERE op_id=?", (op['op_id'],)).fetchone() is None
-    assert tuple(hub.conn.execute("SELECT * FROM kanban_sync_tombstones WHERE table_name='task_events' "
-                                  "AND row_uid=?", (uid,)).fetchone()) == tomb
+    assert tuple(hub.conn.execute("SELECT * FROM kanban_sync_tombstones WHERE table_name=? "
+                                  "AND row_uid=?", (table, uid)).fetchone()) == tomb
     assert [tuple(r) for r in hub.conn.execute("SELECT uid,payload FROM task_events WHERE kind='sync_rejected'")
             if json.loads(r['payload']).get('op_id') == op['op_id']] == audits
-    assert uid not in svc.board(child.BOARD)['rows']['task_events']
+    assert uid not in svc.board(child.BOARD)['rows'][table]
     assert svc.board(child.BOARD)['leases'][tid]['holder'] == child.WORKER
     assert client.status(hub.conn)['rejected'] == 0
 
 
-@pytest.fixture
-def refused(gws, svc, monkeypatch):
+@pytest.fixture(params=['task_events', 'task_runs'])
+def refused(gws, svc, monkeypatch, request):
     from hermes_cli import kanban_sync_rejected_event as event
     from hermes_cli.kanban_sync_rejections import _inputs
     hub, worker = gws
     tid = _running_on_worker(hub, worker, svc)
-    child._old_core_complete(hub.conn, tid)
+    table = request.param
+    child._old_core_complete(hub.conn, tid, phantom=table == 'task_runs')
     with monkeypatch.context() as patch:
         patch.setattr(event, 'moot_event', lambda *args: False)
         hub.round()
-    op = dict(hub.conn.execute("SELECT * FROM kanban_sync_outbox WHERE table_name='task_events' "
-                               "AND state='rejected'").fetchone())
+    op = dict(hub.conn.execute("SELECT * FROM kanban_sync_outbox WHERE table_name=? "
+                               "AND state='rejected'", (table,)).fetchone())
     before = _inputs(hub.conn, op)
-    evidence = svc.hub(child.HUB).row_evidence(child.BOARD, 'task_events', op['row_uid'])
+    evidence = svc.hub(child.HUB).row_evidence(child.BOARD, table, op['row_uid'])
     assert event.moot_event(op, before, evidence)
     return hub, op, before, evidence
 
@@ -64,6 +67,12 @@ def test_every_retirement_predicate_fails_closed(refused, veto):
     _, op, before, evidence = copy.deepcopy((None, *refused[1:]))
     if veto in ('table', 'operation', 'reason'):
         op[{'table': 'table_name', 'operation': 'op', 'reason': 'last_error'}[veto]] = 'wrong'
+        if veto == 'table':
+            before['tombstones'][0] = ('wrong', op['row_uid'], before['tombstones'][0][2])
+            audit = before['fenced_event']['audits'][0]
+            payload = json.loads(audit['payload'])
+            payload['table'] = 'wrong'
+            audit['payload'] = json.dumps(payload)
         if veto == 'reason':
             audit = before['fenced_event']['audits'][0]
             payload = json.loads(audit['payload'])
@@ -119,8 +128,8 @@ def test_evidence_read_revalidates_retirement_provenance(refused, svc, monkeypat
             elif race == 'mode':
                 hub.conn.execute("UPDATE kanban_sync_state SET mode='shadow'")
             else:
-                hub.conn.execute("DELETE FROM kanban_sync_tombstones WHERE table_name='task_events' AND row_uid=?",
-                                 (op['row_uid'],))
+                hub.conn.execute("DELETE FROM kanban_sync_tombstones WHERE table_name=? AND row_uid=?",
+                                 (op['table_name'], op['row_uid']))
         return evidence
 
     monkeypatch.setattr(transport, 'row_evidence', read)

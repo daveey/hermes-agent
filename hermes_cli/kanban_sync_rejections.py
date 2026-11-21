@@ -94,7 +94,7 @@ def _classify(op, before, evidence, parent_evidence, run_evidence=None):
     from hermes_cli import kanban_sync_client as client
     from hermes_cli.kanban_sync_rejected_event import moot_event
     if moot_event(op, before, evidence):
-        return "moot", "live-claim fenced phantom event remains tombstoned with its rejection audit; never stored by Board"
+        return "moot", "live-claim fenced phantom event/run remains tombstoned with its rejection audit; never stored by Board"
     if before["pending"] or before["tombstones"]:
         return "unresolved", "pending local work or local tombstone"
     gate = reserved_key.receipt_resolution(op, before, evidence, parent_evidence)

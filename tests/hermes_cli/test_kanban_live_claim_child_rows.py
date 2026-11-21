@@ -134,6 +134,8 @@ def test_refused_phantom_run_is_removed_and_never_reuploaded(gws, svc):
     run_id = _old_core_complete(hub.conn, tid, phantom=True)
     hub.round()
     hub.round()
+    assert hub.conn.execute("SELECT row_uid FROM kanban_sync_outbox WHERE table_name='task_runs' "
+                            "AND state='rejected'").fetchall() == []
     assert set(_board_runs(svc, tid)) == before
     assert hub.conn.execute("SELECT COUNT(*) FROM task_runs WHERE id = ?", (run_id,)).fetchone()[0] == 0
     assert ("task_runs", "live_claim") in {(r.get("table", "tasks"), r["reason"].split(":")[0]) for r in _rejections(hub.conn, tid)}
