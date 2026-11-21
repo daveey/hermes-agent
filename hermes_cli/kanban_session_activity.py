@@ -445,8 +445,6 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
     conn, _ident, lock, _shm = entry
     remaining = busy_budget - (time.monotonic() - started)
     if not try_borrow(lock, min(remaining, _RO_SHARED_WAIT_S)):
-        with _RO_CACHE_LOCK:
-            ro_stats["private_fallbacks"] += 1
         # Never more than the shared reader's own SQLite busy timeout, whatever budget the caller passed.
         with _private_ro(path, min(busy_budget - (time.monotonic() - started), _RO_BUSY_TIMEOUT_S)) as private:
             yield private
@@ -486,8 +484,11 @@ def cached_ro(path: Path, *, busy_budget: float = 0.5) -> Iterator[sqlite3.Conne
 @contextlib.contextmanager
 def _private_ro(path: Path, budget: float) -> Iterator[sqlite3.Connection]:
     """A one-call read-only connection for when the shared reader is borrowed: same opener and read-only semantics
-    as the cache, SQLite busy timeout = what is left of the caller's budget, always closed afterwards."""
+    as the cache, SQLite busy timeout = ``budget`` (the caller passes what is left of its own, capped at the shared
+    reader's ``_RO_BUSY_TIMEOUT_S``), always closed afterwards. Counted in ``ro_stats`` once it is open."""
     conn = _open_ro(path, timeout=max(0.0, budget))
+    with _RO_CACHE_LOCK:
+        ro_stats["private_fallbacks"] += 1
     try:
         yield conn
     finally:

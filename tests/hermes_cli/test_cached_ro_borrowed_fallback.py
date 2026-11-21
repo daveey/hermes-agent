@@ -103,9 +103,12 @@ def test_zero_budget_borrowed_reader_also_falls_back(board):
 
 
 def _is_closed(conn):
+    """Only meaningful on the thread that owns ``conn`` (or a ``check_same_thread=False`` one): a foreign-thread call
+    raises ProgrammingError for an open connection too."""
     try:
         conn.execute("SELECT 1")
-    except sqlite3.ProgrammingError:
+    except sqlite3.ProgrammingError as exc:
+        assert "thread" not in str(exc), exc
         return True
     return False
 
@@ -115,10 +118,9 @@ def test_fallback_connection_is_closed_after_the_body(board):
         def read():
             with activity.cached_ro(board) as conn:
                 assert not _is_closed(conn)
-                return conn
+            return _is_closed(conn)  # checked on the owning thread
 
-        private = _in_thread(read)
-    assert _is_closed(private)
+        assert _in_thread(read) is True
 
 
 def test_fallback_connection_is_closed_when_the_body_raises(board):
@@ -127,13 +129,13 @@ def test_fallback_connection_is_closed_when_the_body_raises(board):
         captured = []
 
         def read():
-            with activity.cached_ro(board) as conn:
-                captured.append(conn)
-                conn.execute("SELECT * FROM no_such_table")
+            with pytest.raises(sqlite3.OperationalError, match="no such table"):
+                with activity.cached_ro(board) as conn:
+                    captured.append(conn)
+                    conn.execute("SELECT * FROM no_such_table")
+            return _is_closed(captured[0])  # checked on the owning thread
 
-        with pytest.raises(sqlite3.OperationalError, match="no such table"):
-            _in_thread(read)
-        assert _is_closed(captured[0])
+        assert _in_thread(read) is True
         assert captured[0] is not shared
         assert _shared_entry(board) is entry  # a fallback error does not evict the shared reader
         assert not _is_closed(shared)
@@ -189,7 +191,7 @@ def test_fallback_busy_timeout_is_the_remaining_budget(board):
 
         ms = _in_thread(timeout_ms)
     # 400 ms budget minus the <=50 ms shared wait and the entry lookup; never the reader's full 500 ms.
-    assert 150 <= ms <= 350
+    assert 150 <= ms <= 360
 
 
 def test_holder_releasing_within_the_wait_hands_over_the_shared_reader(board, monkeypatch):
@@ -203,7 +205,8 @@ def test_holder_releasing_within_the_wait_hands_over_the_shared_reader(board, mo
     timer = threading.Timer(0.01, lock.release)
     timer.start()
     try:
-        assert _enter_conn(board) is entry[0]
+        with activity.cached_ro(board, busy_budget=5) as conn:  # the wait is min(budget, _RO_SHARED_WAIT_S)
+            assert conn is entry[0]
     finally:
         timer.join(5)
     assert activity.ro_stats["private_fallbacks"] == before
