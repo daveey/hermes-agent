@@ -137,7 +137,7 @@ def test_runs_on_no_machine_carries_reads_unplaceable(home, monkeypatch, capsys)
     tid = _card("PR831 land", runs_on=["hermes-hub"])
     _registry(monkeypatch, {"hub": ["linux"], "worker-1": ["linux"]})
     want = {"lane": "unplaceable", "runs_on": ["hermes-hub"], "missing": ["hermes-hub"],
-            "machines": ["hub", "worker-1"]}
+            "machines": ["hub", "worker-1"], "task_id": tid}
     out = _tool(tid)
     assert out.get("queue") == want
     assert "no machine" in (out.get("queue_note") or "") and "hermes-hub" in out["queue_note"]
