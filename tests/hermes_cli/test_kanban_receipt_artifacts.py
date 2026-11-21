@@ -15,9 +15,38 @@ from tests.hermes_cli import test_kanban_metadata_files as helpers
 kanban_home = helpers.kanban_home
 
 
+@pytest.fixture(autouse=True)
+def receipt_process_inventory(monkeypatch):
+    # Receipt preservation tests own no external jobs. Real host process scans
+    # may fail closed and defer deletion; that separate safety contract is
+    # exercised in test_kanban_workspace_jobs, not by receipt byte assertions.
+    from hermes_cli import kanban_workspace_jobs as jobs
+    monkeypatch.setattr(jobs.psutil, "process_iter", lambda: iter(()))
+
+
 def receipt(ref):
     return {"version": 1, "items": [{"scope": "report", "disposition": "delivered",
         "evidence": [{"ref": ref, "observed_at": "2026-01-01T00:00:00Z", "verification": "reported"}], "remaining": []}]}
+
+
+def test_receipt_preserved_when_process_scan_defers_cleanup(kanban_home, monkeypatch):
+    from hermes_cli import kanban_workspace_jobs as jobs
+
+    def unavailable():
+        raise jobs.psutil.AccessDenied(pid=123456789)
+
+    monkeypatch.setattr(jobs.psutil, "process_iter", unavailable)
+    with kbc.connect_closing() as conn:
+        task, ws, run = helpers._scratch_card(conn)
+        report = ws / "report.md"
+        report.write_text("preserved despite cleanup deferral")
+        value = receipt(str(report))
+        assert kb.complete_task(conn, task, summary="Report", expected_run_id=run,
+                                metadata={"completion_receipt": value})
+        meta = kb.latest_run(conn, task).metadata
+        assert meta["completion_receipt"] == value
+        assert Path(meta["attached_from_workspace"][str(report)]).read_text() == report.read_text()
+        assert ws.exists()  # fail-closed safety remains production behaviour
 
 
 def test_receipt_identity_survives_artifact_relocation(kanban_home):

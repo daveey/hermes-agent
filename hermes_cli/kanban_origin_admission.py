@@ -93,8 +93,8 @@ def require_receipt(conn, task_id):
 
 
 def existing(conn, idempotency_key):
-    """Strict replays are decided under the same write lock as insertion."""
-    if not active() or not idempotency_key:
+    """Recheck every replay under the insertion lock; validate strict custody too."""
+    if not idempotency_key:
         return None
     from hermes_cli.kanban_db_creation import existing_creation_key
     row = existing_creation_key(conn, idempotency_key)
