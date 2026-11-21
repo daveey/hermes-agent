@@ -60,29 +60,7 @@ def main():
             sync.set_mode(conn, "primary")
         return
 
-    # Always run the real integrity check in this harness; a TTL stamp is NOT a
-    # correctness oracle and must not hide our injected slow/hung integrity seam.
-    if not mode.startswith("cached"):
-        kbc._INTEGRITY_STAMP_TTL_SECONDS = 0
     real_check = kbc._run_integrity_check
-
-    if mode.startswith("cached") and hasattr(kbc, "_integrity_generation"):
-        # Observe the production detector without changing its answer, metadata,
-        # stamp, or connection lifecycle. Cache misses must name the generation
-        # mismatch rather than assume that a read-only command is byte-quiescent.
-        real_generation = kbc._integrity_generation
-
-        def observed_generation(path):
-            generation = real_generation(path)
-            try:
-                stamp = json.loads(kbc._integrity_stamp_path(path).read_text())
-            except (OSError, ValueError):
-                stamp = None
-            with marker.with_suffix(".generations").open("a") as log:
-                log.write(json.dumps({"generation": generation, "stamp": stamp}) + "\n")
-            return generation
-
-        kbc._integrity_generation = observed_generation
 
     def checked(conn):
         marker.with_suffix(".integrity-entered").write_text(str(os.getpid()))

@@ -5,8 +5,8 @@ Run: bash scripts/run_tests.sh tests/hermes_cli/test_enrollment_cli_create.py -v
 Scaler-equivalent canary/file_card argv (hermes_worker_scaler.HubCards), but all
 state is disposable and registry input is fixture-owned. No scaler lifecycle,
 service enrollment, Board HTTP synchronization, live board, or model is exercised.
-These tests prove timeout/retry semantics, NOT that PR3945's stamp is safe or
-that connect-only latency/count tests establish production create fairness.
+These tests prove timeout/retry semantics; the separate convoy suite proves
+that a slow full scan cannot monopolize other real create commands.
 """
 from __future__ import annotations
 
@@ -218,43 +218,3 @@ def test_concurrent_real_cli_same_create_key_returns_one_committed_card(sandbox)
     rows = box.rows()
     assert len(rows) == 1 and rows[0]["id"] == ids[0]
     assert rows[0]["idempotency_key"] == key
-
-
-@pytest.mark.parametrize("kind", ["canary", "failure-report"])
-def test_actual_create_reuses_unchanged_verified_generation_within_budget(sandbox, kind):
-    """Old full CLI enters the blocked probe and times out; unchanged verified DB needs no second scan.
-
-    This is an injected scan-stall boundary on a quiescent board, not a large-DB
-    benchmark or an assertion that a continuously written board obtains cache hits.
-    """
-    box = sandbox
-    warm_argv = create_argv("canary", "worker-scaler:canary:i-warm")
-    # The first observer's real probe closes the last SQLite connection and
-    # checkpoints the warm create's WAL. That changes the main-file generation
-    # during verification, so production correctly refuses to publish its stamp.
-    # A second real observer verifies that now-quiescent generation. Do not fake
-    # a stamp, hold a reader open, or reset timestamps to manufacture a cache hit.
-    for i in range(3):  # create, checkpointing observer, verifying observer
-        p = box.start("cached", f"warm-{i}", warm_argv)
-        out, err = p.communicate(timeout=30)
-        assert p.returncode == 0, (out, err)
-        if i == 0:
-            warm_argv = ["kanban", "--board", "default", "show", json.loads(out)["id"], "--json"]
-    # Both observers must have exercised the real probe: the first cannot stamp
-    # a checkpoint-changing generation; the second establishes the cache premise.
-    assert (box.root / "warm-1.integrity-done").exists()
-    assert (box.root / "warm-2.integrity-done").exists()
-    argv = create_argv(kind, f"worker-scaler:{kind}:i-budget")
-    p = box.start("cached-gate", "budget", argv)
-    try:
-        out, err = p.communicate(timeout=10)
-    except subprocess.TimeoutExpired:
-        box.stop(p)
-        traces = {p.name: [json.loads(line) for line in p.read_text().splitlines()]
-                  for p in sorted(box.root.glob("*.generations"))}
-        pytest.fail("actual create repeated the full probe; generation/stamp observations:\n"
-                    + json.dumps(traces, indent=2))
-    assert p.returncode == 0, (out, err)
-    assert not (box.root / "budget.integrity-entered").exists()
-    assert json.loads(out)["id"] in {row["id"] for row in box.rows()}
-    assert len(box.rows()) == 2

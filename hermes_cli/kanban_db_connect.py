@@ -37,6 +37,7 @@ from typing import Optional
 
 _INITIALIZED_PATHS: set[str] = set()
 _INIT_LOCK = threading.RLock()
+_COLD_PATH_LOCKS: dict[str, threading.RLock] = {}
 _SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
 
@@ -52,14 +53,6 @@ _CONTENT_ADDRESSED_BACKUP = re.compile(r"\.corrupt\.[0-9a-f]{16}\.bak")
 # then proceed without the lock (in-process _INIT_LOCK + idempotent init backstop).
 _INIT_LOCK_TIMEOUT_SECONDS = 10.0
 _INIT_LOCK_POLL_SECONDS = 0.05
-# A clean full ``integrity_check`` is O(board size) (3.0 s at the hub's 700 MB) and ran once PER PROCESS, under the
-# cross-process init lock, so N concurrent ``hermes kanban`` CLIs cost N serial scans (9-20 s each, 2026-11-21).
-# A clean result is stamped only for an unchanged DB+WAL metadata generation. Ordinary writes,
-# replacements and recovery/checkpoint side effects invalidate it; continuous writers may get no hits.
-# This is not a media-integrity certificate: unchanged metadata can conceal silent storage corruption.
-# The six-hour TTL bounds reuse even without a visible write. A TTL of 0 always scans.
-_INTEGRITY_STAMP_SUFFIX = ".integrity-ok"
-_INTEGRITY_STAMP_TTL_SECONDS = 6 * 3600.0
 
 
 def _resolve_busy_timeout_ms() -> int:
@@ -678,80 +671,6 @@ def _probe_for_corruption(resolved: Path) -> tuple[Optional[list[str]], Optional
     return messages, f"integrity_check returned {messages[0] if messages else '<no row>'!r}"
 
 
-def _integrity_stamp_path(resolved: Path) -> Path:
-    return resolved.with_name(resolved.name + _INTEGRITY_STAMP_SUFFIX)
-
-
-def _integrity_generation(resolved: Path) -> Optional[dict]:
-    """Conservative change detector, not a content hash or a media-integrity guarantee.
-
-    WAL contains committed pages absent from the main file. SHM contains coordination,
-    not persistent pages. A rollback journal may need recovery: never cache that case.
-    ctime also invalidates ordinary in-place writes that restore the old mtime.
-    """
-    try:
-        try:
-            Path(str(resolved) + "-journal").stat()
-        except FileNotFoundError:
-            pass
-        else:
-            return None
-        generation = {}
-        for suffix in ("", "-wal"):
-            try:
-                st = Path(str(resolved) + suffix).stat()
-            except FileNotFoundError:
-                if not suffix:
-                    return None
-                generation[suffix] = None
-            else:
-                generation[suffix] = [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
-        return generation
-    except OSError:
-        return None
-
-
-def _integrity_stamp_fresh(resolved: Path) -> bool:
-    """Reuse only a clean check of an unchanged DB/WAL generation within the TTL."""
-    ttl = _INTEGRITY_STAMP_TTL_SECONDS
-    if ttl <= 0:
-        return False
-    try:
-        generation = _integrity_generation(resolved)
-        stamp = json.loads(_integrity_stamp_path(resolved).read_text(encoding="utf-8-sig"))
-        age = time.time() - float(stamp["verified_at"])
-        return (generation is not None and stamp["version"] == 2
-                and stamp["generation"] == generation and 0 <= age < ttl)
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
-
-
-def _invalidate_integrity_stamp(resolved: Path) -> None:
-    with contextlib.suppress(OSError):
-        _integrity_stamp_path(resolved).unlink(missing_ok=True)
-
-
-def _write_integrity_stamp(resolved: Path, generation: Optional[dict]) -> None:
-    """Publish only the generation sampled BEFORE the check, if unchanged after close.
-
-    Probe recovery/checkpoint, schema writes and active WAL writers can prevent reuse.
-    A racing write after this comparison invalidates the captured generation on use.
-    """
-    if _INTEGRITY_STAMP_TTL_SECONDS <= 0 or generation is None:
-        return
-    target = _integrity_stamp_path(resolved)
-    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-    try:
-        if generation != _integrity_generation(resolved):
-            return
-        tmp.write_text(json.dumps({"version": 2, "generation": generation,
-                                  "verified_at": time.time(), "pid": os.getpid()}), encoding="utf-8")
-        os.replace(tmp, target)
-    except OSError:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-
-
 def _guard_existing_db_is_healthy(path: Path) -> None:
     """Run ``PRAGMA integrity_check`` on an existing non-empty DB file.
 
@@ -762,9 +681,8 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
     the file + sidecars and raise :class:`KanbanDbCorruptError` so callers
     never recreate the schema on top of a damaged DB. ``OperationalError``
     (lock/busy) is NOT corruption and propagates raw (no spurious backup).
-    No-op for missing / zero-byte files, paths already proven healthy this
-    process, and files another process fully checked within the stamp TTL.
-    All writes are confined to the resolved path's parent.
+    No-op for missing / zero-byte files and paths already proven healthy this
+    process. All writes are confined to the resolved path's parent.
     """
     try:
         resolved = path.resolve()
@@ -772,13 +690,8 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
         return
     if _missing_or_empty(resolved) or str(resolved) in _INITIALIZED_PATHS:
         return
-    if _integrity_stamp_fresh(resolved):
-        return
-    generation = _integrity_generation(resolved)
-    _invalidate_integrity_stamp(resolved)
     messages, reason = _probe_for_corruption(resolved)
     if reason is None:
-        _write_integrity_stamp(resolved, generation)
         return
     # The probe ran in THIS process, whose view can be stale (deleted WAL/SHM
     # generation after a sibling's close). Only an independently confirmed failure
@@ -841,7 +754,6 @@ def repair_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) ->
         return RepairResult(status="missing", db_path=resolved)
 
     with _cross_process_init_lock(resolved):
-        _invalidate_integrity_stamp(resolved)
         messages, reason = _probe_for_corruption(resolved)
         if reason is not None:
             messages, reason = _confirm_corruption(resolved, messages, reason)
@@ -988,6 +900,29 @@ def _ensure_activity_revision(conn: sqlite3.Connection, resolved: str) -> None:
                          resolved, exc)
 
 
+def _db_file_identity(path: Path) -> Optional[tuple[int, int]]:
+    """Identity only: ordinary WAL commits do not invalidate a checked snapshot."""
+    try:
+        st = path.stat()
+        return (st.st_dev, st.st_ino) if st.st_size else None
+    except OSError:
+        return None
+
+
+def _healthy_preprobe_identity(path: Path) -> Optional[tuple[int, int]]:
+    """Full SQLite snapshot check without owning the schema/init turn.
+
+    No repair/quarantine here. Suspicion is rechecked by the existing guard under
+    the init lock; replacement is rechecked there too. No result survives this
+    connect call, so every fresh CLI still pays its own full integrity check.
+    """
+    identity = _db_file_identity(path)
+    if identity is None:
+        return None
+    _messages, reason = _probe_for_corruption(path.resolve())
+    return identity if reason is None else None
+
+
 def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None,
             check_same_thread: bool = True) -> sqlite3.Connection:
     """Open (and initialize if needed) the kanban DB. WAL is (re)enabled on
@@ -1051,16 +986,29 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None,
             path,
         )
 
+    with _INIT_LOCK:
+        cold_lock = _COLD_PATH_LOCKS.setdefault(resolved, threading.RLock())
+    with cold_lock:
+        # One probe per cold path in this process; unrelated processes can scan
+        # concurrently. Do not hold _INIT_LOCK while waiting for another process.
+        if resolved in _INITIALIZED_PATHS:
+            return connect(path, check_same_thread=check_same_thread)
+        return _connect_cold(path, check_same_thread=check_same_thread)
+
+
+def _connect_cold(path: Path, *, check_same_thread: bool) -> sqlite3.Connection:
+    # Imports/attestation and full scans must not convoy unrelated fresh CLIs
+    # behind the exclusive schema turn. SQLite protects the probe's snapshot;
+    # all application repair/quarantine and schema changes remain below the lock.
+    from hermes_state import preflight_db_writability
+    preflight_db_writability(path, db_label=f"kanban.db ({path.name})")
+    _validate_sqlite_header(path)
+    checked_identity = _healthy_preprobe_identity(path)
     with _cross_process_init_lock(path):
-        # Read-only file/sidecar preflight first, so a stray read-only kanban.db
-        # fails actionably instead of "attempt to write a readonly database".
-        # See #12508.
-        from hermes_state import preflight_db_writability
         preflight_db_writability(path, db_label=f"kanban.db ({path.name})")
-        # Cheap byte-level header check before any sqlite connection, then the
-        # full integrity probe (cached per path via _INITIALIZED_PATHS).
         _validate_sqlite_header(path)
-        _guard_existing_db_is_healthy(path)
+        if checked_identity is None or checked_identity != _db_file_identity(path):
+            _guard_existing_db_is_healthy(path)
         resolved = str(path.resolve())
 
         def _init_if_needed(conn: sqlite3.Connection) -> Optional[str]:
