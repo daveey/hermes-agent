@@ -28,6 +28,10 @@ def kanban_home(tmp_path, monkeypatch):
     (home / "config.yaml").write_text(
         "kanban:\n  dispatch_profiles: [worker-a]\n", encoding="utf-8",
     )
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    profile = home / "profiles" / "worker-a"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text(_managed_yaml())
     kb.init_db()
     return home
 
@@ -40,8 +44,8 @@ def test_reassign_inside_claim_window_does_not_spawn_unvetted_profile(
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="card", assignee="worker-a")
         if lane == "review":
-            with kb.write_txn(conn):
-                conn.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (tid,))
+            from tests.hermes_cli.test_kanban_model_tier import _review_source
+            _review_source(conn, tid)
         real_guard = kbd.check_respawn_guard
 
         def guard_then_reassign(c, task_id, **kw):

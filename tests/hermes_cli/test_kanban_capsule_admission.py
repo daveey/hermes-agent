@@ -43,9 +43,11 @@ def _repo(path: Path) -> Path:
 
 
 def _profile(home: Path, name: str, config: str) -> Path:
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+
     path = home / "profiles" / name
     path.mkdir(parents=True)
-    (path / "config.yaml").write_text(config, encoding="utf-8")
+    (path / "config.yaml").write_text(config + _managed_yaml(), encoding="utf-8")
     return path.resolve()
 
 
@@ -76,6 +78,7 @@ class Env:
         self.conn = kbc.connect(self.db)
         set_dispatch_owner(self.db, OWNER)
         self.calls: list[tuple[str, str]] = []
+        self.routes = {}
         self.spawn = self._record  # one callable object: dispatch binds callable identity
 
     @property
@@ -85,6 +88,7 @@ class Env:
 
     def _record(self, task, workspace, board=None):
         self.calls.append((task.id, workspace))
+        self.routes[task.id] = (task.model_override, task.provider_override)
 
     def register(self, **overrides):
         args = dict(board_path=self.db, dispatch_owner=OWNER,
@@ -346,6 +350,29 @@ def _untouched(env, tid, status="ready"):
     assert task.consecutive_failures == 0
     assert env.conn.execute("SELECT count(*) FROM task_runs WHERE task_id = ?", (tid,)).fetchone()[0] == 0
     assert not Path(task.workspace_path).exists()
+
+
+def _admitted_review(env):
+    """Source-linked downstream review keeps the capsule itself unclaimed/unmaterialized."""
+    from hermes_cli.kanban_review_model import implementer_models
+
+    source = kb.create_task(env.conn, title="Capsule implementation", assignee="localdev")
+    result = kbd.dispatch_once(env.conn, spawn_fn=env.spawn, dispatcher_id=OWNER, max_spawn=1)
+    assert [row[0] for row in result.spawned] == [source], result
+    source_task = kb.get_task(env.conn, source)
+    assert source_task is not None and source_task.current_run_id is not None
+    run = source_task.current_run_id
+    kb._append_event(env.conn, source, "worker_result",
+                     {"route_model": "claude-sonnet-5-5", "route_provider": "anthropic"}, run_id=run)
+    assert kb.complete_task(env.conn, source, summary="Fixture implementation complete")
+    handle = env.register()
+    with handle.create_scope():
+        tid = env.create(title="Independent capsule review", creator_task_id=source)
+    assert kb.request_review(env.conn, tid)
+    assert implementer_models(env.conn, kb.get_task(env.conn, tid)) == {"claude-sonnet-5-5"}
+    env.calls.clear()  # implementation is not part of the capsule claim under test
+    _untouched(env, tid, status="review")
+    return handle, tid
 
 
 def test_registered_dispatch_spawns_exact_worktree(env):

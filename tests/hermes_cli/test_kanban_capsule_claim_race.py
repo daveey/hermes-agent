@@ -18,7 +18,7 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_gateway_drain as drain
 from hermes_cli.kanban_capabilities import CapabilityMismatchError
-from tests.hermes_cli.test_kanban_capsule_admission import OWNER, _admitted, _untouched
+from tests.hermes_cli.test_kanban_capsule_admission import OWNER, _admitted, _admitted_review, _untouched
 from tests.hermes_cli import test_kanban_capsule_admission as _admission
 
 env = _admission.env  # shared fixture
@@ -90,8 +90,7 @@ def test_ready_row_mutated_between_admission_and_claim_is_refused(env, monkeypat
 @pytest.mark.parametrize("case", ["workspace", "assignee", "closed"])
 def test_review_row_mutated_between_admission_and_claim_is_refused(env, monkeypatch, case):
     monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: True)
-    handle, tid = _admitted(env)
-    assert kb.request_review(env.conn, tid) is True  # real transition, no reviewer reassignment
+    handle, tid = _admitted_review(env)
     mutate, code, escape = _mutations(env, handle, tid)[case]
     fired = _mutate_before_claim(monkeypatch, mutate)
     result = kbd.dispatch_once(env.conn, spawn_fn=env.spawn, dispatcher_id=OWNER)
@@ -111,12 +110,18 @@ def test_unmutated_row_still_claims_through_the_recheck(env, monkeypatch):
 
 def test_review_lane_dispatches_registered_capsule(env, monkeypatch):
     monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: True)
-    _, tid = _admitted(env)
-    assert kb.request_review(env.conn, tid) is True
+    _, tid = _admitted_review(env)
     result = kbd.dispatch_once(env.conn, spawn_fn=env.spawn, dispatcher_id=OWNER)
     assert [t for t, _a, _w in result.spawned] == [tid]
     assert result.capsule_refused == []
     assert kb.get_task(env.conn, tid).status == "running"
+    from hermes_cli.kanban_review_model import _routable_models, implementer_models
+    task = kb.get_task(env.conn, tid)
+    model, provider = env.routes[tid]
+    assert model in _routable_models(task.assignee)
+    assert model not in implementer_models(env.conn, task)
+    assert provider in {"anthropic", "openai-codex"}
+    assert (task.model_override, task.provider_override) == (None, None)
 
 
 def test_review_reassignment_cannot_carry_host_repo(env):
