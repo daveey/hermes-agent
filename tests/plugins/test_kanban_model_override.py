@@ -175,7 +175,11 @@ def test_spawn_resolves_claimed_task_policy(
 
     profile = kanban_home / "profiles" / "elias"
     profile.mkdir(parents=True)
-    (profile / "config.yaml").write_text("{}\n")  # identity marker: a bare dir is not a live profile
+    # Tier admission reads the executing profile, not the root-home registry.
+    (profile / "config.yaml").write_text((kanban_home / "config.yaml").read_text())
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    effective = _assignee_config("elias")
+    assert effective is not None and effective["model_routing"]["enabled"] is True
     workspace = tmp_path / "ws"
     workspace.mkdir()
     overrides = dict(overrides)
