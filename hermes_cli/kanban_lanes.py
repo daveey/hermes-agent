@@ -41,6 +41,7 @@ import math
 import os
 import re
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -353,7 +354,46 @@ def _classify(conn, pol: Policy, given, inherited, opts) -> tuple[str, str]:
         inherited = row["tenant"]
     if inherited:
         return inherited, "inherited"
+    # Creator/parent/rule precedence is rechecked under the write lock. Only the
+    # optional network result is prepared outside it, never the admission decision.
+    from hermes_cli.kanban_lane_classifier import cached
+    lane = opts.get("_lane_classification", cached(opts))
+    if lane is None and not pol.shadow and not conn.in_transaction:
+        try:
+            lane = _fallback_lane(pol, opts)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            lane = None
+    if not pol.shadow and isinstance(lane, str) and lane in pol.lanes:
+        return lane, "classified"
     return pol.default, "unclassified"
+
+
+def _fallback_lane(pol, opts):
+    from hermes_cli.kanban_lane_classifier import classify
+
+    return classify(pol, opts)
+
+
+def prepare_classification(conn, parents, initial_status, triage, tenant, opts):
+    """Optional semantic result, computed before creation enters its atomic write.
+
+    Nested graph writers that did not preflight deliberately keep the default;
+    they must never perform network I/O while holding their caller's write lock.
+    """
+    from hermes_cli.kanban_db_graph import initial_task_state
+    from hermes_cli.kanban_lane_classifier import cached
+
+    if cached(opts) is not None:
+        return cached(opts)
+    if conn.in_transaction:
+        return False
+    pol = safe_policy()
+    if pol is None or pol.shadow:
+        return False
+    opts = classification_options(conn, opts)
+    _, inherited = initial_task_state(conn, parents, initial_status, triage, tenant)
+    lane, source = _classify(conn, pol, tenant, inherited, opts)
+    return lane if source == "classified" else False
 
 
 def _gated(conn, pol: Policy, lane_name: str, opts: dict) -> bool:
@@ -387,6 +427,12 @@ def lane_tenant(conn, parents, initial_status, triage, tenant, opts) -> Optional
 
     ``create_task`` classifies on its resolved project repository, so resolve it the same way here.
     """
+    opts = classification_options(conn, opts)
+    return initial_state(conn, parents, initial_status, triage, tenant, opts)[1]
+
+
+def classification_options(conn, opts):
+    """Resolve repository provenance identically for preflight and creation."""
     from hermes_cli import kanban_db as kb
 
     opts = dict(opts)
@@ -405,7 +451,7 @@ def lane_tenant(conn, parents, initial_status, triage, tenant, opts) -> Optional
         opts["project_repo"] = repo
         if opts.get("workspace_path") is None and repo is None and kind in {"dir", "worktree"}:
             opts["workspace_path"] = board.get("default_workdir")
-    return initial_state(conn, parents, initial_status, triage, tenant, opts)[1]
+    return opts
 
 
 def initial_state(conn, parents, initial_status, triage, tenant, opts) -> tuple[str, Optional[str], Decision]:

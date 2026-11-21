@@ -1232,12 +1232,9 @@ def create_task(
                       workspace_path=workspace_path, project=project_id,
                       origin_intent=origin_intent, board=board)
     if origin_intent is not None:
-        # Capture all caller options before defaults mutate them, including future options.
-        creation_options = {key: value for key, value in locals().items()
-                            if key not in ("conn", "origin_intent", "creation_receipt")}
-        from hermes_cli.kanban_origin_creation import create_with_origin
+        from hermes_cli.kanban_lane_classifier import create_origin
 
-        return create_with_origin(conn, origin_intent, creation_options)
+        return create_origin(conn, origin_intent, locals())
 
     from hermes_cli.kanban_lanes import initial_state as lane_state
     from hermes_cli.kanban_creator_chats import initialize_ownership
@@ -1312,6 +1309,9 @@ def create_task(
         require_declaration=require_declaration, model=model_override, provider=provider_override)
     from hermes_cli.kanban_pin_provider import reject_spaced_pin
     reject_spaced_pin(model_override, provider_override)
+
+    from hermes_cli.kanban_lanes import prepare_classification
+    _lane_classification = prepare_classification(conn, parents, initial_status, triage, tenant, locals())
 
     # Retry once on the extremely unlikely id collision.
     for attempt in range(2):
