@@ -29,14 +29,21 @@ def _clear_cache() -> None:
     _pending.clear()
 
 
+def _fresh_head_matches(contract, assignee, head) -> bool:
+    # A pool thread must not mutate the dispatch thread's PR-state dictionaries.
+    from hermes_cli.kanban_pr_acceptance import _api, _assignee_profile_home
+    repo, number = contract.removeprefix("https://github.com/").rsplit("/pull/", 1)
+    data = _api(f"repos/{repo}/pulls/{number}", profile_home=_assignee_profile_home(assignee))
+    return data.get("state") == "open" and data.get("head", {}).get("sha") == head
+
+
 def _collect(contract, assignee, head) -> bool:
-    from hermes_cli import kanban_db_dispatch_pr_state as prs
     from hermes_cli.kanban_pr_acceptance import collect_acceptance
     receipt = collect_acceptance(contract, contract, assignee=assignee)
     green = (receipt.get("ok") is True and receipt.get("pr_state") == "OPEN"
              and receipt.get("pr_url") == contract and receipt.get("head_sha") == head
              and bool(receipt.get("checks")))
-    return bool(green and prs.pr_head(contract, max_age=0) == head)
+    return bool(green and _fresh_head_matches(contract, assignee, head))
 
 
 def green(key, contract, assignee, head) -> bool:
@@ -53,13 +60,13 @@ def _green(key, contract, assignee, head) -> bool:
     # Reap finished jobs even if their original task never asks again.
     for old, (started, future) in list(_pending.items()):
         if future.done():
+            _pending.pop(old)  # A failed observer must not poison subsequent dispatch ticks.
             try:
                 passed = future.result() is True and now - started <= OBSERVATION_BUDGET_SECONDS
-            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            except Exception:  # health: allow BLE001 -- pool observation failures mean unknown CI; exception text may contain credentials
                 # Failed observation remains fail-closed; never retain exception text.
                 passed = False
             _cache[old] = (now + TTL_SECONDS, passed)
-            _pending.pop(old)
     while len(_cache) > MAX_ENTRIES:
         _cache.popitem(last=False)
     hit = _cache.get(key)

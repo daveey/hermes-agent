@@ -30,6 +30,7 @@ def green(monkeypatch):
     monkeypatch.setattr(checks, "_pool", ImmediatePool())
     monkeypatch.setattr(prs, "pr_state", lambda url: "OPEN")
     monkeypatch.setattr(prs, "pr_head", lambda url, **kw: SHA)
+    monkeypatch.setattr(checks, "_fresh_head_matches", lambda url, a, head: prs.pr_head(url) == head)
     receipt = {"ok": True, "pr_state": "OPEN", "head_sha": SHA,
                "pr_url": URL, "checks": [{"name": "required", "conclusion": "success"}]}
     calls = []

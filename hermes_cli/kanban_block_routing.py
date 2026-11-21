@@ -165,7 +165,9 @@ def guard_hold_cap_seconds(reason: str) -> int | None:
     """Keep active PR publication waits below the fairness limit, with a notice first."""
     from hermes_cli import kanban_db_dispatch as dispatch
     if reason == "active_pr":
-        return 2100  # 35 min: existing 30-min notice precedes home-owned escalation
+        # Operators may shorten, but never extend, the 35-minute fairness bound.
+        return min(2100, dispatch._env_seconds(
+            "HERMES_KANBAN_GUARD_HOLD_CAP_LONG_SECONDS", dispatch.DEFAULT_GUARD_HOLD_CAP_LONG_SECONDS))
     if reason in dispatch._GUARD_HOLD_EXEMPT_REASONS:
         return None
     if reason in dispatch._GUARD_HOLD_SHORT_CAP_REASONS:
