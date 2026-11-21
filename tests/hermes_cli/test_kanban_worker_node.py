@@ -305,7 +305,12 @@ def test_worker_runs_a_hub_card_and_the_hub_never_requeues_or_counts_it(gws, svc
 def test_default_placement_cards_and_pinned_cards_follow_the_rules(gws, svc):
     hub, worker = gws
     wt = _hub_card(hub, title="worktree", workspace_kind="worktree", workspace_path="/tmp/x")
-    mac = _hub_card(hub, title="mac", runs_on=["macos"])
+    # Label-only cards carried solely by foreign pinned-only machines are now
+    # refused at creation; retain the pickup exclusion proof with a legacy row.
+    mac = _hub_card(hub, title="mac", runs_on=["linux"])
+    hub.conn.execute("UPDATE tasks SET runs_on = ? WHERE id = ?", (json.dumps(["macos"]), mac))
+    hub.conn.commit()
+    hub.round()
     pinned_hub = _hub_card(hub, title="hub only", runs_on=["machine:hub"])
     worker.round()
     worker.tick()

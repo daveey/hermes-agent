@@ -63,6 +63,9 @@ def test_label_only_pinned_only_machines_carry_is_impossible():
     assert roc.impossible(["macos"], MACHINES, HUB)
     assert kc.refusals(["macos"], MACHINES, HUB) == {"macbook": "pinned_only"}
     assert kc.claimants(["macos"], MACHINES, HUB) == []
+    two_macs = {**MACHINES, "mini": {**MACHINES["macbook"], "pickup": None}}
+    assert roc.impossible(["macos"], two_macs, HUB)
+    assert kc.refusals(["macos"], two_macs, HUB) == {"macbook": "pinned_only", "mini": "pinned_only"}
 
 
 def test_the_machines_own_cards_and_carried_labels_stay_claimable():
