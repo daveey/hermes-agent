@@ -376,7 +376,7 @@ def _route_from_base(conn, task, base, *, lane, cfg):
         return base
     # An expired episode no longer judges the route: another card's (or the live pool's) wall still does.
     # Legacy provider-wide walls may only change ordinary default routing.
-    if base[2] == 'default' and not task.provider_override:
+    if base[2] == 'default' and str(task.provider_override or 'auto').lower() == 'auto':
         from hermes_cli.kanban_provider_walls import retier_for_walls
         from copy import copy
         probe = copy(task)
@@ -434,9 +434,18 @@ def _class_alternate_off_wall(conn, task, base):
     model, provider = base[0], pw._norm(base[1])
     if pw.requires_model(task):
         return None
-    if not model or not provider or provider == 'auto':
+    if not model:
         return None
     now = time.time()
+    from agent.model_routing import is_class_selector
+    if is_class_selector(model) and provider in {'', 'auto'}:
+        from hermes_cli.kanban_class_walls import class_wall_routes
+        routes, known = class_wall_routes(task, model, now=now)
+        if not known or not routes:
+            return None
+        return routes[0]['model'], routes[0]['provider'], sorted(known)[0]
+    if not provider or provider == 'auto':
+        return None
     until = pw.active_walls(now=now).get(provider) or pw.live_quota_wall(provider, model)
     if not until:
         return None

@@ -207,6 +207,14 @@ def test_shared_admission_preview_and_owner_route(board, monkeypatch, entry):
         if expected_reroute:
             claim = kb.claim_review_task if lane == 'review' else kb.claim_task
             task = claim(conn, tid, claimer=kb._claimer_id())
+        if lane == 'review':
+            from hermes_cli.kanban_review_model import ReviewModelUnavailable
+            with pytest.raises(ReviewModelUnavailable, match='author|implementer'):
+                tier.apply_model_tier(conn, task, lane=lane, cfg=cfg)
+            seen = []
+            dispatch.dispatch_once(conn, spawn_fn=lambda row, ws: seen.append(row.id))
+            assert seen == []
+            return
         tier.apply_model_tier(conn, task, lane=lane, cfg=cfg)
         assert tier.effective_route(task)[:2] == preview[:2]
         if expected_reroute:
@@ -285,11 +293,10 @@ def test_new_unpinned_card_created_after_a_known_wall_never_routes_to_it(board, 
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.id, task.provider_override)))
         # Neutral admission stays a provider-unknown class (the worker allocates): the dispatcher never
         # concretely pins the walled provider, and its receipt names no provider at all.
-        assert seen == [(new, 'auto')]
+        assert seen == [(new, 'anthropic')]
         route = kb._json_dict(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='run_route' "
                                            "ORDER BY id DESC LIMIT 1", (new,)).fetchone()[0])
-        assert route['provider'] is None and route['model'] == 'class:standard'
-        assert 'openai-codex' not in str(route)
+        assert route['provider'] == 'anthropic' and route['model'] == 'claude-sonnet-5-5'
 
 
 @pytest.mark.parametrize('reroute', [False, True])

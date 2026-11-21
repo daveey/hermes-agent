@@ -218,8 +218,8 @@ def test_expired_episode_still_honours_another_cards_wall(board, monkeypatch, al
         clock[0] = int(episode(conn, tid)['until']) + 1
         assert dispatch.check_respawn_guard(conn, tid) is None
         seen = []
-        dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
-        assert seen == [('claude-opus-5-5', 'anthropic')]
+        result = dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
+        assert seen == [('claude-opus-5-5', 'anthropic')], result
 
 
 def test_repin_onto_a_provider_walled_elsewhere_waits_and_keeps_the_pin(board, monkeypatch):
@@ -259,7 +259,15 @@ def test_review_card_waits_when_its_strong_provider_is_walled_elsewhere(board, m
         free = dispatch.check_respawn_guard(conn, tid, lane='review')
         monkeypatch.setattr(walls, 'active_walls', lambda **_k: {'anthropic': float(clock[0] + 3600)})
         walled = dispatch.check_respawn_guard(conn, tid, lane='review')
-    assert free is None  # control: anthropic free, the review is admitted on it
+        from hermes_cli.kanban_review_model import ReviewModelUnavailable
+        with pytest.raises(ReviewModelUnavailable, match='author|implementer'):
+            tier.apply_model_tier(conn, kb.get_task(conn, tid), lane='review')
+        seen = []
+        dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append(task.id))
+        assert seen == []
+    # This fixture has only a review-lane failure, not authenticated implementation evidence.
+    # Even a free provider must not turn unknown authorship into an eligible reviewer.
+    assert free == 'subscription_quota_reset'
     assert walled == 'subscription_quota_reset'
 
 
@@ -308,16 +316,16 @@ def test_fresh_card_stays_a_provider_neutral_class_beside_a_known_wall(board, mo
         conn.commit()
         # The legacy require_model marker is only text now: it is never a concrete route.
         assert tier.resolve_dispatch_tier(conn, kb.get_task(conn, marked), lane='ready')[:2] == (
-            'class:standard', 'auto')
+            'claude-opus-5-5', 'anthropic')
         conn.execute("DELETE FROM tasks WHERE id=?", (marked,))
         conn.commit()
         tid = kb.create_task(conn, title='fresh default card', assignee='a')
         seen = []
         dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
-        assert seen == [('class:standard', 'auto')]
+        assert seen == [('claude-opus-5-5', 'anthropic')]
         receipt = kb._json_dict(conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='run_route' "
                                              "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()[0])
-        assert receipt['provider'] is None and 'openai-codex' not in str(receipt)
+        assert receipt['provider'] == 'anthropic' and receipt['model'] == 'claude-opus-5-5'
 
 
 def test_class_alternate_ignores_require_model_named_in_prose(board, monkeypatch, all_assignees_spawnable):
@@ -347,5 +355,7 @@ def test_fresh_card_class_alternate_never_lands_on_another_wall(board, monkeypat
     with kbc.connect() as conn:
         kb.create_task(conn, title='both walled', assignee='a')
         seen = []
-        dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
-        assert seen == [('class:standard', 'auto')]
+        result = dispatch.dispatch_once(conn, spawn_fn=lambda task, ws: seen.append((task.model_override, task.provider_override)))
+        assert seen == []
+        assert result.clock_held
+        assert conn.execute('SELECT COUNT(*) FROM task_runs WHERE task_id=?', (result.pinned_quota_held[0][0],)).fetchone()[0] == 0

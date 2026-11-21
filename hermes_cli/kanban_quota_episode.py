@@ -188,9 +188,15 @@ def _strong_fallback(task, base, walls, cfg, now):
     task = routing_view(task)
     if task.model_override or task.provider_override or base[2] != 'default' or not base[0]:
         return None
+    from hermes_cli.kanban_class_walls import class_wall_routes
+    config = load_tier_config() if cfg is None else cfg
+    strong = str(config.get('strong_model') or '')
+    if strong.startswith('class:'):
+        routes, _known = class_wall_routes(task, strong, now=now, extra_walls=walls)
+        return (routes[0]['model'], routes[0]['provider']) if routes else None
     probe = copy(task)
     probe.model_override, probe.provider_override = base[:2]
-    moved = retier_for_walls(probe, load_tier_config() if cfg is None else cfg, now=now, extra_walls=walls)
+    moved = retier_for_walls(probe, config, now=now, extra_walls=walls)
     return moved[:2] if moved else None
 
 
