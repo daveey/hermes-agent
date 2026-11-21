@@ -537,6 +537,16 @@ def test_start_waits_out_a_stale_update_marker_once(home):
     assert ro.aod.UPDATE_WAIT_S <= waited < 2 * ro.aod.UPDATE_WAIT_S  # one wait, not start()'s plus roll()'s
 
 
+def test_start_lets_roll_recheck_a_marker_that_had_cleared(home):
+    host = FakeHost(running={9148}, commits={9148: "a" * 40})
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    calls = []
+    roller.roll = lambda reason, **kw: calls.append(kw) or True  # type: ignore[method-assign]
+    assert roller.start() is True
+    assert calls == [{"marker_waited": False}]  # an update that starts during the probes is still waited for
+
+
 def test_start_does_not_demote_a_healthy_active_backend(home):
     host = FakeHost(running={9148}, commits={9148: "a" * 40})
     ro.write_active(9148)
