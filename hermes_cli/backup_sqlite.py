@@ -386,10 +386,15 @@ def _clone_snapshot(source: Path, staged: Path) -> dict:
             source_fd = os.open(source, os.O_RDONLY)  # sqlite-sidecar-open: ok — opened before and closed after the lock connection
         lock = sqlite3.connect(str(source), timeout=_CLONE_LOCK_WAIT_SECONDS, isolation_level=None,
                                check_same_thread=False)
+        # As the last connection to close, SQLite would checkpoint the whole WAL into state.db: a
+        # write the snapshot has no business making (Python 3.12+ can turn it off).
+        if hasattr(lock, "setconfig") and hasattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"):
+            lock.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
         lock.execute("BEGIN IMMEDIATE")
         locked_at = time.monotonic()
         _clone_file(source, staged, source_fd)
         if wal_mode and Path(f"{source}-wal").exists():
+            # sqlite-sidecar-open: ok — SQLite never locks the -wal itself (WAL locks live in -shm and state.db)
             _clone_file(Path(f"{source}-wal"), Path(f"{staged}-wal"))
         lock_ms = (time.monotonic() - locked_at) * 1000
     finally:

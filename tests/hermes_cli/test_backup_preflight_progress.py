@@ -108,7 +108,7 @@ def test_reporter_throttles_to_two_lines_a_second_and_always_writes_the_final_li
     now = [100.0]
     out = io.StringIO()
     reporter = _ProgressReporter(out, clock=lambda: now[0])
-    for done in range(0, 100):
+    for done in range(100):
         reporter.progress(done, 1000, method="copy")
         now[0] += 0.004  # 100 updates in 0.4 s
     assert len(out.getvalue().splitlines()) == 1
@@ -316,3 +316,23 @@ def test_the_clone_path_can_be_turned_off(tmp_path, monkeypatch):
     monkeypatch.setattr(backup_sqlite, "_clone_file", must_not_clone)
     monkeypatch.setenv("HERMES_PREFLIGHT_CLONE", "0")
     assert backup_sqlite.preflight_state_db(home, clone=True)["method"] == "copy"
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.skipif(not hasattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"), reason="needs Python 3.12+")
+def test_the_clone_never_writes_the_source_database(clone_base):
+    """The lock connection may be the last one on state.db; closing it must not fold the WAL in."""
+    home = _home(clone_base, 20)
+    db = home / "state.db"
+    writer = _wal_writer(db)
+    writer.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+    writer.execute("INSERT INTO messages VALUES ('only in the WAL')")
+    writer.close()
+    assert Path(f"{db}-wal").stat().st_size > 0
+    before = db.read_bytes()
+
+    result, _events_seen, _elapsed = _run(home)
+
+    assert result["method"] == "clone"
+    assert db.read_bytes() == before
+    assert _snapshot_rows(result["path"])[-1] == ("only in the WAL",)
