@@ -66,6 +66,25 @@ function backupLogMessage(backup: UpdateBackupProgress): string {
   return `Backing up state.db (${backup.method}): ${gb(backup.doneBytes)} of ${gb(backup.totalBytes)} GB`
 }
 
+/**
+ * The update log's line for one progress event. Backup progress arrives twice
+ * a second for minutes and the in-memory log keeps 300 lines, so its ticks are
+ * left out: the log keeps a backup's start, its end and its check.
+ */
+export function updateProgressLogLine(merged: {
+  stage: string
+  message?: string
+  error?: string | null
+  percent?: number | null
+  backup?: UpdateBackupProgress
+}): string {
+  if (merged.stage === 'backup' && merged.backup?.phase === 'copy' && merged.percent !== 0 && merged.percent !== 100) {
+    return ''
+  }
+
+  return `[updates] ${merged.stage}: ${merged.message || merged.error || ''}`
+}
+
 /** Forward the pre-flight snapshot's reports to the update overlay as stage `backup`. */
 export function backupProgressEmitter(
   deps: Pick<CheckoutStrategyDeps, 'emitUpdateProgress'>

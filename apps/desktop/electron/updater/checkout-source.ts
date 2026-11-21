@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { promisify } from 'node:util'
 
@@ -30,6 +30,21 @@ export interface SourceUpdateProbe {
 const execute: typeof execFile.__promisify__ = promisify(execFile)
 
 /** The two channels a source checkout can select from Settings. */
+/** The Desktop's update-branch config (`desktop-update.json`): the chosen branch, else the default. */
+export function readDesktopUpdateConfig(
+  configPath: string,
+  defaultBranch: string
+): { branch: string; branchExplicit: boolean } {
+  try {
+    const parsed: { branch?: unknown } | null = JSON.parse(readFileSync(configPath, 'utf8'))
+    const branch: string = typeof parsed?.branch === 'string' ? parsed.branch.trim() : ''
+
+    return { branch: branch || defaultBranch, branchExplicit: branch.length > 0 }
+  } catch {
+    return { branch: defaultBranch, branchExplicit: false }
+  }
+}
+
 export function sourceChannelName(name: unknown): 'main' | 'stable' {
   if (name !== 'stable' && name !== 'main') {
     throw new Error('The update channel must be stable or main.')

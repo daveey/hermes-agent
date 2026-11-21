@@ -672,8 +672,13 @@ import { ChannelResolver, type ChannelTarget } from './updater/channel'
 import { inspectRunningChannelApp } from './updater/channel-native'
 import { ChannelStrategy } from './updater/channel-strategy'
 import { verifyPreparedChannelInstaller } from './updater/channel-windows-host'
-import { type CheckoutStrategy, createCheckoutStrategy } from './updater/checkout'
-import { readSourceUpdate, sourceChannelName, type SourceUpdate } from './updater/checkout-source'
+import { type CheckoutStrategy, createCheckoutStrategy, updateProgressLogLine } from './updater/checkout'
+import {
+  readDesktopUpdateConfig,
+  readSourceUpdate,
+  sourceChannelName,
+  type SourceUpdate
+} from './updater/checkout-source'
 import { ExternalStrategy } from './updater/external'
 import { readUpdatesFeedBaseFromConfig, resolveFeedBaseUrl } from './updater/feed-config'
 import { createChannelMacStrategy, createMacStrategy } from './updater/mac-client'
@@ -685,7 +690,7 @@ import {
   type RelaunchRegistration
 } from './updater/relaunch'
 import { startUpdateRelaunchWaiter } from './updater/relaunch-waiter'
-import { preflightStateDb, type StateDbBackupProgress } from './updater/state-db-preflight'
+import { preflightStateDb } from './updater/state-db-preflight'
 import { createStoreStrategy } from './updater/store-client'
 import { filenameFromUrl } from './url-filename'
 import { isExternalVenvHolder, isHermesOwnedVenvDaemon } from './venv-holder-select'
@@ -3319,17 +3324,6 @@ function resolveGhBinary() {
 
 // ─── Self-update (git-pull against the running backend's hermes root) ──────
 
-function readDesktopUpdateConfig(): { branch: string; branchExplicit: boolean } {
-  try {
-    const parsed: { branch?: unknown } | null = JSON.parse(fs.readFileSync(DESKTOP_UPDATE_CONFIG_PATH, 'utf8'))
-    const branch: string = typeof parsed?.branch === 'string' ? parsed.branch.trim() : ''
-
-    return { branch: branch || DEFAULT_UPDATE_BRANCH, branchExplicit: branch.length > 0 }
-  } catch {
-    return { branch: DEFAULT_UPDATE_BRANCH, branchExplicit: false }
-  }
-}
-
 // Atomic file write: temp + rename (atomic on all platforms). Prevents
 // partial writes on crash/power loss that corrupt JSON config files.
 function writeFileAtomic(targetPath, data, encoding?: BufferEncoding) {
@@ -3427,15 +3421,7 @@ function resolveUpdateRoot() {
 
 function emitUpdateProgress(payload) {
   const merged = { stage: 'idle', message: '', percent: null, error: null, ...payload, at: Date.now() }
-
-  // Backup progress arrives twice a second for minutes; the log keeps its start, end and check.
-  const backupTick =
-    merged.stage === 'backup' && merged.backup?.phase === 'copy' && merged.percent !== 100 && merged.percent !== 0
-
-  if (!backupTick) {
-    rememberLog(`[updates] ${merged.stage}: ${merged.message || merged.error || ''}`)
-  }
-
+  rememberLog(updateProgressLogLine(merged))
   desktopMetrics.noteUpdateProgress(merged.stage)
 
   for (const window of BrowserWindow.getAllWindows()) {
@@ -3656,11 +3642,7 @@ function resolveCheckoutUpdateStrategy(): CheckoutStrategy {
     startHermes,
     stopBackendsForUpdate,
     repairMacUpdaterHelper: updater => repairMacUpdaterHelper(updater, { isMac: IS_MAC, log: rememberLog }),
-    preflightStateDb: async (
-      home: string,
-      log: (message: string) => void,
-      onProgress?: (progress: StateDbBackupProgress) => void
-    ): Promise<void> => {
+    preflightStateDb: async (home, log, onProgress): Promise<void> => {
       const root: string = resolveUpdateRoot()
 
       // `updates.pre_update_backup: off` is the CLI's opt-out for the whole
@@ -4453,7 +4435,7 @@ async function handOffWindowsBootstrapRecovery(reason) {
   }
 
   const updateRoot = resolveUpdateRoot()
-  const { branch: configuredBranch } = readDesktopUpdateConfig()
+  const { branch: configuredBranch } = readDesktopUpdateConfig(DESKTOP_UPDATE_CONFIG_PATH, DEFAULT_UPDATE_BRANCH)
 
   // Recovery can run without Python. Keep the chosen branch; do not guess a replacement.
   const branch: string = configuredBranch || DEFAULT_UPDATE_BRANCH
@@ -16820,7 +16802,7 @@ ipcMain.handle(
   async (_event: Electron.IpcMainInvokeEvent, opts?: { force?: boolean }): Promise<UpdaterStatusWire> =>
     checkUpdates({ force: Boolean(opts?.force) }).catch((error: Error): UpdaterStatusWire => ({
       supported: true,
-      branch: readDesktopUpdateConfig().branch,
+      branch: readDesktopUpdateConfig(DESKTOP_UPDATE_CONFIG_PATH, DEFAULT_UPDATE_BRANCH).branch,
       error: 'check-failed',
       message: error?.message || String(error),
       fetchedAt: Date.now()
