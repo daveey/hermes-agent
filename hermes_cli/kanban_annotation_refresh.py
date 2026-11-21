@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import threading
+import time
 from typing import Any, Callable
 
 _log = logging.getLogger("hermes_cli.kanban_session_activity")
@@ -25,12 +26,30 @@ def record(scope: tuple[str, ...], parts: tuple, at: float) -> None:
     _read_at[scope] = (parts, at)
 
 
+class ObservedParts(tuple):
+    """An immutable host read carrying its own date, independent of a concurrently publishing scope cache."""
+
+    observed_at: float
+
+    def __new__(cls, parts: tuple, observed_at: float):
+        value = super().__new__(cls, parts)
+        value.observed_at = observed_at
+        return value
+
+
 def read_at(parts: Any) -> float | None:
     """Wall time this process read ``parts`` (None for a loaded copy or an unknown tuple)."""
+    if isinstance(parts, ObservedParts):
+        return parts.observed_at
     for read, at in list(_read_at.values()):
         if read is parts:
             return at
     return None
+
+
+def unavailable(parts: tuple | None, display: bool, observed_at: float | None) -> bool:
+    """Match the Desktop's persisted observation horizon; expiry is unknown, never empty/done."""
+    return parts is None or (display and observed_at is not None and time.time() - observed_at > 180.0)
 
 
 def reset() -> None:

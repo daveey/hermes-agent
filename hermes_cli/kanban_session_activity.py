@@ -1748,6 +1748,11 @@ def _refresh_annotation_locked(scope: tuple[str, ...], read_at: float | None = N
 
 @_la.accounted("annotation.poll")
 def _annotation_snapshot(*, display: bool = False) -> tuple | None:
+    parts = _annotation_snapshot_owned(display=display)
+    return _host_copy.peek_display(_origin_scope(), parts) if display else parts
+
+
+def _annotation_snapshot_owned(*, display: bool = False) -> tuple | None:
     """One in-flight annotation read, shared by overlapping polls.
 
     Returns the last good parts when a refresh is already running, so those polls
@@ -1864,10 +1869,10 @@ def annotate_kanban_activity(rows: list[dict[str, Any]], *, display: bool = Fals
             copy_at = _annotation_copy.observed_at(parts)  # [daveey] a previous process's copy keeps its own date
             if copy_at is None:
                 copy_at = annotation_read_at(parts)  # a previous read served while the next one runs keeps its date
-            if parts is None:
+            if _bounded.unavailable(parts, display, copy_at):
                 # [daveey] Not a read error (those raise with their own traceback): one line, no synthetic
                 # traceback for self-heal to chase.
-                _log.warning("kanban annotation unavailable (no snapshot); rows marked kanban_unknown")
+                _log.warning("kanban annotation unavailable (no current snapshot); rows marked kanban_unknown")
                 return _mark_kanban_unknown(rows)
             (active, blocked, unseen, remote_stale, waiting, parked, held, stalled, remote_keys, extra,
              attention) = parts[:11]

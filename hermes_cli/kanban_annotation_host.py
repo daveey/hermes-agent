@@ -342,14 +342,8 @@ def _display_identity(scope: tuple[str, ...]) -> tuple[str, bool]:
     return hashlib.sha256(json.dumps(body, separators=(",", ":"), sort_keys=True).encode()).hexdigest(), complete
 
 
-def adopt_display(scope: tuple[str, ...]) -> tuple | None:
-    """Display-only bounded adoption; cannot certify strict task/closeout inputs.
-
-    Caller holds the annotation lock. Reject pending own writes, and verify code
-    identity in the same disk read as the parts, without probing changing inputs.
-    """
-    from hermes_cli import kanban_session_activity as _ksa
-
+def _display_read(scope: tuple[str, ...]) -> tuple | None:
+    """Read and validate an immutable display copy, without running sources or changing the annotation cache."""
     if not enabled():
         return None
     try:
@@ -373,12 +367,38 @@ def adopt_display(scope: tuple[str, ...]) -> tuple | None:
     except Exception:  # health: allow BLE001 -- unknown code/copy fails closed to the normal read
         log.debug("kanban annotation display copy not adopted", exc_info=True)
         return None
+    return parts, copy[1], complete
+
+
+def adopt_display(scope: tuple[str, ...]) -> tuple | None:
+    """Caller holds the annotation lock; adopt a validated copy and rerun undeclared sources."""
+    from hermes_cli import kanban_session_activity as _ksa
+
+    read = _display_read(scope)
+    if read is None:
+        return None
+    parts, observed_at, complete = read
     if not complete:
         extra = {sid: frozenset(ids) for sid, ids in _ksa._extra_waiting().items()}
         parts = parts[:9] + (extra,) + parts[10:]
-    _ksa._bounded.record(scope, parts, copy[1])
+    _ksa._bounded.record(scope, parts, observed_at)
     _ksa._last_annotation[scope] = parts
     return parts
+
+
+def peek_display(scope: tuple[str, ...], previous: tuple | None) -> tuple | None:
+    """Prefer a newer host copy even during a slow refresh, without writing its cache or running sources."""
+    from hermes_cli import kanban_annotation_refresh as bounded
+
+    read = _display_read(scope)
+    if read is None or not read[2]:
+        return previous
+    parts, observed_at, _complete = read
+    previous_at = bounded.read_at(previous)
+    if previous_at is not None and previous_at >= observed_at:
+        return previous
+    return bounded.ObservedParts(parts, observed_at)
+
 
 
 def adopt(scope: tuple[str, ...]) -> tuple | None:
