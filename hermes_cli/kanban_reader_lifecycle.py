@@ -4,7 +4,7 @@ import os
 import sqlite3
 import threading
 
-from hermes_cli.kanban_generation import BoardLifecycleBusy, DeletedWalGenerationError, lifecycle_access, retry_open
+from hermes_cli.kanban_generation import DeletedWalGenerationError, lifecycle_access, retry_open
 
 
 def try_borrow(lock, budget) -> bool:
@@ -16,7 +16,7 @@ def try_borrow(lock, budget) -> bool:
 def borrow_lock(lock, budget):
     """Python coordination is part of the reader budget, not an unbounded prelude."""
     if not try_borrow(lock, budget):
-        raise BoardLifecycleBusy("database is locked: cached reader is borrowed")
+        raise sqlite3.OperationalError("database is locked: cached reader is borrowed")
     try:
         yield
     finally:
