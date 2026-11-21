@@ -424,6 +424,8 @@ def _task_detail(conn: sqlite3.Connection, task: kanban_db.Task, run_state_type:
     _attach_diagnostics(task_d, _compute_task_diagnostics(conn, task_ids=[task_id]).get(task_id) or [])
     from hermes_cli import kanban_wake_check as kwc
     task_d["wake_check"] = kwc.get_state(conn, task_id)  # condition wake probe [daveey]
+    from hermes_cli import kanban_wait_episode
+    task_d["wait_episode"] = kanban_wait_episode.read(conn, task_id) if task.status == "scheduled" else None
     from hermes_cli.kanban_artifact_receipt import latest_receipt
     return {
         "task": task_d,
