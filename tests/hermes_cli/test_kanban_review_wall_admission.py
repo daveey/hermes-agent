@@ -16,11 +16,22 @@ START = 1_800_000_000
 RESET = START + 7200
 
 
+@pytest.fixture
+def review_host_registry(board):
+    """Wall probes need a usable assignee policy before review-owned admission."""
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+
+    profile = board / 'profiles' / 'a'
+    profile.mkdir(parents=True)
+    (profile / 'config.yaml').write_text(_managed_yaml())
+    return profile
+
+
 @pytest.mark.parametrize("route_level", ["deep", "standard"])
 @pytest.mark.parametrize("source", ["wall", "hold", "live", "overlap"])
 @pytest.mark.parametrize("lane", ["review", "ready"])
 def test_walled_review_not_claimed_and_unwalled_host_claims(
-        board, monkeypatch, all_assignees_spawnable, source, lane, route_level):
+        board, review_host_registry, monkeypatch, all_assignees_spawnable, source, lane, route_level):
     clock = [START]
     monkeypatch.setattr(kb.time, "time", lambda: clock[0])
     monkeypatch.setattr(tier, "load_tier_config", lambda: {"enabled": True})
@@ -202,7 +213,8 @@ def test_one_host_deferral_stays_one_event_across_cycles(board, monkeypatch):
                             (tid, admission.EVENT)).fetchone()[0] == 1
 
 
-def test_review_wall_hold_records_a_dispatch_skip(board, monkeypatch, all_assignees_spawnable):
+def test_review_wall_hold_records_a_dispatch_skip(
+        board, review_host_registry, monkeypatch, all_assignees_spawnable):
     from hermes_cli import kanban_dispatch_skip as skips
     from hermes_cli import kanban_queue_position as qp
 
