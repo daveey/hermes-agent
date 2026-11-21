@@ -18,10 +18,12 @@ from hermes_cli import kanban_llm_pacing as lp
 from hermes_cli import kanban_llm_pacing_dispatch as pd
 from hermes_cli import kanban_worker_node as wn
 from tests.hermes_cli import kanban_pacing_state as pacing_state
+from tests.hermes_cli import test_kanban_pickup_paced_window as pickup
 from tests.hermes_cli import test_kanban_worker_node as support
 
 svc = support.svc
-gws = support.gws
+base_gws = pickup.base_gws
+gws = pickup.gws
 AGED_S = 90 * 60  # the aged codex queue: ready 90 min, like the 21 cards ahead of #3207's owner at 16:55Z
 TURN_LEFT_S = 70 * 60
 
@@ -55,8 +57,11 @@ def pools(monkeypatch):
 
 
 def _codex(conn, title, *, aged):
-    tid = kb.create_task(conn, title=title, assignee="default", priority=1000, runs_on=["linux"],
-                         model_override="gpt-5.5", provider_override="openai-codex")
+    tid = kb.create_task(conn, title=title, assignee="paced", priority=1000, runs_on=["linux"])
+    task = kb.get_task(conn, tid)
+    assert task is not None
+    assert (task.model_override, task.provider_override) == (None, None)
+    assert pd.candidate_providers(conn, task, "ready") == ["openai-codex"]
     if aged:
         old = int(time.time()) - AGED_S
         conn.execute("UPDATE tasks SET created_at = ? WHERE id = ?", (old, tid))

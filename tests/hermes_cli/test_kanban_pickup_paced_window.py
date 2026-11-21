@@ -14,8 +14,38 @@ from tests.hermes_cli import kanban_pacing_state as pacing_state
 from tests.hermes_cli import test_kanban_worker_node as support
 
 svc = support.svc
-gws = support.gws
+base_gws = support.gws
 WINDOW = 9
+
+
+def configure_pool_profile(gateway, name, provider):
+    """Real isolated execution profiles; pacing observes eligible routes, not card pins."""
+    import json
+    from hermes_cli.config_effective import load_profile_config_effective
+    from hermes_cli.kanban_model_assignment import _assignee_config
+
+    gateway.enter()
+    config = load_profile_config_effective(gateway.home / "config.yaml", fail_closed=True)
+    policy = config["model_routing"]
+    policy["routes"] = {
+        level: [route for route in routes if route["provider"] == provider]
+        for level, routes in policy["routes"].items()
+        if any(route["provider"] == provider for route in routes)
+    }
+    profile = gateway.home / "profiles" / name
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text(json.dumps(config))
+    effective = _assignee_config(name)
+    assert effective is not None
+    assert effective["model_routing"] == policy
+
+
+@pytest.fixture
+def gws(base_gws):
+    for gateway in base_gws:
+        configure_pool_profile(gateway, "paced", "openai-codex")
+        configure_pool_profile(gateway, "open", "anthropic")
+    return base_gws
 
 
 @pytest.fixture
@@ -46,16 +76,24 @@ def imports(monkeypatch):
 
 def _codex(hub, n):
     hub.enter()
-    ids = [kb.create_task(hub.conn, title=f"codex {i}", assignee="default", priority=100 - i, runs_on=["linux"],
-                          model_override="gpt-5.5", provider_override="openai-codex") for i in range(n)]
+    ids = [kb.create_task(hub.conn, title=f"codex {i}", assignee="paced", priority=100 - i, runs_on=["linux"])
+           for i in range(n)]
+    for tid in ids:
+        task = kb.get_task(hub.conn, tid)
+        assert task is not None
+        assert (task.model_override, task.provider_override) == (None, None)
+        assert pd.candidate_providers(hub.conn, task, "ready") == ["openai-codex"]
     hub.round()
     return ids
 
 
 def _anthropic(hub, priority=0):
     hub.enter()
-    tid = kb.create_task(hub.conn, title="anthropic", assignee="default", priority=priority, runs_on=["linux"],
-                         model_override="claude-sonnet-5-5", provider_override="anthropic")
+    tid = kb.create_task(hub.conn, title="anthropic", assignee="open", priority=priority, runs_on=["linux"])
+    task = kb.get_task(hub.conn, tid)
+    assert task is not None
+    assert (task.model_override, task.provider_override) == (None, None)
+    assert pd.candidate_providers(hub.conn, task, "ready") == ["anthropic"]
     hub.round()
     return tid
 

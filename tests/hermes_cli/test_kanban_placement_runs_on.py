@@ -43,7 +43,7 @@ def test_mandatory_model_pin_is_refused_not_silently_relaxed(mac):
     mac["result"]["help"] = helpers.NEW_HELP
     out = json.loads(kt._handle_create({"title": "Regenerate the plugin index", "placement": "hub",
                                         "model": "example-model", "pin_mandatory": True}))
-    assert out.get("code") == "placement_unavailable" and "pin_mandatory" in out["error"], out
+    assert "Kanban is model-neutral" in out["error"], out
     assert mac["calls"] == [] and helpers._local_count() == 0
 
 

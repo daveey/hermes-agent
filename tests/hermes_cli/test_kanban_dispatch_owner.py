@@ -101,12 +101,23 @@ def test_allowed_tick_really_claims_and_spawns(board_db, monkeypatch, kind):
     monkeypatch.setattr(kbd, "reap_terminal_workers", lambda conn: [])
     tid = kb.create_task(conn, title="Dispatchable card", assignee="default")
     spawn = Mock(return_value=None)
+    preview = kbd.dispatch_once(conn, dispatcher_id="owner" if kind == "owned" else None,
+                                spawn_fn=spawn, reconcile_orphans=False, dry_run=True)
+    assert preview.skipped_ineligible == [(tid, "model_unroutable:routing_disabled")]
+    assert not preview.spawned and not kb.list_runs(conn, tid)
+    spawn.assert_not_called()
+    from hermes_cli.kanban_model_assignment import _assignee_config
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    home = Path.home() / "home"
+    (home / "config.yaml").write_text(_managed_yaml())
+    assert _assignee_config("default")["model_routing"]["enabled"]
     result = kbd.dispatch_once(conn, dispatcher_id="owner" if kind == "owned" else None,
                                spawn_fn=spawn, reconcile_orphans=False)
     assert result.skipped_owned is False
     assert result.ownership_error is None
     assert result.dispatch_owner == ("owner" if kind == "owned" else None)
-    assert [row[0] for row in result.spawned] == [tid]
+    assert not result.respawn_guarded, result.respawn_guarded
+    assert [row[0] for row in result.spawned] == [tid], result
     assert spawn.call_count == 1
     task = kb.get_task(conn, tid)
     assert task is not None
