@@ -652,8 +652,9 @@ async def _spawn_registered_worker(authority, ref, row, policy=None):
         log_path = worker_log_path(authority.profile_id)
         from gateway.session_kanban_scope import placing_spawn
         from gateway.capsule_contract import worker_command
+        command = await asyncio.to_thread(worker_command, policy)
         process = await acquire_process(placing_spawn(lambda *a, **kw: subprocess.Popen(*a, **kw), policy),
-            worker_command(policy),
+            command,
             cwd=cwd, stdin=subprocess.PIPE, env=env, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL if log_path is None else subprocess.PIPE, **WORKER_POPEN)
     except asyncio.CancelledError:

@@ -14,7 +14,19 @@ async def test_registered_worker_launch_shape(monkeypatch, required):
     authority = SimpleNamespace(profile_id='fixture', _managed_spawning={})
     monkeypatch.setattr(managed, '_mark_spawning', lambda *a: authority._managed_spawning)
     monkeypatch.setattr(managed, '_worker_env', lambda a: {'HERMES_HOME': '/fixture/profile'})
-    monkeypatch.setattr('gateway.session_kanban_capsule.check_capsule_transport', lambda policy: required)
+    import asyncio
+    import threading
+    calls = []
+    def preflight(policy):
+        calls.append(threading.current_thread() is threading.main_thread())
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            pytest.fail('capsule preflight ran on the event loop')
+        return required
+    monkeypatch.setattr('gateway.session_kanban_capsule.check_capsule_transport', preflight)
     monkeypatch.setattr('gateway.session_managed_worker_log.worker_log_path', lambda profile: None)
     seen = []
     class StopBeforeSpawn(Exception):
@@ -27,6 +39,7 @@ async def test_registered_worker_launch_shape(monkeypatch, required):
         await managed._spawn_registered_worker(authority, SimpleNamespace(session_id='s'),
                                                {'generation': 1}, object())
     [(argv, kwargs)] = seen
+    assert calls == [False]
     root = Path(managed.__file__).resolve().parents[1]
     if required:
         from hermes_cli._launch_template import render

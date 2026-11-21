@@ -1,4 +1,5 @@
 """Strict, dynamically checked availability of the cross-revision capsule ABI."""
+import threading
 from pathlib import Path
 
 from hermes_cli.kanban_capsule_owner import CONTRACT_CAPABILITY
@@ -32,6 +33,39 @@ def _verified_sha(*, worker=False):
         return None
 
 
+# Advisory only: one in-flight verifier, no cached positives. A slow filesystem
+# must withdraw v2 rather than consume the control client's entire timeout.
+_IDENTIFY_VERIFY_BUDGET_S = 0.5
+_advisory_lock = threading.Lock()
+
+
+def _advisory_sha():
+    if not _advisory_lock.acquire(blocking=False):
+        return None
+    done = threading.Event()
+    result: list[str | None] = [None]
+
+    def verify():
+        try:
+            result[0] = _verified_sha()
+        except Exception:
+            # This advisory must never take legacy identify down with it.
+            import logging
+            logging.getLogger(__name__).exception('Capsule identify verification failed')
+            result[0] = None
+        finally:
+            _advisory_lock.release()
+            done.set()
+
+    try:
+        from agent.memory_provider import spawn_context_thread
+        spawn_context_thread(verify, name='capsule-identify', daemon=True).start()
+    except RuntimeError:
+        _advisory_lock.release()
+        return None
+    return result[0] if done.wait(_IDENTIFY_VERIFY_BUDGET_S) else None
+
+
 def available_capabilities(capabilities, *, advertised_sha=None):
     """Withdraw v2 on unknown/dirty/skewed code; never manufacture an advertisement.
 
@@ -40,7 +74,7 @@ def available_capabilities(capabilities, *, advertised_sha=None):
     """
     result = list(capabilities)
     if CONTRACT_CAPABILITY in result:
-        sha = _verified_sha()
+        sha = _advisory_sha()
         if sha is None or advertised_sha != sha:
             result = [cap for cap in result if cap != CONTRACT_CAPABILITY]
     return result

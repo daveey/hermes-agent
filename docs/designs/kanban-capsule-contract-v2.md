@@ -7,8 +7,11 @@ permission grant, a full loaded-code digest or a sandbox against same-uid attack
 ## Admission and launch
 
 The submitter still requires a known full commit identity and transport-v1. A
-same-revision owner retains the legacy path. Different revisions additionally
-require v2. No caller chooses a child core or interpreter.
+same-revision owner retains the legacy **submitter admission** path. Different
+revisions additionally require v2. Every capsule-required launch, same-revision
+included, must pass strict owner/child identity checks; dirty/untracked core or
+any unfiltered ledger unknown (including external plugins) refuses that launch.
+No caller chooses a child core or interpreter.
 
 The ready descriptor names the implemented ABI. Every control-socket identify
 filters v2 against the bootstrap-installed integrity ledger and strict disk
@@ -29,9 +32,12 @@ checkpoint recovery, before construction, before ready and before turns. An
 installed FD with lost expectation fails closed. Startup failures revoke binding
 and close session/RPC resources; consumed rendezvous cannot be reused.
 
-These checks are uncached. A measured clean disk scan alone is not a bound on
-whole identify latency or ledger inventory. Unsupported bootstrap routes do not
-perform the strict capsule boot scan.
+These checks are uncached. Advisory identify waits at most 0.5 seconds for a
+single-flight verifier; overrun or an already-running check withdraws v2 only,
+with no reuse of late positive results. Launch and child verification remain
+strict, synchronous and uncached. A measured clean disk scan alone is not a
+bound on ledger inventory. Unsupported bootstrap routes do not perform the
+strict capsule boot scan.
 
 ## Frozen ABI and evidence limits
 
