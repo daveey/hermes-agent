@@ -86,8 +86,10 @@ async def test_status_and_health_answer_while_slow_reads_fill_the_shared_pool_an
             assert health.status_code == 200
             report = health.json()["thread_lanes"]
             assert len(in_other) == SHARED_POOL  # the other routes kept the shared pool full throughout
-            assert report["sessions"]["in_use"] == lanes.DEFAULT_SIZES["sessions"]
-            assert report["sessions"]["waiting"] > 0
+            assert report["kanban"]["in_use"] == lanes.DEFAULT_SIZES["kanban"]
+            assert report["kanban"]["waiting"] > 0
+            # The slow kanban reads never took the session lists' threads.
+            assert report["sessions"]["in_use"] == 0
             # The slow reads never touched the control lane's budget.
             assert report["control"]["in_use"] == 0 and report["control"]["rejected"] == 0
     finally:

@@ -208,8 +208,9 @@ def _session_kanban_tasks_read(ids: str):
 
 @list_router.get("/api/session-kanban-tasks")
 async def get_session_kanban_tasks(request: Request, ids: str = Query(..., max_length=4000)):
-    # Reads every board's linked cards: on the sessions lane, so a slow board never holds the shared pool. [daveey]
-    return await run_in_lane("sessions", _session_kanban_tasks_read, ids, request=request)
+    # Reads every board's linked cards: the kanban lane, so a slow board holds neither the shared pool nor the
+    # threads of the session lists. [daveey]
+    return await run_in_lane("kanban", _session_kanban_tasks_read, ids, request=request)
 
 
 # ``le=100`` on limit: an unbounded limit lets one request drag every session

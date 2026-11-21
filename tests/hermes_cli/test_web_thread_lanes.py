@@ -18,7 +18,7 @@ TIMEOUT = 5.0
 
 @pytest.fixture(autouse=True)
 def _lanes():
-    lanes.configure({"control": 2, "sessions": 1, "feed": 1, "probe": 1}, queue_deadline_s=5.0)
+    lanes.configure({"control": 2, "sessions": 1, "kanban": 1, "feed": 1, "probe": 1}, queue_deadline_s=5.0)
     yield
     lanes.configure(dict(lanes.DEFAULT_SIZES), lanes.QUEUE_DEADLINE_S)
 
@@ -55,7 +55,7 @@ async def test_a_full_lane_makes_the_next_caller_wait_then_runs_it():
 
 @pytest.mark.asyncio
 async def test_a_waiter_past_the_deadline_gets_503_and_never_runs():
-    lanes.configure({"control": 1, "sessions": 1, "feed": 1, "probe": 1}, queue_deadline_s=0.2)
+    lanes.configure({"control": 1, "sessions": 1, "kanban": 1, "feed": 1, "probe": 1}, queue_deadline_s=0.2)
     work, started, release = _blocker()
     holder = asyncio.create_task(lanes.run_in_lane("sessions", work))
     await _until(started.is_set)
@@ -181,3 +181,92 @@ def test_an_unconfigured_process_uses_the_defaults_without_reading_config(monkey
 async def test_unknown_lane_is_a_programming_error():
     with pytest.raises(KeyError):
         await lanes.run_in_lane("nope", lambda: None)
+
+
+def _borrowed(lane):
+    gate, _runner = lanes._lane(lane).limiters()
+    return gate.statistics().borrowed_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turns", range(6))
+async def test_a_cancel_right_after_the_hand_off_never_leaks_the_slot(turns):
+    # Review of #3936: a cancellation landing just after the gate handed the slot to a waiter left it held
+    # forever (the probe lane filled after two /api/status timeouts).
+    work, started, release = _blocker()
+    holder = asyncio.create_task(lanes.run_in_lane("sessions", work))
+    await _until(started.is_set)
+    waiter = asyncio.create_task(lanes.run_in_lane("sessions", lambda: "late"))
+    await _until(lambda: lanes.stats()["sessions"]["waiting"] == 1)
+    release.set()
+    await holder  # its slot is now handed to the waiter
+    for _ in range(turns):
+        await asyncio.sleep(0)
+    waiter.cancel()
+    try:
+        await waiter
+    except asyncio.CancelledError:
+        pass
+    await _until(lambda: lanes.stats()["sessions"]["in_use"] == 0)
+    assert _borrowed("sessions") == 0
+    assert await asyncio.wait_for(lanes.run_in_lane("sessions", lambda: "next"), 2) == "next"
+
+
+class _GoneWhen:
+    """Disconnected once ``gone()`` is true; answers without yielding, as uvicorn does once it knows."""
+
+    def __init__(self, gone):
+        self.gone = gone
+
+    async def is_disconnected(self):
+        return self.gone()
+
+
+@pytest.mark.asyncio
+async def test_a_disconnect_seen_with_the_hand_off_never_leaks_the_slot(monkeypatch):
+    # Review of #3936: when the slot was handed over in the same loop turn the disconnect poll woke, the poll
+    # overwrote the acquisition with 'disconnected' and the slot was never released. The client reads as gone
+    # from the hand-off on (the gate has dequeued the waiter); repeated so both orderings come up.
+    monkeypatch.setattr(lanes, "DISCONNECT_POLL_S", 0)
+    gate, _runner = lanes._lane("sessions").limiters()
+    for _ in range(20):
+        work, started, release = _blocker()
+        holder = asyncio.create_task(lanes.run_in_lane("sessions", work))
+        await _until(started.is_set)
+        handed = _GoneWhen(lambda: gate.statistics().tasks_waiting == 0)
+        waiter = asyncio.create_task(lanes.run_in_lane("sessions", lambda: "ran", request=handed))
+        await _until(lambda: gate.statistics().tasks_waiting == 1)
+        release.set()
+        await holder
+        try:
+            await asyncio.wait_for(waiter, 2)
+        except lanes.LaneBusy as busy:
+            assert busy.detail["reason"] == "disconnected"
+        await _until(lambda: lanes.stats()["sessions"]["in_use"] == 0)
+        assert _borrowed("sessions") == 0
+
+
+@pytest.mark.asyncio
+async def test_a_caller_cancelled_while_its_thread_runs_keeps_the_slot_until_the_thread_returns():
+    # Review of #3936: /api/status's own 0.75 s timeout cancelled the caller and freed the slot while the
+    # state.db read kept running, so the probe lane did not bound its threads.
+    work, started, release = _blocker()
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(lanes.run_in_lane("probe", work), 0.2)
+    assert started.is_set()
+    assert lanes.stats()["probe"]["in_use"] == 1 and _borrowed("probe") == 1
+    with pytest.raises(lanes.LaneBusy):  # the lane is still full: its one thread is still busy
+        await lanes.run_in_lane("probe", lambda: None, deadline=0.1)
+    release.set()
+    await _until(lambda: lanes.stats()["probe"]["in_use"] == 0)
+    assert _borrowed("probe") == 0 and lanes.stats()["probe"]["served"] == 1
+    assert await asyncio.wait_for(lanes.run_in_lane("probe", lambda: "free"), 2) == "free"
+
+
+@pytest.mark.asyncio
+async def test_an_exception_from_the_work_releases_the_slot():
+    def boom():
+        raise ValueError("read failed")
+    with pytest.raises(ValueError):
+        await lanes.run_in_lane("sessions", boom)
+    assert lanes.stats()["sessions"]["in_use"] == 0 and _borrowed("sessions") == 0
