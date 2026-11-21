@@ -61,8 +61,14 @@ def test_known_author_actual_dispatch_still_obeys_candidate_walls(board, monkeyp
     conn, _ = board
     tid = helpers._hand_off_for_review(conn, {})
     if lane == 'ready':
-        conn.execute("UPDATE tasks SET status='ready', skills=? WHERE id=?", ('["sdlc-review"]', tid))
-        conn.commit()
+        source = tid
+        # Existing dispatcher-created source receipt, not a declaration or pin.
+        assert kb.complete_task(conn, source, summary='Fixture implementation complete')
+        tid = kb.create_task(conn, title='Independent review of Browser build',
+                             assignee='worker', creator_task_id=source,
+                             skills=['sdlc-review'])
+        from hermes_cli.kanban_review_model import implementer_models
+        assert implementer_models(conn, kb.get_task(conn, tid)) == {'claude-sonnet-5-5'}
     monkeypatch.setattr(walls, 'active_walls', lambda **kw: {})
     monkeypatch.setattr(walls, 'live_quota_wall', lambda *a: None)
     monkeypatch.setattr(pacing, 'held_pools', lambda *a: {'anthropic': 9999999999, 'openai-codex': 9999999999} if blocked else {})

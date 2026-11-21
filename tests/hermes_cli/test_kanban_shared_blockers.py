@@ -384,10 +384,10 @@ def test_pinned_wall_preview_matches_dispatch(kanban_home, monkeypatch, tmp_path
         assert task is not None
         tier.apply_model_tier(conn, task, lane="ready", cfg=cfg)
         assert preview[:2] == tier.effective_route(task)[:2]
-        # The raw legacy pin row is ignored: the next route is the neutral class, provider unknown, so either
-        # provider-scoped wall conservatively holds it; the author row is retained.
-        assert preview == ("class:standard", None, "ready")
-        assert guard == ksb.GUARD_REASON
+        # Known Codex wall chooses an eligible Anthropic peer dynamically; the
+        # provider-scoped blocker follows that actual route, not the retired pin.
+        assert preview == ("claude-sonnet-5-5", "anthropic", "ready")
+        assert guard == (ksb.GUARD_REASON if blocker_provider == 'anthropic' else None)
         row = kb.get_task(conn, tid)
         assert (row.model_override, row.provider_override) == ("gpt-6-astra", "openai-codex")
 
@@ -453,7 +453,11 @@ def test_scheduled_review_uses_resume_lane(kanban_home, scoped_routing):
         assert kb.claim_review_task(conn, tid)
         assert continue_task(conn, tid, checkpoint="provider unavailable", resume_after_seconds=600,
                              metadata={"blocker_id": BID, "blocker_provider": "anthropic"})["ok"]
-        assert ksb.task_route(conn, tid) == ("class:deep", None, "review")
+        # Resume lane survives even though unknown authors cannot be allocated a reviewer.
+        assert ksb.task_route(conn, tid) == (None, None, "review")
+        from hermes_cli import kanban_review_model as review
+        with pytest.raises(review.ReviewModelUnavailable, match='author is unknown'):
+            review.resolve_review_model(conn, kb.get_task(conn, tid), {})
         assert ksb.shared_blocker_guard(conn, tid, interval=1800) == ksb.GUARD_REASON
 
 
@@ -584,7 +588,8 @@ def _write_home_cfg(home: Path, *, profile_model: str, profile_provider: str = "
         lines.append(f"  provider: {profile_provider}")
     if kanban:
         lines += ["kanban:", *(f"  {line}" for line in kanban.splitlines())]
-    home.joinpath("config.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    home.joinpath("config.yaml").write_text("\n".join(lines) + "\n" + _managed_yaml(), encoding="utf-8")
 
 
 def _park_behind(conn, tid: str, provider: Optional[str] = "anthropic") -> None:
@@ -803,6 +808,9 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(ksb, "probe_interval_seconds", lambda cfg=None: 1800)
+    from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
+    # Lifecycle dispatch uses the real model-neutral class eligibility boundary.
+    (home / 'config.yaml').write_text(_managed_yaml())
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
     return home

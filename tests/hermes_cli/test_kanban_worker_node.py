@@ -40,8 +40,10 @@ class Gateway:
         self.home, self.name, self.svc, self.mp = root / name / ".hermes", name, svc, monkeypatch
         self.home.mkdir(parents=True)
         self.enter()
+        from tests.hermes_cli.test_kanban_managed_pin_policy import _managed_yaml
         (self.home / "config.yaml").write_text(
-            "kanban:\n  sync:\n    enabled: true\n" + (f"    pickup: {pickup}\n" if pickup else ""))
+            "kanban:\n  sync:\n    enabled: true\n" + (f"    pickup: {pickup}\n" if pickup else "")
+            + _managed_yaml())
         self.conn = kbc.connect(self.home / "kanban.db")
         ksc.ensure_identity(self.conn, BOARD, name)
         sync.set_mode(self.conn, "primary")
