@@ -109,29 +109,43 @@ def test_non_installed_checkout_leaves_the_schema_and_refuses_writes(home):
     assert _columns(db) == before
 
 
-def test_non_installed_checkout_opens_a_current_board_normally(home):
+@pytest.mark.parametrize("missing_counter", [False, True])
+def test_non_installed_checkout_opens_a_current_board_normally(home, missing_counter):
+    from hermes_cli import kanban_notify_revision as notify_rev
+
     db = home / "kanban.db"
     kbc.connect(db).close()  # created by "the installed core" (no install yet)
+    if missing_counter:
+        with sqlite3.connect(db) as raw:
+            for name in notify_rev.TRIGGERS:
+                raw.execute(f'DROP TRIGGER "{name}"')
+            raw.execute(f'DROP TABLE "{notify_rev.TABLE}"')
+    before = _triggers(db)
     kbc._INITIALIZED_PATHS.discard(str(db.resolve()))
     _foreign_install(home)
     conn = kbc.connect(db)
     try:
         tid = kb.create_task(conn, title="compatible board", assignee="default")
         assert conn.execute("SELECT id FROM tasks WHERE id = ?", (tid,)).fetchone()
+        assert not owner.missing_schema(conn)
+        if missing_counter:
+            assert notify_rev.read_revision(conn, ()) is None
     finally:
         conn.close()
+    assert _triggers(db) == before
 
 
 def test_reference_schema_matches_what_connect_creates(home):
     """The "at par" reference is every table/column connect()'s schema pass creates: no step is left out.
-    Only ``kanban_activity_revision`` and its ``kanban_task_change`` are outside it: display-only, their absence
+    The display-only activity/change and notification revision tables are outside it: their absence
     leaves readers on a stat fallback or a full read."""
     from hermes_cli.kanban_activity_revision import CHANGE_TABLE, REVISION_TABLE
+    from hermes_cli.kanban_notify_revision import TABLE as NOTIFY_REVISION_TABLE
     db = home / "kanban.db"
     kbc.connect(db).close()
     raw = sqlite3.connect(db)
     try:
-        created = {t: c for t, c in owner._tables(raw).items() if t not in (REVISION_TABLE, CHANGE_TABLE)}
+        created = {t: c for t, c in owner._tables(raw).items() if t not in (REVISION_TABLE, CHANGE_TABLE, NOTIFY_REVISION_TABLE)}
         assert created == owner._reference_schema()
     finally:
         raw.close()
@@ -324,11 +338,12 @@ def _synced_board(home: Path) -> Path:
 def test_reference_schema_with_sync_matches_what_a_synced_connect_creates(home, monkeypatch):
     """With sync live, the at-par reference also holds every sync table/column connect() installs."""
     from hermes_cli.kanban_activity_revision import CHANGE_TABLE, REVISION_TABLE
+    from hermes_cli.kanban_notify_revision import TABLE as NOTIFY_REVISION_TABLE
     monkeypatch.setattr(owner, "_REFERENCE", {})
     db = _synced_board(home)
     raw = sqlite3.connect(db)
     try:
-        created = {t: c for t, c in owner._tables(raw).items() if t not in (REVISION_TABLE, CHANGE_TABLE)}
+        created = {t: c for t, c in owner._tables(raw).items() if t not in (REVISION_TABLE, CHANGE_TABLE, NOTIFY_REVISION_TABLE)}
         assert "kanban_sync_state" in created
         assert created == owner._reference_schema(sync=True)
     finally:
