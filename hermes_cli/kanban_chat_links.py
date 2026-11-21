@@ -584,6 +584,7 @@ def _read_replica_links(conn: sqlite3.Connection, gateway: str, profile: str) ->
     rows = [dict(r) for r in conn.execute(
         "SELECT l.task_id AS id, t.id AS task_row, t.title, t.status, t.assignee, t.created_at, t.started_at, "
         f"t.priority, t.block_kind, t.human_request, t.created_on, {placement_select(conn, 't')}, "
+        f"{placement_select(conn, 't', ('ready_since',))}, "
         f"l.chat_session, l.chat_profile, l.kind {optional_select(conn)} "
         "FROM task_chat_links l LEFT JOIN tasks t ON t.id = l.task_id "
         "WHERE l.chat_gateway = ? AND l.chat_profile = ? AND l.released = 0 "
@@ -836,6 +837,7 @@ def replica_cards(session_ids: Optional[Iterable[str]], gateway: str, statuses: 
                 "title": r["title"], "status": (DONE_PENDING_RELEASE if not missing and status == "done" else UNKNOWN)
                 if unknown else status, "assignee": r["assignee"],
                 "created_at": r["created_at"], "started_at": r["started_at"], "priority": r["priority"],
+                "ready_since": r.get("ready_since"),  # ms, when the Board last saw it become ready
                 "block_kind": r["block_kind"], "human_request": _decoded_request(r["human_request"]), "id": tid,
                 "board": board,
                 "gateway": owner, "key": key, "session": r["chat_session"], "session_id": r["chat_session"],

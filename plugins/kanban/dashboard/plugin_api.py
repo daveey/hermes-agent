@@ -409,6 +409,14 @@ def get_task(
     raise HTTPException(status_code=404, detail=f"task {task_id} not found")
 
 
+def _ready_since(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    """When the card last became ready (ms, the Board's synced column); None on a board without it."""
+    if "ready_since" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+        return None
+    row = conn.execute("SELECT ready_since FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    return row[0] if row else None
+
+
 def _task_detail(conn: sqlite3.Connection, task: kanban_db.Task, run_state_type: Optional[str],
                  run_state_name: Optional[str]) -> dict[str, Any]:
     """The GET /tasks/:id payload for ``task`` read from ``conn`` (the live file or the board replica)."""
@@ -417,6 +425,7 @@ def _task_detail(conn: sqlite3.Connection, task: kanban_db.Task, run_state_type:
     task_d = _task_dict(
         task, latest_summary=kanban_db.latest_summary(conn, task_id),
         current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id))
+    task_d["ready_since"] = _ready_since(conn, task_id)
     links = _links_for(conn, task_id)
     child_summaries = kanban_db.latest_summaries(conn, links["children"])
     children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))

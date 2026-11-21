@@ -1552,7 +1552,7 @@ def blocked_task_counts() -> dict[str, int]:
 # ``review`` (also waiting on a human). [daveey]
 LISTED_STATUSES = tuple(dict.fromkeys(ACTIVE_STATUSES + BLOCKED_STATUSES + ("review",)))
 _TASK_FIELDS = ("id", "title", "status", "assignee", "session_id", "created_at", "started_at", "block_kind", "human_request",
-                "current_run_id", "last_heartbeat_at")
+                "current_run_id", "last_heartbeat_at", "ready_since")
 
 
 def _board_slug(path: Path) -> str:
