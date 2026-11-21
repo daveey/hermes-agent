@@ -371,34 +371,85 @@ def test_supervisor_rolls_on_a_dead_backend_and_on_confirmed_commit_drift(home):
     assert rolls and "not running" in rolls[0]
 
 
+def _scripted_health(host, answers):
+    """host.answers follows *answers*, one entry per supervise poll (each poll asks /api/health once)."""
+    seq = list(answers)
+    real_get = host.get
+
+    def get(port, path, timeout):
+        if path == "/api/health" and seq:
+            host.answers = seq.pop(0)
+        return real_get(port, path, timeout)
+    return get
+
+
 def test_supervisor_rolls_an_alive_backend_only_after_it_stops_answering_for_several_polls(home):
-    # Live 2026-11-21: the active backend stayed `active` but its loop was saturated by turns for ~2 h; every
-    # Desktop call through the proxy timed out at 30 s and drift() saw no reason to roll (no health body).
+    # Live 2026-11-21: the active backend stayed `active` but its threadpool was starved for ~2 h; every Desktop
+    # call through the proxy timed out at 30 s and drift() saw no reason to roll (no health body).
     host = FakeHost(running={9148}, commits={9148: "c" * 40})
     ro.write_active(9148)
     roller = make_roller(home, host)
     rolls = []
     roller.roll = lambda reason: rolls.append(reason) or True  # type: ignore[method-assign]
-    host.answers = False
-    assert "does not answer" in roller.drift()
-    roller.supervise(max_polls=ro.UNRESPONSIVE_CONFIRMATIONS - 1)
-    assert rolls == []  # a short stall (a few slow polls) is not a reason to roll
-    host.answers = True
-    roller.supervise(max_polls=1)
-    host.answers = False
-    roller.supervise(max_polls=ro.UNRESPONSIVE_CONFIRMATIONS - 1)
-    assert rolls == []  # one good answer resets the count
+    miss = [False] * (ro.UNRESPONSIVE_CONFIRMATIONS - 1)
+    roller.get = _scripted_health(host, [*miss, True, *miss])
+    roller.supervise(max_polls=2 * len(miss) + 1)  # one run: the count lives in supervise()
+    assert rolls == []  # short stalls, and one good answer between them resets the count
 
 
-def test_supervisor_rolls_after_consecutive_unanswered_health_polls(home):
+def test_supervisor_rolls_after_consecutive_unanswered_health_polls_and_demotes_the_old_backend(home):
     host = FakeHost(running={9148}, commits={9148: "c" * 40}, answers=False)
     ro.write_active(9148)
     roller = make_roller(home, host)
     rolls = []
-    roller.roll = lambda reason: rolls.append(reason) or True  # type: ignore[method-assign]
+
+    def roll(reason):
+        rolls.append(reason)
+        ro.write_active(9149, home=home)
+        return True
+    roller.roll = roll  # type: ignore[method-assign]
     roller.supervise(max_polls=ro.UNRESPONSIVE_CONFIRMATIONS)
     assert len(rolls) == 1 and "does not answer" in rolls[0]
-    assert ro.UNRESPONSIVE_CONFIRMATIONS > ro.DRIFT_CONFIRMATIONS
+    assert set(roller._load_demoted()) == {9148}
+
+
+def test_commit_drift_polls_do_not_complete_an_unresponsive_count(home):
+    host = FakeHost(running={9148}, commits={9148: "c" * 40})
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    rolls = []
+    roller.roll = lambda reason: rolls.append(reason) or True  # type: ignore[method-assign]
+    reasons = iter(["active backend :9148 runs aaaaaaaaaa, checkout is at cccccccccc"]
+                   + [f"active backend :9148 {ro.UNRESPONSIVE_REASON}"] * (ro.UNRESPONSIVE_CONFIRMATIONS - 1))
+    roller.drift = lambda: next(reasons)  # type: ignore[method-assign]
+    roller.supervise(max_polls=ro.UNRESPONSIVE_CONFIRMATIONS)
+    assert rolls == []
+
+
+def test_pick_port_never_adopts_a_demoted_backend(home):
+    host = FakeHost(running={9148, 9149}, commits={9148: "c" * 40, 9149: "c" * 40})
+    ro.write_active(9148)
+    roller = make_roller(home, host)
+    assert roller.pick_port(9148, "c" * 40) == (9149, True)  # control: an answering backend on HEAD is adopted
+    roller.demote(9149)
+    assert roller.pick_port(9148, "c" * 40) == (9150, False)
+
+
+def test_reap_stops_a_demoted_backend_after_the_short_hard_limit(home):
+    host = FakeHost(running={9148, 9149}, commits={9148: "c" * 40, 9149: "c" * 40})
+    ro.write_active(9149)
+    wall = [1000.0]
+    roller = make_roller(home, host)
+    roller.wall = lambda: wall[0]  # type: ignore[method-assign]
+    roller._retire_fenced = lambda port: False  # type: ignore[method-assign]  # busy: the fence refuses
+    roller.demote(9148)
+    assert roller.reap_superseded() == []
+    wall[0] += ro.DEMOTED_HARD_S
+    assert roller.reap_superseded() == [9148]
+    assert ("stop", "--no-block", ro.backend_unit(9148)) in host.calls
+    host.running.discard(9148)
+    roller.reap_superseded()
+    assert roller._load_demoted() == {}
 
 
 def test_unanswered_health_mid_update_is_not_a_reason_to_roll(home):

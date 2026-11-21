@@ -84,6 +84,11 @@ FAILED_ROLL_BACKOFF_S = 300.0
 SUPERSEDED_GRACE_S = 900.0   # a superseded backend not retired by then is retired by the roller through its idle fence
 SUPERSEDED_HARD_S = 6 * 3600.0  # ... and stopped (SIGTERM, turns checkpoint) once this old, busy or not
 SUPERSEDED_NAME = "superseded.json"
+# Backends rolled away from because they stopped answering: never adopted again, and stopped after
+# DEMOTED_HARD_S (SIGTERM checkpoints their turns) instead of SUPERSEDED_HARD_S, so a starved backend that
+# never passes its idle fence cannot hold one of the four BACKEND_PORTS for hours.
+DEMOTED_NAME = "demoted.json"
+DEMOTED_HARD_S = 1800.0
 LOOP_WATCH_TAIL_BYTES = 4 * 1024 * 1024
 
 # Read-only GETs safe to replay into a warming backend. Anything else Desktop polls (a courier outbox
@@ -605,9 +610,12 @@ class Roller:
         or one the previous roll recorded as warming that is still booting, so restarts close together never
         stack cold boots onto the pool. Else the first port with no unit; else None."""
         warming = set(warming)
+        demoted = self._load_demoted()
         others = [p for p in self.ports if p != active_port]
         running = [p for p in others if self.unit_active(p)]
         for port in running:
+            if port in demoted:
+                continue  # rolled away from for not answering: it holds its port until reaped, never serves again
             body = self.health(port)
             if body and self.same_commit(body.get("commit"), head):
                 return port, True
@@ -762,9 +770,9 @@ class Roller:
             # times out until a roll moves new connections to a fresh backend.
             return f"active backend :{port} {UNRESPONSIVE_REASON}"
         head = self.head()
-        if body and self.same_commit(body.get("commit"), head) is False:
+        if self.same_commit(body.get("commit"), head) is False:
             return f"active backend :{port} runs {str(body.get('commit'))[:10]}, checkout is at {str(head)[:10]}"
-        if body and self.runtime_intact(port) is False:
+        if self.runtime_intact(port) is False:
             return f"active backend :{port} lost its runtime (runtimeIntact false)"
         return None
 
@@ -778,6 +786,25 @@ class Roller:
             data = json.loads(self._superseded_path().read_text(encoding="utf-8-sig"))
             return {int(k): float(v) for k, v in data.items()}
         return {}
+
+    def _demoted_path(self) -> Path:
+        return aod.state_dir(self.home) / DEMOTED_NAME
+
+    def _load_demoted(self) -> dict[int, float]:
+        """{port: wall time it was rolled away from for not answering}. Persisted like superseded.json."""
+        with contextlib.suppress(OSError, ValueError, TypeError):
+            data = json.loads(self._demoted_path().read_text(encoding="utf-8-sig"))
+            return {int(k): float(v) for k, v in data.items()}
+        return {}
+
+    def _save_demoted(self, since: dict[int, float]) -> None:
+        with contextlib.suppress(OSError):
+            aod._write_private(self._demoted_path(), json.dumps({str(k): v for k, v in since.items()}))
+
+    def demote(self, port: int) -> None:
+        demoted = self._load_demoted()
+        demoted.setdefault(int(port), self.wall())
+        self._save_demoted(demoted)
 
     def _save_superseded(self, since: dict[int, float]) -> None:
         with contextlib.suppress(OSError):
@@ -806,13 +833,19 @@ class Roller:
             return []
         live = {record["port"], *record["warming"]}
         since = self._load_superseded()
+        demoted = self._load_demoted()
         now, stopped = self.wall(), []
         for port in self.ports:
             if port in live or not self.unit_active(port):
                 since.pop(port, None)
+                demoted.pop(port, None)
                 continue
             age = now - since.setdefault(port, now)
-            if age >= hard_s:
+            if port in demoted and now - demoted[port] >= min(hard_s, DEMOTED_HARD_S):
+                log(f"backend :{port} demoted {now - demoted[port]:.0f}s ago for not answering; stopping it")
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    self.systemctl("stop", "--no-block", backend_unit(port), timeout=15)
+            elif age >= hard_s:
                 log(f"backend :{port} still busy {age:.0f}s after it was superseded; stopping it")
                 with contextlib.suppress(OSError, subprocess.SubprocessError):
                     self.systemctl("stop", "--no-block", backend_unit(port), timeout=15)
@@ -821,24 +854,33 @@ class Roller:
             else:
                 continue
             since.pop(port, None)
+            demoted.pop(port, None)
             stopped.append(port)
         self._save_superseded(since)
+        self._save_demoted(demoted)
         return stopped
 
     def supervise(self, *, max_polls: Optional[int] = None) -> None:
-        seen, polls, retry_at = 0, 0, 0.0
+        seen, kind, polls, retry_at = 0, None, 0, 0.0
         while max_polls is None or polls < max_polls:
             polls += 1
             try:
                 self.reap_superseded()
                 reason = self.drift()
                 dead = bool(reason) and "not running" in reason or reason == "no active backend recorded"
-                seen = seen + 1 if reason else 0
-                need = UNRESPONSIVE_CONFIRMATIONS if reason and UNRESPONSIVE_REASON in reason else DRIFT_CONFIRMATIONS
+                unresponsive = bool(reason) and UNRESPONSIVE_REASON in reason
+                # Each kind confirms on its own count: polls of one kind never complete the other's.
+                now_kind = ("unresponsive" if unresponsive else "drift") if reason else None
+                seen = seen + 1 if reason and now_kind == kind else (1 if reason else 0)
+                kind = now_kind
+                need = UNRESPONSIVE_CONFIRMATIONS if unresponsive else DRIFT_CONFIRMATIONS
                 if reason and (dead or seen >= need) and self.clock() >= retry_at:
                     seen = 0
+                    before = read_active(self.home)
                     if not self.roll(reason):
                         retry_at = self.clock() + FAILED_ROLL_BACKOFF_S
+                    elif unresponsive and before is not None:
+                        self.demote(before["port"])
             # One bad poll (a malformed answer, a systemctl hiccup) must not end supervision.
             except Exception:  # health: allow BLE001 -- supervisor loop boundary; traceback logged
                 log(f"supervise: poll failed:\n{traceback.format_exc()}")
