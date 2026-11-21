@@ -176,6 +176,9 @@ _pf86="$(env | sed -n 's/^ProgramFiles(x86)=//p' | head -n1)"
 #     tests/tools/test_docker_backend_real.py); remote-backends.yml points them at
 #     a throwaway sshd container and a small public image. The key is a
 #     per-run throwaway, never a credential.
+#   * HERMES_TEST_REFLINK_DIR points the copy-on-write clone tests
+#     (tests/hermes_cli/test_backup_preflight_progress.py) at a btrfs/xfs mount; on
+#     ext4 they otherwise skip. A directory, never a credential.
 #   * HERMES_TEST_USER_STEPS_API points tests/hermes_cli/test_web_links_stale.py at a
 #     user-steps plugin_api.py other than ~/code/hermes-mods (a candidate worktree, or
 #     hermes-mods CI running that core regression against its own plugin).
@@ -192,7 +195,7 @@ TEST_ENV=()
 for _test_var in HERMES_TEST_IMAGE HERMES_TEST_WORKERS HERMES_TEST_PATHS \
   HERMES_TEST_FILE_TIMEOUT HERMES_TEST_FILE_RETRIES HERMES_TEST_SLICE HERMES_TEST_FORKSERVER \
   HERMES_TEST_SLOW_CASE_S HERMES_TEST_FLAKY_REPORT HERMES_TEST_REQUIRE_EXTRAS \
-  HERMES_TEST_HOST_SLOTS HERMES_TEST_SLOT_DIR HERMES_TEST_SLOT_HELD HERMES_TEST_USER_STEPS_API \
+  HERMES_TEST_HOST_SLOTS HERMES_TEST_SLOT_DIR HERMES_TEST_SLOT_HELD HERMES_TEST_USER_STEPS_API HERMES_TEST_REFLINK_DIR \
   SSL_CERT_FILE SSL_CERT_DIR HERMES_GATEWAY_LOCK_DIR HERMES_E2E_REQUIRE_TUI CI GITHUB_ACTIONS GITHUB_STEP_SUMMARY \
   HERMES_E2E_WINDOWS_INSTALL HERMES_E2E_MACHINE_ROOT HERMES_E2E_PROFILES_ROOT HERMES_E2E_ARTIFACTS \
   HERMES_E2E_STRICT_ACCEPTANCE HERMES_E2E_UPGRADE_BASE HERMES_E2E_N1_REF \
