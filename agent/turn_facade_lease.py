@@ -216,6 +216,8 @@ class DurableTurnLease:
         try:
             self.db.release_session_turn_lease(self.session_id, self.holder)
         except Exception as exc:
+            from agent.turn_lease_recovery import remember_failed_release
+            remember_failed_release(agent, self.db, self.session_id, self.holder)
             if classify_persistence_error(exc) == "locked":
                 logger.warning(
                     "Session turn lease release deferred (state.db busy); retrying in the background: %s (%s)",

@@ -114,16 +114,29 @@ def _foreign_turn_owner(session: dict):
     key = str(session.get("session_key") or "")
     if not key:
         return None
-    with _session_db(session) as db:
-        owner = db.session_turn_lease_owner(key)
-    own_holder = getattr(session.get("agent"), "_active_session_turn_lease_holder", None)
-    return owner if owner and owner["holder"] != own_holder else None
+    from agent.turn_facade_lease import turn_admission_lock
+    from agent.turn_lease_recovery import settle_failed_release
+    agent = session.get("agent")
+    with turn_admission_lock(agent) if agent is not None else contextlib.nullcontext():
+        with _session_db(session) as db:
+            owner = db.session_turn_lease_owner(key)
+            own_holder = getattr(agent, "_active_session_turn_lease_holder", None)
+            if owner and owner["holder"] != own_holder and settle_failed_release(agent, db, owner):
+                owner = db.session_turn_lease_owner(key)
+        return owner if owner and owner["holder"] != own_holder else None
 
 
 def _durable_owner_refusal(session: dict):
-    from hermes_cli.active_sessions import ActiveSessionRefusal, SESSION_NOT_OWNED
+    from hermes_cli.active_sessions import ActiveSessionRefusal, SESSION_NOT_OWNED, SESSION_COORDINATION_UNAVAILABLE
+    from agent.turn_lease_recovery import FailedTurnReleasePending
     try:
         owner = _foreign_turn_owner(session)
+    except FailedTurnReleasePending as exc:
+        logger.warning("Could not settle ended self turn lease", exc_info=True)
+        refusal = ActiveSessionRefusal(_SESSION_OWNERSHIP_UNAVAILABLE, SESSION_COORDINATION_UNAVAILABLE)
+        refusal.ownership_cause = "lease_self_orphan"
+        refusal.holder_pid = exc.receipt.pid
+        return refusal
     except Exception:
         logger.warning("Could not inspect durable turn owner", exc_info=True)
         return _SESSION_OWNERSHIP_UNAVAILABLE
@@ -131,11 +144,13 @@ def _durable_owner_refusal(session: dict):
         return None
     holder = owner["holder"]
     surface = holder.rsplit(":platform=", 1)[-1] if ":platform=" in holder else "unknown"
-    return ActiveSessionRefusal(
+    refusal = ActiveSessionRefusal(
         "This chat is active in another Hermes window/terminal. Use Take over here "
         "(session.take_over), or wait for that turn to finish.\n"
         f"Details: session {owner['conversation_id']} opened by {surface}. "
         f"Writer: {holder}", SESSION_NOT_OWNED)
+    refusal.ownership_cause = "lease_foreign"
+    return refusal
 
 
 #: Display kinds of turns Hermes starts on its own (no human typed them): the turn-starting notices
