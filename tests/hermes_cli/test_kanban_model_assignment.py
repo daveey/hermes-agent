@@ -72,16 +72,32 @@ def test_dispatch_routes_legacy_incompatible_pin_without_spawning(board, monkeyp
     from hermes_cli.kanban_review_model import implementer_models
     conn, _ = board
     tid = kb.create_task(conn, title='Legacy review', assignee='worker', session_id='chat')
+    source_run = None
     if lane == 'review':
         _review_source(conn, tid)
+        source_run = conn.execute(
+            'SELECT id FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1', (tid,)).fetchone()[0]
     # Historical rows remain audit evidence, not an ingress path to create pins.
     conn.execute('UPDATE tasks SET model_override=?, status=? WHERE id=?', ('claude-opus-5-5', lane, tid))
     conn.commit()
     spawned = []
     result = dispatch_once(conn, spawn_fn=lambda task, *args: spawned.append(
         (task.id, task.model_override, task.provider_override)), max_spawn=1)
-    expected = ('claude-opus-5-5', 'anthropic') if lane == 'review' else ('class:standard', 'auto')
-    assert spawned == [(tid, *expected)], repr(result)
+    if lane == 'review':
+        from agent.model_routing import eligible_routes, validate_policy
+        from agent.model_routing_agent import class_requirements
+        from hermes_cli.kanban_model_assignment import _assignee_config
+        config = _assignee_config('worker')
+        assert config is not None
+        validate_policy(config['model_routing'])
+        qualified = {(route['model'], route['provider'])
+                     for route in eligible_routes(config['model_routing'], 'standard', class_requirements(config))}
+        assert len(spawned) == 1 and spawned[0][0] == tid, repr(result)
+        assert spawned[0][1:] in qualified
+        assert kb.get_task(conn, tid).current_run_id != source_run
+        assert conn.execute('SELECT outcome FROM task_runs WHERE id=?', (source_run,)).fetchone()[0] == 'review_requested'
+    else:
+        assert spawned == [(tid, 'class:standard', 'auto')], repr(result)
     task = kb.get_task(conn, tid)
     assert task.status == 'running' and task.assignee == 'worker' and task.block_kind is None
     assert task.model_override == 'claude-opus-5-5'  # never rewrite historical row

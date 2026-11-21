@@ -53,7 +53,11 @@ def source_id(conn):
 def create_review(conn, title, assignee, **kwargs):
     tid = kb.create_task(conn, title=f"Independent review of {title}", assignee=assignee,
                          creator_task_id=source_id(conn), **kwargs)
-    assert kb.request_review(conn, tid, summary="Review the completed source")
+    # A never-claimed downstream review has no implementation run to close.
+    # A summary would synthesize a historical run, polluting no-attempt and
+    # readiness-age controls before the scheduler has admitted this target.
+    assert kb.request_review(conn, tid)
+    assert conn.execute("SELECT count(*) FROM task_runs WHERE task_id=?", (tid,)).fetchone()[0] == 0
     task = kb.get_task(conn, tid)
     assert implementer_models(conn, task) == {AUTHOR}
     assert (task.model_override, task.provider_override) == (None, None)
