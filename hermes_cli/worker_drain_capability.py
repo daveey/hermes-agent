@@ -25,8 +25,19 @@ CAPABILITIES = ('turn', 'claim', 'cron', 'plugin')
 # Linux uapi/linux/fcntl.h. Some bundled Python builds omit these constants
 # despite exposing fcntl and memfd_create; the kernel remains the authority.
 _ADD_SEALS, _GET_SEALS, _REQUIRED_SEALS = 1033, 1034, 0x0F
-REQUIRED_FILES = ('hermes_cli/worker_drain_fence.py', 'hermes_cli/worker_drain_capability.py',
-                  'tui_gateway/turn_admission.py', 'cron/scheduler.py', 'tools/registry.py')
+REQUIRED_FILES = (
+    'hermes_cli/worker_drain_fence.py', 'hermes_cli/worker_drain_capability.py',
+    'hermes_cli/worker_drain_ingress.py', 'hermes_cli/worker_drain_census.py',
+    'hermes_cli/worker_drain_baseline.py', 'hermes_cli/worker_drain_baseline_cli.py',
+    'hermes_cli/worker_drain_observer.py', 'hermes_cli/worker_drain_result_inventory.py',
+    'hermes_cli/worker_drain_results_gate.py', 'hermes_cli/gateway.py',
+    'hermes_cli/gateway_drain_startup.py', 'hermes_cli/local_work_handle.py',
+    'hermes_cli/local_work_threads.py', 'hermes_cli/plugins_loader.py',
+    'tui_gateway/turn_admission.py', 'agent/turn_facade.py', 'agent/review_idle_queue.py',
+    'run_agent.py', 'cron/scheduler.py', 'cron/scheduler_tick.py', 'cron/cleanup_timeout.py',
+    'gateway/run.py', 'gateway/run_adapters.py', 'gateway/run_startup.py',
+    'gateway/run_drain_work.py', 'tools/registry.py',
+)
 
 
 def verified_contract(manifest: dict) -> dict:
@@ -161,5 +172,7 @@ def validate_capability(pid, entry, ident, manifest, *, proc_root='/proc') -> No
                 continue
         if matches != [expected]:
             raise CaptureRefused('daemon capability missing or mismatched')
+        from hermes_cli.worker_drain_ingress import validate_ingress
+        validate_ingress(pid, expected['homes'], proc_root=proc_root)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise CaptureRefused('daemon capability unreadable') from exc

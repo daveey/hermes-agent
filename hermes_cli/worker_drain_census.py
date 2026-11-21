@@ -1,10 +1,8 @@
-"""Positive lower-bound worker census; incomplete observations never emit zero.
+"""Worker census: incomplete observations never emit zero.
 
-A unit name exempts neither a daemon nor any descendants. A complete idle proof
-needs host cgroup/namespace traversal and exact manifest/live adapter identities;
-that part is not implemented yet. Until then this producer returns positive work
-or UNKNOWN. It cannot enable scale-in even when drain activation is present.
-processes.json is not an authority.
+The legacy census stays a positive lower bound. Manifest observations require a
+strict live baseline with image-authored unit/runtime provenance and the running
+daemon's no-ingress capability. processes.json is never an authority.
 """
 from __future__ import annotations
 
@@ -72,10 +70,11 @@ def _is_kernel_thread(root: str, pid: str) -> bool:
 # ---------------------------------------------------------------------------
 # Manifest census: zero is provable only when EVERY manifest adapter proves zero.
 # ---------------------------------------------------------------------------
-# Nothing writes BASELINE_PATH yet: core has no producer and the state-repo installer (Stage 2 item (d),
-# card t_01a1fa0ba16b94f7, install-drain-fence.py) does not capture one. Until it does, host_processes is
-# never ZERO in production, so the manifest count is positive or UNKNOWN and scale-in stays off. INCOMPLETE.
+# Produced by the fixed root worker_drain_baseline_cli after image-manifest
+# preparation and cold daemon startup. Production installer integration/idle ZERO
+# rollout remains INCOMPLETE until independently observed on an installed worker.
 BASELINE_PATH = '/var/lib/hermes-worker/drain-baseline.json'
+_fixed_observer_pid: int | None = None
 ADAPTERS = ('host_processes', 'work_leases', 'local_results')  # the complete manifest
 ZERO, POSITIVE, UNKNOWN = 'zero', 'positive', 'unknown'
 
@@ -179,7 +178,7 @@ def observe_processes(proc_root: str = '/proc', baseline: Baseline | None = None
     procs: dict = {}  # pid -> (ppid, identity)
     unreadable = 0
     for pid in pids:
-        if pid == me:
+        if pid == me and _fixed_observer_pid == os.getpid():
             continue
         try:
             if _is_kernel_thread(proc_root, pid):
@@ -218,7 +217,12 @@ def observe_leases() -> Observation:
 
 def observe_results() -> Observation:
     from hermes_cli import worker_drain_results_gate as gate
-    state = gate.local_results_state()
+    from hermes_cli import worker_drain_fence as fence
+    from hermes_cli import worker_drain_result_inventory as inventory
+    try:
+        state = gate.local_results_state(inventory.paths(fence.census_root()[0]))
+    except (OSError, ValueError, fence.DrainRefused):
+        return Observation(UNKNOWN, reason='result inventory unavailable')
     if state.state == gate.CLEAR:
         return Observation(ZERO)
     if state.state == gate.PENDING:

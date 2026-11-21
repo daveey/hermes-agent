@@ -52,10 +52,15 @@ def main(argv=None) -> int:
     commands.add_parser('capture', help='capture only declared, idle process identities')
     args = parser.parse_args(argv)
     try:
+        # This fixed root producer executes no payload; arbitrary API callers
+        # remain visible to the census and cannot exempt their own daemon.
+        baseline.census._fixed_observer_pid = os.getpid()
         doc = prepare(args.image_manifest) if args.command == 'prepare' else baseline.install()
     except (OSError, ValueError, baseline.CaptureRefused, fence.DrainRefused) as exc:
         print(f'drain baseline refused: {exc}', file=sys.stderr)
         return 1
+    finally:
+        baseline.census._fixed_observer_pid = None
     print(json.dumps(doc, sort_keys=True))
     return 0
 

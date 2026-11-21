@@ -1430,6 +1430,8 @@ class GatewayStartupMixin:
         # The mirror image: a SECONDARY enabled shared ingress (WhatsApp/Relay) that only the default can run.
         for _line in self._unserved_shared_ingress_warnings():
             logger.warning(_line)
+        from hermes_cli.worker_drain_ingress import attest_activated_runner
+        attest_activated_runner(self)
         return False, connected_count
 
     def _start_handle_no_connections(
