@@ -34,9 +34,7 @@ def test_secondary_profile_worker_gets_no_launch_credentials(tmp_path, monkeypat
 
 
 def test_launch_profile_worker_drops_undeclared_tool_credentials_under_multiplex(tmp_path, monkeypatch):
-    """Under multiplex the launch profile's own worker resolves what its owner resolves for that
-    profile (``launch_secret_scope``): a tool key injected only into the launch environment
-    (systemd ``Environment=``, ``op run``) reaches it, while a secondary's worker never sees it."""
+    """An undeclared launch-only tool key is never inherited by either profile's exec."""
     launch = tmp_path / ".hermes"
     sec = launch / "profiles" / "l106742sec"
     sec.mkdir(parents=True)

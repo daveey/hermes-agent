@@ -6,12 +6,17 @@ import json
 from hermes_state_runtime import RuntimeStoreError
 
 # Positive exec allowlist, not a credential-name denylist. In particular no arbitrary
-# HERMES_*, PYTHON*, shell startup, proxy, cloud, or profile .env inputs are inherited.
+# HERMES_*, PYTHON*, shell startup, cloud, or profile .env inputs are inherited.
 EXEC_ENV = frozenset({
     'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
     'TMPDIR', 'TMP', 'TEMP', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT',
     'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
     'HERMES_REAL_HOME', 'HERMES_MANAGED_HOME', 'HERMES_NEMO_RELAY_PLUGINS_TOML',
+    'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'no_proxy',
+    'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS',
+    'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH',
+    'SSH_AUTH_SOCK', 'DISPLAY', 'XDG_CONFIG_HOME', 'XDG_DATA_DIRS', 'LD_LIBRARY_PATH',
+    'TERM', 'KUBECONFIG', 'HERMES_BUNDLED_SKILLS',
 })
 
 
@@ -96,6 +101,7 @@ def stage_credentials(authority, scope, policy, config, terminal, request):
     if isinstance(construct, dict) and 'fallback_model' in construct:
         route_config['fallback_model'] = construct['fallback_model']
     environment = route_environment(authority, policy, route_config)
+    environment.update(tool_environment(authority, policy, config))
     key = route_launch_key(authority, policy, config)
     _extract_config_secrets(config, private)
     _extract_config_secrets(terminal, private, (None,))
@@ -133,6 +139,7 @@ def resolve_credentials(authority, params):
 
 def hydrate_credentials(frame, rpc):
     """Resolve the handle via the authenticated owner, before freezing child config."""
+    bind_completion_owner(frame)
     request = json.loads(frame['policy']['request_json'])
     if not request.pop('credentials_v1', False):
         return frame
@@ -151,3 +158,22 @@ def hydrate_credentials(frame, rpc):
     return {**frame, 'api_key': material['api_key'], 'policy': {**frame['policy'],
         'config_json': json.dumps(config), 'terminal_json': json.dumps(terminal),
         'request_json': json.dumps(request)}}
+
+
+def tool_environment(authority, policy, config):
+    """Only credential requirements of tools selected by the child's frozen policy."""
+    from tools.registry import registry
+    from toolsets import resolve_toolset
+    from tools.environments.local_env_policy import _is_hermes_internal_secret
+    selected = {name for toolset in policy.current_toolsets(config) for name in resolve_toolset(toolset)}
+    names = {name for entry in registry.get_all_entries() if entry.name in selected
+             for name in entry.requires_env if isinstance(name, str) and not _is_hermes_internal_secret(name)}
+    values = _profile_values(authority, policy)
+    return {name: values[name] for name in names if values.get(name) is not None}
+
+
+def bind_completion_owner(frame):
+    """A nonsecret completion destination, not Desktop backend authentication."""
+    from agent import runtime_session_store
+    request = json.loads(frame['policy']['request_json'])
+    runtime_session_store._desktop_completion_owner = request.get('desktop_completion_owner_v1') is True

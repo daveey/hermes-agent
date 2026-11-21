@@ -309,9 +309,8 @@ def test_orderly_exit_journal_takes_custody_and_delivers_once(home, registry, ba
 
 def test_managed_worker_of_a_desktop_chat_owes_its_finished_notice_to_the_desktop_keeper(home, registry, backend,
                                                                                           monkeypatch):
-    """A managed worker's Desktop completion queue dies with its turn; the Desktop keeper
-    retains and re-arms its notice obligation. Exec no longer inherits the Desktop token;
-    the explicit identity fixture here exercises keeper recovery, not env propagation."""
+    """A worker receives a completion destination, never the Desktop backend credential;
+    its keeper retains and re-arms the notice after that worker exits."""
     from agent import runtime_session_store
     from gateway.session_managed_worker import _worker_env
     from tools.process_registry_readopt import _checkpoint_keeper_tick
@@ -323,7 +322,12 @@ def test_managed_worker_of_a_desktop_chat_owes_its_finished_notice_to_the_deskto
     monkeypatch.setattr(runtime_session_store, "_worker_process", True)
     child_env = _worker_env(types.SimpleNamespace(profile_id=str(home)))
     assert 'HERMES_DASHBOARD_SESSION_TOKEN' not in child_env
-    assert process_identity.is_desktop_owned_backend() is True
+    from gateway.session_worker_credentials import bind_completion_owner
+    monkeypatch.setattr(runtime_session_store, '_desktop_completion_owner', False, raising=False)
+    bind_completion_owner({'policy': {'request_json': json.dumps({'desktop_completion_owner_v1': True})}})
+    monkeypatch.delenv('HERMES_DESKTOP')
+    monkeypatch.delenv('HERMES_DASHBOARD_SESSION_TOKEN')
+    assert process_identity.is_desktop_owned_backend() is False
 
     worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
@@ -335,6 +339,8 @@ def test_managed_worker_of_a_desktop_chat_owes_its_finished_notice_to_the_deskto
 
         # The Desktop backend's keeper ticks while the worker still runs: the worker holds it, nothing re-arms.
         monkeypatch.setattr(runtime_session_store, "_worker_process", False)
+        monkeypatch.setenv('HERMES_DESKTOP', '1')
+        monkeypatch.setenv('HERMES_DASHBOARD_SESSION_TOKEN', 'desktop-spawn-token')
         desktop, armed, wakes = _next_backend(monkeypatch)
         _checkpoint_keeper_tick(desktop)
         assert (armed, wakes, desktop.has_parked_events()) == (0, [], False)

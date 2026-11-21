@@ -85,6 +85,8 @@ def _bootstrap(authority, ref, row, policy, scope, text=None):
     from gateway.session_profile_selection import commit_selection
     commit_selection(authority, ref, policy, config, model, scope['generation'], ended=ended)
     from gateway.session_worker_credentials import stage_credentials
+    from hermes_cli.process_identity import is_desktop_owned_backend
+    request['desktop_completion_owner_v1'] = is_desktop_owned_backend()
     config, terminal, request, credentials = stage_credentials(authority, scope, policy, config, terminal, request)
     if credentials:
         request['credentials_v1'] = True
@@ -475,23 +477,6 @@ def _worker_env(authority):
     from hermes_constants import apply_subprocess_home_env
     apply_subprocess_home_env(env)
     return env
-
-
-def _launch_env_only_credentials(home, env):
-    """Credentials the LAUNCH profile's owner resolves from its frozen launch env
-    (``launch_secret_scope``: systemd ``Environment=`` / ``op run`` keys with no ``.env`` line) that
-    the scrub removed from *env* — the same mapping the owner's own ``get_secret`` reads for this
-    profile. Credential names only: non-credential names the constructor removed on purpose
-    (unbound session context, venv markers) stay removed, and Hermes-internal secrets
-    (``AUXILIARY_*_API_KEY``, relay auth) never reach a child. Only the launch home's worker calls
-    this; a routed home's worker sees its own files only."""
-    from tools.environments.local import _scrub_credentials
-    from tools.environments.local_env_policy import _is_hermes_internal_secret
-    from tui_gateway.launch_profile_policy import launch_secret_scope
-    missing = {k: v for k, v in launch_secret_scope(home).items()
-               if k not in env and not _is_hermes_internal_secret(k)}
-    plain = _scrub_credentials(dict(missing), inherit_credentials=False)
-    return {k: v for k, v in missing.items() if k not in plain}
 
 
 def _interrupted_before_bootstrap(authority, row, cause=None):

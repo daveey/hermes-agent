@@ -109,14 +109,16 @@ def owes_gateway_delivery(session) -> bool:
 def owes_tui_delivery(session) -> bool:
     """Whether a finished session's completion is owed to a Desktop chat this Desktop backend hosts. A CLI
     delivers in-process and never leaves one behind. A managed worker of the Desktop backend does, on purpose
-    (it inherits the Desktop identity, and its per-turn completion queue dies with it): the Desktop keeper
+    (it receives a nonsecret completion destination, and its per-turn queue dies with it): the Desktop keeper
     re-arms that obligation once the worker is gone."""
     from tools.process_registry_readopt import OWNER_TUI, checkpoint_entry_owner
     if not session.notify_on_complete or checkpoint_entry_owner(
             {"session_key": session.session_key, "watcher_platform": session.watcher_platform}) != OWNER_TUI:
         return False
     from hermes_cli.process_identity import is_desktop_owned_backend
-    return is_desktop_owned_backend()
+    from agent import runtime_session_store
+    return bool(is_desktop_owned_backend() or (
+        runtime_session_store._worker_process and getattr(runtime_session_store, '_desktop_completion_owner', False)))
 
 
 def obligation_owner(owed: dict) -> str:

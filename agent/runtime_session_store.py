@@ -22,6 +22,7 @@ from hermes_dir_acl import make_user_dir
 logger = logging.getLogger(__name__)
 
 _worker_process = False
+_desktop_completion_owner = False  # Nonsecret keeper destination, never backend authentication.
 
 
 def is_worker_process():
