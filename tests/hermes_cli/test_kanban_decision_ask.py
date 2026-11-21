@@ -455,17 +455,17 @@ def _owned_parked(subscribed: bool) -> str:
     return tid
 
 
-def test_owner_with_no_wakeable_chat_turns_an_imported_ask_into_a_visible_one(kanban_home) -> None:
-    """Adversarial review of #3647: a foreign-card park skips the subscriber check, so the owner must act."""
+def test_owner_with_no_wakeable_chat_retains_agent_recovery(kanban_home) -> None:
+    """A foreign-card park without a subscriber retains its schedule and agent recovery custody."""
     tid = _owned_parked(subscribed=False)
     _imported_ask(tid)
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, tid)
-        assert task.status == "blocked", task.status
+        assert task.status == "scheduled", task.status
         assert kwc.get_state(conn, tid) is None
         assert [e.kind for e in kb.list_events(conn, tid) if e.kind == "decision_unanswerable"]
         request = json.loads(task.human_request) if isinstance(task.human_request, str) else task.human_request
-        assert request["interaction"] == "reply" and "premise A, B or C" in request["action"]
+        assert request is None
 
 
 def test_owner_with_a_wakeable_chat_leaves_the_card_parked(kanban_home) -> None:
@@ -491,7 +491,7 @@ class _ChatStore:
         return lambda *a, **k: None
 
 
-def _sweep(chat, now, *, busy_slots=False):
+def _sweep(chat, now, *, busy_slots=False, wake_result="started"):
     from tui_gateway import kanban_unloaded as ku
     wakes, rows = [], []
 
@@ -506,7 +506,7 @@ def _sweep(chat, now, *, busy_slots=False):
 
     def wake(tip, text, meta):
         wakes.append(text)
-        return "started"
+        return wake_result
 
     if busy_slots:
         taken = 0
@@ -555,19 +555,24 @@ def test_an_ask_that_cannot_wake_now_is_retried_never_written_passively(kanban_h
     ku._reset_wake_budget_for_tests()
 
 
-def test_an_ask_undelivered_for_two_hours_goes_to_david(kanban_home, monkeypatch) -> None:
+def test_an_ask_undelivered_for_two_hours_retains_retry_custody(kanban_home, monkeypatch) -> None:
     from tui_gateway import kanban_unloaded as ku
     chat, tid = _parked_ask(monkeypatch)
     now = time.time() + ku.ASK_OVERDUE_S + 60
     ku._reset_wake_budget_for_tests()
     for i in range(ku.WAKES_PER_HOUR):
         ku._charge_wake(chat, now - 60 * (i + 1))
-    _sweep(chat, now)
+    wakes, rows = _sweep(chat, now)
     with kbc.connect_closing() as conn:
         task = kb.get_task(conn, tid)
-        assert task.status == "blocked", task.status
+        assert task.status == "scheduled", task.status
         request = json.loads(task.human_request) if isinstance(task.human_request, str) else task.human_request
-        assert "premise A/B/C" in request["action"] or "Owning orchestrator" in request["action"], request
+        assert request is None
+        assert not rows
+        assert not wakes
+    ku._reset_wake_budget_for_tests()
+    wakes, rows = _sweep(chat, now + 3600)
+    assert len(wakes) == 1 and not rows
     ku._reset_wake_budget_for_tests()
 
 
@@ -624,15 +629,16 @@ def test_separately_answered_questions_do_not_escalate(kanban_home, monkeypatch)
             assert kb.claim_task(conn, tid, claimer="worker") is not None
 
 
-def test_unanswered_chat_wait_goes_to_david_after_two_hours(kanban_home, monkeypatch) -> None:
-    """Adversarial review of #3647: a wake that was refused, failed or never started acked the ask passively.
-    The board backstop: the card's comment probe says "not yet" for 2 h -> needs_input for David."""
+def test_unanswered_chat_wait_retains_probe_after_two_hours(kanban_home, monkeypatch) -> None:
+    """A failed owner wake never transfers decision authority to the user, even after two hours."""
     from hermes_cli import kanban_decision_ask as kda
     _chat, tid = _parked_ask(monkeypatch)
     with kbc.connect_closing() as conn:
         assert not kda.escalate_if_overdue(conn, tid, now=int(time.time()) + 60)  # not yet overdue
         assert kda.escalate_if_overdue(conn, tid, now=int(time.time()) + kda.ASK_OVERDUE_S + 60)
-        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert kb.get_task(conn, tid).human_request is None
+        assert kwc.get_state(conn, tid) is not None
 
 
 @pytest.mark.parametrize("answered", [False, True])
@@ -652,7 +658,7 @@ def test_a_chat_wait_on_its_own_named_probe_has_the_deadline_until_answered(kanb
             _orchestrator_comment(monkeypatch, conn, tid, "Go with premise A; then wait for the CI run.")
         result = kda.escalate_if_overdue(conn, tid, now=int(time.time()) + kda.ASK_OVERDUE_S + 60)
         assert result is (not answered)
-        assert kb.get_task(conn, tid).status == ("scheduled" if answered else "blocked")
+        assert kb.get_task(conn, tid).status == "scheduled"
 
 
 @pytest.mark.parametrize("cmd,expected", [
@@ -771,4 +777,75 @@ def test_a_filtered_probe_that_misses_the_answer_still_escalates(kanban_home, mo
         assert out.get("status") == "scheduled", out
         _orchestrator_comment(monkeypatch, conn, tid, "Go with premise A.")
         assert kda.escalate_if_overdue(conn, tid, now=int(time.time()) + kda.ASK_OVERDUE_S + 60)
-        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert kb.get_task(conn, tid).human_request is None
+        assert kwc.get_state(conn, tid) is not None
+
+
+OBSERVED_AGENT_ONLY_ASK = (
+    "Agent-only placement: create default-board pool source owner per comment467 and recovery FINAL SEND, "
+    "then post handle. Source route settled; completed recovery delivered no implementation. "
+    "Private-board worker tools cannot place it.")
+
+
+@pytest.mark.parametrize("cause", ["quota", "offline", "no_subscriber"])
+def test_observed_agent_only_timeout_never_fabricates_human_authority(kanban_home, monkeypatch, cause):
+    from hermes_cli import kanban_decision_ask as kda
+    from hermes_cli.kanban_human_request import needs_human
+    _chat, tid = _parked_ask(monkeypatch)
+    with kbc.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='decision_requested'",
+                         (json.dumps({"why": OBSERVED_AGENT_ONLY_ASK, "reason": "Source gate NOT MET; no David ask."}), tid))
+        before = kwc.get_state(conn, tid)
+        park = _park_payload(conn, tid)
+        if cause == "no_subscriber":
+            with kb.write_txn(conn):
+                conn.execute("DELETE FROM kanban_notify_subs WHERE task_id=?", (tid,))
+            assert kda.owner_fallback(conn, tid)
+        else:
+            assert kda.escalate(conn, tid, "HTTP429 subscription quota" if cause == "quota" else "owner offline")
+        task = kb.get_task(conn, tid)
+        assert task.status == "scheduled"
+        assert not needs_human(task.human_request, kind=task.block_kind)
+        assert task.human_request is None
+        assert kwc.get_state(conn, tid) == before
+        assert _park_payload(conn, tid) == park
+        events = kb.list_events(conn, tid)
+        assert not any(e.kind == "blocked" for e in events)
+        recovered = [e for e in events if e.kind == "decision_unanswerable"]
+        assert len(recovered) == 1 and recovered[0].payload["why"] == OBSERVED_AGENT_ONLY_ASK
+        # A probe runs repeatedly; recovery must not flood the feed.
+        kda.escalate(conn, tid, "still offline")
+        assert len([e for e in kb.list_events(conn, tid) if e.kind == "decision_unanswerable"]) == 1
+
+
+def test_explicit_human_only_action_still_blocks(kanban_home):
+    from hermes_cli.kanban_human_request import needs_human
+    with kbc.connect_closing() as conn:
+        tid = _running(conn)
+        request = {"action": "Approve $400 beyond the agreed GPU budget. Unblock = approve; archive = stop.",
+                   "why_human": "Tried: the approved budget cannot fund this run. Only you can: raise the spending limit.",
+                   "interaction": "approval",
+                   "scope": "Situation: The run exceeds the approved budget.\nOptions:\nA) Raise budget: costs $400; cannot undo spend.\nB) Stop: no cost.\nRecommend: B - avoid unapproved spend.",
+                   "evidence": "quote: $400 above approved cap"}
+        assert kb.block_task(conn, tid, kind="needs_input", reason=request["action"], human_request=request)
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert needs_human(task.human_request, kind=task.block_kind)
+
+
+@pytest.mark.parametrize("failure", ["quota_exceeded", "offline", "error"])
+def test_failed_owner_wake_is_retried_without_passive_consumption(kanban_home, monkeypatch, failure):
+    from tui_gateway import kanban_unloaded as ku
+    chat, tid = _parked_ask(monkeypatch)
+    now = time.time() + ku.ASK_OVERDUE_S + 60
+    ku._reset_wake_budget_for_tests()
+    wakes, rows = _sweep(chat, now, wake_result=failure)
+    assert len(wakes) == 1 and not rows
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "scheduled"
+        assert kwc.get_state(conn, tid) is not None
+    wakes, rows = _sweep(chat, now + 60)
+    assert len(wakes) == 1 and not rows
+    ku._reset_wake_budget_for_tests()

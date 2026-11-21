@@ -14,17 +14,16 @@ Mac ``notify+wake`` row starts a turn, and the unloaded sweeper wakes a dormant 
 
 The subscriber check runs only where the card is owned (subscriptions are machine-local). When a pool
 worker's ask reaches the owner by sync and the owner has no chat that can take it, :func:`owner_fallback`
-turns it into a visible ask for David (``needs_input`` with ``human_request``) instead of a silent park.
+records agent-owned recovery while preserving the schedule and answer probe; missing delivery is not human authority.
 """
 from __future__ import annotations
 
 from typing import Any
 
 NOTICE_KIND = "decision_requested"
-# A chat wait unanswered this long goes to David, whatever happened to its delivery (a wake refused, failed, never
-# started, a budget or slot shortage): checked by the card's own comment probe (escalate_if_overdue).
+# An unanswered chat wait records recovery after this interval. Delivery failure never creates a human ask.
 ASK_OVERDUE_S = 2 * 3600
-UNANSWERED_KIND = "decision_unanswerable"  # the owner had no chat to take the ask; it became David's
+UNANSWERED_KIND = "decision_unanswerable"  # diagnostic only: recovery remains agent-owned
 
 
 def is_chat_wait(awaiting: Any) -> bool:
@@ -38,7 +37,8 @@ def notice_text(payload: dict) -> str:
         ask = ask[:4500] + "\n[... full text in the card comments ...]\n" + ask[-1500:]
     return ("Decision for the creator agent (not a request for the user). This card is parked until you decide:\n" + ask
             + "\nAnswer with a comment on the card (kanban_comment); the comment wakes it. "
-            "If you cannot decide, block it with kind='needs_input' and a human_request for David.")
+            "Retain agent recovery on quota/offline failures. Escalate to the user only for a concrete human-only "
+            "action, after try-to-unblock and generate-unblock-card, with a meaningful scope and evidence.")
 
 
 def post_notice(conn, task_id: str, *, reason: str | None, awaiting: Any, run_id: int | None = None) -> None:
@@ -52,7 +52,7 @@ def post_notice(conn, task_id: str, *, reason: str | None, awaiting: Any, run_id
 
 def owner_fallback(conn, task_id: str) -> bool:
     """On the owning gateway, after an imported ``decision_requested``: no wakeable subscriber means nobody gets
-    the ask, so it becomes David's (:func:`escalate`). True when it blocked."""
+    the ask, so record agent recovery (:func:`escalate`). True when recorded."""
     from hermes_cli import kanban_awaiting as kaw
     from hermes_cli import kanban_wake_check as kwc
     if kaw.has_chat_subscriber(conn, task_id):
@@ -62,41 +62,36 @@ def owner_fallback(conn, task_id: str) -> bool:
 
 
 def escalate(conn, task_id: str, why_unanswered: str, *, trust_probe: bool = False) -> bool:
-    """A still-parked card whose orchestrator ask cannot reach anyone: leave the park (``scheduled`` -> ``triage``,
-    probe cleared, ``decision_unanswerable``) and block it ``needs_input`` with the question, as the spend-budget hold
-    leaves a park. If the block is refused it stays visibly in triage. True when it blocked."""
+    """Record agent-owned recovery without promoting delivery failure to human authority.
+
+    Keep the original schedule, probe and owner: a timeout, quota failure or absent chat
+    proves no human-only action. True when recovery was recorded for this ask. A real
+    human escalation must be authored separately with concrete action/scope evidence.
+    """
     from hermes_cli import kanban_awaiting as kaw
     from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_wake_check as kwc
-    task = kb.get_task(conn, task_id)
-    if task is None or task.status != "scheduled":
-        return False
-    record, _reason, _wake_check, park_at = _latest_chat_park(conn, task_id)
-    # ``trust_probe``: the card's own probe just said "not yet", and it is the authority (a worker-supplied probe may
-    # filter: --contains, --from-gateway). Otherwise an answer since the park means its probe wakes the card.
-    if not trust_probe and record is not None and kaw._answered_since(conn, task_id, park_at):
-        return False
-    ask = [e for e in kb.list_events(conn, task_id) if e.kind == NOTICE_KIND]
-    payload = (ask[-1].payload or {}) if ask else {}
-    question = str(payload.get("why") or payload.get("reason") or "").strip()[:1500]
-    question = question or "the decision named in the card's latest comment"
     with kb.write_txn(conn):
-        if conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ? AND status = 'scheduled'",
-                        (task_id,)).rowcount != 1:
+        task = kb.get_task(conn, task_id)
+        if task is None or task.status != "scheduled":
             return False
-        kwc.set_check(conn, task_id, None, None)
-        kb._append_event(conn, task_id, UNANSWERED_KIND, {"why": question, "because": why_unanswered})
-    return bool(kb.block_task(
-        conn, task_id, kind="needs_input",
-        reason=(f"This card's worker parked waiting on its orchestrator's decision, but {why_unanswered}. "
-                "1) Answer the question below with a comment on the card. 2) Then unblock it.\n" + question),
-        human_request={
-            "action": "Answer the card's question: " + question[:400],
-            "why_human": f"its worker asked its orchestrator, and {why_unanswered}",
-            "interaction": "reply",
-            "scope": f"card {task_id}: {str(task.title or '')[:120]}",
-            "evidence": f"decision_requested on {task_id}; {why_unanswered}",
-        }))
+        record, _reason, _wake_check, park_at = _latest_chat_park(conn, task_id)
+        # A freshly run comment probe is authoritative, including its explicit filters.
+        if not trust_probe and record is not None and kaw._answered_since(conn, task_id, park_at):
+            return False
+        asks = [e for e in kb.list_events(conn, task_id) if e.kind == NOTICE_KIND]
+        if not asks:
+            return False
+        ask = asks[-1]
+        # One recovery observation per ask, not one feed write every probe tick.
+        if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind=? AND id>? LIMIT 1",
+                        (task_id, UNANSWERED_KIND, ask.id)).fetchone():
+            return False
+        payload = ask.payload or {}
+        question = str(payload.get("why") or payload.get("reason") or "").strip()
+        kb._append_event(conn, task_id, UNANSWERED_KIND,
+                         {"why": question, "because": why_unanswered, "ownership": "agent",
+                          "recovery": "retain schedule and answer probe; retry owner delivery"})
+    return True
 
 
 def _latest_chat_park(conn, task_id: str) -> tuple:
@@ -116,7 +111,7 @@ def _latest_chat_park(conn, task_id: str) -> tuple:
 
 def escalate_if_overdue(conn, task_id: str, *, now: int | None = None) -> bool:
     """Called after a chat wait's comment probe said "not yet" (outside its write txn): a chat park older than
-    ``ASK_OVERDUE_S`` with no answer becomes David's. The board-side guarantee behind every delivery path."""
+    ``ASK_OVERDUE_S`` with no answer records recovery, never a fabricated human request."""
     import time
     record, _reason, cmd, at = _latest_chat_park(conn, task_id)
     if record is None or at is None:
