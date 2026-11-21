@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import shutil
@@ -14,7 +15,7 @@ from hermes_constants import get_hermes_home
 logger = logging.getLogger(__name__)
 
 
-def dispose_path(path: str, *, actor: str, reason: str) -> dict:
+def dispose_path(path: str, *, actor: str, reason: str, empty_only: bool = False) -> dict:
     """Dispose of one scoped path without following its final symlink.
 
     Return JSON data with path, outcome (disposed/missing/refused/error), and detail.
@@ -30,14 +31,16 @@ def dispose_path(path: str, *, actor: str, reason: str) -> dict:
         raise ValueError("reason must not be empty or blank")
     if not isinstance(actor, str):
         raise TypeError("actor must be a string")
+    if not isinstance(empty_only, bool):
+        raise TypeError("empty_only must be a bool")
     if not path or "\x00" in path:
         raise ValueError("path must not be empty or contain NUL")
 
     checked = os.path.abspath(path)
 
     def result(outcome: str, detail: str = "") -> dict:
-        logger.info("Path disposal actor=%r reason=%r path=%r outcome=%s detail=%r",
-                    actor, reason, checked, outcome, detail)
+        logger.info("Path disposal actor=%r reason=%r path=%r outcome=%s detail=%r empty_only=%s",
+                    actor, reason, checked, outcome, detail, empty_only)
         return {"path": checked, "outcome": outcome, "detail": detail}
 
     try:
@@ -59,7 +62,16 @@ def dispose_path(path: str, *, actor: str, reason: str) -> dict:
             mode = target.lstat().st_mode
         except FileNotFoundError as exc:
             return result("missing", str(exc))
-        if stat.S_ISDIR(mode):
+        if empty_only:
+            if not stat.S_ISDIR(mode):
+                return result("refused", "empty_only: path is not a directory")
+            try:
+                os.rmdir(target)
+            except OSError as exc:
+                if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                    return result("refused", "empty_only: directory is not empty")
+                raise
+        elif stat.S_ISDIR(mode):
             shutil.rmtree(target)
         else:
             target.unlink()

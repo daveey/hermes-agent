@@ -1,5 +1,6 @@
 """Disposal policy and the real out-of-process ctx round trip."""
 
+import errno
 import json
 import logging
 import os
@@ -181,6 +182,209 @@ def test_host_crossing(tmp_path, monkeypatch, caplog):
         assert not path.exists()
         missing = json.loads(registry.dispatch("disposal_probe", {"path": str(path)}, scope=manager.scope_key))
         assert missing["result"]["outcome"] == "missing"
+    finally:
+        manager.unload()
+        manager._plugin_host().shutdown()
+
+
+# Keep the original frozen host probe and its default-mode tests unchanged.
+HOST_EMPTY_PLUGIN = HOST_PLUGIN.replace(
+    'reason="expired via host")',
+    'reason="expired via host", empty_only=args["empty_only"])',
+)
+
+
+def empty_dispose(path):
+    return path_disposal.dispose_path(
+        str(path), actor="plugin:probe", reason="empty sweep", empty_only=True)
+
+
+def test_empty_only_directory(home, caplog):
+    path = home / "empty-dir"
+    path.mkdir()
+    ctx = PluginContext(SimpleNamespace(name="probe"), SimpleNamespace())
+    with caplog.at_level(logging.INFO, logger=path_disposal.__name__):
+        result = ctx.dispose_path(str(path), reason="empty sweep", empty_only=True)
+    assert result == {"path": str(path), "outcome": "disposed", "detail": ""}
+    assert not path.exists()
+    assert "empty_only=True" in caplog.text
+
+
+def test_empty_only_nonempty(home):
+    path = home / "nonempty"
+    path.mkdir()
+    (path / "keep").write_text("keep")
+    assert empty_dispose(path) == {
+        "path": str(path), "outcome": "refused", "detail": "empty_only: directory is not empty"}
+    assert (path / "keep").read_text() == "keep"
+
+
+@pytest.mark.parametrize("empty_only", [True, False])
+def test_empty_only_arrival(home, empty_only):
+    path = home / "observed-empty"
+    path.mkdir()
+    assert not any(path.iterdir())
+    (path / "arrival").write_text("arrived after observation")
+    result = path_disposal.dispose_path(
+        str(path), actor="plugin:probe", reason="sweep", empty_only=empty_only)
+    if empty_only:
+        assert result == {"path": str(path), "outcome": "refused",
+                          "detail": "empty_only: directory is not empty"}
+        assert (path / "arrival").read_text() == "arrived after observation"
+    else:
+        assert result == {"path": str(path), "outcome": "disposed", "detail": ""}
+        assert not path.exists()
+
+
+def test_empty_only_symlink(home):
+    target = home / "target-dir"
+    target.mkdir()
+    (target / "keep").write_text("keep")
+    link = home / "directory-link"
+    link.symlink_to(target, target_is_directory=True)
+    assert empty_dispose(link) == {
+        "path": str(link), "outcome": "refused", "detail": "empty_only: path is not a directory"}
+    assert link.is_symlink()
+    assert (target / "keep").read_text() == "keep"
+
+
+def test_empty_only_file(home):
+    path = home / "regular-file"
+    path.write_text("keep")
+    assert empty_dispose(path) == {
+        "path": str(path), "outcome": "refused", "detail": "empty_only: path is not a directory"}
+    assert path.read_text() == "keep"
+
+
+def test_empty_only_missing(home):
+    assert empty_dispose(home / "absent")["outcome"] == "missing"
+
+
+def test_empty_only_scope(home, tmp_path):
+    outside = tmp_path / "outside-empty"
+    outside.mkdir()
+    assert empty_dispose(outside)["outcome"] == "refused"
+    assert outside.is_dir()
+    assert empty_dispose(home)["outcome"] == "refused"
+    assert home.is_dir()
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_empty_only_nonbool(home, value):
+    with pytest.raises(TypeError, match="empty_only"):
+        path_disposal.dispose_path(str(home / "absent"), actor="probe", reason="sweep", empty_only=value)
+
+
+@pytest.mark.parametrize("error", [PermissionError("controlled permission error"),
+                                  OSError(errno.EBUSY, "controlled busy error"),
+                                  OSError(errno.ENOTDIR, "controlled swapped-path error")])
+def test_empty_only_oserror(home, monkeypatch, error):
+    path = home / "busy"
+    path.mkdir()
+    calls = []
+    def fail(target):
+        calls.append(target)
+        raise error
+    with monkeypatch.context() as patcher:
+        patcher.setattr(os, "rmdir", fail)
+        result = empty_dispose(path)
+    assert result == {"path": str(path), "outcome": "error", "detail": str(error)}
+    assert calls == [path]
+    assert path.is_dir()
+
+
+@pytest.mark.parametrize("error_number", [errno.EEXIST, errno.ENOTEMPTY])
+def test_empty_only_notempty_errno(home, monkeypatch, error_number):
+    path = home / "notempty-error"
+    path.mkdir()
+    calls = []
+    def fail(target):
+        calls.append(target)
+        raise OSError(error_number, "controlled notempty error")
+    with monkeypatch.context() as patcher:
+        patcher.setattr(os, "rmdir", fail)
+        result = empty_dispose(path)
+    assert result == {"path": str(path), "outcome": "refused",
+                      "detail": "empty_only: directory is not empty"}
+    assert calls == [path]
+    assert path.is_dir()
+
+
+def test_empty_only_write_denied(home):
+    path = home / "state.db"
+    path.mkdir()
+    assert empty_dispose(path) == {
+        "path": str(path), "outcome": "refused", "detail": "path is write-denied"}
+    assert path.is_dir()
+
+
+def test_empty_only_tmp_root(home):
+    with tempfile.TemporaryDirectory(prefix="hermes-disposal-", dir="/tmp") as root:  # no-tmp: ok — policy fixture
+        assert empty_dispose(root)["outcome"] == "refused"
+        child = Path(root) / "empty"
+        child.mkdir()
+        assert empty_dispose(child) == {"path": str(child.resolve()), "outcome": "disposed", "detail": ""}
+        assert not child.exists()
+
+
+def test_empty_only_single_atomic_attempt(home, monkeypatch):
+    path = home / "atomic-empty"
+    path.mkdir()
+    calls = []
+    real_rmdir = os.rmdir
+    def remove(target):
+        calls.append(target)
+        # Simulate an arrival after lstat, immediately before the kernel operation.
+        (path / "arrival").write_text("keep")
+        return real_rmdir(target)
+    real_iterdir = Path.iterdir
+    def no_target_scan(target):
+        if target == path:
+            pytest.fail("empty_only must not pre-check emptiness")
+        return real_iterdir(target)
+    def forbidden(*args, **kwargs):
+        pytest.fail("empty_only must not recurse or unlink")
+    with monkeypatch.context() as patcher:
+        patcher.setattr(os, "rmdir", remove)
+        patcher.setattr(Path, "iterdir", no_target_scan)
+        patcher.setattr(path_disposal.shutil, "rmtree", forbidden)
+        patcher.setattr(Path, "unlink", forbidden)
+        result = empty_dispose(path)
+    assert result == {"path": str(path), "outcome": "refused",
+                      "detail": "empty_only: directory is not empty"}
+    assert calls == [path]
+    assert (path / "arrival").read_text() == "keep"
+
+
+@pytest.mark.parametrize("nonempty", [False, True])
+def test_host_crossing_empty_only(tmp_path, monkeypatch, nonempty):
+    from tools.registry import registry
+    home = _home_with_plugins(tmp_path, monkeypatch, {"disposal-probe": HOST_EMPTY_PLUGIN})
+    path = home / "host-directory"
+    path.mkdir()
+    if nonempty:
+        (path / "keep").write_text("keep")
+    manager = PluginManager()
+    manager.discover_and_load()
+    try:
+        assert manager._plugins["disposal-probe"].error is None
+        reply = json.loads(registry.dispatch(
+            "disposal_probe", {"path": str(path), "empty_only": True}, scope=manager.scope_key))
+        assert reply["pid"] != os.getpid()
+        ctx = PluginContext(SimpleNamespace(name="disposal-probe"), SimpleNamespace())
+        if nonempty:
+            assert (path / "keep").read_text() == "keep"
+        else:
+            assert not path.exists()
+            path.mkdir()
+        assert reply["result"] == ctx.dispose_path(
+            str(path), reason="expired via host", empty_only=True)
+        assert reply["result"]["outcome"] == ("refused" if nonempty else "disposed")
+        if nonempty:
+            assert reply["result"]["detail"] == "empty_only: directory is not empty"
+            assert (path / "keep").read_text() == "keep"
+        else:
+            assert not path.exists()
     finally:
         manager.unload()
         manager._plugin_host().shutdown()

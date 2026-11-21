@@ -145,9 +145,10 @@ See [Register slash commands](../../developer-guide/plugins/index.md#register-sl
 
 ## Guarded path disposal
 
-`ctx.dispose_path(path: str, *, reason: str) -> dict` performs a one-shot,
-host-owned disposal, including when the plugin runs out of process. **disk-cleanup
-is the first intended consumer**; its migration to this seam is a separate change.
+`ctx.dispose_path(path: str, *, reason: str, empty_only: bool = False) -> dict`
+performs a one-shot, host-owned disposal, including when the plugin runs out of
+process. **disk-cleanup is the first intended consumer**: `_sweep_empty_dirs` uses
+`empty_only=True` in its separate migration to this seam.
 
 The JSON result is `{"path": "<absolute checked path>", "outcome": "disposed",
 "detail": ""}`. Outcomes are `disposed`, `missing`, `refused`, or `error`; the latter
@@ -159,13 +160,32 @@ raise `TypeError` or `ValueError`.
 Only paths strictly inside the active `HERMES_HOME` or a top-level `/tmp/hermes-*`
 directory are eligible (including macOS's `/private/tmp` alias). Those roots
 themselves and write-denied paths are refused. Parents are resolved before the
-scope check, but the final symlink is not followed: disposal unlinks that link,
-unlinks a file, or removes a directory tree. Every outcome logs the plugin actor,
-reason and checked path, never file contents.
+scope check, but the final symlink is not followed. With `empty_only=False` (the
+unchanged default), disposal unlinks that link, unlinks a file, or removes a
+directory tree. Every outcome logs the plugin actor, reason, checked path and
+`empty_only=True` or `empty_only=False`, never file contents.
 
-**A `refused` result is final. Never fall back to a plugin's own deletion or `rm`.**
-The shared host executor is `hermes_cli.path_disposal.dispose_path(path, *, actor,
-reason)`; this is where host custody policy can veto removal.
+With `empty_only=True`, the same scope and write-denied checks run first, then
+`lstat` inspects the final path without following symlinks:
+
+| Condition | Outcome | Detail |
+|---|---|---|
+| Missing at `lstat` | `missing` | OS error text |
+| Not a directory, including any symlink | `refused` | `empty_only: path is not a directory` |
+| Empty directory removed | `disposed` | Empty string |
+| `rmdir` reports `ENOTEMPTY` or `EEXIST` | `refused` | `empty_only: directory is not empty` |
+| Other OS error, including `ENOTDIR` after a path swap | `error` | OS error text |
+
+Removal calls `os.rmdir` exactly once: it is atomic and nonrecursive, with no
+emptiness pre-check, retry or recursive fallback. A file arriving after an earlier
+observation of emptiness is preserved. `empty_only` must be a real bool; integers,
+strings and `None` raise `TypeError`.
+
+**A `refused` result is final. Never fall back to a plugin's own deletion or `rm`.
+In particular, a refused non-empty directory must not be removed another way.**
+The shared host executor is
+`hermes_cli.path_disposal.dispose_path(path: str, *, actor: str, reason: str, empty_only: bool = False) -> dict`;
+this is where host custody policy can veto both removal modes.
 
 ## Plugin discovery
 
