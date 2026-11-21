@@ -79,6 +79,24 @@ def test_running_executor_publishes_round_residual_once(monkeypatch, board_kind)
     assert rows['executor_item/' + name]['cpu_s'] < 0.015
 
 
+def test_step_cpu_is_residual_not_double_counted():
+    def operation():
+        burn(0.02)
+        with la.Scope('sync.board/nested'):
+            burn(0.02)
+        return 42
+    with cpu.iterations(lambda: True) as rounds:
+        next(rounds)
+        assert cpu.step(operation) == 42
+    rows = la.counters()
+    step = rows['sync.step/' + la._callable_name(operation)]
+    assert 0.018 <= step['cpu_s'] < 0.035
+    assert 0.018 <= rows['sync.board/nested']['cpu_s'] < 0.035
+    assert rows['sync.round/loop']['cpu_s'] < 0.015
+    assert la.snapshot()['process']['accounted_cpu_s'] == pytest.approx(
+        step['cpu_s'] + rows['sync.board/nested']['cpu_s'] + rows['sync.round/loop']['cpu_s'], abs=0.005)
+
+
 def test_success_in_ambient_except_does_not_book_error():
     def job():
         return 42

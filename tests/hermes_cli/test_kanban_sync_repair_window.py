@@ -158,6 +158,15 @@ def test_a_local_write_after_its_window_repairs_at_once(live, svc, kanban_home, 
 def test_a_burst_of_local_writes_runs_one_repair_pass_per_window(live, svc, kanban_home, monkeypatch, clock, mode):
     """Hub 2026-11-13: writes by other processes ran 80 full passes in 601 s on a 5,428-card board."""
     monkeypatch.setattr(win, "LOCAL_WRITE_REPAIR_MIN_S", 10.0)  # shorter than the feed window: told apart below
+    # This case isolates WAL commits from main-file replacement/checkpoint
+    # invalidation. Observe every opener, not only the fixture's writer.
+    live.execute("PRAGMA wal_autocheckpoint=0")
+    connect = kbc.connect
+    def without_checkpoint(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        return conn
+    monkeypatch.setattr(kbc, "connect", without_checkpoint)
     parent, _ = _settle(live, svc, kanban_home, mode)
     clock[0] += 60
     calls = _spy(monkeypatch, HEAVY)

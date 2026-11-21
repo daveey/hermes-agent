@@ -83,6 +83,41 @@ def test_pending_answers_are_never_used_as_empty_deadline_proof(board, monkeypat
     assert sendable.call_count == 2
 
 
+def test_rejected_to_pending_invalidates_empty_proof(board, monkeypatch):
+    path, conn = board
+    _insert(conn)
+    conn.execute("UPDATE kanban_sync_outbox SET state='rejected'")
+    monkeypatch.setattr(client.backlog, "behind", lambda path: False)
+    assert age._sample(path) is None
+    conn.execute("UPDATE kanban_sync_outbox SET state='pending'")
+    assert age._sample(path)[0] == "op"
+
+
+def test_closed_watch_handle_falls_back_then_recovers(board, monkeypatch):
+    path, conn = board
+    monkeypatch.setattr(client.backlog, "behind", lambda path: False)
+    assert age._sample(path) is None
+    # Keep the writer open: losing the watcher must not be masked by last-close
+    # sidecar deletion or a main-file checkpoint.
+    client._WATCH._conns[os.path.realpath(path)][1].close()
+    _insert(conn)
+    opened = Mock(wraps=kbc.connect_closing)
+    monkeypatch.setattr(kbc, "connect_closing", opened)
+    assert age._sample(path)[0] == "op"
+    assert opened.call_count == 1
+    assert age._sample(path)[0] == "op"
+
+
+def test_empty_after_round_still_reads_fresh_awake_state(board, monkeypatch):
+    path, _conn = board
+    awake = Mock(side_effect=[True, False, True])
+    monkeypatch.setattr(age.replica_age, "note_round", lambda *a, **kw: None)
+    result = client.RoundResult(board="default", mode="primary")
+    for _ in range(3):
+        assert age.after_round([result], [("default", path)], awake_fn=awake) == []
+    assert awake.call_count == 3
+
+
 def test_same_inode_restore_cannot_reuse_empty_proof(board, monkeypatch):
     source, conn = board
     path = source.with_name("closed-empty.db")

@@ -86,7 +86,7 @@ def test_events_during_io_and_periodic_recovery_are_not_lost():
 
 
 @pytest.mark.parametrize('journal', ['DELETE', 'WAL'])
-def test_unchanged_outbox_does_not_query_and_commit_is_seen_next_tick(tmp_path, journal):
+def test_unchanged_outbox_does_not_query_and_commit_is_seen_next_tick(tmp_path, journal, monkeypatch):
     import sqlite3
     path = tmp_path / 'board.db'
     writer = sqlite3.connect(path)
@@ -94,18 +94,50 @@ def test_unchanged_outbox_does_not_query_and_commit_is_seen_next_tick(tmp_path, 
     writer.execute('CREATE TABLE kanban_sync_outbox (state TEXT)')
     writer.commit()
     watch = client._BoardWatch()
+    from hermes_cli import kanban_sync_board_watch as watcher
+    traced = []
+    connect = watcher._kanban_lockguard.connect
+    def traced_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.set_trace_callback(traced.append)
+        return conn
+    monkeypatch.setattr(watcher._kanban_lockguard, 'connect', traced_connect)
     sql = "SELECT 1 FROM kanban_sync_outbox WHERE state = 'pending' LIMIT 1"
     try:
         assert watch.query(path, sql, unchanged_ok=True)[1] is None
-        conn = next(iter(watch._conns.values()))[1]
-        traced = []
-        conn.set_trace_callback(traced.append)
+        traced.clear()  # include replacement handles when DELETE commits move the main file
         assert watch.query(path, sql, unchanged_ok=True)[1] is None
         assert traced == ['PRAGMA data_version']
         writer.execute("INSERT INTO kanban_sync_outbox VALUES ('pending')")
         writer.commit()
         assert watch.query(path, sql, unchanged_ok=True)[1] == (1,)
         assert sql in traced
+    finally:
+        watch.reset()
+        writer.close()
+
+
+def test_checkpoint_reopens_watcher_generation(tmp_path):
+    import sqlite3
+    path = tmp_path / 'checkpoint.db'
+    writer = sqlite3.connect(path)
+    writer.execute('PRAGMA journal_mode=WAL')
+    writer.execute('PRAGMA wal_autocheckpoint=0')
+    writer.execute('CREATE TABLE probe (value INTEGER)')
+    writer.execute('INSERT INTO probe VALUES (1)')
+    writer.commit()
+    watch = client._BoardWatch()
+    try:
+        first = watch.query(path, 'SELECT value FROM probe', unchanged_ok=True)
+        writer.execute('UPDATE probe SET value=2')
+        writer.commit()
+        changed = watch.query(path, 'SELECT value FROM probe', unchanged_ok=True)
+        assert changed == (first[0], (2,))  # a WAL commit keeps the reader generation
+        result = writer.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+        assert result[0] == 0
+        checkpointed = watch.query(path, 'SELECT value FROM probe', unchanged_ok=True)
+        assert checkpointed[1] == (2,)
+        assert checkpointed[0] != first[0]  # a main-image change cannot certify old history
     finally:
         watch.reset()
         writer.close()

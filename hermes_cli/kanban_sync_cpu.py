@@ -20,6 +20,13 @@ from hermes_cli import loop_accounting
 _local = threading.local()
 
 
+def step(fn, *args, **kwargs):
+    """Name a completed loop step; nested scopes book only their residual CPU."""
+    if not loop_accounting.scopes_enabled():
+        return fn(*args, **kwargs)
+    return loop_accounting.scoped_call("sync.step", fn)(*args, **kwargs)
+
+
 @contextmanager
 def service(name):
     """Publish one completed service, including exceptional exits, on this thread."""

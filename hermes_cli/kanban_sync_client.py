@@ -1521,17 +1521,17 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
     try:
         with sync_cpu.iterations(keep_running) as rounds:
             for _round in rounds:
-                boards = board_paths()
-                sweep_gone_board_handles()  # a removed board is never read again: close what it pins (2026-11-13)
+                boards = sync_cpu.step(board_paths)
+                sync_cpu.step(sweep_gone_board_handles)  # close handles a removed board pins
                 for slug, _path in boards:
                     if slug not in watchers or not watchers[slug].is_alive():
                         watcher = FeedWatcher(ident, slug, wake, keep_running, on_change=work.changed,
                                               on_state=work.feed_state)
                         watchers[slug] = threading.Thread(target=watcher.run, daemon=True, name=f"kanban-feed-{slug}")
                         watchers[slug].start()
-                selected = sync_timing.select(work.select, boards, time.monotonic(), outbox_pending)
-                selected += [b for b in deferred_repairs_due(boards, _repair_clock()) if b not in selected]
-                selected += [b for b in backlog.due(boards) if b not in selected]  # a pull backlog drains round by round
+                selected = sync_cpu.step(sync_timing.select, work.select, boards, time.monotonic(), outbox_pending)
+                selected += [b for b in sync_cpu.step(deferred_repairs_due, boards, _repair_clock()) if b not in selected]
+                selected += [b for b in sync_cpu.step(backlog.due, boards) if b not in selected]
                 picked = time.monotonic()  # a board backing off a failed round waits for it, whatever else is due
                 selected = [b for b in selected if not work.backing_off(b[0], picked)]
                 selected = refusal.runnable(selected)  # a refused board waits out its own backoff, no busy retry
@@ -1553,10 +1553,10 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                         _log.info("kanban sync: %s %s pulled=%d pushed=%d rejected=%d", r.board, r.mode, r.pulled,
                                   r.push.sent, r.push.rejected)
                 # WARNING: an unsent edit older than 10 min after a good round (a skipped round judges nothing)
-                outbox_age.after_round([r for r in results if not r.skipped], boards)
+                sync_cpu.step(outbox_age.after_round, [r for r in results if not r.skipped], boards)
                 if time.monotonic() >= next_links and links.request(boards):  # busy: ask again next iteration
                     next_links = time.monotonic() + LINKS_EVERY_S
-                sync_timing.report(sender.loop_report)
+                sync_cpu.step(sync_timing.report, sender.loop_report)
                 # From this round's results: a board that stopped behind the head reruns at once; one a tick held is
                 # retried shortly (a skipped board's stale behind flag would otherwise spin with zero wait).
                 remaining = 0.0 if any(r.behind for r in results) else max(0.0, work.deadline - time.monotonic())
@@ -1571,7 +1571,7 @@ def _run_forever(keep_running: Callable[[], bool], interval: Optional[float], ru
                 retry_in = work.next_retry(now)
                 if retry_in is not None:
                     remaining = min(remaining, retry_in)
-                sync_timing.wait(wait_for_work, wake, [p for _, p in ready], remaining, keep_running)
+                sync_cpu.step(sync_timing.wait, wait_for_work, wake, [p for _, p in ready], remaining, keep_running)
     finally:
         links.stop()
         _LINKS_RUNNER = None  # no stale runner for the next loop's tests to wait on
