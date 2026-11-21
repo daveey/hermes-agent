@@ -34,6 +34,39 @@ def test_rest_patch_refuses_before_other_fields(client,conn,payload):
     assert 'model-neutral' in response.text
     assert tuple(conn.execute('SELECT * FROM tasks WHERE id=?',(tid,)).fetchone())==before
 
+@pytest.mark.parametrize('payload', [
+    {'model_override': 'gpt-6.1-sol', 'provider_override': 'openai-codex'},
+    {'body': 'require_model: true'},
+    {'status': 'review', 'metadata': {'review_model': 'gpt-6.1-sol', 'review_provider': 'openai-codex'}},
+])
+def test_invalid_mixed_patch_preserves_all_fields_and_history(client, conn, payload):
+    tid = kb.create_task(conn, title='original', body='original body', assignee='default')
+    before = tuple(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+    events = [tuple(row) for row in conn.execute('SELECT * FROM task_events WHERE task_id=?', (tid,))]
+    response = client.patch('/api/plugins/kanban/tasks/' + tid, json={
+        'assignee': '', 'status': 'triage', 'priority': 1, 'body': 'replacement', **payload,
+    })
+    assert response.status_code == 400, response.text
+    assert 'model-neutral' in response.text
+    assert tuple(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone()) == before
+    assert [tuple(row) for row in conn.execute('SELECT * FROM task_events WHERE task_id=?', (tid,))] == events
+
+
+@pytest.mark.parametrize('selector', [{}, {'model_override': 'class:deep', 'provider_override': 'auto'}])
+def test_valid_neutral_mixed_patch_succeeds(client, conn, selector):
+    tid = kb.create_task(conn, title='original', assignee='default')
+    response = client.patch('/api/plugins/kanban/tasks/' + tid, json={
+        'assignee': '', 'status': 'triage', 'priority': 1, 'body': 'Use tools and an eligible reviewer.', **selector,
+    })
+    assert response.status_code == 200, response.text
+    stored = kb.get_task(conn, tid)
+    assert stored is not None
+    assert stored.assignee is None and stored.status == 'triage' and stored.priority == 1
+    assert stored.body == 'Use tools and an eligible reviewer.'
+    assert stored.model_override == selector.get('model_override')
+    assert stored.provider_override == selector.get('provider_override')
+
+
 @pytest.mark.parametrize('payload',[
     {'model':'gpt-6.1-sol','provider':'openai-codex'},
     {'pin_mandatory':True},

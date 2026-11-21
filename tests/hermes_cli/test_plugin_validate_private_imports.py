@@ -101,6 +101,24 @@ def test_platform_plugin_seams_are_public_and_exist(tmp_path):
     assert _private_warnings(validate_plugin_dir(plugin)) == []
 
 
+def test_kanban_pure_validation_exports_are_name_scoped(tmp_path):
+    """Publish validation, not routing or a whole-module exemption."""
+    from hermes_cli import kanban_model_neutral as neutral
+
+    names = ("validate_selector", "validate_text", "validate_review")
+    assert all(callable(getattr(neutral, name)) for name in names)
+    imports = "".join(f"from hermes_cli.kanban_model_neutral import {name}\n" for name in names)
+    assert _private_warnings(validate_plugin_dir(_plugin(tmp_path / "validation", {"view.py": imports}))) == []
+    private = _plugin(tmp_path / "routing", {"view.py": (
+        "from hermes_cli.kanban_model_neutral import effective_selector, routing_view\n"
+        "import hermes_cli.kanban_model_neutral\n"
+    )})
+    [warning] = _private_warnings(validate_plugin_dir(private))
+    for name in ("effective_selector", "routing_view"):
+        assert f"hermes_cli.kanban_model_neutral.{name}" in warning
+    assert "view.py:2 hermes_cli.kanban_model_neutral" in warning
+
+
 _SKILL_CATALOG_SEAMS = (
     ("tools.skills_tool", "find_all_skills"), ("tools.skills_tool", "sort_skills"),
     ("tools.skills_tool", "skill_search_dirs"), ("tools.skills_tool", "locate_skill"),
