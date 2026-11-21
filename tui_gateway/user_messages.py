@@ -143,13 +143,13 @@ _AUTH_LOCK_TIMEOUT_PREFIXES = (
 )
 
 
-def agent_init_failed_message(exc: Any) -> str:
+def agent_init_failed_message(exc: Any, pin_model: str | None = None) -> str:
     # [daveey] A build refused by the pinned route's subscription quota wall: the reset in PT and /model, the
     # same sentence as the pre-build refusal (``held_reply``), not a raw epoch and `hermes setup` advice.
-    from agent.model_routing_unavailable import quota_refusal_wall
-    if (wall := quota_refusal_wall(exc)) is not None:
-        from agent.model_routing_walls import walled_pin_reply
-        return walled_pin_reply(*wall)
+    from agent.model_routing_unavailable import quota_refusal_walls
+    if (walls := quota_refusal_walls(exc, pin_model)) is not None:
+        from agent.model_routing_walls import walled_reply
+        return walled_reply(walls)
     detail = str(exc).rstrip(". ")  # resolver messages end in a sentence; no ".." before the hint
     if any(prefix in detail for prefix in _AUTH_LOCK_TIMEOUT_PREFIXES):
         return (f"Hermes could not start the assistant for this session. Details: {detail}. "

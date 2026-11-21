@@ -118,6 +118,37 @@ def walled_pin_reply(provider, model, resets_at):
             f"This chat is pinned to it; use /model to switch, or resend after the reset.")
 
 
+def _route_name(provider, model):
+    return f"{provider}/{model}" if model else provider
+
+
+def walled_chain_reply(primary, routes):
+    """The sentence for a pinned *primary* ``(provider, model, resets_at, kind)`` whose fallback *routes* (same
+    shape) are walled too: the pin "is rate-limited until" (a rate-limited ``AuthError``) or its "subscription
+    quota is out until" (a typed refusal), then each fallback. "Resend after" is the earliest reset across the
+    chain, the first moment a route can serve. A pin with no model is named by its provider alone."""
+    from agent.model_routing_unavailable import WALL_RATE_LIMIT
+
+    provider, model, resets_at, kind = primary
+    state = "is rate-limited" if kind == WALL_RATE_LIMIT else "subscription quota is out"
+    fallbacks = ", ".join(f"{_route_name(p, m)} until {reset_pt(r)}" for p, m, r, _ in routes)
+    also = f", and its fallbacks are out too ({fallbacks})" if routes else ""
+    earliest = min([resets_at, *(r for _, _, r, _ in routes)])
+    return (f"⚠️ {_route_name(provider, model)} {state} until {reset_pt(resets_at)}{also}. This chat is pinned "
+            f"to it; use /model to switch, or resend after {reset_pt(earliest)}.")
+
+
+def walled_reply(walls):
+    """``walled_pin_reply`` for one quota-walled route, ``walled_chain_reply`` otherwise (a pin plus walled
+    fallbacks, or a rate-limited pin whose fallbacks all repeated it)."""
+    from agent.model_routing_unavailable import WALL_QUOTA
+
+    primary, *routes = walls
+    if not routes and primary[3] == WALL_QUOTA:
+        return walled_pin_reply(*primary[:3])
+    return walled_chain_reply(primary, routes)
+
+
 def held_reply(wall):
     """The reply for a walled pin that holds (explicit, or a wall under the reroute threshold)."""
     return walled_pin_reply(wall.provider, wall.model, wall.resets_at)

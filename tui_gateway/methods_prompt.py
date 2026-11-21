@@ -674,18 +674,21 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
 def _agent_init_failure_surface(session: dict, message: str) -> tuple[str, dict, str | None]:
     """[daveey] ``(message, error_surface, boundary notice)`` for a turn whose agent build failed.
 
-    A build refused by the pinned route's subscription quota wall (``agent_failure.failure_route``, recorded by
-    the build-failure handler) closes like the pre-build refusal of that pin (``gateway/run_turn_runner.py``
-    ``_resolution_failure_result``): a non-retryable ``route_refused`` card whose body names the reset in PT and
-    /model, and the boundary copy without "Send it again". Everything else stays ``agent_init_failed``."""
+    A build refused by the pinned route's subscription quota wall, or by a fallback chain whose pin and every
+    fallback are walled (``agent_failure.failure_route``, recorded by the build-failure handler), closes like
+    the pre-build refusal of that pin (``gateway/run_turn_runner.py`` ``_resolution_failure_result``): a
+    non-retryable ``route_refused`` card whose body names the reset in PT and /model, and the boundary copy
+    without "Send it again". Everything else stays ``agent_init_failed``."""
     failure = session.get("agent_failure")
     route = failure.get("failure_route") if isinstance(failure, dict) else None
     if isinstance(route, dict):
         try:
             from agent.error_surface import _surface
-            from agent.model_routing_walls import walled_pin_reply
-            reply = walled_pin_reply(route["provider"], route["model"], route["resets_at"])
-            surface = _surface("gateway", "route_refused", False, route["provider"], route["model"])
+            from agent.model_routing_walls import walled_reply
+            walls = [(w["provider"], w["model"], w["resets_at"], w.get("kind", "quota"))
+                     for w in route.get("walls") or [route]]  # a record without ``walls`` is one route
+            reply = walled_reply(walls)
+            surface = _surface("gateway", "route_refused", False, walls[0][0], walls[0][1])
         except Exception:  # health: allow BLE001 -- a malformed record keeps the generic card
             logger.warning("prompt.submit: unusable failure_route %r", route, exc_info=True)
         else:

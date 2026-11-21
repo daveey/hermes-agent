@@ -229,19 +229,43 @@ def _finish_agent_build(sid: str, key: str, current: dict, *, notify_registered:
             session_db.close()
 
 
-def _record_failure_route(failure: dict, error: BaseException) -> None:
-    """[daveey] The pinned route whose own quota wall refused the build, with that wall's reset: the turn waiting
-    on it closes as a route refusal (``methods_prompt._agent_init_failure_surface``). Server-side only, like
-    ``failure_resets_at`` (``credential_failure.client_failure_fields`` drops it); cleared when a build starts."""
+def _requested_model(session: dict) -> str:
+    """[daveey] The model this session asked for (its override, else the config default): names a fallback chain's
+    pin when the pin's ``AuthError`` entry carries no model. "" when none is known; never invented."""
     try:
-        from agent.model_routing_unavailable import quota_refusal_wall
-        wall = quota_refusal_wall(error)
+        for overrides in (session.get("model_override"), session.get("resume_runtime_overrides")):
+            model = overrides.get("model") if isinstance(overrides, dict) else overrides
+            if isinstance(model, str) and model.strip():
+                return model.strip()
+        cfg_model = _load_cfg().get("model")
+        model = cfg_model.get("default") if isinstance(cfg_model, dict) else cfg_model
+        return model.strip() if isinstance(model, str) else ""
+    except Exception:  # health: allow BLE001 -- the pin is then named by its provider alone
+        logger.warning("agent build: could not read the requested model", exc_info=True)
+        return ""
+
+
+def _record_failure_route(failure: dict, error: BaseException, pin_model: str = "") -> None:
+    """[daveey] The pinned route whose quota wall refused the build and the earliest reset across the chain (for
+    an all-walled fallback chain, every route, pin first, in ``walls``): the turn waiting on it closes as a route
+    refusal (``methods_prompt._agent_init_failure_surface``). Server-side only, like ``failure_resets_at``
+    (``credential_failure.client_failure_fields`` drops it); cleared when a build starts. A chain's earliest
+    reset also fills ``failure_resets_at`` (the replay clock and the client's ``reset_at``)."""
+    try:
+        from agent.model_routing_unavailable import quota_refusal_walls
+        walls = quota_refusal_walls(error, pin_model)
     except Exception:  # health: allow BLE001 -- the generic init-failure card still goes out
         logger.warning("agent build: could not read the quota wall of %r", error, exc_info=True)
         return
-    if wall is not None:
-        provider, model, resets_at = wall
-        failure["failure_route"] = {"provider": provider, "model": model, "resets_at": resets_at}
+    if walls is None:
+        return
+    (provider, model, _, _), earliest = walls[0], min(w[2] for w in walls)
+    failure["failure_route"] = {"provider": provider, "model": model, "resets_at": earliest}
+    from hermes_cli.fallback_errors import ProviderFallbackError
+    if isinstance(error, ProviderFallbackError):
+        failure["failure_route"]["walls"] = [
+            {"provider": p, "model": m, "resets_at": r, "kind": k} for p, m, r, k in walls]
+        failure.setdefault("failure_resets_at", earliest)
 
 
 def _start_agent_build(sid: str, session: dict) -> None:
@@ -325,7 +349,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
                     and "failure_resets_at" not in current["agent_failure"]):
                 current["agent_failure"]["failure_resets_at"] = float(resets_at)
             current["agent_error"] = str(e)
-            _record_failure_route(current["agent_failure"], e)
+            pin_model = _requested_model(current)
+            _record_failure_route(current["agent_failure"], e, pin_model)
             # Logged: a failed build otherwise leaves no trace, so a prompt waiting on it reads in agent.log as
             # a message that "never ran" (the client only got an event, which a disconnect can lose). [daveey]
             from tui_gateway.build_diagnostics import log_build_failure
@@ -334,7 +359,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # error toast — but only if it can tell. The sentence is for the reader, the code is
             # for the client; older clients keep matching the text.
             _emit("error", sid, {
-                "message": agent_init_failed_message(e), **client_failure_fields(current["agent_failure"]),
+                "message": agent_init_failed_message(e, pin_model), **client_failure_fields(current["agent_failure"]),
                 **({"code": "provider_not_configured"} if provider_not_configured(e)
                    and current["agent_failure"].get("failure_kind") != "exhausted" else {})})
         finally:

@@ -247,7 +247,7 @@ def quota_refusal_wall(exc):
     absolute ``resets_at``, else None.
 
     A fallback chain gives None: its routes are the pin plus configured fallbacks, so no one route and reset
-    describes it (a mixed chain's real cause may not be a quota at all). A ``retry_after`` hint is not an
+    describes it (``quota_refusal_walls`` reads an all-walled chain). A ``retry_after`` hint is not an
     absolute reset. The names are as the refusal gives them, like ``model_routing_walls.held_reply``."""
     from hermes_cli.fallback_errors import ProviderFallbackError
 
@@ -259,6 +259,73 @@ def quota_refusal_wall(exc):
     if reset is None or not all(isinstance(v, str) and v.strip() for v in (provider, model)):
         return None
     return provider.strip(), model.strip(), reset
+
+
+#: [daveey] ``quota_refusal_walls`` entry kinds: a typed subscription quota refusal with its own absolute
+#: ``resets_at``, or a rate-limited ``AuthError`` pin whose wait hint (``retry_after`` / "retry after Ns") was
+#: turned into an absolute reset at read time.
+WALL_QUOTA, WALL_RATE_LIMIT = "quota", "rate_limit"
+
+
+def _chain_pin(entry, pin_model, now):
+    """``(provider, model, resets_at, kind)`` for a fallback chain's first entry, else None."""
+    from hermes_cli.auth import AuthError, is_rate_limited_auth_error
+
+    provider, model, failure = entry
+    if (wall := quota_refusal_wall(failure)) is not None:
+        reset, kind = wall[2], WALL_QUOTA
+    else:
+        error = _terminal_refusal(failure)
+        if not (isinstance(error, AuthError) and is_rate_limited_auth_error(error)):
+            return None
+        wait = _own_wait(error, now)
+        if wait is None:
+            return None
+        reset, kind = now + wait, WALL_RATE_LIMIT
+    # The chain entry names the route that was tried; the requested model fills a model-less AuthError entry.
+    provider = (provider if isinstance(provider, str) and provider.strip() else getattr(failure, "provider", "")) or ""
+    model = model if isinstance(model, str) and model.strip() else (wall[1] if wall else pin_model) or ""
+    if not (isinstance(provider, str) and provider.strip()):
+        return None
+    return provider.strip(), str(model).strip(), reset, kind
+
+
+def quota_refusal_walls(exc, pin_model=None, now=None):
+    """[daveey] Every walled route behind *exc*, pin first, as ``[(provider, model, resets_at, kind), ...]``,
+    else None. ``kind`` is ``WALL_QUOTA`` or ``WALL_RATE_LIMIT``.
+
+    One route's own refusal gives ``[(*quota_refusal_wall(exc), WALL_QUOTA)]``. A ``ProviderFallbackError``
+    (raised only after the pin failed with an ``AuthError``: ``tui_gateway.agent_factory``
+    ``_resolve_runtime_with_fallback``) qualifies when its pin is a rate-limited ``AuthError`` with a finite
+    wait (reset = *now* + wait) or a typed quota refusal with ``resets_at``, AND every fallback is a typed quota
+    refusal with a finite reset (``quota_refusal_wall``). The pin is named as its chain entry gives it, with
+    *pin_model* (the session's requested model) when the entry has none; with no model at all it is named by
+    provider alone (model ""). Fallbacks are named as their refusal gives them; a repeat of the pin or of an
+    earlier fallback is folded into the first, keeping the earlier reset. A mixed or no-wait chain gives None
+    and keeps its own error, and so does a chain nested in a chain (unlike ``is_quota_failure``, which looks
+    inside one: no raiser nests them)."""
+    import time
+
+    from hermes_cli.fallback_errors import ProviderFallbackError
+
+    error = _terminal_refusal(exc)
+    if not isinstance(error, ProviderFallbackError):
+        wall = quota_refusal_wall(exc)
+        return None if wall is None else [(*wall, WALL_QUOTA)]
+    if not error.failures:
+        return None
+    pin = _chain_pin(error.failures[0], pin_model, time.time() if now is None else now)
+    fallbacks = [quota_refusal_wall(failure) for _, _, failure in error.failures[1:]]
+    if pin is None or not fallbacks or any(w is None for w in fallbacks):
+        return None
+    walls = [pin]
+    for provider, model, reset in fallbacks:
+        same = next((i for i, w in enumerate(walls) if (w[0], w[1]) == (provider, model)), None)
+        if same is None:
+            walls.append((provider, model, reset, WALL_QUOTA))
+        elif reset < walls[same][2]:
+            walls[same] = (*walls[same][:2], reset, walls[same][3])
+    return walls
 
 
 def is_quota_failure(exc):
