@@ -806,13 +806,15 @@ class SessionAuthority:
             logging.getLogger(__name__).exception(
                 'Releasing refused attachments of request %s failed', request.request_id)
 
-    async def receipt(self, actor, ref, admission_id):
-        self.authorize(actor, ref, 'session:submit')
+    async def receipt(self, actor, ref, admission_id, *, receipt_only=False):
+        # Write callers retain submit authorization; only prompt.receipt opts into the read grant.
+        self.authorize(actor, ref, 'session:receipt' if receipt_only else 'session:submit')
         row = get_session_admission(self.db, admission_id=admission_id)
         if row is None or row['target_session_id'] != ref.session_id:
             raise RuntimeStoreError('not_found')
         from gateway.owner_identity import same_owner
-        if not same_owner(row['principal_id'], actor.subject) and 'session:control' not in actor.capabilities:
+        if (not same_owner(row['principal_id'], actor.subject)
+                and (receipt_only or 'session:control' not in actor.capabilities)):
             raise RuntimeStoreError('permission_denied')
         live = self.sessions[ref.session_id]
         with live.event_stream.lock:

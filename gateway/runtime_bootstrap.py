@@ -7,6 +7,7 @@ import threading
 import time
 
 _PURPOSE_CAPABILITIES = {
+    'prompt-receipt': frozenset({'session:receipt'}),
     'interactive': frozenset({'session:create', 'session:read', 'session:submit',
                               'session:control', 'session:approve', 'session:respond'}),
     'native-http': frozenset({'http:owner'}),

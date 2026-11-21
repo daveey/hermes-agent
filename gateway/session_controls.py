@@ -312,6 +312,10 @@ class AuthorityConnection:
             return None
         rid = request.get('id')
         method = request.get('method')
+        # Receipt tickets are not interactive viewers, including for plugin/ancillary RPCs.
+        if 'session:receipt' in self.actor.capabilities and method != 'prompt.receipt':
+            return {'jsonrpc': '2.0', 'id': rid, 'error': {
+                'code': 4001, 'message': 'permission_denied', 'data': {'reason': 'permission_denied'}}}
         params = request.get('params') or {}
         if not isinstance(params, dict):
             # Every handler indexes params as a mapping; refuse the frame before ``.get``.
@@ -939,7 +943,8 @@ class AuthorityConnection:
         return result
 
     async def receipt(self, ref, params):
-        receipt = await self.authority.receipt(self.actor, ref, params.get('admission_id'))
+        receipt = await self.authority.receipt(self.actor, ref, params.get('admission_id'),
+            receipt_only='session:receipt' in self.actor.capabilities)
         out = asdict(receipt)
         if params.get('include_result') is True and receipt.status == 'terminal':
             # The exact structured result the turn committed with settlement (`finish_result`):

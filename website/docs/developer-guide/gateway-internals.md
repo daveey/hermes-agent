@@ -480,7 +480,7 @@ Each gateway listens on a local control socket. It is how a client on the same m
 gateway that serves its profile and gets a WebSocket ticket, without spawning Python. Three verbs
 are public: `identify` (read-only), `resolve-profile` and the public form of `session-ticket`.
 Every other verb, the `session-ticket` parameters `subject` and `scope`, and purposes other than
-`interactive` are internal to Hermes (Desktop, the dashboard, the updater) and may change.
+`interactive` and `prompt-receipt` are internal to Hermes (Desktop, the dashboard, the updater) and may change.
 Starting or recovering a gateway stays `hermes gateway attach --start` / `--recover`
 ([below](#hermes-gateway-attach)).
 
@@ -516,6 +516,22 @@ and `runtime_protocol: 1`; its `ticket` expires after `expires_in_seconds` (30).
 `ws_url` with the subprotocols `[ws_protocol, ticket_protocol_prefix + ticket]`, from loopback,
 with no `Origin` header, and check that the server selected `ws_protocol`. Mint a new ticket for
 every connection and reconnect.
+
+For a client that only polls `prompt.receipt`, request `"purpose": "prompt-receipt"`
+instead. This profile-bound ticket carries only `session:receipt`, never
+`session:control` or `session:operator`, and the socket refuses every other RPC.
+The receipt must belong to the caller's admission principal and, for a local
+session, its local owner (including the existing legacy same-owner mappings).
+Receipt reads may include the saved terminal result. They cannot submit, cancel,
+steer, resume, or inspect other session state. A receipt-only ticket cannot use
+host scope. Like an interactive ticket, it does not bypass draining admission;
+machine pollers should send `"restart_wait": "refuse"`.
+
+An older gateway rejects this purpose: do not silently retry with `interactive`
+when least privilege is required. Interactive tickets intentionally retain the
+Desktop/TUI owner's full controls and cross-session operator access. This is
+capability attenuation for a ticket holder, not isolation against the same OS
+user who can request a separate interactive ticket from the private socket.
 
 | Case | `error` |
 |---|---|

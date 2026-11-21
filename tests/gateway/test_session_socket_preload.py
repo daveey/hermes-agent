@@ -129,10 +129,11 @@ async def test_an_attach_counts_as_a_client_while_its_handler_is_still_loading(t
 
 
 @pytest.mark.asyncio
-async def test_a_drain_that_began_while_the_handler_loaded_refuses_the_attach(tmp_path, monkeypatch):
+@pytest.mark.parametrize('purpose', ['interactive', 'prompt-receipt'])
+async def test_a_drain_that_began_while_the_handler_loaded_refuses_the_attach(tmp_path, monkeypatch, purpose):
     """Admission is re-checked after the fetch: an interactive client is refused (1013) by a drain
     that started while the handler loaded, exactly as if it had arrived after the drain."""
     def drain(runner):
         runner._draining = True
-    handled, sent = await _attach_while_loading(tmp_path, monkeypatch, during_load=drain)
+    handled, sent = await _attach_while_loading(tmp_path, monkeypatch, during_load=drain, purpose=purpose)
     assert not handled and sent[-1] == {'type': 'websocket.close', 'code': 1013, 'reason': ''}

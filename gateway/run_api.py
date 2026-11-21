@@ -505,20 +505,20 @@ class GatewayRuntimeAPI:
                 or ws.headers.get('origin') or not native_peer):
             await ws.close(code=4403)
             return
-        operator = True
-        try:
-            grant = self.runner.session_ticket_store.redeem(ticket, profile_id=None, purpose='interactive')
-        except PermissionError:
-            operator = False
+        for purpose in ('interactive', 'worker-adoption', 'prompt-receipt'):
             try:
-                grant = self.runner.session_ticket_store.redeem(ticket, profile_id=None, purpose='worker-adoption')
+                grant = self.runner.session_ticket_store.redeem(ticket, profile_id=None, purpose=purpose)
+                break
             except PermissionError:
-                # Browser/OAuth tickets have a separate issuer.
-                if draining_socket:
-                    await ws.close(code=1013)
-                    return
-                return await self.app(scope, receive, send)
-        allow_draining = not operator
+                continue
+        else:
+            # Browser/OAuth tickets have a separate issuer.
+            if draining_socket:
+                await ws.close(code=1013)
+                return
+            return await self.app(scope, receive, send)
+        operator = purpose == 'interactive'
+        allow_draining = purpose == 'worker-adoption'
         # Decided here, at admission, not at the mint: a restart wait that opened after the client's
         # discovery still refuses the machine poller that asked to stay out of it (a Kanban worker),
         # which would otherwise hold the turn the wait is waiting on.
