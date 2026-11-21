@@ -76,7 +76,10 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     clear: () => ipcRenderer.send('hermes:transcript-cache:clear'),
     stats: () => ipcRenderer.invoke('hermes:transcript-cache:stats'),
     // [daveey] Fire-and-forget: warm an `@session`-referenced session before it is clicked.
-    prefetch: key => ipcRenderer.send('hermes:transcript-cache:prefetch', key)
+    prefetch: key => ipcRenderer.send('hermes:transcript-cache:prefetch', key),
+    // [daveey] Fire-and-forget: a gateway socket's `sessions.moved` push, for main's background prefetcher.
+    sessionsMoved: (connectionId, sessions) =>
+      ipcRenderer.send('hermes:transcript-cache:sessions-moved', { connectionId, sessions })
   },
   getGatewayWsUrl: profile => ipcRenderer.invoke('hermes:gateway:ws-url', profile),
   // Registry-scoped fresh WS URL: { connectionId, profile } → result shape of

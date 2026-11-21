@@ -917,6 +917,34 @@ event("groups.changed", GroupsChangedPayload,
       doc="A Group Chat log, task or live status moved; an open room re-reads its log delta and groups.state.")
 
 
+# ── sessions.moved (names the sessions whose message rows moved) ──────────────────────────────
+
+
+class SessionsMovedEntry(OpenPayload):
+    """One session ``change_watcher._moved_sessions`` saw new message rows for. ``activity`` is the hub
+    listing's ``COALESCE(last_activity_at, started_at)``; ``last_message_id`` its newest row id (the Desktop's
+    cached tail fetches the rows after its own last id); ``parent_session_id`` lets a client treat a compression
+    child of a session it caches as its continuation; ``profile`` the store's owner profile."""
+
+    id: str
+    profile: str
+    message_count: int | None = None
+    activity: float | None = None
+    last_message_id: int
+    parent_session_id: str | None = None
+
+
+class SessionsMovedPayload(OpenPayload):
+    """``change_watcher._sessions_moved_payload``: at most once per second, only when message rows were added,
+    newest mover first (at most ``SESSIONS_MOVED_MAX``). Absent on older backends: keep polling."""
+
+    sessions: list[SessionsMovedEntry]
+
+
+event("sessions.moved", SessionsMovedPayload,
+      doc="Message rows were added to these sessions; a transcript cache fetches the rows after its cached tail.")
+
+
 __all__ = [
     "BillingBlock", "BillingStepUpVerificationPayload", "BrowserProgressPayload", "ChangeSignalPayload", "ErrorPayload",
     "ErrorSurface", "FreeTierChallengePayload", "GatewayReadyPayload", "GroupsChangedPayload",
@@ -927,6 +955,7 @@ __all__ = [
     "PreviewOpenPayload", "PreviewRestartProgressPayload", "ReactionPayload", "ResumePhaseStatus",
     "ReviewSummaryPayload", "SessionControlSnapshot", "SessionControlUpdatePayload",
     "SessionReclaimedPayload", "SessionResumeProgressPayload", "SessionTitlePayload", "SessionUsagePayload",
+    "SessionsMovedEntry", "SessionsMovedPayload",
     "SetupReadyPayload", "SideAgentCompletePayload", "SkinPayload", "StatusUpdatePayload",
     "StreamDeltaPayload", "SubagentEventPayload", "SubagentOutputTailEntry", "TerminalClosePayload",
     "TerminalOutputPayload", "TipShowPayload", "TodoUpdatedPayload", "ToolCompletePayload",

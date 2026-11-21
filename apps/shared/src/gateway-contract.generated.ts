@@ -6484,6 +6484,21 @@ export interface GroupsChangedPayload {
   broadcast_id?: string | null
   [key: string]: unknown
 }
+/** ``change_watcher._sessions_moved_payload``: at most once per second, only when message rows were added, newest mover first (at most ``SESSIONS_MOVED_MAX``). Absent on older backends: keep polling. */
+export interface SessionsMovedPayload {
+  sessions: SessionsMovedEntry[]
+  [key: string]: unknown
+}
+/** One session ``change_watcher._moved_sessions`` saw new message rows for. ``activity`` is the hub listing's ``COALESCE(last_activity_at, started_at)``; ``last_message_id`` its newest row id (the Desktop's cached tail fetches the rows after its own last id); ``parent_session_id`` lets a client treat a compression child of a session it caches as its continuation; ``profile`` the store's owner profile. */
+export interface SessionsMovedEntry {
+  id: string
+  profile: string
+  message_count?: number | null
+  activity?: number | null
+  last_message_id: number
+  parent_session_id?: string | null
+  [key: string]: unknown
+}
 export type ConnectorErrorReason = 'INVALID_PARAMS' | 'NOT_OWNER' | 'UNSUPPORTED_RUNTIME' | 'CONNECTOR_REQUEST_FAILED' | 'INVALID_CONNECTOR_RESPONSE' | 'UNKNOWN_TARGET' | 'LINK_STILL_VALID' | 'REISSUE_REFUSED' | 'UNKNOWN_OPERATION' | 'INVALID_ANSWER' | 'NEEDS_NOUS_AUTH' | 'CONNECTOR_NOT_FOUND' | 'TOOLS_UNAVAILABLE' | 'CONNECTORS_UNAVAILABLE' | 'CATALOG_UNAVAILABLE' | 'ACCOUNTS_UNAVAILABLE' | 'CONNECTION_NOT_FOUND' | 'POLICY_UNAVAILABLE' | 'POLICY_CONFLICT' | 'FORBIDDEN_SCOPE' | 'ORG_REQUIRED' | 'ORG_ACCESS_DENIED' | 'INVALID_POLICY' | 'ALIAS_TAKEN'
 
 // ── Client→server methods ──
@@ -7628,6 +7643,8 @@ export interface BackendGatewayEventMap {
   'session.usage': SessionUsagePayload
   /** state.db moved; refetch the session list. */
   'sessions.changed': ChangeSignalPayload
+  /** Message rows were added to these sessions; a transcript cache fetches the rows after its cached tail. */
+  'sessions.moved': SessionsMovedPayload
   /** The free-tier bootstrap finished (broadcast); the desktop's setup gate reads the record. */
   'setup.ready': SetupReadyPayload
   /** A skill root moved (installed/removed elsewhere); refetch commands.catalog from the gateway. */
@@ -7735,6 +7752,7 @@ export const GATEWAY_EVENT_TYPES = [
   'session.title',
   'session.usage',
   'sessions.changed',
+  'sessions.moved',
   'setup.ready',
   'skills.changed',
   'skin.changed',

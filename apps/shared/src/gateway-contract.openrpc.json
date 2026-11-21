@@ -42483,6 +42483,85 @@
         "title": "SessionWorkspaceMoveResult",
         "type": "object"
       },
+      "SessionsMovedEntry": {
+        "additionalProperties": true,
+        "description": "One session ``change_watcher._moved_sessions`` saw new message rows for. ``activity`` is the hub\nlisting's ``COALESCE(last_activity_at, started_at)``; ``last_message_id`` its newest row id (the Desktop's\ncached tail fetches the rows after its own last id); ``parent_session_id`` lets a client treat a compression\nchild of a session it caches as its continuation; ``profile`` the store's owner profile.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "message_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Message Count"
+          },
+          "activity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Activity"
+          },
+          "last_message_id": {
+            "title": "Last Message Id",
+            "type": "integer"
+          },
+          "parent_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Parent Session Id"
+          }
+        },
+        "required": [
+          "id",
+          "profile",
+          "last_message_id"
+        ],
+        "title": "SessionsMovedEntry",
+        "type": "object"
+      },
+      "SessionsMovedPayload": {
+        "additionalProperties": true,
+        "description": "``change_watcher._sessions_moved_payload``: at most once per second, only when message rows were added,\nnewest mover first (at most ``SESSIONS_MOVED_MAX``). Absent on older backends: keep polling.",
+        "properties": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionsMovedEntry"
+            },
+            "title": "Sessions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "title": "SessionsMovedPayload",
+        "type": "object"
+      },
       "SetupBeat": {
         "enum": [
           "name",
@@ -53318,6 +53397,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/ChangeSignalPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "sessions.moved",
+      "summary": "Message rows were added to these sessions; a transcript cache fetches the rows after its cached tail.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/SessionsMovedPayload"
           }
         }
       ]

@@ -24,11 +24,13 @@ export const STORE_OPS = [
   'meta',
   'metaMany',
   'migrateProfile',
+  'putAfter',
   'putLatest',
   'putOlder',
   'read',
   'setMeta',
-  'stats'
+  'stats',
+  'tailId'
 ] as const
 
 export type StoreOp = (typeof STORE_OPS)[number]

@@ -517,6 +517,91 @@ def _groups_changed_payload(before: dict, after: dict) -> dict:
     return {**scope, "broadcast_id": f"{replay_epoch()}:{next(_groups_broadcast_count)}"}
 
 
+# [daveey] ``sessions.moved``: which sessions got new message rows, so the Desktop extends its cached transcript
+# tails by push instead of polling the hub listing. The signature is each watched store's highest message id (one
+# indexed MAX behind the kept observer's commit key: an unchanged store costs one PRAGMA); the payload reads the
+# rows between the last broadcast's cursor and this one, so a floored window loses nothing.
+_sessions_moved_cursor_cache: dict[str, tuple[object, object, bool]] = {}
+# One frame names at most this many sessions (the newest movers); a longer burst is the listing's job.
+SESSIONS_MOVED_MAX = 500
+
+
+def _messages_cursor(conn, _key):
+    row = conn.execute("SELECT MAX(id) FROM messages").fetchone()
+    return int(row[0] or 0) if row is not None else 0, False
+
+
+def _sessions_moved_sig() -> tuple:
+    """``((home, highest message id | None), ...)`` across the watched stores."""
+    return tuple((str(root), _db_content_sig(root / "state.db", _sessions_moved_cursor_cache, _messages_cursor))
+                 for root in _watched_homes())
+
+
+def _home_profile_name(home: Path) -> str:
+    with contextlib.suppress(Exception):  # health: allow BLE001 -- a profile probe must not cost the frame
+        from gateway.host_attach import profile_name_for_home
+        return profile_name_for_home(home)
+    return home.name if home.parent.name == "profiles" else "default"
+
+
+def _moved_sessions(home: Path, start: int, end: int) -> list[dict]:
+    """The sessions of ``home``'s store with message rows in ``(start, end]``, newest mover first:
+    ``{id, profile, message_count, activity, last_message_id, parent_session_id}``. ``activity`` is the hub
+    listing's own definition (``COALESCE(last_activity_at, started_at)``) so a cache stamped from a push and the
+    listing agree."""
+    from tui_gateway import watch_store
+    with watch_store.observed(home / "state.db") as (_key, conn):
+        conn.execute("BEGIN")
+        try:
+            moved = conn.execute(
+                "SELECT session_id, MAX(id) AS last_id FROM messages WHERE id > ? AND id <= ? "
+                "GROUP BY session_id ORDER BY last_id DESC LIMIT ?", (start, end, SESSIONS_MOVED_MAX)).fetchall()
+            if not moved:
+                return []
+            have = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+
+            def pick(col: str, alt: str = "NULL") -> str:
+                return col if col in have else alt
+            activity = ("COALESCE(last_activity_at, started_at)" if {"last_activity_at", "started_at"} <= have
+                        else pick("started_at"))
+            ids = [row[0] for row in moved]
+            rows = {row[0]: row for row in conn.execute(
+                f"SELECT id, {pick('message_count')}, {activity}, {pick('profile_name')}, "
+                f"{pick('parent_session_id')} FROM sessions WHERE id IN ({', '.join('?' for _ in ids)})", ids)}
+        finally:
+            conn.execute("COMMIT")
+    fallback_profile = _home_profile_name(home)
+    out = []
+    for session_id, last_id in moved:
+        row = rows.get(session_id)
+        out.append({
+            "id": session_id, "profile": (row[3] if row is not None and row[3] else fallback_profile),
+            "message_count": row[1] if row is not None else None,
+            "activity": row[2] if row is not None else None,
+            "last_message_id": int(last_id),
+            "parent_session_id": row[4] if row is not None else None})
+    return out
+
+
+def _sessions_moved_payload(before: tuple, after: tuple) -> dict | None:
+    """``{"sessions": [...]}`` for every store whose cursor advanced; None (no frame) when none did (a store
+    seen for the first time, replaced or restored to a lower id seeds its cursor silently)."""
+    prior = dict(before or ())
+    moved: list[dict] = []
+    for home, cursor in after:
+        start = prior.get(home)
+        if start is None or cursor is None or cursor <= start:
+            continue
+        try:
+            moved += _moved_sessions(Path(home), start, cursor)
+        except Exception:  # health: allow BLE001 -- a busy/foreign store skips this frame; the Desktop's listing poll is the backstop
+            logger.debug("sessions.moved read failed home=%s", home, exc_info=True)
+    if not moved:
+        return None
+    moved.sort(key=lambda entry: entry["last_message_id"], reverse=True)
+    return {"sessions": moved[:SESSIONS_MOVED_MAX]}
+
+
 def _skills_sig():
     """The skill roots' stat signature for every scope a session resolved commands in (each profile
     home and session repo, not only the launch one: ``agent.skill_commands.published_scopes_signature``):
@@ -546,12 +631,16 @@ _CHANGE_WATCHES: dict[str, tuple[float, Any, Any] | tuple[float, Any, Any, Any]]
     "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, dict),
     # An open room view re-reads its log delta + status on this; its slow poll is only the backstop.
     # Its payload names what moved: an optional 4th slot, ``fn(previous broadcast signature, current one)``.
-    "groups.changed": (0.5, _groups_sig, dict, _groups_changed_payload)}
+    "groups.changed": (0.5, _groups_sig, dict, _groups_changed_payload),
+    # The sessions whose message rows moved since the last frame (ids, counts, newest row id): the Desktop's
+    # transcript cache fetches just those rows. A 4th-slot payload of None sends nothing.
+    "sessions.moved": (0.5, _sessions_moved_sig, dict, _sessions_moved_payload)}
 
 # state.db moves on every append of a streaming turn and gateway_state.json on
 # in-flight bookkeeping; the floor coalesces bursts to one broadcast per window,
 # trailing edge included (a floored change keeps its old signature, re-fires later).
-_CHANGE_BROADCAST_FLOOR_S = {"sessions.changed": 2.0, "platforms.changed": 5.0, "groups.changed": 1.0}
+_CHANGE_BROADCAST_FLOOR_S = {"sessions.changed": 2.0, "platforms.changed": 5.0, "groups.changed": 1.0,
+                             "sessions.moved": 1.0}
 
 _change_sigs: dict[str, Any] = {}
 _change_checked_at: dict[str, float] = {}
@@ -582,9 +671,12 @@ def _broadcast_watched_changes(now: float | None = None) -> None:
         if floor and now - _change_broadcast_at.get(event, -floor) < floor:
             continue  # floored: old signature stays so it re-fires when the window opens
         before, _change_sigs[event] = _change_sigs[event], sig
-        _change_broadcast_at[event] = now
         with contextlib.suppress(Exception):
-            _broadcast_global_event(event, diff_fn[0](before, sig) if diff_fn else payload_fn())
+            payload = diff_fn[0](before, sig) if diff_fn else payload_fn()
+            if payload is None:
+                continue  # the move carried nothing to tell (sessions.moved: no rows in range)
+            _change_broadcast_at[event] = now
+            _broadcast_global_event(event, payload)
 
 
 _skin_watcher_started = False

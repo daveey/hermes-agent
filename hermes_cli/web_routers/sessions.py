@@ -891,9 +891,12 @@ async def get_session_messages(
     request: Request,
     session_id: str, profile: Optional[str] = None, limit: Optional[int] = Query(None, ge=0),
     offset: int = Query(0, ge=0), order: Optional[str] = Query(None),
-    include_compacted: bool = Query(False), inline_images: bool = Query(True)):
+    include_compacted: bool = Query(False), inline_images: bool = Query(True),
+    after_id: Optional[int] = Query(None, ge=0)):
     if order not in (None, "oldest", "latest"):
         raise HTTPException(status_code=400, detail="order must be one of: oldest, latest")
+    if after_id is not None:
+        return await _session_messages_after(request, session_id, profile, after_id, limit, inline_images)
 
     def _read(db):
         sid = _resolve_session_id(db, session_id)
@@ -936,6 +939,48 @@ async def get_session_messages(
             "order": order or ("latest" if limit is None else "oldest"),
             "returned": len(projected_messages)}}
     return _display_transcript_response(request, body) if display else body
+
+
+# [daveey] Push-driven transcript deltas (``sessions.moved``): one page after a cached tail's last row.
+SESSION_MESSAGES_AFTER_DEFAULT_LIMIT = 200
+
+
+async def _session_messages_after(request: Request, session_id: str, profile: Optional[str], after_id: int,
+                                  limit: Optional[int], inline_images: bool):
+    """``GET /api/sessions/{id}/messages?after_id=N``: the live display rows of the stored session that holds
+    the messages (the same ``resolve_resume_session_id`` redirect the latest page uses) after row ``N``.
+
+    ``delta.anchor_found`` False (row N is not a live row of that session: rewind, compaction, rotation) and
+    ``delta.has_more`` True (more than ``limit`` rows: a gap) both tell the Desktop its cached run cannot be
+    extended cleanly; it refetches the latest page instead. ``session_id`` names the session read, so a caller
+    whose key resolved elsewhere (a compression rotation) refetches too. ``delta.transcript_revision`` moves on
+    an in-place rewrite of an older row. Bounded like every page: at most 500 rows."""
+    _limit = SESSION_MESSAGES_AFTER_DEFAULT_LIMIT if limit is None else min(limit, 500)
+
+    def _read(db):
+        sid = _resolve_session_id(db, session_id)
+        if not sid:
+            return None
+        sid = db.resolve_resume_session_id(sid)
+        return sid, db.get_display_messages_after(sid, after_id, _limit + 1)
+
+    result = await asyncio.to_thread(_with_db, profile, _read, read_only=True)
+    if result is None:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    sid, page = result
+    rows = page["messages"]
+    has_more = len(rows) > _limit
+    projected = await asyncio.to_thread(
+        _project_for_display, rows[:_limit], home=_history_profile_home(profile), inline_images=inline_images)
+    if request.headers.get(DISPLAY_TRANSCRIPT_HEADER) == "1":
+        projected = _slim_for_display(projected)
+    return {
+        "session_id": sid,
+        "profile": _serving_profile(profile),
+        "messages": projected,
+        "delta": {"after_id": after_id, "anchor_found": bool(page["anchor_found"]), "has_more": has_more,
+                  "transcript_revision": page["transcript_revision"], "limit": _limit,
+                  "returned": len(projected)}}
 
 
 def _timeline_session_id(db, session_id: str, owner: str) -> str:

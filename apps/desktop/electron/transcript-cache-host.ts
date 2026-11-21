@@ -17,6 +17,7 @@
  *   hermes:transcript-cache:clear            send
  *   hermes:transcript-cache:stats            invoke    -> {bytes, sessions}
  *   hermes:transcript-cache:prefetch         send      {connectionId, profile, sessionId}  ([daveey] @session ref warm-up)
+ *   hermes:transcript-cache:sessions-moved   send      {connectionId, sessions}  ([daveey] a gateway's `sessions.moved` push)
  */
 import path from 'node:path'
 
@@ -31,7 +32,7 @@ import {
   type TranscriptCacheClient,
   workerClient
 } from './transcript-cache-client'
-import { type HubSessionRecord, TranscriptPrefetcher } from './transcript-prefetch'
+import { type DeltaPage, type HubSessionRecord, TranscriptPrefetcher } from './transcript-prefetch'
 
 export interface TranscriptCacheHostDeps {
   /** Resolve the backend descriptor of a registry connection's default profile. */
@@ -291,6 +292,32 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
   const prefetcher = new TranscriptPrefetcher({
     connectionForGateway,
     paused: deps.prefetchPaused,
+    // [daveey] Push delta: the rows after the cached tail. A gateway without the route answers a plain page with no
+    // `delta` block (an older core ignores the unknown query param): null, and the prefetcher stops asking it.
+    fetchAfter: async (key, afterId, limit): Promise<DeltaPage | null> => {
+      const descriptor = await deps.backendFor(key.connectionId, dialOptions(key.connectionId))
+      const query = new URLSearchParams({ after_id: String(afterId), limit: String(limit), profile: key.profile })
+
+      const page = await deps.getJson(
+        descriptor,
+        `/api/sessions/${encodeURIComponent(key.sessionId)}/messages?${query.toString()}`,
+        { timeoutMs: 30_000 }
+      )
+
+      const delta = page?.delta
+
+      if (!delta || typeof delta !== 'object' || !Array.isArray(page?.messages)) {
+        return null
+      }
+
+      return {
+        anchorFound: delta.anchor_found === true,
+        hasMore: delta.has_more === true,
+        messages: page.messages,
+        sessionId: typeof page.session_id === 'string' ? page.session_id : key.sessionId,
+        transcriptRevision: typeof delta.transcript_revision === 'number' ? delta.transcript_revision : null
+      }
+    },
     fetchLatest: async (key, limit) => {
       const descriptor = await deps.backendFor(key.connectionId, dialOptions(key.connectionId))
 
@@ -333,7 +360,9 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
     store: {
       meta: key => client.call('meta', [key]),
       metaMany: keys => client.call('metaMany', [keys]),
-      putLatest: (key, latest, meta) => client.call<boolean>('putLatest', [key, latest, meta])
+      putAfter: (key, anchorId, rows, meta) => client.call<boolean>('putAfter', [key, anchorId, rows, meta]),
+      putLatest: (key, latest, meta) => client.call<boolean>('putLatest', [key, latest, meta]),
+      tailId: key => client.call<null | number>('tailId', [key])
     }
   })
 
@@ -344,6 +373,13 @@ export function installTranscriptCache(deps: TranscriptCacheHostDeps) {
     if (key) {
       void prefetcher.prefetchKey(key).catch(error => deps.log(`transcript prefetch (ref) failed: ${error}`))
     }
+  })
+
+  // [daveey] A renderer forwards each gateway socket's `sessions.moved` frame; '' names the registry primary.
+  deps.ipcMain.on('hermes:transcript-cache:sessions-moved', (_event, payload) => {
+    const connectionId = String(payload?.connectionId ?? '').trim() || deps.registry().primary || 'local'
+
+    void prefetcher.sessionsMoved(connectionId, payload?.sessions)
   })
 
   return {

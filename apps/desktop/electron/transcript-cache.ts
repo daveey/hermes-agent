@@ -104,6 +104,15 @@ export function mergeLatest(cached: readonly unknown[], latest: readonly unknown
   return at > 0 ? [...cached.slice(0, at), ...latest] : [...latest]
 }
 
+/** [daveey] The server row id of a cached run's last row: the anchor a push delta (`?after_id=`) extends. Null when
+ *  the last row has no numeric id (a client-side row): such a run is only ever replaced by a latest page. */
+export function tailRowId(messages: readonly unknown[]): null | number {
+  const last = messages.at(-1) as Record<string, unknown> | undefined
+  const id = typeof last?.id === 'number' ? last.id : typeof last?.id === 'string' ? Number(last.id) : NaN
+
+  return Number.isSafeInteger(id) ? id : null
+}
+
 /** An older page loaded above the cached run: prepend what the run does not already hold. */
 export function mergeOlder(cached: readonly unknown[], older: readonly unknown[]): unknown[] {
   if (cached.length === 0) {
@@ -244,6 +253,31 @@ export class TranscriptCacheStore {
     const cached = this.read(key, { touch: false })?.messages ?? []
 
     return this.write(key, mergeLatest(cached, latest.slice(-LATEST_ROWS)), meta)
+  }
+
+  /** [daveey] The cached run's last server row id (see tailRowId), or null when there is no run or no anchor. */
+  tailId(key: TranscriptCacheKey): null | number {
+    const current = this.read(key, { touch: false })
+
+    return current ? tailRowId(current.messages) : null
+  }
+
+  /**
+   * [daveey] Append a push delta: the rows the server holds after `anchorId`. Applies only while the cached run
+   * still ends at that row (another write since the delta was asked for, an open's latest page, means the delta
+   * no longer lines up: false, and the caller refetches the latest page). The meta moves to the delta's.
+   */
+  putAfter(key: TranscriptCacheKey, anchorId: number, rows: readonly unknown[], meta: TranscriptCacheMeta = {}): boolean {
+    const current = this.read(key, { touch: false })
+
+    if (!current || tailRowId(current.messages) !== anchorId || !Array.isArray(rows)) {
+      return false
+    }
+
+    const held = new Set(current.messages.map(messageIdentity))
+    const fresh = rows.filter(row => !held.has(messageIdentity(row)))
+
+    return this.write(key, [...current.messages, ...fresh], meta)
   }
 
   /** Store an older page the user loaded ("Show earlier"). Ignored without a cached run to extend. */

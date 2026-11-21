@@ -126,6 +126,8 @@ declare global {
         stats: () => Promise<{ bytes: number; sessions: number }>
         /** [daveey] Warm a session's latest page in main (fire-and-forget; main dedupes and backs off). */
         prefetch?: (key: TranscriptCacheBridgeKey) => void
+        /** [daveey] Forward a gateway socket's `sessions.moved` push to main's prefetcher ('' = registry primary). */
+        sessionsMoved?: (connectionId: string, sessions: unknown[]) => void
       }
       getGatewayWsUrl: (profile?: null | string) => Promise<GatewayWsUrlResult>
       // Browser host only: before a pick routes `profile`, re-read the served

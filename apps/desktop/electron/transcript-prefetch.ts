@@ -8,6 +8,16 @@
  * was taken against a different activity/message_count. So a click on any of them
  * paints from the local cache, and a session that moved is refetched on the next
  * tick. All I/O is injected; electron/main.ts wires it to ensureRegistryBackend.
+ *
+ * Push (`sessions.moved`, the gateway's change watcher): a renderer forwards each frame
+ * here (sessionsMoved). Every named session this prefetcher tracks (a listing target, or
+ * already cached) fetches only the rows after its cached tail (`?after_id=`), at once and
+ * with no MIN_REFETCH_MS throttle: one fetch in flight and one queued per session. A delta
+ * that does not line up (anchor row gone, a gap, a rotation, an in-place rewrite since the
+ * last full page) refetches the latest page instead. While a gateway pushes, the listing
+ * pass is only a SAFETY_NET_MS backstop for it; a gateway that never pushes (older core,
+ * no socket open) keeps the 5 s pass. A moved session the prefetcher does not know asks
+ * for an early listing pass.
  */
 import { LATEST_ROWS, type TranscriptCacheKey, type TranscriptCacheMeta } from './transcript-cache'
 
@@ -23,6 +33,14 @@ export const DEMAND_QUEUE_MAX = 50
 /** [daveey] A cached session the hub listing does not cover is refetched on demand at most this often. */
 export const UNLISTED_REFETCH_MS = 10 * 60_000
 const DEMAND_MISSED_MAX = 500
+/** [daveey] A connection that delivered `sessions.moved` within this long is push-live: its listing pass is a backstop. */
+export const PUSH_LIVE_MS = 5 * 60_000
+/** [daveey] How often the listing pass still refreshes a push-live gateway's cached sessions. */
+export const SAFETY_NET_MS = 60_000
+/** [daveey] A pushed session the prefetcher does not know triggers a listing pass, at most this often. */
+export const EARLY_PASS_MIN_MS = 5_000
+/** [daveey] Transcript revisions remembered (one per pushed session), oldest forgotten first. */
+const REVISIONS_MAX = 2_000
 
 export interface HubSessionRecord {
   activity?: null | number
@@ -49,6 +67,28 @@ export interface PrefetchTarget {
 type CachedMeta = { activity: null | number; messageCount: null | number; savedAt: number } | null
 type MaybePromise<T> = Promise<T> | T
 
+/** [daveey] One `sessions.moved` entry (gateway contract SessionsMovedEntry). */
+export interface MovedSession {
+  activity?: null | number
+  id: string
+  last_message_id?: null | number
+  message_count?: null | number
+  parent_session_id?: null | string
+  profile?: null | string
+}
+
+/** [daveey] `GET /api/sessions/{id}/messages?after_id=` as the prefetcher reads it. */
+export interface DeltaPage {
+  anchorFound: boolean
+  hasMore: boolean
+  messages: unknown[]
+  sessionId: string
+  transcriptRevision: null | number
+}
+
+/** What one push-triggered fetch did. */
+export type PushOutcome = 'backoff' | 'current' | 'delta' | 'empty' | 'failed' | 'full'
+
 /**
  * The cache as the prefetcher sees it. Every call may be asynchronous: Desktop runs the SQLite store on a worker
  * thread (transcript-cache-client.ts), because a write that waits on the disk froze Electron's main loop for
@@ -57,12 +97,23 @@ type MaybePromise<T> = Promise<T> | T
 export interface PrefetchStore {
   meta(key: TranscriptCacheKey): MaybePromise<CachedMeta>
   metaMany?(keys: readonly TranscriptCacheKey[]): MaybePromise<CachedMeta[]>
+  /** [daveey] Append a push delta after `anchorId` (false: the cached run no longer ends there). */
+  putAfter?(
+    key: TranscriptCacheKey,
+    anchorId: number,
+    rows: readonly unknown[],
+    meta?: TranscriptCacheMeta
+  ): MaybePromise<boolean>
   putLatest(key: TranscriptCacheKey, latest: readonly unknown[], meta?: TranscriptCacheMeta): MaybePromise<boolean>
+  /** [daveey] The cached run's last server row id, or null (no run / no anchor). */
+  tailId?(key: TranscriptCacheKey): MaybePromise<null | number>
 }
 
 export interface PrefetchDeps {
   /** Registry connection id of a hub gateway name, or undefined (unregistered gateway). */
   connectionForGateway: (gateway: string) => Promise<string | undefined> | string | undefined
+  /** [daveey] The rows after `afterId` (push delta), or null when the gateway has no such route (older core). */
+  fetchAfter?: (key: TranscriptCacheKey, afterId: number, limit: number) => Promise<DeltaPage | null>
   /** Latest `limit` raw display rows of one session (chronological). */
   fetchLatest: (key: TranscriptCacheKey, limit: number) => Promise<unknown[]>
   listHubSessions: () => Promise<HubSessionRecord[] | null>
@@ -190,20 +241,272 @@ export class TranscriptPrefetcher {
   private running: null | Promise<PrefetchTickResult> = null
   private timer: null | ReturnType<typeof setTimeout> = null
   private stopped = true
+  /** [daveey] Push state: when each connection last pushed, when its safety-net pass last ran. */
+  private readonly pushSeenAt = new Map<string, number>()
+  private readonly safetyNetAt = new Map<string, number>()
+  /** Connections the last listing pass mapped a gateway to. */
+  private readonly listedConnections = new Set<string>()
+  /** keyString of every target of the last listing pass (the tracked set, with the cache). */
+  private readonly targetKeys = new Set<string>()
+  /** Per session: the push fetch in flight and the newest entry queued behind it. */
+  private readonly pushLanes = new Map<string, { done: Promise<void>; queued: MovedSession | null }>()
+  /** Transcript revision each session's cached run was last made whole at (a latest page or a clean delta). */
+  private readonly revisions = new Map<string, null | number>()
+  /** Connections whose gateway has no `after_id` route: pushes there refetch the latest page. */
+  private readonly deltaUnsupported = new Set<string>()
+  private lastListingAt = Number.NEGATIVE_INFINITY
+  private earlyPassTimer: null | ReturnType<typeof setTimeout> = null
+  /** [daveey] Push work counted for logs and measurement. */
+  readonly pushStats = { coalesced: 0, current: 0, delta: 0, earlyPasses: 0, failed: 0, full: 0, unknown: 0 }
 
   constructor(deps: PrefetchDeps) {
     this.deps = deps
   }
 
-  /** One pass; concurrent calls share the pass in flight. */
-  tick(): Promise<PrefetchTickResult> {
+  private now(): number {
+    return this.deps.now?.() ?? Date.now()
+  }
+
+  /** One pass; concurrent calls share the pass in flight. `force` lists even while every gateway pushes. */
+  tick(options: { force?: boolean } = {}): Promise<PrefetchTickResult> {
     if (!this.running) {
-      this.running = this.pass().finally(() => {
+      this.running = this.pass(Boolean(options.force)).finally(() => {
         this.running = null
       })
     }
 
     return this.running
+  }
+
+  /** [daveey] Whether `connectionId` pushed `sessions.moved` recently enough to trust its pushes. */
+  isPushLive(connectionId: string, now: number = this.now()): boolean {
+    return now - (this.pushSeenAt.get(connectionId) ?? Number.NEGATIVE_INFINITY) < PUSH_LIVE_MS
+  }
+
+  /**
+   * [daveey] A `sessions.moved` frame from `connectionId`'s gateway. Each named session this prefetcher tracks
+   * fetches the rows after its cached tail now; an unknown one asks for an early listing pass. Resolves when the
+   * fetches it started (or queued behind) are done. Never throws.
+   */
+  async sessionsMoved(connectionId: string, sessions: unknown): Promise<void> {
+    try {
+      await this.handleMoved(String(connectionId ?? '').trim(), sessions)
+    } catch (error) {
+      this.deps.log?.(`transcript push skipped: ${(error as Error)?.message || error}`)
+    }
+  }
+
+  private async handleMoved(connectionId: string, sessions: unknown): Promise<void> {
+    if (!connectionId || !Array.isArray(sessions)) {
+      return
+    }
+
+    this.pushSeenAt.set(connectionId, this.now())
+
+    const entries = sessions.filter(
+      (entry): entry is MovedSession => typeof entry?.id === 'string' && entry.id.trim() !== ''
+    )
+
+    if (entries.length === 0) {
+      return
+    }
+
+    const keyOf = (sessionId: string, profile: unknown): TranscriptCacheKey => ({
+      connectionId,
+      profile: profileOf(profile),
+      sessionId
+    })
+
+    const keys = entries.map(entry => keyOf(entry.id, entry.profile))
+    // A compression child continues its parent: it is tracked when the parent is.
+    const parents = entries.map(entry => (entry.parent_session_id ? keyOf(entry.parent_session_id, entry.profile) : null))
+    const lookups = [...keys, ...parents.filter((key): key is TranscriptCacheKey => key !== null)]
+    const { store } = this.deps
+
+    const metas = store.metaMany
+      ? await store.metaMany(lookups)
+      : await Promise.all(lookups.map(key => store.meta(key)))
+
+    const cached = new Set(lookups.filter((_key, index) => metas[index]).map(keyString))
+    const tracked = (key: null | TranscriptCacheKey) => Boolean(key) && (cached.has(keyString(key!)) || this.targetKeys.has(keyString(key!)))
+    const work: Promise<void>[] = []
+    let unknown = false
+
+    entries.forEach((entry, index) => {
+      if (tracked(keys[index]) || tracked(parents[index])) {
+        work.push(this.enqueuePush(keys[index], entry))
+      } else {
+        unknown = true
+        this.pushStats.unknown += 1
+      }
+    })
+
+    if (unknown) {
+      this.requestEarlyPass()
+    }
+
+    await Promise.all(work)
+  }
+
+  /** One fetch in flight per session and the newest entry queued behind it (older queued entries are superseded). */
+  private enqueuePush(key: TranscriptCacheKey, entry: MovedSession): Promise<void> {
+    const id = keyString(key)
+    const lane = this.pushLanes.get(id)
+
+    if (lane) {
+      if (lane.queued) {
+        this.pushStats.coalesced += 1
+      }
+
+      lane.queued = entry
+
+      return lane.done
+    }
+
+    const fresh: { done: Promise<void>; queued: MovedSession | null } = { done: Promise.resolve(), queued: null }
+
+    fresh.done = (async () => {
+      let next: MovedSession | null = entry
+
+      try {
+        while (next) {
+          const current: MovedSession = next
+          fresh.queued = null
+          const outcome = await this.applyPush(key, current)
+          this.pushStats[outcome === 'empty' || outcome === 'backoff' ? 'failed' : outcome] += 1
+          next = fresh.queued
+        }
+      } finally {
+        this.pushLanes.delete(id)
+      }
+    })()
+
+    this.pushLanes.set(id, fresh)
+
+    return fresh.done
+  }
+
+  private rememberRevision(id: string, revision: null | number | undefined): void {
+    this.revisions.delete(id)
+
+    if (revision === undefined) {
+      return
+    }
+
+    this.revisions.set(id, revision)
+
+    for (const stale of this.revisions.keys()) {
+      if (this.revisions.size <= REVISIONS_MAX) {
+        break
+      }
+
+      this.revisions.delete(stale)
+    }
+  }
+
+  /**
+   * Bring one session's cached run up to `entry`: the rows after its tail when they line up, else the latest page.
+   * The delta read also learns the session's transcript revision BEFORE any latest page is read, so a later delta
+   * can tell an in-place rewrite of a row it already holds (it refetches the page then).
+   */
+  private async applyPush(key: TranscriptCacheKey, entry: MovedSession): Promise<PushOutcome> {
+    const { connectionId } = key
+
+    if ((this.downUntil.get(connectionId) ?? 0) > this.now()) {
+      return 'backoff'
+    }
+
+    const meta = { activity: entry.activity ?? null, messageCount: entry.message_count ?? null }
+
+    try {
+      const delta = await this.tryDelta(key, entry, meta)
+
+      return delta.outcome ?? (await this.refetchLatest(key, meta, delta.revision, delta.reason))
+    } catch (error) {
+      if (isGatewayFailure(error)) {
+        this.downUntil.set(connectionId, this.now() + GATEWAY_BACKOFF_MS)
+        this.deps.log?.(`transcript push: ${connectionId} unreachable (${(error as Error)?.message || error}); backing off`)
+      }
+
+      this.rememberRevision(keyString(key), undefined)
+
+      return 'failed'
+    }
+  }
+
+  /** The delta half of applyPush: an outcome when it settled the push, else why the latest page is needed. */
+  private async tryDelta(
+    key: TranscriptCacheKey,
+    entry: MovedSession,
+    meta: TranscriptCacheMeta
+  ): Promise<{ outcome?: PushOutcome; reason: string; revision?: null | number }> {
+    const { fetchAfter, store } = this.deps
+
+    if (!fetchAfter || !store.tailId || !store.putAfter || this.deltaUnsupported.has(key.connectionId)) {
+      return { reason: 'no delta route' }
+    }
+
+    const anchor = await store.tailId(key)
+
+    if (anchor !== null && typeof entry.last_message_id === 'number' && entry.last_message_id <= anchor) {
+      return { outcome: 'current', reason: '' } // this run already holds the pushed rows (a page read past them)
+    }
+
+    // No cached anchor: after_id=0 matches no row, so the read only learns the revision.
+    const page = await fetchAfter(key, anchor ?? 0, LATEST_ROWS)
+
+    if (page === null) {
+      this.deltaUnsupported.add(key.connectionId)
+
+      return { reason: 'no delta route' }
+    }
+
+    const id = keyString(key)
+    const reason = deltaMismatch(anchor, page, key.sessionId, this.revisions.has(id) ? this.revisions.get(id) : undefined)
+
+    if (!reason && anchor !== null && (await store.putAfter(key, anchor, page.messages, meta))) {
+      this.rememberRevision(id, page.transcriptRevision)
+
+      return { outcome: 'delta', reason: '' }
+    }
+
+    return { reason: reason || 'cache moved under the delta', revision: page.transcriptRevision }
+  }
+
+  private async refetchLatest(
+    key: TranscriptCacheKey,
+    meta: TranscriptCacheMeta,
+    revision: null | number | undefined,
+    reason: string
+  ): Promise<PushOutcome> {
+    const rows = await this.deps.fetchLatest(key, LATEST_ROWS)
+
+    if (rows.length === 0 || !(await this.deps.store.putLatest(key, rows, meta))) {
+      return 'empty'
+    }
+
+    this.rememberRevision(keyString(key), revision)
+    this.deps.log?.(`transcript push: ${key.connectionId}/${key.profile}/${key.sessionId} latest page (${reason})`)
+
+    return 'full'
+  }
+
+  /** A pushed session no pass has listed yet: list soon (at most every EARLY_PASS_MIN_MS) so it is fetched. */
+  private requestEarlyPass(): void {
+    if (this.stopped || this.earlyPassTimer) {
+      return
+    }
+
+    const wait = Math.max(0, this.lastListingAt + EARLY_PASS_MIN_MS - this.now())
+
+    this.earlyPassTimer = setTimeout(() => {
+      this.earlyPassTimer = null
+      this.pushStats.earlyPasses += 1
+      void this.tick({ force: true }).catch(error =>
+        this.deps.log?.(`transcript prefetch early pass failed: ${(error as Error)?.message || error}`)
+      )
+    }, wait)
+    this.earlyPassTimer.unref?.()
   }
 
   /**
@@ -394,11 +697,74 @@ export class TranscriptPrefetcher {
       clearTimeout(this.timer)
       this.timer = null
     }
+
+    if (this.earlyPassTimer) {
+      clearTimeout(this.earlyPassTimer)
+      this.earlyPassTimer = null
+    }
   }
 
-  private async pass(): Promise<PrefetchTickResult> {
+  /** [daveey] A push-live connection whose safety-net window has not elapsed: its cached sessions wait for pushes. */
+  private netHeld(connectionId: string, now: number): boolean {
+    return (
+      this.isPushLive(connectionId, now) &&
+      now - (this.safetyNetAt.get(connectionId) ?? Number.NEGATIVE_INFINITY) < SAFETY_NET_MS
+    )
+  }
+
+  private listingHeld(now: number): boolean {
+    return (
+      this.listedConnections.size > 0 &&
+      [...this.listedConnections].every(connectionId => this.netHeld(connectionId, now))
+    )
+  }
+
+  /**
+   * [daveey] Remember a pass's targets as the tracked set and return the push-live connections it is NOT the safety
+   * net for (their cached sessions wait for pushes); the rest of the push-live ones restart their window now.
+   */
+  private trackTargets(targets: readonly PrefetchTarget[], now: number): Set<string> {
+    this.listedConnections.clear()
+    this.targetKeys.clear()
+
+    for (const target of targets) {
+      this.listedConnections.add(target.key.connectionId)
+      this.targetKeys.add(keyString(target.key))
+    }
+
+    const held = new Set([...this.listedConnections].filter(connectionId => this.netHeld(connectionId, now)))
+
+    for (const connectionId of this.listedConnections) {
+      if (!held.has(connectionId) && this.isPushLive(connectionId, now)) {
+        this.safetyNetAt.set(connectionId, now)
+      }
+    }
+
+    return held
+  }
+
+  /** A target this pass fetches: moved per the listing, unless its gateway pushes it (a never-cached one is fetched
+   *  regardless: nothing pushes a session in). */
+  private passDue(target: PrefetchTarget, cached: CachedMeta, held: ReadonlySet<string>, now: number): boolean {
+    if (cached && held.has(target.key.connectionId)) {
+      return false
+    }
+
+    return needsRefresh(cached ?? this.unstored.get(keyString(target.key)) ?? null, target, now)
+  }
+
+  private async pass(force = false): Promise<PrefetchTickResult> {
     const now = this.deps.now?.() ?? Date.now()
     const result: PrefetchTickResult = { failed: 0, fetched: 0, skipped: 0, targets: 0 }
+
+    // [daveey] Every gateway the last listing saw pushes and none is due its safety net: nothing to list for.
+    if (!force && this.listingHeld(now)) {
+      result.listed = false
+
+      return result
+    }
+
+    this.lastListingAt = now
     const records = await this.deps.listHubSessions()
 
     if (!records) {
@@ -419,6 +785,8 @@ export class TranscriptPrefetcher {
 
     const targets = selectPrefetchTargets(records, gateway => names.get(gateway))
     result.targets = targets.length
+
+    const held = this.trackTargets(targets, now)
 
     // [daveey] Every listed session's hub meta (not just the targets), for on-demand freshness checks.
     this.listed.clear()
@@ -449,9 +817,7 @@ export class TranscriptPrefetcher {
     const { store } = this.deps
     const cached = store.metaMany ? await store.metaMany(keys) : await Promise.all(keys.map(key => store.meta(key)))
 
-    const due = targets.filter((target, index) =>
-      needsRefresh(cached[index] ?? this.unstored.get(keyOf(target)) ?? null, target, now)
-    )
+    const due = targets.filter((target, index) => this.passDue(target, cached[index] ?? null, held, now))
 
     result.skipped = targets.length - due.length
 
@@ -523,8 +889,41 @@ export class TranscriptPrefetcher {
 export interface PrefetchTickResult {
   failed: number
   fetched: number
+  /** [daveey] False when the pass skipped the listing: every gateway pushes and none is due its safety net. */
+  listed?: boolean
   skipped: number
   targets: number
+}
+
+/** [daveey] Why a delta page cannot extend the cached run ending at `anchor`, or '' when it can. `known` is the
+ *  transcript revision the run was last made whole at (undefined: never seen, so an older rewrite may be missed). */
+export function deltaMismatch(
+  anchor: null | number,
+  page: DeltaPage,
+  sessionId: string,
+  known: null | number | undefined
+): string {
+  if (anchor === null) {
+    return 'nothing cached'
+  }
+
+  if (!page.anchorFound) {
+    return 'anchor row gone'
+  }
+
+  if (page.hasMore) {
+    return 'gap'
+  }
+
+  if (page.sessionId !== sessionId) {
+    return `rotated to ${page.sessionId}`
+  }
+
+  if (known === undefined) {
+    return 'revision unknown'
+  }
+
+  return known === page.transcriptRevision ? '' : 'rewritten in place'
 }
 
 /** A 404 is one missing session; anything without an HTTP status is the route itself. */

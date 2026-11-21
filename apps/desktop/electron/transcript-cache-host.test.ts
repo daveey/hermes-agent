@@ -209,3 +209,68 @@ describe('[daveey] open Inbox cards in prefetch', () => {
     expect(fetched[0]).toBe('card')
   })
 })
+
+describe('[daveey] sessions.moved push in the host', () => {
+  it('reads `?after_id=` deltas into the cache and falls back to the page on a gateway without the route', async () => {
+    const { getJson, host, on } = install()
+    let deltaRoute = false
+
+    getJson.mockImplementation(async (descriptor: any, requestPath: string) => {
+      if (requestPath.startsWith('/api/plugins/hub-sync/sessions')) {
+        return { sessions: [{ activity: 2, gateway: 'mini', id: 'm1', message_count: 1, profile: 'default' }] }
+      }
+
+      if (requestPath === '/api/plugins/hub-sync/status') {
+        return { gateway: descriptor.connectionId === 'local' ? 'macbook' : 'mini' }
+      }
+
+      if (requestPath.includes('after_id=') && deltaRoute) {
+        return {
+          delta: { anchor_found: true, has_more: false, transcript_revision: 4 },
+          messages: [{ content: 'two', id: 2, role: 'assistant' }],
+          session_id: 'm1'
+        }
+      }
+
+      return { messages: [{ content: 'one', id: 1, role: 'user' }] }
+    })
+
+    const key = { connectionId: 'mac-mini', profile: 'default', sessionId: 'm1' }
+
+    try {
+      await host.prefetcher.tick()
+      const moved = [{ activity: 3, id: 'm1', last_message_id: 2, message_count: 2, profile: 'default' }]
+
+      // Older core: no `delta` block in the answer, so the latest page is read and the route is not asked again.
+      await host.prefetcher.sessionsMoved('mac-mini', moved)
+      expect(getJson).toHaveBeenCalledWith(
+        { connectionId: 'mac-mini' },
+        '/api/sessions/m1/messages?after_id=1&limit=200&profile=default',
+        { timeoutMs: 30_000 }
+      )
+      expect(host.prefetcher.pushStats.full).toBe(1)
+
+      // A current core on a fresh host: first push learns the revision, the next applies the delta.
+      const fresh = install()
+      fresh.getJson.mockImplementation(getJson.getMockImplementation()!)
+      deltaRoute = true
+
+      try {
+        await fresh.host.prefetcher.tick()
+        await fresh.host.prefetcher.sessionsMoved('mac-mini', moved)
+        await fresh.host.prefetcher.sessionsMoved('mac-mini', [{ ...moved[0], last_message_id: 3 }])
+        expect(fresh.host.prefetcher.pushStats).toMatchObject({ delta: 1, full: 1 })
+        expect((await fresh.host.client.call<any>('read', [key])).messages.map((row: any) => row.id)).toEqual([1, 2])
+      } finally {
+        fresh.host.stop()
+      }
+
+      // The renderer's IPC lands on the prefetcher; '' names the registry primary.
+      const spy = vi.spyOn(host.prefetcher, 'sessionsMoved').mockResolvedValue()
+      on.get('hermes:transcript-cache:sessions-moved')!({}, { connectionId: '', sessions: moved })
+      expect(spy).toHaveBeenCalledWith('local', moved)
+    } finally {
+      host.stop()
+    }
+  })
+})

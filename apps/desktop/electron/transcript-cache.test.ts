@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { LATEST_ROWS, mergeLatest, mergeOlder, TranscriptCacheStore } from './transcript-cache'
+import { LATEST_ROWS, mergeLatest, mergeOlder, tailRowId, TranscriptCacheStore } from './transcript-cache'
 
 const rows = (from: number, to: number) =>
   Array.from({ length: to - from + 1 }, (_, index) => ({
@@ -284,5 +284,36 @@ describe('transcript cache: metadata never reads bodies', () => {
 
     expect(() => store.putLatest(key('full'), [{ content: 'f'.repeat(1024 * 1024), id: 1 }])).toThrow(/full/i)
     expect(store.meta(key('full'))).toBeNull()
+  })
+})
+
+describe('[daveey] push deltas (putAfter)', () => {
+  it('extends the run past its tail, keeping the loaded older pages, and moves the meta', () => {
+    const store = new TranscriptCacheStore(':memory:')
+    store.putLatest(key('s'), rows(201, 400))
+    store.putOlder(key('s'), rows(101, 200))
+
+    expect(store.tailId(key('s'))).toBe(400)
+    expect(store.putAfter(key('s'), 400, rows(401, 403), { activity: 9, messageCount: 403 })).toBe(true)
+
+    const entry = store.read(key('s'))!
+    expect(entry.messages.map(row => (row as { id: number }).id)).toEqual(rows(101, 403).map(row => row.id))
+    expect(entry).toMatchObject({ activity: 9, messageCount: 403 })
+  })
+
+  it('refuses a delta whose anchor is no longer the tail, and a session with no run', () => {
+    const store = new TranscriptCacheStore(':memory:')
+    store.putLatest(key('s'), rows(1, 5))
+
+    expect(store.putAfter(key('s'), 4, rows(6, 6))).toBe(false)
+    expect(store.putAfter(key('none'), 4, rows(6, 6))).toBe(false)
+    expect(store.tailId(key('none'))).toBeNull()
+    expect(store.read(key('s'))!.messages).toHaveLength(5)
+  })
+
+  it('anchors only on a server row id', () => {
+    expect(tailRowId([{ id: 3 }, { id: '7' }])).toBe(7)
+    expect(tailRowId([{ id: 3 }, { role: 'user' }])).toBeNull()
+    expect(tailRowId([])).toBeNull()
   })
 })
