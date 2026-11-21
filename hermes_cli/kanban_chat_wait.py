@@ -95,6 +95,9 @@ def notice_text(payload: Any) -> str:
     """Chat line for ``chat_wait_unclaimed`` (gateway and TUI notifiers share it)."""
     payload = payload if isinstance(payload, dict) else {}
     tid = str(payload.get("parent") or "<card>")[:64]
+    if payload.get("unclaimable"):
+        return (f"{tid}, which this chat waits on, has been ready {payload.get('ready_minutes', '?')} min. "
+                f"{payload['unclaimable']}")
     title = str(payload.get("parent_title") or "").strip()[:120]
     named = f"{tid} ({title})" if title else tid
     checkpoint = last_checkpoint.sentence(payload)  # before the advice (kanban-3debc730ab) [daveey]

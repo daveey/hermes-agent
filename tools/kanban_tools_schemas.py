@@ -983,9 +983,12 @@ KANBAN_CREATE_SCHEMA = _schema(
         )),
         "runs_on": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9:._-]{0,63}$"},
                     "description": "Machine labels the card needs (all of them), on a board that syncs to the "
-                    "Board service: e.g. ['linux'], ['macos', 'xcode'], ['machine:<name>'] for one machine, "
+                    "Board service: e.g. ['linux'], ['capability:git'], ['machine:<name>'] for one machine, "
                     "[] for any machine. Omit for the default: it runs here, or on a machine like this one "
-                    "if it waits too long. 'machine:<name>' is refused (placement_unavailable) unless that "
+                    "if it waits too long. Labels carried only by pinned_only machines (the Macs: 'macos', "
+                    "'xcode') are refused: those machines run only cards created on their own gateway, so a card "
+                    "from here never starts; create it on that machine's gateway instead (placement='<name>'). "
+                    "'machine:<name>' is refused (placement_unavailable) unless that "
                     "machine picks up this board; then use placement='<name>'."},
         "placement": _prop("string", (
                 "Where the card runs. 'auto' uses configured worker pools for portable work, queueing without hub overflow. "

@@ -118,7 +118,8 @@ def placement(conn: sqlite3.Connection, task_id: str, *, backlog: bool = True) -
     wanted = set(labels)
     if wanted <= carried[me]:
         return None
-    fits = sorted(name for name, have in carried.items() if wanted <= have)
+    from hermes_cli import kanban_claimants as kc
+    fits = kc.claimants(labels, machines, str(me))
     if fits:
         place: dict[str, Any] = {"lane": "machine", "runs_on": labels, "machines": fits}
         held = [name for name in fits if (machines.get(name) or {}).get("hold")]
@@ -139,8 +140,9 @@ def placement(conn: sqlite3.Connection, task_id: str, *, backlog: bool = True) -
                 place["backlog"] = queue
         return place
     every = set().union(*carried.values())
+    refused = kc.refusals(labels, machines, str(me))
     return {"lane": "unplaceable", "runs_on": labels, "missing": [lb for lb in labels if lb not in every],
-            "machines": sorted(machines)}
+            "machines": sorted(machines), **({"refused": refused} if refused else {})}
 
 
 def recorded_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
@@ -368,6 +370,9 @@ def _describe_lane(place: Optional[dict[str, Any]]) -> Optional[str]:
                 "the dispatcher skips a ready card with a claim_lock. Its leftover-claim sweep clears a dead local "
                 "claim on the next tick; if this line persists, the claim belongs to a live or foreign worker")
     if lane == "unplaceable":
+        if place.get("refused"):
+            from hermes_cli import kanban_claimants as kc
+            return kc.stranded_text(place.get("task_id") or "<id>", place.get("runs_on") or [], place["refused"])
         missing = place.get("missing") or []
         what = (f"label(s) {', '.join(missing)} carried by no machine" if missing
                 else "no machine carries all of " + ", ".join(place.get("runs_on") or []))

@@ -96,17 +96,24 @@ def history(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
 
 
 def matching_machines(runs_on: list[str], machines: Mapping[str, Mapping[str, Any]], *, me: str,
-                      exclude_me: bool = True, now: Optional[float] = None) -> list[str]:
+                      exclude_me: bool = True, now: Optional[float] = None,
+                      home: Optional[str] = None) -> list[str]:
     """Active, unheld registry machines carrying every label; running moves exclude ``me``.
 
     A machine that has published ``metrics.claiming == 0`` is not taking portable cards. A pin to
     that machine (``machine:<name>`` in ``runs_on``) stays, because a batch or worktree may be there.
+    With ``home`` (the card's home gateway) a ``pinned_only`` machine that would never claim a card of that home
+    is no match (``kanban_claimants``).
     """
+    from hermes_cli import kanban_claimants as kc
     from hermes_cli import kanban_worker_node as wn
     out = []
     now = time.time() if now is None else now
+    never = kc.refusals(runs_on, machines, home, pins=False) if home else {}
     for name, entry in machines.items():
         if (exclude_me and name == me) or not entry or entry.get("state", "active") != "active" or entry.get("hold"):
+            continue
+        if name in never:
             continue
         if _not_claiming(entry, now=now) and f"machine:{name}" not in runs_on:
             continue
@@ -207,9 +214,14 @@ def check(conn: sqlite3.Connection, task_id: str, runs_on: Any, *, force: bool =
     if capacity_wait and not force:
         raise MoveRefused(klb.MOVE_REFUSED, capacity_wait)
     exclude_me = row["status"] == "running"
-    matches = matching_machines(labels, pool, me=me, exclude_me=exclude_me)
+    home = conn.execute("SELECT created_on FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] or me
+    matches = matching_machines(labels, pool, me=me, exclude_me=exclude_me, home=home)
     if not matches:
         other = f" other than {me}" if exclude_me else ""
+        from hermes_cli import kanban_claimants as kc
+        if kc.refusals(labels, pool, home, pins=False):
+            raise MoveRefused("no_machine", f"no active, unheld machine{other} can claim a card of {home}: "
+                              + kc.message(labels, pool, home))
         raise MoveRefused("no_machine", f"no active, unheld machine{other} has every label in {labels}")
     try:
         wn.check_machine_pins(conn, labels, machines=pool, me=me)
