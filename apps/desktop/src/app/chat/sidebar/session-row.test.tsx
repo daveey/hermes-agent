@@ -254,25 +254,29 @@ const renderRow = (
   )
 }
 
-it.each([['object', { a: 1 }], ['number', 7], ['boolean', true]] as const)(
-  'keeps rendering the sidebar row with non-array %s observations',
-  (_kind, value) => {
-    const { container } = renderRow(makeSession({
+it.each([
+  ['object', { a: 1 }],
+  ['number', 7],
+  ['boolean', true]
+] as const)('keeps rendering the sidebar row with non-array %s observations', (_kind, value) => {
+  const { container } = renderRow(
+    makeSession({
       title: 'Malformed observations',
       kanban_active: 1,
       execution_observations: value as unknown as SessionInfo['execution_observations']
-    }))
+    })
+  )
 
-    expect(screen.getByText('Malformed observations')).not.toBeNull()
-    expect(container.querySelector('[data-run-square]')?.getAttribute('data-run-square')).toBe('running')
-    expect(container.querySelector('[data-card-colour="green"]')).toBeNull()
-  }
-)
+  expect(screen.getByText('Malformed observations')).not.toBeNull()
+  expect(container.querySelector('[data-run-square]')).toBeNull()
+  expect(container.querySelector('.rounded-full')?.className).toContain('bg-(--ui-accent)')
+  expect(container.querySelector('[data-card-colour="green"]')).toBeNull()
+})
 
-describe('always-on left run square', () => {
+describe('one merged running circle', () => {
   for (const card of [false, true]) {
     for (const kanban_active of [0, 2]) {
-      it(`sits after the dot lead and before the title (card=${card}, active=${kanban_active})`, () => {
+      it(`paints one circle before the title (card=${card}, active=${kanban_active})`, () => {
         const now = Date.now() / 1000
 
         const execution_observations = Array.from({ length: kanban_active }, (_, i) => ({
@@ -287,15 +291,13 @@ describe('always-on left run square', () => {
           card
         })
 
-        const square = container.querySelector('[data-run-square]')!
-        expect(square).not.toBeNull()
-        expect(square.getAttribute('data-run-square')).toBe(kanban_active ? 'running' : 'idle')
-        expect(square.className.includes('bg-sky-400')).toBe(kanban_active > 0)
-        const lead = square.previousElementSibling!
-        expect(lead.querySelector('.rounded-full')).not.toBeNull()
-        expect(lead.nextElementSibling).toBe(square)
+        expect(container.querySelector('[data-run-square]')).toBeNull()
+        const dots = container.querySelectorAll('.rounded-full')
+        expect(dots).toHaveLength(1)
+        expect(dots[0].className).toContain(kanban_active ? 'bg-(--ui-accent)' : 'border-(--ui-text-quaternary)')
+        expect(dots[0].getAttribute('aria-label')).toBe(kanban_active ? 'Running' : null)
         const title = screen.getByText('Run markers')
-        expect(square.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+        expect(dots[0].compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
         expect(container.querySelector('[data-card-colour="blue"]')).toBeNull()
         expect(screen.queryByTestId('session-row-card-squares')).toBeNull()
       })
@@ -1167,9 +1169,7 @@ describe('SidebarSessionRow own activity stamps', () => {
         } as Partial<SessionInfo> & { title: string })
       )
 
-      expect(
-        container.querySelector('[role="status"][aria-label="Running in background"]')?.getAttribute('title')
-      ).toBe('Running in background')
+      expect(container.querySelector('[role="status"][aria-label="Running"]')?.className).toContain('bg-(--ui-accent)')
       expect(container.querySelector('[aria-label="Open work, current status unknown"]')).toBeNull()
     } finally {
       vi.useRealTimers()

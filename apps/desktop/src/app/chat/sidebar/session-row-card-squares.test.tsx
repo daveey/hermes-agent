@@ -6,9 +6,9 @@ import { I18nProvider } from '@/i18n'
 
 import {
   flatRowCardMarks,
+  runningCardCount,
   sessionCardColours,
-  SessionRowCardSquares,
-  SessionRowRunSquare
+  SessionRowCardSquares
 } from './session-row-card-squares'
 
 const session = (fields: Partial<SessionInfo> = {}) => fields as SessionInfo
@@ -136,31 +136,12 @@ it('keeps running cards out of the trailing cluster and empty flat marks', () =>
 })
 
 it.each([
-  [{}, 'idle', 'No linked cards running'],
-  [{ kanban_active: 2 }, 'running', 'Running 2'],
-  [{ kanban_active: 7, kanban_parked: 2, kanban_held: 1 }, 'running', 'Running 4'],
-  [{ kanban_active: 1, kanban_parked: 2 }, 'idle', 'No linked cards running']
-] as const)('always renders the run square for %j', (fields, state, label) => {
-  vi.useFakeTimers()
-
-  const { container } = render(
-    <I18nProvider configClient={null} initialLocale="en">
-      <SessionRowRunSquare session={session(fields)} />
-    </I18nProvider>
-  )
-
-  const square = container.querySelector('[data-run-square]')!
-  expect(square.getAttribute('data-run-square')).toBe(state)
-  expect(square.className).toContain('size-[6px]')
-  expect(square.className).toContain('rounded-[1.5px]')
-  expect(square.className.includes('bg-sky-400')).toBe(state === 'running')
-  expect(square.className.includes('border-(--ui-text-quaternary)')).toBe(state === 'idle')
-  expect(square.getAttribute('aria-label')).toBe(label)
-  act(() => {
-    fireEvent.pointerMove(square, { pointerType: 'mouse' })
-    vi.advanceTimersByTime(700)
-  })
-  expect(screen.getByRole('tooltip').textContent).toBe(label)
+  [{}, 0],
+  [{ kanban_active: 2 }, 2],
+  [{ kanban_active: 7, kanban_parked: 2, kanban_held: 1 }, 4],
+  [{ kanban_active: 1, kanban_parked: 2 }, 0]
+] as const)('supplies the merged circle count for %j', (fields, count) => {
+  expect(runningCardCount(session(fields))).toBe(count)
 })
 
 it('renders worker waits and unseen completions with distinct colours and copy', () => {

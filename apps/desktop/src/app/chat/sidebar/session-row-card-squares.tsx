@@ -67,22 +67,8 @@ export function sessionCardColours(
   )
 }
 
-export function SessionRowRunSquare({ session }: { session: SessionInfo }) {
-  const { t } = useI18n()
-  const count = sessionCardColours(session, 0).find(item => item.colour === 'blue')?.count ?? 0
-  const label = count > 0 ? `${t.sidebar.row.cardColours.blue} ${count}` : t.sidebar.row.cardsIdle
-
-  return (
-    <Tip label={label} side="top">
-      <span
-        aria-label={label}
-        className={`size-[6px] shrink-0 rounded-[1.5px] ${count > 0 ? COLOURS.blue : 'border border-(--ui-text-quaternary)'}`}
-        data-run-square={count > 0 ? 'running' : 'idle'}
-        role="img"
-      />
-    </Tip>
-  )
-}
+export const runningCardCount = (session: SessionInfo): number =>
+  sessionCardColours(session, 0).find(item => item.colour === 'blue')?.count ?? 0
 
 const trailingColours = (session: SessionInfo, executionUnknown: number) =>
   sessionCardColours(session, executionUnknown).filter(item => item.colour !== 'blue')

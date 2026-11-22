@@ -12,7 +12,7 @@ import type { SessionInfo } from '@/types/hermes'
 import type { SessionOutcome } from '@/types/session-outcome'
 
 // A pure lookup table: each state maps to its className, aria-label, and title.
-// No priority resolution here — $sessionDotStateById already picked one.
+// Live priority comes from $sessionDotStateById; sidebar card activity only promotes passive states.
 // Label/title resolve from sidebar.row translations, keyed by name.
 type DotVariant = {
   ariaLabel?: (r: Translations['sidebar']['row']) => string
@@ -160,6 +160,8 @@ export interface SessionStatusDotProps {
   storedSessionId: null | string
   /** The session row supplies outcome and execution evidence on every surface. */
   session?: null | SessionInfo
+  /** Sidebar-only activity; other surfaces retain their agent-only presentation. */
+  runningCardCount?: number
   /** TUI-style tree stem for a branched session (`└─ ` / `├─ `). */
   branchStem?: string
   /** Applied to the OUTER wrapper (stem + dot) — e.g. hover-fade on the
@@ -174,13 +176,23 @@ export interface SessionStatusDotProps {
  * already reduced to one mutually exclusive answer. Idle is hollow grey;
  * active states own the dot with their semantic colour.
  */
-export function SessionStatusDot({ storedSessionId, session, branchStem, className }: SessionStatusDotProps) {
+export function SessionStatusDot({
+  storedSessionId,
+  session,
+  runningCardCount = 0,
+  branchStem,
+  className
+}: SessionStatusDotProps) {
   const { t } = useI18n()
   const r = t.sidebar.row
 
   // Selector, not a plain useStore: the map is rebuilt whenever any session's
   // status changes, but a given dot only repaints when ITS OWN state flips.
-  const dotState = useSessionDotState(storedSessionId, session)
+  const agentState = useSessionDotState(storedSessionId, session)
+
+  const dotState =
+    runningCardCount > 0 && agentState !== 'needs-input' && agentState !== 'unread' ? 'working' : agentState
+
   const backgroundLabel = useBackgroundDotLabel(storedSessionId, session, dotState)
 
   const variant = sessionDotVariant(dotState, session?.outcome, backgroundLabel)

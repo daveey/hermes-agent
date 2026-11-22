@@ -57,7 +57,7 @@ import {
 } from './chrome'
 import { shellOwnsPress } from './reorderable-list'
 import { SessionContextMenu } from './session-actions-menu'
-import { flatRowCardMarks, SessionRowRunSquare } from './session-row-card-squares'
+import { flatRowCardMarks, runningCardCount } from './session-row-card-squares'
 import { sessionRowDetails } from './session-row-details'
 import { resolveSessionRowClick } from './session-row-gesture'
 import { RowHoverActions } from './session-row-hover-actions'
@@ -557,6 +557,7 @@ function SidebarSessionRowImpl({
                   <SessionStatusDot
                     branchStem={branchStem}
                     className="transition-opacity group-hover/handle:opacity-0 group-focus-within/handle:opacity-0"
+                    runningCardCount={runningCardCount(session)}
                     session={session}
                     storedSessionId={session.id}
                   />
@@ -564,7 +565,14 @@ function SidebarSessionRowImpl({
               </SidebarRowGrab>
             ) : (
               <SidebarRowLead className="overflow-hidden">
-                {lead ?? <SessionStatusDot branchStem={branchStem} session={session} storedSessionId={session.id} />}
+                {lead ?? (
+                  <SessionStatusDot
+                    branchStem={branchStem}
+                    runningCardCount={runningCardCount(session)}
+                    session={session}
+                    storedSessionId={session.id}
+                  />
+                )}
               </SidebarRowLead>
             )
 
@@ -583,7 +591,6 @@ function SidebarSessionRowImpl({
               return (
                 <>
                   {leadNode}
-                  <SessionRowRunSquare session={session} />
                   <SessionRowSlot area={SESSION_ROW_AREAS.leading} sessionId={sessionPinId(session)} />
                   {handoffBadge}
                   <span className="min-w-0 flex-1 self-center">
@@ -644,7 +651,6 @@ function SidebarSessionRowImpl({
                     entire width — nothing truncates against the kebab. */}
                 <div className="flex min-w-0 items-center gap-1.5">
                   {leadNode}
-                  <SessionRowRunSquare session={session} />
                   <SessionRowSlot area={SESSION_ROW_AREAS.leading} sessionId={sessionPinId(session)} />
                   <span
                     className={cn(
