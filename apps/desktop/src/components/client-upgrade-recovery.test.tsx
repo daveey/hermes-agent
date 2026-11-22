@@ -7,17 +7,20 @@ import { stubResizeObserver } from '@/test/jsdom'
 
 import { NotificationStack } from './notifications'
 
-const { openUpdatesWindow } = vi.hoisted(() => ({ openUpdatesWindow: vi.fn() }))
+const { openUpdatesWindow, cloud } = vi.hoisted(() => ({ openUpdatesWindow: vi.fn(), cloud: { served: false } }))
 vi.mock('@/store/updates', () => ({ openUpdatesWindow }))
-vi.mock('@/lib/hermes-cloud-host', () => ({ servedByHermesCloud: () => false }))
+vi.mock('@/lib/hermes-cloud-host', () => ({ servedByHermesCloud: () => cloud.served }))
 
 beforeAll(stubResizeObserver)
 afterEach(() => {
   cleanup()
+
   for (const notification of $notifications.get()) {
     dismissNotification(notification.id)
   }
+
   localStorage.clear()
+  cloud.served = false
   vi.clearAllMocks()
 })
 
@@ -39,6 +42,28 @@ test('rendered Update button retains visible durable recovery until explicit dis
     notifyError(new Error('client_upgrade_required'), 'Edit failed again')
   })
   expect(hasClientUpgradeNote()).toBe(true)
+  cleanup()
+  vi.resetModules()
+  const reloaded = await import('@/store/notifications')
+  expect(reloaded.$notifications.get()[0].id).toBe('client-upgrade-required')
+  reloaded.dismissNotification('client-upgrade-required')
+})
+
+test('rendered Cloud reload action preserves recovery for the next renderer', async () => {
+  cloud.served = true
+  notifyError(new Error('client_upgrade_required'), 'Edit failed')
+  render(<NotificationStack />)
+  // jsdom cannot navigate; the actual reload callback still exercises action acknowledgement.
+  fireEvent.click(screen.getByRole('button', { name: /reload/i }))
+  expect(hasClientUpgradeNote()).toBe(true)
+  expect($notifications.get()).toHaveLength(1)
+  expect(openUpdatesWindow).not.toHaveBeenCalled()
+  cleanup()
+  vi.resetModules()
+  const reloaded = await import('@/store/notifications')
+  expect(reloaded.$notifications.get()).toHaveLength(1)
+  expect(reloaded.$notifications.get()[0].action?.dismiss).toBe(false)
+  reloaded.dismissNotification('client-upgrade-required')
 })
 
 test.each(['action', 'secondaryAction'] as const)('ordinary %s still dismisses and invokes callback', async slot => {
