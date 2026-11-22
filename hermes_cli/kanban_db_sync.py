@@ -479,6 +479,8 @@ def apply_sync_schema_steps(conn: sqlite3.Connection) -> None:
     conn.executescript(SYNC_SCHEMA_SQL)
     for table, column, ddl in _SYNC_COLUMN_DDL:
         _add_column_if_missing(conn, table, column, ddl)
+    from hermes_cli.kanban_sync_capture_storage import install as install_capture_storage
+    install_capture_storage(conn)
     for table in _UID_TABLES:
         conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uid ON {table}(uid)")
     # task_runs.sync_version joins the board's run-bookkeeping covering index.
