@@ -577,6 +577,8 @@ _SPECS = [
         _HUMAN_REQUEST,
         _arg("--metadata-only", action="store_true",
              help="Audit parked legacy classification only; requires reason and --human-request (null clears); never unblocks"),
+        _arg("--classification-cas", type=json.loads, metavar="JSON",
+             help="Explicit canonical reclassify_parked operation; requires metadata-only, kind dependency and null request"),
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason (also appended as a comment)"),
         _bulk_ids("block"),

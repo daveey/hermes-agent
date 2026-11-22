@@ -58,3 +58,55 @@ def classify_cli_request(args, request, reason):
                                                actor=cli_actor(), reason=reason),
             lambda tid: f"Classified {tid} (metadata only; remains parked)",
             lambda tid: f"cannot classify {tid} (requires parked card without a current run)")
+
+
+def reclassify_cli_request(args, reason):
+    """Authenticated home-gateway CAS, not a worker or synthetic human answer.
+
+    The supported hub-admin operator transport records the initiating card. The
+    enrolled home gateway key authenticates canonical ingress; actor strings and
+    null request metadata are not credentials. Never perform a local rekind.
+    """
+    if os.environ.get("HERMES_KANBAN_TASK") or os.environ.get("HERMES_KANBAN_WORKER_TASK"):
+        raise PermissionError("classification CAS requires the owner operator surface")
+    op = args.classification_cas
+    if (not args.metadata_only or args.kind != "dependency" or getattr(args, "human_request", object()) is not None
+            or args.ids or args.wake_check or args.check_every is not None or args.clock_only
+            or any(getattr(args, name, None) for name in ("needs", "awaiting", "awaiting_why"))
+            or not isinstance(op, dict) or op.get("op") != "reclassify_parked"
+            or op.get("task") != args.task_id or op.get("reason") != reason):
+        raise ValueError("classification CAS requires one exact task, dependency kind, null request and matching reason")
+    from hermes_cli import kanban as cli
+    from hermes_cli import kanban_db_sync as sync
+    from hermes_cli import kanban_sync_client as client
+    from hermes_cli.kanban_sync_pending import pending_task_fields
+
+    ident = client.load_identity()
+    hub = client.Hub(ident)
+    with cli.kbc.connect_closing() as conn:
+        state = sync.sync_state(conn) or {}
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (args.task_id,)).fetchone()
+        if (state.get("mode") != "primary" or state.get("gateway_id") != ident.gateway
+                or row is None or row["created_on"] != ident.gateway):
+            raise PermissionError("classification CAS requires the authenticated primary owner")
+        if (row["current_run_id"] is not None or row["claim_lock"] is not None or row["worker_pid"] is not None
+                or args.task_id in pending_task_fields(conn)):
+            raise ValueError("classification CAS refuses active or locally pending task state")
+        board = state["board_id"]
+        result = hub.ops(board, [op])
+        outcomes = result.get("results")
+        if not isinstance(outcomes, list) or len(outcomes) != 1 or outcomes[0].get("status") != "applied":
+            raise ValueError(f"classification CAS not applied: {outcomes!r}; preserve the exact request for recovery")
+        # Use the ordinary certified feed, not a handwritten local correction.
+        client.pull(conn, hub, board, observers=True, partition=ident.gateway)
+        canonical = hub.row_evidence(board, "tasks", args.task_id).get("row")
+        current = conn.execute("SELECT status,block_kind,human_request,current_run_id,claim_lock,worker_pid FROM tasks WHERE id=?",
+                               (args.task_id,)).fetchone()
+        expected = {"status": "blocked", "block_kind": "dependency", "human_request": None}
+        if (not isinstance(canonical, dict) or any(canonical.get(k) != v for k, v in expected.items())
+                or canonical.get("current_run_uid") is not None or canonical.get("lease_holder") is not None
+                or current is None or any(current[k] != v for k, v in expected.items())
+                or any(current[k] is not None for k in ("current_run_id", "claim_lock", "worker_pid"))):
+            raise ValueError("classification receipt recorded but current owner/canonical convergence is unconfirmed; do not resubmit with a new identity")
+    print(f"Classified {args.task_id} as dependency (canonical CAS; remains blocked; no execution release)")
+    return 0

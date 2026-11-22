@@ -1398,6 +1398,11 @@ def _cmd_reopen(args: argparse.Namespace) -> int:
 
 
 def _cmd_block(args: argparse.Namespace) -> int:
+    if getattr(args, "classification_cas", None) is not None:
+        if not getattr(args, "metadata_only", False):
+            return _err("classification CAS requires --metadata-only", 2)
+        from hermes_cli.kanban_human_request_migration import reclassify_cli_request
+        return reclassify_cli_request(args, _joined_words(args.reason))
     from hermes_cli.kanban_cli_actor import cli_actor
     reason = _joined_words(args.reason)
     kind = getattr(args, "kind", None)

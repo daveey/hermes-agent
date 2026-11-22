@@ -519,6 +519,48 @@ Relaying execution to another gateway does not change the logical probe. The
 store identity is local: cloning a live database for concurrent operation is not
 a supported way to enroll another gateway.
 
+### Non-releasing correction of withdrawn legacy asks
+
+Ordinary `block --metadata-only --human-request null` withdraws ask payload/probe
+metadata but deliberately retains the existing block kind. It is not an execution
+release, so a legacy `blocked/needs_input` card can still have no live human ask.
+Null request metadata alone never authorizes a replacement classification.
+
+On a synced PRIMARY owner, an explicitly authorized operator can request the
+narrow canonical correction through the existing classification surface:
+
+```text
+hermes kanban --board <board> block <task> '<reason>' --metadata-only \
+  --human-request null --kind dependency --classification-cas '<operation JSON>'
+```
+
+The operation is `reclassify_parked`, with an explicit retained `client_op_id`,
+`task`, `reason` matching the CLI reason, `expected_revision`,
+`expected_event_uid` (the latest withdrawn metadata-only ask classification),
+`expected_spend_episode` (the current pending stop UID or null), sorted
+`expected_parents`, `expected_parent_links` (matching ordered `{uid,version}`
+link snapshots), and `disposition_comment_uid` (the home-authored disposition
+already recorded on this exact task). The enrolled home gateway authenticates
+canonical ingress; free-form actor labels are not credentials. Worker entry is
+refused; use the authorized, audited owner operator transport, never stripped
+worker identity or direct SQLite edits.
+
+The canonical transaction rejects stale revisions/events, a live/new ask,
+active run/lease, changed parent identities/link revisions, a changed spend
+stop or missing disposition. It changes only `block_kind` and synchronization
+metadata and appends `block_classification_corrected`; status remains **blocked**.
+Body, acceptance, dependencies, execution selectors, counters and spending or
+containment evidence are not renewed. Parent completion cannot release this
+blocked card. There is no unblock, promotion, synthetic human answer or budget
+reset. An independent release decision is still necessary for execution.
+
+The CLI confirms through the ordinary partitioned owner feed and canonical row
+readback. If delivery/readback is unknown, retain and recover the **same exact
+request**; never mint a new operation identity to retry. The Board's private
+receipt makes identical replay inert even after the ordinary op cache expires.
+Deploy the matching Board operation before using the client entry. Neither a
+local unit test nor an HTTP ACK alone proves installed owner/renderer convergence.
+
 Human asks that resolve outside Hermes: a blocked card's `human_request` may
 carry `resolved_check` (a shell command) and `resolved_check_every` (seconds,
 default 900, 120–21600). Use it when David's step leaves a readable trace, so
