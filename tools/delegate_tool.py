@@ -632,11 +632,11 @@ def _build_children(
                 **{"toolsets": None, "model": route.creds["model"], **(rebuild[i] if rebuild else {})},
             )
             pin_child_service_tier(child, route.creds)
-            # Construction and the tier overlay can both add SDK kwargs after logical preflight.
-            # Inspect only request tuning, never the concrete route chosen by the native allocator.
+            # Construction and the tier overlay can both add SDK kwargs after logical preflight. Caller and
+            # tier input are judged apart from the allocated route's own operator extra_body (check_built_child).
             from agent import kanban_delegation_policy as _policy
             if _policy.origin_for(parent_agent) is not None:
-                _policy.check_request_overrides(getattr(child, "request_overrides", None))
+                _policy.check_built_child(child, route.creds.get("task_tier_overrides"))
         except ValueError as exc:
             if child is not None:
                 _detach_child(parent_agent, child)

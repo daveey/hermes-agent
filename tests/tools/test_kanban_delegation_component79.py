@@ -194,3 +194,136 @@ def test_malformed_bound_root_capability_refused(worker, field):
     agent._native_origin_worker_custody = replace(bound, **{field: changes[field]})
     with pytest.raises(policy.RestrictionError, match="invalid_worker_origin_registration"):
         policy.register_root(agent, agent._test_original_worker_custody)
+
+
+# ── post-construction recheck: allocator-selected route config is not caller authority ───────
+
+RELAY_URL = "http://127.0.0.1:9/v1"
+ROUTE_BODY = {"provider": {"order": ["x"], "allow_fallbacks": False}, "models": ["relay-model"], "route": "fallback"}
+
+
+def _real_children(native, monkeypatch, *, route_body=None, tier=None):
+    """Real ``_routes_for`` + ``_build_children`` + ``AIAgent``; ``route_body`` None = native subscription route."""
+    from pathlib import Path
+    from hermes_cli.config import atomic_config_write, load_config_readonly
+    from hermes_constants import get_hermes_home
+    from tests.agent.test_model_routing import policy as routing_policy
+    import tools.delegate_tool as dt
+    home = get_hermes_home()
+    monkeypatch.setattr(Path, "home", lambda: home.parent / "account79")
+    cfg = load_config_readonly()
+    cfg.update(routing_policy())
+    base = deepcopy(cfg["model_routing"]["routes"]["deep"][0])
+    base["capabilities"]["streaming"] = True
+    if route_body is None:
+        cfg["model_routing"]["routes"]["deep"] = [base]
+        (home / "auth.json").write_text(json.dumps({"version": 1, "credential_pool": {"anthropic": [
+            {"id": "eligible", "auth_type": "oauth", "source": "manual", "priority": 0,
+             "access_token": "-".join(("sk", "ant", "oat01", "fixture", "only"))}]}}))
+        monkeypatch.setattr("agent.anthropic_adapter.build_anthropic_client", lambda *a, **kw: MagicMock())
+    else:
+        cfg["model_routing"]["routes"]["deep"] = [dict(base, provider="custom:relay", model="relay-model",
+                                                       billing="metered")]
+        cfg["model_routing"]["allow_metered"] = True
+        cfg["custom_providers"] = [{"name": "relay", "base_url": RELAY_URL, "api_key": "k", "model": "relay-model",
+                                    "extra_body": deepcopy(route_body)}]
+    cfg["model"] = {"context_length": 100000}
+    atomic_config_write(home / "config.yaml", cfg)
+    monkeypatch.setattr("model_tools.get_tool_definitions", lambda **kw: [])
+    monkeypatch.setattr(dt, "_load_config", dict)
+    monkeypatch.setattr(dt, "_get_max_spawn_depth", lambda: 4)
+    monkeypatch.setattr(dt, "_open_child_session_db", lambda *a, **kw: None)
+    # The relay endpoint is never contacted: stub the local-server probe and keep every other send fatal.
+    monkeypatch.setattr("agent.model_metadata.detect_local_server_type", lambda *a, **kw: None)
+    monkeypatch.setattr("httpx.Client.send", lambda *a, **kw: pytest.fail("network during construction"))
+    closed = []
+    real_close = dt._close_child
+    monkeypatch.setattr(dt, "_close_child", lambda obj, *a: closed.append(obj) or real_close(obj, *a))
+    routes, error = dt._routes_for([{"goal": "neutral analysis", "model": "class:deep"}], {}, None, native)
+    assert not error
+    if tier is not None:
+        routes[0].creds["task_tier_overrides"] = tier
+    children, error = dt._build_children([{"goal": "neutral analysis"}], [None], routes, top_role="leaf",
+        max_iterations=2, parent_agent=native, live_deleg_id=None, live_writers=[])
+    return [c for _, _, c in children], error, closed
+
+
+@pytest.mark.parametrize("route_body", [ROUTE_BODY, {"model": "upstream-alias"}, {"service_tier": "flex"}, None],
+                         ids=["routing-keys", "model-key", "control-tier", "native"])
+def test_real_build_children_admits_the_allocated_routes_own_extra_body(native, monkeypatch, route_body):
+    children, error, closed = _real_children(native, monkeypatch, route_body=route_body)
+    try:
+        assert not error, error
+        child, = children
+        assert closed == [] and policy.origin_for(child) is policy.origin_for(native)
+        if route_body is None:
+            assert child.provider == "anthropic" and not (child.request_overrides or {}).get("extra_body")
+        else:  # the operator's route config reaches the wire unchanged; nothing was stripped to pass the check
+            assert child.provider == "custom:relay" and child.model == "relay-model"
+            assert child.request_overrides == {"extra_body": route_body}
+    finally:
+        for child in children:
+            child.release_clients()
+
+
+@pytest.mark.parametrize("tier", [
+    {"extra_body": deepcopy(ROUTE_BODY)},                       # spoof: same keys AND values as the trusted route
+    {"extra_body": {"provider": ROUTE_BODY["provider"]}},       # same-key collision, equal value
+    {"extra_body": {"provider": {"only": ["other"]}}},          # same key, different value
+    {"model": "late-pin"},
+], ids=["spoof-equal", "collision-equal", "collision-differs", "top-level"])
+def test_real_build_children_refuses_tier_overlay_routing_keys_even_when_equal_to_route_config(
+        native, monkeypatch, tier):
+    children, error, closed = _real_children(native, monkeypatch, route_body=ROUTE_BODY, tier=tier)
+    assert children == [] and error and "routing override" in error
+    assert len(closed) == 1 and closed[0].provider == "custom:relay"  # built, refused before launch, closed
+
+
+@pytest.mark.parametrize("overrides", [{"extra_body": {"provider": ROUTE_BODY["provider"]}},
+                                       {"extra_body": {"route": "fallback"}}])
+def test_caller_overlay_equal_to_route_config_is_refused_before_construction(native, monkeypatch, overrides):
+    import tools.delegate_tool as dt
+    monkeypatch.setattr(dt, "_build_child_preserving_parent_tools", lambda **kw: pytest.fail("constructed"))
+    routes, error = dt._routes_for([{"goal": "neutral analysis", "model": "class:deep"}],
+                                   {"request_overrides": overrides}, None, native)
+    assert routes == [] and error and "routing override" in error
+
+
+def _built(final, *, caller=None, providers=None):
+    from types import SimpleNamespace
+    return SimpleNamespace(provider="custom:relay", model="relay-model", base_url=RELAY_URL, request_overrides=final,
+                           _caller_extra_body=caller or {}, _custom_providers=providers if providers is not None else [
+                               {"name": "relay", "base_url": RELAY_URL, "model": "relay-model",
+                                "extra_body": deepcopy(ROUTE_BODY)}])
+
+
+def test_built_child_check_admits_only_the_trusted_routes_exact_extra_body():
+    policy.check_built_child(_built({"temperature": 0.1, "extra_body": {**ROUTE_BODY, "service_tier": "flex"}}))
+    policy.check_built_child(_built({"extra_body": {"service_tier": "flex"}}, providers=[]))
+    policy.check_built_child(_built(None))
+
+
+@pytest.mark.parametrize("child", [
+    _built({"extra_body": deepcopy(ROUTE_BODY)}, caller={"provider": ROUTE_BODY["provider"]}),  # caller-owned, equal
+    _built({"extra_body": deepcopy(ROUTE_BODY)}, caller={"Provider": {"order": ["x"]}}),
+    _built({"extra_body": {**ROUTE_BODY, "provider": {"order": ["y"]}}}),                # route value was replaced
+    _built({"extra_body": {**ROUTE_BODY, "fallbacks": ["m"]}}),                          # key the route never set
+    _built({"extra_body": deepcopy(ROUTE_BODY)}, providers=[]),                          # no trusted source at all
+    _built({"extra_body": deepcopy(ROUTE_BODY)},
+           providers=[{"name": "other", "base_url": RELAY_URL, "extra_body": deepcopy(ROUTE_BODY)}]),
+    _built({"extra_body": deepcopy(ROUTE_BODY), "model": "x"}),
+    _built({"extra_body": deepcopy(ROUTE_BODY), "extra_query": {"model": "x"}}),
+    _built({"extra_body": deepcopy(ROUTE_BODY), "extra_headers": {"Authorization": "Bearer x"}}),
+    _built({"extra_body": ["provider"]}),
+    _built({"extra_body": deepcopy(ROUTE_BODY)}, caller=["provider"]),
+], ids=["caller-equal", "caller-case", "replaced", "added", "no-route", "other-route", "top-level", "query",
+        "header", "body-shape", "caller-shape"])
+def test_built_child_check_refuses_unauthorized_or_caller_owned_routing_keys(child):
+    with pytest.raises(policy.RestrictionError):
+        policy.check_built_child(child)
+
+
+def test_built_child_check_refuses_tier_routing_keys_before_reading_the_route():
+    child = _built({"extra_body": deepcopy(ROUTE_BODY)})
+    with pytest.raises(policy.RestrictionError):
+        policy.check_built_child(child, {"extra_body": {"provider": ROUTE_BODY["provider"]}})

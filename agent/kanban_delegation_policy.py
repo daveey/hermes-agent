@@ -180,6 +180,35 @@ def check_request_overrides(overrides: Any, index: Optional[int] = None) -> None
                 raise _refuse(index, f"request_overrides.extra_headers.{key} is a destination/auth override")
 
 
+def check_built_child(child: Any, tier: Any = None) -> None:
+    """Post-construction recheck of a built child's ``request_overrides``, judged by where each key came from.
+
+    Construction merges the allocator-selected custom route's own ``custom_providers[].extra_body`` under the
+    caller's.  That operator route config is not a delegation override, so a routing key in the final
+    ``extra_body`` is admitted only when that route's config (re-read here for the child's concrete
+    provider/model/endpoint) holds the same key with the same value.  Caller authority is judged on its own
+    record: the body captured before the merge and the tier overlay refuse any routing key, whether or not its
+    value equals the route config.  Everything else in the final mapping gets the full check, so a key added or
+    replaced after the merge still refuses.  Nothing is removed from what the child sends."""
+    check_request_overrides(tier)
+    caller = getattr(child, "_caller_extra_body", None)
+    if caller:
+        check_request_overrides({"extra_body": caller})
+    final = getattr(child, "request_overrides", None)
+    if not isinstance(final, Mapping) or not isinstance(final.get("extra_body"), Mapping):
+        return check_request_overrides(final)
+    body = final["extra_body"]
+    from agent.agent_init import _custom_provider_extra_body_for_agent
+    providers = getattr(child, "_custom_providers", None)
+    trusted = _custom_provider_extra_body_for_agent(
+        provider=str(getattr(child, "provider", "") or ""), model=str(getattr(child, "model", "") or ""),
+        base_url=str(getattr(child, "base_url", "") or ""),
+        custom_providers=providers if isinstance(providers, list) else []) or {}
+    unowned = {key: value for key, value in body.items()
+               if not (str(key).lower() in _ROUTING_KEYS and key in trusted and trusted[key] == value)}
+    check_request_overrides({**final, "extra_body": unowned})
+
+
 def preflight_tasks(parent: Any, tasks: Any) -> list[str]:
     """Class for every task (whole-batch refusal); non-list/non-dict shapes keep their native handling."""
     if not isinstance(tasks, list):
