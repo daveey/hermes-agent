@@ -105,22 +105,25 @@ NON_ENTRY_WRITER_EVENTS = {
     "parent_missing", "status_healed",
     # Preclaim observation; exhaustion moves to triage, never releases to ready.
     "review_admission_refused",
+    # Safety observations close/retain a stopped run, never enter ready.
+    "safety_refused", "decision_hold_restricted",
 }
 
 
-def test_review_admission_refusal_does_not_reset_ready_age(conn):
+@pytest.mark.parametrize("kind", ["review_admission_refused", "safety_refused", "decision_hold_restricted"])
+def test_nonentry_observation_does_not_reset_ready_age(conn, kind):
     tid = kb.create_task(conn, title="review refusal observation", assignee="default")
     with kb.write_txn(conn):
         conn.execute("UPDATE tasks SET created_at=100 WHERE id=?", (tid,))
         conn.execute("UPDATE task_events SET created_at=100 WHERE task_id=?", (tid,))
-        kb._append_event(conn, tid, "review_admission_refused", {"preclaim": True})
+        kb._append_event(conn, tid, kind, {"preclaim": True})
         conn.execute(
             "UPDATE task_events SET created_at=200 WHERE task_id=? AND kind=?",
-            (tid, "review_admission_refused"),
+            (tid, kind),
         )
     assert pu.ready_since(conn, tid, 100) == 100
     assert score._ready_since(conn, [tid])[tid] == 100
-    assert "'review_admission_refused'" not in cw._floor_kinds()
+    assert f"'{kind}'" not in cw._floor_kinds()
 
 
 def _writer_events(source):

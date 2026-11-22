@@ -305,6 +305,8 @@ _STATUS_IN = re.compile(r"(?<![\w.])status\s+IN\s*\(([^)]*)\)", re.IGNORECASE)
 
 # Every status-leaving ``UPDATE tasks`` that can move a card out of ``running``, by ``path::function``.
 WRAPPED = {
+    # Stop-only reclaim still preserves staged source custody with the real wrapper.
+    "hermes_cli/kanban_refusal_receipt.py::stop_failed_refusal",
     "hermes_cli/kanban_db.py::complete_task",
     "hermes_cli/kanban_dependency_review.py::apply_block_update",  # block_task
     "hermes_cli/kanban_timed_park.py::park",
