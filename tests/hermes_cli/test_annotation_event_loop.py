@@ -1,5 +1,6 @@
 """Real native waits with independent lease maintenance."""
 import itertools
+import os
 import resource
 import threading
 import time
@@ -7,16 +8,20 @@ from types import SimpleNamespace
 
 from hermes_cli.annotation_event_loop import run
 from hermes_cli.annotation_file_events import FileEvents
+from tests.hermes_cli.annotation_idle_fixture import PrivateInputEvents
 
 
 def test_idle_beats_do_not_read_inputs_and_change_wakes(tmp_path):
-    source = tmp_path / 'source'
+    shared = tmp_path / 'shared'
+    private = shared / 'private'
+    private.mkdir(parents=True)
+    source = private / 'source'
     source.write_text('one')
     stop = threading.Event()
     ready = threading.Event()
     updated = threading.Event()
     reads, beats = [], []
-    with FileEvents() as events:
+    with PrivateInputEvents(source) as events:
         def refresh():
             events.replace([source])
             reads.append(source.read_text() if source.exists() else None)
@@ -35,6 +40,10 @@ def test_idle_beats_do_not_read_inputs_and_change_wakes(tmp_path):
         thread.start()
         try:
             assert ready.wait(1)
+            # Controlled ambient metadata activity outside the private input root.
+            # Production must observe this (utime and chmod both emit IN_ATTRIB),
+            # but it is not part of this scheduler-only fixture's input contract.
+            os.utime(shared, None)
             assert not updated.wait(61)
             assert len(beats) >= 3
             started = time.monotonic()

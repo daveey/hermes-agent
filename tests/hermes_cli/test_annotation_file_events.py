@@ -74,6 +74,42 @@ def test_file_write_wakes_without_input_polling(tmp_path):
         assert not events.wait(0)
 
 
+@pytest.mark.parametrize('operation', ['utime', 'chmod'])
+def test_ancestor_attributes_invalidate_without_source_mutation(tmp_path, operation):
+    # Both metadata operations emit IN_ATTRIB. Suppressing the harmless utime
+    # packet would also suppress a real access change; keep production coverage.
+    ancestor = tmp_path / 'ancestor'
+    source = ancestor / 'private' / 'input'
+    source.parent.mkdir(parents=True)
+    source.write_text('unchanged')
+    with FileEvents() as events:
+        events.replace([source])
+        assert not events.wait(0)
+        if operation == 'utime':
+            os.utime(ancestor, None)
+        else:
+            ancestor.chmod(0o700)
+        assert events.wait(.8)
+        assert not events.control_only
+        assert source.read_text() == 'unchanged'
+
+
+def test_unrelated_sibling_activity_does_not_invalidate(tmp_path):
+    ancestor = tmp_path / 'ancestor'
+    source = ancestor / 'private' / 'input'
+    source.parent.mkdir(parents=True)
+    source.write_text('unchanged')
+    with FileEvents() as events:
+        events.replace([source])
+        sibling = ancestor / 'sibling'
+        sibling.mkdir()
+        (sibling / 'other').write_text('unrelated')
+        (ancestor / 'other').write_text('unrelated')
+        assert not events.wait(.1)
+        source.unlink()
+        assert events.wait(.8)
+
+
 def test_high_descriptors_deliver_source_and_explicit_wake(tmp_path):
     import fcntl
     import resource
