@@ -95,6 +95,37 @@ def test_refusals_do_not_create_a_systemic_crash_fix_card(live, monkeypatch):
     assert all(kb.get_task(live, tid).status == "triage" for tid in tids)
 
 
+@pytest.mark.parametrize("provider_message", [
+    "the model returned no explanation",
+    "provider refusal category: cyber",
+])
+@pytest.mark.parametrize("clean_exit", [False, True])
+def test_history_refusal_tail_stops_without_generic_refused_to(live, monkeypatch, provider_message, clean_exit):
+    from agent.turn_refusal_history import HISTORY_REFUSAL_COPY
+
+    output = HISTORY_REFUSAL_COPY.format(label="OpenAI", summary=provider_message)[-400:]
+    tid, _ = _local_crash(live, monkeypatch)
+    with kb.write_txn(live):
+        live.execute("UPDATE tasks SET max_retries=2 WHERE id=?", (tid,))
+    monkeypatch.setattr(dispatch, "_classify_dead_worker", lambda *a, **kw:
+                        dispatch._DeadWorker("clean_exit" if clean_exit else "nonzero_exit",
+                                             0 if clean_exit else 1, "exit", "protocol_violation" if clean_exit else "crashed",
+                                             {"worker_output": output}, protocol_violation=clean_exit))
+    assert summary.classify_failure("crashed", {"worker_output": output}) == "provider_refusal"
+    assert dispatch.detect_crashed_workers(live) == [tid]
+    task = kb.get_task(live, tid)
+    assert task.status == "triage"
+    assert task.consecutive_failures == 1
+    final = json.loads(live.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='failure_finalized'", (tid,),
+    ).fetchone()[0])
+    assert final["reason_code"] == "provider_refusal"
+    notice = summary.describe_failure("failure_finalized", "fixture", final)
+    assert f"'{provider_message}'" in notice
+    assert "Not a worker crash; no automatic retry" in notice
+    assert dispatch.detect_crashed_workers(live) == []
+
+
 def test_notice_quotes_provider_message_after_long_preamble():
     message = "This content was flagged for possible cybersecurity risk. " + "detail " * 40
     text = summary.describe_failure("crashed", "fixture", {
