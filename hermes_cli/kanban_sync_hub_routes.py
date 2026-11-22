@@ -17,6 +17,11 @@ class HubRoutesMixin:
 
         return self._call("GET", f"/v2/boards/{quote(board, safe='')}/status-origin/capability")
 
+    def actionability_capability(self, board: str) -> dict:
+        from urllib.parse import quote
+
+        return self._call("GET", f"/v2/boards/{quote(board, safe='')}/actionability/capability")
+
     def decision_retain_capability(self, board: str) -> dict:
         from urllib.parse import quote
 

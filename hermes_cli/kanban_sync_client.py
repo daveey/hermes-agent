@@ -674,7 +674,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
     cache (one per round, shared by both sends)."""
     from hermes_cli.kanban_db_connect import write_txn
     from hermes_cli import kanban_sync_live_claim as _live_claim
-    from hermes_cli import kanban_retain_transport as retain_transport
+    from hermes_cli import kanban_actionability_transport as retain_transport
     refuse_if_schema_ahead(conn)  # an older core would strip the newer columns; the ops stay pending [daveey]
     out, seen = PushResult(), {} if seen is None else seen
     for _ in range(max_batches):
@@ -694,7 +694,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             from hermes_cli import kanban_sync_envelope as envelopes
             envelopes.prune_parents(conn)
             rows, _wire, parents = _within_batch(conn, rows, [{} for _r in rows], gateway)
-            wire = [retain_transport.outbound(conn, r) if r["op"] == "retain" else envelopes.outbound(conn, r, lambda r=r: strip_stale_push(
+            wire = [retain_transport.outbound(conn, r) if r["op"] in ("retain", "actionability_record") else envelopes.outbound(conn, r, lambda r=r: strip_stale_push(
                 conn, wire_ops.translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway))), supported=bool(origin_cap)) for r in rows]
             parents = [(envelopes.parent(conn, tid, lambda op=op: op, supported=bool(origin_cap)), tid) for op, tid in parents]
             wire = [op for op, _tid in parents] + wire
@@ -716,7 +716,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     row = rejected_parent(conn, parents, res)
                 if row is None:
                     continue
-                if row["op"] == "retain":
+                if row["op"] in ("retain", "actionability_record"):
                     result = retain_transport.record_result(conn, row, res)
                     setattr(out, result, getattr(out, result) + 1)
                     continue  # No generic transient remap, mirror edits or acknowledgement authority.

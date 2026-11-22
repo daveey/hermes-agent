@@ -1,0 +1,102 @@
+"""Diagnostic commands use real SQLite lifecycle/outbox; ACK never means receipt."""
+import hashlib
+import json
+
+import pytest
+
+from hermes_cli import kanban_db as kb, kanban_db_connect as kbc, kanban_db_sync as sync
+from hermes_cli import kanban_sync_client as client
+from tests.hermes_cli import test_kanban_failure_transport as support
+
+live = support.live
+
+
+def contract(conn):
+    tid = kb.create_task(conn, title='diagnostic original scope', assignee='default')
+    with kbc.write_txn(conn):
+        # Canonical-home evidence normally arrives on the task's first Board ACK.
+        conn.execute("UPDATE tasks SET created_on='fixture',sync_version=1 WHERE id=?", (tid,))
+        conn.execute('DELETE FROM kanban_sync_outbox')
+    return tid, {'version': 1, 'facts': {'status': 'ready', 'assignee': 'default', 'current_run_uid': None,
+        'root_episode': None, 'source_uids': [], 'dependencies': []}, 'owner': {'kind': 'unavailable', 'refs': []},
+        'blocker': {'prerequisite': 'administrative owner', 'trigger': 'explicit owner decision', 'evidence': []},
+        'action': 'repair_lifecycle_contract', 'instruction': 'Repair diagnostic custody, not original scope',
+        'first_observed': 1, 'deadline_at': 2, 'legacy': False}
+
+
+def reserve(conn, tid, payload, phase='contract'):
+    from hermes_cli import kanban_actionability_transport as act
+    with kbc.write_txn(conn):
+        return act.reserve(conn, tid, payload, phase=phase)
+
+
+def test_wire_custody_and_outbox_atomic_rollback_and_no_original_effect(live):
+    from hermes_cli import kanban_actionability_transport as act
+    tid, payload = contract(live)
+    before = dict(live.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+    with pytest.raises(RuntimeError), kbc.write_txn(live):
+        act.reserve(live, tid, payload)
+        raise RuntimeError('rollback diagnostic command')
+    assert not sync.outbox(live)
+    owned = reserve(live, tid, payload)
+    assert owned['request_sha256'] == hashlib.sha256(owned['request_json'].encode()).hexdigest()
+    assert dict(live.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone()) == before
+    assert len(sync.outbox(live)) == 1
+    assert reserve(live, tid, payload) == owned
+    assert act.outbound(live, sync.outbox(live)[0]) == json.loads(owned['request_json'])
+    with pytest.raises(ValueError, match='changed'):
+        reserve(live, tid, {**payload, 'deadline_at': 3})
+
+
+@pytest.mark.parametrize('answer', ['lost', 'ack', 'storage_error', 'missing', 'malformed'])
+def test_real_push_retains_original_identity_after_unknown_or_ack(live, answer):
+    from hermes_cli import kanban_actionability_transport as act
+    tid, payload = contract(live)
+    owned = reserve(live, tid, payload)
+    wire = json.loads(owned['request_json'])
+    class Hub:
+        def actionability_capability(self, board):
+            return {'actionability_record': 1, 'frozen_replay': 1, 'diagnostic_only': True,
+                    'hlc': '0000000000001-0000-server'}
+        def ops(self, board, sent):
+            assert sent == [wire]
+            if answer == 'lost':
+                raise OSError('lost reply')
+            if answer == 'missing':
+                return {'results': []}
+            if answer == 'malformed':
+                return {'results': [{'client_op_id': owned['op_id'], 'status': 'merged'}]}
+            return {'results': [{'client_op_id': owned['op_id'], 'status': 'applied' if answer == 'ack' else 'rejected', 'reason': 'storage_error'}]}
+    if answer == 'lost':
+        with pytest.raises(OSError):
+            client.push(live, Hub(), 'default', 'fixture', primary=True, max_batches=1)
+    else:
+        client.push(live, Hub(), 'default', 'fixture', primary=True, max_batches=1)
+    current = act.command(live, owned['op_id'])
+    assert current['request_json'] == owned['request_json'] and current['canonical_receipt_json'] is None
+    if answer == 'ack':
+        assert current['delivery_state'] == 'acknowledged' and not sync.outbox(live)
+    else:
+        assert len(sync.outbox(live)) == 1 and sync.outbox(live)[0]['op_id'] == owned['op_id']
+    assert live.execute('SELECT status FROM tasks WHERE id=?', (tid,)).fetchone()[0] == 'ready'
+
+
+def test_deleted_disposable_indexes_do_not_renew_contract_deadline(live):
+    from hermes_cli import kanban_actionability_transport as act
+    tid, payload = contract(live)
+    root = reserve(live, tid, payload)
+    # Transport custody is NOT a disposable scheduling index, even after its ACK.
+    with kbc.write_txn(live):
+        act.record_result(live, sync.outbox(live)[0], {'status': 'applied'})
+        live.execute('CREATE TABLE kanban_actionability(task_id TEXT)')
+        live.execute('DROP TABLE kanban_actionability')
+    assert reserve(live, tid, payload) == act.command(live, root['op_id'])
+    assert not sync.outbox(live)
+    with pytest.raises(ValueError, match='changed'):
+        reserve(live, tid, {**payload, 'first_observed': 10, 'deadline_at': 11})
+
+
+def test_administrative_notice_does_not_promise_comment_release():
+    from hermes_cli.kanban_decision_ask import notice_text
+    text = notice_text({'why': 'scope authority unavailable', 'actionability': {'kind': 'administrative_only'}})
+    assert 'never release or rerun' in text and 'the comment wakes it' not in text

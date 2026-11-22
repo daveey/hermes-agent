@@ -16,6 +16,9 @@ def translate(row: dict, hlc: str) -> dict:
     if row["op"] == "retain":
         from hermes_cli.kanban_retain_transport import frozen_wire
         return frozen_wire(row)
+    if row["op"] == "actionability_record":
+        from hermes_cli.kanban_actionability_transport import frozen_wire
+        return frozen_wire(row)
     op = {"client_op_id": row["op_id"], "table": row["table_name"], "uid": row["row_uid"], "hlc": hlc}
     if row["op"] == "delete":
         return {**op, "op": "delete"}
