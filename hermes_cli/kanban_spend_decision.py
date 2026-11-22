@@ -50,13 +50,14 @@ def pending_episode(conn, task_id: str):
         "SELECT * FROM task_events WHERE task_id=? AND kind IN "
         "('spend_budget_triaged','decision_hold_restricted','decision_retained','promoted_manual','archived')", (task_id,))]
     events.sort(key=_event_order, reverse=True)
+    receipts = {e['id'] for e in receipt_restrictions(conn, task_id)}
     for event in events:
         try:
             payload = json.loads(event['payload'] or '{}')
         except (TypeError, ValueError):
             continue
-        disposition = payload.get('disposition') if isinstance(payload, dict) else None
-        if event['kind'] == 'decision_retained' and isinstance(disposition, dict) and disposition.get('reason') == 'scope_stopped':
+
+        if event['id'] in receipts:
             return next((e for e in events if e['kind'] == EVENT and (e.get('uid') or str(e['id'])) == payload.get('episode_uid')), event)
         if (isinstance(payload, dict) and payload.get('cause') in {'safety_refusal', 'scope_stopped'}
                 and event['kind'] in (EVENT, 'decision_hold_restricted')):
@@ -78,13 +79,41 @@ def execution_restricted(conn, task_id: str) -> bool:
 
 def restricted_since(conn, task_id: str) -> int | None:
     """One monotone restriction predicate for release fencing and accounting."""
-    row = conn.execute("SELECT MIN(COALESCE(created_at,0)) FROM (SELECT created_at FROM task_events WHERE task_id=? AND kind IN "
+    row = conn.execute("SELECT MIN(COALESCE(created_at,0)) FROM task_events WHERE task_id=? AND kind IN "
                         "('spend_budget_triaged','decision_hold_restricted') AND json_valid(payload) "
                         "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.cause') END "
-                        "IN ('safety_refusal','scope_stopped') UNION ALL SELECT created_at FROM task_events WHERE task_id=? "
-                        "AND kind='decision_retained' AND json_valid(payload) AND CASE WHEN json_valid(payload) "
-                        "THEN json_extract(payload,'$.disposition.reason') END='scope_stopped')", (task_id, task_id)).fetchone()
-    return row[0]
+                        "IN ('safety_refusal','scope_stopped')", (task_id,)).fetchone()
+    times = [e['created_at'] or 0 for e in receipt_restrictions(conn, task_id)]
+    if row[0] is not None:
+        times.append(row[0])
+    return min(times) if times else None
+
+
+def receipt_restrictions(conn, task_id: str, *, safety_only: bool = False) -> list[dict]:
+    """Only locally independently confirmed receipts bridge a lagging restriction feed.
+
+    Historical reserved-kind lookalikes are not retroactively attested. Foreign
+    pickup relies on canonical STOP/RESTRICT rows, not locally invented custody.
+    """
+    import json
+    from hermes_cli.kanban_retain_transport import command, confirmed_command
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_failure_commands'").fetchone():
+        return []
+    out = []
+    for row in conn.execute("SELECT e.*,r.uid AS bound_run_uid FROM task_events e LEFT JOIN task_runs r ON r.id=e.run_id "
+                            "WHERE e.task_id=? AND e.kind='decision_retained'", (task_id,)):
+        event = dict(row)
+        run_uid = event['bound_run_uid']
+        owned = command(conn, run_uid)
+        if not owned or not confirmed_command(conn, task_id, run_uid) or owned.get('operation_kind') != 'retain':
+            continue
+        receipt = json.loads(owned['canonical_receipt_json'])
+        if event.get('uid') != owned['event_uid'] or json.loads(event['payload']) != receipt:
+            continue
+        safety = receipt.get('superseded_by_safety_stop') is True
+        if safety or not safety_only and receipt.get('disposition', {}).get('reason') == 'scope_stopped':
+            out.append(event)
+    return out
 
 
 def unblock_refusal(conn, task_id: str) -> str | None:

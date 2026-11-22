@@ -11,9 +11,9 @@ from tests.hermes_cli import test_kanban_retain_transport as support
 live = support.live
 
 
-def fixture(conn):
+def fixture(conn, reason='scope_stopped'):
     tid, rid = support.support._running(conn)
-    owned = support.reserve(conn, tid, rid)
+    owned = support.reserve(conn, tid, rid, reason=reason)
     wire = json.loads(owned['request_json'])
     episode = 'fixture-stop'
     gateway = 'fixture-gateway'

@@ -24,11 +24,12 @@ def refusal_fields(result) -> dict:
 
 def restricted(conn, task_id: str) -> bool:
     """A safety restriction cannot be cleared by ordinary budget promotion/archive."""
+    from hermes_cli.kanban_spend_decision import receipt_restrictions
     return conn.execute(
         "SELECT 1 FROM task_events WHERE task_id=? AND kind IN "
         "('spend_budget_triaged','decision_hold_restricted') AND json_valid(payload) "
         "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.cause') END='safety_refusal' "
-        "LIMIT 1", (task_id,)).fetchone() is not None
+        "LIMIT 1", (task_id,)).fetchone() is not None or bool(receipt_restrictions(conn, task_id, safety_only=True))
 
 
 def reclaim_admission(conn, row, *, failed_results_only=False):

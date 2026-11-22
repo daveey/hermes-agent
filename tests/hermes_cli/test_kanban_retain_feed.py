@@ -29,10 +29,11 @@ def test_feed_retained_claim_release_requires_exact_confirmed_command(live, conf
 
 
 @pytest.mark.parametrize('feed_before_confirmation', [False, True])
-def test_confirmed_projection_settles_ended_run_and_live_claim_atomically(live, feed_before_confirmation):
+@pytest.mark.parametrize('safety_superseded', [False, True])
+def test_confirmed_projection_settles_ended_run_and_live_claim_atomically(live, feed_before_confirmation, safety_superseded):
     from hermes_cli import kanban_retain_transport as transport
     from hermes_cli import kanban_db_sync as sync
-    owned, receipt, rows, hub = support.fixture(live)
+    owned, receipt, rows, hub = support.fixture(live, reason='capability_unavailable' if safety_superseded else 'scope_stopped')
     tid, uid = owned['task_id'], owned['run_uid']
     with kbc.write_txn(live):
         live.execute('UPDATE tasks SET claim_lock=?,worker_pid=?,worker_started_at=? WHERE id=?',
@@ -44,6 +45,10 @@ def test_confirmed_projection_settles_ended_run_and_live_claim_atomically(live, 
     rows['task_events', owned['event_uid']]['version'] = 1
     rows['tasks', tid].update(id=tid, title='Retained fixture', assignee='worker', lease_holder=None, lease_expires=None)
     rows['task_events', receipt['episode_uid']]['payload'] = json.dumps({'accounting_boundary':False})
+    if safety_superseded:
+        receipt['superseded_by_safety_stop'] = True
+        rows['task_events', owned['event_uid']]['payload'] = json.dumps(receipt)
+        rows['task_runs', uid]['outcome'] = 'safety_refused'
     with kbc.write_txn(live):
         live.execute('UPDATE task_runs SET claim_lock=? WHERE uid=?', (kb._host_prefix() + ':1234', uid))
     if feed_before_confirmation:
@@ -54,11 +59,14 @@ def test_confirmed_projection_settles_ended_run_and_live_claim_atomically(live, 
     transport.project(live, hub, 'default', result)
     task = kb.get_task(live, tid)
     assert task.status == 'triage' and task.current_run_id is None and task.claim_lock is None
-    assert live.execute('SELECT outcome FROM task_runs WHERE uid=?', (uid,)).fetchone()[0] == 'retained'
+    assert live.execute('SELECT outcome FROM task_runs WHERE uid=?', (uid,)).fetchone()[0] == ('safety_refused' if safety_superseded else 'retained')
     assert sync.sync_state(live)['cursor'] == cursor
     assert not sync.outbox(live)
     from hermes_cli import kanban_spend_decision as decision
     assert decision.execution_restricted(live, tid)
+    if safety_superseded:
+        from hermes_cli.kanban_refusal_receipt import restricted
+        assert restricted(live, tid)
     with kbc.write_txn(live):
         kb._append_event(live, tid, 'promoted_manual', {})
     assert decision.pending(live, tid)
