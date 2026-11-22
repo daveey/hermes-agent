@@ -69,7 +69,12 @@ def test_real_submit_keeps_queue_until_holder_clears(held, monkeypatch, cause):
     refusal = active_sessions.ActiveSessionRefusal('owned', 'SESSION_NOT_OWNED')
     refusal.ownership_cause = cause
     state = [refusal]
-    monkeypatch.setattr(server, '_ensure_active_session_slot', lambda *a: state[0])
+    def slot(*args, allow_takeover=True):
+        if held.session.get('queued_prompt'):
+            assert allow_takeover is False
+        return state[0]
+
+    monkeypatch.setattr(server, '_ensure_active_session_slot', slot)
     reply = queue_tests._submit()
     assert reply['result']['status'] == 'queued'
     assert held.persisted == [('hello there', None)]
@@ -90,6 +95,11 @@ def test_drain_rechecks_fence_before_consuming_queue(admission, monkeypatch):
     admission.session.update(running=False, queued_prompt=head)
     admission.refusal = SimpleNamespace(reason='SESSION_NOT_OWNED', ownership_cause='lease_unknown')
     monkeypatch.setattr(server, '_session_turn_admission', lambda _: nullcontext(True))
+    def slot(*args, allow_takeover=True):
+        assert allow_takeover is False
+        return admission.refusal
+
+    monkeypatch.setattr(server, '_ensure_active_session_slot', slot)
     retries = []
     from tui_gateway import admission_retry
     monkeypatch.setattr(admission_retry, 'retry_queued_prompt', lambda *a: retries.append(a) or True)
