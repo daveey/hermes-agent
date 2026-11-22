@@ -111,7 +111,7 @@ export const sessionDotVariant = (
 
   return {
     ariaLabel: label,
-    className: cn(DOT_BASE, stripe === 'done' ? 'bg-(--ui-success)' : stripe ? 'bg-(--session-status-color)' : 'border border-(--ui-text-quaternary)', sessionStatusStripeColor(stripe)),
+    className: cn(DOT_BASE, stripe === 'done' ? 'bg-(--ui-success)' : stripe === 'waiting' && outcome?.status?.kind === 'running' ? 'bg-(--ui-accent)' : stripe ? 'bg-(--session-status-color)' : 'border border-(--ui-text-quaternary)', sessionStatusStripeColor(stripe)),
     role: 'status',
     title: label
   }

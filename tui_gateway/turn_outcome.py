@@ -53,8 +53,18 @@ def refresh_turn_outcome(session: dict, agent=None, concluding_turn: Optional[fr
     """Refresh the outcome of the row this turn wrote (the agent's compression tip, else the session key).
     ``concluding_turn``: the turn's own evidence (``concluding_turn_identity``); omitted = nothing discounted."""
     sid = turn_sid(session, agent) if session_id is None else session_id
-    if not sid:
-        return
+    if sid:
+        _refresh_session_outcome(session, sid, "turn_end", concluding_turn or frozenset())
+
+
+def refresh_turn_start_outcome(session: dict, agent=None) -> None:
+    """Publish admitted live evidence without discounting this turn's marker or lease."""
+    sid = turn_sid(session, agent)
+    if sid:
+        _refresh_session_outcome(session, sid, "turn_start", frozenset())
+
+
+def _refresh_session_outcome(session: dict, sid: str, trigger: str, concluding: frozenset) -> None:
     try:
         from hermes_state_outcome import refresh_outcome
         from tui_gateway import server  # split helpers only work rebound onto server globals (bind_module)
@@ -64,9 +74,9 @@ def refresh_turn_outcome(session: dict, agent=None, concluding_turn: Optional[fr
         # context threads: bind the owning session's full runtime scope again.
         with server._session_profile_runtime_scope(session), server._session_db(session) as db:
             if db is not None:
-                refresh_outcome(sid, "turn_end", db=db, concluding_turn=concluding_turn or frozenset())
-    except Exception:  # health: allow BLE001 -- the turn already concluded; a failed refresh is logged
-        logger.warning("turn-end outcome refresh failed for %s", sid, exc_info=True)
+                refresh_outcome(sid, trigger, db=db, concluding_turn=concluding)
+    except Exception:  # health: allow BLE001 -- outcome publication must never block a turn
+        logger.warning("%s outcome refresh failed for %s", trigger, sid, exc_info=True)
 
 
 def refresh_closed_session_outcome(session: dict) -> None:

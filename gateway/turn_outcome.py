@@ -94,6 +94,21 @@ def finish_gateway_turn_outcome(runner, session_entry, event, session_key, outco
         runner._clear_session_env(env_tokens)
 
 
+def refresh_gateway_turn_start_outcome(runner, session_entry) -> None:
+    """Publish admission in the caller's profile scope before transcript/provider work."""
+    sid = str(getattr(session_entry, "session_id", "") or "")
+    store = getattr(runner, "_session_db", None)
+    db = getattr(store, "_db", store)
+    if not sid or db is None:
+        return
+    try:
+        from hermes_state_outcome import refresh_outcome
+
+        refresh_outcome(sid, "turn_start", db=db)
+    except Exception:  # health: allow BLE001 -- publication failure never refuses an admitted turn
+        logger.warning("gateway turn-start outcome refresh failed for %s", sid, exc_info=True)
+
+
 def _refresh(sid: str, db, concluding_turn: frozenset) -> None:
     try:
         from hermes_state_outcome import refresh_outcome

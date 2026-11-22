@@ -88,6 +88,9 @@ def _verdict(snapshot: dict, coverage: dict, generation: int, failures: list[dic
     work = [item for item in snapshot.get("work") or () if not (
         item.get("passive") is True and item.get("state") in {"watching", "scheduled"})]
     open_work = [item for item in work if item.get("state") in _OPEN]
+    if any(item.get("kind") == "card" and item.get("state") == "running" for item in open_work):
+        return {"kind": "running", "on": deepcopy(open_work),
+                "presentation": {"stripe": "waiting", "reason_codes": ["linked_work_running"]}}
     if open_work:
         return {"kind": "waiting", "on": deepcopy(open_work),
                 "presentation": {"stripe": "waiting", "reason_codes": ["linked_work_open"]}}

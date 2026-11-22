@@ -1489,8 +1489,9 @@ def _run_admitted_prompt(
         st.provider_retry_not_before = session.get("_auto_continue_provider_retry_not_before")
         st.marker_key = _record_turn_marker(session, text, auto_continue=auto_continue and terminal_callback is None,
             notification_category=(display_metadata or {}).get("notification_category"))
-        from tui_gateway.turn_outcome import own_turn_marker
+        from tui_gateway.turn_outcome import own_turn_marker, refresh_turn_start_outcome
         st.own_marker = own_turn_marker(session, st.marker_key)
+        refresh_turn_start_outcome(session, st.agent)
         st.display_kind = display_kind
         st.display_metadata = display_metadata
         from tui_gateway import automation_replay  # [daveey] a failed automation turn's copy and its one replay

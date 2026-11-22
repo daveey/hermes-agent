@@ -78,6 +78,42 @@ def test_incomplete_or_foreign_source_never_green(source, defect):
     assert any(source in reason for reason in out["coverage"]["reasons"])
 
 
+def test_running_card_publishes_running_and_preserves_all_open_work():
+    work = [{"id": "card", "kind": "card", "state": "running"},
+            {"id": "queued", "kind": "card", "state": "todo"}]
+    out = reduce(snapshot(work=work))
+    assert out["kind"] == "running"
+    assert out["presentation"] == {"stripe": "waiting", "reason_codes": ["linked_work_running"]}
+    assert out["on"] == work
+    work[0]["state"] = "done"
+    assert out["on"][0]["state"] == "running"
+
+
+@pytest.mark.parametrize("state", ["todo", "scheduled"])
+def test_nonrunning_cards_remain_waiting(state):
+    out = reduce(snapshot(work=[{"id": "card", "kind": "card", "state": state}]))
+    assert out["kind"] == "waiting"
+    assert out["presentation"]["reason_codes"] == ["linked_work_open"]
+
+
+@pytest.mark.parametrize("changes,kind,reason", [
+    ({"asks": [{"id": "ask"}]}, "decision", "human_ask"),
+    ({"muted": True}, "muted", "muted"),
+    ({"turn": {"state": "running", "generation": 7}}, "running", "own_turn_active"),
+])
+def test_running_card_preserves_higher_precedence(changes, kind, reason):
+    out = reduce(snapshot(work=[{"id": "card", "kind": "card", "state": "running"}], **changes))
+    assert out["kind"] == kind
+    assert out["presentation"]["reason_codes"] == [reason]
+
+
+@pytest.mark.parametrize("kind", ["process", "goal", "subagent"])
+def test_other_running_work_remains_waiting(kind):
+    out = reduce(snapshot(work=[{"id": "other", "kind": kind, "state": "running"}]))
+    assert out["kind"] == "waiting"
+    assert out["presentation"]["reason_codes"] == ["linked_work_open"]
+
+
 def test_revision_only_changes_when_canonical_evidence_changes():
     value = snapshot()
     first = reduce(value)

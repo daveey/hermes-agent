@@ -35,7 +35,7 @@ DECLARABLE_KINDS = ("done", "decision", "waiting")
 WAIT_KINDS = ("card", "process", "cron", "time", "capacity", "subagent", "goal")
 UNRESOLVED_REASONS = ("notice_tail", "no_summary", "turn_failed", "interrupted", "subagent_killed",
                       "subagent_lost", "empty")
-TRIGGERS = ("turn_end", "notice", "card_change", "reap", "mute", "manual")
+TRIGGERS = ("turn_start", "turn_end", "notice", "card_change", "reap", "mute", "manual")
 SUMMARY_CHARS = 400
 # A delegate child with an open row but no activity for this long is not live work. It is *lost*
 # (``unresolved{subagent_lost}``) until a declared outcome made after its last activity accounts for it:

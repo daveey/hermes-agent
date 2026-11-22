@@ -102,6 +102,35 @@ def test_every_turn_conclusion_refreshes_the_stored_outcome(turn_env, db, reply,
     assert (stored["kind"], stored.get("reason")) == (kind, reason)
 
 
+@pytest.mark.parametrize("previous", [None, "waiting"])
+def test_admission_publishes_running_before_prepare(turn_env, db, previous):
+    turn_env.setattr(server, "_session_home", lambda session: db.db_path.parent)
+    db.create_session("row-start", source="desktop")
+    if previous:
+        db.append_message("row-start", role="user", content="earlier")
+        so.register_outcome_provider("queued-card", lambda sid: {"waiting_on": [{"kind": "card", "id": "card", "state": "todo", "label": "queued"}]})
+        so.refresh_outcome("row-start", "manual", db=db)
+        assert so.get_outcome("row-start", db=db)["status"]["kind"] == previous
+    else:
+        assert so.get_outcome("row-start", db=db) is None
+    agent = _Agent("row-start", db, SUMMARY)
+    session = server._sessions["ui-outcome-start"] = _session(agent)
+    prepare = server._prepare_turn_input
+    observed = []
+
+    def inspect(*args, **kwargs):
+        stored = so.get_outcome("row-start", db=db)
+        assert stored is not None
+        observed.append(stored["status"]["kind"])
+        assert stored["status"]["presentation"]["reason_codes"] == ["own_turn_active"]
+        return prepare(*args, **kwargs)
+
+    turn_env.setattr(server, "_prepare_turn_input", inspect)
+    assert server._run_prompt_submit("rid", "ui-outcome-start", session, "work") is True
+    assert observed == ["running"]
+    assert so.get_outcome("row-start", db=db)["status"]["kind"] != "running"
+
+
 def test_a_later_good_reply_clears_stored_turn_failed_without_manual_refresh(turn_env, db):
     """Hub chats 20261120_041627_3ea0c6 / d40002 / 2e950a: a failed-turn row then a later
     successful TUI reply must not leave ``unresolved{turn_failed}`` until ``hermes sessions

@@ -47,6 +47,9 @@ describe('SessionStatusDot published status', () => {
     expect(dot.getAttribute('aria-label')).toBe(label)
     expect(dot.getAttribute('title')).toBe(label)
     expect(dot.className).not.toContain('bg-(--ui-success)')
+    expect(dot.className).toContain(kind === 'running' ? 'bg-(--ui-accent)' : 'bg-(--session-status-color)')
+
+    if (kind === 'waiting') {expect(dot.className).not.toContain('bg-(--ui-accent)')}
   })
 
   it('announces a canonical never-started session as draft, not Running', () => {
