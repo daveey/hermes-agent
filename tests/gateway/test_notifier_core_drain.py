@@ -11,6 +11,8 @@ from tests.gateway.test_wake_admitted_before_drain_authority import (
 )
 from tests.waiting import async_wait_until
 
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")  # symbolic profile ids are relative homes
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('release', ['apply', 'give-up'])

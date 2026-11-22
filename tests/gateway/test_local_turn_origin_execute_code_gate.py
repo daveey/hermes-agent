@@ -12,6 +12,8 @@ import pytest
 
 from tests.waiting import async_wait_until
 
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")  # symbolic profile ids are relative homes
+
 
 @pytest.mark.asyncio
 async def test_only_the_viewers_own_turn_skips_the_whole_script_gate(tmp_path, monkeypatch):

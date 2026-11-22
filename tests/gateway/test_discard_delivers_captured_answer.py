@@ -8,6 +8,7 @@ from gateway.session_contract import Submission
 from hermes_state_runtime import RuntimeStoreError, get_session_admission
 
 
+@pytest.mark.usefixtures('authority_cwd_in_tmp')  # symbolic profile ids are relative homes
 @pytest.mark.asyncio
 @pytest.mark.parametrize('live_waiter', [True, False])
 async def test_discard_of_a_captured_answer_delivers_it_once(tmp_path, monkeypatch, live_waiter):

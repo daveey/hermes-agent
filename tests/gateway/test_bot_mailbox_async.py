@@ -6,6 +6,7 @@ import time
 import pytest
 
 pytest_plugins = ('tests.gateway.test_session_bot_retry',)
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")  # symbolic profile ids are relative homes
 
 
 def test_canonical_poll_reads_owner_projection_without_handshake(tmp_path, monkeypatch):
