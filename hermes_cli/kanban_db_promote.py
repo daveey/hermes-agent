@@ -15,9 +15,9 @@ def promote_task(
     System callers omit the precondition. Manual boundaries check unread comments
     under the write lock; dry runs validate without writing anything.
     """
-    from hermes_cli.kanban_spend_decision import execution_restricted as restricted
-    if restricted(conn, task_id):
-        return False, 'Provider safety restriction has no supported execution release'
+    from hermes_cli.kanban_spend_decision import execution_refusal
+    if refusal := execution_refusal(conn, task_id):
+        return False, refusal
     cur_status = _kb._task_status(conn, task_id)
     if cur_status is None:
         return False, f"task {task_id} not found"
@@ -41,8 +41,8 @@ def promote_task(
             return False, refusal
         return True, None
     with _kb.write_txn(conn):
-        if restricted(conn, task_id):
-            return False, 'Provider safety restriction has no supported execution release'
+        if refusal := execution_refusal(conn, task_id):
+            return False, refusal
         if precondition and (refusal := precondition(conn)):
             return False, refusal
         # A scheduled exception authorizes only an unresolved spend decision, rechecked under the writer lock.

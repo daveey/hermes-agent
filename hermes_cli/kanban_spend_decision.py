@@ -116,15 +116,22 @@ def receipt_restrictions(conn, task_id: str, *, safety_only: bool = False) -> li
     return out
 
 
-def unblock_refusal(conn, task_id: str) -> str | None:
-    """An unblock is not a recorded spend decision; keep every release surface honest."""
-    if not pending(conn, task_id):
-        return None
+def execution_refusal(conn, task_id: str) -> str | None:
+    """Cause-specific diagnostic only; never converts a scope stop into clearance."""
     from hermes_cli.kanban_refusal_receipt import restricted
     if restricted(conn, task_id):
         return 'Provider safety restriction retained; no supported execution release. Owning supervisor must resolve the scope/authority boundary without rerunning refused work.'
     if execution_restricted(conn, task_id):
         return 'Scope stopped; no supported execution release. Owning supervisor must resolve the scope/authority boundary.'
+    return None
+
+
+def unblock_refusal(conn, task_id: str) -> str | None:
+    """An unblock is not a recorded spend decision; keep every release surface honest."""
+    if not pending(conn, task_id):
+        return None
+    if refusal := execution_refusal(conn, task_id):
+        return refusal
     return (f"cannot unblock {task_id}: spend-budget decision pending; split or re-scope the work, "
             f"then use `hermes kanban promote {task_id} --reason <what changed>`, or archive it")
 

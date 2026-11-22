@@ -64,6 +64,13 @@ def test_scope_restriction_survives_later_ordinary_promotion(board, monkeypatch)
     before = budget._window_start(board, tid, 2999999999)
     kb.add_comment(board, tid, 'operator-fixture', 'Administrative note, not release', writer_kind='human')
     assert kb.get_task(board, tid).status == 'triage'
-    assert kb.promote_task(board, tid, actor='fixture', reason='generic promotion')[0] is False
+    promoted, refusal = kb.promote_task(board, tid, actor='fixture', reason='generic promotion')
+    assert promoted is False
+    assert 'scope stopped' in refusal.lower()
+    assert 'provider' not in refusal.lower()
+    from hermes_cli.kanban_spend_promote import scope_refusal
+    refusal = scope_refusal(board, tid, 'decision-fixture', 'episode-fixture', 1)
+    assert 'scope stopped' in refusal.lower()
+    assert 'provider' not in refusal.lower()
     assert not kb.unblock_task(board, tid)
     assert budget._window_start(board, tid, 2999999999) == before
