@@ -21,7 +21,7 @@ def test_portable_reason_accepts_light_and_heavy_scratch_work(title):
     {"title": "Tail /home/ubuntu/.hermes/logs/agent.log"},
     {"title": "Restart the gateway"}, {"title": "Use token-broker"},
     {"title": "Run launchd"}, {"title": "Inspect Chrome on my Mac"},
-    {"human_request": {"action": "approve"}}, {"max_retries": 2}, {"tenant": "x"},
+    {"human_request": {"action": "approve"}}, {"max_retries": 2},
 ])
 def test_portable_reason_retains_conservative_exclusions(fields):
     assert placement.portable_reason({"title": "Analyze public data", **fields}, {})
