@@ -1,5 +1,6 @@
 """Clock bounds and pre-upgrade capture compatibility at the persisted boundary."""
 import json
+import json.scanner
 
 import pytest
 
@@ -40,10 +41,15 @@ def test_sample_bound_includes_sampling_interval(monkeypatch):
         "wall_ns": 123456789, "mono_ns": 100, "clock_error_ns": 57}
 
 
-def test_deep_persisted_clock_reports_gap_without_advancing(conn, tmp_path):
+def test_deep_persisted_clock_reports_gap_without_advancing(conn, tmp_path, monkeypatch):
     kb.create_task(conn, title="deep", assignee="a")
     journal.arm(conn, "deep", clock_error_ns=0)
-    depth = 100000  # Exceed both Python and native JSON decoder recursion limits.
+    # Exercise the real recursive decoder: native JSON implementations may decode
+    # arbitrarily deep arrays without recursion (including the CI interpreter).
+    decoder = json.JSONDecoder()
+    decoder.scan_once = json.scanner.py_make_scanner(decoder)
+    monkeypatch.setattr(json, "_default_decoder", decoder)
+    depth = 100000
     raw = "[" * depth + "0" + "]" * depth
     with pytest.raises(RecursionError):
         json.loads(raw)
