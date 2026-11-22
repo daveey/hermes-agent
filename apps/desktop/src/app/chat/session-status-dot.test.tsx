@@ -501,6 +501,36 @@ describe('SessionStatusDot external label', () => {
     expect(bg(down.querySelector('[data-background-label="external_down"]'))).toBe('rgb(239, 68, 68)')
   })
 
+  it.each(['external', 'external_down'] as const)('keeps %s semantics with a running linked card', label => {
+    const session = {
+      id: `mixed-${label}`,
+      kanban_active: 2,
+      kanban_external: label === 'external' ? 1 : 0,
+      kanban_external_down: label === 'external_down' ? 1 : 0,
+      kanban_observed_at: NOW,
+      kanban_parked: 1,
+      message_count: 4
+    } as SessionInfo
+
+    const { container } = render(
+      <SessionStatusDot runningCardCount={1} session={session} storedSessionId={session.id} />
+    )
+
+    const el = container.querySelector('.rounded-full')!
+
+    if (label === 'external_down') {
+      expect(el.getAttribute('data-background-label')).toBe('external_down')
+      expect(getComputedStyle(el).backgroundColor).toBe('rgb(239, 68, 68)')
+      expect(el.getAttribute('aria-label')).toBe('An external service is down')
+      expect(el.getAttribute('title')).toBe('An external service is down')
+    } else {
+      expect(el.getAttribute('data-background-label')).toBe('external')
+      expect(getComputedStyle(el).backgroundColor).toBe('rgb(56, 189, 248)')
+      expect(el.getAttribute('aria-label')).toBe('Running on an external service')
+      expect(el.getAttribute('title')).toBe('Running on an external service')
+    }
+  })
+
   it('missing cards keep the generic external label, not a service claim', () => {
     const c = dot({
       id: 'ext-generic',

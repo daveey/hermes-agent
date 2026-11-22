@@ -691,6 +691,23 @@ describe('SidebarSessionRow inside the sortable list', () => {
     )
   }
 
+  it('passes running cards into the sortable grabber dot', () => {
+    const { container } = render(
+      <Host
+        onResume={noop}
+        session={makeSession({ title: 'Card work', kanban_active: 2, kanban_observed_at: Date.now() / 1000 })}
+      />
+    )
+
+    const grabber = container.querySelector('[data-reorder-handle]')!
+    const dot = grabber.querySelector('.rounded-full')!
+
+    expect(dot.className).toContain('bg-(--ui-accent)')
+    expect(dot.className).not.toContain('border')
+    expect(container.querySelector('[data-run-square]')).toBeNull()
+    expect(container.querySelector('[data-card-colour="blue"]')).toBeNull()
+  })
+
   const space = { code: 'Space', key: ' ' }
 
   it('lets Space through to a focused row control instead of arming a keyboard drag', () => {

@@ -190,10 +190,18 @@ export function SessionStatusDot({
   // status changes, but a given dot only repaints when ITS OWN state flips.
   const agentState = useSessionDotState(storedSessionId, session)
 
-  const dotState =
-    runningCardCount > 0 && agentState !== 'needs-input' && agentState !== 'unread' ? 'working' : agentState
+  const agentBackgroundLabel = useBackgroundDotLabel(storedSessionId, session, agentState)
 
-  const backgroundLabel = useBackgroundDotLabel(storedSessionId, session, dotState)
+  const dotState =
+    runningCardCount > 0 &&
+    agentState !== 'needs-input' &&
+    agentState !== 'unread' &&
+    agentBackgroundLabel !== 'external' &&
+    agentBackgroundLabel !== 'external_down'
+      ? 'working'
+      : agentState
+
+  const backgroundLabel = dotState === 'background' ? agentBackgroundLabel : 'running'
 
   const variant = sessionDotVariant(dotState, session?.outcome, backgroundLabel)
 
