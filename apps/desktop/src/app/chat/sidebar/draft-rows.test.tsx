@@ -29,7 +29,6 @@ vi.mock('@/store/composer', () => ({
 vi.mock('@/store/projects', () => ({ $projectTree: atom([]), $projects: atom([]), resolveNewSessionCwd: () => '' }))
 vi.mock('react-router', () => ({ useLocation: () => ({ pathname: '/' }) }))
 
-import { captureMainDraftBeforeTile } from '@/app/session/new-session-cwd'
 import { $draftTitles } from '@/store/composer'
 import { $currentCwd } from '@/store/session'
 import {
@@ -41,7 +40,6 @@ import {
 } from '@/store/session'
 import { $focusedSessionIsTile, $focusedStoredSessionId } from '@/store/session-focus'
 import { $sessionTiles } from '@/store/session-states'
-import { $mainSidebarDraftCwd, $sidebarBorrowedTileCwd, $sidebarBorrowedTileId } from '@/store/sidebar-draft'
 
 import { SidebarDraftRows } from './draft-rows'
 
@@ -63,9 +61,7 @@ beforeEach(() => {
   focusedId.set(null)
   focusedTile.set(false)
   $currentCwd.set('')
-  $mainSidebarDraftCwd.set('')
-  $sidebarBorrowedTileCwd.set(null)
-  $sidebarBorrowedTileId.set(null)
+
   $sessions.set([])
   $unlistedSessionOwnerRows.set([])
   $sessionTiles.set([])
@@ -75,21 +71,20 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('client-only sidebar drafts', () => {
-  it('keeps the main draft in Home when a project tile publishes its cwd', () => {
+  it('moves the main draft with the live send target when a tile publishes cwd', () => {
     $freshDraftReady.set(true)
     const { rerender } = render(view({ projectId: '__no_project__' }))
     expect(rows()).toHaveLength(2)
     act(() => {
-      captureMainDraftBeforeTile('center', '/other-project', 'project-tile')
       $sessionTiles.set([{ storedSessionId: 'project-tile', runtimeId: 'tile-runtime' }])
       focusedId.set('project-tile')
       focusedTile.set(true)
       $currentCwd.set('/other-project')
     })
+    expect(rows()).toHaveLength(1)
+    rerender(view({ projectId: '/other-project' }))
     expect(rows()).toHaveLength(2)
     expect(screen.getByRole('button', { name: 'New session' }).getAttribute('aria-current')).toBeNull()
-    rerender(view({ projectId: '/other-project' }))
-    expect(rows()).toHaveLength(1)
   })
 
   it('drops an untouched tab on navigation and never paints bot or archived drafts', () => {

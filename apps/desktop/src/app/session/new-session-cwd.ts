@@ -5,26 +5,17 @@ import { $activeGatewayProfile, $newChatProfile } from '@/store/profile'
 import { $projectScope } from '@/store/project-scope'
 import { $projectTree, resolveNewSessionCwd } from '@/store/projects'
 import { $configuredDefaultProjectDir, $connection, $currentCwd, $newChatWorkspaceTarget } from '@/store/session'
-import { $sessionTiles } from '@/store/session-states'
-import { $mainSidebarDraftCwd, $sidebarBorrowedTileCwd, $sidebarBorrowedTileId } from '@/store/sidebar-draft'
 
-/** Fresh display read only. The send path deliberately keeps its original inline expression. */
+/** Mirror the live pre-PR send expression; never snapshot a different display target. */
 export function mainSidebarDisplayCwd(): string {
-  const target = $newChatWorkspaceTarget.get()
-  const scope = $projectScope.get()
-  const currentCwd = $currentCwd.get()
-  const borrowedCwd = $sidebarBorrowedTileCwd.get()
-  const borrowedId = $sidebarBorrowedTileId.get()
-  const tileOpen = $sessionTiles.get().some(tile => tile.storedSessionId === borrowedId)
-  // Focus alone is not borrowing: right splits and cwd-less center tiles never capture it.
-  const borrowed = tileOpen && borrowedCwd !== null && currentCwd === borrowedCwd
-  const displayCwd = borrowed ? $mainSidebarDraftCwd.get() || '' : currentCwd
+  const workspaceTarget = $newChatWorkspaceTarget.get()
+  const homeScope = $projectScope.get() === NO_PROJECT_ID
 
-  return target === null || (target === undefined && scope === NO_PROJECT_ID)
+  return workspaceTarget === null || (workspaceTarget === undefined && homeScope)
     ? ''
-    : typeof target === 'string'
-      ? target.trim()
-      : displayCwd.trim() || (borrowed ? $mainSidebarDraftCwd.get() || '' : resolveNewSessionCwd())
+    : typeof workspaceTarget === 'string'
+      ? workspaceTarget.trim()
+      : $currentCwd.get().trim() || resolveNewSessionCwd()
 }
 
 /** Subscribe to every fallback input, but evaluate afresh on every render (no computed cache). */
@@ -39,19 +30,6 @@ export function useMainSidebarDisplayCwd(): string {
   useStore($activeGatewayProfile)
   useStore($configuredDefaultProjectDir)
   useStore($connection)
-  useStore($mainSidebarDraftCwd)
-  useStore($sidebarBorrowedTileCwd)
-  useStore($sidebarBorrowedTileId)
-  useStore($sessionTiles)
 
   return mainSidebarDisplayCwd()
-}
-
-/** Capture before a center tile borrows the workspace for Files. */
-export function captureMainDraftBeforeTile(dir: string, cwd: null | string | undefined, storedId: string): void {
-  if (dir === 'center' && cwd) {
-    $mainSidebarDraftCwd.set(mainSidebarDisplayCwd())
-    $sidebarBorrowedTileCwd.set(cwd)
-    $sidebarBorrowedTileId.set(storedId)
-  }
 }

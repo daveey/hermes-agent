@@ -31,7 +31,6 @@ import { idsShareLineage, lineageAliases, sessionMatchesStoredId } from './sessi
 import { $removedSessionIds, isSessionRemovalPending, tombstoneRowIds } from './session-removal'
 import type { SessionOwnerRoute, SessionOwnerScope } from './session-request-router'
 import { clearUnreadOnOpen } from './session-unread-remote'
-import { $sidebarBorrowedTileCwd } from './sidebar-draft'
 
 type Updater<T> = T | ((current: T) => T)
 export type ComposerModelSource = '' | 'default' | 'manual'
@@ -1840,7 +1839,6 @@ export const setYoloActive = (next: Updater<boolean>) => updateAtom($yoloActive,
  *  a conversation's cwd, use `setCurrentCwdTransient`.
  */
 export const setCurrentCwd = (next: Updater<string>) => {
-  $sidebarBorrowedTileCwd.set(null)
   updateAtom($currentCwd, next)
   persistString(workspaceCwdKey(), $currentCwd.get().trim() || null)
 }

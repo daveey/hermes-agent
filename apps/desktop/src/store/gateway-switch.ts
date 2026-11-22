@@ -271,7 +271,6 @@ export function wipeSessionListsForGatewaySwitch(): void {
   // sending on session.create) the previous gateway's folder (#114306).
   // Transient on purpose: the per-backend memory of the old gateway stays.
   setCurrentCwdTransient('')
-
   setCurrentBranch('')
 
   // Reaction overlays describe the outgoing backend's messages: $agentReactions

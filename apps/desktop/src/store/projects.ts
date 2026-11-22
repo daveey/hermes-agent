@@ -226,9 +226,13 @@ export function resolveNewSessionCwd(profile?: string): string {
   return workspaceCwdForNewSession(owner)
 }
 
-// Entering a project moves only a fresh main draft, never a stored chat's
-// workspace. A stored conversation keeps its cwd: entering is a scope switch
-// (#72772). The next new chat uses the project via resolveNewSessionCwd.
+// Entering a project moves the live workspace only when main holds a fresh
+// draft: the draft has no folder of its own yet, and the project root is where
+// its first message should run. A stored conversation keeps its cwd — entering
+// is a scope switch, and moving the workspace under the selected chat re-pointed
+// Files/Review and the composer's Git context at the project while the
+// transcript stayed on the old session (#72772). The next new chat still lands
+// in the project through resolveNewSessionCwd.
 export function followEnteredProjectCwd(cwd: string): void {
   const target = cwd.trim()
 
@@ -934,6 +938,7 @@ interface MoveTarget {
   remote: boolean
 }
 
+
 function moveTargetGateway(sessionId: string, profile?: null | string, connectionId?: null | string): MoveTarget {
   const row =
     $sessions.get().find(s => sessionMatchesStoredId(s, sessionId)) ??
@@ -1148,6 +1153,7 @@ export async function moveSessionToProject(
     throw error
   }
 }
+
 
 // [daveey] ⌘⇧P "+ Create project": a new project named `name` with an empty
 // `~/code/<slug>` folder, on the session's own gateway, then the move into it.

@@ -316,75 +316,81 @@ describe('new-session gateway target', () => {
       $projects.set([])
     })
   })
-  it.each(['enter project after tile', 'pick same tile folder', 'choose same cwd', 'return to tile cwd', 'close tile'])(
-    'preserves main workspace intent after %s',
-    async operation => {
-      const { closeSessionTile } = await import('@/store/session-states')
-      const { result } = mountActions()
-      await act(() => setDefaultProfile(HUB))
-      act(() => {
-        $projects.set([
-          { id: 'original', name: 'Original', folders: [{ path: '/repo' }] },
-          { id: 'next', name: 'Next', folders: [{ path: '/new-project' }] },
-          { id: 'tile', name: 'Tile', folders: [{ path: '/other-project' }] }
-        ] as never)
-        $layoutTree.set(group(['workspace'], { active: 'workspace', id: 'boundary' }))
-        $activeTreeGroup.set('boundary')
-        setSelectedStoredSessionId(null)
-        result.current.startFreshSessionDraft()
-        followEnteredProjectCwd('/repo')
-      })
-      vi.mocked(requestGatewayForAgent).mockResolvedValueOnce({
-        session_id: 'tile-runtime',
-        stored_session_id: 'tile-stored',
-        info: { cwd: '/other-project' }
-      })
-      await act(() => result.current.openNewSessionTile('center', { cwd: '/other-project', listed: false, route: HUB }))
-      act(() => {
-        $layoutTree.set(group(['workspace', 'session-tile:tile-stored'], { active: 'workspace', id: 'boundary' }))
-        $activeTreeGroup.set('boundary')
+  it.each([
+    'enter project after tile',
+    'enter tile project directly',
+    'pick same tile folder',
+    'choose same cwd',
+    'return to tile cwd',
+    'close tile'
+  ])('mirrors the live first-send target after %s', async operation => {
+    const { closeSessionTile } = await import('@/store/session-states')
+    const { result } = mountActions()
+    await act(() => setDefaultProfile(HUB))
+    act(() => {
+      $projects.set([
+        { id: 'original', name: 'Original', folders: [{ path: '/repo' }] },
+        { id: 'next', name: 'Next', folders: [{ path: '/new-project' }] },
+        { id: 'tile', name: 'Tile', folders: [{ path: '/other-project' }] }
+      ] as never)
+      $layoutTree.set(group(['workspace'], { active: 'workspace', id: 'boundary' }))
+      $activeTreeGroup.set('boundary')
+      setSelectedStoredSessionId(null)
+      result.current.startFreshSessionDraft()
+      followEnteredProjectCwd('/repo')
+    })
+    vi.mocked(requestGatewayForAgent).mockResolvedValueOnce({
+      session_id: 'tile-runtime',
+      stored_session_id: 'tile-stored',
+      info: { cwd: '/other-project' }
+    })
+    await act(() => result.current.openNewSessionTile('center', { cwd: '/other-project', listed: false, route: HUB }))
+    act(() => {
+      $layoutTree.set(group(['workspace', 'session-tile:tile-stored'], { active: 'workspace', id: 'boundary' }))
+      $activeTreeGroup.set('boundary')
 
-        if (operation === 'close tile') {
-          closeSessionTile('tile-stored')
-        } else if (operation === 'pick same tile folder') {
-          setNewChatWorkspaceTarget('/other-project')
-        } else if (operation === 'choose same cwd') {
-          setCurrentCwd('/other-project')
-        } else if (operation === 'return to tile cwd') {
-          followEnteredProjectCwd('/new-project')
-          followEnteredProjectCwd('/other-project')
-        } else {
-          followEnteredProjectCwd('/new-project')
-        }
-      })
-      const expectedCwd = operation === 'enter project after tile' ? '/new-project' : '/other-project'
+      if (operation === 'close tile') {
+        closeSessionTile('tile-stored')
+      } else if (operation === 'enter tile project directly') {
+        followEnteredProjectCwd('/other-project')
+      } else if (operation === 'pick same tile folder') {
+        setNewChatWorkspaceTarget('/other-project')
+      } else if (operation === 'choose same cwd') {
+        setCurrentCwd('/other-project')
+      } else if (operation === 'return to tile cwd') {
+        followEnteredProjectCwd('/new-project')
+        followEnteredProjectCwd('/other-project')
+      } else {
+        followEnteredProjectCwd('/new-project')
+      }
+    })
+    const expectedCwd = operation === 'enter project after tile' ? '/new-project' : '/other-project'
 
-      const expectedBucket = operation === 'enter project after tile' ? 'next' : 'tile'
+    const expectedBucket = operation === 'enter project after tile' ? 'next' : 'tile'
 
-      const view = render(
-        <MemoryRouter>
-          <SidebarDraftRows projectId="original" />
-          <SidebarDraftRows projectId="next" />
-          <SidebarDraftRows projectId="tile" />
-        </MemoryRouter>
-      )
+    const view = render(
+      <MemoryRouter>
+        <SidebarDraftRows projectId="original" />
+        <SidebarDraftRows projectId="next" />
+        <SidebarDraftRows projectId="tile" />
+      </MemoryRouter>
+    )
 
-      expect
-        .soft(view.container.querySelector('[data-sidebar-draft-project]')?.getAttribute('data-sidebar-draft-project'))
-        .toBe(expectedBucket)
-      const beforeSendCwd = prePrSendCwd()
-      await act(() => result.current.createBackendSessionForSend('First send'))
-      const call = vi.mocked(requestGatewayForAgent).mock.calls.findLast(call => call[2] === 'session.create')!
-      expect(call[3]?.cwd).toBe(expectedCwd)
-      expect(call[3]?.cwd || '').toBe(beforeSendCwd)
-      expect(sessionBucketId($sessions.get()[0], $projects.get())).toBe(expectedBucket)
-      expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(0)
-      act(() => {
-        $projects.set([])
-        closeAllOpenSessionTiles('workspace')
-      })
-    }
-  )
+    expect
+      .soft(view.container.querySelector('[data-sidebar-draft-project]')?.getAttribute('data-sidebar-draft-project'))
+      .toBe(expectedBucket)
+    const beforeSendCwd = prePrSendCwd()
+    await act(() => result.current.createBackendSessionForSend('First send'))
+    const call = vi.mocked(requestGatewayForAgent).mock.calls.findLast(call => call[2] === 'session.create')!
+    expect(call[3]?.cwd).toBe(expectedCwd)
+    expect(call[3]?.cwd || '').toBe(beforeSendCwd)
+    expect(sessionBucketId($sessions.get()[0], $projects.get())).toBe(expectedBucket)
+    expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(0)
+    act(() => {
+      $projects.set([])
+      closeAllOpenSessionTiles('workspace')
+    })
+  })
   it.each([
     'default seed',
     'gateway and seed',
@@ -395,7 +401,7 @@ describe('new-session gateway target', () => {
     'detached',
     'Home scope',
     'tile workspace'
-  ])('preserves first-send cwd and display placement policy after %s', async operation => {
+  ])('mirrors the pre-PR first-send cwd and bucket after %s', async operation => {
     const { startWorkspaceSession } = await import('@/app/session/workspace-session-target')
     const { ensureDefaultWorkspaceCwd, setNewChatWorkspaceTarget } = await import('@/store/session')
     const { result } = mountActions()
@@ -412,6 +418,7 @@ describe('new-session gateway target', () => {
     const view = render(
       <MemoryRouter>
         <SidebarDraftRows projectId="p1" />
+        <SidebarDraftRows projectId="/other-project" />
         <SidebarDraftRows projectId={NO_PROJECT_ID} />
       </MemoryRouter>
     )
@@ -473,11 +480,9 @@ describe('new-session gateway target', () => {
       })
     }
 
-    // A positively captured center tile temporarily paints Files' cwd into ambient
-    // state. Display preserves main's /repo snapshot; send intentionally keeps its
-    // pre-existing ambient /other-project behavior. All other cases agree.
-    const expectedCwd = operation === 'detached' || operation === 'Home scope' ? '' : '/repo'
-    const expectedBucket = expectedCwd ? 'p1' : NO_PROJECT_ID
+    // Display follows the same fresh inputs as send, including ambient tile cwd.
+    const expectedCwd = prePrSendCwd()
+    const expectedBucket = sessionBucketId(makeSessionInfo({ cwd: expectedCwd }), $projects.get())
     expect(placement()).toBe(expectedBucket)
     expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(1)
     const beforeSendCwd = prePrSendCwd()

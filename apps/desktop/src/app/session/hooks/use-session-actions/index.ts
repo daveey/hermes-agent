@@ -9,7 +9,6 @@ import {
   graftRefreshedTailOntoBackfill,
   olderPageReader
 } from '@/app/chat/transcript-backfill'
-import { captureMainDraftBeforeTile } from '@/app/session/new-session-cwd'
 import { defaultNewSessionTarget, prepareDefaultNewSession } from '@/app/session/new-session-route'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { setWorkspaceScope } from '@/components/pane-shell/workspace-scope'
@@ -143,7 +142,6 @@ import {
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { forgetSessionUnread } from '@/store/session-unread'
 import { $archivedSessions } from '@/store/sidebar-archive'
-import { $mainSidebarDraftCwd, $sidebarBorrowedTileCwd } from '@/store/sidebar-draft'
 import { clearSessionSubagents } from '@/store/subagents'
 import { clearSessionTodos, restoreSessionTodosFromSnapshot } from '@/store/todos'
 import {
@@ -637,8 +635,6 @@ export function useSessionActions({
       setWorkspaceCwdOwner(null)
       setCurrentBranch('')
       // Never clear the composer here — ChatBar's per-thread draft swap owns it.
-      $mainSidebarDraftCwd.set($currentCwd.get())
-      $sidebarBorrowedTileCwd.set(null)
       setFreshDraftReady(true)
     },
     [activeSessionIdRef, busyRef, navigate, onFreshDraftRouteIntent, resetViewSync, selectedStoredSessionIdRef]
@@ -1177,15 +1173,12 @@ export function useSessionActions({
         const runtimeInfo = applyRuntimeInfo(created.info, backgroundRuntimeOptions(capturedRoute, requestedProfile))
         updateSessionState(created.session_id, state => (runtimeInfo ? { ...state, ...runtimeInfo } : state), stored)
 
-        // Capture main before opening the tile can move pane focus.
-        captureMainDraftBeforeTile(dir, runtimeInfo?.cwd, stored)
-
         openSessionTile(stored, dir, options?.anchor, options?.before, workspaceScope)
         patchSessionTile(stored, { runtimeId: created.session_id })
 
         if (dir === 'center' && runtimeInfo?.cwd) {
-          setWorkspaceCwdOwner(stored)
           setCurrentCwdTransient(runtimeInfo.cwd)
+          setWorkspaceCwdOwner(stored)
         }
 
         focusOpenSession(stored, workspaceScope)
