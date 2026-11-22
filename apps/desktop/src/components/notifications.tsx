@@ -17,6 +17,7 @@ import {
   type AppNotification,
   clearNotifications,
   dismissNotification,
+  type NotificationAction,
   type NotificationKind
 } from '@/store/notifications'
 
@@ -274,6 +275,19 @@ function NotificationItem({ notification, stack }: { notification: AppNotificati
   const accent = notification.accentColor
   const iconStyle: CSSProperties = { marginTop: '0.42ch', ...(accent ? { color: accent } : {}) }
 
+  function runAction(action: NotificationAction) {
+    if (action.dismiss === false) {
+      action.onClick()
+
+      return
+    }
+
+    void stack.depart(() => {
+      action.onClick()
+      dismissNotification(notification.id)
+    })
+  }
+
   return (
     <Alert
       aria-live={!stack.active ? 'off' : notification.kind === 'error' ? 'assertive' : 'polite'}
@@ -301,12 +315,7 @@ function NotificationItem({ notification, stack }: { notification: AppNotificati
               {notification.action && (
                 <Button
                   disabled={stack.busy || !stack.active}
-                  onClick={() => {
-                    void stack.depart(() => {
-                      notification.action?.onClick()
-                      dismissNotification(notification.id)
-                    })
-                  }}
+                  onClick={() => notification.action && runAction(notification.action)}
                   size="sm"
                   type="button"
                   variant="default"
@@ -317,12 +326,7 @@ function NotificationItem({ notification, stack }: { notification: AppNotificati
               {notification.secondaryAction && (
                 <Button
                   disabled={stack.busy || !stack.active}
-                  onClick={() => {
-                    void stack.depart(() => {
-                      notification.secondaryAction?.onClick()
-                      dismissNotification(notification.id)
-                    })
-                  }}
+                  onClick={() => notification.secondaryAction && runAction(notification.secondaryAction)}
                   size="sm"
                   type="button"
                   variant="outline"

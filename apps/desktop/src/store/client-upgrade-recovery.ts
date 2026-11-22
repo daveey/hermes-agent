@@ -21,9 +21,10 @@ export function clientUpgradeNote(): NotificationInput {
     persistent: true,
     message: translateNow('notifications.errors.rpcOutOfSync'),
     action: servedByHermesCloud()
-      ? { label: translateNow('commandCenter.reloadWindow'), onClick: () => window.location.reload() }
+      ? { label: translateNow('commandCenter.reloadWindow'), onClick: () => window.location.reload(), dismiss: false }
       : {
           label: translateNow('notifications.updateHermes'),
+          dismiss: false,
           onClick: () => void import('@/store/updates').then(({ openUpdatesWindow }) => openUpdatesWindow('client'))
         },
     // Only an explicit acknowledgement removes the reminder. Opening Updates or an

@@ -14,6 +14,8 @@ export type NotificationKind = 'error' | 'warning' | 'info' | 'success'
 export interface NotificationAction {
   label: string
   onClick: () => void
+  /** False for inspection/recovery actions that are not acknowledgement. */
+  dismiss?: boolean
 }
 
 export type NotificationPlacement = 'default' | 'bottom-right'
