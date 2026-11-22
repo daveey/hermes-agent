@@ -85,6 +85,24 @@ def unvisited_scopes(
     return [(flag, key) for key, flag in keys.items() if key not in visited]
 
 
+def mark_effective_visit(command, visited, budget, identity, *, executed):
+    """Register the scope established at a charged script's entry, not its caller's old scope.
+
+    Alias discovery has already run; pre-discover integer declarations before walking any
+    payload so this key describes coverage of the whole script. Later recursive discoveries
+    still require another visit under their genuinely stronger scope.
+    """
+    from cron.lifecycle_guard_arith_words import may_set_integer_attributes
+
+    if identity is None:
+        return
+    budget.integer_context = budget.integer_context or may_set_integer_attributes(
+        command, aliases_defined=budget.aliases_defined)
+    scopes = unvisited_scopes(visited, budget, identity[0], python_source=False,
+                              nested=False, executed=executed, working_directory=identity[1])
+    visited.update(itertools.chain.from_iterable((key, key[:2]) for _nested, key in scopes))
+
+
 def collect_nested_shell_inputs(
     command: str, walk_command: str, *, cwd: Optional[str], budget: _LifecycleScanBudget,
     session_payloads: Sequence[str] = (),

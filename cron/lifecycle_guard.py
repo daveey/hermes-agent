@@ -1674,6 +1674,7 @@ def _contains_unsafe_gateway_action(
     read_remote_script: Optional[_ReadRemoteScriptFn] = None, executed: bool = True,
     source: Optional[str] = None, covered_quote_scope: Optional[tuple] = None,
     variable_source: bool = True, preserve_cwd: bool = False,
+    visit_identity: Optional[tuple[Path, Optional[str]]] = None,
 ) -> bool:
     """``executed=False`` means *command* is the content of a file that is only MENTIONED in inert
     (masked) text: it is still scanned for a literal lifecycle command, but "could not scan" (budget,
@@ -1685,6 +1686,9 @@ def _contains_unsafe_gateway_action(
     if _direct_lifecycle_scan(command, mask_heredocs=budget.mask_heredocs):
         return True
     budget.note_aliases(command)
+    from cron.lifecycle_guard_nested_shells import mark_effective_visit
+
+    mark_effective_visit(command, visited, budget, visit_identity, executed=executed)
     if (refused := _walk_refusal(budget, command, depth, executed)) is not None:
         return refused
 
@@ -1692,6 +1696,7 @@ def _contains_unsafe_gateway_action(
         text: str, cwd: Optional[str], executed: bool, source: Optional[str], python_source: bool = False,
         nested: bool = False, covered_quotes: Optional[tuple] = None, variable_source: bool = True,
         preserve_source_cwd: bool = preserve_cwd,
+        visit_identity: Optional[tuple[Path, Optional[str]]] = None,
     ) -> bool:
         if python_source:
             return _python_source_is_unsafe(text, budget)
@@ -1700,7 +1705,7 @@ def _contains_unsafe_gateway_action(
                 text, cwd=cwd, depth=depth + 1, visited=visited, budget=budget,
                 read_remote_script=read_remote_script, executed=executed, source=source,
                 covered_quote_scope=covered_quotes, variable_source=variable_source,
-                preserve_cwd=preserve_source_cwd,
+                preserve_cwd=preserve_source_cwd, visit_identity=visit_identity,
             )
 
     # The walks below must see the same masked view `_direct_lifecycle_scan` sees (#110422): a
@@ -1786,6 +1791,7 @@ def _contains_unsafe_gateway_action(
         if any(recurse(
             script_text, script_working_directory(resolved, cwd, preserve_cwd), candidate_executed,
             f"`{script_path}`", python_source, nested=nested,
+            visit_identity=(resolved, str(cwd or Path.cwd()) if preserve_cwd else None),
         ) for nested, _key in scopes):
             return True
     return False
