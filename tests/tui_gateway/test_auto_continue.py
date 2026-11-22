@@ -31,6 +31,7 @@ import types
 from pathlib import Path
 
 import pytest
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 from tui_gateway import server
 from tui_gateway.turn_marker import (

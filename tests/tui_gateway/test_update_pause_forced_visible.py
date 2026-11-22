@@ -6,6 +6,9 @@ from __future__ import annotations
 
 from tests.tui_gateway import test_lease_lost_turn_visible as lease
 from tui_gateway import update_pause as up
+import pytest
+
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 emitted = lease.emitted
 

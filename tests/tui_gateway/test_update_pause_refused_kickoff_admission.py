@@ -20,7 +20,7 @@ from tui_gateway import server
 from tui_gateway import update_pause as up
 from tui_gateway.turn_marker import mark_turn_paused, read_turn_marker, record_turn_start
 
-pytestmark = pytest.mark.platforms("posix")
+pytestmark = [pytest.mark.platforms("posix"), pytest.mark.usefixtures("no_background_link_refresh")]
 
 CFG = {"desktop": {"auto_continue": {"enabled": True, "resume_on_startup": True, "freshness_minutes": 240,
                                      "max_attempts": 2}}}

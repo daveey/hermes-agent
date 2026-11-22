@@ -11,6 +11,9 @@ import threading
 import types
 
 from tui_gateway import server
+import pytest
+
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 
 class _InlineThread:

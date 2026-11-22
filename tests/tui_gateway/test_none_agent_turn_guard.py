@@ -14,6 +14,9 @@ import types
 
 from tui_gateway import server
 from tui_gateway.user_messages import AGENT_BUILD_ABANDONED
+import pytest
+
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 
 class _InlineThread:

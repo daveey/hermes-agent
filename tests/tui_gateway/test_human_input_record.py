@@ -14,6 +14,7 @@ import time
 import types
 
 import pytest
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 from tui_gateway import human_input, server
 

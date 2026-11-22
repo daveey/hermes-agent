@@ -8,6 +8,7 @@ import threading
 import types
 
 import pytest
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 from tests.tui_gateway.test_update_pause_mid_tool import _InlineThread
 from tui_gateway import server

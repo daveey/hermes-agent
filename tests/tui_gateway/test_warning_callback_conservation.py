@@ -4,6 +4,7 @@ import queue
 from types import SimpleNamespace
 
 import pytest
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 import hermes_yaml as yaml
 
 from agent.status_output import StatusOutputMixin

@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 from agent import update_pause_cancel
 from hermes_cli import admission_fence as af

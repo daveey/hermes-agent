@@ -3,6 +3,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 from tui_gateway import server
 from tests.tui_gateway.test_auto_continue import turn_env, marker_home, _session

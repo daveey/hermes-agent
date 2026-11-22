@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 
 @pytest.fixture()

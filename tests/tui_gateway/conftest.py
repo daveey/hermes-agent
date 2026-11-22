@@ -32,6 +32,18 @@ def _no_automation_replay(monkeypatch):
     automation_replay.reset()
 
 
+@pytest.fixture
+def no_background_link_refresh(monkeypatch):
+    """Inline turn workers must not run the links reader's process-lifetime daemon.
+
+    Keep real cold card reads and cached projections; only background revalidation
+    is outside these prompt lifecycle fixtures' scope. Outcome integration tests
+    intentionally do not opt in to this fixture.
+    """
+    from hermes_cli import kanban_session_activity
+    monkeypatch.setattr(kanban_session_activity, "_refresh_links_in_background", lambda *_a, **_k: None)
+
+
 _TURN_WORKER_PREFIXES = ("prompt-submit-", "prompt-wait-", "prompt-turn-")
 
 

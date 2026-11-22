@@ -12,6 +12,7 @@ import threading
 import types
 
 import pytest
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 from tui_gateway import server
 from tui_gateway.transport import bind_transport, reset_transport

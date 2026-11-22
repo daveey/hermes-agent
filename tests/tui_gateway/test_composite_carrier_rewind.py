@@ -6,6 +6,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+pytestmark = pytest.mark.usefixtures("no_background_link_refresh")
 
 from agent.context_compressor import (
     HISTORICAL_TASK_HEADING,
