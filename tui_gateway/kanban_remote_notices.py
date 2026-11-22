@@ -219,27 +219,33 @@ def _index(path: Path) -> tuple[str, dict]:
 
 
 def _chat_index(path: Path, ledger, now: float, profile: str, sids: tuple,
-                own: bool = False, *, on_defer: Optional[Callable[[], None]] = None) -> tuple[str, dict[str, Any], dict]:
+                own: bool = False, *, on_defer: Optional[Callable[[], None]] = None,
+                shared_window: bool = False) -> tuple[str, dict[str, Any], dict]:
     """``(me, {sid: [card, ...]}, observed)`` for one chat: the host's published copy when it is of the replica's
     current state, else built here (``_index`` + ``observe``, as before) and offered for publishing. [daveey]
 
     On the host's ``own`` replica and ledger a miss is left to a live holder for at most one poll
     (:func:`kanban_remote_index.defer`): no cards this poll, nothing read or claimed."""
     from tui_gateway import kanban_remote_index as published
-    from tui_gateway.kanban_replica_observer import fingerprint
+    from tui_gateway import notification_shared_window as shared
 
     ledger_file = Path(ledger) if ledger is not None else ledger_path()
-    stamp = fingerprint(path)
-    hit = published.lookup(path, ledger_file, stamp, profile, sids)
-    if hit is not None:
-        return hit
-    key = published.current_key(path, ledger_file, stamp)
-    if own and published.defer(path, ledger_file, profile, sids, key):
-        if on_defer is not None:
-            on_defer()
-        return "", {}, {}
-    me, index, observed = published.compute(path, ledger, ledger_file, now, key)
-    return me, {sid: index.get((profile, sid), ()) for sid in sids}, observed
+    # Only structural candidates/observation times are shared. Defer remains per
+    # chat; collect's freshness, transcript checks, claims and ACKs run afterward.
+    with shared.borrow(path, ledger_file, enabled=shared_window) as window:
+        stamp = window.stamp
+        hit = published.lookup(path, ledger_file, stamp, profile, sids)
+        if hit is not None:
+            return hit
+        key = published.current_key(path, ledger_file, stamp)
+        if own and published.defer(path, ledger_file, profile, sids, key):
+            if on_defer is not None:
+                on_defer()
+            return "", {}, {}
+        if window.computed is None:
+            window.computed = published.compute(path, ledger, ledger_file, now, key)
+        me, index, observed = window.computed
+        return me, {sid: index.get((profile, sid), ()) for sid in sids}, observed
 
 
 def _linked_chats(task: dict, me: str) -> list[tuple[str, str]]:
@@ -726,8 +732,12 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
             now: Optional[float] = None, lineage: tuple[str, ...] = (),
             skip: Optional[Callable[[str], bool]] = None,
             transcript_has: Optional[Callable[[str, str], bool]] = None, per_link: bool = False,
-            on_defer: Optional[Callable[[], None]] = None) -> list[dict]:
+            on_defer: Optional[Callable[[], None]] = None, shared_window: bool = False) -> list[dict]:
     """Claim and return ``[{text, session, ref, state, event_key}]`` for this session's newly terminal remote cards.
+
+    ``shared_window`` is enabled by the serve poller only; strict/gateway callers
+    retain immediate structural reads. HERMES_NOTIFICATION_SHARED_WINDOW=0
+    restores that literal path for the poller too.
 
     The ledger row stays in flight (holder pid + start) until :func:`ack`. ``lineage`` adds earlier ids of the
     same chat (a compaction fork keeps the link on the old id). ``skip(task_id)`` is true for remote cards a
@@ -752,7 +762,8 @@ def collect(session_key: str, profile: str, *, hub_db: Optional[Path] = None, le
             from tui_gateway.kanban_remote_index import ensure_holder
             ensure_holder("serve")  # once per process; a gateway's own later claim upgrades the role
         me, by_sid, fresh_times = _chat_index(path, ledger, now, profile, sids,
-                                              own=hub_db is None and ledger is None, on_defer=on_defer)
+                                              own=hub_db is None and ledger is None, on_defer=on_defer,
+                                              shared_window=shared_window)
         cards = [dict(c, sid=sid) for sid in sids for c in by_sid.get(sid, ())]
         if not cards:
             return []
@@ -1055,6 +1066,8 @@ def _reset_for_tests() -> None:
 
     from tui_gateway.remote_index_projection import reset as reset_index_projection
     from tui_gateway.kanban_remote_index import reset as reset_published_index
+    from tui_gateway.notification_shared_window import reset as reset_shared_window
+    reset_shared_window()
     reset_published_index()
     reset_projection()
     reset_index_projection()

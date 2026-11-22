@@ -911,7 +911,7 @@ def start_holder(role: str) -> threading.Thread | None:
         log.debug("kanban annotation holder: own scope unavailable", exc_info=True)
 
     from hermes_cli.annotation_file_events import FileEvents
-    from hermes_cli.annotation_event_loop import run
+    from hermes_cli.annotation_event_loop import holder_coalesce, run
     try:
         events = FileEvents()
     except (OSError, NotImplementedError):
@@ -923,7 +923,8 @@ def start_holder(role: str) -> threading.Thread | None:
 
     def loop() -> None:
         try:
-            run(events, stop, lease, lambda: _event_refresh(events), interval=HOLDER_INTERVAL_S)
+            run(events, stop, lease, lambda: _event_refresh(events), interval=HOLDER_INTERVAL_S,
+                coalesce=holder_coalesce(), floor_all=holder_coalesce() == 3.0)
         finally:
             _native_events.remove(events)
             events.close()

@@ -1001,7 +1001,8 @@ def _collect_remote_kanban_notifications(session_key: str, claims: list | None, 
                 session["_kanban_remote_retry_at"] = time.monotonic() + 1.0
         found = _krn.collect(session_key, get_active_profile_name() or "default",
                              lineage=_session_lineage(session_key), skip=_forwarded_locally,
-                             transcript_has=_remote_transcript_has(session_key), on_defer=on_defer)
+                             transcript_has=_remote_transcript_has(session_key), on_defer=on_defer,
+                             shared_window=True)
     except Exception as exc:
         if session is not None:
             session.pop("_kanban_remote_retry_at", None)
