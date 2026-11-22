@@ -17,6 +17,28 @@ class Observed(BaseException):
     """Stop the real admission path before invoking a provider."""
 
 
+@pytest.mark.parametrize("path", ["tui", "gateway"])
+def test_turn_start_publication_failure_is_logged_not_raised(tmp_path, monkeypatch, caplog, path):
+    from contextlib import nullcontext
+    from tui_gateway import server
+    from tui_gateway.turn_outcome import refresh_turn_start_outcome
+    from gateway.turn_outcome import refresh_gateway_turn_start_outcome
+
+    def fail(*args, **kwargs):
+        assert args == ("start", "turn_start")
+        assert not kwargs.get("concluding_turn")
+        raise OSError("unavailable fixture store")
+
+    monkeypatch.setattr(so, "refresh_outcome", fail)
+    if path == "tui":
+        monkeypatch.setattr(server, "_session_profile_runtime_scope", lambda session: nullcontext())
+        monkeypatch.setattr(server, "_session_db", lambda session: nullcontext(object()))
+        refresh_turn_start_outcome({"session_key": "start"})
+    else:
+        refresh_gateway_turn_start_outcome(SimpleNamespace(_session_db=object()), SimpleNamespace(session_id="start"))
+    assert "unavailable fixture store" in caplog.text
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("previous", [None, "waiting"])
 async def test_gateway_admission_publishes_running(tmp_path, monkeypatch, previous):

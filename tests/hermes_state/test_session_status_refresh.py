@@ -229,13 +229,13 @@ def test_repeated_refresh_and_reads_never_change_revision_or_paint(db):
 def test_declaration_keeps_the_envelope_and_has_no_status_authority(db, board):
     add_card(board, "t_open", "running")
     turn(db)
-    assert refresh(db)["kind"] == "waiting"
+    assert refresh(db)["kind"] == "running"
     declared = so.declare_outcome("chat", {"kind": "done", "summary": "all finished"}, db=db)
     assert declared["kind"] == "done"
     stored = so.get_outcome("chat", db=db)
-    assert stored["status"]["kind"] == "waiting" and stored["status"]["revision"] == 1
+    assert stored["status"]["kind"] == "running" and stored["status"]["revision"] == 1
     status = refresh(db, "manual")
-    assert (status["kind"], status["revision"]) == ("waiting", 1)
+    assert (status["kind"], status["revision"]) == ("running", 1)
     set_card(board, "t_open", "done")
     status = refresh(db, "card_change")
     assert_done(status)

@@ -81,6 +81,9 @@ def turn_env(monkeypatch, tmp_path, db):
     }.items():
         monkeypatch.setattr(server, name, stub)
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    # These turn lifecycle fixtures have no linked cards; ImmediateThread cannot
+    # execute the board reader's asynchronous refresher (which requires args).
+    monkeypatch.setattr(so, "_live_work", lambda *args: ([], [], False))
     yield monkeypatch
     for sid in [s for s in server._sessions if s.startswith(("ui-outcome-", "ui-retry"))]:
         server._sessions.pop(sid, None)
