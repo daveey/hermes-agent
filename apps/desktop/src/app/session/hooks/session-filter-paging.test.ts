@@ -39,6 +39,19 @@ it('deepens the page for a plugin-only filter and restores it on disposal', asyn
     })
     expect($sessionsLimit.get()).toBe(300)
     expect(listSidebarSessions).toHaveBeenCalledTimes(1)
+
+    // React effect cleanup + setup replaces the contribution in one tick.
+    // Selection/session-map updates must not shrink and reload the page.
+    for (let update = 0; update < 2; update++) {
+      await act(async () => {
+        dispose()
+        dispose = registry.register({ area: SESSION_FILTER_AREA, id: 'paging-lane', data: { match: () => false } })
+        expect($sessionsLimit.get()).toBe(300)
+      })
+      expect($sessionsLimit.get()).toBe(300)
+      expect(listSidebarSessions).toHaveBeenCalledTimes(1)
+    }
+
     await act(async () => dispose())
     expect($sessionsLimit.get()).toBe(50)
     expect(listSidebarSessions).toHaveBeenCalledTimes(2)

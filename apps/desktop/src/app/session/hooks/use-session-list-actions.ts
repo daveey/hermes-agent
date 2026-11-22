@@ -603,16 +603,26 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
   // paged to by hand is what it returns to.
   const unfilteredLimit = useRef<null | number>(null)
 
-  useEffect(
-    () =>
-      $sidebarFiltersActive.subscribe(active => {
-        if (active) {
-          unfilteredLimit.current ??= $sessionsLimit.get()
+  // This ref retains the user's pre-filter page size; it does not mirror an atom.
+  // eslint-disable-next-line no-restricted-syntax
+  useEffect(() => {
+    let disposed = false
 
-          if (raiseSessionsLimit(SIDEBAR_FILTERED_PAGE_SIZE)) {
-            void refreshSessions()
+    const unsubscribe = $sidebarFiltersActive.subscribe(active => {
+      if (active) {
+        unfilteredLimit.current ??= $sessionsLimit.get()
+
+        if (raiseSessionsLimit(SIDEBAR_FILTERED_PAGE_SIZE)) {
+          void refreshSessions()
+        }
+      } else {
+        // Plugins replace contributions during effect cleanup/setup. Only a
+        // settled clear should shrink the page, not that synchronous gap.
+        queueMicrotask(() => {
+          if (disposed || $sidebarFiltersActive.get() || unfilteredLimit.current === null) {
+            return
           }
-        } else if (unfilteredLimit.current !== null) {
+
           const restored = unfilteredLimit.current
           unfilteredLimit.current = null
 
@@ -620,10 +630,15 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
             $sessionsLimit.set(restored)
             void refreshSessions()
           }
-        }
-      }),
-    [refreshSessions]
-  )
+        })
+      }
+    })
+
+    return () => {
+      disposed = true
+      unsubscribe()
+    }
+  }, [refreshSessions])
 
   // [daveey] A failed list leaves its owners stale: their rows paint as cached copies (no red/grey stripe, 0/0 kanban
   // badge) and only a SUCCESSFUL list makes them live again. Nothing used to re-list on its own: after a Desktop
