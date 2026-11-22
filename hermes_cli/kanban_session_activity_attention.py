@@ -13,6 +13,7 @@ David-MBP every expiry re-ran every check (~125 ms of CPU each 30 s) while no lo
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import threading
@@ -128,6 +129,22 @@ def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool], *,
     return _dispose
 
 
+def _check_passes(checks) -> contextlib.ExitStack:
+    """One read pass for every check that offers one: a check function may carry ``attention_pass``, a context
+    manager factory inside which its calls share their reads (kanban-honest-done: one connection per database
+    instead of several per card). Entered around all the cards of one count and closed with it, so nothing is held
+    between counts. A pass that cannot be entered is skipped: the check then reads on its own, as before."""
+    stack = contextlib.ExitStack()
+    for check in checks:
+        factory = getattr(check, "attention_pass", None)
+        if callable(factory):
+            try:
+                stack.enter_context(factory())
+            except Exception:  # health: allow BLE001 -- a plugin's pass is an optimisation, never a requirement
+                _log.debug("kanban done check pass unavailable", exc_info=True)
+    return stack
+
+
 def attention_task_counts(now: float | None = None) -> dict[str, int]:
     """``{session_id: completed cards a registered check flags}`` over the last ``activity.ATTENTION_WINDOW_S``. Cached;
     a check that raises counts as False."""
@@ -153,6 +170,23 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     boards = tuple(str(p) for p in paths)
     pairs: set[tuple[str, str]] = set()
     windows: list[float] = []
+    passes = _check_passes(checks)
+    try:
+        _flag_recent_done(activity, paths, since, checks, boards, scope, mono, forced, pairs, windows)
+    finally:
+        passes.close()
+    counts: dict[str, int] = {}
+    for sid, _tid in pairs:
+        counts[sid] = counts.get(sid, 0) + 1
+    window = min(windows, default=None)
+    activity._attention.put(scope, mono, counts, inputs, window=window)
+    activity._host_copy.note_deadline(window)
+    return counts
+
+
+def _flag_recent_done(activity, paths, since, checks, boards, scope, mono, forced, pairs, windows) -> None:
+    """Add the flagged ``(session, card)`` of every board's recent done cards to ``pairs`` and each card's window
+    boundary to ``windows``."""
     for path in paths:
         try:
             recent = activity._recent_done.memoized(path, since, activity._read_recent_done, activity._revalidate.board_memo_key, scope)  # [daveey]
@@ -172,10 +206,3 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
             key = (boards, str(path), str(card["id"]), card.get("completed_at"), card.get("title"), card.get("summary"))
             if activity._attention.verdict(key, mono, lambda card=card: activity._run_done_checks(checks, card), force=forced):
                 pairs.add((sid, key[2]))
-    counts: dict[str, int] = {}
-    for sid, _tid in pairs:
-        counts[sid] = counts.get(sid, 0) + 1
-    window = min(windows, default=None)
-    activity._attention.put(scope, mono, counts, inputs, window=window)
-    activity._host_copy.note_deadline(window)
-    return counts

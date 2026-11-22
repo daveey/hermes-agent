@@ -6,6 +6,7 @@ back to back (51% CPU in the ``kanban-annotation`` thread).
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import threading
 import time
@@ -227,6 +228,67 @@ def test_deadlines_dropped_while_nobody_polled_force_the_read_when_demand_return
     monkeypatch.setattr(host, '_scope_interested', interested)
     _refresh(source=False)  # demand is back
     assert _published()[10] == {}, 'a verdict that moved at a declared wall time was served from the cache'
+
+
+def test_a_declared_board_or_replica_reruns_the_checks_on_content_not_on_bookkeeping(world, monkeypatch, tmp_path):
+    """kanban-honest-done declares the boards and their sync replicas. Both files are rewritten several times a
+    second by bookkeeping; keyed by stat, every such write reran every done check."""
+    shadow = tmp_path / 'sync-shadow'
+    shadow.mkdir()
+    replica = helpers._board(shadow / 'b.db', [('r1', 'running', 's9')])
+    try:
+        monkeypatch.setattr(parts, '_replica_dir', lambda: str(shadow))
+        check = ksa._done_checks['fixture']
+        monkeypatch.setattr(host, '_done_event_sources', {
+            'fixture': (check, lambda: [world.board, shadow / 'b.db', world.declared], lambda: None)})
+        for conn in (world.conn, replica):
+            conn.execute('CREATE TABLE IF NOT EXISTS bookkeeping_stamp (at REAL)')
+        _refresh()
+        _refresh()
+        before = world.checks
+        for conn in (world.conn, replica):  # each file moves; no row a reader selects does
+            conn.execute('INSERT INTO bookkeeping_stamp VALUES (1.0)')
+        _refresh()
+        assert world.checks == before, 'a bookkeeping write to a declared board or replica reran the done checks'
+        world.flagged = False
+        replica.execute("UPDATE tasks SET status = 'done' WHERE id = 'r1'")  # replica content the check may read
+        _refresh()
+        assert world.checks == before + 1
+        assert _published()[10] == {}
+    finally:
+        replica.close()
+
+
+def test_a_check_that_offers_a_read_pass_gets_one_around_all_its_cards_and_it_is_closed(world, monkeypatch):
+    seen: list[str] = []
+
+    @contextlib.contextmanager
+    def one_pass():
+        seen.append('open')
+        try:
+            yield
+        finally:
+            seen.append('close')
+
+    def check(card):
+        seen.append(f"check {card['id']}")
+        return True
+    check.attention_pass = one_pass
+    monkeypatch.setattr(ksa, '_done_checks', {'fixture': check})
+    monkeypatch.setattr(host, '_done_event_sources', {})  # undeclared: every refresh runs the checks
+    monkeypatch.setattr(ksa._recent_done, 'memoized', lambda path, since, *a: [
+        ('s1', {'id': f'd{n}', 'completed_at': time.time() - 60, 'title': 'done', 'summary': 'ok'}) for n in (1, 2)])
+    _refresh()
+    assert seen == ['open', 'check d1', 'check d2', 'close']
+    assert _published()[10] == {'s1': 2}
+
+    def broken():
+        raise RuntimeError('no pass today')
+    check.attention_pass = broken  # the pass is an optimisation: without it the check still answers
+    del seen[:]
+    _refresh()
+    assert seen == ['check d1', 'check d2']
+    assert _published()[10] == {'s1': 2}
 
 
 def test_a_burst_of_board_writes_is_a_bounded_number_of_reads_and_the_last_write_shows(world, monkeypatch):
