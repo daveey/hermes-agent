@@ -29,7 +29,9 @@ def _records(path):
 
 
 def key(token, url, reset_at, failure_at):
-    raw = json.dumps([token, url, reset_at, failure_at], allow_nan=False).encode()
+    # Auth JSON can contain non-finite stamps. Hash them deterministically rather
+    # than letting this optional throttle raise before the live quota probe.
+    raw = json.dumps([token, url, reset_at, failure_at], allow_nan=True).encode()
     return hashlib.sha256(raw).hexdigest()
 
 
