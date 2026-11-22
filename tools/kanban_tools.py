@@ -1351,20 +1351,20 @@ def _handle_comment(args: dict, **kw) -> str:
     _reject_delegated_child_mutation("kanban_comment", args)
     tid = args.get("task_id")
     if not tid:
-        # A comment writes to the board, so a bare call must stay an error — but
-        # point at kanban_list, not an env var a chat caller cannot set (#91431).
+        # Comments are per-task; a chat has no dispatcher default.
         raise _Reject(
             "task_id is required: comments are per-task and this session has no "
             "dispatcher-assigned task to default to. Discover task ids with "
             "kanban_list, or pass the task id you mean.")
     body = _redact(_require_text(args, "body"))
-    # Author comes from the worker's runtime identity (``_persisted_identity``), never caller args: comments are
-    # injected into future workers' system prompts (``build_worker_context``), so an ``args["author"]`` override
-    # could forge a directive from ``hermes-system``. Cross-task commenting stays unrestricted. See #19713.
+    # Runtime identity only: caller-supplied authors could forge worker directives (#19713).
     author = _persisted_identity()
     with _board(args.get("board")) as (kb, conn):
         from hermes_cli import kanban_foreign_card as _kfc
         from hermes_cli import kanban_relayed_human as _krh
+        from hermes_cli.kanban_origin_comment import forward
+        if forwarded := forward(conn, str(tid), args, str(body)):
+            return _ok(**forwarded)
         foreign = _kfc.refusal(conn, str(tid))  # [daveey] only a replica copy here: name the owner
         if foreign:
             raise _Reject(foreign, _kfc.REJECTION)
