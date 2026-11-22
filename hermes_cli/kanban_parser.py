@@ -657,6 +657,7 @@ _SPECS = [
             "stop). Does not promote: run `hermes kanban promote` afterwards"),
     _cmd("spend-budget", [
         _TASK_ID,
+        _arg("--seen", dest="seen_comment_id", type=int, help="Newest decision comment read; refuse replacing an unread spend-stop budget decision."),
         _arg("--runs", type=_nonnegative_int, help="This card's spending-run limit (0 = no limit)"),
         _arg("--cache-read-tokens", type=_nonnegative_int, help="This card's cache-read token limit (0 = no limit)"),
         _arg("--exempt", action="store_true", help="No spend budget for this card (standing cards)"),

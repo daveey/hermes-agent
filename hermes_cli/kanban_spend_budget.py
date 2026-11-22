@@ -129,9 +129,11 @@ def _has_override(conn: sqlite3.Connection, task_id: str) -> bool:
 
 
 def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] = None,
-                 cache_read_tokens: Optional[int] = None, by: str, reason: str) -> dict:
+                 cache_read_tokens: Optional[int] = None, by: str, reason: str,
+                 seen: Optional[int] = None, board: Optional[str] = None) -> dict:
     """Give ``task_id`` its own limits (0 = no limit; None = the board's), recorded as a ``spend_budget_set``
-    event and a comment naming ``by`` and ``reason``. Both None clears the override. The newest event wins.
+    event and a comment naming ``by`` and ``reason``. Both None clears the override. Replacing a spend-stop
+    decision requires ``seen`` to acknowledge its comment, checked atomically even after promotion.
     For cards meant to run indefinitely (standing shepherds), set explicitly, never inferred from a title."""
     from hermes_cli import kanban_db as kb
 
@@ -145,9 +147,17 @@ def set_override(conn: sqlite3.Connection, task_id: str, *, runs: Optional[int] 
     with kb.write_txn(conn):
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
             raise ValueError(f"unknown task {task_id}")
+        from hermes_cli.kanban_spend_override_fence import check
+        if episode := check(conn, task_id, seen=seen, board=board):
+            payload['episode'] = episode
+        cid = kb.add_comment(conn, task_id, AUTHOR,
+                             f"Spend budget for this card: {_override_text(payload)}, set by {by}: {reason}.", system=True)
+        if episode:
+            note = conn.execute("SELECT * FROM task_comments WHERE id=?", (cid,)).fetchone()
+            payload['decision_comment'] = {'comment_id': cid, 'author': AUTHOR}
+            if 'uid' in note.keys() and note['uid']:
+                payload['decision_comment']['comment_uid'] = note['uid']
         kb._append_event(conn, task_id, OVERRIDE_EVENT, payload)
-        kb.add_comment(conn, task_id, AUTHOR, f"Spend budget for this card: {_override_text(payload)}, set by {by}: "
-                       f"{reason}.", system=True)
     return payload
 
 

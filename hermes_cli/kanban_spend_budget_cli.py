@@ -4,6 +4,9 @@ Without a change flag it prints the card's effective limits, its override (who s
 spend. ``--runs N`` / ``--cache-read-tokens N`` (0 = no limit), ``--exempt`` (both 0) or ``--clear`` (back to
 the board's limits) record a ``spend_budget_set`` event and need ``--reason``. Worker and delegate_task shells
 are fenced from this verb like every other board write, so a looping card cannot exempt itself.
+For a spend-stop episode, an existing budget decision must be read before replacement (``--seen COMMENT_ID``).
+This acknowledgment is checked under the writer lock, survives promotion, and is not a retry instruction:
+keep the first decision unless an explicit reconciliation is warranted. Read-only display is unchanged.
 """
 from __future__ import annotations
 
@@ -40,7 +43,12 @@ def command(args: argparse.Namespace) -> int:
         if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (tid,)).fetchone() is None:
             return _err(f"kanban spend-budget: unknown task {tid}")
         if changing:
-            ksb.set_override(conn, tid, runs=runs, cache_read_tokens=cache, by=_actor(), reason=args.reason)
+            from hermes_cli.kanban_release_comments import UNREAD_EXIT, UnreadComments
+            try:
+                ksb.set_override(conn, tid, runs=runs, cache_read_tokens=cache, by=_actor(), reason=args.reason,
+                                 seen=getattr(args, 'seen_comment_id', None), board=getattr(args, 'board', None))
+            except UnreadComments as exc:
+                return _err(str(exc), UNREAD_EXIT)
         lim = ksb.card_limits(conn, tid, ksb.limits())
         override = ksb.card_override(conn, tid)
         spent = ksb.spend(conn, tid)
