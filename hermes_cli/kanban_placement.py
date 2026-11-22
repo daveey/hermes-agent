@@ -240,7 +240,9 @@ UNCARRIED_OPTIONS = ("initial_status", "human_request", "workspace_path", "proje
                      "runs_on", "pin_mandatory")  # courier cannot preserve mandatory model pins either
 # Of those, the ones the pool route carries anyway: Board row fields a worker's pickup copies. A mandatory model
 # pin rides model_pin_mandatory; kanban_mandatory_pin gates it on the destination's attestation. [daveey]
-POOL_CARRIED_OPTIONS = ("pin_mandatory",)
+# Tenant is already part of the synced Board row; it is not a host-local resource.
+# Keep it in UNCARRIED_OPTIONS: the legacy create-task courier still cannot carry it.
+POOL_CARRIED_OPTIONS = ("pin_mandatory", "tenant")
 # kanban_create options a hermes-hub client with `create-task --option KEY=JSON` carries to the card.
 # (hermes-hub also allows reasoning_effort, but kanban_create has no such parameter.)
 CARRIED_OPTIONS = ("skills", "max_runtime_seconds", "priority", "model", "provider", "goal_mode",
