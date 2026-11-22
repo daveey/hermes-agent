@@ -222,8 +222,10 @@ _SPECS = [
         _arg("--json", action="store_true", help="Return structured pending creation (always JSON)"),
     ], help="Create owner work through registered tools, pending origin receipt"),
     _cmd("origin-adopt", [
-        _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),
-        _arg("--json", action="store_true", help="Return pending adoption (always JSON)"),
+        _arg("task_id", nargs="?", help="Existing local card (requires --local)"),
+        _arg("--local", action="store_true", help="Current interactive chat takes decision ownership of an ownerless local card"),
+        _arg("--request-file", help="Trusted courier envelope file ('-' = stdin); incompatible with --local"),
+        _arg("--json", action="store_true", help="Return adoption result (always JSON)"),
     ], help="Attach existing owner work through registered tools, pending origin receipt"),
     _cmd("ownership-snapshot", [
         _arg("--request-file", required=True, help="Trusted courier envelope file ('-' = stdin)"),

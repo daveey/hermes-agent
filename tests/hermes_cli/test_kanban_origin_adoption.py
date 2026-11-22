@@ -258,8 +258,7 @@ def test_chat_refusal_for_card_on_this_gateway_subscribes_instead(board, tmp_pat
     _hub_state(tmp_path, monkeypatch, "hub", [("hub", f"default/default/{tid}")])
     monkeypatch.setenv("HERMES_SESSION_ID", "s_local")
     refused = _refuse(tid)
-    assert refused["next_step"] == (f"hermes kanban --board default notify-subscribe {tid} "
-                                    "--platform tui --chat-id s_local")
+    assert refused["next_step"] == f"hermes kanban --board default origin-adopt {tid} --local"
     assert refused["run_on"] == "hub"
 
 
@@ -267,8 +266,7 @@ def test_chat_refusal_for_card_on_another_local_profile_names_it(board, tmp_path
     _hub_state(tmp_path, monkeypatch, "hub", [("hub", "work/release/t_rel1")])
     monkeypatch.setenv("HERMES_SESSION_ID", "s_local")
     refused = _refuse("t_rel1", board="release")
-    assert refused["next_step"] == ("hermes -p work kanban --board release notify-subscribe t_rel1 "
-                                    "--platform tui --chat-id s_local")
+    assert refused["next_step"] == "hermes -p work kanban --board release origin-adopt t_rel1 --local"
 
 
 def test_worker_refusal_points_at_origin_gateway_cli(board, tmp_path, monkeypatch):
@@ -320,7 +318,7 @@ def test_worker_with_origin_on_same_gateway_gets_no_self_addressed_delegate(boar
     monkeypatch.setenv("HERMES_ORIGIN_SESSION", "@session:default@hub/s_here")
     refused = _refuse(tid)
     assert "delegate" not in refused
-    assert refused["next_step"] == f"hermes kanban --board default notify-subscribe {tid} --platform tui --chat-id s_here"
+    assert refused["next_step"] == f"hermes kanban --board default origin-adopt {tid} --local"
     assert "cross_session" in refused["error"]
 
 
@@ -342,5 +340,4 @@ def test_chat_refusal_names_this_turns_chat_not_the_process_env(board, tmp_path,
             sc.clear_session_vars(tokens)
 
     refused = contextvars.copy_context().run(turn)
-    assert refused["next_step"] == (f"hermes kanban --board default notify-subscribe {tid} "
-                                    "--platform tui --chat-id s_this_chat"), refused
+    assert refused["next_step"] == f"hermes kanban --board default origin-adopt {tid} --local", refused

@@ -130,6 +130,9 @@ def snapshot_command(args) -> int:
 
 
 def command(args) -> int:
+    if args.kanban_action == 'origin-adopt' and getattr(args, 'local', False):
+        from hermes_cli.kanban_local_adoption import command as local_command
+        return local_command(args)
     if args.kanban_action == 'selfwork-producer':
         from hermes_cli.kanban_selfwork_producer import command as producer_command
         return producer_command(args)
@@ -142,6 +145,8 @@ def command(args) -> int:
     if args.kanban_action == 'ownership-snapshot':
         return snapshot_command(args)
     try:
+        if args.kanban_action == 'origin-adopt' and (getattr(args, 'task_id', None) or not args.request_file):
+            raise ValueError('origin_request_invalid')
         raw = sys.stdin.read() if args.request_file == '-' else Path(args.request_file).read_text(encoding="utf-8-sig")
         request = json.loads(raw)
         expected = {'origin-create': 'create', 'origin-adopt': 'origin-adopt'}.get(args.kanban_action)

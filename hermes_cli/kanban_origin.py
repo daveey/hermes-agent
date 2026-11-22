@@ -338,7 +338,7 @@ def adopt_next_step(task_id: str, board: str, *, env: Optional[Mapping[str, str]
     if me and owner_gw == me and (not worker or run_on == me):
         # Card and chat on the same gateway: a tui subscription binds them, no courier involved.
         pflag = "" if owner_profile == my_profile else f"-p {owner_profile} "
-        step = f"hermes {pflag}kanban --board {board} notify-subscribe {task_id} --platform tui --chat-id {session}"
+        step = f"hermes {pflag}kanban --board {board} origin-adopt {task_id} --local"
         who = ("A worker is fenced from that on its own board: report to the chat with cross_session instead, or "
                "have the chat run it:" if worker else "Bind this chat to it by running in a terminal here:")
         return {"next_step": step, "run_on": me, "complete": "<" not in step,
