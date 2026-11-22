@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SidebarDraftRows } from '@/app/chat/sidebar/draft-rows'
 import {
+  knownProjectsOf,
   NO_PROJECT_ID,
   overlayLiveLanes,
   overlayLivePreviews,
@@ -12,6 +13,7 @@ import {
   sessionMatchesProjectFilter,
   type SidebarProjectTree
 } from '@/app/chat/sidebar/projects/workspace-groups'
+import { useMainSidebarDisplayCwd } from '@/app/session/new-session-cwd'
 import { notifyNewSessionTargetUnreachable, prepareDefaultNewSession } from '@/app/session/new-session-route'
 import { group } from '@/components/pane-shell/tree/model'
 import { $activeTreeGroup, $layoutTree } from '@/components/pane-shell/tree/store'
@@ -31,8 +33,15 @@ import {
   ensureGatewayAgent
 } from '@/store/profile'
 import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
-import { $projects, followEnteredProjectCwd, resolveNewSessionCwd } from '@/store/projects'
 import {
+  $projectOwnerBySessionId,
+  $projects,
+  $projectTree,
+  followEnteredProjectCwd,
+  resolveNewSessionCwd
+} from '@/store/projects'
+import {
+  $connection,
   $currentCwd,
   $freshDraftKey,
   $newChatWorkspaceTarget,
@@ -87,6 +96,10 @@ function prePrSendCwd() {
       : $currentCwd.get().trim() || resolveNewSessionCwd()
 }
 
+function sidebarBucket(row: Parameters<typeof sessionBucketId>[0], projects: Parameters<typeof sessionBucketId>[1]) {
+  return sessionBucketId(row, projects, $projectOwnerBySessionId.get(), knownProjectsOf($projectTree.get()))
+}
+
 function mountActions() {
   const ref = <T,>(current: T) => ({ current })
   const state = createClientSessionState()
@@ -121,6 +134,8 @@ beforeEach(() => {
   $newChatProfile.set(null)
   $activeGatewayProfile.set('default')
   $projectScope.set(ALL_PROJECTS)
+  $projectTree.set([])
+  $projects.set([])
   $connectionsRegistry.set({
     connections: [
       { id: 'local', kind: 'local', label: 'This device', tokenPreview: null, tokenSet: false },
@@ -174,6 +189,74 @@ afterEach(() => {
 })
 
 describe('new-session gateway target', () => {
+  it.each(['active profile', 'connection', 'scope'])(
+    'reacts to only the %s input without incidental UI subscriptions',
+    async input => {
+      const { browserDefaultProjectDirKey, browserFolderBasePath } = await import('@/lib/browser-settings')
+      $currentCwd.set('')
+      $newChatWorkspaceTarget.set(undefined)
+      $newChatProfile.set(null)
+      $projectScope.set(ALL_PROJECTS)
+      $projects.set([{ id: 'p1', name: 'Project', folders: [{ path: '/repo' }] }] as never)
+      $projectTree.set([{ id: 'p1', label: 'Project', path: '/repo', repos: [], sessionCount: 0 }])
+      document.documentElement.dataset.hermesDesktopHost = 'browser'
+      const connection = $connection.get()!
+
+      const key = browserDefaultProjectDirKey(
+        browserFolderBasePath(input === 'connection' ? 'hermes-hub' : 'local'),
+        input === 'active profile' ? 'beta' : 'default'
+      )
+
+      localStorage.setItem(key, '/repo')
+
+      if (input === 'scope') {
+        localStorage.removeItem(key)
+      }
+
+      // Isolate the production hook: i18n/profile consumers in the whole sidebar can
+      // otherwise mask a missing subscription by incidentally causing another render.
+      const probe = renderHook(() =>
+        sidebarBucket(makeSessionInfo({ cwd: useMainSidebarDisplayCwd() }), $projects.get())
+      )
+
+      setSelectedStoredSessionId(null)
+      setFreshDraftReady(true)
+
+      const view = render(
+        <MemoryRouter>
+          <SidebarDraftRows projectId="p1" />
+          <SidebarDraftRows projectId={NO_PROJECT_ID} />
+        </MemoryRouter>
+      )
+
+      const paintedBucket = () =>
+        view.container.querySelector('[data-sidebar-draft-project]')?.getAttribute('data-sidebar-draft-project')
+
+      try {
+        expect(probe.result.current).toBe(NO_PROJECT_ID)
+        expect(paintedBucket()).toBe(NO_PROJECT_ID)
+        act(() => {
+          if (input === 'active profile') {
+            $activeGatewayProfile.set('beta')
+          } else if (input === 'connection') {
+            $connection.set({ ...connection, connectionId: 'hermes-hub' })
+          } else {
+            $projectScope.set('p1')
+          }
+        })
+        expect(probe.result.current).toBe('p1')
+        expect(paintedBucket()).toBe('p1')
+        expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(1)
+        expect(prePrSendCwd()).toBe('/repo')
+      } finally {
+        view.unmount()
+        probe.unmount()
+        localStorage.removeItem(key)
+        delete document.documentElement.dataset.hermesDesktopHost
+      }
+    }
+  )
+
   it.each([
     { dir: 'right' as const, cwd: '/repo' },
     { dir: 'center' as const, cwd: null }
@@ -384,7 +467,7 @@ describe('new-session gateway target', () => {
     const call = vi.mocked(requestGatewayForAgent).mock.calls.findLast(call => call[2] === 'session.create')!
     expect(call[3]?.cwd).toBe(expectedCwd)
     expect(call[3]?.cwd || '').toBe(beforeSendCwd)
-    expect(sessionBucketId($sessions.get()[0], $projects.get())).toBe(expectedBucket)
+    expect(sidebarBucket($sessions.get()[0], $projects.get())).toBe(expectedBucket)
     expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(0)
     act(() => {
       $projects.set([])
@@ -482,7 +565,7 @@ describe('new-session gateway target', () => {
 
     // Display follows the same fresh inputs as send, including ambient tile cwd.
     const expectedCwd = prePrSendCwd()
-    const expectedBucket = sessionBucketId(makeSessionInfo({ cwd: expectedCwd }), $projects.get())
+    const expectedBucket = sidebarBucket(makeSessionInfo({ cwd: expectedCwd }), $projects.get())
     expect(placement()).toBe(expectedBucket)
     expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(1)
     const beforeSendCwd = prePrSendCwd()
@@ -491,8 +574,8 @@ describe('new-session gateway target', () => {
     expect(createCall[3]?.cwd || '').toBe(beforeSendCwd)
     expect(beforeSendCwd).toBe(operation === 'tile workspace' ? '/other-project' : expectedCwd)
     expect($sessions.get()).toHaveLength(1)
-    expect(sessionBucketId($sessions.get()[0], $projects.get())).toBe(
-      sessionBucketId(makeSessionInfo({ cwd: beforeSendCwd }), $projects.get())
+    expect(sidebarBucket($sessions.get()[0], $projects.get())).toBe(
+      sidebarBucket(makeSessionInfo({ cwd: beforeSendCwd }), $projects.get())
     )
     expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(0)
     act(() => {
@@ -549,7 +632,7 @@ describe('new-session gateway target', () => {
       if (operation !== 'switch gateway') {
         await act(() => result.current.createBackendSessionForSend('First send'))
         const row = $sessions.get().find(row => row.id === 'created-stored')!
-        expect(sessionBucketId(row, $projects.get())).toBe('p1')
+        expect(sidebarBucket(row, $projects.get())).toBe('p1')
         expect(row.cwd).toBe(operation === 'pick folder' ? '/repo/normalized' : '/repo')
         expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(0)
       }
@@ -663,7 +746,7 @@ describe('new-session gateway target', () => {
       const row = $sessions.get()[0]
       expect(row.connection_id).toBe(HUB.connectionId)
       expect(row.cwd || null).toBeNull()
-      expect(sessionBucketId(row, [])).toBe(NO_PROJECT_ID)
+      expect(sidebarBucket(row, [])).toBe(NO_PROJECT_ID)
       expect(sessionMatchesProjectFilter(row, [NO_PROJECT_ID], [])).toBe(true)
       expect(overlayLiveLanes(home, $sessions.get()).repos[0].groups[0].sessions.map(s => s.id)).toEqual([
         'created-stored',

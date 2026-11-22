@@ -1,4 +1,5 @@
 import { useStore } from '@nanostores/react'
+import { useMemo } from 'react'
 import { useLocation } from 'react-router'
 
 import { NEW_CHAT_ROUTE } from '@/app/routes'
@@ -8,7 +9,7 @@ import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { $draftTitles, $freshDraftKey, takeSessionDraft } from '@/store/composer'
-import { $projects } from '@/store/projects'
+import { $projectOwnerBySessionId, $projects, $projectTree } from '@/store/projects'
 import {
   $activeSessionId,
   $freshDraftReady,
@@ -19,7 +20,7 @@ import {
 import { $focusedSessionIsTile, $focusedStoredSessionId } from '@/store/session-focus'
 import { $sessionTiles, focusOpenSession } from '@/store/session-states'
 
-import { sessionBucketId, sessionMatchesProjectFilter } from './projects/workspace-groups'
+import { knownProjectsOf, sessionBucketId, sessionMatchesProjectFilter } from './projects/workspace-groups'
 
 interface DraftRow {
   id: string
@@ -53,6 +54,9 @@ export function SidebarDraftRows({
   const stubs = useStore($unlistedSessionOwnerRows)
   const tiles = useStore($sessionTiles)
   const projects = useStore($projects)
+  const projectTree = useStore($projectTree)
+  const projectOwners = useStore($projectOwnerBySessionId)
+  const knownProjects = useMemo(() => knownProjectsOf(projectTree), [projectTree])
   const rows = new Map<string, DraftRow>()
 
   if (ready && !runtime && !selected && pathname === NEW_CHAT_ROUTE) {
@@ -90,8 +94,8 @@ export function SidebarDraftRows({
     const placement = { cwd: row.cwd, git_repo_root: row.git_repo_root, id: row.id } as SessionInfo
 
     if (
-      (projectId && sessionBucketId(placement, projects) !== projectId) ||
-      !sessionMatchesProjectFilter(placement, filter, projects)
+      (projectId && sessionBucketId(placement, projects, projectOwners, knownProjects) !== projectId) ||
+      !sessionMatchesProjectFilter(placement, filter, projects, projectOwners, knownProjects)
     ) {
       return null
     }
@@ -104,7 +108,7 @@ export function SidebarDraftRows({
           row.selected && 'bg-sidebar-accent text-sidebar-accent-foreground'
         )}
         data-sidebar-draft-id={row.id}
-        data-sidebar-draft-project={sessionBucketId(placement, projects) ?? undefined}
+        data-sidebar-draft-project={sessionBucketId(placement, projects, projectOwners, knownProjects) ?? undefined}
         key={row.id}
         onClick={() => {
           if (row.main) {

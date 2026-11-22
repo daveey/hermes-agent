@@ -26,10 +26,22 @@ vi.mock('@/store/composer', () => ({
   $freshDraftKey: atom('__new__:test'),
   takeSessionDraft: () => ({ text: '', attachments: [] })
 }))
-vi.mock('@/store/projects', () => ({ $projectTree: atom([]), $projects: atom([]), resolveNewSessionCwd: () => '' }))
+vi.mock('@/store/projects', async () => {
+  const { computed } = await import('nanostores')
+  const { projectOwnerBySessionId } = await import('./projects/workspace-groups')
+  const $projectTree = atom([])
+
+  return {
+    $projectTree,
+    $projects: atom([]),
+    $projectOwnerBySessionId: computed($projectTree, projectOwnerBySessionId),
+    resolveNewSessionCwd: () => ''
+  }
+})
 vi.mock('react-router', () => ({ useLocation: () => ({ pathname: '/' }) }))
 
 import { $draftTitles } from '@/store/composer'
+import { $projects, $projectTree } from '@/store/projects'
 import { $currentCwd } from '@/store/session'
 import {
   $activeSessionId,
@@ -61,6 +73,8 @@ beforeEach(() => {
   focusedId.set(null)
   focusedTile.set(false)
   $currentCwd.set('')
+  $projects.set([])
+  $projectTree.set([])
 
   $sessions.set([])
   $unlistedSessionOwnerRows.set([])
@@ -71,7 +85,45 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('client-only sidebar drafts', () => {
+  it.each([
+    { name: 'repo subfolder', cwd: '/repo/src', bucket: '/repo' },
+    { name: 'in-tree worktree', cwd: '/repo/.worktrees/task', bucket: '/repo' },
+    { name: 'sibling lane', cwd: '/lane-task', bucket: '/repo' },
+    { name: 'root control', cwd: '/repo', bucket: '/repo' },
+    { name: 'unclaimed folder', cwd: '/unclaimed', bucket: '__no_project__' },
+    { name: 'explicit p1 sibling lane', cwd: '/lane-task', bucket: 'p1', explicit: true }
+  ])('uses real sidebar placement inputs for $name', ({ cwd, bucket, explicit }) => {
+    $freshDraftReady.set(true)
+    $currentCwd.set(cwd)
+
+    if (explicit) {
+      $projects.set([{ id: 'p1', name: 'Project', folders: [{ path: '/repo' }] }] as never)
+    }
+
+    $projectTree.set([
+      {
+        id: explicit ? 'p1' : '/repo',
+        label: 'Repo',
+        path: '/repo',
+        sessionCount: 0,
+        repos: [
+          {
+            id: '/repo',
+            label: 'Repo',
+            path: '/repo',
+            sessionCount: 0,
+            groups: [{ id: 'lane', label: 'Lane', path: '/lane-task', sessions: [] }]
+          }
+        ]
+      }
+    ])
+    render(view({ projectId: bucket, filter: [bucket] }))
+    expect(rows()).toHaveLength(2)
+    expect(rows()[0].getAttribute('data-sidebar-draft-project')).toBe(bucket)
+  })
+
   it('moves the main draft with the live send target when a tile publishes cwd', () => {
+    $projects.set([{ id: '/other-project', name: 'Other', folders: [{ path: '/other-project' }] }] as never)
     $freshDraftReady.set(true)
     const { rerender } = render(view({ projectId: '__no_project__' }))
     expect(rows()).toHaveLength(2)
@@ -179,6 +231,7 @@ describe('client-only sidebar drafts', () => {
   })
 
   it('places detached drafts only in Home and project drafts only in that project', () => {
+    $projects.set([{ id: '/repo', name: 'Repo', folders: [{ path: '/repo' }] }] as never)
     $freshDraftReady.set(true)
     const { rerender } = render(view({ projectId: '/repo' }))
     expect(rows()).toHaveLength(1)
