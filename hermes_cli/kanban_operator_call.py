@@ -503,7 +503,9 @@ def _result_for(conn: sqlite3.Connection, target: str, uid: str, home: Optional[
     return _RETRY if retry else None
 
 
-_STATUS = {"applied": "done", "already_applied": "done", "refused": "rejected", "failed": "failed"}
+# `done` settles courier administration, not the target scope or its current hold.
+_STATUS = {"applied": "done", "already_applied": "done", "recorded": "done",
+           "refused": "rejected", "failed": "failed"}
 
 
 def poll(conn: sqlite3.Connection, executor: str, *, now: Optional[int] = None) -> list[tuple[int, str]]:
@@ -535,6 +537,8 @@ def poll(conn: sqlite3.Connection, executor: str, *, now: Optional[int] = None) 
             status = _STATUS.get(outcome, "failed")
         results = [{**op, "outcome": outcome, **({"detail": detail} if detail else {}),
                     "home": res.get("executor_gateway") if res else state.get("home")}]
+        if res and op.get("action") == "protect_stopped":
+            results[0]["protection"] = res.get("protection")
         if status == "done" and res and res.get("operator_delivery"):
             results[0]["operator_delivery"] = {**res["operator_delivery"],
                                                "result_event_uid": res["result_event_uid"]}

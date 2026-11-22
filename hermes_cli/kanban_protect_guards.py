@@ -7,6 +7,9 @@ from __future__ import annotations
 
 
 def install(conn):
+    # Unsynced UID bootstrap adds the column but not sync's UID index. The insert
+    # fence probes id OR uid on EVERY event append; both arms must be indexed.
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_protect_event_uid ON task_events(uid)')
     protected = "SELECT task_id FROM task_events WHERE kind='decision_protected_stopped'"
     evidence = ("EXISTS (SELECT 1 FROM task_events ps WHERE ps.kind='decision_protected_stopped' "
                 "AND ps.task_id=OLD.task_id AND (OLD.kind='decision_protected_stopped' "

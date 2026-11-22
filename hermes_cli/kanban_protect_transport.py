@@ -144,7 +144,7 @@ def confirm(conn, hub, board, request_uid):
     # The receipt acknowledges history; it never promises the target is STILL held.
     # Pull a bounded authenticated feed before reporting current protection, so a
     # renewal of the adopted episode cannot be missed by the direct row refresh.
-    pulled = client.pull(conn, hub, board, observers=False)
+    pulled = client.pull(conn, hub, board, observers=True, partition=gateway)
     if pulled.more:
         raise ValueError('protect current projection incomplete; preserve frozen command')
     renewed = conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='scope_renewed' "
