@@ -121,10 +121,9 @@ def board_signature(path, chat_id=None):
     """What a poll of ``path`` for ``chat_id`` could claim: equal signatures mean no new deliverable event and no
     change to that chat's subscription rows, so a bookkeeping commit (heartbeat, claim of another card, run
     stamps) keeps it. A board without the notify tables keys on its commit revision. Raises like any read."""
-    from hermes_cli.kanban_session_activity import cached_ro
-    from hermes_cli.kanban_reader_lifecycle import is_shared_reader
+    from tui_gateway.notification_reader import reading
     key = str(path)
-    with cached_ro(Path(path)) as conn:
+    with reading(Path(path)) as (conn, retained):
         version = conn.execute("PRAGMA data_version").fetchone()[0]
         with _SIGS_LOCK:
             held = _SIGS.get(key)
@@ -134,7 +133,7 @@ def board_signature(path, chat_id=None):
             held = _notify_content(conn, version, held, path)
             if held is None:
                 return conn, version
-            if is_shared_reader(path, conn):
+            if retained:
                 with _SIGS_LOCK:
                     if len(_SIGS) >= _SIGS_MAX:
                         _SIGS.clear()
@@ -144,6 +143,8 @@ def board_signature(path, chat_id=None):
 
 
 def reset_board_signatures() -> None:
+    from tui_gateway.notification_reader import close_all
+    close_all()
     with _SIGS_LOCK:
         _SIGS.clear()
 

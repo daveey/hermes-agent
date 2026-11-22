@@ -8,6 +8,7 @@ import pytest
 from hermes_cli import kanban_session_activity as activity
 from hermes_cli import kanban_notify_revision as revision
 from tui_gateway import notification_idle as idle
+from tui_gateway import notification_reader as reader
 from tests.tui_gateway import test_notify_subs_gate as helpers
 
 board = helpers.board
@@ -47,7 +48,7 @@ def test_private_fallback_does_not_displace_shared_memo(board):
     ready, release = threading.Event(), threading.Event()
 
     def hold():
-        with activity.cached_ro(path):
+        with reader.reading(path):
             ready.set()
             assert release.wait(5)
 
@@ -66,7 +67,7 @@ def test_private_fallback_does_not_displace_shared_memo(board):
         release.set()
         thread.join(5)
     assert not thread.is_alive()
-    with activity.cached_ro(path) as conn:
+    with reader.reading(path) as (conn, _retained):
         sql = []
         conn.set_trace_callback(sql.append)
     try:
@@ -74,7 +75,7 @@ def test_private_fallback_does_not_displace_shared_memo(board):
         assert idle._SIGS[str(path)][0] is shared[0]
         assert not any('WHERE id > 0 ' in s for s in sql), sql
     finally:
-        with activity.cached_ro(path) as conn:
+        with reader.reading(path) as (conn, _retained):
             conn.set_trace_callback(None)
 
 
@@ -194,7 +195,7 @@ def test_same_file_new_connection_does_not_reuse_data_version(board):
     path, _tasks = board
     before = idle.board_signature(path, CHAT)
     old = idle._SIGS[str(path)][0]
-    activity.evict_readers(str(path.resolve()))
+    reader.evict(str(path.resolve()))
     with writer(path) as conn:
         conn.execute("UPDATE kanban_notify_subs SET last_event_id = 74 WHERE chat_id = ?", (CHAT,))
     assert idle.board_signature(path, CHAT) != before
@@ -208,7 +209,7 @@ def test_replaced_database_rebuilds_event_and_subscription_state(board):
     with contextlib.closing(sqlite3.connect(path)) as source:
         with contextlib.closing(sqlite3.connect(replacement)) as target:
             source.backup(target)
-    activity.evict_readers(str(path.resolve()))
+    reader.evict(str(path.resolve()))
     with writer(replacement) as conn:
         conn.execute("DELETE FROM task_events")
         conn.execute("UPDATE kanban_notify_subs SET last_event_id = 81 WHERE chat_id = ?", (CHAT,))

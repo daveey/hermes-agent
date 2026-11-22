@@ -49,15 +49,15 @@ def _bookkeeping(tid: str, n: int) -> None:
 
 @contextlib.contextmanager
 def _subs_reads(path):
-    """Full tui subscription reads on the shared board reader."""
-    from hermes_cli.kanban_session_activity import cached_ro
+    """Full tui subscription reads on the retained notification observer."""
+    from tui_gateway.notification_reader import reading
     seen: list = []
-    with cached_ro(path) as conn:
+    with reading(path) as (conn, _retained):
         conn.set_trace_callback(lambda sql: seen.append(sql) if "last_event_id, inflight_from FROM" in sql else None)
     try:
         yield seen
     finally:
-        with contextlib.suppress(Exception), cached_ro(path) as conn:
+        with contextlib.suppress(Exception), reading(path) as (conn, _retained):
             conn.set_trace_callback(None)
 
 
