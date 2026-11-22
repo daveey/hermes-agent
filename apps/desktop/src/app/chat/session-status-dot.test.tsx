@@ -37,6 +37,18 @@ describe('SessionStatusDot published status', () => {
     }
   )
 
+  it.each([
+    ['running', 'waiting', 'Running'],
+    ['waiting', 'running', 'Waiting']
+  ] as const)('labels published %s without consulting legacy %s', (kind, legacyKind, label) => {
+    const { container } = mount(canonicalOutcome('waiting', { kind }, { kind: legacyKind }))
+    const dot = container.querySelector('[data-session-status-dot]')!
+    expect(dot.getAttribute('data-session-status-dot')).toBe('waiting')
+    expect(dot.getAttribute('aria-label')).toBe(label)
+    expect(dot.getAttribute('title')).toBe(label)
+    expect(dot.className).not.toContain('bg-(--ui-success)')
+  })
+
   it('announces a canonical never-started session as draft, not Running', () => {
     // Shape published by reduce_status for an empty transcript with complete source reads.
     const status = {
@@ -46,8 +58,8 @@ describe('SessionStatusDot published status', () => {
       presentation: { stripe: 'none', reason_codes: ['never_started'] }
     }
     const { container } = mount({ kind: 'unresolved', status })
-
     const dot = container.querySelector('[data-session-status-dot]')!
+
     expect(dot.getAttribute('data-session-status-dot')).toBe('none')
     expect(dot.getAttribute('aria-label')).toBe('Draft — nothing sent yet')
     expect(dot.getAttribute('title')).toBe('Draft — nothing sent yet')

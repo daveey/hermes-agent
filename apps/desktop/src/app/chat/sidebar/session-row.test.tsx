@@ -1179,7 +1179,7 @@ describe('SidebarSessionRow own activity stamps', () => {
 
     try {
       const { container } = renderRow(
-        makeSession({ outcome: canonicalOutcome('none', {}, { kind: 'running' }),
+        makeSession({ outcome: canonicalOutcome('waiting', { kind: 'running' }, { kind: 'running' }),
           execution_observations: [fixture.base],
           id: 'running-card',
           kanban_active: 1,
@@ -1190,7 +1190,7 @@ describe('SidebarSessionRow own activity stamps', () => {
         } as Partial<SessionInfo> & { title: string })
       )
 
-      expect(container.querySelector('[role="status"][aria-label="Running"]')?.getAttribute('data-session-status-dot')).toBe('none')
+      expect(container.querySelector('[role="status"][aria-label="Running"]')?.getAttribute('data-session-status-dot')).toBe('waiting')
       expect(container.querySelector('[aria-label="Open work, current status unknown"]')).toBeNull()
     } finally {
       vi.useRealTimers()
@@ -1540,7 +1540,7 @@ describe('SidebarSessionRow stored outcome', () => {
           kanban_active: 2,
           kanban_parked: 2,
           message_count: 4,
-          outcome: canonicalOutcome(({ waiting: 'waiting', running: 'none', unresolved: 'attention', decision: 'stuck' } as const)[outcome.kind], {}, { ...outcome, items: 'items' in outcome ? [...outcome.items] : undefined, on: 'on' in outcome ? [...outcome.on] : undefined }),
+          outcome: canonicalOutcome(({ waiting: 'waiting', running: 'waiting', unresolved: 'attention', decision: 'stuck' } as const)[outcome.kind], { kind: outcome.kind }, { ...outcome, items: 'items' in outcome ? [...outcome.items] : undefined, on: 'on' in outcome ? [...outcome.on] : undefined }),
           title: 'Parked cards'
         } as Partial<SessionInfo> & { title: string })
       )

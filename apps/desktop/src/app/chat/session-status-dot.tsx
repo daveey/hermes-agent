@@ -106,7 +106,7 @@ export const sessionDotVariant = (
         : stripe === 'stuck' ? r.outcomeDecision
           : stripe === 'blocked' ? r.outcomeMuted
             : stripe === 'attention' ? r.outcomeUnresolved(null)
-              : stripe === 'waiting' ? r.outcomeWaiting
+              : stripe === 'waiting' ? outcome?.status?.kind === 'running' ? r.outcomeRunning : r.outcomeWaiting
                 : r.draftSession
 
   return {
