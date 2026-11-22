@@ -150,7 +150,8 @@ def _control_items(sid: str) -> tuple[list[dict], list[dict]]:
         if not isinstance(result, dict):
             raise ValueError("malformed control result")
         for key, normalizer, target in (("decision_items", so._decision_item, decisions), ("waiting_on", so._wait_item, waits)):
-            values = result.get(key) or []
+            # Omitted collections mean no contribution; supplied null/non-lists are unavailable evidence.
+            values = result.get(key, [])
             if not isinstance(values, list):
                 raise ValueError("malformed control items")
             for value in values:

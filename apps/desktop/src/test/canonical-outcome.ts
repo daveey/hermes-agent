@@ -13,7 +13,7 @@ export function canonicalOutcome(
     ...outcome,
     status: {
       status_version: 1,
-      kind: ({ done: 'done', attention: 'unresolved', blocked: 'muted', stuck: 'decision', waiting: 'waiting', none: 'running' } as const)[stripe],
+      kind: ({ done: 'done', attention: 'unresolved', blocked: 'muted', stuck: 'decision', waiting: 'waiting', none: 'unresolved' } as const)[stripe],
       revision: 7,
       generation: 3,
       identity: { gateway: 'gateway', profile: 'default', session_id: 'session', owner_epoch: 'epoch' },

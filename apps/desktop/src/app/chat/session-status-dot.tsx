@@ -107,7 +107,7 @@ export const sessionDotVariant = (
           : stripe === 'blocked' ? r.outcomeMuted
             : stripe === 'attention' ? r.outcomeUnresolved(null)
               : stripe === 'waiting' ? r.outcomeWaiting
-                : r.sessionRunning
+                : r.draftSession
 
   return {
     ariaLabel: label,

@@ -37,6 +37,23 @@ describe('SessionStatusDot published status', () => {
     }
   )
 
+  it('announces a canonical never-started session as draft, not Running', () => {
+    // Shape published by reduce_status for an empty transcript with complete source reads.
+    const status = {
+      ...canonicalOutcome('none').status,
+      kind: 'unresolved',
+      reason: 'empty',
+      presentation: { stripe: 'none', reason_codes: ['never_started'] }
+    }
+    const { container } = mount({ kind: 'unresolved', status })
+
+    const dot = container.querySelector('[data-session-status-dot]')!
+    expect(dot.getAttribute('data-session-status-dot')).toBe('none')
+    expect(dot.getAttribute('aria-label')).toBe('Draft — nothing sent yet')
+    expect(dot.getAttribute('title')).toBe('Draft — nothing sent yet')
+    expect(dot.className).toContain('border-(--ui-text-quaternary)')
+  })
+
   it.each([undefined, { kind: 'done' }, { kind: 'done', status: { status_version: 2 } }] as const)(
     'missing and unsupported protocols remain unknown: %j', value => {
       const { container } = mount(value as SessionOutcome | undefined)

@@ -120,7 +120,11 @@ def test_declaration_cron_receipt_cannot_restore_an_older_status_revision(db, bo
     assert so.get_outcome("chat", db=db)["status"] == successor[0]
 
 
-@pytest.mark.parametrize("value", [[], {"decision_items": [{}]}, {"waiting_on": [{"kind": "unsupported", "id": "work"}]}])
+@pytest.mark.parametrize("value", [
+    [], {"decision_items": [{}]}, {"waiting_on": [{"kind": "unsupported", "id": "work"}]},
+    {"decision_items": {}}, {"waiting_on": False}, {"decision_items": 0}, {"waiting_on": ""},
+    {"decision_items": None}, {"waiting_on": None},
+])
 def test_malformed_control_source_is_unknown_then_recovers(db, value):
     turn(db)
     so.register_outcome_provider("invalid", lambda sid: value)
@@ -128,6 +132,13 @@ def test_malformed_control_source_is_unknown_then_recovers(db, value):
     assert status["coverage"]["state"] == "unknown"
     assert status["presentation"]["stripe"] != "done"
     so.register_outcome_provider("invalid", lambda sid: None)
+    assert_done(refresh(db))
+
+
+@pytest.mark.parametrize("value", [{}, {"decision_items": [], "waiting_on": []}, None])
+def test_empty_or_noncontributing_control_source_is_complete(db, value):
+    turn(db)
+    so.register_outcome_provider("empty", lambda sid: value)
     assert_done(refresh(db))
 
 
