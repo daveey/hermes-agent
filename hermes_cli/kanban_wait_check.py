@@ -141,11 +141,34 @@ def _unreachable_task(gateway, target, *, board, until, since, live_timeout) -> 
     time, not when the owner wrote the row, so it is not weighed against the registry's ``observed_at``. A live
     owner read stands; a Board replica that is not fresh adds nothing."""
     from hermes_cli.kanban_wait_replica import check
+    gateway = current_gateway(gateway)  # the registry partition is keyed by the owner's name today
     rc, msg = check(gateway, target, board=board, until=until, since=since, live_timeout=live_timeout)
     if rc == 0 or "(live owner" in msg:
         return rc, msg
     board_view = _board_replica_task(board, target, until=until, since=since)
     return board_view if board_view is not None and board_view[0] == 0 else (rc, msg)
+
+
+def current_gateway(gateway: str) -> str:
+    """``gateway`` as this host's hub.db knows it today: a probe parked before an in-place rename still names
+    the old gateway (``--gateway mini``), and the owner's records now sit under the new name. Resolved from
+    ``kanban.placement.aliases`` and the local hub.db only (``kanban_gateway_alias.current``): no network, and
+    the name is unchanged until the new one has records here. Never raises."""
+    try:
+        from hermes_cli import kanban_gateway_alias
+        if kanban_gateway_alias.resolve(gateway) == str(gateway or "").strip().lower():
+            return gateway  # no alias names it: hub.db is not opened for the common case
+        from hermes_cli.kanban_origin import gateway_names
+        return kanban_gateway_alias.current(gateway, gateway_names()[1])
+    except (ImportError, OSError, sqlite3.Error, ValueError):
+        return gateway
+
+
+def _ssh_host(gateway: str) -> str:
+    """The ssh destination for ``gateway``. The name as typed stays the destination (ssh aliases are their own
+    namespace: host ``mini`` is still reachable as ``mini`` after its gateway became ``daveey-mini-1``); the
+    built-in route of the gateway it names today is used when the typed name has none."""
+    return GATEWAY_SSH.get(gateway) or GATEWAY_SSH.get(current_gateway(gateway), gateway)
 
 
 def _producer_suffix(board, target, *, source=None):
@@ -177,7 +200,7 @@ def check_remote(gateway: str, kind: str, target: str, *, board: Optional[str] =
     # ``since`` (--from) is applied here, on the reply, so an older remote never sees a flag it would reject.
     if board:
         inner += ["--board", board]
-    host = GATEWAY_SSH.get(gateway, gateway)
+    host = _ssh_host(gateway)
     remote = "export PATH=$HOME/.local/bin:$HOME/.hermes/bin:$PATH; " + shlex.join(inner)
     try:
         p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_TIMEOUT}", host, remote],

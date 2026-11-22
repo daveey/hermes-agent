@@ -127,7 +127,12 @@ def gateway_names() -> tuple[str, set[str]]:
 
     The answer is reused while its inputs (hub.db, its WAL, the mail config) keep their identity, size and mtime,
     for at most ``_NAMES_MAX_AGE_S``: links reconcile, creator backfill and provenance checks ask once per row,
-    and each uncached answer opens hub.db (4% of hub gateway CPU, 2026-11-12). [daveey]"""
+    and each uncached answer opens hub.db (4% of hub gateway CPU, 2026-11-12).
+
+    A gateway renamed in place leaves its old name behind in replica rows of the old partition this host still
+    holds (their tombstones have not arrived, or one was missed). The known set drops a name that
+    ``kanban.placement.aliases`` maps to another known gateway (:func:`hermes_cli.kanban_gateway_alias.former`):
+    the old partition is not a second live gateway. This gateway's own name is never dropped. [daveey]"""
     global _names_memo
     path, cfg = _hub_db(), _mail_config()
     key = _names_key(path, cfg)
@@ -136,6 +141,7 @@ def gateway_names() -> tuple[str, set[str]]:
         return memo[2], set(memo[3])
     failed: list[sqlite3.Error] = []
     me, known = _read_gateway_names(path, cfg, failed)
+    known = _without_former(me, known)
     # A file written within the timestamp granularity could change again under the same signature: not kept.
     # Nor is an answer from a hub.db read that failed (locked, mid-replace): the next caller reads again.
     racy = time.time_ns() - _NAMES_RACY_NS
@@ -151,12 +157,19 @@ def gateway_name() -> str:
     (10 min), keyed on hub.db's identity (path, device, inode) and the mail config's signature, never on hub.db's
     WAL or mtime: the hub writes those continuously, so a memo keyed on them would almost never be kept, and every
     card in a task list asked again (an open + close of hub.db each, 70% of ``session_tasks`` CPU on the hub,
-    2026-11-20). Gateways are never renamed in place; re-enrolling replaces hub.db (a new inode), which busts the
-    memo, as does any change to the mail config. A miss reads only the hub.db ``meta`` row (a primary-key lookup)
-    and the mail config, never the ``replica`` scan. ``gateway_names`` (the known set, which does change) keeps its
-    short memo. So after an in-place ``meta.gateway`` change (never done on purpose) ``gateway_name()`` may lag
-    ``gateway_names()[0]`` for up to 10 min; that is intended. An empty name is never kept: hermes-hub writes
-    ``meta.gateway`` only after its first sync, and an empty answer must not stick for 10 min. [daveey]"""
+    2026-11-20). Re-enrolling replaces hub.db (a new inode), which busts the memo, as does any change to the mail
+    config. A miss reads only the hub.db ``meta`` row (a primary-key lookup) and the mail config, never the
+    ``replica`` scan. ``gateway_names`` (the known set, which does change) keeps its short memo.
+
+    A gateway CAN be renamed in place (``hermes-mail rename-self``: same key, same hub.db file). The rename
+    writes the mail config's ``gateway`` and hub.db ``meta.gateway``; hermes-hub also copies the config name
+    into ``meta.gateway`` on every sync, so the two agree except while a rename is being written. The config
+    write changes the memo key, and a name read while the two disagree is not kept (the next caller reads
+    again), so the new name is returned from the first call after the rename completes, with no restart. Only
+    a ``meta.gateway`` edit that leaves the mail config untouched (nothing supported does that, and the next
+    hermes-hub sync reverts it) can lag, for at most ``_NAME_MAX_AGE_S``. An empty name is never kept either:
+    hermes-hub writes ``meta.gateway`` only after its first sync, and an empty answer must not stick for
+    10 min. [daveey]"""
     global _name_memo
     path, cfg = _hub_db(), _mail_config()
     memo, now = _names_memo, time.monotonic()
@@ -168,12 +181,30 @@ def gateway_name() -> str:
         return own[2]
     failed: list[sqlite3.Error] = []
     me = _read_gateway_names(path, cfg, failed, names=False)[0]
-    # A failed hub.db read (locked, mid-replace), an empty name (hub not synced yet) or a mail config written
-    # within the timestamp granularity is not kept: the next caller reads again.
+    # A failed hub.db read (locked, mid-replace), an empty name (hub not synced yet), a mail config written
+    # within the timestamp granularity, or a name the mail config does not agree with (a rename is half
+    # written) is not kept: the next caller reads again.
     cfg_sig = key[-1]
     racy = isinstance(cfg_sig, tuple) and cfg_sig[1] >= time.time_ns() - _NAMES_RACY_NS
-    _name_memo = None if failed or racy or not me else (key, now, me)
+    renaming = _mail_gateway(cfg) not in ("", me)
+    _name_memo = None if failed or racy or renaming or not me else (key, now, me)
     return me
+
+
+def _mail_gateway(cfg: Path) -> str:
+    """The gateway name the hermes-mail config carries; "" when it has none or cannot be read."""
+    try:
+        return str(json.loads(cfg.read_text(encoding="utf-8-sig")).get("gateway") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def _without_former(me: str, known: set[str]) -> set[str]:
+    """``known`` minus a renamed gateway's old names (never ``me``). No alias map drops nothing."""
+    if len(known) < 2:
+        return known
+    from hermes_cli import kanban_gateway_alias
+    return known - (kanban_gateway_alias.former(known) - {me})
 
 
 def _name_key(path: Optional[Path], cfg: Path) -> tuple:
@@ -211,10 +242,7 @@ def _read_gateway_names(path: Optional[Path], cfg: Path,
             if failed is not None:
                 failed.append(exc)
     if not me:
-        try:
-            me = str(json.loads(cfg.read_text(encoding="utf-8-sig")).get("gateway") or "")
-        except (OSError, ValueError, AttributeError):
-            me = ""
+        me = _mail_gateway(cfg)
     if me:
         known.add(me)
     return me, known
@@ -234,6 +262,9 @@ def resolve(explicit: Optional[str] = None) -> Optional[Origin]:
         raise OriginError("hub_not_installed",
                           "this gateway has no hermes-hub client (no hub.db / hermes-mail config), so a card created "
                           f"here can never show in {origin.ref}; install hermes-hub or create the cards on that gateway")
+    if origin.gateway not in known:  # a ref written before its gateway was renamed still names that gateway
+        from hermes_cli import kanban_gateway_alias
+        origin = Origin(kanban_gateway_alias.current(origin.gateway, known), origin.profile, origin.session)
     if origin.gateway == me:
         return None
     if origin.gateway not in known:

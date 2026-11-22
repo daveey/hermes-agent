@@ -147,6 +147,26 @@ def is_system_author(author: Optional[str]) -> bool:
     return name.startswith(SYSTEM_AUTHOR_PREFIX) or name in SYSTEM_AUTHORS
 
 
+def gateway_spellings(gateway: Optional[str]) -> list[str]:
+    """Every name of ``gateway``, lowercased, the given one first: a gateway renamed in place wrote its earlier
+    comments under the old name (``origin_gateway`` ``mini``, author ``hub:gw:mini``) and writes the new one
+    after, and a probe parked on either name must match both (``kanban.placement.aliases``, no network)."""
+    name = (gateway or "").strip().lower()
+    if not name:
+        return []
+    try:
+        from hermes_cli import kanban_gateway_alias
+        return kanban_gateway_alias.spellings(name) or [name]
+    except ImportError:
+        return [name]
+
+
+def _names_gateway(spellings: list[str], origin: Optional[str], author: Optional[str]) -> bool:
+    """Whether a comment's ``origin_gateway`` is one of ``spellings`` or its author contains one."""
+    origin, author = (origin or "").lower(), (author or "").lower()
+    return any(gw == origin or gw in author for gw in spellings)
+
+
 def find_comment(conn: sqlite3.Connection, task_id: str, *, after_id: int = 0, from_gateway: Optional[str] = None,
                  contains: Optional[str] = None, from_card: Optional[str] = None,
                  skip_system: bool = False) -> Optional[dict]:
@@ -162,14 +182,14 @@ def find_comment(conn: sqlite3.Connection, task_id: str, *, after_id: int = 0, f
             rows = [(*r, None) for r in conn.execute(
                 "SELECT id, author, origin_gateway, body FROM task_comments WHERE task_id = ? AND id > ? "
                 "ORDER BY id", (task_id, int(after_id or 0))).fetchall()]
-        gw = (from_gateway or "").strip().lower()
+        gws = gateway_spellings(from_gateway)
         for row in rows:
             writer = writers.get(str(row[4])) if row[4] else writers.get(("id", int(row[0])))
             if writer != card and not _from_card(row[1], card):
                 continue
             if skip_system and is_system_author(row[1]):
                 continue
-            if gw and gw != (row[2] or "").lower() and gw not in (row[1] or "").lower():
+            if gws and not _names_gateway(gws, row[2], row[1]):
                 continue
             if contains and contains.lower() not in (row[3] or "").lower():
                 continue
@@ -183,10 +203,11 @@ def find_comment(conn: sqlite3.Connection, task_id: str, *, after_id: int = 0, f
         sql += (" AND substr(lower(trim(author)), 1, ?) != ? AND lower(trim(author)) NOT IN ("
                 + ",".join("?" * len(SYSTEM_AUTHORS)) + ")")
         params += [len(SYSTEM_AUTHOR_PREFIX), SYSTEM_AUTHOR_PREFIX, *sorted(SYSTEM_AUTHORS)]
-    if from_gateway:
-        gw = from_gateway.strip().lower()
-        sql += " AND (lower(coalesce(origin_gateway, '')) = ? OR instr(lower(author), ?) > 0)"
-        params += [gw, gw]
+    gws = gateway_spellings(from_gateway)
+    if gws:
+        sql += " AND (" + " OR ".join(
+            ["lower(coalesce(origin_gateway, '')) = ? OR instr(lower(author), ?) > 0"] * len(gws)) + ")"
+        params += [x for gw in gws for x in (gw, gw)]
     if contains:
         sql += " AND instr(lower(body), ?) > 0"
         params.append(contains.lower())
@@ -311,8 +332,7 @@ def comment_wake_note(conn: sqlite3.Connection, task_id: str, author: str, body:
                 if not card or (own != card and not _from_card(author, card)):
                     why.append(f"a comment from card {c['from_card']}")
             if c["from_gateway"]:
-                g = c["from_gateway"].strip().lower()
-                if g != gw and g not in a:
+                if not _names_gateway(gateway_spellings(c["from_gateway"]), gw, a):
                     why.append(f"a comment from gateway {c['from_gateway']}")
             if not why:
                 return None

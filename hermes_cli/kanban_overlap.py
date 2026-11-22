@@ -355,6 +355,7 @@ def _file_reason(why: str) -> bool:
 _HOST_ALIASES = {
     "macbook": "macbook", "mbp": "macbook", "david-mbp": "macbook", "test-key-gen": "macbook",
     "mini": "mini", "daveey-mini": "mini", "mac-mini": "mini", "davids-mac-mini-1": "mini",
+    "daveey-mini-1": "mini",  # the same machine's Board gateway name since its in-place rename from ``mini``
     "hermes-hub": "hub",
 }
 # Bare "hub" is not a host here: it is also the BB hub (on the mini) and "for hub t_..." quotes a card. A host is a
