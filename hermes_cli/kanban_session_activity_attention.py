@@ -112,7 +112,10 @@ def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool], *,
     ``summary`` (latest run summary, else ``result``), ``completed_at``, ``board`` and ``board_path``. Re-registering a
     name replaces it; the returned callable unregisters. Optional event callbacks
     have the same no-DB-read contract as ``register_waiting_source``; undeclared
-    checks retain bounded fallback rather than silently missing external inputs."""
+    checks retain bounded fallback rather than silently missing external inputs.
+    A declared board or sync replica is keyed by its content revision (``kanban_activity_revision.LOCAL_TABLES`` /
+    ``SHADOW_TABLES``), not by its file: a check that reads a table outside those lists does not rerun on a write
+    to it until the attention cache's own bound. Other declared files are keyed by their stat."""
     from hermes_cli import kanban_session_activity as activity
     activity._host_copy.declare_events(name, fn, watch_paths, next_deadline, done_check=True)
     activity._done_checks[name] = fn
@@ -145,6 +148,15 @@ def _check_passes(checks) -> contextlib.ExitStack:
     return stack
 
 
+def _close_passes(passes: contextlib.ExitStack) -> None:
+    """Close every entered pass. A pass whose exit raises is logged like one that cannot be entered: the checks
+    have already answered, and their verdicts must not be lost to a plugin's failing close."""
+    try:
+        passes.close()
+    except Exception:  # health: allow BLE001 -- a plugin's pass is an optimisation, never a requirement
+        _log.debug("kanban done check pass close failed", exc_info=True)
+
+
 def attention_task_counts(now: float | None = None) -> dict[str, int]:
     """``{session_id: completed cards a registered check flags}`` over the last ``activity.ATTENTION_WINDOW_S``. Cached;
     a check that raises counts as False."""
@@ -174,7 +186,7 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     try:
         _flag_recent_done(activity, paths, since, checks, boards, scope, mono, forced, pairs, windows)
     finally:
-        passes.close()
+        _close_passes(passes)
     counts: dict[str, int] = {}
     for sid, _tid in pairs:
         counts[sid] = counts.get(sid, 0) + 1

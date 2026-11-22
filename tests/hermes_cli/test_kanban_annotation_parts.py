@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import sqlite3
 import threading
 import time
 from types import SimpleNamespace
@@ -329,3 +330,97 @@ def test_a_burst_of_board_writes_is_a_bounded_number_of_reads_and_the_last_write
             events.wake()
             thread.join(5)
     assert not thread.is_alive()
+
+
+class _Pass:
+    """Not a generator: nothing but an explicit exit closes it."""
+
+    def __init__(self, seen):
+        self.seen = seen
+
+    def __enter__(self):
+        self.seen.append('open')
+
+    def __exit__(self, *exc):
+        self.seen.append('close')
+        return False
+
+
+def _check_with_pass(monkeypatch, seen, factory=None):
+    def check(card):
+        seen.append(f"check {card['id']}")
+        return True
+    check.attention_pass = factory or (lambda: _Pass(seen))
+    monkeypatch.setattr(ksa, '_done_checks', {'fixture': check})
+    monkeypatch.setattr(host, '_done_event_sources', {})
+
+
+def test_a_pass_that_is_not_a_generator_is_closed_with_the_count(world, monkeypatch):
+    seen: list[str] = []
+    _check_with_pass(monkeypatch, seen)
+    _refresh()
+    assert seen == ['open', 'check d1', 'close']
+
+
+def test_a_pass_is_closed_when_the_count_raises(world, monkeypatch):
+    seen: list[str] = []
+    _check_with_pass(monkeypatch, seen)
+
+    def boom(path, since, *a):
+        raise RuntimeError('unexpected')
+    monkeypatch.setattr(ksa._recent_done, 'memoized', boom)
+    _refresh()
+    assert seen == ['open', 'close']
+
+
+def test_a_pass_whose_exit_raises_keeps_the_verdicts_and_closes_the_other_passes(world, monkeypatch):
+    seen: list[str] = []
+
+    @contextlib.contextmanager
+    def failing():
+        try:
+            yield
+        finally:
+            raise RuntimeError('close failed')
+
+    def other(card):
+        return False
+    other.attention_pass = lambda: _Pass(seen)
+    _check_with_pass(monkeypatch, seen, failing)
+    monkeypatch.setattr(ksa, '_done_checks', {'other': other, **ksa._done_checks})
+    monkeypatch.setattr(ksa._recent_done, 'memoized', lambda path, since, *a: [
+        ('s1', {'id': f'd{n}', 'completed_at': time.time() - 60, 'title': 'done', 'summary': 'ok'}) for n in (1, 2)])
+    _refresh()
+    assert seen == ['open', 'check d1', 'check d2', 'close']
+    assert _published()[10] == {'s1': 2}, 'a failing close lost the verdicts the checks returned'
+
+
+def test_a_replica_whose_revision_cannot_vouch_reruns_the_checks(world, monkeypatch, tmp_path):
+    shadow = tmp_path / 'sync-shadow'
+    shadow.mkdir()
+    replica = sqlite3.connect(shadow / 'b.db', isolation_level=None)  # no revision triggers: stat fallback
+    replica.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, session_id TEXT)")
+    replica.execute("INSERT INTO tasks VALUES ('r1', 'running', 's9')")
+    try:
+        monkeypatch.setattr(parts, '_replica_dir', lambda: str(shadow))
+        check = ksa._done_checks['fixture']
+        monkeypatch.setattr(host, '_done_event_sources', {
+            'fixture': (check, lambda: [world.board, shadow / 'b.db'], lambda: None)})
+        assert ksa._board_content_key(shadow / 'b.db', ksa._revision.SHADOW_TABLES)[:1] == ('stat',)
+        _refresh()
+        before = world.checks
+        _refresh()  # written < STAT_SETTLED_S ago: the stat vouches for nothing, so the checks rerun
+        assert world.checks == before + 1, 'an unsettled stat-keyed replica was trusted'
+    finally:
+        replica.close()
+
+
+def test_a_scope_whose_counts_sit_in_a_saved_slot_is_not_renewed_before_its_age(world, monkeypatch):
+    _refresh()
+    assert world.counts == 1
+    monkeypatch.setattr(ksa, '_origin_scope', lambda: ('annotation-parts-test', 'other'))
+    ksa._all_counts()  # another profile's poll owns the active slot
+    assert world.counts == 2
+    monkeypatch.setattr(ksa, '_origin_scope', lambda: SCOPE)
+    _refresh()
+    assert world.counts == 2, 'fresh counts in a saved slot were read again'
