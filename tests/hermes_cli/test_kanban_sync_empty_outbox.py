@@ -27,7 +27,7 @@ def board(tmp_path, monkeypatch):
     client.reset_board_watch()
 
 
-def test_checkpoint_refreshes_answers_without_rearming_repair_generation(board):
+def test_checkpoint_keeps_reader_and_answers_without_rearming_repair_generation(board):
     path, conn = board
     sql = "SELECT 1 FROM kanban_sync_outbox WHERE state='pending' LIMIT 1"
     first = client._WATCH.query(path, sql, unchanged_ok=True)
@@ -37,9 +37,10 @@ def test_checkpoint_refreshes_answers_without_rearming_repair_generation(board):
     assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
     current = client._WATCH.query(path, sql, unchanged_ok=True)
     assert current == (first[0], (1,))
-    assert client._WATCH._conns[os.path.realpath(path)][1] is not old
-    with pytest.raises(sqlite3.ProgrammingError):
-        old.execute("SELECT 1")
+    # SQLite's wal-index proves the main file moved in a checkpoint: the reader is kept (no
+    # schema re-parse) and still answers from the checkpointed content.
+    assert client._WATCH._conns[os.path.realpath(path)][1] is old
+    assert old.execute("SELECT 1").fetchone() == (1,)
 
 
 def test_empty_sample_does_not_reopen_schema(board, monkeypatch):

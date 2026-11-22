@@ -503,11 +503,18 @@ def _pread_fd(path: Path | str) -> Optional[tuple[int, os.stat_result]]:
 
 def pread_lock_safe(path: Path | str, offset: int, length: int) -> Optional[bytes]:
     """``length`` bytes at ``offset`` of *path* without ever closing a descriptor on it."""
+    got = pread_lock_safe_stat(path, offset, length)
+    return None if got is None else got[0]
+
+
+def pread_lock_safe_stat(path: Path | str, offset: int, length: int) -> Optional[tuple[bytes, os.stat_result]]:
+    """:func:`pread_lock_safe` plus the ``fstat`` of the descriptor the bytes came from, so the
+    two always describe the same file even when the path is replaced during the call."""
     entry = _pread_fd(path)
     if entry is None:
         return None
     try:
-        return os.pread(entry[0], length, offset)
+        return os.pread(entry[0], length, offset), os.fstat(entry[0])
     except OSError:
         return None
 

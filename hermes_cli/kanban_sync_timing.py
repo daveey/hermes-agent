@@ -557,7 +557,8 @@ class TimingDiag:
 
     def wait(self, fn: Callable[..., Any], *args: Any) -> Any:
         """The loop's wait for work. Its start is the loop's safe boundary: config check and flush first."""
-        self.boundary()
+        from hermes_cli.kanban_sync_cpu import wait_boundary
+        wait_boundary(self.boundary)
         cap = self.capture
         if cap is None:
             return fn(*args)

@@ -1456,15 +1456,23 @@ def wait_for_work(wake: threading.Event, paths: Iterable[Path], period: float,
     period ran out. Returns which, so a local write is pushed within ``tick`` and a remote one pulled at once."""
     paths = list(paths)
     deadline = time.monotonic() + period
-    while keep_running():
-        if wake.wait(timeout=max(0.0, min(tick, deadline - time.monotonic()))):
-            wake.clear()
-            return "remote"
-        if outbox_pending(paths):
-            return "local"
-        if time.monotonic() >= deadline:
-            return "period"
-    return "stopped"
+    split = sync_cpu.WaitSplit()  # sync.wait/*: where this step's CPU goes, live
+    try:
+        while keep_running():
+            fired = wake.wait(timeout=max(0.0, min(tick, deadline - time.monotonic())))
+            split.mark("event_wait")
+            if fired:
+                wake.clear()
+                return "remote"
+            pending = outbox_pending(paths)
+            split.mark("outbox_probe")
+            if pending:
+                return "local"
+            if time.monotonic() >= deadline:
+                return "period"
+        return "stopped"
+    finally:
+        split.publish()
 
 
 @connection_scope()

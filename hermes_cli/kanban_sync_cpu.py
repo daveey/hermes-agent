@@ -22,9 +22,74 @@ _local = threading.local()
 
 def step(fn, *args, **kwargs):
     """Name a completed loop step; nested scopes book only their residual CPU."""
-    if not loop_accounting.scopes_enabled():
-        return fn(*args, **kwargs)
-    return loop_accounting.scoped_call("sync.step", fn)(*args, **kwargs)
+    outer = getattr(_local, "step", None)
+    _local.step = getattr(fn, "__name__", "other")  # which step a kept-reader open is booked under
+    try:
+        if not loop_accounting.scopes_enabled():
+            return fn(*args, **kwargs)
+        return loop_accounting.scoped_call("sync.step", fn)(*args, **kwargs)
+    finally:
+        _local.step = outer
+
+
+def note_reader_open(cpu, reason):
+    """Book one BoardWatch reader open under the loop step that triggered it, on any thread.
+
+    Subsets of the enclosing step or board service, never added to the thread's accounted CPU:
+    ``sync.reader_open.step/<step>`` says where the CPU went, ``sync.reader_open.reason/<reason>``
+    why (``first``: no reader yet; ``replaced``: another file; ``changed``: the same file moved
+    with no checkpoint proof). ``WaitSplit`` subtracts the running total from its outbox probe."""
+    _local.opened = getattr(_local, "opened", 0.0) + cpu
+    where = getattr(_local, "step", None) or ("board" if getattr(_local, "frames", ()) else "other")
+    loop_accounting.record(f"sync.reader_open.step/{where}", cpu_s=cpu, outer=False)
+    loop_accounting.record(f"sync.reader_open.reason/{reason}", cpu_s=cpu, outer=False)
+
+
+def note_reader_keep(cpu):
+    """A reader kept across a proven checkpoint (the CPU is the proof's own cost)."""
+    loop_accounting.record("sync.reader_keep/checkpoint", cpu_s=cpu, outer=False)
+
+
+WAIT_PARTS = ("event_wait", "outbox_probe", "reader_open")  # sync.wait/boundary: TimingDiag.wait
+
+
+def wait_boundary(fn):
+    """Run the wait step's config check and flush as ``sync.wait/boundary``."""
+    start = time.thread_time()
+    try:
+        return fn()
+    finally:
+        loop_accounting.record("sync.wait/boundary", cpu_s=time.thread_time() - start, outer=False)
+
+
+class WaitSplit:
+    """Thread-CPU partition of one wait for work: ``sync.wait/<part>`` for each of ``WAIT_PARTS``.
+
+    Marks are chained (the end of one part starts the next), so with the boundary the parts
+    leave out only the step's own bookkeeping. They are subsets of ``sync.step/...wait``:
+    published with ``outer=False``, they change neither that step nor ``sync.cpu.total/loop``."""
+
+    __slots__ = ("_last", "_opened", "parts", "ticks")
+
+    def __init__(self):
+        self.parts = dict.fromkeys(WAIT_PARTS, 0.0)
+        self.ticks = 0
+        self._opened = getattr(_local, "opened", 0.0)
+        self._last = time.thread_time()
+
+    def mark(self, part):
+        now = time.thread_time()
+        opened = getattr(_local, "opened", 0.0)
+        opens = min(now - self._last, opened - self._opened)
+        self.parts[part] += now - self._last - opens
+        self.parts["reader_open"] += opens
+        self.ticks += part == "event_wait"
+        self._last, self._opened = now, opened
+
+    def publish(self):
+        for part, cpu in self.parts.items():
+            loop_accounting.record(f"sync.wait/{part}", cpu_s=cpu, outer=False,
+                                   rows=self.ticks if part == "event_wait" else 0)
 
 
 @contextmanager
