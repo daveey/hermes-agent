@@ -4,9 +4,9 @@ This inventory stamps nothing, certifies nothing and activates nothing. Historic
 and new rows stay UNKNOWN until a separately reviewed capture slice, writer drain
 and complete exposure-principal provenance. ORIGINAL_CANDIDATE is not originality.
 
-The test-suite SQLite authorizer checks resolved writes against exact module,
-qualified function, verb and table identities, not source-text patterns or counts.
-Runtime observations do not claim coverage of unexecuted paths.
+An exact reviewed test snapshot pins full qualified function names, SQL verbs,
+table sets and classifications. It does not discover new writers or prove that
+source bodies still match this inventory. No runtime write interception is used.
 """
 from __future__ import annotations
 
@@ -72,12 +72,13 @@ SITES: dict[tuple[str, str, str, str], str] = {
 }
 
 # Audited dynamic-table sites. Only the two recovery copies can reach custody;
-# their exact caller/verb is authorized for both resolved custody tables at runtime.
+# the static snapshot declares both resolved custody tables for those entries.
+# This is a reviewed declaration, not runtime authorization or write discovery.
 _D = "<dynamic-table>"
 DYNAMIC_SITES: dict[tuple[str, str, str, str], tuple[str, bool]] = {
     ("kanban_db_recover.py", "_salvage_table", "INSERT", _D): (RECOVERY_AMBIGUOUS, True),
     ("kanban_db_recover.py", "_fill_from_backup", "INSERT", _D): (RECOVERY_AMBIGUOUS, True),
-    ("flaky_intake.py", "_initialize", "UPDATE", _D): (NOT_CUSTODY, False),
+    ("flaky_intake.py", "Journal._initialize", "UPDATE", _D): (NOT_CUSTODY, False),
     ("kanban_candidate_receipts.py", "persist", "DELETE", _D): (NOT_CUSTODY, False),
     ("kanban_containment_connections.py", "bootstrap", "UPDATE", _D): (NOT_CUSTODY, False),
     ("kanban_db.py", "_delete_task_relations", "DELETE", _D): (NOT_CUSTODY, False),
@@ -88,7 +89,7 @@ DYNAMIC_SITES: dict[tuple[str, str, str, str], tuple[str, bool]] = {
     ("kanban_db_sync.py", "_upsert_row", "UPDATE", _D): (NOT_CUSTODY, False),
     ("kanban_db_sync.py", "install_or_remove", "UPDATE", _D): (NOT_CUSTODY, False),
     ("kanban_db_sync.py", "repair_ms_timestamps", "UPDATE", _D): (NOT_CUSTODY, False),
-    ("kanban_llm_pacing_history.py", "record", "DELETE", _D): (NOT_CUSTODY, False),
+    ("kanban_llm_pacing_history.py", "History.record", "DELETE", _D): (NOT_CUSTODY, False),
     ("kanban_scratch_custody_discovery.py", "discover", "INSERT", _D): (NOT_CUSTODY, False),
     ("kanban_sync_quarantine.py", "adopt", "INSERT", _D): (NOT_CUSTODY, False),
     ("kanban_sync_quarantine.py", "restore", "INSERT", _D): (NOT_CUSTODY, False),

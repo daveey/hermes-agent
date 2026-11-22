@@ -1,259 +1,134 @@
-"""Runtime custody inventory gate (approved design §8); no source-text completeness pins. [daveey]"""
+"""Exact reviewed inventory snapshot; not an automatic write-discovery gate. [daveey]
+
+This pins identities, resolved table sets, verbs and classifications. It does not
+prove that an unlisted writer cannot exist or that a listed function still writes
+the declared tables. No SQLite interception or source-substring SQL matching.
+"""
 from __future__ import annotations
 
-import sqlite3
-
-import pytest
+import ast
+from pathlib import Path
 
 from hermes_cli import kanban_sync_capture_sites as inventory
-from tests.hermes_cli.custody_authorizer import CustodyGuard
 
 
-@pytest.fixture
-def guarded(monkeypatch):
-    guard = CustodyGuard()
-    monkeypatch.setattr(sqlite3, "connect", guard.factory(sqlite3.dbapi2.connect))
-    conn = sqlite3.connect(":memory:")
-    conn.executescript('''
-        CREATE TABLE kanban_sync_outbox (id INTEGER PRIMARY KEY, x INTEGER);
-        CREATE TABLE kanban_sync_parent_envelopes (id INTEGER PRIMARY KEY, x INTEGER);
-        INSERT INTO kanban_sync_outbox VALUES (1, 0);
-        INSERT INTO kanban_sync_parent_envelopes VALUES (1, 0);
-    ''')
-    yield guard, conn
-    conn.close()
+# Independently reviewed snapshot. Full module + qualified function identities:
+# a rename, extra prefix, other module, table, verb or disposition changes the pin.
+EXPECTED_SITES = """
+hermes_cli.kanban_db_sync._outbox_insert|INSERT|kanban_sync_outbox|original_candidate
+hermes_cli.kanban_db_sync._insert_trigger|INSERT|kanban_sync_outbox|original_candidate
+hermes_cli.kanban_retain_transport.reserve|INSERT|kanban_sync_outbox|original_candidate
+hermes_cli.kanban_actionability_transport.reserve|INSERT|kanban_sync_outbox|original_candidate
+hermes_cli.kanban_failure_release.queue|INSERT|kanban_sync_outbox|original_candidate
+hermes_cli.kanban_db_sync._queue_rows|INSERT|kanban_sync_outbox|recovery_ambiguous
+hermes_cli.kanban_sync_client.import_board|INSERT|kanban_sync_outbox|recovery_ambiguous
+hermes_cli.kanban_sync_client.repair_missing_children|INSERT|kanban_sync_outbox|recovery_ambiguous
+hermes_cli.kanban_sync_client.retire_lost_placeholder_links|INSERT|kanban_sync_outbox|recovery_ambiguous
+hermes_cli.kanban_sync_compat.enqueue_retry|INSERT|kanban_sync_outbox|recovery_ambiguous
+hermes_cli.kanban_sync_compat._drop_virtual|INSERT|kanban_sync_outbox|recovery_ambiguous
+hermes_cli.kanban_sync_divergence.repair_divergence|INSERT|kanban_sync_outbox|recovery_ambiguous
+hermes_cli.kanban_sync_omissions._queue_restore|INSERT|kanban_sync_outbox|recovery_ambiguous
+hermes_cli.kanban_sync_reserved_key._queue_children|INSERT|kanban_sync_outbox|recovery_ambiguous
+hermes_cli.kanban_sync_reserved_key._write_receipt|INSERT|kanban_sync_outbox|recovery_ambiguous
+hermes_cli.kanban_sync_compat.rejected_parent|INSERT|kanban_sync_outbox|synthetic_unknown
+hermes_cli.kanban_sync_envelope.parent|INSERT|kanban_sync_parent_envelopes|synthetic_unknown
+hermes_cli.kanban_containment_outbox.strip_lifecycle|UPDATE|kanban_sync_outbox|identity_rotation
+hermes_cli.kanban_sync_client.push|UPDATE|kanban_sync_outbox|identity_rotation
+hermes_cli.kanban_sync_envelope.outbound|UPDATE|kanban_sync_outbox|wire_freeze
+hermes_cli.kanban_actionability_transport.eligible_pending|UPDATE|kanban_sync_outbox|state_only
+hermes_cli.kanban_actionability_transport.record_result|UPDATE|kanban_sync_outbox|state_only
+hermes_cli.kanban_retain_transport.record_result|UPDATE|kanban_sync_outbox|state_only
+hermes_cli.kanban_sync_status_origin.bind|UPDATE|kanban_sync_outbox|state_only
+hermes_cli.kanban_actionability_transport.confirm|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_actionability_transport.record_result|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_containment_outbox.strip_lifecycle|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_db_sync._apply_one|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_retain_safety.recover|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_retain_transport.confirm|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_retain_transport.record_result|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_sync_client.import_board|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_sync_client.push|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_sync_compat._drop_virtual|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_sync_dependency_delete.settle|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_sync_envelope.prune_parents|DELETE|kanban_sync_parent_envelopes|removal
+hermes_cli.kanban_sync_envelope.retire_parent|DELETE|kanban_sync_parent_envelopes|removal
+hermes_cli.kanban_sync_rejections.resolve_rejections|DELETE|kanban_sync_outbox|removal
+scripts.gen_source_receipt_fixture._running|DELETE|kanban_sync_outbox|removal
+hermes_cli.kanban_sync_capture_storage.install|UPDATE|kanban_sync_outbox|guard_install
+hermes_cli.kanban_sync_capture_storage.install|UPDATE|kanban_sync_parent_envelopes|guard_install
+"""
+
+# Exact resolved custody-table sets for each reviewed dynamic site. Empty means
+# reviewed non-custody, not permission to write any table. These are declarations,
+# not observations or enforcement. Keep the classifications pinned separately.
+EXPECTED_DYNAMIC = {
+    ("hermes_cli.kanban_db_recover._salvage_table", "INSERT"): {"kanban_sync_outbox", "kanban_sync_parent_envelopes"},
+    ("hermes_cli.kanban_db_recover._fill_from_backup", "INSERT"): {"kanban_sync_outbox", "kanban_sync_parent_envelopes"},
+    ("scripts.ci.flaky_intake.Journal._initialize", "UPDATE"): set(),
+    ("hermes_cli.kanban_candidate_receipts.persist", "DELETE"): set(),
+    ("hermes_cli.kanban_containment_connections.bootstrap", "UPDATE"): set(),
+    ("hermes_cli.kanban_db._delete_task_relations", "DELETE"): set(),
+    ("hermes_cli.kanban_db_connect._rebuild_drifted_tables", "INSERT"): set(),
+    ("hermes_cli.kanban_db_sync._delete_row", "DELETE"): set(),
+    ("hermes_cli.kanban_db_sync._insert_trigger", "UPDATE"): set(),
+    ("hermes_cli.kanban_db_sync._upsert_row", "INSERT"): set(),
+    ("hermes_cli.kanban_db_sync._upsert_row", "UPDATE"): set(),
+    ("hermes_cli.kanban_db_sync.install_or_remove", "UPDATE"): set(),
+    ("hermes_cli.kanban_db_sync.repair_ms_timestamps", "UPDATE"): set(),
+    ("hermes_cli.kanban_llm_pacing_history.History.record", "DELETE"): set(),
+    ("hermes_cli.kanban_scratch_custody_discovery.discover", "INSERT"): set(),
+    ("hermes_cli.kanban_sync_quarantine.adopt", "INSERT"): set(),
+    ("hermes_cli.kanban_sync_quarantine.restore", "INSERT"): set(),
+    ("hermes_cli.kanban_worker_node._evict_one", "DELETE"): set(),
+}
 
 
-def writer(source, name="unaudited", module="hermes_cli.kanban_db_recover"):
-    """Executable controlled mutants, not a scan of production source."""
-    namespace = {"__name__": module}
-    exec(compile(f"def {name}(c, table):\n" + "\n".join("    " + line for line in source.splitlines()),
-                 "<custody-writer-mutant>", "exec"), namespace)
-    return namespace[name]
+def qualified(filename, function):
+    module = Path(filename).stem
+    package = {"gen_source_receipt_fixture.py": "scripts", "flaky_intake.py": "scripts.ci"}.get(filename, "hermes_cli")
+    return f"{package}.{module}.{function}"
 
 
-@pytest.mark.parametrize("statement", [
-    'c.execute("DELETE FROM %s" % table)',
-    'c.execute("DELETE " + "FROM main." + table)',
-    'c.execute(f\'DELETE FROM "{table}"\')',
-    'c.execute("UPDATE %s AS t SET x=2" % table)',
-    'c.execute("UPDATE {} AS t SET x=2".format(table))',
-    'q = "DELETE FROM "; q += table; c.execute(q)',
-    'c.cursor().execute("DELETE FROM " + table)',
-    'c.executemany("UPDATE " + table + " SET x=?", [(2,), (3,)])',
-    'c.executescript("DELETE FROM " + table)',
-])
-@pytest.mark.parametrize("table", sorted({k[3] for k in inventory.SITES}))
-def test_unlisted_writer_is_denied_by_resolved_table(guarded, statement, table):
-    guard, conn = guarded
-    with pytest.raises(sqlite3.DatabaseError, match="authorized"):
-        writer(statement)(conn, table)
-    assert guard.violations[-1][0:2] == ("hermes_cli.kanban_db_recover", "unaudited")
-    assert conn.execute(f"SELECT x FROM {table}").fetchall() == [(0,)]
+def test_exact_reviewed_sites():
+    expected_rows = [tuple(row.split("|")) for row in EXPECTED_SITES.strip().splitlines()]
+    expected = {row[:3]: row[3] for row in expected_rows}
+    assert len(expected) == len(expected_rows), "duplicate reviewed entry"
+    actual = {
+        (qualified(filename, function), verb, table): disposition
+        for (filename, function, verb, table), disposition in inventory.SITES.items()
+    }
+    assert len(actual) == len(inventory.SITES), "qualified identities must not collide"
+    assert actual == expected
 
 
-def test_round4_non_sql_pin_cannot_be_traded_for_a_write(guarded):
-    guard, conn = guarded
-    # Exact round-4 shape: errors='replace' changes to 'ignore' and a dynamic deletion is added
-    # in an existing, non-custody-authorized production function. No string counts are consulted.
-    probe = writer('''"ignore"  # formerly errors="replace"
-for (t,) in c.execute("SELECT name FROM sqlite_master WHERE name = ?", (table,)):
-    c.execute("DELETE FROM %s" % t)''', name="spawn_recovery")
-    with pytest.raises(sqlite3.DatabaseError, match="authorized"):
-        probe(conn, "kanban_sync_outbox")
-    assert guard.violations[-1][1] == "spawn_recovery"
+def test_exact_reviewed_dynamic_table_sets():
+    actual = {}
+    for (filename, function, verb, table), (disposition, reaches_custody) in inventory.DYNAMIC_SITES.items():
+        assert table == "<dynamic-table>"
+        assert type(reaches_custody) is bool
+        assert disposition == (inventory.RECOVERY_AMBIGUOUS if reaches_custody else inventory.NOT_CUSTODY)
+        actual[qualified(filename, function), verb] = (
+            {"kanban_sync_outbox", "kanban_sync_parent_envelopes"} if reaches_custody else set()
+        )
+    assert len(actual) == len(inventory.DYNAMIC_SITES)
+    assert actual == EXPECTED_DYNAMIC
 
 
-def test_ordinary_python_and_non_custody_writes_are_unaffected(guarded, tmp_path):
-    guard, conn = guarded
-    with (tmp_path / "text").open("w", errors="replace") as stream:
-        stream.write("delete core-update insert")
-    writer('c.execute("CREATE TABLE harmless (x)"); c.execute("INSERT INTO harmless VALUES (1)")')(conn, "harmless")
-    assert guard.violations == []
-
-
-def test_allowed_function_is_anchored_to_exact_module_function_verb_and_table(guarded):
-    guard, conn = guarded
-    allowed = writer('c.execute("INSERT INTO " + table + " VALUES (2, 1)")', "_salvage_table")
-    allowed(conn, "kanban_sync_outbox")
-    for name, module, sql in [
-        ("prefix_salvage_table", "hermes_cli.kanban_db_recover", "INSERT INTO "),
-        ("_salvage_table", "other.kanban_db_recover", "INSERT INTO "),
-        ("_salvage_table", "hermes_cli.kanban_db_recover", "DELETE FROM "),
-    ]:
-        statement = f'c.execute("{sql}" + table' + (' + " VALUES (3, 1)"' if sql.startswith("INSERT") else '') + ')'
-        with pytest.raises(sqlite3.DatabaseError, match="authorized"):
-            writer(statement, name, module)(conn, "kanban_sync_outbox")
-    assert len(guard.violations) == 3
-
-
-def test_cached_statement_cannot_borrow_an_allowed_callers_authorization(guarded):
-    _, conn = guarded
-    sql = 'c.execute("DELETE FROM " + table)'
-    writer(sql, "prune_parents", "hermes_cli.kanban_sync_envelope")(conn, "kanban_sync_parent_envelopes")
-    with pytest.raises(sqlite3.DatabaseError, match="authorized"):
-        writer(sql)(conn, "kanban_sync_parent_envelopes")
-
-
-def test_replacing_authorizer_does_not_remove_guard(guarded):
-    _, conn = guarded
-    conn.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
-    conn.set_authorizer(None)
-    with pytest.raises(sqlite3.DatabaseError, match="authorized"):
-        writer('c.execute("DELETE FROM " + table)')(conn, "kanban_sync_outbox")
-
-
-def test_unlisted_trigger_is_denied_even_when_invoked_by_test_fixture(guarded):
-    _, conn = guarded
-    writer('c.executescript("CREATE TABLE domain (x); CREATE TRIGGER unknown AFTER INSERT ON domain "'
-           ' + "BEGIN DELETE FROM " + table + "; END;")')(conn, "kanban_sync_outbox")
-    with pytest.raises(sqlite3.DatabaseError, match="authorized"):
-        conn.execute("INSERT INTO domain VALUES (1)")
-
-
-def test_independent_memory_databases_cannot_borrow_trigger_identity(guarded):
-    _, first = guarded
-    trigger = ('c.executescript("CREATE TABLE domain (x); CREATE TRIGGER same AFTER INSERT ON domain "'
-               ' + "BEGIN INSERT INTO " + table + " VALUES (2, 1); END;")')
-    writer(trigger)(first, "kanban_sync_outbox")
-    second = sqlite3.connect(":memory:")
-    try:
-        second.execute("CREATE TABLE kanban_sync_outbox (id INTEGER PRIMARY KEY, x INTEGER)")
-        writer(trigger, "install_triggers", "hermes_cli.kanban_db_sync")(second, "kanban_sync_outbox")
-        with pytest.raises(sqlite3.DatabaseError, match="authorized"):
-            first.execute("INSERT INTO domain VALUES (1)")
-        second.execute("INSERT INTO domain VALUES (1)")
-        assert second.execute("SELECT x FROM kanban_sync_outbox").fetchall() == [(1,)]
-    finally:
-        second.close()
-
-
-def test_fixture_trigger_cannot_exempt_a_production_writer(guarded):
-    _, conn = guarded
-    conn.executescript("CREATE TABLE domain (x); CREATE TRIGGER fixture AFTER INSERT ON domain "
-                       "BEGIN DELETE FROM kanban_sync_outbox; END;")
-    with pytest.raises(sqlite3.DatabaseError, match="authorized"):
-        writer('c.execute("INSERT INTO domain VALUES (1)")')(conn, "kanban_sync_outbox")
-
-
-@pytest.mark.parametrize("kind", ["corrupt", "locked", "non_utf8"])
-def test_connect_does_not_read_schema(tmp_path, kind):
-    path = tmp_path / "fixture.db"
-    raw_connect = sqlite3.dbapi2.connect
-    lock = None
-    if kind == "corrupt":
-        path.write_bytes(b"not a database")
-    else:
-        lock = raw_connect(path)
-        if kind == "locked":
-            lock.execute("CREATE TABLE ordinary (x)")
-            lock.commit()
-            lock.execute("BEGIN EXCLUSIVE")
-        else:
-            lock.executescript("PRAGMA writable_schema=ON; CREATE TABLE ordinary(x); "
-                               "UPDATE sqlite_master SET sql=CAST(x'ff' AS TEXT) WHERE name='ordinary';")
-            lock.commit()
-    connection = None
-    try:
-        connection = CustodyGuard().factory(raw_connect)(path, timeout=0)
-    finally:
-        if connection is not None:
-            connection.close()
-        if lock is not None:
-            lock.close()
-
-
-def test_guard_does_not_leave_a_reader_that_blocks_checkpoint(tmp_path):
-    connect = CustodyGuard().factory(sqlite3.dbapi2.connect)
-    conn = connect(tmp_path / "checkpoint.db")
-    try:
-        conn.execute("PRAGMA journal_mode=WAL").fetchall()
-        conn.executescript("CREATE TABLE domain(x); CREATE TRIGGER fixture AFTER INSERT ON domain "
-                           "BEGIN SELECT 1; END;")
-        conn.execute("INSERT INTO domain VALUES (1)")
-        conn.commit()
-        assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall() == [(0, 0, 0)]
-    finally:
-        conn.close()
-
-
-def test_successful_backup_retains_exact_trigger_creator(guarded):
-    guard, source = guarded
-    writer('c.executescript("CREATE TABLE domain(x); CREATE TRIGGER audited AFTER INSERT ON domain "'
-           ' + "BEGIN INSERT INTO " + table + " VALUES (2, 1); END;")',
-           "install_triggers", "hermes_cli.kanban_db_sync")(source, "kanban_sync_outbox")
-    source.commit()
-    target = sqlite3.connect(":memory:")
-    try:
-        source.backup(target)
-        target.execute("INSERT INTO domain VALUES (1)")
-        assert target.execute("SELECT x FROM kanban_sync_outbox WHERE id=2").fetchall() == [(1,)]
-        assert not guard.violations
-    finally:
-        target.close()
-
-
-@pytest.mark.parametrize("use_cursor", [False, True])
-def test_backup_trigger_adoption_never_reenters_sqlite_authorizer(use_cursor):
-    depths = []
-
-    class Observe(sqlite3.Connection):
-        def set_authorizer(self, callback):
-            depth = 0
-
-            def observed(*args):
-                nonlocal depth
-                depth += 1
-                depths.append(depth)
-                try:
-                    return callback(*args)
-                finally:
-                    depth -= 1
-
-            return super().set_authorizer(observed if callback else None)
-
-    connect = CustodyGuard().factory(sqlite3.dbapi2.connect)
-    source = connect(":memory:", factory=Observe)
-    target = connect(":memory:", factory=Observe)
-    try:
-        source.executescript("CREATE TABLE domain(x); CREATE TABLE kanban_sync_outbox(x); "
-                             "CREATE TRIGGER fixture AFTER INSERT ON domain "
-                             "BEGIN INSERT INTO kanban_sync_outbox VALUES(new.x); END;")
-        source.backup(target)
-        depths.clear()
-        executor = target.cursor() if use_cursor else target
-        executor.execute("INSERT INTO domain VALUES(7)")
-        assert target.execute("SELECT x FROM kanban_sync_outbox").fetchall() == [(7,)]
-        assert max(depths) == 1, "schema SQL must run outside the authorizer callback"
-        if use_cursor:
-            executor.close()
-    finally:
-        source.close()
-        target.close()
-
-
-def test_custom_connection_class_is_stable_across_opens():
-    class Custom(sqlite3.Connection):
-        pass
-
-    connect = CustodyGuard().factory(sqlite3.dbapi2.connect)
-    first = connect(":memory:", factory=Custom)
-    second = connect(":memory:", factory=Custom)
-    try:
-        assert type(first) is type(second)
-        assert isinstance(first, Custom)
-    finally:
-        first.close()
-        second.close()
-
-
-def test_connect_keeps_existing_explicit_unwrapped_probe_interface():
-    def wrapper(*args, **kwargs):
-        return sqlite3.dbapi2.connect(*args, **kwargs)
-
-    wrapper.__wrapped__ = sqlite3.dbapi2.connect
-    connect = CustodyGuard().factory(wrapper)
-    assert connect.__wrapped__ is wrapper.__wrapped__
+def test_reviewed_functions_exist_at_exact_qualified_identity():
+    """AST declarations only: no importing writers, SQL discovery or interception."""
+    root = Path(__file__).resolve().parents[2]
+    entries = set(inventory.SITES) | set(inventory.DYNAMIC_SITES)
+    for filename, function, _, _ in sorted(entries):
+        module = qualified(filename, "").rstrip(".")
+        path = root.joinpath(*module.split(".")).with_suffix(".py")
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        nodes = tree.body
+        for component in function.split("."):
+            matches = [node for node in nodes if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                       and node.name == component]
+            assert len(matches) == 1, qualified(filename, function)
+            nodes = matches[0].body
+        assert isinstance(matches[0], (ast.FunctionDef, ast.AsyncFunctionDef))
 
 
 def test_dispositions_and_original_candidates_remain_bounded():
