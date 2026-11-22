@@ -585,11 +585,11 @@ def test_unpublished_park_refusal_without_publish_refusal_is_unchanged(card, mon
 # --- endings carry the receipt; the ending always proceeds (S6) ------------------------------------------------------
 
 def _leaving_op(conn, tid, status):
-    from hermes_cli import kanban_sync_client as ksc
+    from hermes_cli import kanban_sync_client as ksc, kanban_sync_wire as wire_ops
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM kanban_sync_outbox WHERE table_name='tasks' AND row_uid=? AND state='pending' ORDER BY rowid",
         (tid,))]
-    ops = [ksc.translate(ksc._full_row_if_unseen(conn, r), "hlc") for r in rows]
+    ops = [wire_ops.translate(ksc._full_row_if_unseen(conn, r), "hlc") for r in rows]
     return [o for o in ops if o["fields"].get("status") == status]
 
 

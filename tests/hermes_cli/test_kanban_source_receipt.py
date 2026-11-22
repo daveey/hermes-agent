@@ -74,7 +74,8 @@ def _wire(conn, tid):
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM kanban_sync_outbox WHERE table_name = 'tasks' AND row_uid = ? AND state = 'pending' "
         "ORDER BY created_at, rowid", (tid,))]
-    return [ksc.translate(ksc._full_row_if_unseen(conn, r), "hlc") for r in rows]
+    from hermes_cli import kanban_sync_wire as wire_ops
+    return [wire_ops.translate(ksc._full_row_if_unseen(conn, r), "hlc") for r in rows]
 
 
 def _pending(conn) -> int:

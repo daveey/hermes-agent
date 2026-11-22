@@ -104,7 +104,8 @@ def _classify(op, before, evidence, parent_evidence, run_evidence=None):
         if _moot_release(op, before, evidence, run_evidence):
             return "moot", "authoritative run already ended and does not hold the card's lease; nothing to release"
         return "unresolved", "no proof the released run already ended off this card's lease"
-    fields = client._wire_fields(op["table_name"], json.loads(op["fields"]))
+    from hermes_cli.kanban_sync_wire import wire_fields
+    fields = wire_fields(op["table_name"], json.loads(op["fields"]))
     if reserved(fields.get("idempotency_key")) and fields["idempotency_key"] != (before["fields"] or {}).get("idempotency_key"):
         # The card's key was rewritten after this write was refused: equality of the *current* values proves nothing
         # about the original key. Only a verified supersession receipt (above) may retire it.

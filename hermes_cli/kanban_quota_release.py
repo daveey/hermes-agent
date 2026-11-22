@@ -57,6 +57,7 @@ def persist_wall(provider, until, *, now=None, path=None):
 def pending_task(conn, task_id):
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_neutral_effects'").fetchone():
         return False
+    from hermes_cli.kanban_failure_release import release_predicate
     return conn.execute("SELECT 1 FROM kanban_neutral_effects e JOIN kanban_failure_commands c USING(run_uid) "
-                        "WHERE c.task_id=? AND e.done=0 AND e.event_kind='rate_limited' LIMIT 1",
+                        f"WHERE c.task_id=? AND e.done=0 AND e.event_kind='rate_limited' AND {release_predicate(conn)} LIMIT 1",
                         (task_id,)).fetchone() is not None

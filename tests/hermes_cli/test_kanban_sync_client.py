@@ -14,7 +14,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_sync as sync
-from hermes_cli import kanban_sync_client as ksc
+from hermes_cli import kanban_sync_client as ksc, kanban_sync_wire as wire_ops
 from tests.hermes_cli import kanban_sync_support as support
 from tests.hermes_cli.kanban_sync_fake_board import FakeService
 
@@ -74,18 +74,18 @@ def _tables_digest(conn) -> str:
 # --- translate --------------------------------------------------------------------------------------------------
 
 def test_translate_upsert_import_and_delete_rows():
-    up = ksc.translate({"op_id": "0192-a", "table_name": "tasks", "row_uid": "t_1", "op": "upsert",
+    up = wire_ops.translate({"op_id": "0192-a", "table_name": "tasks", "row_uid": "t_1", "op": "upsert",
                         "fields": json.dumps({"title": "x", "status": "ready", "lease_holder": "me", "brand_new": 1})},
                        "0000000000001-0000-me")
     assert up == {"client_op_id": "0192-a", "table": "tasks", "uid": "t_1", "hlc": "0000000000001-0000-me",
                   "op": "upsert", "fields": {"title": "x", "status": "ready"}}  # local/undeclared columns stay home
-    imp = ksc.translate({"op_id": "0192-b", "table_name": "tasks", "row_uid": "t_1", "op": "import",
+    imp = wire_ops.translate({"op_id": "0192-b", "table_name": "tasks", "row_uid": "t_1", "op": "import",
                          "fields": {"title": "x"}}, "h")
     assert imp["op"] == "upsert" and imp["import"] is True
-    child = ksc.translate({"op_id": "0192-c", "table_name": "task_runs", "row_uid": "r-1", "op": "import",
+    child = wire_ops.translate({"op_id": "0192-c", "table_name": "task_runs", "row_uid": "r-1", "op": "import",
                            "fields": {"task_id": "t_1", "status": "done"}}, "h")
     assert child["op"] == "upsert" and "import" not in child
-    gone = ksc.translate({"op_id": "0192-d", "table_name": "task_links", "row_uid": "a>b", "op": "delete",
+    gone = wire_ops.translate({"op_id": "0192-d", "table_name": "task_links", "row_uid": "a>b", "op": "delete",
                           "fields": "{}"}, "h")
     assert gone == {"client_op_id": "0192-d", "table": "task_links", "uid": "a>b", "hlc": "h", "op": "delete"}
 
@@ -129,7 +129,7 @@ def test_transport_failure_keeps_rows_pending_and_counts_the_attempt(live, svc):
 
 def test_outbox_survives_a_restart_and_a_lost_ack_replays_idempotently(live, svc, kanban_home):
     tid = kb.create_task(live, title="replay", assignee="worker")
-    wire = [ksc.translate(r, f"{i + 1:013d}-0000-{ME}") for i, r in enumerate(_pending(live))]
+    wire = [wire_ops.translate(r, f"{i + 1:013d}-0000-{ME}") for i, r in enumerate(_pending(live))]
     svc.hub(ME).ops(BOARD, wire)  # the service applied them, but the answer never arrived
     live.close()
     conn = kbc.connect(kanban_home / "kanban.db")  # restart: the rows are still queued

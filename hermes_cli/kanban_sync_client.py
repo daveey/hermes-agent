@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_awaited_card_wake as acw  # parks naming a card a pull or rebuild moved re-probe now
-from hermes_cli import kanban_db_sync as sync
+from hermes_cli import kanban_db_sync as sync, kanban_sync_wire as wire_ops
 from hermes_cli import kanban_replica_lag as lag  # pushed rows the replica holds only after its next pull
 from hermes_cli import kanban_sync_backlog as backlog  # page budget per pull; boards the loop reruns at once
 from hermes_cli import kanban_sync_outbox_age as outbox_age  # oldest pending op: status, WARNING, defect card
@@ -553,26 +553,6 @@ def _next_hlc(conn: sqlite3.Connection, gateway: str) -> str:
 
 # --- push -----------------------------------------------------------------------------------------
 
-def _wire_fields(table: str, fields: dict) -> dict:
-    """Only the synced wire columns (a column a later migration added is not sent until it is declared)."""
-    allowed = {sync._wire_name(table, c) for c in sync.SYNCED_COLUMNS[table]}
-    allowed |= sync.VIRTUAL_WIRE_FIELDS.get(table, frozenset())
-    return {k: v for k, v in fields.items() if k in allowed}
-
-
-def translate(row: dict, hlc: str) -> dict:
-    """One outbox row -> one row op."""
-    op = {"client_op_id": row["op_id"], "table": row["table_name"], "uid": row["row_uid"], "hlc": hlc}
-    if row["op"] == "delete":
-        return {**op, "op": "delete"}
-    fields = row["fields"] if isinstance(row["fields"], dict) else json.loads(row["fields"])
-    if row["op"] == "release":
-        return {**fields, "client_op_id": row["op_id"], "op": "release", "task": row["row_uid"]}
-    out = {**op, "op": "upsert", "fields": _wire_fields(row["table_name"], fields)}
-    if row["op"] in ("import", "compat_import") and row["table_name"] == "tasks":
-        out["import"] = True
-    return out
-
 
 def _full_row_if_unseen(conn: sqlite3.Connection, row: dict) -> dict:
     """A task edit captured before the service has acknowledged the card (``sync_version`` NULL: it was created
@@ -652,7 +632,7 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
         saved = conn.execute("SELECT wire FROM kanban_sync_parent_envelopes WHERE task_id=?", (tid,)).fetchone()
         op = json.loads(saved[0]) if saved else {
             "client_op_id": sync.uuid7(), "table": "tasks", "uid": tid, "op": "upsert",
-            "fields": _wire_fields("tasks", _row_fields(conn, "tasks", task)), "hlc": _next_hlc(conn, gateway)}
+            "fields": wire_ops.wire_fields("tasks", _row_fields(conn, "tasks", task)), "hlc": _next_hlc(conn, gateway)}
         out.append((op, tid))
     return out
 
@@ -694,6 +674,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
     cache (one per round, shared by both sends)."""
     from hermes_cli.kanban_db_connect import write_txn
     from hermes_cli import kanban_sync_live_claim as _live_claim
+    from hermes_cli import kanban_retain_transport as retain_transport
     refuse_if_schema_ahead(conn)  # an older core would strip the newer columns; the ops stay pending [daveey]
     out, seen = PushResult(), {} if seen is None else seen
     for _ in range(max_batches):
@@ -702,6 +683,9 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                                                 limit=PUSH_BATCH, before_head=before_head)
         if not rows:
             break
+        command_batch = retain_transport.own_batch(rows)
+        retain_split, rows = len(command_batch) < len(rows), command_batch
+        retain_transport.before_send(conn, rows, hub, board)
         from hermes_cli.kanban_sync_status_origin import absorb_clock, capability
         origin_cap = capability(hub, board)
         with write_txn(conn):
@@ -710,8 +694,8 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
             from hermes_cli import kanban_sync_envelope as envelopes
             envelopes.prune_parents(conn)
             rows, _wire, parents = _within_batch(conn, rows, [{} for _r in rows], gateway)
-            wire = [envelopes.outbound(conn, r, lambda r=r: strip_stale_push(
-                conn, translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway))), supported=bool(origin_cap)) for r in rows]
+            wire = [retain_transport.outbound(conn, r) if r["op"] == "retain" else envelopes.outbound(conn, r, lambda r=r: strip_stale_push(
+                conn, wire_ops.translate(_full_row_if_unseen(conn, r), _next_hlc(conn, gateway))), supported=bool(origin_cap)) for r in rows]
             parents = [(envelopes.parent(conn, tid, lambda op=op: op, supported=bool(origin_cap)), tid) for op, tid in parents]
             wire = [op for op, _tid in parents] + wire
         try:
@@ -732,6 +716,10 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
                     row = rejected_parent(conn, parents, res)
                 if row is None:
                     continue
+                if row["op"] == "retain":
+                    result = retain_transport.record_result(conn, row, res)
+                    setattr(out, result, getattr(out, result) + 1)
+                    continue  # No generic transient remap, mirror edits or acknowledgement authority.
                 if status in ("applied", "merged"):
                     from hermes_cli.kanban_sync_omissions import acknowledge
                     sent = next(op.get('fields', {}) for op in wire if op['client_op_id'] == op_id)
@@ -783,7 +771,7 @@ def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primar
         if authoritative:
             cursor = (sync.sync_state(conn) or {}).get("cursor", 0)
             sync.apply_remote_changes(conn, authoritative, new_cursor=cursor, board=board)
-        if out.deferred or stopped or len(selected) < PUSH_BATCH:  # deferred rows retry next round, not in a hot loop
+        if out.deferred or stopped or (len(selected) < PUSH_BATCH and not retain_split):  # no hot deferred retry
             break
     return out
 

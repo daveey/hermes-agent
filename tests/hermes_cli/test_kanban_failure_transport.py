@@ -290,8 +290,9 @@ def test_queued_receipt_is_run_scoped_primary_only_and_cleans_up(live):
 
 
 def test_release_outbox_keeps_run_identity_and_policy():
+    from hermes_cli import kanban_sync_wire as wire_ops
     fields = {"run_uid": "run-fixture", "outcome": "crashed", "error": "exited 1",
               "force_trip": True, "failure_limit": 2}
-    wire = client.translate({"op_id": "failure-fixture", "table_name": "tasks",
+    wire = wire_ops.translate({"op_id": "failure-fixture", "table_name": "tasks",
                              "row_uid": "t_fixture", "op": "release", "fields": json.dumps(fields)}, "unused")
     assert wire == {"client_op_id": "failure-fixture", "op": "release", "task": "t_fixture", **fields}

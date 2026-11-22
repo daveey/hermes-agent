@@ -43,26 +43,49 @@ def route_dead_worker(conn: sqlite3.Connection, row, dead, sweep, pid: int) -> b
     return False
 
 
-def queued(conn: sqlite3.Connection, run_id: int | None) -> bool:
-    """Skip repeated observations/side effects while the authoritative feed lags."""
+def _command(conn: sqlite3.Connection, run_id: int | None):
+    """Read custody without migrating a legacy table from a read-only caller."""
     if sync.board_mode(conn) != "primary":
-        return False
+        return None
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_failure_commands'").fetchone():
-        return False
-    return conn.execute("SELECT 1 FROM kanban_failure_commands WHERE run_uid=?",
-                        (sync.run_uid(conn, run_id),)).fetchone() is not None
+        return None
+    return conn.execute("SELECT * FROM kanban_failure_commands WHERE run_uid=?",
+                        (sync.run_uid(conn, run_id),)).fetchone()
+
+
+def command_owned(conn: sqlite3.Connection, run_id: int | None) -> bool:
+    """Any first-wins command owns the run; observers must not race a retain."""
+    return _command(conn, run_id) is not None
+
+
+def queued(conn: sqlite3.Connection, run_id: int | None) -> bool:
+    """Legacy release-only predicate: retain custody is never failure/quota authority."""
+    row = _command(conn, run_id)
+    return row is not None and ("operation_kind" not in row.keys() or row["operation_kind"] in (None, "release"))
+
+
+def release_predicate(conn: sqlite3.Connection) -> str:
+    """SQL for existing joined readers (command alias c), including unmigrated NULL legacy rows."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(kanban_failure_commands)")}
+    return "(c.operation_kind IS NULL OR c.operation_kind='release')" if "operation_kind" in columns else "1"
 
 
 def _ensure_commands(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS kanban_failure_commands ("
                  "run_uid TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, "
                  "op_id TEXT NOT NULL)")
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(kanban_failure_commands)")}
+    for name in ("operation_kind", "request_uid", "event_uid", "request_json", "request_sha256",
+                 "delivery_state", "canonical_receipt_json"):
+        if name not in existing:
+            conn.execute(f"ALTER TABLE kanban_failure_commands ADD COLUMN {name} TEXT")
 
 
 def mark_sent(conn: sqlite3.Connection, run_uid: str, task_id: str) -> None:
     """Record that ``run_uid``'s release went to the Board synchronously (first wins: no later outbox release)."""
     _ensure_commands(conn)
-    conn.execute("INSERT OR IGNORE INTO kanban_failure_commands VALUES (?, ?, ?)", (run_uid, task_id, "sync"))
+    conn.execute("INSERT OR IGNORE INTO kanban_failure_commands (run_uid,task_id,op_id,operation_kind) "
+                 "VALUES (?, ?, ?, 'release')", (run_uid, task_id, "sync"))
 
 
 def queue(conn: sqlite3.Connection, task_id: str, run_id: int | None, *,
@@ -84,7 +107,8 @@ def queue(conn: sqlite3.Connection, task_id: str, run_id: int | None, *,
         raise ValueError("failure release requires a write transaction")
     _ensure_commands(conn)
     op_id = sync.uuid7()
-    inserted = conn.execute("INSERT OR IGNORE INTO kanban_failure_commands VALUES (?, ?, ?)",
+    inserted = conn.execute("INSERT OR IGNORE INTO kanban_failure_commands (run_uid,task_id,op_id,operation_kind) "
+                            "VALUES (?, ?, ?, 'release')",
                             (uid, task_id, op_id)).rowcount
     if inserted:
         fields = {**policy, "run_uid": uid, "outcome": outcome, "error": error[:500]}

@@ -24,6 +24,8 @@ def queue(conn, row, dead):
         return False
     release.queue(conn, row["id"], dead.run_id, outcome=reason,
                   error=dead.error_text, extra=dict(dead.event_payload))
+    if not release.queued(conn, dead.run_id):
+        return True  # Another command owns custody; never attach neutral side effects to retain.
     conn.execute("CREATE TABLE IF NOT EXISTS kanban_neutral_effects ("
                  "run_uid TEXT PRIMARY KEY REFERENCES kanban_failure_commands(run_uid) ON DELETE CASCADE, "
                  "event_kind TEXT NOT NULL, hook TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0)")
@@ -39,7 +41,8 @@ def pending(conn):
     """Read-only idle gate: avoid write transactions when there are no effects."""
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_neutral_effects'").fetchone():
         return False
-    return conn.execute("SELECT 1 FROM kanban_neutral_effects WHERE done=0 LIMIT 1").fetchone() is not None
+    return conn.execute("SELECT 1 FROM kanban_neutral_effects e JOIN kanban_failure_commands c USING(run_uid) "
+                        f"WHERE e.done=0 AND {release.release_predicate(conn)} LIMIT 1").fetchone() is not None
 
 
 def drain(conn):
@@ -56,7 +59,7 @@ def drain(conn):
         for row in conn.execute("SELECT e.*, c.task_id, r.id AS run_id, r.outcome FROM kanban_neutral_effects e "
                                 "JOIN kanban_failure_commands c USING(run_uid) "
                                 "JOIN task_runs r ON r.uid=e.run_uid AND r.task_id=c.task_id "
-                                "WHERE e.done=0 AND r.ended_at IS NOT NULL").fetchall():
+                                f"WHERE e.done=0 AND r.ended_at IS NOT NULL AND {release.release_predicate(conn)}").fetchall():
             hook = json.loads(row["hook"])
             expired = conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND run_id=? AND kind='reclaimed'",
                                    (row["task_id"], row["run_id"])).fetchone()

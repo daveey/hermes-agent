@@ -15,7 +15,7 @@ def promote_task(
     System callers omit the precondition. Manual boundaries check unread comments
     under the write lock; dry runs validate without writing anything.
     """
-    from hermes_cli.kanban_refusal_receipt import restricted
+    from hermes_cli.kanban_spend_decision import execution_restricted as restricted
     if restricted(conn, task_id):
         return False, 'Provider safety restriction has no supported execution release'
     cur_status = _kb._task_status(conn, task_id)

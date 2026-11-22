@@ -71,7 +71,7 @@ def session_called_kanban_terminal(messages: Iterable[dict] | None) -> bool:
             return True
         if role == "tool" and str(msg.get("name") or "") in _TERMINAL_KANBAN_TOOLS:
             return True
-        if role == "tool" and msg.get("name") == "kanban_contain":
+        if role == "tool" and msg.get("name") in {"kanban_contain", "kanban_retain"}:
             # Attempted stops and descendant stops do not end the actor's run.
             result = msg.get("content")
             if isinstance(result, str):

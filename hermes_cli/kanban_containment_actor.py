@@ -20,7 +20,8 @@ class Actor:
     run_uid: str
 
 
-def current_actor(conn: sqlite3.Connection) -> Actor:
+def bound_actor(conn: sqlite3.Connection) -> Actor:
+    """Authenticate original admitted identity; grants no new mutation authority."""
     from agent.delegation_context import owned_kanban_task
     from gateway.session_context import get_session_env
     task = owned_kanban_task()
@@ -56,5 +57,10 @@ def current_actor(conn: sqlite3.Connection) -> Actor:
         from hermes_cli.kanban_containment_connections import bootstrap
         bootstrap(conn)  # local-only; durable synced state never manufactures a lease UID
         uid = conn.execute("SELECT uid FROM task_runs WHERE id=?", (int(run_id),)).fetchone()[0]
-    _actor(conn, task, uid)
     return Actor(task, uid)
+
+
+def current_actor(conn: sqlite3.Connection) -> Actor:
+    actor = bound_actor(conn)
+    _actor(conn, actor.task, actor.run_uid)
+    return actor

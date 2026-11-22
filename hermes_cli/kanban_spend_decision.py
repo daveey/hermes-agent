@@ -22,11 +22,13 @@ def ensure_producer(conn, task_id: str) -> None:
         payload = json.loads(stop["payload"] or "{}")
         from hermes_cli.kanban_refusal_receipt import restricted
         safety = restricted(conn, task_id)
+        scope = execution_restricted(conn, task_id) and not safety
         prior = json.loads(previous[0]) if previous else None
-        if prior and (not safety or prior.get('cause') == 'safety_refusal'):
+        cause = 'safety_refusal' if safety else 'scope_stopped' if scope else None
+        if prior and (cause is None or prior.get('cause') == cause):
             return
-        if safety:
-            payload['cause'] = 'safety_refusal'
+        if cause:
+            payload['cause'] = cause
         route = prior['producer'] if prior else producer(conn, task_id, payload.get('reason') or 'Spend budget reached')
         kb._append_event(conn, task_id, NOTICE, {**payload, "episode": episode, "producer": route})
 
@@ -46,25 +48,43 @@ def pending_episode(conn, task_id: str):
     from hermes_cli.kanban_sync_divergence import _event_order
     events = [dict(r) for r in conn.execute(
         "SELECT * FROM task_events WHERE task_id=? AND kind IN "
-        "('spend_budget_triaged','decision_hold_restricted','promoted_manual','archived')", (task_id,))]
+        "('spend_budget_triaged','decision_hold_restricted','decision_retained','promoted_manual','archived')", (task_id,))]
     events.sort(key=_event_order, reverse=True)
     for event in events:
         try:
             payload = json.loads(event['payload'] or '{}')
         except (TypeError, ValueError):
             continue
-        if (isinstance(payload, dict) and payload.get('cause') == 'safety_refusal'
+        disposition = payload.get('disposition') if isinstance(payload, dict) else None
+        if event['kind'] == 'decision_retained' and isinstance(disposition, dict) and disposition.get('reason') == 'scope_stopped':
+            return next((e for e in events if e['kind'] == EVENT and (e.get('uid') or str(e['id'])) == payload.get('episode_uid')), event)
+        if (isinstance(payload, dict) and payload.get('cause') in {'safety_refusal', 'scope_stopped'}
                 and event['kind'] in (EVENT, 'decision_hold_restricted')):
             return next((e for e in events if e['kind'] == EVENT
                          and (e.get('uid') or str(e['id'])) == payload.get('episode')),
                         event) if event['kind'] != EVENT else event
-    ordinary = [e for e in events if e['kind'] != 'decision_hold_restricted']
+    ordinary = [e for e in events if e['kind'] not in ('decision_hold_restricted', 'decision_retained')]
     return ordinary[0] if ordinary and ordinary[0]['kind'] == EVENT else None
 
 
 def pending(conn, task_id: str) -> bool:
     """Budget promotion/archive never clear an attributable safety restriction."""
     return pending_episode(conn, task_id) is not None
+
+
+def execution_restricted(conn, task_id: str) -> bool:
+    return restricted_since(conn, task_id) is not None
+
+
+def restricted_since(conn, task_id: str) -> int | None:
+    """One monotone restriction predicate for release fencing and accounting."""
+    row = conn.execute("SELECT MIN(COALESCE(created_at,0)) FROM (SELECT created_at FROM task_events WHERE task_id=? AND kind IN "
+                        "('spend_budget_triaged','decision_hold_restricted') AND json_valid(payload) "
+                        "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.cause') END "
+                        "IN ('safety_refusal','scope_stopped') UNION ALL SELECT created_at FROM task_events WHERE task_id=? "
+                        "AND kind='decision_retained' AND json_valid(payload) AND CASE WHEN json_valid(payload) "
+                        "THEN json_extract(payload,'$.disposition.reason') END='scope_stopped')", (task_id, task_id)).fetchone()
+    return row[0]
 
 
 def unblock_refusal(conn, task_id: str) -> str | None:
@@ -74,11 +94,15 @@ def unblock_refusal(conn, task_id: str) -> str | None:
     from hermes_cli.kanban_refusal_receipt import restricted
     if restricted(conn, task_id):
         return 'Provider safety restriction retained; no supported execution release. Owning supervisor must resolve the scope/authority boundary without rerunning refused work.'
+    if execution_restricted(conn, task_id):
+        return 'Scope stopped; no supported execution release. Owning supervisor must resolve the scope/authority boundary.'
     return (f"cannot unblock {task_id}: spend-budget decision pending; split or re-scope the work, "
             f"then use `hermes kanban promote {task_id} --reason <what changed>`, or archive it")
 
 
 def notice(payload: dict) -> str:
+    if payload.get('cause') == 'scope_stopped':
+        return 'Scope stopped without execution authority. Record the administrative decision only; no generic promotion, comment, timer or review releases it.'
     if payload.get('cause') == 'safety_refusal':
         return ('Provider safety refusal retained. There is no supported execution release; '
                 'ordinary promotion, review, comments and timers are not clearance. '
@@ -93,6 +117,12 @@ def producer(conn, task_id: str, note: str) -> dict:
     """Inside the stop transaction: one chat-notice route OR one supervisor, never both."""
     from hermes_cli.kanban_db_notify import is_headless_session
     from hermes_cli.profiles import get_active_profile_name
+    import json
+    role = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='administrative_decision' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    if role:
+        root = json.loads(role[0])
+        return {'kind': 'unavailable', 'root_task': root['root_task'], 'root_episode': root['root_episode'],
+                'error': 'administrative_owner_exhausted'}
 
     def bind(platform, chat_id):
         conn.execute(
@@ -127,9 +157,10 @@ def producer(conn, task_id: str, note: str) -> dict:
     episode = conn.execute("SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0]
     from hermes_cli.kanban_refusal_receipt import restricted
     safety = restricted(conn, task_id)
-    guidance = notice({'reason': note, **({'cause': 'safety_refusal'} if safety else {})})
+    stopped = execution_restricted(conn, task_id)
+    guidance = notice({'reason': note, **({'cause': 'safety_refusal' if safety else 'scope_stopped'} if stopped else {})})
     action = ('\n\nRecord the administrative scope/authority decision without execution release. '
-              'Do not run the original work here.' if safety else
+              'Do not run the original work here. Administrative acceptance is decision recorded; authority unavailable, not root-work completion.' if stopped else
               f"\n\nRecord the decision on {task_id}; use `hermes kanban promote {task_id} --reason '<what changed>'` "
               'only after re-scoping or justifying further spend, or archive it. Do not run the original work here.')
     sup = kb.create_task(
@@ -139,4 +170,7 @@ def producer(conn, task_id: str, note: str) -> dict:
              + forwarded_text(note) + "\n\n" + guidance + action,
         assignee=_supervisor_profile(), created_by="kanban-spend-budget", workspace_kind="scratch",
         idempotency_key=f"spend-budget-decision:{task_id}:{episode}", tenant=task.tenant)
+    stop = pending_episode(conn, task_id)
+    kb._append_event(conn, sup, 'administrative_decision', {'role': 'administrative_decision',
+                     'root_task': task_id, 'root_episode': (stop.get('uid') or str(stop['id'])) if stop else None})
     return {"kind": "supervisor", "task_id": sup}

@@ -12,6 +12,18 @@ from __future__ import annotations
 import sqlite3
 
 
+def settle_retained(conn: sqlite3.Connection, task_id: str, run_uid: str) -> bool:
+    """Exact run/claim CAS also works when the feed already cleared current_run_id."""
+    from hermes_cli.kanban_retain_transport import confirmed_command
+    run = conn.execute('SELECT id,claim_lock FROM task_runs WHERE task_id=? AND uid=?', (task_id, run_uid)).fetchone()
+    if not run or not run['claim_lock'] or not confirmed_command(conn, task_id, run_uid):
+        return False
+    cur = conn.execute("UPDATE tasks SET claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,worker_started_at=NULL,last_heartbeat_at=NULL "
+                       "WHERE id=? AND status='triage' AND claim_lock=? AND (current_run_id IS NULL OR current_run_id=?)",
+                       (task_id, run['claim_lock'], run['id']))
+    return cur.rowcount == 1
+
+
 def release_on_feed(conn: sqlite3.Connection, task_id: str, old, new_status) -> bool:
     """Called inside the feed apply, after the task row update. ``old`` is the local row before it.
 
@@ -27,8 +39,15 @@ def release_on_feed(conn: sqlite3.Connection, task_id: str, old, new_status) -> 
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_failure_commands'").fetchone():
         return False
     from hermes_cli import kanban_db_sync as sync
+    from hermes_cli.kanban_failure_release import queued
     uid = sync.run_uid(conn, run_id)
-    if not uid or conn.execute("SELECT 1 FROM kanban_failure_commands WHERE run_uid = ? AND task_id = ?",
+    from hermes_cli.kanban_retain_transport import confirmed_command
+    if uid and new_status == 'triage' and confirmed_command(conn, task_id, uid):
+        cur = conn.execute("UPDATE tasks SET claim_lock=NULL,claim_expires=NULL,worker_pid=NULL,worker_started_at=NULL,last_heartbeat_at=NULL "
+                           "WHERE id=? AND status=? AND claim_lock IS ? AND worker_pid IS ? AND worker_started_at IS ?",
+                           (task_id, new_status, lock, old['worker_pid'], old['worker_started_at']))
+        return cur.rowcount == 1
+    if not uid or not queued(conn, run_id) or conn.execute("SELECT 1 FROM kanban_failure_commands WHERE run_uid = ? AND task_id = ?",
                                (uid, task_id)).fetchone() is None:
         return False
     pid = old["worker_pid"]

@@ -97,6 +97,7 @@ def test_ready_entry_path_floor(conn, kind):
 # explicit audit even when a writer uses a bound status parameter, different SQL
 # whitespace, or a bare (rather than facade-qualified) _append_event call.
 NON_ENTRY_WRITER_EVENTS = {
+    "decision_retained",  # stop-only custody, never ready admission
     "continuation_exhausted", "blocked", "spend_budget_held", "gave_up",
     "dependency_wait", "linked", "claim_rejected", "completed", "review_requested",
     "descendant_invalidated", "status", "scheduled", "assigned", "supervisor_escalated",

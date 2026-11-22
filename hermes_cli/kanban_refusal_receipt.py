@@ -77,7 +77,7 @@ def stop_failed_refusal(conn, row, proof) -> bool:
         (task, run, row['claim_lock'], row['worker_pid'], row['worker_started_at'])), run_id=run)
     if changed.rowcount != 1:
         return True  # lost CAS: never book a competing failure
-    payload = {**diagnostic, 'cause': 'safety_refusal',
+    payload = {**diagnostic, 'cause': 'safety_refusal', 'accounting_boundary': False,
                'reason': 'Provider safety refusal; execution release unavailable',
                'release_authority': 'unavailable',
                'next_step': 'Owning supervisor must resolve the scope/authority boundary; do not rerun refused work'}

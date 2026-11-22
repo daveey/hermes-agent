@@ -194,7 +194,8 @@ def test_fenced_field_refusal_strips_and_resends_without_omission(conn, field):
         conn.execute("DELETE FROM kanban_sync_outbox")
         conn.execute(f"UPDATE tasks SET {field} = 'dir', priority = 5 WHERE id = ?", (tid,))
     row = dict(conn.execute("SELECT * FROM kanban_sync_outbox WHERE row_uid = ? AND op = 'upsert'", (tid,)).fetchone())
-    wire = ksc.translate(ksc._full_row_if_unseen(conn, row), "hlc")
+    from hermes_cli import kanban_sync_wire as wire_ops
+    wire = wire_ops.translate(ksc._full_row_if_unseen(conn, row), "hlc")
     with kbc.write_txn(conn):
         out = compat.enqueue_retry(conn, row, wire, {"reason": "forbidden_field",
                                                      "detail": f"not writable on tasks: {field}"})
@@ -440,7 +441,8 @@ def test_primary_refusal_returns_unused_grant_without_competing_status(conn, cod
         assert ended["outcome"] == "released" and json.loads(ended["metadata"])["unused_grant"] is True
         pending = [dict(r) for r in conn.execute(
             "SELECT * FROM kanban_sync_outbox WHERE table_name='tasks' AND op='upsert' ORDER BY rowid")]
-        wire = [ksc.translate(ksc._full_row_if_unseen(conn, r), "hlc") for r in pending]
+        from hermes_cli import kanban_sync_wire as wire_ops
+        wire = [wire_ops.translate(ksc._full_row_if_unseen(conn, r), "hlc") for r in pending]
         assert any(op["fields"].get("status") == "blocked" for op in wire)
         assert all(op["op"] == "upsert" for op in wire)  # Board rows.ts, NOT TASK_OPS.block
         assert kb.unblock_task(conn, tid)

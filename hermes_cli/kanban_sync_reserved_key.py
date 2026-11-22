@@ -368,9 +368,9 @@ def _receipt_flaw(op: dict, before: dict, evidence: dict, receipt: dict) -> Opti
 
 def _task_proof(op: dict, before: dict, evidence: dict, receipt: dict) -> Optional[str]:
     """The original task op retires only when the Board's card is the corrected one and every *other* wire field agrees."""
-    from hermes_cli.kanban_sync_client import _wire_fields
+    from hermes_cli.kanban_sync_wire import wire_fields
     remote, local = evidence["row"], before.get("row") or {}
-    sent = _wire_fields("tasks", json.loads(op["fields"] or "{}"))
+    sent = wire_fields("tasks", json.loads(op["fields"] or "{}"))
     if sent.get("idempotency_key", receipt["old_key"]) != receipt["old_key"]:
         return "rejected op carries a key other than the receipt's old key"
     current = before.get("fields") or {}

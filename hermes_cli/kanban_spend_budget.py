@@ -182,11 +182,16 @@ def usage_fields(agent) -> dict:
 
 
 def _window_start(conn: sqlite3.Connection, task_id: str, cut: int) -> int:
+    from hermes_cli.kanban_spend_decision import restricted_since
+    restriction = restricted_since(conn, task_id)
+    if restriction is not None:
+        cut = min(cut, restriction)  # cap reset authority only; spend() still counts later run usage
     marks = ",".join("?" for _ in RESET_OUTCOMES)
     handed = conn.execute(
         f"SELECT MAX(ended_at) FROM task_runs WHERE task_id = ? AND outcome IN ({marks}) AND ended_at < ?",
         (task_id, *RESET_OUTCOMES, cut)).fetchone()[0]
-    triaged = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind = ? AND created_at < ?",
+    triaged = conn.execute("SELECT MAX(created_at) FROM task_events WHERE task_id = ? AND kind = ? AND created_at < ? "
+                           "AND (NOT json_valid(payload) OR json_extract(payload, '$.accounting_boundary') IS NOT 0)",
                            (task_id, EVENT, cut)).fetchone()[0]
     # A human answer (typed by a person, or a chat's verified relay of one -- the no-progress budget's rule)
     # re-authorizes the card: without it, answering a card that spent its budget while blocked sent it straight

@@ -81,7 +81,8 @@ def _wire(conn, tid):
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM kanban_sync_outbox WHERE table_name = 'tasks' AND row_uid = ? AND state = 'pending' "
         "ORDER BY created_at, rowid", (tid,))]
-    return [ksc.translate(ksc._full_row_if_unseen(conn, r), "hlc") for r in rows]
+    from hermes_cli import kanban_sync_wire as wire_ops
+    return [wire_ops.translate(ksc._full_row_if_unseen(conn, r), "hlc") for r in rows]
 
 
 def _pending(conn) -> int:
@@ -264,7 +265,8 @@ def test_old_board_multi_field_refusal_strips_virtual(conn):
         assert kb.complete_task(conn, tid, result="ok", summary="done", expected_run_id=run_id)
     row = dict(conn.execute("SELECT * FROM kanban_sync_outbox WHERE table_name='tasks' AND row_uid=? "
                             "AND fields LIKE '%source_receipt%'", (tid,)).fetchone())
-    wire = ksc.translate(ksc._full_row_if_unseen(conn, row), "hlc")
+    from hermes_cli import kanban_sync_wire as wire_ops
+    wire = wire_ops.translate(ksc._full_row_if_unseen(conn, row), "hlc")
     detail = "not writable on tasks: result, source_receipt"
     with kbc.write_txn(conn):
         out = compat.enqueue_retry(conn, row, wire, {"reason": "forbidden_field", "detail": detail})
@@ -307,6 +309,7 @@ _STATUS_IN = re.compile(r"(?<![\w.])status\s+IN\s*\(([^)]*)\)", re.IGNORECASE)
 WRAPPED = {
     # Stop-only reclaim still preserves staged source custody with the real wrapper.
     "hermes_cli/kanban_refusal_receipt.py::stop_failed_refusal",
+    "hermes_cli/kanban_retain.py::_local",  # voluntary own-run stop, real source wrapper
     "hermes_cli/kanban_db.py::complete_task",
     "hermes_cli/kanban_dependency_review.py::apply_block_update",  # block_task
     "hermes_cli/kanban_timed_park.py::park",

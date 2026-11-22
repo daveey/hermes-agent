@@ -96,7 +96,7 @@ def test_later_owner_restart_cannot_hide_refusal(board, monkeypatch, observer):
 
 @pytest.mark.parametrize('observer', [False, True])
 def test_primary_refusal_queues_exact_release_without_local_closure(live, kanban_home, svc, monkeypatch, observer):
-    from hermes_cli.kanban_sync_client import translate
+    from hermes_cli.kanban_sync_wire import translate
     from hermes_cli.kanban_failure_release import queued
 
     monkeypatch.setenv('HERMES_KANBAN_CRASH_GRACE_SECONDS', '0')

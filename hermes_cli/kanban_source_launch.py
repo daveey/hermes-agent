@@ -219,7 +219,7 @@ def release_with_receipt(conn: sqlite3.Connection, task_id: str, run_id: int, re
     uid = sync.run_uid(conn, run_id)
     if not uid:
         raise ValueError("a source release needs the run's portable identity")
-    if release.queued(conn, run_id):
+    if release.command_owned(conn, run_id):
         return "taken"
     fields = {**policy, "outcome": outcome, "error": error[:500], "source_receipt": receipt}
     try:
