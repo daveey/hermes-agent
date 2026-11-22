@@ -55,6 +55,7 @@ from hermes_cli import kanban_sync_refusal as refusal  # one board's Containment
 from hermes_cli.kanban_containment_lifecycle import ContainmentRefused
 from hermes_cli.kanban_sync_connections import connection, connection_scope, invalidate
 from hermes_cli.kanban_sync_hub_routes import HubRoutesMixin
+from hermes_cli.kanban_replay_sender import PushResult, push
 from hermes_cli.kanban_sync_compat import REASSESSMENT_REFUSALS, TRANSIENT_REASONS, transient_rejection  # re-exported compatibility seam
 from hermes_cli.kanban_sync_hub_transport import peer_closed as _peer_closed
 from hermes_cli.kanban_sync_hub_transport import BoundedRedirects, BoundedResponseError, read_response
@@ -618,15 +619,6 @@ def _unacked_parents(conn: sqlite3.Connection, rows: list[dict], gateway: str) -
     return out
 
 
-@dataclass
-class PushResult:
-    sent: int = 0
-    applied: int = 0
-    merged: int = 0
-    rejected: int = 0
-    deferred: int = 0
-
-
 def _within_batch(conn: sqlite3.Connection, rows: list[dict], wire: list[dict],
                   gateway: str) -> tuple[list[dict], list[dict], list[tuple[dict, str]]]:
     """``(rows, wire, parents)`` trimmed so parents + rows fit one request. The Board refuses more than PUSH_BATCH
@@ -642,7 +634,7 @@ def _within_batch(conn: sqlite3.Connection, rows: list[dict], wire: list[dict],
     return rows, wire, parents
 
 
-def push(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primary: bool,
+def _push_legacy(conn: sqlite3.Connection, hub: Hub, board: str, gateway: str, *, primary: bool,
          max_batches: int = MAX_BATCHES_PER_ROUND, before_head: bool = False,
          seen: Optional[dict] = None) -> PushResult:
     """Drain pending outbox rows in FIFO batches. A transport failure leaves them pending (retried next round).
