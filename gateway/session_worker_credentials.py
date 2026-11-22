@@ -161,13 +161,24 @@ def hydrate_credentials(frame, rpc):
 
 
 def tool_environment(authority, policy, config):
-    """Only credential requirements of tools selected by the child's frozen policy."""
+    """Only explicitly selected tool credentials; platform delivery stays with the owner."""
     from tools.registry import registry
     from toolsets import resolve_toolset
+    from hermes_cli.toolset_validation import parse_platform_toolsets_value
     from tools.environments.local_env_policy import _is_hermes_internal_secret
-    selected = {name for toolset in policy.current_toolsets(config) for name in resolve_toolset(toolset)}
+    request = json.loads(policy.request_json)
+    platform = 'acp' if policy.source == 'acp' else 'cli'
+    explicit = request.get('toolsets') if 'toolsets' in request else (
+        (config.get('platform_toolsets') or {}).get(platform))
+    explicit = parse_platform_toolsets_value(explicit)
+    if not explicit:
+        return {}
+    permitted = {name for toolset in explicit for name in resolve_toolset(toolset)}
+    selected = {name for toolset in policy.current_toolsets(config) for name in resolve_toolset(toolset)} & permitted
     names = {name for entry in registry.get_all_entries() if entry.name in selected
-             for name in entry.requires_env if isinstance(name, str) and not _is_hermes_internal_secret(name)}
+             for name in entry.requires_env if isinstance(name, str) and not _is_hermes_internal_secret(name)
+             and not name.upper().startswith(('SLACK_', 'TELEGRAM_'))
+             and not name.upper().endswith(('_BOT_TOKEN', '_APP_TOKEN'))}
     values = _profile_values(authority, policy)
     return {name: values[name] for name in names if values.get(name) is not None}
 

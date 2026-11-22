@@ -65,7 +65,9 @@ def test_declared_tool_credentials_are_owner_hydrated_not_bootstrapped(tmp_path,
     import toolsets
     _, (authority, ref, row, policy, scope) = assignment(tmp_path, monkeypatch)
     values = {'FIRECRAWL_API_KEY': 'synthetic-declared-tool-key', 'GH_TOKEN': 'synthetic-undeclared-key'}
-    policy = replace(policy, ignore_user_config=False)
+    config = json.loads(policy.config_json)
+    config['platform_toolsets'] = {'cli': ['web']}
+    policy = replace(policy, ignore_user_config=False, config_json=json.dumps(config))
     monkeypatch.setattr('tools.environments.local._is_routed_home', lambda home: routed)
     monkeypatch.setattr('tui_gateway.launch_profile_policy.launch_secret_scope', lambda home: values)
     own = {'FIRECRAWL_API_KEY': 'synthetic-routed-tool-key'} if routed else {}
