@@ -120,7 +120,7 @@ def execution_refusal(conn, task_id: str) -> str | None:
     """Cause-specific diagnostic only; never converts a scope stop into clearance."""
     from hermes_cli.kanban_refusal_receipt import restricted
     if restricted(conn, task_id):
-        return 'Provider safety restriction retained; no supported execution release. Owning supervisor must resolve the scope/authority boundary without rerunning refused work.'
+        return 'Provider safety restriction retained; no supported execution release. A budget decision is not clearance. Owning supervisor must resolve the scope/authority boundary without rerunning refused work.'
     if execution_restricted(conn, task_id):
         return 'Scope stopped; no supported execution release. Owning supervisor must resolve the scope/authority boundary.'
     return None
