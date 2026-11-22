@@ -24,6 +24,7 @@ def test_reads_exact_authenticated_record(config, monkeypatch):
     def open_request(req, timeout):
         assert req.full_url == 'https://example.com/hub/v2/sync/requests/request-one'
         assert req.method == 'GET' and req.headers['Authorization'] == 'Bearer fixture-key'
+        assert req.get_header('User-agent') == 'hermes-card-answer-readback/1.0'
         assert timeout == 10
         return io.BytesIO(json.dumps({'request': {'id': 'request-one', 'state': 'done'}}).encode())
     monkeypatch.setattr(reader._opener, 'open', open_request)
@@ -55,7 +56,7 @@ def test_malformed_or_wrong_record_refuses(config, raw, monkeypatch):
         reader.read('request-one')
 
 
-@pytest.mark.parametrize('status', [302, 401, 404, 503])
+@pytest.mark.parametrize('status', [302, 401, 403, 404, 503])
 def test_http_errors_have_no_sensitive_details(config, status, monkeypatch):
     reader = transport.Records()
     def fail(*a, **kw):

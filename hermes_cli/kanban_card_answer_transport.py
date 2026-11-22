@@ -41,7 +41,8 @@ class Records:
         if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,199}', request_id):
             raise AnswerRefused('courier_request_id_invalid')
         request = urllib.request.Request(self.url + '/v2/sync/requests/' + urllib.parse.quote(request_id, safe=''),
-                                         headers={'Authorization': 'Bearer ' + self._key}, method='GET')
+                                         headers={'Authorization': 'Bearer ' + self._key,
+                                                  'User-Agent': 'hermes-card-answer-readback/1.0'}, method='GET')
         try:
             with self._opener.open(request, timeout=10) as response:
                 raw = response.read(1024 * 1024 + 1)
