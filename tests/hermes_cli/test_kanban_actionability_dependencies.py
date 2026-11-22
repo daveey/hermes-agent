@@ -5,10 +5,10 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_spend_budget as budget
-from tests.hermes_cli import test_kanban_pacing as pacing
+from tests.hermes_cli import test_kanban_containment_actor as support
 from tests.hermes_cli import test_kanban_spend_budget as spend
 
-board = pacing.board
+board = support.board
 
 
 def restrict(conn, tid):
