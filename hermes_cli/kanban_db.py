@@ -1930,7 +1930,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
                 continue
             # A spend stop leaves only on a recorded decision (kanban_spend_decision.pending). The triage clause
             # above would read an older ``gave_up`` as the stop: promote here, re-triage in the hold, every tick.
-            if row["status"] == "triage" and spend_decision.pending(conn, task_id):
+            if spend_decision.pending(conn, task_id):
                 continue
             cur_status = _graph.clear_found_parents(conn, row, remote=remote)  # parent_missing block, parents back: todo
             if cur_status == row["status"] and recovery_held(conn, row, failure_limit):

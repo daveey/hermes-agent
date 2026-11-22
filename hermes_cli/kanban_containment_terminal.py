@@ -119,8 +119,24 @@ def archive_local(conn, task, *, comment=None, precondition=None, via=None, even
 
 
 def parent_status_sql(conn, alias="", *, table="tasks"):
-    """Legacy schemas lack the marker; ordinary archived parents remain successful."""
-    prefix = alias + "." if alias else ""
-    if "containment_episode" not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+    """Effective dependency state, never terminal success for an execution-restricted scope.
+
+    Both full and incremental foreign mirrors use this expression. Legacy minimal
+    schemas may lack history/marker columns; do not reference nonexistent columns.
+    Ordinary archives remain successful; administrative archive does not clear a stop.
+    """
+    prefix = (alias or table) + "."
+    clauses = []
+    if "containment_episode" in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+        clauses.append(f"({prefix}status='archived' AND {prefix}containment_episode IS NOT NULL)")
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(task_events)")}
+    if {"task_id", "kind", "payload"} <= columns:
+        live = " AND de.deleted_at IS NULL" if "deleted_at" in columns else ""
+        clauses.append(f"EXISTS (SELECT 1 FROM task_events de WHERE de.task_id={prefix}id "
+                       "AND de.kind IN ('spend_budget_triaged','decision_hold_restricted') "
+                       "AND CASE WHEN json_valid(de.payload) THEN json_extract(de.payload,'$.cause') END "
+                       f"IN ('safety_refusal','scope_stopped'){live})")
+    if not clauses:
         return prefix + "status"
-    return f"CASE WHEN {prefix}status='archived' AND {prefix}containment_episode IS NOT NULL THEN 'triage' ELSE {prefix}status END"
+    return (f"CASE WHEN {prefix}status IN ('done','archived') AND ({' OR '.join(clauses)}) "
+            f"THEN 'triage' ELSE {prefix}status END")
