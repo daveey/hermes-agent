@@ -90,6 +90,7 @@ import {
 } from './projects-move-paths'
 import { renameProjectSessions } from './projects-rename-sessions'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature } from './projects-repo-discovery'
+import { $mainSidebarDraftCwd } from './sidebar-draft'
 
 export {
   type RepoDiscoveryPolicy,
@@ -226,13 +227,9 @@ export function resolveNewSessionCwd(profile?: string): string {
   return workspaceCwdForNewSession(owner)
 }
 
-// Entering a project moves the live workspace only when main holds a fresh
-// draft: the draft has no folder of its own yet, and the project root is where
-// its first message should run. A stored conversation keeps its cwd — entering
-// is a scope switch, and moving the workspace under the selected chat re-pointed
-// Files/Review and the composer's Git context at the project while the
-// transcript stayed on the old session (#72772). The next new chat still lands
-// in the project through resolveNewSessionCwd.
+// Entering a project moves only a fresh main draft, never a stored chat's
+// workspace. A stored conversation keeps its cwd: entering is a scope switch
+// (#72772). The next new chat uses the project via resolveNewSessionCwd.
 export function followEnteredProjectCwd(cwd: string): void {
   const target = cwd.trim()
 
@@ -241,6 +238,7 @@ export function followEnteredProjectCwd(cwd: string): void {
   }
 
   setCurrentCwd(target)
+  $mainSidebarDraftCwd.set(target)
 }
 
 // The project (explicit or auto) that owns `cwd`, by longest path match across

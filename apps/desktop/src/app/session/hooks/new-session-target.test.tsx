@@ -20,6 +20,7 @@ import { createClientSessionState } from '@/lib/chat-runtime'
 import { $connectionsRegistry } from '@/store/connections'
 import { $defaultProfileRoute, setDefaultProfile } from '@/store/default-profile'
 import { activeGatewayConnectionId, requestGatewayForAgent } from '@/store/gateway'
+import { wipeSessionListsForGatewaySwitch } from '@/store/gateway-switch'
 import { $notifications, clearNotifications } from '@/store/notifications'
 import {
   $activeGatewayProfile,
@@ -30,6 +31,7 @@ import {
   ensureGatewayAgent
 } from '@/store/profile'
 import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
+import { $projects, followEnteredProjectCwd } from '@/store/projects'
 import { $sessions, setFreshDraftReady, setSelectedStoredSessionId } from '@/store/session'
 import { $unlistedSessionOwnerRows } from '@/store/session'
 import {
@@ -39,9 +41,12 @@ import {
   setConnection,
   setSessions
 } from '@/store/session'
+import { setCurrentCwd } from '@/store/session'
 import { $sessionTiles, closeAllOpenSessionTiles } from '@/store/session-states'
+import { $mainSidebarDraftCwd } from '@/store/sidebar-draft'
 import { makeSessionInfo } from '@/test/session-info'
 
+import { useCwdActions } from './use-cwd-actions'
 import { useSessionActions } from './use-session-actions'
 
 // [daveey] "New sessions on <gateway>": the saved default route (device
@@ -150,6 +155,65 @@ afterEach(() => {
 })
 
 describe('new-session gateway target', () => {
+  it.each(['enter project', 'pick folder', 'switch gateway'])(
+    'keeps the main draft placement current after %s',
+    async operation => {
+      const { result } = mountActions()
+
+      const cwdActions = renderHook(() =>
+        useCwdActions({
+          activeSessionIdRef: { current: null },
+          requestGateway: vi.fn(async () => ({ cwd: '/repo/normalized' })) as never
+        })
+      )
+
+      act(() => {
+        $projects.set([{ id: 'p1', name: 'Project', folders: [{ path: '/repo' }] }] as never)
+        $layoutTree.set(group(['workspace'], { active: 'workspace', id: 'draft-placement' }))
+        $activeTreeGroup.set('draft-placement')
+        setSelectedStoredSessionId(null)
+        setCurrentCwd('')
+        result.current.startFreshSessionDraft({ workspaceTarget: operation === 'switch gateway' ? '/repo' : null })
+      })
+      const view = render(
+        <MemoryRouter>
+          <SidebarDraftRows projectId="p1" />
+          <SidebarDraftRows projectId={NO_PROJECT_ID} />
+        </MemoryRouter>
+      )
+      const placement = () =>
+        view.container.querySelector('[data-sidebar-draft-id]')?.getAttribute('data-sidebar-draft-project')
+      expect(placement()).toBe(operation === 'switch gateway' ? 'p1' : NO_PROJECT_ID)
+
+      if (operation === 'enter project') {
+        act(() => followEnteredProjectCwd('/repo'))
+      } else if (operation === 'pick folder') {
+        await act(() => cwdActions.result.current.changeSessionCwd('/repo'))
+      } else {
+        act(() => wipeSessionListsForGatewaySwitch())
+      }
+
+      expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(1)
+      expect(placement()).toBe(operation === 'switch gateway' ? NO_PROJECT_ID : 'p1')
+      expect($mainSidebarDraftCwd.get()).toBe(
+        operation === 'switch gateway' ? '' : operation === 'pick folder' ? '/repo/normalized' : '/repo'
+      )
+
+      if (operation !== 'switch gateway') {
+        await act(() => result.current.createBackendSessionForSend('First send'))
+        const row = $sessions.get().find(row => row.id === 'created-stored')!
+        expect(sessionBucketId(row, $projects.get())).toBe('p1')
+        expect(row.cwd).toBe(operation === 'pick folder' ? '/repo/normalized' : '/repo')
+        expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(0)
+      }
+
+      act(() => {
+        $projects.set([])
+        setFreshDraftReady(false)
+      })
+    }
+  )
+
   it.each(['main', 'tab'])(
     'replaces a real %s draft with exactly one hub Home row before any tree refresh',
     async kind => {
@@ -203,8 +267,9 @@ describe('new-session gateway target', () => {
         $projectScope.set(NO_PROJECT_ID)
       })
 
-      if (kind === 'main') {act(() => result.current.startFreshSessionDraft({ workspaceTarget: null }))}
-      else {
+      if (kind === 'main') {
+        act(() => result.current.startFreshSessionDraft({ workspaceTarget: null }))
+      } else {
         await act(() => result.current.openNewSessionTile('center', { cwd: null, listed: false, route: HUB }))
         // The shell's pane registry adopts a newly created tile asynchronously.
         act(() => {
@@ -231,8 +296,9 @@ describe('new-session gateway target', () => {
       expect(painted()[0].hasAttribute('data-sidebar-draft-id')).toBe(true)
       expect($sessions.get().map(row => row.id)).toEqual(['older'])
 
-      if (kind === 'main') {await act(() => result.current.createBackendSessionForSend('First send'))}
-      else {
+      if (kind === 'main') {
+        await act(() => result.current.createBackendSessionForSend('First send'))
+      } else {
         const { listTileSessionRow } = await import('@/app/chat/session-tile-actions')
         act(() => {
           listTileSessionRow({
