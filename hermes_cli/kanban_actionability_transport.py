@@ -197,6 +197,13 @@ def confirm(conn, hub, board: str, op_id: str) -> dict:
         dest = receipt.get('destination')
         if not isinstance(dest, dict) or dest.get('kind') not in ('task', 'chat', 'unavailable'):
             raise ValueError('actionability destination unconfirmed')
+        owner = wire['payload']['owner']
+        target = owner['refs'][0] if dest['kind'] == 'task' and owner['kind'] == 'task' and len(owner['refs']) == 1 else wire['task']
+        outcome = 'route_unavailable' if dest['kind'] == 'unavailable' else 'recorded'
+        if (set(dest) != {'task_id', 'kind'} or dest['task_id'] != target or receipt['outcome'] != outcome
+                or dest['kind'] == 'task' and owner['kind'] != 'task'
+                or dest['kind'] == 'chat' and owner['kind'] == 'task'):
+            raise ValueError('actionability destination does not match frozen owner')
         notice, notice_p = _evidence(hub, board, wire['notice_uid'], dest.get('task_id'), 'decision_requested', gateway)
         expected = {'root_task': wire['task'], 'root_episode': wire['payload']['facts']['root_episode'],
                     'contract_key': wire['payload']['contract_key'], 'contract_event_uid': wire['contract_uid'],
