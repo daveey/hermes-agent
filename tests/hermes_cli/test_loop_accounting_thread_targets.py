@@ -323,20 +323,40 @@ def test_lifetime_reset_clears_both_target_maps(clear):
     assert la._target_exited == {}
 
 
-def test_thread_start_overhead_is_small():
+@pytest.mark.parametrize("scheduling_gap", [False, True])
+def test_thread_start_overhead_is_small(monkeypatch, scheduling_gap):
     """One wrapped thread lifecycle adds two lock rounds: pin the added cost under 50 µs per thread."""
+    if scheduling_gap:
+        original_join = threading.Thread.join
+        joined = 0
+        idle = threading.Event()
+
+        def delayed_join(thread, *args, **kwargs):
+            nonlocal joined
+            result = original_join(thread, *args, **kwargs)
+            joined += 1
+            # Give each enabled sample an idle scheduling gap after the first
+            # lifecycle. Waiting adds wall time, not instrumentation CPU work.
+            if joined > 900 and (joined - 901) % 300 == 0:
+                idle.wait(0.1)
+            return result
+
+        monkeypatch.setattr(threading.Thread, "join", delayed_join)
+
     def noop():
         pass
 
     def per_thread(n: int) -> float:
         best = float("inf")
         for _ in range(3):
-            t0 = time.perf_counter()
+            # Account for the parent and spawned threads, excluding idle time
+            # and descheduling that are not work added by instrumentation.
+            t0 = time.process_time()
             for _ in range(n):
                 th = threading.Thread(target=noop)
                 th.start()
                 th.join()
-            best = min(best, (time.perf_counter() - t0) / n)
+            best = min(best, (time.process_time() - t0) / n)
         return best
 
     base = per_thread(300)
