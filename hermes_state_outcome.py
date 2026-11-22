@@ -24,6 +24,7 @@ import json
 import logging
 import sqlite3
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional
 
@@ -323,7 +324,27 @@ def _gateway_running(home: Path) -> bool:
     return get_running_pid(home / "gateway.pid", cleanup_stale=False) is not None
 
 
+# [daveey] One card read per refresh attempt: the explanation and the canonical status reduce the same
+# answer (or the same failure), not a cold projection followed by a second, stale display read.
+_card_read: ContextVar[Optional[dict]] = ContextVar("session_outcome_card_read", default=None)
+
+
 def _card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
+    memo = _card_read.get()
+    if memo is None:
+        return _read_card_items(ids)
+    key = tuple(ids)
+    if key not in memo:
+        try:
+            memo[key] = _read_card_items(ids)
+        except Exception as exc:  # health: allow BLE001 -- replayed to every reader of this attempt
+            memo[key] = exc
+    if isinstance(memo[key], Exception):
+        raise memo[key]
+    return memo[key]
+
+
+def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
     """(decision items, waits) from the cards these chats created or shepherd: a card parked on a
     validated ``human_request`` is a decision, every other open card is a wait."""
     from hermes_cli.kanban_open_asks import card_is_open_human_ask

@@ -282,12 +282,17 @@ def refresh(db: Any, sid: str, trigger: str, concluding: frozenset[str]) -> dict
     for _attempt in range(CAS_ATTEMPTS):
         tip = so._tip(db, sid)
         row = so._row(db, tip)
-        derived = so._derive(db, tip, concluding=concluding)
-        if row is None:
-            return derived
-        raw, fence = row.get("outcome_json"), _user_fence(db, tip)
-        stored = so._parse(raw)
-        derived = {**derived, "status": canonical_status(db, tip, stored, trigger=trigger, concluding=concluding)}
+        shared = so._card_read.set({})  # the explanation and the status reduce one card read
+        try:
+            derived = so._derive(db, tip, concluding=concluding)
+            if row is None:
+                return derived
+            raw, fence = row.get("outcome_json"), _user_fence(db, tip)
+            stored = so._parse(raw)
+            derived = {**derived,
+                       "status": canonical_status(db, tip, stored, trigger=trigger, concluding=concluding)}
+        finally:
+            so._card_read.reset(shared)
         if so._same(stored, derived):
             # Unchanged is only an answer while it is still what is stored for the same newest request.
             if (so._row(db, tip) or {}).get("outcome_json") == raw and _user_fence(db, tip) == fence:

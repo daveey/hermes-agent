@@ -391,3 +391,41 @@ def test_exhausted_fence_leaves_the_successor_in_place(db, monkeypatch):
     out = so.refresh_outcome("chat", "manual", db=db)
     assert count[0] == snapshot.CAS_ATTEMPTS
     assert out == before == so.get_outcome("chat", db=db)
+
+
+def test_one_refresh_reads_the_board_once_for_explanation_and_status(db, board, monkeypatch):
+    """A second card read in the same refresh is a warm display read: it answers stale and starts a
+    background projection, so the status would be reduced from different data than the explanation."""
+    say(db, "user", "do it")
+    say(db, "assistant", "Done.", finish_reason="stop")
+    add_card(board, "t_open", "running")
+    reads, background = [], []
+    real = ksa.session_outcome_tasks
+    monkeypatch.setattr(ksa, "session_outcome_tasks", lambda *a, **kw: reads.append(a) or real(*a, **kw))
+    monkeypatch.setattr(ksa, "_refresh_links_in_background", background.append)
+
+    first = refresh(db)
+    assert len(reads) == 1 and background == []
+    assert first["presentation"]["stripe"] == "waiting"
+
+    set_card(board, "t_open", "done")  # the next refresh reads again: nothing is remembered across refreshes
+    second = refresh(db)
+    assert len(reads) == 2
+    assert second["presentation"]["stripe"] == "done"
+
+
+def test_a_failed_board_read_is_replayed_not_reread_as_empty(db, monkeypatch):
+    say(db, "user", "do it")
+    say(db, "assistant", "Done.", finish_reason="stop")
+    calls = []
+
+    def broken(*a, **kw):
+        calls.append(a)
+        raise OSError("board unreadable")
+
+    monkeypatch.setattr(ksa, "session_outcome_tasks", broken)
+    status = refresh(db)
+    assert len(calls) == 1
+    assert status["presentation"]["stripe"] != "done"
+    assert status["reason"] == "source_unknown"
+    assert any(reason.startswith("cards:") for reason in status["coverage"]["reasons"])
