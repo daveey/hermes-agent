@@ -162,6 +162,24 @@ def test_origin_tool_comment_reaches_owner_only_as_agent(kanban_home, world, mon
             assert kb.get_task(owner, tid).status == 'running'  # no unblock/status authority
 
 
+def test_courier_holds_real_drain_lease_and_refuses_closed_latch(bound, courier, monkeypatch, tmp_path):
+    from hermes_cli import worker_drain_fence as fence
+    from tests.hermes_cli.test_worker_drain_fence import IDENT, req
+    fence.install_state(tmp_path, IDENT)
+    monkeypatch.setattr(fence, 'admit', lambda purpose: fence.acquire_lease(tmp_path, IDENT, purpose))
+    original = comments.subprocess.run
+    def observed(*args, **kwargs):
+        assert fence.busy_leases(tmp_path) == 1
+        return original(*args, **kwargs)
+    monkeypatch.setattr(comments.subprocess, 'run', observed)
+    comments.send(lookup(bound), session='s_current', body='B')
+    assert fence.busy_leases(tmp_path) == 0
+    fence.apply_request(tmp_path, IDENT, req('establish', 1))
+    with pytest.raises(fence.DrainRefused):
+        comments.send(lookup(bound), session='s_current', body='C')
+    assert len(courier[1]) == 1
+
+
 def test_oversize_text_is_refused_not_truncated(bound, courier):
     with pytest.raises(ValueError, match='origin_comment_too_long'):
         comments.send(lookup(bound), session='s_current', body='x' * 8001)

@@ -505,6 +505,11 @@
    "routed": 0,
    "status": "pending"
   },
+  "hermes_cli/kanban_origin_comment.py": {
+   "direct": 0,
+   "routed": 2,
+   "status": "fenced"
+  },
   "hermes_cli/kanban_placement.py": {
    "direct": 2,
    "routed": 0,

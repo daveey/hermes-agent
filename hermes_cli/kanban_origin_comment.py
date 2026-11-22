@@ -13,6 +13,8 @@ import subprocess
 from contextlib import closing
 from pathlib import Path
 
+from hermes_cli.worker_drain_fence import fenced
+
 
 def bound_owner(path: Path, *, task_id: str, board: str, gateway: str,
                 profile: str, session: str, resolve_session) -> dict | None:
@@ -23,7 +25,8 @@ def bound_owner(path: Path, *, task_id: str, board: str, gateway: str,
     except FileNotFoundError:
         return None
     matches = {}
-    with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+    # Origin-local ledger, not a Kanban board connection.
+    with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:  # noqa: kanban-lockguard
         for key, digest, raw, task_raw in db.execute(
                 'SELECT binding_id,binding_hash,binding_json,task_json FROM origin_obligations WHERE released=0'):
             binding = json.loads(raw)
@@ -46,6 +49,7 @@ def bound_owner(path: Path, *, task_id: str, board: str, gateway: str,
     return next(iter(matches.values()), None)
 
 
+@fenced('kanban.origin_comment')
 def send(route: dict, *, session: str, body: str) -> dict:
     """Queue exactly once. Submission is not application; only owner outcomes confirm it."""
     from hermes_cli import kanban_capability_registry as reg
