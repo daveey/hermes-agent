@@ -20,6 +20,14 @@ PREFIX = 'Historical run instruction (superseded and not active): '
 _scan_cursor: dict[str, str] = {}
 
 
+def owns_policy(conn, task_id):
+    """Legacy unsynced files are local; identity-incomplete synced files fail closed."""
+    if own_gateway(conn) is None and conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_sync_state'").fetchone():
+        return False
+    return not foreign_copy(conn, task_id)
+
+
 def retire_selectors(conn, row):
     """CAS the exact stored selector triple, leaving concurrent supported edits intact."""
     old = tuple(row[field] for field in FIELDS)
@@ -29,7 +37,7 @@ def retire_selectors(conn, row):
     if old == new:
         return False
     with kb.write_txn(conn):
-        if foreign_copy(conn, row['id']):
+        if not owns_policy(conn, row['id']):
             return False
         cur = conn.execute(
             "UPDATE tasks SET model_override=?,provider_override=?,model_pin_mandatory=? "
@@ -79,11 +87,16 @@ def sweep(conn, *, limit=64):
     key = str(_main_db_file(conn))
     own = own_gateway(conn)
     owner_sql = ' AND (created_on IS NULL OR created_on=?)' if own else ''
-    rows = conn.execute(
+    query = (
         "SELECT id,body,model_override,provider_override,model_pin_mandatory FROM tasks "
         "WHERE status IN ('todo','triage','ready','scheduled','blocked','running','review')" + owner_sql
-        + ' ORDER BY (id <= ?), id LIMIT ?',
-        (*((own,) if own else ()), _scan_cursor.get(key, ''), max(0, min(limit, 256)))).fetchall()
+        + ' AND id {} ? ORDER BY id LIMIT ?')
+    size = max(0, min(limit, 256))
+    cursor = _scan_cursor.get(key, '')
+    params = (own,) if own else ()
+    rows = conn.execute(query.format('>'), (*params, cursor, size)).fetchall()
+    if len(rows) < size:
+        rows += conn.execute(query.format('<='), (*params, cursor, size - len(rows))).fetchall()
     changed = 0
     for row in rows:
         _scan_cursor[key] = row['id']

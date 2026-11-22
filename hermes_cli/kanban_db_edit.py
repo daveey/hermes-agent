@@ -14,8 +14,8 @@ _UNSET = object()
 def _edit_snapshot_matches(conn, task_id, status, expected_body, home_open_only):
     """Recheck maintenance custody and body CAS under edit_task's write transaction."""
     if home_open_only:
-        from hermes_cli.kanban_wake_check import foreign_copy
-        if status in ('done', 'archived') or foreign_copy(conn, task_id):
+        from hermes_cli.kanban_model_retirement import owns_policy
+        if status in ('done', 'archived') or not owns_policy(conn, task_id):
             return False
     if expected_body is not _UNSET:
         stored = conn.execute('SELECT body FROM tasks WHERE id=?', (task_id,)).fetchone()
@@ -102,7 +102,9 @@ def edit_task(
     ``priority_reason`` is given, and :class:`PriorityRaisePacedRefused` when it is above the stored
     value of a ready card the LLM pacing governor holds; the check runs inside the write transaction, so a
     stale read can't slip past it. ``priority_reason`` lands in the ``reprioritized``
-    event payload. [daveey]
+    event payload. Maintenance callers can supply ``expected_body`` for an
+    exact stored-body CAS, ``home_open_only`` to recheck nonterminal home custody,
+    and ``audit_comment`` to append an explanation in the same transaction. [daveey]
     """
     from hermes_cli.kanban_model_neutral import validate_text
     validate_text(title, body)

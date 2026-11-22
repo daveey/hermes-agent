@@ -94,6 +94,63 @@ def test_body_exact_line_roundtrip_and_supported_edit(board, monkeypatch):
         assert sweep(conn) == 0
 
 
+@pytest.mark.parametrize('field,new', [('model_override', 'different-model'), ('provider_override', 'auto'), ('model_pin_mandatory', None)])
+def test_each_exact_selector_cas_atom(board, field, new):
+    from hermes_cli.kanban_model_retirement import retire_selectors
+    with kbc.connect() as conn:
+        tid = seed(conn)
+        snapshot = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+        conn.execute(f'UPDATE tasks SET {field}=? WHERE id=?', (new, tid))
+        assert not retire_selectors(conn, snapshot)
+        assert conn.execute(f'SELECT {field} FROM tasks WHERE id=?', (tid,)).fetchone()[0] == new
+
+
+def test_second_connection_wins_at_transaction_boundary(board, monkeypatch):
+    from contextlib import contextmanager
+    from hermes_cli.kanban_model_retirement import retire_selectors
+    with kbc.connect() as conn, kbc.connect() as other:
+        tid = seed(conn)
+        snapshot = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+        original = kb.write_txn
+        injected = []
+        @contextmanager
+        def race(c, **kwargs):
+            if c is conn and not injected:
+                injected.append(True)
+                kb.set_model_override(other, tid, 'class:deep', 'auto')
+            with original(c, **kwargs):
+                yield
+        monkeypatch.setattr(kb, 'write_txn', race)
+        assert not retire_selectors(conn, snapshot)
+        assert injected
+        assert kb.get_task(conn, tid).model_override == 'class:deep'
+
+
+def test_notify_observes_committed_row_and_audit(board, monkeypatch):
+    import sqlite3
+    with kbc.connect() as conn:
+        tid = seed(conn, body='require_model: true')
+        seen = []
+        def observe(c, task, fields, **kwargs):
+            assert task == tid
+            assert not c.in_transaction
+            with sqlite3.connect('file:' + str(kbc._main_db_file(c)) + '?mode=ro', uri=True) as reader:
+                assert reader.execute('SELECT model_override FROM tasks WHERE id=?', (task,)).fetchone()[0] is None
+                assert reader.execute('SELECT COUNT(*) FROM task_comments WHERE task_id=?', (task,)).fetchone()[0] >= 1
+            seen.append(tuple(fields))
+        monkeypatch.setattr(kb, 'notify_task_updated', observe)
+        assert sweep(conn) == 1
+        assert len(seen) == 2
+
+
+@pytest.mark.parametrize('ending', ['\n', '\r\n', '\r', '\v', '\f', '\x1c', '\x1d', '\x1e', '\x85', '\u2028', '\u2029', ''])
+def test_all_body_line_endings_and_preexisting_evidence(ending):
+    from hermes_cli.kanban_model_retirement import retired_body
+    accepted = PREFIX + json.dumps('Use only grok-4.6.') + '\nuntouched λ  \n'
+    source = accepted + 'Use only grok-4.6. λ  ' + ending
+    assert retired_body(source) == accepted + PREFIX + json.dumps('Use only grok-4.6. λ  ', ensure_ascii=False) + ending
+
+
 def test_cas_concurrent_set_model_wins(board):
     from hermes_cli.kanban_model_retirement import retire_selectors
     with kbc.connect() as conn:

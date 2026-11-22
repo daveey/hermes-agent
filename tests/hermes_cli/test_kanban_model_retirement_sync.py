@@ -56,6 +56,19 @@ def test_policy_field_clocks_and_replica_readback(live):
     assert svc.board('default')['seq'] == head
 
 
+def test_synced_missing_identity_fails_closed(live):
+    conn, _path, _svc = live
+    tid = kb.create_task(conn, title='ordinary work', assignee='default')
+    conn.execute("UPDATE tasks SET model_override='grok-4.6',body='require_model: true' WHERE id=?", (tid,))
+    snapshot = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (tid,)).fetchone())
+    conn.execute('DELETE FROM kanban_sync_state')
+    assert retirement.sweep(conn) == 0
+    assert not retirement.retire_selectors(conn, snapshot)
+    assert not retirement.retire_body(conn, snapshot)
+    assert kb.get_task(conn, tid).model_override == 'grok-4.6'
+    assert kb.get_task(conn, tid).body == 'require_model: true'
+
+
 def test_foreign_copy_and_changed_ownership_are_not_repaired(live):
     conn, _path, _svc = live
     tid = kb.create_task(conn, title='ordinary work', assignee='default')
