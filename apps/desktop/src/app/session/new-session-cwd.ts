@@ -5,7 +5,6 @@ import { $activeGatewayProfile, $newChatProfile } from '@/store/profile'
 import { $projectScope } from '@/store/project-scope'
 import { $projectTree, resolveNewSessionCwd } from '@/store/projects'
 import { $configuredDefaultProjectDir, $connection, $currentCwd, $newChatWorkspaceTarget } from '@/store/session'
-import { $focusedSessionIsTile } from '@/store/session-focus'
 import { $sessionTiles } from '@/store/session-states'
 import { $mainSidebarDraftCwd, $sidebarBorrowedTileCwd, $sidebarBorrowedTileId } from '@/store/sidebar-draft'
 
@@ -17,7 +16,8 @@ export function mainSidebarDisplayCwd(): string {
   const borrowedCwd = $sidebarBorrowedTileCwd.get()
   const borrowedId = $sidebarBorrowedTileId.get()
   const tileOpen = $sessionTiles.get().some(tile => tile.storedSessionId === borrowedId)
-  const borrowed = $focusedSessionIsTile.get() || (tileOpen && borrowedCwd !== null && currentCwd === borrowedCwd)
+  // Focus alone is not borrowing: right splits and cwd-less center tiles never capture it.
+  const borrowed = tileOpen && borrowedCwd !== null && currentCwd === borrowedCwd
   const displayCwd = borrowed ? $mainSidebarDraftCwd.get() || '' : currentCwd
 
   return target === null || (target === undefined && scope === NO_PROJECT_ID)
@@ -42,7 +42,6 @@ export function useMainSidebarDisplayCwd(): string {
   useStore($mainSidebarDraftCwd)
   useStore($sidebarBorrowedTileCwd)
   useStore($sidebarBorrowedTileId)
-  useStore($focusedSessionIsTile)
   useStore($sessionTiles)
 
   return mainSidebarDisplayCwd()

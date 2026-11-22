@@ -34,6 +34,7 @@ import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
 import { $projects, followEnteredProjectCwd, resolveNewSessionCwd } from '@/store/projects'
 import {
   $currentCwd,
+  $freshDraftKey,
   $newChatWorkspaceTarget,
   $sessions,
   setFreshDraftReady,
@@ -173,6 +174,59 @@ afterEach(() => {
 })
 
 describe('new-session gateway target', () => {
+  it.each([
+    { dir: 'right' as const, cwd: '/repo' },
+    { dir: 'center' as const, cwd: null }
+  ])('does not borrow the main draft cwd for a $dir tile with cwd $cwd', async ({ dir, cwd }) => {
+    const { result } = mountActions()
+    await act(() => setDefaultProfile(HUB))
+    act(() => {
+      $projects.set([{ id: 'p1', name: 'Project', folders: [{ path: '/repo' }] }] as never)
+      $layoutTree.set(group(['workspace'], { active: 'workspace', id: 'uncaptured' }))
+      $activeTreeGroup.set('uncaptured')
+      setSelectedStoredSessionId(null)
+      setCurrentCwd('')
+      result.current.startFreshSessionDraft()
+      followEnteredProjectCwd('/repo')
+    })
+
+    const view = render(
+      <MemoryRouter>
+        <SidebarDraftRows projectId="p1" />
+        <SidebarDraftRows projectId={NO_PROJECT_ID} />
+      </MemoryRouter>
+    )
+
+    vi.mocked(requestGatewayForAgent).mockResolvedValueOnce({
+      session_id: 'tile-runtime',
+      stored_session_id: 'tile-stored',
+      info: { cwd }
+    })
+    await act(() => result.current.openNewSessionTile(dir, { cwd, listed: false, route: HUB }))
+    // Focus the opened split too; right splits need not take focus on creation.
+    act(() => {
+      $layoutTree.set(
+        group(['workspace', 'session-tile:tile-stored'], { active: 'session-tile:tile-stored', id: 'uncaptured' })
+      )
+      $activeTreeGroup.set('uncaptured')
+    })
+    expect
+      .soft(
+        view.container
+          .querySelector(`[data-sidebar-draft-id="${$freshDraftKey.get()}"]`)
+          ?.getAttribute('data-sidebar-draft-project')
+      )
+      .toBe('p1')
+    const expected = prePrSendCwd()
+    expect(expected).toBe('/repo')
+    await act(() => result.current.createBackendSessionForSend('First send'))
+    const call = vi.mocked(requestGatewayForAgent).mock.calls.findLast(call => call[2] === 'session.create')!
+    expect(call[3]?.cwd).toBe(expected)
+    act(() => {
+      $projects.set([])
+      closeAllOpenSessionTiles('workspace')
+    })
+  })
   it.each(['new-chat profile', 'active profile'])('rebuckets a mounted row after only the %s changes', async input => {
     const { browserDefaultProjectDirKey } = await import('@/lib/browser-settings')
     const { result } = mountActions()
@@ -185,12 +239,14 @@ describe('new-session gateway target', () => {
       document.documentElement.dataset.hermesDesktopHost = 'browser'
       localStorage.setItem(browserDefaultProjectDirKey('/', 'beta'), '/repo')
     })
+
     const view = render(
       <MemoryRouter>
         <SidebarDraftRows projectId="p1" />
         <SidebarDraftRows projectId={NO_PROJECT_ID} />
       </MemoryRouter>
     )
+
     try {
       expect(
         view.container.querySelector('[data-sidebar-draft-project]')?.getAttribute('data-sidebar-draft-project')
@@ -229,12 +285,14 @@ describe('new-session gateway target', () => {
       $currentCwd.set('')
       $newChatWorkspaceTarget.set(undefined)
     })
+
     const view = render(
       <MemoryRouter>
         <SidebarDraftRows projectId="p1" />
         <SidebarDraftRows projectId={NO_PROJECT_ID} />
       </MemoryRouter>
     )
+
     expect(
       view.container.querySelector('[data-sidebar-draft-project]')?.getAttribute('data-sidebar-draft-project')
     ).toBe(NO_PROJECT_ID)
@@ -337,7 +395,7 @@ describe('new-session gateway target', () => {
     'detached',
     'Home scope',
     'tile workspace'
-  ])('keeps draft placement identical to the real first send after %s', async operation => {
+  ])('preserves first-send cwd and display placement policy after %s', async operation => {
     const { startWorkspaceSession } = await import('@/app/session/workspace-session-target')
     const { ensureDefaultWorkspaceCwd, setNewChatWorkspaceTarget } = await import('@/store/session')
     const { result } = mountActions()
@@ -415,6 +473,9 @@ describe('new-session gateway target', () => {
       })
     }
 
+    // A positively captured center tile temporarily paints Files' cwd into ambient
+    // state. Display preserves main's /repo snapshot; send intentionally keeps its
+    // pre-existing ambient /other-project behavior. All other cases agree.
     const expectedCwd = operation === 'detached' || operation === 'Home scope' ? '' : '/repo'
     const expectedBucket = expectedCwd ? 'p1' : NO_PROJECT_ID
     expect(placement()).toBe(expectedBucket)

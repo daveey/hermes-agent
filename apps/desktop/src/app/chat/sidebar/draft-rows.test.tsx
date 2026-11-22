@@ -29,6 +29,7 @@ vi.mock('@/store/composer', () => ({
 vi.mock('@/store/projects', () => ({ $projectTree: atom([]), $projects: atom([]), resolveNewSessionCwd: () => '' }))
 vi.mock('react-router', () => ({ useLocation: () => ({ pathname: '/' }) }))
 
+import { captureMainDraftBeforeTile } from '@/app/session/new-session-cwd'
 import { $draftTitles } from '@/store/composer'
 import { $currentCwd } from '@/store/session'
 import {
@@ -40,7 +41,7 @@ import {
 } from '@/store/session'
 import { $focusedSessionIsTile, $focusedStoredSessionId } from '@/store/session-focus'
 import { $sessionTiles } from '@/store/session-states'
-import { $mainSidebarDraftCwd } from '@/store/sidebar-draft'
+import { $mainSidebarDraftCwd, $sidebarBorrowedTileCwd, $sidebarBorrowedTileId } from '@/store/sidebar-draft'
 
 import { SidebarDraftRows } from './draft-rows'
 
@@ -63,6 +64,8 @@ beforeEach(() => {
   focusedTile.set(false)
   $currentCwd.set('')
   $mainSidebarDraftCwd.set('')
+  $sidebarBorrowedTileCwd.set(null)
+  $sidebarBorrowedTileId.set(null)
   $sessions.set([])
   $unlistedSessionOwnerRows.set([])
   $sessionTiles.set([])
@@ -77,6 +80,8 @@ describe('client-only sidebar drafts', () => {
     const { rerender } = render(view({ projectId: '__no_project__' }))
     expect(rows()).toHaveLength(2)
     act(() => {
+      captureMainDraftBeforeTile('center', '/other-project', 'project-tile')
+      $sessionTiles.set([{ storedSessionId: 'project-tile', runtimeId: 'tile-runtime' }])
       focusedId.set('project-tile')
       focusedTile.set(true)
       $currentCwd.set('/other-project')
