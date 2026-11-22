@@ -191,6 +191,43 @@ def test_notification_sweep_defers_lifecycle_busy_close(home):
     assert _fds_under(directory) == []
 
 
+def test_busy_removed_board_does_not_stop_release_of_the_next(home):
+    """One lifecycle-busy removed board must not stop the sweep of the boards behind it."""
+    from hermes_cli import kanban_generation as generation
+
+    busy, idle = _board("busy"), _board("idle")
+    for path in (busy, idle):
+        notification_idle.board_signature(path, "chat")
+    busy_dir, idle_dir = _remove(busy), _remove(idle)
+    ready, release = threading.Event(), threading.Event()
+    errors = []
+
+    def hold():
+        try:
+            with generation.lifecycle_access(busy, timeout=5):
+                ready.set()
+                assert release.wait(10)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert ready.wait(5)
+        # Call the observer's own sweep: gone.sweep() swallows BoardLifecycleBusy itself and would hide a
+        # regression in release_gone's per-board handling.
+        assert notification_reader.release_gone() == 1
+        assert _fds_under(idle_dir) == []
+        assert _fds_under(busy_dir)
+        assert list(notification_reader._registry) == [str(busy)]
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive() and not errors
+    assert gone.sweep() == 1
+    assert _fds_under(busy_dir) == []
+
+
 def test_notification_sweep_rechecks_path_after_acquiring_custody(home, monkeypatch):
     from hermes_cli import kanban_sync_board_watch as watch_module
 
