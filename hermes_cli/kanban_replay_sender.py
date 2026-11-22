@@ -47,12 +47,14 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
     remote = hub._call('GET', root + 'inspect')['slot']
     reconcile(local, remote)  # inspect before authenticated full-state session CAS
     identity = dict(board_incarnation=local['board_incarnation'], journal_id=local['journal_id'])
+    expected = dict(remote, session=str(int(remote['session']) + 1))
     remote = hub._call('POST', root + 'session', dict(identity, expected=remote))['slot']
+    if remote != expected:
+        raise ValueError('session readback mismatch')
+    reconcile(local, remote)
 
-    def record(verdict):
+    def source():
         pending = journal.snapshot(conn)['pending']
-        if verdict['client_op_id'] != pending['op_id']:
-            raise ValueError('source verdict identity mismatch')
         row = conn.execute('SELECT * FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],)).fetchone()
         if row is None:
             raise ValueError('issued source custody missing')
@@ -60,7 +62,23 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
         del wire['replay']
         if row['wire_json'] is None or json.loads(row['wire_json']) != wire:
             raise ValueError('issued source custody changed')
+        if (row['row_uid'] != wire['uid'] or row['table_name'] != wire['table'] or
+                row['op'] != wire['op'] or row['state'] != 'pending'):
+            raise ValueError('issued source custody routing changed')
+        return row
+
+    def record(verdict):
+        pending = journal.snapshot(conn)['pending']
+        if verdict['client_op_id'] != pending['op_id']:
+            raise ValueError('source verdict identity mismatch')
+        row = source()
         status = verdict['status']
+        if status == 'rejected':
+            reason = f"{verdict.get('reason') or 'rejected'}: {verdict.get('detail') or ''}".strip(': ')
+            conn.execute("UPDATE kanban_sync_outbox SET state='rejected', last_error=?, attempts=attempts+1 "
+                         "WHERE op_id=?", (reason[:500], pending['op_id']))
+            out.rejected += 1
+            return  # Keep the semantic obligation visible; no sync success or identity rotation.
         if status not in ('applied', 'merged'):
             raise ValueError('tracer final disposition requires custody integration')
         if verdict.get('version'):
@@ -89,6 +107,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
                 intent = envelopes.outbound(conn, row, lambda: strip_stale_push(conn, wire_ops.translate(
                     client._full_row_if_unseen(conn, row), client._next_hlc(conn, gateway))), supported=True)
                 encoded = journal.issue(conn, intent)
+            source()  # Validate retained source custody on RETRY as well as final recovery.
         wire = json.loads(encoded)
         wire['replay']['session'] = remote['session']
         hub._call('POST', root + 'ops', dict(identity, ops=[wire]))
@@ -100,8 +119,11 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
             break
     settled = journal.snapshot(conn)
     if settled['settled'] != '0' and remote['a'] != settled['settled']:
+        expected = dict(remote, a=settled['settled'])
         remote = hub._call('POST', root + 'ack', dict(identity, session=remote['session'],
             generation=settled['generation'], ack=dict(sequence=settled['settled'],
                 op_id=settled['last_op_id'], payload_sha256=settled['last_payload_sha256'])))['slot']
+        if remote != expected:
+            raise ValueError('ack readback mismatch')
         reconcile(settled, remote)
     return out
