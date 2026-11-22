@@ -74,6 +74,7 @@ from hermes_state_dbfile import (
     RetiredGenerationCaptureError, capture_retired_wal_generation, refuse_deleted_wal_generation,
 )
 from hermes_state_messages import SessionMessagesMixin
+from hermes_cli.sqlite_safe_read import finalizer_close as _finalizer_close  # bound now: __del__ must not import
 from hermes_state_prune_rewrite import SessionPruneRewriteMixin
 from hermes_state_api_content import SessionApiContentMixin
 from hermes_state_coverage import SessionCoverageMixin
@@ -1777,7 +1778,8 @@ class SessionDB(
         guarded: module teardown order is undefined."""
         if self.__dict__.get("_conn") is not None:
             try:
-                self.close()
+                with _finalizer_close():
+                    self.close()
             except Exception:
                 pass
 

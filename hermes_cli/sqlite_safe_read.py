@@ -31,6 +31,11 @@ _live_connections: dict[str, int] = {}
 # garbage collection) and applied under _live_lock by the next registry read. Lock-free on purpose:
 # a collection can run while any lock is held, so it must never wait for _live_lock.
 _released: deque[str] = deque()
+# Connections whose finalizer-time close() could not take _live_lock without waiting (another thread holds it, or
+# was frozen holding it at interpreter teardown). Closed by the next registry operation that holds the lock.
+_deferred_closes: deque = deque()
+# Set while a garbage-collection finalizer (SessionDB.__del__) closes: such a close must never block on _live_lock.
+_finalizer_state = threading.local()
 # Private, randomised name so no caller overloads it by accident (that would free the release
 # object early, while the connection is still open).
 _RELEASE_FUNCTION = f"_hermes_release_{secrets.token_hex(8)}"
@@ -89,8 +94,29 @@ def untrack_connection(path: Path | str) -> None:
 
 def _apply_releases() -> None:
     """Untrack every connection SQLite has finished closing (caller holds ``_live_lock``)."""
+    while _deferred_closes:
+        conn = _deferred_closes.popleft()
+        try:
+            sqlite3.Connection.close(conn)
+        except Exception:  # e.g. cross-thread ProgrammingError: the entry stays, as for any failed close
+            logger.debug("Deferred connection close failed", exc_info=True)
+        else:
+            conn._hermes_tracked_path = None
     while _released:
         _track_key(_released.popleft(), -1)
+
+
+@contextlib.contextmanager
+def finalizer_close():
+    """Mark closes on this thread as running inside a finalizer: :class:`_TrackingMixin` then never waits
+    for ``_live_lock`` (a collection can run while another thread holds it, or after that thread was
+    frozen at interpreter teardown) and defers the close to the next registry operation instead."""
+    previous = getattr(_finalizer_state, "active", False)
+    _finalizer_state.active = True
+    try:
+        yield
+    finally:
+        _finalizer_state.active = previous
 
 
 class _ReleaseOnClose:
@@ -149,6 +175,11 @@ class _TrackingMixin:
     _hermes_tracked_path: str | None = None
 
     def close(self) -> None:  # type: ignore[misc]
+        if getattr(_finalizer_state, "active", False):
+            if not _live_lock.acquire(blocking=False):
+                _deferred_closes.append(self)
+                return
+            _live_lock.release()  # we own it now (reentrant): the ``with`` below cannot block
         with _live_lock:
             super().close()  # type: ignore[misc]
             self._hermes_tracked_path = None
