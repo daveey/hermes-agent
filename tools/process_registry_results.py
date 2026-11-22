@@ -26,34 +26,48 @@ _RESULT_FIELDS = (
 )
 
 
-def _result_paths():
+def _result_paths(*, strict: bool = False):
     """Prune by completion time, not start time (jobs can take days)."""
     directory = get_hermes_home() / "logs" / "process-results"
     cutoff = time.time() - RESULT_RETENTION_SECONDS
     retained = []
-    for path in directory.glob("proc_*.json"):
+    if strict:
+        # Path.glob may suppress enumeration errors. An absent results directory
+        # is normal before the first completion; other errors are not absence.
+        try:
+            paths = [p for p in directory.iterdir() if p.name.startswith("proc_") and p.suffix == ".json"]
+        except FileNotFoundError:
+            paths = []
+    else:
+        paths = directory.glob("proc_*.json")
+    for path in paths:
         try:
             modified = path.stat().st_mtime
             if modified < cutoff:
-                path.unlink(missing_ok=True)
+                if not strict:
+                    path.unlink(missing_ok=True)
             else:
                 retained.append((modified, path))
         except FileNotFoundError:
-            continue  # Another producer pruned it.
+            continue  # Another producer pruned it: expiry, in strict reads too.
     retained.sort(key=lambda item: (item[0], item[1].name), reverse=True)
     visible = [path for _, path in retained[:MAX_RETAINED_RESULTS]]
     for _, path in retained[MAX_RETAINED_RESULTS:]:
-        if _owed(path):  # retained custody must also remain retrievable [daveey]
+        if _owed(path, strict=strict):  # retained custody must also remain retrievable [daveey]
             visible.append(path)
-        else:
+        elif not strict:
             path.unlink(missing_ok=True)
     return visible
 
 
-def _owed(path) -> bool:
+def _owed(path, *, strict: bool = False) -> bool:
     try:
         record = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return False  # pruned since it was listed
     except (OSError, ValueError):
+        if strict:
+            raise
         return False
     return isinstance(record, dict) and isinstance(record.get("delivery_obligation"), dict)
 
@@ -102,21 +116,55 @@ def _owns_result(owner: str, parent: str | None) -> bool:
         db.close()
 
 
-def load_completed_results(prefix: str = "") -> dict:
+def registry_sessions(registry, include_retained, strict, owner_session_id, loader) -> dict:
+    """Opt-in qualified status view; preserve the default tool/display inventory."""
+    from tools.environments.sandbox_scope import sandbox_visible
+
+    if strict and (not include_retained or not owner_session_id):
+        raise ValueError("strict process inventory requires retained results and explicit owner")
+    sessions = (loader(strict=True, owner_session_id=owner_session_id) if strict
+                else loader()) if include_retained else {}
+    with registry._lock:
+        sessions.update(registry._finished)
+        sessions.update(registry._running)
+    if not strict:
+        return sessions
+    selected = {}
+    for key, session in sessions.items():
+        if not session.parent_session_id:
+            raise ValueError("process owner scope unavailable")
+        if not _owns_result(owner_session_id, session.parent_session_id):
+            continue
+        if not sandbox_visible(session.sandbox_key):
+            raise ValueError("process owner scope unavailable")
+        refreshed = registry._refresh_detached_session(session)
+        if refreshed is None or registry._uncollected_gone(refreshed):
+            raise ValueError("current process missing exit evidence")
+        if refreshed.exited and type(refreshed.exit_code) is not int:
+            raise ValueError("current process missing exit evidence")
+        selected[key] = refreshed
+    return selected
+
+
+def load_completed_results(prefix: str = "", *, strict: bool = False, owner_session_id: str | None = None) -> dict:
     """Restore read-only snapshots; no process handles, watchers, or queue events."""
     from tools.process_registry import ProcessSession
 
     from gateway.session_context import get_session_env
     from tools.environments.sandbox_scope import hosted_scope
 
-    owner = get_session_env("HERMES_SESSION_ID", "")
+    owner = owner_session_id if owner_session_id is not None else get_session_env("HERMES_SESSION_ID", "")
+    if strict and (not owner_session_id or hosted_scope() is not None):
+        raise ValueError("process owner scope unavailable")
     # A hosted agent's processes leave no receipt here and it sees no local one: never read or prune them.
     if not owner or hosted_scope() is not None:
         return {}
     results = {}
     try:
-        paths = _result_paths()
+        paths = _result_paths(strict=True) if strict else _result_paths()
     except OSError:
+        if strict:
+            raise
         logger.warning("Could not read retained process results", exc_info=True)
         return results
     for path in paths:
@@ -125,16 +173,28 @@ def load_completed_results(prefix: str = "") -> dict:
         try:
             record = json.loads(path.read_text(encoding="utf-8-sig"))
             if record["id"] != path.stem or not re.fullmatch(r"proc_[\w]+", record["id"]):
+                if strict:
+                    raise ValueError("malformed process identity")
                 continue
+            if strict and not isinstance(record.get("parent_session_id"), str):
+                raise ValueError("process owner scope unavailable")
             if not _owns_result(owner, record.get("parent_session_id")):
                 continue
+            if strict and type(record.get("exit_code")) is not int:
+                raise ValueError("current process missing exit evidence")
             session = ProcessSession(
                 **{key: record[key] for key in _RESULT_FIELDS},
                 # Receipts written before processes carried a sandbox are a local activity's.
                 sandbox_key=record.get("sandbox_key", ""), exited=True, output_buffer=record["output"],
             )
+            if strict:  # receipts carry no exit time; their mtime is the completion time pruning already uses
+                session.exited_at = path.stat().st_mtime
             session._completion_event.set()
             results[session.id] = session
+        except FileNotFoundError:
+            continue  # pruned by another producer after it was listed: expiry, not unreadable evidence
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+            if strict:
+                raise
             logger.debug("Skipping unreadable process result %s", path.name, exc_info=True)
     return results

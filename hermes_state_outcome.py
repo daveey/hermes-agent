@@ -463,8 +463,8 @@ def _guarded(label: str, sid: str, fn: Callable[[], Any], empty: Any) -> Any:
 def _declared(stored: Optional[dict]) -> Optional[dict]:
     if not stored:
         return None
-    if stored.get("source") == "declared":
-        return stored
+    if stored.get("source") == "declared":  # [daveey] the canonical envelope is not part of what was declared
+        return {k: v for k, v in stored.items() if k != "status"} if "status" in stored else stored
     nested = stored.get("declared")
     return nested if isinstance(nested, dict) and nested.get("source") == "declared" else None
 
@@ -846,6 +846,8 @@ def declare_outcome(sid: str, outcome: dict, *, db: Any = None) -> dict[str, Any
             declared.update(historical_fields(_parse((_row(handle, tip) or {}).get("outcome_json"))))
         # Persist intent before touching the separate cron store. A failed DB
         # write must never release ownership without a completion receipt.
+        status = (_parse((_row(handle, tip) or {}).get("outcome_json")) or {}).get("status")
+        declared.update({"status": status} if status else {})  # [daveey] a declaration never resets the envelope
         _write(handle, tip, declared)
         if declared["kind"] == "done":
             from cron.session_ownership import release_for_database
@@ -904,18 +906,10 @@ def refresh_outcome(sid: str, trigger: str, *, db: Any = None,
     evidence is not a live turn; any other live turn derives ``running``."""
     if trigger not in TRIGGERS:
         raise ValueError(f"unknown outcome trigger {trigger!r}")
-    with _db_scope(db) as handle:
-        tip = _tip(handle, sid)
-        row = _row(handle, tip)
-        derived = _derive(handle, tip, concluding=frozenset(concluding_turn or ()))
-        if row is None:
-            return derived
-        stored = _parse(row.get("outcome_json"))
-        if _same(stored, derived):
-            return stored
-        _write(handle, tip, derived)
-        logger.debug("session outcome %s -> %s (%s)", tip, derived.get("kind"), trigger)
-        return derived
+    from hermes_state_session_status_snapshot import refresh
+
+    with _db_scope(db) as handle:  # [daveey] also reduces and fence-publishes the canonical ``status`` envelope
+        return refresh(handle, sid, trigger, frozenset(concluding_turn or ()))
 
 
 def get_outcome(sid: str, *, db: Any = None) -> Optional[dict[str, Any]]:

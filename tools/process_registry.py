@@ -2311,7 +2311,8 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
         """O(1) running count for status-bar polling; dict ``len()`` is atomic, no lock."""
         return len(self._running)
 
-    def list_sessions(self, task_id: str | None = None, session_key: str | None = None, *, include_retained: bool = False) -> list:
+    def list_sessions(self, task_id: str | None = None, session_key: str | None = None, *, include_retained: bool = False,
+                      strict: bool = False, owner_session_id: str | None = None) -> list:
         """Running and recently-finished processes for ``task_id`` and/or ``session_key``;
         cross-task entries sharing the gateway session (a forgotten preview server
         blocking session reset) are flagged ``"session_scoped": true``.
@@ -2321,14 +2322,11 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
         under that gateway session are surfaced too, even if they belong to a different task — so the agent
         can discover a forgotten preview server that is blocking session reset (#29177).
         """
-        # Only an explicit tool query reads historical receipts. Status bars and
-        # gateway liveness scans call this frequently and need the live registry.
-        sessions = load_completed_results() if include_retained else {}
-        with self._lock:
-            sessions.update(self._finished)
-            sessions.update(self._running)
+        # Retained reads are opt-in; routine status bars use the live registry.
+        from tools.process_registry_results import registry_sessions
+        sessions = registry_sessions(self, include_retained, strict, owner_session_id, load_completed_results)
         from tools.environments.sandbox_scope import sandbox_visible
-        all_sessions = [
+        all_sessions = list(sessions.values()) if strict else [
             refreshed for refreshed in (
                 self._refresh_detached_session(s) for s in sessions.values() if sandbox_visible(s.sandbox_key)
             ) if refreshed is not None and not self._uncollected_gone(refreshed)
@@ -2344,6 +2342,8 @@ class ProcessRegistry(ProcessObligationMixin, ProcessTerminationMixin, ProcessCh
             # List-only refreshes must observe child exit even while descendants
             # keep the capture pipe open; retain the existing completion owner.
             self._reconcile_local_exit(s)
+            if strict and s.exited and type(s.exit_code) is not int:
+                raise ValueError("current process missing exit evidence")
             entry = {
                 "session_id": s.id,
                 "command": s.command[:200],

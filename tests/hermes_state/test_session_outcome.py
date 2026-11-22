@@ -270,10 +270,12 @@ def test_5_declared_done_holds_until_a_newer_user_row(db):
     say(db, "tool", "ok", tool_name="session_outcome", tool_call_id="c1")
     say(db, "assistant", "ok?")  # would be no_summary without the declaration
     out = so.refresh_outcome("chat", "turn_end", db=db)
+    out.pop("status")  # [daveey] the canonical envelope rides beside what was declared (additive key)
     assert out == declared and out["source"] == "declared"
     say(db, "user", "one more thing", timestamp=time.time() + 1)
-    assert so.refresh_outcome("chat", "turn_end", db=db) == {**so.derive_outcome("chat", db=db),
-                                                              "at": so.get_outcome("chat", db=db)["at"]}
+    out = so.refresh_outcome("chat", "turn_end", db=db)
+    assert out.pop("status")["reason"] == "interrupted"  # [daveey] additive envelope agrees
+    assert out == {**so.derive_outcome("chat", db=db), "at": so.get_outcome("chat", db=db)["at"]}
     assert so.get_outcome("chat", db=db)["reason"] == "interrupted"
 
 
@@ -703,6 +705,7 @@ def test_busy_card_read_cannot_derive_done(db, board, monkeypatch, verdict, prio
     so.register_outcome_judge(lambda sid, text: verdict)
     out = so.refresh_outcome("chat", "turn_end", db=db)
     if prior_kind in ("waiting", "decision"):
+        assert out.pop("status")["coverage"]["state"] == "unknown"  # [daveey] additive envelope: unread = unknown
         assert out == prior
     else:
         assert (out["kind"], out["reason"]) == ("unresolved", "card_read_failed")

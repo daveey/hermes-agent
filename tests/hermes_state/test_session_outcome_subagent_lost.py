@@ -116,6 +116,7 @@ def test_a_declared_done_after_its_last_activity_accounts_for_it(db):
     reply(db, at=time.time() - 10)
     declared = declare(db, {"kind": "done", "summary": "Gate F verified; the stuck subagent was replaced."})
     out = so.refresh_outcome("chat", "turn_end", db=db)
+    out.pop("status")  # [daveey] the canonical envelope rides beside what was declared (additive key)
     assert out == declared and out["kind"] == "done"
 
 
