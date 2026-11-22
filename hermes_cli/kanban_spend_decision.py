@@ -55,7 +55,8 @@ def pending_episode(conn, task_id: str):
             continue
         if (isinstance(payload, dict) and payload.get('cause') == 'safety_refusal'
                 and event['kind'] in (EVENT, 'decision_hold_restricted')):
-            return next((e for e in events if e['kind'] == EVENT and e.get('uid') == payload.get('episode')),
+            return next((e for e in events if e['kind'] == EVENT
+                         and (e.get('uid') or str(e['id'])) == payload.get('episode')),
                         event) if event['kind'] != EVENT else event
     ordinary = [e for e in events if e['kind'] != 'decision_hold_restricted']
     return ordinary[0] if ordinary and ordinary[0]['kind'] == EVENT else None

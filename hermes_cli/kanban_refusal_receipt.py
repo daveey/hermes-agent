@@ -89,5 +89,5 @@ def stop_failed_refusal(conn, row, proof) -> bool:
     else:
         kb._append_event(conn, task, decision.EVENT, payload, run_id=run)
     kb._append_event(conn, task, 'safety_refused', payload, run_id=run)
-    decision.ensure_producer(conn, task)
+    decision.safe_ensure_producer(conn, task)
     return True
