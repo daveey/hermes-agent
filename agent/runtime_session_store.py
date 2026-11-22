@@ -396,6 +396,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
         self.max_bytes = max_bytes
         self.lock = threading.RLock()
         self.failure = None
+        self._receipt_clear_dirty = False
         self.path = Path(outbox_dir) / 'pending.json'
         make_user_dir(self.path.parent, mode=0o700, parents=True, exist_ok=True)
         if self.path.parent.is_symlink() or self.path.is_symlink():
@@ -474,6 +475,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
         from utils import atomic_write_bytes
         # Owner-only journal (the dir is 0700 too); the rename and its directory entry are durable.
         atomic_write_bytes(self.path, encoded, tmp_prefix='.pending-', mode=0o600, fsync_dir=True)
+        self._receipt_clear_dirty = False
 
     def _session(self, session_id):
         if session_id != self.scope['session_id']:
@@ -592,7 +594,15 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
                         candidate = self._acked(candidate, entry)
                     else:
                         candidate = {key: value for key, value in candidate.items() if key != 'acked'}
-                    self._save(candidate)
+                    # Only idempotent same-target startup metadata: keep the durable pending
+                    # entry until the next BEFORE-send save atomically carries its ACK forward.
+                    # A crash replays the exact sequence/digest through the unchanged owner fences.
+                    # Child, compression, transcript and terminal receipts retain immediate clears.
+                    if (entry['operation'] in {'session.prompt', 'session.model', 'session.sidecars', 'session.tools'}
+                            and candidate['scope'] == self.scope and not result.get('worker_assignment')):
+                        self._receipt_clear_dirty = True
+                    else:
+                        self._save(candidate)
                     self.scope = candidate['scope']
                     self.journal = candidate
                     results.append(result)
@@ -797,5 +807,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
         with self.lock:
             try:
                 self.flush_token_counts()
+                if self._receipt_clear_dirty:
+                    self._save(self.journal)
             finally:
                 self._outbox_owner.close()

@@ -773,6 +773,10 @@ def _probe_codex_quota_restored(
         return None
     cache_key = _codex_quota_probe_cache_key(token)
     scope = (reset_at, failure_at)
+    from hermes_cli import auth_codex_quota_negative as negative
+    negative_key = negative.key(token, _codex_usage_probe_url(base_url), reset_at, failure_at)
+    if negative.hit(negative_key, min_interval_seconds):
+        return False
     now = time.monotonic()
     with _codex_quota_probe_lock:
         cached = _codex_quota_probe_cache.get(cache_key)
@@ -799,6 +803,8 @@ def _probe_codex_quota_restored(
     except Exception:
         logger.debug("Codex quota probe failed", exc_info=True)
         result = None
+    if result is False:
+        negative.remember(negative_key)
     with _codex_quota_probe_lock:
         _codex_quota_probe_cache[cache_key] = (now, result)
     return result
