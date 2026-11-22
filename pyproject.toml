@@ -50,6 +50,9 @@ dependencies = [
   "python-dotenv==1.2.4; python_version >= '3.14'",
   "fire==0.7.1; python_version >= '3.14'",
   "httpx[socks]==0.28.1; python_version >= '3.14'",
+  # The built-in Board sync sender hashes immutable replay envelopes with RFC8785.
+  # This pure-Python codec has no transitive dependencies.
+  "rfc8785==0.1.4; python_version >= '3.14'",
   "rich==14.3.4; python_version >= '3.14'",
   "tomli-w==1.2.0; python_version >= '3.14'",  # Preserve relative dependency paths in staged plugin metadata.
   # 0.18.17 requires ruamel.yaml.clib on 3.14, which has no Windows ARM64 wheel.

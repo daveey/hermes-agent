@@ -1,0 +1,152 @@
+"""Dormant W=1 replay journal in the caller's Board database. [daveey]
+
+No production installer or transport calls this yet. Admission, capture provenance,
+parent ordering and source-custody bookkeeping must be integrated before activation.
+The caller owns the transaction and COMMIT, including source custody changes.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Callable
+
+import rfc8785
+
+from hermes_cli.kanban_replay_reconcile import _identity, _local_state, reconcile
+from hermes_cli.kanban_replay_wire import freeze, verify
+
+_SCHEMA = """CREATE TABLE IF NOT EXISTS kanban_replay_sender1 (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    state TEXT NOT NULL, wire BLOB
+)"""
+
+
+def _transaction(conn: sqlite3.Connection) -> None:
+    if not conn.in_transaction or getattr(conn, 'autocommit', False) is True:
+        raise ValueError('caller transaction required')
+
+
+def _reserve(conn: sqlite3.Connection) -> None:
+    _transaction(conn)
+    # Reserve before reading even when the caller used a deferred BEGIN.
+    conn.execute('UPDATE kanban_replay_sender1 SET state=state WHERE singleton=1')
+
+
+def _validate(state: dict) -> None:
+    if not isinstance(state, dict):
+        raise ValueError('invalid journal state')
+    _local_state(state)
+    for key in ('board_incarnation', 'gateway_principal', 'journal_id'):
+        if not isinstance(state.get(key), str) or not state[key]:
+            raise ValueError(f'invalid journal binding: {key}')
+
+
+def _ack(state: dict) -> dict | None:
+    return (dict(sequence=state['settled'], op_id=state['last_op_id'],
+                 payload_sha256=state['last_payload_sha256']) if state['settled'] != '0' else None)
+
+
+def _check_wire(state: dict, encoded: bytes | None) -> None:
+    pending = state['pending']
+    if pending is None:
+        if encoded is not None:
+            raise ValueError('unexpected pending wire')
+        return
+    if not isinstance(encoded, bytes):
+        raise ValueError('missing pending wire')
+    wire = json.loads(encoded)
+    if not isinstance(wire, dict) or not isinstance(wire.get('replay'), dict):
+        raise ValueError('invalid pending wire')
+    replay = wire['replay']
+    if (rfc8785.dumps(wire) != encoded or verify(wire) != pending['payload_sha256'] or
+            wire.get('client_op_id') != pending['op_id'] or replay.get('protocol') != 'processed_prefix1' or
+            replay.get('generation') != state['generation'] or replay.get('sequence') != pending['sequence'] or
+            replay.get('ack') != _ack(state) or 'session' in replay):
+        raise ValueError('pending wire custody mismatch')
+
+
+def _read(conn: sqlite3.Connection) -> tuple[dict, bytes | None]:
+    row = conn.execute('SELECT state,wire FROM kanban_replay_sender1 WHERE singleton=1').fetchone()
+    if row is None:
+        raise ValueError('missing journal state')
+    state = json.loads(row[0])
+    _validate(state)
+    _check_wire(state, row[1])
+    return state, row[1]
+
+
+def initialize(conn: sqlite3.Connection, binding: dict) -> None:
+    """Install an explicitly bound empty journal, without taking remote authority."""
+    _transaction(conn)
+    _validate(binding)
+    if binding['settled'] != '0' or binding['pending'] is not None:
+        raise ValueError('initial journal must be empty')
+    conn.execute(_SCHEMA)
+    conn.execute('INSERT INTO kanban_replay_sender1(singleton,state) VALUES (1,?)',
+                 (json.dumps(binding),))
+
+
+def snapshot(conn: sqlite3.Connection) -> dict:
+    """Read and validate persisted allocation/custody without business-row hydration."""
+    return _read(conn)[0]
+
+
+def pending_wire(conn: sqlite3.Connection) -> bytes | None:
+    """Return exact canonical bytes after validating identity, digest and ack custody."""
+    return _read(conn)[1]
+
+
+def issue(conn: sqlite3.Connection, intent: dict) -> bytes:
+    """Freeze only the dependency-ordered head selected by the serialized sender."""
+    _reserve(conn)
+    state = snapshot(conn)
+    if state['pending'] is not None:
+        raise ValueError('outstanding issued envelope')
+    if 'replay' in intent:
+        raise ValueError('intent already framed')
+    _identity(intent.get('client_op_id'), '0' * 64, 'intent')
+    sequence = str(int(state['settled']) + 1)
+    wire = dict(intent)
+    replay: dict = dict(protocol='processed_prefix1', generation=state['generation'], sequence=sequence)
+    ack = _ack(state)
+    if ack is not None:
+        replay['ack'] = ack
+    wire['replay'] = replay
+    wire = freeze(wire)
+    state['pending'] = dict(sequence=sequence, op_id=wire['client_op_id'],
+                            payload_sha256=wire['replay']['payload_sha256'])
+    _validate(state)
+    encoded = rfc8785.dumps(wire)
+    conn.execute('UPDATE kanban_replay_sender1 SET state=?,wire=? WHERE singleton=1',
+                 (json.dumps(state), encoded))
+    return encoded
+
+
+def recover(conn: sqlite3.Connection, remote: dict, record: Callable[[dict], None]) -> dict:
+    """Record an inspected exact final verdict with caller's bookkeeping/prune.
+
+    ``record`` must persist visible rejection/cancellation/deferred custody or
+    success bookkeeping in this transaction. It must not commit or issue work.
+    Authentication and serving capability are the transport caller's obligations.
+    """
+    _reserve(conn)
+    state = snapshot(conn)
+    decision = reconcile(state, remote)
+    if decision['action'] == 'record':
+        conn.execute('SAVEPOINT replay_record1')
+        try:
+            record(decision['verdict'])
+            pending = state['pending']
+            state.update(settled=pending['sequence'], last_op_id=pending['op_id'],
+                         last_payload_sha256=pending['payload_sha256'],
+                         last_verdict=remote['last_verdict'], pending=None)
+            conn.execute('UPDATE kanban_replay_sender1 SET state=?,wire=NULL WHERE singleton=1',
+                         (json.dumps(state),))
+            conn.execute('RELEASE replay_record1')
+        except BaseException:
+            # Storage faults may already have rolled back the outer transaction.
+            if conn.in_transaction:
+                conn.execute('ROLLBACK TO replay_record1')
+                conn.execute('RELEASE replay_record1')
+            raise
+    return decision
