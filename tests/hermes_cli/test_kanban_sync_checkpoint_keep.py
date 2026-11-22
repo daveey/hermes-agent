@@ -84,7 +84,18 @@ def _two_images(writer, path):
     writer.execute("UPDATE t SET v = 'b'")
     _checkpoint(writer, "TRUNCATE")
     assert len(path.read_bytes()) == len(image)
+    # Same size, so only mtime can show the next write, and a coarse file clock (one kernel tick,
+    # 1-10 ms before Linux 6.13) stamps a write in this same tick with this same mtime. Age the
+    # file so every later write moves it. (CI 2026-11-22: the checkpoint landed in the tick.)
+    stat = os.stat(path)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns - 10_000_000_000))
     return image
+
+
+def _moved(watch, path):
+    """The main file no longer has the (mtime, size) the kept reader was stored with."""
+    stat = os.stat(path)
+    return watch._conns[str(path)][0][2:] != (stat.st_mtime_ns, stat.st_size)
 
 
 def test_same_inode_raw_restore_reopens(board):
@@ -97,6 +108,7 @@ def test_same_inode_raw_restore_reopens(board):
     assert state is not None  # the sidecars are there: nothing but missing proof forces the reopen
     _rewrite(path, image)
     assert evidence.read(path) == state
+    assert _moved(watch, path)
     assert watch.query(path, VALUE, unchanged_ok=True) == (gen, ("a",))
     assert _reader(watch, path) is not old
     with pytest.raises(sqlite3.ProgrammingError):
@@ -121,6 +133,7 @@ def test_restore_with_checkpoint_in_same_interval_matches_fresh_reader(board):
     finally:
         fresh.close()
     assert expected == ("a",)
+    assert _moved(watch, path)  # else the watch is never asked to choose, and no path is tested
     assert watch.query(path, VALUE)[1] == expected
     assert _reader(watch, path) is kept  # the proof held, so this exercised the kept path
     assert _runs("sync.reader_keep/checkpoint") == 1
