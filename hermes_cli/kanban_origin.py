@@ -129,10 +129,9 @@ def gateway_names() -> tuple[str, set[str]]:
     for at most ``_NAMES_MAX_AGE_S``: links reconcile, creator backfill and provenance checks ask once per row,
     and each uncached answer opens hub.db (4% of hub gateway CPU, 2026-11-12).
 
-    A gateway renamed in place leaves its old name behind in replica rows of the old partition this host still
-    holds (their tombstones have not arrived, or one was missed). The known set drops a name that
-    ``kanban.placement.aliases`` maps to another known gateway (:func:`hermes_cli.kanban_gateway_alias.former`):
-    the old partition is not a second live gateway. This gateway's own name is never dropped. [daveey]"""
+    The local replica removes tombstoned rows on pull. Names with surviving rows remain addressable:
+    placement aliases can point in either direction during rollout and do not prove which partition is live.
+    Once the old partition's tombstones arrive, its name disappears naturally. [daveey]"""
     global _names_memo
     path, cfg = _hub_db(), _mail_config()
     key = _names_key(path, cfg)
@@ -141,7 +140,6 @@ def gateway_names() -> tuple[str, set[str]]:
         return memo[2], set(memo[3])
     failed: list[sqlite3.Error] = []
     me, known = _read_gateway_names(path, cfg, failed)
-    known = _without_former(me, known)
     # A file written within the timestamp granularity could change again under the same signature: not kept.
     # Nor is an answer from a hub.db read that failed (locked, mid-replace): the next caller reads again.
     racy = time.time_ns() - _NAMES_RACY_NS
@@ -197,14 +195,6 @@ def _mail_gateway(cfg: Path) -> str:
         return str(json.loads(cfg.read_text(encoding="utf-8-sig")).get("gateway") or "")
     except (OSError, ValueError, AttributeError):
         return ""
-
-
-def _without_former(me: str, known: set[str]) -> set[str]:
-    """``known`` minus a renamed gateway's old names (never ``me``). No alias map drops nothing."""
-    if len(known) < 2:
-        return known
-    from hermes_cli import kanban_gateway_alias
-    return known - (kanban_gateway_alias.former(known) - {me})
 
 
 def _name_key(path: Optional[Path], cfg: Path) -> tuple:

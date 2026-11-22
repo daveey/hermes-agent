@@ -156,7 +156,7 @@ def current_gateway(gateway: str) -> str:
     the name is unchanged until the new one has records here. Never raises."""
     try:
         from hermes_cli import kanban_gateway_alias
-        if kanban_gateway_alias.resolve(gateway) == str(gateway or "").strip().lower():
+        if len(kanban_gateway_alias.spellings(gateway)) < 2:
             return gateway  # no alias names it: hub.db is not opened for the common case
         from hermes_cli.kanban_origin import gateway_names
         return kanban_gateway_alias.current(gateway, gateway_names()[1])

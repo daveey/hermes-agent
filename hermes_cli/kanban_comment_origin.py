@@ -162,9 +162,11 @@ def gateway_spellings(gateway: Optional[str]) -> list[str]:
 
 
 def _names_gateway(spellings: list[str], origin: Optional[str], author: Optional[str]) -> bool:
-    """Whether a comment's ``origin_gateway`` is one of ``spellings`` or its author contains one."""
-    origin, author = (origin or "").lower(), (author or "").lower()
-    return any(gw == origin or gw in author for gw in spellings)
+    """Match exact gateway components, never a substring of a sibling gateway's name."""
+    origin, author = (origin or "").strip().lower(), (author or "").strip().lower()
+    named = gateway_from_author(author)
+    return origin in spellings or (named in spellings if named else any(
+        author in (gw, f"{gw}-chat") for gw in spellings))
 
 
 def find_comment(conn: sqlite3.Connection, task_id: str, *, after_id: int = 0, from_gateway: Optional[str] = None,
@@ -211,10 +213,10 @@ def find_comment(conn: sqlite3.Connection, task_id: str, *, after_id: int = 0, f
     if contains:
         sql += " AND instr(lower(body), ?) > 0"
         params.append(contains.lower())
-    row = conn.execute(sql + " ORDER BY id LIMIT 1", params).fetchone()
-    if row is None:
-        return None
-    return {"id": row[0], "author": row[1], "origin_gateway": row[2], "body": row[3]}
+    for row in conn.execute(sql + " ORDER BY id", params):
+        if not gws or _names_gateway(gws, row[2], row[1]):
+            return {"id": row[0], "author": row[1], "origin_gateway": row[2], "body": row[3]}
+    return None
 
 
 def run_wait_comment(args) -> int:

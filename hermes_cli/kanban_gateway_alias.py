@@ -11,9 +11,9 @@ The map is ``kanban.placement.aliases`` (``{former or host-style name: gateway}`
 socket, so a wake probe can call it. Names compare case-insensitively and come back lowercased, as
 ``canonical_pin`` does.
 
-The map is rolled out BEFORE the rename (so every host has it at the cutover), and other gateways learn the new
-name only when its records reach their hub.db. So a name is replaced by its target only once the target is a
-gateway this host knows (:func:`current`): until then the old name is still the live one.
+The placement map is not rename-direction evidence: before cutover it can point from the future name to the
+old name. Preserve an explicitly present partition; only an absent name may fall back to its sole known
+alias-equivalent partition. No tombstone or authoritative rename fact is inferred from configuration.
 """
 from __future__ import annotations
 
@@ -54,33 +54,17 @@ def resolve(name, cfg: Optional[dict] = None, *, table: Optional[dict[str, str]]
 
 
 def current(name, known: Iterable[str], cfg: Optional[dict] = None) -> str:
-    """``name``'s gateway today: its alias target once that target is in ``known``, else ``name`` unchanged.
+    """Preserve a known explicit name; otherwise use its unique known equivalent, in either map direction.
 
     ``known`` is the set of gateways this host has records of (``kanban_origin.gateway_names()[1]``).
+    Multiple surviving equivalents are ambiguous, so an absent name is not redirected to any of them.
     """
     raw = str(name or "").strip()
-    target = resolve(raw, cfg)
-    if target and target != _norm(raw):
-        for gw in known or ():
-            if _norm(gw) == target:
-                return str(gw)
-    return raw
-
-
-def former(known: Iterable[str], cfg: Optional[dict] = None) -> set[str]:
-    """The names in ``known`` that are aliases of another name in ``known``: a renamed gateway's old partition
-    that this host still holds rows of (the tombstones have not arrived, or a row was left behind)."""
-    table = aliases(cfg)
-    if not table:
-        return set()
-    names = [str(g) for g in known or () if g]
-    present = {_norm(g) for g in names}
-    out = set()
-    for gw in names:
-        target = resolve(gw, table=table)
-        if target != _norm(gw) and target in present:
-            out.add(gw)
-    return out
+    present = {_norm(gw): str(gw) for gw in known or ()}
+    if _norm(raw) in present:
+        return present[_norm(raw)]
+    candidates = {present[s] for s in spellings(raw, cfg) if s in present}
+    return next(iter(candidates)) if len(candidates) == 1 else raw
 
 
 def spellings(name, cfg: Optional[dict] = None) -> list[str]:

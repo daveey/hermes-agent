@@ -126,11 +126,13 @@ def test_a_settled_name_is_still_memoized(home, monkeypatch):
 # --- the old partition ---------------------------------------------------------------------------------------------
 
 def test_gateway_names_drops_the_renamed_gateways_old_partition(home):
-    """Another gateway's hub.db after the rename: rows of the old partition are still there (their tombstones
-    have not arrived), next to the new one. The old name is not a second live gateway."""
-    hub_db(home, OTHER, [OTHER, OLD, NEW])
+    """A pulled tombstone physically removes its replica row; config alone cannot establish retirement."""
+    path = hub_db(home, OTHER, [OTHER, OLD, NEW])
     mail_config(home, OTHER)
     aliases(home, {OLD: NEW})
+    assert ko.gateway_names() == (OTHER, {OTHER, OLD, NEW})
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM replica WHERE gw = ?", (OLD,))
     assert ko.gateway_names() == (OTHER, {OTHER, NEW})
 
 
@@ -158,7 +160,7 @@ def test_gateway_names_never_drops_this_gateways_own_name(home):
 
 
 def test_a_ref_written_before_the_rename_reaches_the_renamed_gateway(home):
-    hub_db(home, OTHER, [OTHER, OLD, NEW])
+    hub_db(home, OTHER, [OTHER, NEW])
     mail_config(home, OTHER)
     aliases(home, {OLD: NEW})
     got = ko.resolve(f"@session:default@{OLD}/20261122_040757_29014b")
@@ -184,6 +186,8 @@ def test_alias_chain_loop_and_case():
     assert alias.current("mini", {"Daveey-Mini-1", "hub"}, cfg) == "Daveey-Mini-1"
     assert alias.current("mini", {"hub"}, cfg) == "mini"
     assert alias.current("hub", {"hub", NEW}, cfg) == "hub"
+    assert alias.current("mac-mini", {"mini", NEW}, cfg) == "mac-mini"  # ambiguous, neither is preferred
+    assert alias.current("MINI", {"mini", NEW}, cfg) == "mini"  # explicit partition survives
     assert alias.spellings(NEW, cfg) == [NEW, "mac-mini", "mini"]
     assert alias.spellings("mini", cfg) == ["mini", NEW, "mac-mini"]
     assert alias.spellings("worker-7", cfg) == ["worker-7"] and alias.spellings("", cfg) == []
