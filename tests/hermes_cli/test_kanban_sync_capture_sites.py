@@ -12,7 +12,7 @@ from tests.hermes_cli.custody_authorizer import CustodyGuard
 @pytest.fixture
 def guarded(monkeypatch):
     guard = CustodyGuard()
-    monkeypatch.setattr(sqlite3, "connect", guard.factory(sqlite3.connect))
+    monkeypatch.setattr(sqlite3, "connect", guard.factory(sqlite3.dbapi2.connect))
     conn = sqlite3.connect(":memory:")
     conn.executescript('''
         CREATE TABLE kanban_sync_outbox (id INTEGER PRIMARY KEY, x INTEGER);
@@ -134,6 +134,87 @@ def test_fixture_trigger_cannot_exempt_a_production_writer(guarded):
                        "BEGIN DELETE FROM kanban_sync_outbox; END;")
     with pytest.raises(sqlite3.DatabaseError, match="authorized"):
         writer('c.execute("INSERT INTO domain VALUES (1)")')(conn, "kanban_sync_outbox")
+
+
+@pytest.mark.parametrize("kind", ["corrupt", "locked", "non_utf8"])
+def test_connect_does_not_read_schema(tmp_path, kind):
+    path = tmp_path / "fixture.db"
+    raw_connect = sqlite3.dbapi2.connect
+    lock = None
+    if kind == "corrupt":
+        path.write_bytes(b"not a database")
+    else:
+        lock = raw_connect(path)
+        if kind == "locked":
+            lock.execute("CREATE TABLE ordinary (x)")
+            lock.commit()
+            lock.execute("BEGIN EXCLUSIVE")
+        else:
+            lock.executescript("PRAGMA writable_schema=ON; CREATE TABLE ordinary(x); "
+                               "UPDATE sqlite_master SET sql=CAST(x'ff' AS TEXT) WHERE name='ordinary';")
+            lock.commit()
+    connection = None
+    try:
+        connection = CustodyGuard().factory(raw_connect)(path, timeout=0)
+    finally:
+        if connection is not None:
+            connection.close()
+        if lock is not None:
+            lock.close()
+
+
+def test_guard_does_not_leave_a_reader_that_blocks_checkpoint(tmp_path):
+    connect = CustodyGuard().factory(sqlite3.dbapi2.connect)
+    conn = connect(tmp_path / "checkpoint.db")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL").fetchall()
+        conn.executescript("CREATE TABLE domain(x); CREATE TRIGGER fixture AFTER INSERT ON domain "
+                           "BEGIN SELECT 1; END;")
+        conn.execute("INSERT INTO domain VALUES (1)")
+        conn.commit()
+        assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall() == [(0, 0, 0)]
+    finally:
+        conn.close()
+
+
+def test_successful_backup_retains_exact_trigger_creator(guarded):
+    guard, source = guarded
+    writer('c.executescript("CREATE TABLE domain(x); CREATE TRIGGER audited AFTER INSERT ON domain "'
+           ' + "BEGIN INSERT INTO " + table + " VALUES (2, 1); END;")',
+           "install_triggers", "hermes_cli.kanban_db_sync")(source, "kanban_sync_outbox")
+    source.commit()
+    target = sqlite3.connect(":memory:")
+    try:
+        source.backup(target)
+        target.execute("INSERT INTO domain VALUES (1)")
+        assert target.execute("SELECT x FROM kanban_sync_outbox WHERE id=2").fetchall() == [(1,)]
+        assert not guard.violations
+    finally:
+        target.close()
+
+
+def test_custom_connection_class_is_stable_across_opens():
+    class Custom(sqlite3.Connection):
+        pass
+
+    connect = CustodyGuard().factory(sqlite3.dbapi2.connect)
+    first = connect(":memory:", factory=Custom)
+    second = connect(":memory:", factory=Custom)
+    try:
+        assert type(first) is type(second)
+        assert isinstance(first, Custom)
+    finally:
+        first.close()
+        second.close()
+
+
+def test_connect_keeps_existing_explicit_unwrapped_probe_interface():
+    def wrapper(*args, **kwargs):
+        return sqlite3.dbapi2.connect(*args, **kwargs)
+
+    wrapper.__wrapped__ = sqlite3.dbapi2.connect
+    connect = CustodyGuard().factory(wrapper)
+    assert connect.__wrapped__ is wrapper.__wrapped__
 
 
 def test_dispositions_and_original_candidates_remain_bounded():

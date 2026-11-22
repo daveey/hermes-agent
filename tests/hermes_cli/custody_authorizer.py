@@ -71,23 +71,39 @@ class CustodyGuard:
 
     def install(self, connection, database):
         external = None
-        filename = connection.execute("PRAGMA database_list").fetchone()[2]
-        database_key = filename if filename else object()
-        # A copied/restored fixture can retain provenance only for a byte-identical trigger
-        # definition actually created under this guard, never by trigger name alone.
-        for schema in ("main", "temp"):
-            for name, sql in connection.execute(f"SELECT name, sql FROM {schema}.sqlite_master WHERE type='trigger'"):
-                identity = self.trigger_definitions.get(sql)
-                if identity is not None:
-                    self.triggers[database_key, schema, name] = identity
+        install_authorizer = connection.set_authorizer
+        # Installing an observer must not open a read transaction: recovery tests deliberately
+        # connect to corrupt/locked/undecodable databases. Each connection has separate custody.
+        database_key = object()
+
+        def definitions(schema, name=None):
+            quoted = '"' + schema.replace('"', '""') + '"'
+            sql = f"SELECT name, sql FROM {quoted}.sqlite_master WHERE type='trigger'"
+            cursor = sqlite3.Connection.execute(
+                connection, sql + (" AND name=?" if name is not None else ""),
+                (name,) if name is not None else ())
+            try:
+                return cursor.fetchall()
+            finally:
+                cursor.close()
+
+        def creator(schema, trigger):
+            key = (database_key, schema, trigger)
+            if key not in self.triggers:
+                # A backup/reopen can adopt only an exact definition observed at creation,
+                # never merely a familiar name. This also covers backup-to-memory fixtures.
+                for _, sql in definitions(schema, trigger):
+                    identity = self.trigger_definitions.get(sql)
+                    if identity is not None:
+                        self.triggers[key] = identity
+            return self.triggers.get(key, ("<unknown-trigger>", trigger))
 
         def remember():
             if database_key not in self.pending:
                 return
             self.pending.discard(database_key)
             for schema in ("main", "temp"):
-                for name, sql in sqlite3.Connection.execute(
-                        connection, f"SELECT name, sql FROM {schema}.sqlite_master WHERE type='trigger'"):
+                for name, sql in definitions(schema):
                     identity = self.triggers.get((database_key, schema, name))
                     if identity is not None:
                         self.trigger_definitions[sql] = identity
@@ -102,10 +118,10 @@ class CustodyGuard:
                 self.pending.add(database_key)
             if action in ACTIONS and table in TABLES:
                 if trigger is not None:
-                    creator = self.triggers.get((database_key, schema, trigger), ("<unknown-trigger>", trigger))
+                    trigger_creator = creator(schema, trigger)
                     # Fixture-created triggers cannot lend test exemption to a production caller.
-                    if not creator[0].startswith("tests."):
-                        identity = creator
+                    if not trigger_creator[0].startswith("tests."):
+                        identity = trigger_creator
                 entry = (*identity, ACTIONS[action], table)
                 self.observed.append(entry)
                 # Test fixture setup is not a production writer. Production frames are never skipped
@@ -118,10 +134,10 @@ class CustodyGuard:
         def replace(authorizer_callback):
             nonlocal external
             external = authorizer_callback
-            sqlite3.Connection.set_authorizer(connection, authorize)
+            install_authorizer(authorize)
 
         connection.set_authorizer = replace
-        sqlite3.Connection.set_authorizer(connection, authorize)
+        install_authorizer(authorize)
 
     def factory(self, real_connect):
         guard = self
@@ -129,18 +145,27 @@ class CustodyGuard:
         class Guarded(_RememberConnection, sqlite3.Connection):
             pass
 
+        classes = {sqlite3.Connection: Guarded}
+
         def connect(database, *args, **kwargs):
             # Positional cached_statements/factory are deliberately unsupported rather than silently
             # leave a connection unguarded. The Board opens connections with keyword options.
             if len(args) > 4:
                 raise TypeError("custody guard requires keyword factory/cached_statements")
             base = kwargs.pop("factory", sqlite3.Connection)
-            cls = base if issubclass(base, _RememberConnection) else (
-                Guarded if base is sqlite3.Connection else type("CustodyGuarded", (_RememberConnection, base), {}))
+            if issubclass(base, _RememberConnection):
+                cls = base
+            else:
+                if base not in classes:
+                    classes[base] = type("CustodyGuarded", (_RememberConnection, base), {})
+                cls = classes[base]
             kwargs["factory"] = cls
             kwargs["cached_statements"] = 0
             connection = real_connect(database, *args, **kwargs)
             guard.install(connection, database)
             return connection
 
+        # Safety tests explicitly probe SQLite below the existing home-I/O guard.
+        # Preserve that escape hatch; ordinary calls always install this observer.
+        connect.__wrapped__ = getattr(real_connect, "__wrapped__", real_connect)
         return connect
