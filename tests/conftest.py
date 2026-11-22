@@ -288,6 +288,7 @@ from tests._fixtures.authority_cwd import authority_cwd_in_tmp  # opt-in cwd for
 from tests._fixtures.process_census import isolate_process_census  # real fixture processes, not host bystanders
 from tests._fixtures.fake_dns import public_dns  # opt-in offline resolver for SSRF-guard tests
 from tests._fixtures.model_peer import model_peer  # fixture registers here
+from tests._fixtures.custody_writes import custody_writes_are_audited  # runtime SQLite inventory gate
 from tests._fixtures.card_trees import _card_trees_off_the_real_home  # autouse: no real ~/code/_wt
 from tests._fixtures.offline_catalogs import (
     _offline_metadata_transport, _offline_registry_transport, _offline_video_catalog,
