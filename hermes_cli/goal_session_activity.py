@@ -11,7 +11,8 @@ Paused, done and cleared goals don't count: nothing resumes them unasked.
 [daveey]
 
 Read-only and cheap: one primary-key range scan of ``state_meta`` per profile
-database, cached for a couple of seconds because the sidebar polls.
+database, cached by file change signals checked only on requests. No timer or
+retained SQLite handle is needed.
 """
 
 from __future__ import annotations
@@ -20,45 +21,59 @@ import json
 import logging
 import sqlite3
 import threading
-import time
 from pathlib import Path
 from typing import Any, Iterable
 
 _log = logging.getLogger(__name__)
 
 _KEY_PREFIX = "goal:"
-_CACHE_TTL_S = 2.0
 _cache_lock = threading.Lock()
-_cache: tuple[float, frozenset[str]] | None = None
+# Only immutable answers are retained; SQLite connections close after each scan.
+_cache: dict[Path, tuple[tuple, frozenset[str]]] = {}
+_directories: dict[Path, tuple[tuple, tuple[Path, ...]]] = {}
+_MAX_CACHED_PATHS = 128
+
+
+def _stamp(path: Path) -> tuple:
+    try:
+        st = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return ()
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+def _db_stamp(path: Path) -> tuple:
+    return _stamp(path), _stamp(Path(str(path) + "-wal")), _stamp(Path(str(path) + "-journal"))
+
+
+def _profile_candidates(directory: Path) -> tuple[Path, ...]:
+    before = _stamp(directory)
+    prior = _directories.get(directory)
+    if prior is not None and prior[0] == before:
+        return prior[1]
+    _directories.pop(directory, None)
+    # Include missing state.db candidates: creating one in an existing profile
+    # need not change the profiles directory's mtime.
+    paths = tuple(sorted(p / "state.db" for p in directory.iterdir())) if before else ()
+    if before == _stamp(directory) and len(paths) <= _MAX_CACHED_PATHS:
+        if len(_directories) >= _MAX_CACHED_PATHS:
+            _directories.clear()
+        _directories[directory] = before, paths
+    return paths
 
 
 def _state_db_paths() -> list[Path]:
     from hermes_constants import get_default_hermes_root, get_hermes_home
 
-    paths: list[Path] = []
-    seen: set[str] = set()
-
-    def add(p: Path) -> None:
-        key = str(p.resolve()) if p.exists() else ""
-        if key and key not in seen:
-            seen.add(key)
-            paths.append(p)
-
-    roots = [get_hermes_home()]
-    try:
-        roots.append(get_default_hermes_root())
-    except Exception:  # pragma: no cover - defensive
-        pass
+    roots = dict.fromkeys((Path(get_hermes_home()), Path(get_default_hermes_root())))
+    paths: dict[Path, None] = {}
     for root in roots:
-        add(Path(root) / "state.db")
-        prof = Path(root) / "profiles"
+        paths[root / "state.db"] = None
         try:
-            if prof.is_dir():
-                for p in sorted(prof.glob("*/state.db")):
-                    add(p)
+            paths.update(dict.fromkeys(_profile_candidates(root / "profiles")))
         except OSError:
-            pass
-    return paths
+            _directories.pop(root / "profiles", None)
+    return list(paths)
 
 
 def _read_active(path: Path) -> set[str]:
@@ -84,21 +99,30 @@ def _read_active(path: Path) -> set[str]:
 
 def active_goal_sessions() -> frozenset[str]:
     """Session ids (across every profile) whose standing goal is still active."""
-    global _cache
-    now = time.monotonic()
     with _cache_lock:
-        if _cache is not None and now < _cache[0]:
-            return _cache[1]
-    ids: set[str] = set()
-    for path in _state_db_paths():
-        try:
-            ids |= _read_active(path)
-        except sqlite3.Error as exc:  # no state_meta yet, a locked file
-            _log.debug("goal activity read failed for %s: %s", path, exc)
-    result = frozenset(ids)
-    with _cache_lock:
-        _cache = (now + _CACHE_TTL_S, result)
-    return result
+        paths = _state_db_paths()
+        for removed in _cache.keys() - set(paths):
+            del _cache[removed]
+        ids: set[str] = set()
+        for path in paths:
+            try:
+                before = _db_stamp(path)
+                prior = _cache.get(path)
+                if prior is not None and prior[0] == before:
+                    ids.update(prior[1])
+                    continue
+                _cache.pop(path, None)
+                if not before[0]:
+                    continue
+                active = frozenset(_read_active(path))
+                ids.update(active)
+                if before == _db_stamp(path) and len(_cache) < _MAX_CACHED_PATHS:
+                    _cache[path] = before, active
+            except (OSError, sqlite3.Error) as exc:
+                # Never certify errors; the next request retries even without a write.
+                _cache.pop(path, None)
+                _log.debug("goal activity read failed for %s: %s", path, exc)
+        return frozenset(ids)
 
 
 def _row_ids(row: dict[str, Any]) -> Iterable[str]:
@@ -128,6 +152,6 @@ def annotate_goal_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _reset_cache_for_tests() -> None:
-    global _cache
     with _cache_lock:
-        _cache = None
+        _cache.clear()
+        _directories.clear()
