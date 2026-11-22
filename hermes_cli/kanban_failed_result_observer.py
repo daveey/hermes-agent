@@ -188,8 +188,8 @@ def observe(context):
             if (row is None or row['status'] != 'running' or row['current_run_id'] != context['run_id']
                     or row['claim_lock'] != context['claim_lock']):
                 return
-            from hermes_cli.kanban_failure_release import command_owned
-            if command_owned(conn, context['run_id']):
+            from hermes_cli.kanban_failure_release import observer_held
+            if observer_held(conn, context['run_id']):
                 # A Board-primary release is durably queued: the feed, not this
                 # observer, closes the run, so waiting here would outlive sync.
                 return

@@ -4676,6 +4676,7 @@
                 "kanban_request_changes",
                 "kanban_request_review",
                 "kanban_resume_contained",
+                "kanban_retain",
                 "kanban_show",
                 "kanban_unblock",
                 "kanban_unlink",

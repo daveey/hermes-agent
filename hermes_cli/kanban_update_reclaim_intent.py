@@ -34,8 +34,8 @@ def _owner_alive(intent):
 
 def observer_held(conn, row) -> bool:
     """Keep charged releases and updater-owned reclaims out of the crash sweep."""
-    from hermes_cli.kanban_failure_release import command_owned
-    return command_owned(conn, row["current_run_id"]) or pending(conn, row)
+    from hermes_cli.kanban_failure_release import observer_held as command_held
+    return command_held(conn, row["current_run_id"]) or pending(conn, row)
 
 
 def pending(conn, row) -> bool:

@@ -61,13 +61,34 @@ def command_owned(conn: sqlite3.Connection, run_id: int | None) -> bool:
 def queued(conn: sqlite3.Connection, run_id: int | None) -> bool:
     """Legacy release-only predicate: retain custody is never failure/quota authority."""
     row = _command(conn, run_id)
-    return row is not None and ("operation_kind" not in row.keys() or row["operation_kind"] in (None, "release"))
+    return row is not None and (_is_release(row) or _fallback(row))
+
+
+def _fallback(row) -> bool:
+    return "rejected_release_op_id" in row.keys() and bool(row["rejected_release_op_id"])
+
+
+def _is_release(row) -> bool:
+    return "operation_kind" not in row.keys() or row["operation_kind"] in (None, "release")
+
+
+def observer_held(conn: sqlite3.Connection, run_id: int | None) -> bool:
+    """Rejected retain keeps immutable custody, but cannot disable failure enforcement.
+
+    A fallback marker is permanent release custody, even after transport remaps/ACK.
+    Unknown delivery is not a rejection and must not race a possibly applied retain.
+    """
+    row = _command(conn, run_id)
+    return row is not None and (_is_release(row) or _fallback(row) or row["delivery_state"] != "rejected")
 
 
 def release_predicate(conn: sqlite3.Connection) -> str:
     """SQL for existing joined readers (command alias c), including unmigrated NULL legacy rows."""
     columns = {row[1] for row in conn.execute("PRAGMA table_info(kanban_failure_commands)")}
-    return "(c.operation_kind IS NULL OR c.operation_kind='release')" if "operation_kind" in columns else "1"
+    if "operation_kind" not in columns:
+        return "1"
+    fallback = " OR COALESCE(c.rejected_release_op_id,'')!=''" if "rejected_release_op_id" in columns else ""
+    return f"(c.operation_kind IS NULL OR c.operation_kind='release'{fallback})"
 
 
 def _ensure_commands(conn: sqlite3.Connection) -> None:
@@ -76,7 +97,7 @@ def _ensure_commands(conn: sqlite3.Connection) -> None:
                  "op_id TEXT NOT NULL)")
     existing = {row[1] for row in conn.execute("PRAGMA table_info(kanban_failure_commands)")}
     for name in ("operation_kind", "request_uid", "event_uid", "request_json", "request_sha256",
-                 "delivery_state", "canonical_receipt_json"):
+                 "delivery_state", "canonical_receipt_json", "rejected_release_op_id"):
         if name not in existing:
             conn.execute(f"ALTER TABLE kanban_failure_commands ADD COLUMN {name} TEXT")
 
@@ -110,6 +131,13 @@ def queue(conn: sqlite3.Connection, task_id: str, run_id: int | None, *,
     inserted = conn.execute("INSERT OR IGNORE INTO kanban_failure_commands (run_uid,task_id,op_id,operation_kind) "
                             "VALUES (?, ?, ?, 'release')",
                             (uid, task_id, op_id)).rowcount
+    if not inserted:
+        # A definitive rejection made no canonical terminal mutation. Keep its
+        # frozen audit intact and reserve one ordinary failure release atomically.
+        # This marker is not the current outbox identity (retries may remap it).
+        inserted = conn.execute("UPDATE kanban_failure_commands SET rejected_release_op_id=? "
+                                "WHERE run_uid=? AND operation_kind='retain' AND delivery_state='rejected' "
+                                "AND rejected_release_op_id IS NULL", (op_id, uid)).rowcount
     if inserted:
         fields = {**policy, "run_uid": uid, "outcome": outcome, "error": error[:500]}
         # Same millisecond clock as captured rows: a release may reference a

@@ -705,9 +705,9 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         "  AND t.worker_pid IS NOT NULL"
     ).fetchall()
     from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill, terminate_modern_bindings
-    from hermes_cli.kanban_failure_release import command_owned
+    from hermes_cli.kanban_failure_release import observer_held
     for row in rows:
-        if command_owned(conn, row["current_run_id"]):
+        if observer_held(conn, row["current_run_id"]):
             continue  # Await authoritative feed; never signal an already-released attempt again.
         if owner_reclaim_blocked(conn, row["id"], for_termination=True, selected=row):
             continue

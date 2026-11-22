@@ -51,11 +51,18 @@ def outbound(conn: sqlite3.Connection, row: dict) -> dict:
     """Validate actual durable custody, not just the mutable transport projection."""
     wire = frozen_wire(row)
     owned = command(conn, wire.get("run_uid"))
+    if owned is not None:
+        _replayable(owned)
     if (owned is None or owned.get("operation_kind") != "retain" or owned["op_id"] != row["op_id"]
             or owned["task_id"] != row["row_uid"] or owned["request_json"] != canonical(wire)
             or owned["request_sha256"] != hashlib.sha256(owned["request_json"].encode("utf-8")).hexdigest()):
         raise ValueError("retain outbox lost its exact immutable command custody")
     return wire
+
+
+def _replayable(owned: dict) -> None:
+    if owned.get("delivery_state") == "rejected" or owned.get("rejected_release_op_id"):
+        raise ValueError("retain rejected: immutable custody retained; ordinary failure recovery owns this run")
 
 
 def before_send(conn: sqlite3.Connection, rows: list[dict], hub, board: str) -> None:
@@ -78,6 +85,13 @@ def record_result(conn: sqlite3.Connection, row: dict, result: dict) -> str:
     """An ACK may remove transport, never custody or independent-readback requirement."""
     status = result.get("status")
     op_id = row["op_id"]
+    prior = conn.execute("SELECT delivery_state FROM kanban_failure_commands WHERE op_id=? AND operation_kind='retain'",
+                         (op_id,)).fetchone()
+    if prior is not None and prior[0] in ("rejected", "confirmed", "acknowledged"):
+        return "deferred"  # A delayed reply cannot revoke evidence of application or rejection.
+    from hermes_cli.kanban_sync_compat import transient_rejection
+    if status == "rejected" and transient_rejection(result):
+        status = "deferred"  # Infrastructure/ordering refusal is not a definitive decision.
     if status == "applied":
         conn.execute("DELETE FROM kanban_sync_outbox WHERE op_id=?", (op_id,))
         state, count = "acknowledged", "applied"
@@ -107,12 +121,18 @@ def confirm(conn: sqlite3.Connection, hub, board: str, run_uid: str) -> dict:
     owned = command(conn, run_uid)
     if owned is None or owned.get("operation_kind") != "retain":
         raise ValueError("retain command custody unavailable")
+    _replayable(owned)
     wire = json.loads(owned["request_json"])
     if hashlib.sha256(canonical(wire).encode("utf-8")).hexdigest() != owned["request_sha256"]:
         raise ValueError("retain command digest changed")
     capability(hub, board)
     reply = hub.ops(board, [wire])
     results = reply.get("results", [])
+    if (len(results) == 1 and results[0].get("client_op_id") == owned["request_uid"]
+            and results[0].get("status") == "rejected"):
+        from hermes_cli import kanban_db as kb
+        with kb.write_txn(conn, allow_nested=True):
+            record_result(conn, {"op_id": owned["op_id"]}, results[0])
     if (len(results) != 1 or results[0].get("client_op_id") != owned["request_uid"]
             or results[0].get("status") != "applied"):
         raise ValueError("retain intent not canonically applied; preserve exact command custody")
@@ -137,8 +157,12 @@ def confirm(conn: sqlite3.Connection, hub, board: str, run_uid: str) -> dict:
         raise ValueError("retain canonical run or stop is not terminal")
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn, allow_nested=True):
-        conn.execute("UPDATE kanban_failure_commands SET canonical_receipt_json=?,delivery_state='confirmed' "
-                     "WHERE run_uid=? AND request_sha256=?", (canonical(receipt), run_uid, owned["request_sha256"]))
+        changed = conn.execute("UPDATE kanban_failure_commands SET canonical_receipt_json=?,delivery_state='confirmed' "
+                               "WHERE run_uid=? AND request_sha256=? AND delivery_state!='rejected' "
+                               "AND rejected_release_op_id IS NULL",
+                               (canonical(receipt), run_uid, owned["request_sha256"])).rowcount
+        if not changed:
+            raise ValueError("retain custody changed during canonical confirmation")
         conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (owned['op_id'],))
     return {"ok": True, "task_id": owned["task_id"], "run_uid": run_uid,
             "request_uid": owned["request_uid"], "event_uid": owned["event_uid"],
@@ -199,6 +223,7 @@ def reserve(conn: sqlite3.Connection, task_id: str, run_uid: str, payload: dict,
     old = command(conn, run_uid)
     if old is not None:
         if old["operation_kind"] == "retain":
+            _replayable(old)
             requested = canonical(_envelope(task_id, run_uid, payload, expected_episode,
                                              old["request_uid"], old["event_uid"]))
             if old["request_json"] != requested:

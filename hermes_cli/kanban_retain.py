@@ -37,39 +37,38 @@ def retain(conn, *, board: str, **args) -> dict:
     if mode == 'primary':
         from hermes_cli.kanban_sync_client import Hub, load_identity
         hub = Hub(load_identity())
-        state = sync.sync_state(conn)
-        if state['gateway_id'] != hub.ident.gateway or state['board_id'] != board:
-            hub.close()
-            raise ValueError('retain enrolled board/gateway mismatch')
-        transport.capability(hub, board)
-        with kb.write_txn(conn):
-            if transport.command(conn, actor.run_uid) is None:
-                actors.current_actor(conn)
-            stop = decision.pending_episode(conn, actor.task)
-            expected = (stop.get('uid') or str(stop['id'])) if stop else None
-            old = transport.command(conn, actor.run_uid)
-            if old and old.get('operation_kind') == 'retain':
-                expected = json.loads(old['request_json'])['expected_episode']
-            owned = transport.reserve(conn, actor.task, actor.run_uid, data, expected)
-        if owned.get('operation_kind') != 'retain':
-            try:
-                from hermes_cli.kanban_retain_safety import recover
-                result = recover(conn, hub, board, actor.run_uid)
-                transport.project(conn, hub, board, result)
-                return result
-            finally:
-                hub.close()
         try:
-            from hermes_cli.kanban_sync_client import push
-            push(conn, hub, board, hub.ident.gateway, primary=True)
-            result = transport.confirm(conn, hub, board, actor.run_uid)
-            transport.project(conn, hub, board, result)
-            return result
+            return _primary(conn, hub, board, actor, data)
         finally:
             hub.close()
     if mode != 'off' or sync.sync_state(conn):
         raise ValueError('retain requires owning primary or genuinely local board')
     return _local(conn, actor, data)
+
+
+def _primary(conn, hub, board, actor, data):
+    state = sync.sync_state(conn)
+    if state['gateway_id'] != hub.ident.gateway or state['board_id'] != board:
+        raise ValueError('retain enrolled board/gateway mismatch')
+    transport.capability(hub, board)
+    with kb.write_txn(conn):
+        if transport.command(conn, actor.run_uid) is None:
+            actors.current_actor(conn)
+        stop = decision.pending_episode(conn, actor.task)
+        expected = (stop.get('uid') or str(stop['id'])) if stop else None
+        old = transport.command(conn, actor.run_uid)
+        if old and old.get('operation_kind') == 'retain':
+            expected = json.loads(old['request_json'])['expected_episode']
+        owned = transport.reserve(conn, actor.task, actor.run_uid, data, expected)
+    if owned.get('operation_kind') != 'retain':
+        from hermes_cli.kanban_retain_safety import recover
+        result = recover(conn, hub, board, actor.run_uid)
+    else:
+        from hermes_cli.kanban_sync_client import push
+        push(conn, hub, board, hub.ident.gateway, primary=True)
+        result = transport.confirm(conn, hub, board, actor.run_uid)
+    transport.project(conn, hub, board, result)
+    return result
 
 
 def _local(conn, actor, data) -> dict:
