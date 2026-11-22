@@ -39,9 +39,6 @@ DEFAULT_PARK_SECONDS = 7200
 DEFAULT_OWNER_IDLE_SECONDS = 86400
 DEFAULT_SWEEP_INTERVAL_SECONDS = 300
 SHEPHERD_KIND = "shepherd"
-CHOICES = [{"label": "Release (promote)", "value": "promote"},
-           {"label": "Archive", "value": "archive"},
-           {"label": "Re-scope", "value": "rescope"}]
 _SPEND_KEYS = ("limit", "runs", "runs_with_usage", "cost_usd")
 
 
@@ -303,14 +300,31 @@ def _leased(row: dict, now: int) -> bool:
     return bool(row.get("lease_holder")) and (expires is None or int(expires) > now)
 
 
+def _agent_owned(conn: sqlite3.Connection, task_id: str) -> bool:
+    """An agent route still owns the park: its open kernel recovery card (or a judged goal hold), an enforced lane
+    gate, or the stale-triage sweep that will release it. Escalating these would turn agent work into a human ask
+    (a recovery card's resume then refuses with human_gate, and the requester skips a card with a human_request)."""
+    from hermes_cli.kanban_goal_recovery import current_park
+    from hermes_cli.kanban_lanes import gate_refusal
+    from hermes_cli.kanban_resume_requester import open_recovery_card
+    from hermes_cli.kanban_triage_sweep import awaiting_stale_sweep
+    return bool(open_recovery_card(conn, task_id) or current_park(conn, task_id)
+                or gate_refusal(conn, task_id) or awaiting_stale_sweep(conn, task_id))
+
+
 def _excluded(conn: sqlite3.Connection, row: dict, now: int) -> bool:
     from hermes_cli.kanban_open_asks import card_is_open_human_ask
     tid, kind = row["id"], row.get("block_kind")
     if _leased(row, now) or card_is_open_human_ask(row["status"], kind, row.get("human_request")):
         return True
-    if kind == "time" or (kind == "dependency" and _dependency_open(conn, tid)):
+    if kind in ("time", "lane_gate") or (kind == "dependency" and _dependency_open(conn, tid)):
         return True
-    return _armed_wake(conn, tid)
+    return _armed_wake(conn, tid) or _agent_owned(conn, tid)
+
+
+def _shared_blocker(entry: Optional[dict]) -> bool:
+    """Parked behind a declared shared blocker another card probes (as ``sweep_agent_owned_blocks`` skips)."""
+    return bool(entry and entry["payload"].get("blocker_id"))
 
 
 # --- desk binding --------------------------------------------------------------------------------------------------
@@ -326,16 +340,27 @@ def _desk(desk: str, own: str):
     except OriginError:
         logger.warning("kanban: kanban.triage_owner_chat %r is not <gateway>/<profile>/<session>", desk)
         return None
+    from hermes_cli.kanban_db_notify import is_headless_session
+    from hermes_cli.kanban_placement import is_placeholder_session
+    chat_id = f"{origin.gateway}/{origin.profile}/{origin.session}"
+    if is_placeholder_session(origin.session) or is_headless_session(chat_id):
+        logger.warning("kanban: kanban.triage_owner_chat %r is not an interactive chat; no desk binding", desk)
+        return None
     return origin, bool(own) and origin.gateway == own and origin.profile == get_active_profile_name()
 
 
 def _subscribe_desk(conn: sqlite3.Connection, task_id: str, desk) -> None:
-    """Local delivery for the desk chat: before the escalation event, so the subscription's cursor includes it."""
-    from hermes_cli.kanban_db_notify import add_notify_sub
+    """Local delivery for the desk chat, inside the escalation txn and before its event, so the subscription's
+    cursor includes that event. The same insert as the spend producer's ``bind`` (``add_notify_sub`` opens its own
+    write txn and cannot nest); an existing row keeps its provenance. Caller holds the write txn."""
     origin, local = desk
-    add_notify_sub(conn, task_id=task_id, platform="tui" if local else "hub",
-                   chat_id=origin.session if local else f"{origin.gateway}/{origin.profile}/{origin.session}",
-                   delivery_metadata={"reason": SHEPHERD_KIND})
+    conn.execute(
+        "INSERT OR IGNORE INTO kanban_notify_subs "
+        "(task_id,platform,chat_id,thread_id,delivery_mode,delivery_metadata,created_at,last_event_id) "
+        "VALUES (?,?,?,'','notify',?,?,(SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?))",
+        (task_id, "tui" if local else "hub",
+         origin.session if local else f"{origin.gateway}/{origin.profile}/{origin.session}",
+         json.dumps({"reason": SHEPHERD_KIND}), int(time.time()), task_id))
 
 
 def _link_desk(conn: sqlite3.Connection, task_id: str, desk, now: int) -> None:
@@ -356,16 +381,24 @@ def _link_desk(conn: sqlite3.Connection, task_id: str, desk, now: int) -> None:
 
 # --- the sweep -----------------------------------------------------------------------------------------------------
 
-def _request(row: dict, entry: Optional[dict], age: int, owner_note: str, kind) -> dict:
+def _request(conn: sqlite3.Connection, row: dict, entry: Optional[dict], age: int, owner_note: str, kind) -> dict:
+    """The generated ask. No ``choices``: the default Unblock/Archive buttons answer it (a choice list makes every
+    answer a non-archive unblock). The action follows the ask-line convention (``user_ask_lint_error``). A pending
+    spend decision refuses the Unblock button, so its release is the promote command (a new spend window)."""
     from hermes_cli.kanban_human_request import validate_human_request
+    from hermes_cli.kanban_spend_decision import pending as spend_pending
+    tid = row["id"]
     title = " ".join(str(row.get("title") or "").split())[:200]
+    unblock = (f"Unblock = run `hermes kanban promote {tid} --reason '<what changed>'`, which releases it with a "
+               "new spend window (the Unblock button is refused while the spend decision is pending)"
+               if spend_pending(conn, tid) else "Unblock = it goes back to work as it is")
     return validate_human_request({
-        "action": f"Decide this parked card: release it (promote), archive it, or re-scope it: {title}",
+        "action": (f"Decide this parked card ({title}): release it, archive it, or re-scope it by replying with the "
+                   f"new scope. {unblock}; archive = the card and its remaining work are dropped."),
         "why_human": f"Parked {age // 3600}h with no live owner and no request ({_reason(entry)})",
         "interaction": "approval",
         "scope": "This card only",
         "evidence": _evidence(entry, owner_note),
-        "choices": CHOICES,
     }, kind=kind)
 
 
@@ -376,8 +409,6 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
     from hermes_cli.kanban_human_request import NONHUMAN_KINDS
 
     tid = row["id"]
-    if desk is not None:
-        _subscribe_desk(conn, tid, desk)
     desk_chat = f"{desk[0].gateway}/{desk[0].profile}/{desk[0].session}" if desk is not None else None
     with kb.write_txn(conn):
         fresh = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
@@ -391,9 +422,10 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
             if kind in NONHUMAN_KINDS:
                 kind = "needs_input"
                 conn.execute("UPDATE tasks SET block_kind = ? WHERE id = ?", (kind, tid))
-            store_request(conn, tid, _request(fresh, entry, age, "No unreleased chat link to a live chat and no "
+            store_request(conn, tid, _request(conn, fresh, entry, age, "No unreleased chat link to a live chat and no "
                                               "open spend-decision supervisor card", kind))
         if desk is not None:
+            _subscribe_desk(conn, tid, desk)
             _link_desk(conn, tid, desk, now)
         kb._append_event(conn, tid, EVENT, {
             "episode_start": entry["created_at"] if entry else int(fresh.get("created_at") or 0),
@@ -451,7 +483,7 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
                 continue
             entry = park_entry(conn, tid)
             start = entry["created_at"] if entry else int(row.get("created_at") or 0)
-            if now - start < park_s or _escalated(conn, tid, entry):
+            if now - start < park_s or _shared_blocker(entry) or _escalated(conn, tid, entry):
                 continue
             try:
                 if live_owner(conn, tid, own=own, liveness=liveness):

@@ -32,6 +32,14 @@ _TRIAGE_BRIEF = (
     "probe if it waits on something external. Do not return it to triage."
 )
 _MARKS = ",".join("?" * len(TRIAGE_ENTRY_EVENTS))
+# The re-entry predicate on alias ``t`` (params ``_PENDING_ARGS``): a triage entry newer than the last sweep, and the
+# sweep not capped since that entry. Shared by ``sweep_stale_triage`` and ``awaiting_stale_sweep``.
+_PENDING = (
+    f"COALESCE((SELECT MAX(n.id) FROM task_events n WHERE n.task_id = t.id AND n.kind IN ({_MARKS})), 0) > "
+    "COALESCE((SELECT MAX(s.id) FROM task_events s WHERE s.task_id = t.id AND s.kind = 'triage_swept'), -1) "
+    "AND NOT EXISTS (SELECT 1 FROM task_events c WHERE c.task_id = t.id AND c.kind = 'triage_sweep_capped' "
+    f"AND c.id > COALESCE((SELECT MAX(n.id) FROM task_events n WHERE n.task_id = t.id AND n.kind IN ({_MARKS})), 0))")
+_PENDING_ARGS = (*TRIAGE_ENTRY_EVENTS, *TRIAGE_ENTRY_EVENTS)
 
 
 def _gate_exclusion() -> str:
@@ -240,6 +248,18 @@ def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float
     return created
 
 
+def awaiting_stale_sweep(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when :func:`sweep_stale_triage` will still release this card on its own (once idle long enough): in
+    triage, not gate-held, re-entered since its last sweep and not capped, and not a hold the sweep skips (spend
+    decision, containment). Such a card is agent-owned; it is not stranded."""
+    if conn.execute("SELECT 1 FROM tasks t WHERE t.id = ? AND t.status = 'triage' " + _gate_exclusion()
+                    + "AND " + _PENDING, (task_id, *_PENDING_ARGS)).fetchone() is None:
+        return False
+    from hermes_cli.kanban_containment_connections import held as containment_held
+    from hermes_cli.kanban_spend_decision import pending as spend_decision_pending
+    return not (spend_decision_pending(conn, task_id) or containment_held(conn, task_id))
+
+
 def sweep_stale_triage(
     conn: sqlite3.Connection, *, default_assignee: Optional[str] = None,
     older_than: int = TRIAGE_STALE_SECONDS, now: Optional[int] = None,
@@ -256,12 +276,7 @@ def sweep_stale_triage(
         "SELECT t.id, t.title, t.body, t.assignee, t.human_request, t.tenant FROM tasks t "
         "WHERE t.status = 'triage' " + _gate_exclusion() +
         "AND COALESCE((SELECT MAX(e.created_at) FROM task_events e WHERE e.task_id = t.id), t.created_at) <= ? "
-        "AND COALESCE((SELECT MAX(n.id) FROM task_events n WHERE n.task_id = t.id "
-        f"AND n.kind IN ({_MARKS})), 0) > "
-        "COALESCE((SELECT MAX(s.id) FROM task_events s WHERE s.task_id = t.id AND s.kind = 'triage_swept'), -1) "
-        "AND NOT EXISTS (SELECT 1 FROM task_events c WHERE c.task_id = t.id AND c.kind = 'triage_sweep_capped' "
-        f"AND c.id > COALESCE((SELECT MAX(n.id) FROM task_events n WHERE n.task_id = t.id AND n.kind IN ({_MARKS})), 0))",
-        (cutoff, *TRIAGE_ENTRY_EVENTS, *TRIAGE_ENTRY_EVENTS),
+        "AND " + _PENDING, (cutoff, *_PENDING_ARGS),
     ).fetchall()
     from hermes_cli.kanban_resume_requester import open_recovery_card
     from hermes_cli.kanban_goal_recovery import current_park
