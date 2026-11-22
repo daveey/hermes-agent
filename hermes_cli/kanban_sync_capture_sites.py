@@ -44,6 +44,8 @@ SITES: dict[tuple[str, str, str, str], str] = {
     ("kanban_sync_reserved_key.py", "_queue_children", "INSERT", _O): RECOVERY_AMBIGUOUS,
     ("kanban_sync_reserved_key.py", "_write_receipt", "INSERT", _O): RECOVERY_AMBIGUOUS,
     ("kanban_sync_compat.py", "rejected_parent", "INSERT", _O): SYNTHETIC_UNKNOWN,
+    ("kanban_replay_sender.py", "_push_strict.record", "INSERT", _O): SYNTHETIC_UNKNOWN,
+    ("kanban_replay_sender.py", "_push_strict.record", "UPDATE", _O): STATE_ONLY,
     ("kanban_sync_envelope.py", "parent", "INSERT", _P): SYNTHETIC_UNKNOWN,
     ("kanban_containment_outbox.py", "strip_lifecycle", "UPDATE", _O): IDENTITY_ROTATION,
     ("kanban_sync_client.py", "_push_legacy", "UPDATE", _O): IDENTITY_ROTATION,

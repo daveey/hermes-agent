@@ -79,7 +79,18 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
         status = verdict['status']
         if status == 'rejected':
             if row.get('_parent'):
-                raise ValueError('synthetic rejection requires custody integration')
+                # Move exact synthetic custody into the ordinary visible repair queue.
+                # This is not a new intent, a retry, or an authoritative row success.
+                from time import time
+                from hermes_cli.kanban_sync_envelope import retire_parent
+                wire = json.loads(journal.pending_wire(conn))
+                del wire['replay']
+                conn.execute('INSERT INTO kanban_sync_outbox '
+                             '(op_id,table_name,row_uid,op,fields,hlc,created_at,status_origin,wire_json) '
+                             'VALUES (?,?,?,?,?,?,?,?,?)',
+                             (pending['op_id'], 'tasks', row['row_uid'], 'upsert', json.dumps(wire['fields']),
+                              wire['hlc'], int(time() * 1000), wire.get('status_origin'), json.dumps(wire)))
+                retire_parent(conn, row['row_uid'])
             reason = f"{verdict.get('reason') or 'rejected'}: {verdict.get('detail') or ''}".strip(': ')
             conn.execute("UPDATE kanban_sync_outbox SET state='rejected', last_error=?, attempts=attempts+1 "
                          "WHERE op_id=?", (reason[:500], pending['op_id']))
@@ -107,7 +118,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
         from time import time
         rows = []
         if journal.pending_wire(conn) is None:
-            rows, _, _ = select_pending(conn, hub, board, {}, now=int(time()), limit=1, before_head=False)
+            rows, _, _ = select_pending(conn, hub, board, {}, now=int(time()), limit=1, before_head=False,
+                                        hold_rejected=True)
         with write_txn(conn):
             decision = journal.recover(conn, remote, record)
             if decision['action'] == 'record':
@@ -119,7 +131,7 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
                 current = conn.execute('SELECT * FROM kanban_sync_outbox WHERE op_id=?', (rows[0]['op_id'],)).fetchone()
                 if current is None or dict(current) != rows[0]:
                     raise ValueError('selected source changed before issuance')
-                rows = parent_first(conn, rows, int(time()), 1)
+                rows = parent_first(conn, rows, int(time()), 1, hold_rejected=True)
                 if not rows:
                     break
                 row = rows[0]

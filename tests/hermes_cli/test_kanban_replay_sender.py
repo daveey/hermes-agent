@@ -547,6 +547,139 @@ def test_synthetic_parent_restart_keeps_wire_and_never_issues_child_early(live, 
         restarted.close()
 
 
+def test_synthetic_rejection_is_visible_and_settles_transport(live):
+    tid = kb.create_task(live, title='rejected synthetic parent', assignee='worker')
+    with kbc.write_txn(live):
+        live.execute('DELETE FROM kanban_sync_outbox')
+    kb.add_comment(live, tid, 'author', 'dependent child')
+    receiver = Receiver()
+    receiver.status = 'rejected'
+    result = client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert result.rejected == 1 and result.applied == result.merged == 0
+    op = dict(receiver.sent[0])
+    op.pop('replay')
+    row = dict(live.execute('SELECT * FROM kanban_sync_outbox WHERE op_id=?', (op['client_op_id'],)).fetchone())
+    assert row['state'] == 'rejected' and row['attempts'] == 1
+    assert row['row_uid'] == tid and row['table_name'] == 'tasks' and row['op'] == 'upsert'
+    assert json.loads(row['wire_json']) == op and json.loads(row['fields']) == op['fields']
+    assert row['status_origin'] == op['status_origin'] and row['last_error'] == 'rejected'
+    assert live.execute('SELECT sync_version FROM tasks WHERE id=?', (tid,)).fetchone()[0] is None
+    assert not live.execute('SELECT 1 FROM kanban_sync_parent_envelopes').fetchone()
+    assert journal.pending_wire(live) is None and journal.snapshot(live)['settled'] == '1'
+    assert receiver.slot['a'] == '1'
+
+
+@pytest.mark.parametrize('synthetic', [False, True])
+def test_rejected_parent_holds_children_but_independent_work_drains_after_restart(live, synthetic):
+    tid = kb.create_task(live, title='rejected parent dependency', assignee='worker')
+    if synthetic:
+        with kbc.write_txn(live):
+            live.execute('DELETE FROM kanban_sync_outbox')
+    kb.add_comment(live, tid, 'author', 'dependent child')
+    receiver = Receiver()
+    receiver.status = 'rejected'
+    assert client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1).rejected == 1
+    rejected = dict(live.execute("SELECT * FROM kanban_sync_outbox WHERE state='rejected'").fetchone())
+    other = kb.create_task(live, title='independent work', assignee='worker')
+    restarted = reopen(live)
+    try:
+        receiver.status = 'applied'
+        result = client.push(restarted, receiver, 'default', 'macbook', primary=False, max_batches=1)
+        assert result.applied == 1
+        assert receiver.sent[1]['uid'] == other
+        assert all(w['uid'] != tid and w['fields'].get('task_id') != tid for w in receiver.sent[1:])
+        assert dict(restarted.execute('SELECT * FROM kanban_sync_outbox WHERE op_id=?',
+                                     (rejected['op_id'],)).fetchone()) == rejected
+        assert restarted.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name='task_comments'").fetchone()
+        assert not restarted.execute('SELECT 1 FROM kanban_sync_parent_envelopes').fetchone()
+        for _ in range(5):
+            client.push(restarted, receiver, 'default', 'macbook', primary=False, max_batches=1)
+        assert all(w['uid'] != tid and w['fields'].get('task_id') != tid for w in receiver.sent[1:])
+        before = len(receiver.sent)
+        assert client.push(restarted, receiver, 'default', 'macbook', primary=False, max_batches=10).sent == 0
+        assert len(receiver.sent) == before and journal.pending_wire(restarted) is None
+    finally:
+        restarted.close()
+
+
+def test_rejected_parent_is_not_hidden_by_an_older_pending_parent(live):
+    from hermes_cli.kanban_sync_parent_order import parent_first
+    tid = kb.create_task(live, title='multiple parent obligations', assignee='worker')
+    receiver = Receiver()
+    receiver.status = 'rejected'
+    assert client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1).rejected == 1
+    kb.add_comment(live, tid, 'author', 'child')
+    with kbc.write_txn(live):
+        live.execute("INSERT INTO kanban_sync_outbox(op_id,table_name,row_uid,op,fields,hlc,created_at) "
+                     "VALUES ('older-pending','tasks',?,'upsert','{}','',0)", (tid,))
+    child = dict(live.execute("SELECT * FROM kanban_sync_outbox WHERE table_name='task_comments'").fetchone())
+    assert parent_first(live, [child], 9999999999, 1, hold_rejected=True) == []
+    # Legacy selection deliberately retains its old behavior; bound journals never use it.
+    assert parent_first(live, [child], 9999999999, 1)[0]['op_id'] == 'older-pending'
+
+
+def test_synthetic_rejection_bookkeeping_failure_rolls_back_and_recovers(live, monkeypatch):
+    from hermes_cli import kanban_sync_envelope as envelopes
+    tid = kb.create_task(live, title='reject custody rollback', assignee='worker')
+    with kbc.write_txn(live):
+        live.execute('DELETE FROM kanban_sync_outbox')
+    kb.add_comment(live, tid, 'author', 'held child')
+    receiver = Receiver()
+    receiver.status = 'rejected'
+    retire = envelopes.retire_parent
+    def fail_after_retirement(conn, task_id):
+        retire(conn, task_id)
+        raise OSError('controlled bookkeeping failure')
+    monkeypatch.setattr(envelopes, 'retire_parent', fail_after_retirement)
+    with pytest.raises(OSError, match='^controlled bookkeeping failure$'):
+        client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert journal.pending_wire(live) is not None and journal.snapshot(live)['settled'] == '0'
+    assert live.execute('SELECT 1 FROM kanban_sync_parent_envelopes WHERE task_id=?', (tid,)).fetchone()
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE state='rejected'").fetchone()
+    assert receiver.slot['a'] == '0'
+    monkeypatch.setattr(envelopes, 'retire_parent', retire)
+    restarted = reopen(live)
+    try:
+        result = client.push(restarted, receiver, 'default', 'macbook', primary=False, max_batches=1)
+        assert result.rejected == 1 and result.sent == 0 and len(receiver.sent) == 1
+        assert restarted.execute("SELECT attempts FROM kanban_sync_outbox WHERE state='rejected'").fetchone()[0] == 1
+        assert not restarted.execute('SELECT 1 FROM kanban_sync_parent_envelopes').fetchone()
+        assert journal.pending_wire(restarted) is None and receiver.slot['a'] == '1'
+    finally:
+        restarted.close()
+
+
+@pytest.mark.parametrize('endpoint', ['parent', 'child'])
+def test_rejected_link_endpoint_holds_link_until_authoritative_version(live, endpoint):
+    first = kb.create_task(live, title='first endpoint', assignee='worker')
+    second = kb.create_task(live, title='second endpoint', assignee='worker')
+    rejected = first if endpoint == 'parent' else second
+    with kbc.write_txn(live):
+        live.execute('DELETE FROM kanban_sync_outbox WHERE row_uid!=?', (rejected,))
+    receiver = Receiver()
+    receiver.status = 'rejected'
+    assert client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1).rejected == 1
+    kb.link_tasks(live, first, second)
+    with kbc.write_txn(live):
+        # Scope this fixture to the link, not link_tasks' status/event captures.
+        live.execute("DELETE FROM kanban_sync_outbox WHERE state='pending' AND table_name!='task_links'")
+    assert client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1).sent == 0
+    assert len(receiver.sent) == 1
+    assert live.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name='task_links'").fetchone()
+    # A separately authenticated current-row observation may establish existence;
+    # it never erases the earlier rejection or calls that operation successful.
+    with kbc.write_txn(live):
+        live.execute('UPDATE tasks SET sync_version=5 WHERE id=?', (rejected,))
+    receiver.status = 'applied'
+    for _ in range(5):
+        client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    links = [w for w in receiver.sent if w['table'] == 'task_links']
+    assert len(links) == 1 and links[0]['uid'] == first + '>' + second
+    assert live.execute("SELECT COUNT(*) FROM kanban_sync_outbox WHERE state='rejected'").fetchone()[0] == 1
+    assert not live.execute("SELECT 1 FROM kanban_sync_outbox WHERE state='pending'").fetchone()
+    assert all(w['uid'] != rejected for w in receiver.sent[1:])
+
+
 def test_synthetic_success_without_version_keeps_custody_not_a_fresh_parent(live):
     tid = kb.create_task(live, title='parent version unavailable', assignee='worker')
     with kbc.write_txn(live):

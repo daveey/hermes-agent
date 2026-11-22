@@ -9,7 +9,8 @@ def reassessment_supported(cap) -> bool:
     return bool(cap) and type(cap.get('owner_reassessment_v1')) is int and cap['owner_reassessment_v1'] == 1
 
 
-def select_pending(conn, hub, board, seen, *, now: int, limit: int, before_head: bool, origin_cap: dict | None = None):
+def select_pending(conn, hub, board, seen, *, now: int, limit: int, before_head: bool, origin_cap: dict | None = None,
+                   hold_rejected: bool = False):
     """Dependency selection and the existing pre-head fence share one batch.
 
     ``origin_cap`` is the caller's one per-push capability snapshot; omitted, it is read normally.
@@ -23,16 +24,17 @@ def select_pending(conn, hub, board, seen, *, now: int, limit: int, before_head:
 
     from hermes_cli.kanban_actionability_transport import eligible_pending
     rows = selected = parent_first(conn, eligible_pending(conn, pending_rows(conn, now), hub, board), now, limit,
-                                   reassessment=certified)
+                                   reassessment=certified, hold_rejected=hold_rejected)
     stopped = False
     if before_head:
         rows, stopped = backlog.sendable_before_head(conn, hub, board, rows, seen)
-        rows = parent_first(conn, rows, now, limit, allowed={r['op_id'] for r in rows}, reassessment=certified)
+        rows = parent_first(conn, rows, now, limit, allowed={r['op_id'] for r in rows}, reassessment=certified,
+                            hold_rejected=hold_rejected)
     return rows, selected, stopped
 
 
 def parent_first(conn, rows, now: int, limit: int, *, allowed: set[str] | None = None,
-                 reassessment: bool = False) -> list[dict]:
+                 reassessment: bool = False, hold_rejected: bool = False) -> list[dict]:
     """Promote the existing FIFO parent, never synthesize a competing retry identity.
 
     Only an unacknowledged card needs this dependency ordering. A parent's backoff
@@ -59,13 +61,14 @@ def parent_first(conn, rows, now: int, limit: int, *, allowed: set[str] | None =
             if tid not in parents:
                 hit = conn.execute(
                     "SELECT o.* FROM kanban_sync_outbox o JOIN tasks t ON t.id=o.row_uid "
-                    "WHERE o.table_name='tasks' AND o.state='pending' AND o.op!='release' "
-                    "AND t.id=? AND t.sync_version IS NULL ORDER BY o.created_at,o.rowid LIMIT 1", (tid,)).fetchone()
+                    "WHERE o.table_name='tasks' AND (o.state='pending' OR (? AND o.state='rejected')) AND o.op!='release' "
+                    "AND t.id=? AND t.sync_version IS NULL ORDER BY (o.state='rejected') DESC,o.created_at,o.rowid LIMIT 1",
+                    (hold_rejected, tid)).fetchone()
                 parents[tid] = dict(hit) if hit else None
             parent = parents[tid]
             if parent is None:
                 continue  # normal synthetic-parent path, including its omission guard
-            if ((parent['retry_after'] or 0) > now or not sendable(conn, [parent])
+            if (parent['state'] == 'rejected' or (parent['retry_after'] or 0) > now or not sendable(conn, [parent])
                     or (allowed is not None and parent['op_id'] not in allowed)):
                 blocked = True
                 break
