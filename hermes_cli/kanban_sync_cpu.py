@@ -48,6 +48,28 @@ def note_reader_open(cpu, reason):
 def note_reader_keep(cpu):
     """A reader kept across a proven checkpoint (the CPU is the proof's own cost)."""
     loop_accounting.record("sync.reader_keep/checkpoint", cpu_s=cpu, outer=False)
+    loop_accounting.record(f"sync.reader_keep.step/{_step_name()}", cpu_s=cpu, outer=False)
+
+
+def _step_name():
+    return getattr(_local, "step", None) or ("board" if getattr(_local, "frames", ()) else "other")
+
+
+def detail(part, fn, *args):
+    """Always-on inclusive diagnostic, not an accounted scope or a new loop step.
+
+    ``sync.detail/<triggering step>.<part>`` overlaps its enclosing step, probe
+    and successful keep. Failed proof attempts are included too. Never sum these
+    with steps or subtract them from the collector's total-minus-board value.
+    Only fixed call-site names are used; no board paths or unbounded identifiers.
+    """
+    where = _step_name()
+    began = time.thread_time()
+    try:
+        return fn(*args)
+    finally:
+        loop_accounting.record(f"sync.detail/{where}.{part}",
+                               cpu_s=time.thread_time() - began, outer=False)
 
 
 WAIT_PARTS = ("event_wait", "outbox_probe", "reader_open")  # sync.wait/boundary: TimingDiag.wait

@@ -6,6 +6,8 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Optional
 
+from hermes_cli import kanban_sync_cpu as _sync_cpu
+
 # A board whose round failed is not rerun for its pending outbox, a dirty flag or the poll until this backoff
 # passes: 1 s, doubling, capped at the feed socket's own 60 s reconnect cap. Incident (2026-11-15, David-MBP,
 # t_01a1e1174026210f): DNS failed for 25 min and pending local edits reselected every board on each 0.5 s wait
@@ -90,4 +92,4 @@ class SyncWork:
         return [(slug, path) for slug, path in boards
                 if slug not in waiting and ((slug, path) in new or slug in dirty
                                             or (poll and (slug not in connected or slug in self._failed))
-                                            or pending([path]))]
+                                            or _sync_cpu.detail("outbox_probe", pending, [path]))]

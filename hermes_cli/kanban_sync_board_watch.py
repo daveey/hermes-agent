@@ -158,12 +158,12 @@ class BoardWatch:
         if ent[0][:2] != identity[:2] or identity[3] < ent[0][3]:
             return False
         began = time.thread_time()
-        now = _wal_evidence.read(ent[5])
+        now = _sync_cpu.detail("checkpoint_wal", _wal_evidence.read, ent[5])
         if not _wal_evidence.checkpointed(ent[3], now):
             return False
         try:
-            ent[1].execute("PRAGMA shrink_memory")
-            parsed = parsed_from(ent[1], ent[5])
+            _sync_cpu.detail("checkpoint_shrink", ent[1].execute, "PRAGMA shrink_memory")
+            parsed = _sync_cpu.detail("checkpoint_schema", parsed_from, ent[1], ent[5])
             if parsed is None or parsed != ent[6]:
                 return False
         except sqlite3.Error:
