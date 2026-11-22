@@ -961,7 +961,8 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             return retry_queued_prompt(rid, sid, session)
         if session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
             return False
-        if _transient_ownership_refusal(_ensure_active_session_slot(sid, session)):
+        # Admission holds history_lock; detached takeover takes resume_lock (redrive takes them in reverse).
+        if _transient_ownership_refusal(_ensure_active_session_slot(sid, session, allow_takeover=False)):
             from tui_gateway.admission_retry import retry_queued_prompt
             return retry_queued_prompt(rid, sid, session)
         queue_generation = int(session.get("_queued_prompt_generation", 0))
