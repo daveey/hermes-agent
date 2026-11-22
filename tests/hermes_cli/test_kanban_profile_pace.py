@@ -70,7 +70,8 @@ def test_legacy_profile_pins_are_ignored_and_the_card_escapes_the_held_pool(coac
         conn.commit()
         seen, result = _dispatch(conn)
         assert seen == [(tid, 'claude-sonnet-5-5', 'anthropic')] and tid not in result.clock_held
-        assert kb.get_task(conn, tid).model_override == pin['model_override']  # author provenance retained
+        expected = pin['model_override'] if pin['model_override'].startswith('class:') else None
+        assert kb.get_task(conn, tid).model_override == expected  # concrete provenance retained in audit
 
 
 def test_no_usable_profile_peer_keeps_hold(coach):

@@ -69,13 +69,20 @@ def test_legacy_selector_is_projected_and_dispatched_without_supervisor_or_histo
 
     task = kb.get_task(conn, tid)
     assert task.status == 'running' and task.block_kind is None
-    assert (task.model_override, task.provider_override) == (model, provider)
+    assert (task.model_override, task.provider_override) == (None, None)
     assert [t.id for t in spawned] == [tid]
     assert (spawned[0].model_override, spawned[0].provider_override) == ('class:standard', 'auto')
     assert not result.respawn_guarded
-    assert not _events(conn, tid, 'model_override_cleared')
+    cleared = _events(conn, tid, 'model_override_cleared')
+    assert len(cleared) == 1
+    assert cleared[0]['reason'] == 'model_policy_no_pins'
+    assert cleared[0]['previous']['model_override'] == model
+    assert cleared[0]['previous']['provider_override'] == provider
     assert [(e.id, e.kind, e.payload) for e in kb.list_events(conn, tid)][:len(original_events)] == original_events
-    assert kb.list_comments(conn, tid) == original_comments
+    comments = kb.list_comments(conn, tid)
+    assert comments[:len(original_comments)] == original_comments
+    assert len(comments) == len(original_comments) + 1
+    assert comments[-1].author == 'kanban-dispatcher'
     runs = conn.execute('SELECT id, worker_pid FROM task_runs WHERE task_id=?', (tid,)).fetchall()
     assert [(r['id'], r['worker_pid']) for r in runs] == [(task.current_run_id, 4242)]
 

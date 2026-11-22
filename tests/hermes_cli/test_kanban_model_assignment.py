@@ -101,7 +101,7 @@ def test_dispatch_routes_legacy_incompatible_pin_without_spawning(board, monkeyp
         assert spawned == [(tid, 'class:standard', 'auto')], repr(result)
     task = kb.get_task(conn, tid)
     assert task.status == 'running' and task.assignee == 'worker' and task.block_kind is None
-    assert task.model_override == 'claude-opus-5-5'  # never rewrite historical row
+    assert task.model_override is None  # stored restriction retired; author evidence retained below
     assert conn.execute('SELECT count(*) FROM tasks').fetchone()[0] == 1
     assert conn.execute('SELECT count(*) FROM task_links').fetchone()[0] == 0
     if lane == 'review':

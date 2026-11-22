@@ -84,7 +84,7 @@ def test_dispatch_receipt_and_owner_use_review_model_without_changing_row(board)
         stored = kb.get_task(conn, t.id)
         events = [e.payload for e in kb.list_events(conn, t.id) if e.kind == "model_tier"]
         assert seen["model"] == OPUS
-        assert stored.model_override == SONNET
+        assert stored.model_override is None  # original selector retained in retirement audit
         assert tier.owner_model_pin(conn, stored) == (OPUS, "anthropic")
         assert events[-1] == {"model": OPUS, "provider": "anthropic", "reason": "review_unpinned",
                               "lane": "review", "review_independence": "separate_execution"}

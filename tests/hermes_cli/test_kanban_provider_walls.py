@@ -77,9 +77,10 @@ def test_legacy_pinned_card_on_walled_provider_is_routed_by_class_not_its_pin(bo
     # preserve deferred class allocation, never concretize the legacy pin.
     assert seen[a][:2] == ("class:standard", "auto")
     assert seen[b][:2] == ("class:standard", "auto")
-    # Author provenance is retained untouched.
-    assert (kb.get_task(conn, a).model_override, kb.get_task(conn, a).provider_override) == ("gpt-6-astra", CODEX)
-    assert "require_model: true" in kb.get_task(conn, b).body
+    # Author provenance and superseded body mandates remain historical evidence.
+    assert (kb.get_task(conn, a).model_override, kb.get_task(conn, a).provider_override) == (None, None)
+    from hermes_cli.kanban_model_retirement import retired_body
+    assert kb.get_task(conn, b).body == retired_body("must stay on astra\nrequire_model: true")
 
 
 def test_no_wall_no_change(board, monkeypatch):
@@ -237,11 +238,10 @@ def test_live_pool_exhaustion_counts_as_wall_without_a_crash(board, monkeypatch)
     _legacy(conn, pinned, "gpt-6-astra", CODEX)
     seen = _dispatch(conn)
     assert seen[tid][:2] in ((OPUS, "anthropic"), ("class:standard", "auto"))
-    # A legacy concrete pin is ignored (no hold on the live wall, no crash) and its author row is untouched.
+    # A legacy concrete pin is retired (no hold on the live wall, no crash).
     assert pinned in seen, [tuple(r) for r in conn.execute("SELECT kind, payload FROM task_events WHERE task_id=?", (pinned,))]
     assert seen[pinned][:2] == seen[tid][:2]
-    assert (kb.get_task(conn, pinned).model_override, kb.get_task(conn, pinned).provider_override) == (
-        "gpt-6-astra", CODEX)
+    assert (kb.get_task(conn, pinned).model_override, kb.get_task(conn, pinned).provider_override) == (None, None)
 
 
 def test_every_fallback_exhausted_leaves_task_on_its_class_route(board, monkeypatch):

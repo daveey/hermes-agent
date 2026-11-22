@@ -63,7 +63,7 @@ def test_episode_live_recovery_preserves_structural_gate(board, monkeypatch, all
             assert conn.execute('SELECT COUNT(*) FROM task_runs WHERE task_id=?', (tid,)).fetchone()[0] == runs
             assert any('model_unroutable' in why for _, why in result.skipped_ineligible)
             assert episode(conn, tid) == state
-        assert (current.model_override, current.provider_override) == ('claude-opus-5-5', 'anthropic')
+        assert (current.model_override, current.provider_override, current.model_pin_mandatory) == (None, None, None)
 
 
 @pytest.mark.parametrize('mode', ['disabled', 'empty', 'providers_off', 'capabilities'])

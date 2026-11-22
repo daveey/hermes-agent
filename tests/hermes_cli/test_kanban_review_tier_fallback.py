@@ -139,7 +139,7 @@ def test_dispatch_records_fallback_in_both_route_receipts(board, monkeypatch):
                                spawn_fn=lambda item, ws: seen.append(item.model_override))
         stored = kb.get_task(conn, t.id)
         assert seen == [STANDARD]
-        assert stored.model_override == DEEP[0]
+        assert stored.model_override is None  # original selector retained in retirement audit
         assert tier.owner_model_pin(conn, stored) == (STANDARD, "openai-codex")
         events = {e.kind: e.payload for e in kb.list_events(conn, t.id)
                   if e.run_id == stored.current_run_id and e.kind in ("model_tier", "run_route")}

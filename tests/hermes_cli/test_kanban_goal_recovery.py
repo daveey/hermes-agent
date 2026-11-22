@@ -105,7 +105,7 @@ def test_goal_recovery_neutral_child_preserves_source_and_no_cycle_after_two_res
         rec = kb.get_task(conn, cards[0])
         assert (rec.model_override, rec.provider_override, rec.model_pin_mandatory) == (None, None, None)
         source = kb.get_task(conn, tid)
-        assert (source.model_override, source.provider_override) == ('gpt-5', 'openai-codex')
+        assert (source.model_override, source.provider_override) == (('gpt-5', 'openai-codex') if attempt == 0 else (None, None))
         assert source.body == task.body
         created = next(e for e in kb.list_events(conn, rec.id) if e.kind == 'created')
         assert created.payload['creator_task_id'] == tid

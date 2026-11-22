@@ -158,7 +158,7 @@ def test_a_held_review_override_is_not_taken_by_the_fast_return(board, clock, mo
     assert (reason, route) == ('review_unpinned', GROK)
     assert 'paced' not in tier_event
     assert route_event['tier_reason'] == 'review_unpinned'
-    assert (stored.model_override, stored.provider_override) == PEER  # the row never moves
+    assert (stored.model_override, stored.provider_override) == (None, None)  # policy retired, route still paced
 
 
 @pytest.mark.parametrize('entry', ENTRIES)

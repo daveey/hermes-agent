@@ -190,8 +190,8 @@ def test_preview_matches_admission_and_preserves_concrete_row(board, monkeypatch
         assert preview[:2] == ('class:standard', None)  # preview has no concrete provider yet
         assert _tick(conn) == [(preview[0], preview[1] or 'auto')] == [('class:standard', 'auto')]
         stored = kb.get_task(conn, tid)
-        assert (stored.model_override, stored.provider_override) == PIN
-        assert stored.model_pin_mandatory == 1
+        assert (stored.model_override, stored.provider_override) == (None, None)
+        assert stored.model_pin_mandatory is None
         assert tier.owner_model_pin(conn, stored) == ('class:standard', 'auto')
         route = _events(conn, tid, 'run_route')[-1]
         assert route['model'] == 'class:standard' and route['tier_reason'] == 'default'

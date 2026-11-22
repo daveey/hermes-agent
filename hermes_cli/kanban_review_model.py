@@ -90,7 +90,7 @@ def implementer_models(conn, task) -> set[str]:
         stored = kb.get_task(conn, card.id)
         skilled = "sdlc-review" in (getattr(stored, "skills", None) or [])
         models = set()
-        pin = str(getattr(card, "model_override", None) or "").strip()
+        pin = _conservative_pin(conn, card)
         boundary = False
         if not downstream and not skilled:
             models, boundary = _current_authors(conn, card.id, bounded)
@@ -115,6 +115,25 @@ def implementer_models(conn, task) -> set[str]:
 
     with source_reader(conn) as lookup:
         return collect(conn, task)
+
+
+def _conservative_pin(conn, card):
+    """Retired policy remains diagnostic evidence, under the same epoch rules.
+
+    A subsequent explicit class policy supersedes this fallback. Only the latest
+    clear is relevant, just as replacing a stored pin never accumulated authors.
+    """
+    pin = str(getattr(card, "model_override", None) or "").strip()
+    if pin:
+        return pin
+    row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='model_override_cleared' "
+                       "ORDER BY id DESC LIMIT 1", (card.id,)).fetchone()
+    payload = _payload(row[0] if row else None)
+    previous = payload.get("previous")
+    if payload.get("reason") != "model_policy_no_pins" or not isinstance(previous, dict):
+        return ""
+    value = previous.get("model_override")
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _current_authors(conn, task_id, bounded=True):

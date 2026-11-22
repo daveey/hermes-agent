@@ -133,7 +133,7 @@ def test_dispatch_ignores_legacy_pin_without_rewriting_author_evidence(board, la
     spawned = []
     dispatch_once(conn, spawn_fn=lambda item, *args: spawned.append(item.model_override), max_spawn=1)
     assert spawned == (['class:standard'] if lane == 'ready' else ['claude-opus-5-5'])
-    assert kb.get_task(conn, tid).model_override == 'claude-sonnet-4-5'
+    assert kb.get_task(conn, tid).model_override is None  # provenance lives in retirement audit
     event = [e.payload for e in kb.list_events(conn, tid) if e.kind == 'model_tier'][-1]
     if lane == 'review':
         assert event['review_independence'] == 'separate_execution'

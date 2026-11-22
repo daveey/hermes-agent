@@ -155,7 +155,7 @@ def test_legacy_pin_on_a_held_provider_is_ignored_and_the_card_starts_on_its_cla
         assert pin_tests._events(conn, tid, 'run_route')[-1]['tier_reason'] == 'default+paced:openai-codex'
         task = kb.get_task(conn, tid)
         assert task is not None
-        assert (task.model_override, task.provider_override) == PIN  # the author's historical pin is retained
+        assert (task.model_override, task.provider_override) == (None, None)  # provenance retained in audit
 
 
 @pytest.mark.parametrize('why', ['flag', 'marker'])
