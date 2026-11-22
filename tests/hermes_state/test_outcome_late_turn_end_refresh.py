@@ -323,7 +323,7 @@ def _arm_refused_retry(db, monkeypatch, timers, concluding):
 
     monkeypatch.setattr(server, "_hermes_home", db.db_path.parent)
     _tui_scope(monkeypatch, db)
-    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a: None)
+    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a, **k: None)
     monkeypatch.setattr("tui_gateway.update_pause._detect_skew", lambda: None)
     session = {"session_key": "chat", "agent": None, "_refused_turn_delay": 45.0}
     server._schedule_refused_turn_retry("chat", session, "retry-marker-key", concluding)

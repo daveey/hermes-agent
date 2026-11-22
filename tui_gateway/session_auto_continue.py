@@ -136,7 +136,7 @@ def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str,
         from tui_gateway.update_pause import _detect_skew
         if _detect_skew() is not None:
             return
-        if _maybe_schedule_auto_continue(sid, session, marker_key) is None \
+        if _maybe_schedule_auto_continue(sid, session, marker_key, refused_retry=True) is None \
                 and read_turn_marker(_session_home(session), marker_key) is None:
             from tui_gateway.turn_outcome import refresh_turn_outcome
             refresh_turn_outcome(session, concluding_turn=concluding, session_id=outcome_sid)
@@ -146,10 +146,12 @@ def _schedule_refused_turn_retry(sid: str, session: dict, marker_key: str,
     timer.start()
 
 
-def _auto_continue_note(prompt: str) -> str:
+def _auto_continue_note(prompt: str, *, refused_retry: bool = False) -> str:
     # Same opening as the gateway's recovery notes (transcript tooling recognizes both). The prompt is embedded: a hard
     # crash persists nothing else of the turn.
-    return (f"{_AUTO_CONTINUE_NOTE_PREFIX} — the app or its backend process stopped before the turn could finish. "
+    cause = ("the provider refused the turn with a retryable error; the backend did not stop. " if refused_retry
+             else "the app or its backend process stopped before the turn could finish. ")
+    return (f"{_AUTO_CONTINUE_NOTE_PREFIX} — {cause}"
             "Some of the work may already be complete; check the current state before redoing anything, then "
             f"finish the task. The interrupted request was:]\n\n{prompt}")
 
@@ -209,7 +211,8 @@ def _adopt_stored_continuation_source(sid: str, session: dict, session_key: str)
 from tui_gateway.turn_marker import UPDATE_HOLD_QUEUE_MAX_AGE_S, UPDATE_HOLD_QUEUE_REASON
 
 
-def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
+def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str, *,
+                                   refused_retry: bool = False) -> dict | None:
     """Kick off a continuation turn for a crash-interrupted session (session.resume cold paths). Returns a descriptor
     for the resume payload when scheduled, else None. The turn runs on a background thread after the deferred agent
     build via _run_prompt_submit, so the client that just resumed streams it."""
@@ -279,7 +282,9 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     elif receipt:
         attempt, text = marker["attempts"], jobs_stopped_note(marker.get("killed_jobs"))
     else:
-        attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
+        # Only the live timer knows this was a handled refusal, not a backend death.
+        # Invocation-local evidence cannot survive a crash or contaminate another replay.
+        attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"], refused_retry=refused_retry)
     if not (paused or receipt) and marker.get("killed_jobs"):
         from tui_gateway.update_pause import killed_jobs_report
         text += "\n\n" + killed_jobs_report(marker["killed_jobs"], "Background jobs stopped when the turn was "

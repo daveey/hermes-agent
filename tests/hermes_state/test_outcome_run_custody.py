@@ -24,7 +24,7 @@ timers = late.timers
 @pytest.mark.parametrize("explicit", [False, True])
 def test_retry_targets_frozen_sid_after_agent_replacement(db, monkeypatch, timers, explicit):
     late._tui_scope(monkeypatch, db)
-    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a: None)
+    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a, **k: None)
     monkeypatch.setattr("tui_gateway.update_pause._detect_skew", lambda: None)
     session = {"session_key": "root", "agent": SimpleNamespace(session_id="old-tip"),
                "_refused_turn_delay": 45}

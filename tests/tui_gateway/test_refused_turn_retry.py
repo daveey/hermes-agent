@@ -408,7 +408,7 @@ def test_a_new_message_that_works_ends_the_replay(emits, turn_env, marker_home, 
     session["running"] = True
     server._run_prompt_submit("rid", "sid", session, "something else")
     assert read_turn_marker(marker_home, "session-key") is None
-    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a: calls.append(a))
+    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a, **k: calls.append(a))
     monkeypatch.setattr("tui_gateway.update_pause._detect_skew", lambda: None)
     monkeypatch.setattr("tui_gateway.turn_outcome.refresh_turn_outcome", lambda *a, **kw: None)
     timers[0][1]()
@@ -424,11 +424,11 @@ def _armed(marker_home, timers, monkeypatch):
 
 def test_the_wait_replays_through_auto_continue(emits, turn_env, marker_home, timers, monkeypatch):
     seen = []
-    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a: seen.append(a) or {"attempt": 1})
+    monkeypatch.setattr(server, "_maybe_schedule_auto_continue", lambda *a, **k: seen.append((a, k)) or {"attempt": 1})
     monkeypatch.setattr("tui_gateway.update_pause._detect_skew", lambda: None)
     session, fire = _armed(marker_home, timers, monkeypatch)
     fire()
-    assert seen == [("sid", session, "session-key")]
+    assert seen == [(("sid", session, "session-key"), {"refused_retry": True})]
 
 
 def test_a_skewed_backend_leaves_the_marker_for_the_boot_sweep(emits, turn_env, marker_home, timers, monkeypatch):
@@ -446,7 +446,7 @@ def test_a_marker_that_aged_out_settles_the_outcome(emits, turn_env, marker_home
     monkeypatch.setattr("tui_gateway.turn_outcome.refresh_turn_outcome", lambda *a, **kw: refreshed.append(a))
     _, fire = _armed(marker_home, timers, monkeypatch)
 
-    def aged_out(sid, sess, key):
+    def aged_out(sid, sess, key, **kwargs):
         server.clear_turn_marker(marker_home, key)
 
     monkeypatch.setattr(server, "_maybe_schedule_auto_continue", aged_out)
