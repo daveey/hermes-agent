@@ -410,6 +410,9 @@ def execute(frame, channel):
                 bind_adopted_agent(agent, store, home=frame['home'], scope=scope)
             if origin_custody is not None:
                 origin_custody.bind_agent(agent)
+                # Restriction-only lineage for NEW delegations (no authority; see kanban_delegation_policy).
+                from agent.kanban_delegation_policy import register_root
+                register_root(agent, origin_custody)
             if controls.stopped.is_set():
                 from agent.interrupt_compat import request_hard_interrupt
                 request_hard_interrupt(agent)

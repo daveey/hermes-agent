@@ -51,6 +51,9 @@ class TaskRoute:
     # The task's provider-declared parameters this route came from (no secrets): what a continue after a restart
     # re-routes with. None for an internal caller's explicit route (``route_for_config``), which cannot be rebuilt.
     request: Optional[dict[str, Any]] = None
+    # Private, immutable logical request of a Kanban-origin delegation (agent/kanban_delegation_policy.py);
+    # never read from user input, only set by _routes_for after the logical preflight.
+    logical: Any = None
 
     def report(self) -> Optional[dict[str, Any]]:
         """The ``route`` a backend-routed task's result carries (None for the default backend's unlabelled route)."""
@@ -325,7 +328,8 @@ def _route_one(provider: DelegationProvider, declared: dict[str, dict[str, Any]]
 
 
 def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, Any], parent_agent: Any,
-                        unresolved: Optional[Any] = None) -> tuple[list[TaskRoute], Optional[str]]:
+                        unresolved: Optional[Any] = None,
+                        stage: Optional[Any] = None) -> tuple[list[TaskRoute], Optional[str]]:
     """One :class:`TaskRoute` per task from the backend the session's ``delegate_task`` was built from (else
     ``delegation.backend``), or ``([], error)`` when that backend cannot run (fails closed, never another backend).
     A task the backend cannot route gets a route with ``error`` set; its siblings are unaffected. Identical routes
@@ -333,7 +337,10 @@ def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, An
 
     [daveey] ``unresolved(index)`` true marks a task whose credentials the caller resolves itself (a per-task
     ``model``/``provider`` pin): its non-profile route comes back with empty ``creds`` and is never resolved here,
-    so an unused default route with missing credentials cannot veto the task's explicit route."""
+    so an unused default route with missing credentials cannot veto the task's explicit route.
+
+    ``stage(index, route)`` (Kanban-origin delegations) maps every sibling's backend route to its logical route
+    BEFORE any credential or profile resolution; a ``RestrictionError`` refuses the whole batch."""
     from agent.delegation_backends import pinned_backend
     if pinned := pinned_backend(parent_agent):
         config = {**config, "backend": pinned}
@@ -344,10 +351,28 @@ def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, An
     declared = _declared_parameters(provider, config)
     cache: dict[str, TaskRoute] = {}
     routes: list[TaskRoute] = []
+    prepared: Optional[list[tuple[Optional[dict[str, Any]], Optional[str]]]] = None
+    if stage is not None:
+        from agent.kanban_delegation_policy import RestrictionError
+        prepared = []
+        for i, task in enumerate(task_list):
+            try:
+                staged = _route_one(provider, declared, i, task, config)
+                _check_backend_effort(i, staged, config)
+                prepared.append((stage(i, staged), None))
+            except RestrictionError as exc:
+                return [], str(exc)
+            except ValueError as exc:
+                prepared.append((None, str(exc)))
     for i, task in enumerate(task_list):
         try:
-            route = _route_one(provider, declared, i, task, config)
-            _check_backend_effort(i, route, config)
+            if prepared is not None:
+                route, error = prepared[i]
+                if route is None:
+                    raise ValueError(error)
+            else:
+                route = _route_one(provider, declared, i, task, config)
+                _check_backend_effort(i, route, config)
             request = {name: task[name] for name in declared if task.get(name) is not None}
             if unresolved is not None and not route.get("profile") and unresolved(i):
                 label = route.get("label") if isinstance(route.get("label"), str) else None

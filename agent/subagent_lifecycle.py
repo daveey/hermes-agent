@@ -283,6 +283,18 @@ class SubagentLifecycleService:
         parent_session_id = _session_id_of(parent)
         if request.parent_session_id and request.parent_session_id != parent_session_id:
             raise SubagentLifecycleError("parent_session_id does not match the active session.")
+        # Kanban-origin parents: validate the logical request (and the legacy default's tuning) before ANY cleanup,
+        # correlation, credential, session or executor work.
+        from agent import kanban_delegation_policy as policy
+        origin, model_class, scoped_cfg = None, "", {}
+        try:
+            origin = policy.origin_for(parent)
+            if origin is not None:
+                from tools.delegate_tool import _load_config
+                model_class = policy.class_for_selectors({"model": request.model, "provider": request.provider}, parent)
+                scoped_cfg = policy.canonical_route(_load_config(), model_class)
+        except policy.RestrictionError as exc:
+            raise SubagentLifecycleError(str(exc)) from exc
         correlation_key = (parent_session_id, request.correlation_id or "")
         with _REGISTRY.lock:
             self._cleanup_locked()
@@ -294,20 +306,27 @@ class SubagentLifecycleService:
             DEFAULT_MAX_ITERATIONS,
         )
         # Routing precedence: request.provider > delegation config > parent.
-        routing_cfg = {"provider": request.provider, "model": request.model or ""} if request.provider is not None else _load_config()
+        if origin is not None:  # a class request is the only routing source; legacy concrete defaults are canonicalized
+            routing_cfg, extra = scoped_cfg, {"logical_request": policy.logical_request(model_class, scoped_cfg, origin)}
+        else:
+            routing_cfg = {"provider": request.provider, "model": request.model or ""} if request.provider is not None else _load_config()
+            extra = {}
         try:
             creds = _resolve_delegation_credentials(routing_cfg, parent)
         except ValueError as exc:
             raise SubagentLifecycleError(str(exc)) from exc
-        child = _build_child_preserving_parent_tools(
-            task_index=0, goal=request.goal, context=request.context,
-            toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
-            model=request.model or creds["model"], max_iterations=DEFAULT_MAX_ITERATIONS,
-            task_count=1, parent_agent=parent, role=request.role,
-            model_source=("caller_pin" if request.model or request.provider else
-                          "delegation_default" if routing_cfg.get("model") or routing_cfg.get("provider")
-                          else "parent_inherit"), **_credential_overrides(creds, routing_cfg),
-        )
+        try:
+            child = _build_child_preserving_parent_tools(
+                task_index=0, goal=request.goal, context=request.context,
+                toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
+                model=request.model or creds["model"], max_iterations=DEFAULT_MAX_ITERATIONS,
+                task_count=1, parent_agent=parent, role=request.role,
+                model_source=("caller_pin" if request.model or request.provider else
+                              "delegation_default" if routing_cfg.get("model") or routing_cfg.get("provider")
+                              else "parent_inherit"), **_credential_overrides(creds, routing_cfg), **extra,
+            )
+        except policy.RestrictionError as exc:
+            raise SubagentLifecycleError(str(exc)) from exc
         subagent_id = str(getattr(child, "_subagent_id", "") or "")
         if not subagent_id:
             raise SubagentLifecycleError("Hermes failed to assign a child identity.")

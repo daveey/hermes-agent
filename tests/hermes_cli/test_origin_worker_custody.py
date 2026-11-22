@@ -130,9 +130,14 @@ def test_adopted_execute_hands_capability_to_constructed_agent(tmp_path, monkeyp
     bound = []
     capability = SimpleNamespace(bind_agent=lambda agent: bound.append(agent))
     monkeypatch.setattr(session_kanban, 'bind_worker_context', lambda frame: capability)
+    registered = []
+    monkeypatch.setattr('agent.kanban_delegation_policy.register_root',
+                        lambda agent, original: registered.append((agent, original)))
     def turns(agent, frame, history):
         assert bound == [agent]
+        assert registered == [(agent, capability)]  # restriction lineage registered after the bind, before any turn
         return dict(final_response='ok', completed=True)
     monkeypatch.setattr(session_kanban, 'run_worker_turns', turns)
     _execute(frame, monkeypatch)
     assert len(bound) == 1
+    assert len(registered) == 1

@@ -176,13 +176,20 @@ def test_adopted_execute_binds_managed_custody_only_without_task_custody(tmp_pat
     calls, task_bound = [], []
     capability = SimpleNamespace(bind_agent=task_bound.append) if kanban else None
     monkeypatch.setattr(session_kanban, 'bind_worker_context', lambda frame: capability)
+    # This is a wiring-only mock, not a counterfeit native custody capability. Keep the restriction
+    # registration seam observable without relaxing its production exact-WorkerCustody validation.
+    registered = []
+    monkeypatch.setattr('agent.kanban_delegation_policy.register_root',
+                        lambda agent, original: registered.append((agent, original)))
     monkeypatch.setattr(origin_managed_custody, 'bind_adopted_agent',
                         lambda agent, store, **kw: calls.append((agent, store, kw)))
 
     def turns(agent, frame, history):
         if kanban:
             assert task_bound == [agent] and calls == []
+            assert registered == [(agent, capability)]
         else:
+            assert registered == []
             [(bound, store, kw)] = calls
             # The harness substitutes its store class; the seam must pass the one the agent was built on.
             assert bound is agent and store is built['session_db']

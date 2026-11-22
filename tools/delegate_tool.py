@@ -236,11 +236,20 @@ def _build_child_agent(
     subagent_id: Optional[str] = None,
     session_id: Optional[str] = None,
     expect_endpoint: Optional[tuple] = None,  # endpoint_identity it first ran on; a different one refuses
+    logical_request: Any = None,  # private: the validated class request of a Kanban-origin parent (never user input)
 ):
     """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
     inheritance so children can run on a different provider:model pair. ``profile_home`` builds (and later runs,
     see ``_ChildRun.await_child``) the child inside that profile's scope; it never shares the parent's pool."""
     import uuid as _uuid
+    from agent import kanban_delegation_policy as _policy
+    # Final fence of the Kanban-origin no-pin policy: the first operation, before any callback, profile
+    # hydration, credential handling or session open. A missing/mismatched private request refuses.
+    _origin_token = _policy.fence_build(
+        parent_agent, logical_request, model=model, override_provider=override_provider,
+        override_base_url=override_base_url, override_api_key=override_api_key, override_api_mode=override_api_mode,
+        override_acp_command=override_acp_command, override_acp_args=override_acp_args,
+        override_request_overrides=override_request_overrides)
     from run_agent import AIAgent
     from agent.delegation_context import delegated_child_context
     from tools.delegate_tool_resumable import endpoint_identity
@@ -302,6 +311,8 @@ def _build_child_agent(
         else:
             request_overrides = ({} if rt["provider"] == "auto" or override_provider  # [daveey] auto: no parent overrides
                                  else dict(getattr(parent_agent, "request_overrides", {}) or {}))
+        if _origin_token is not None:  # tier/runtime merges above can add keys the staged request never saw
+            _policy.check_request_overrides(request_overrides)
         parent_sid = getattr(parent_agent, "session_id", None)
         provenance = {
             "model_source": model_source or (
@@ -337,6 +348,8 @@ def _build_child_agent(
                     # A profile route carries that profile's identity (its SOUL.md under the bound home).
                     **({"load_soul_identity": True} if profile_home is not None else {}),
                 )
+                if _origin_token is not None:  # classified before it can run or return, sync or background
+                    _policy.register_child(parent_agent, child, _origin_token)
             except BaseException:
                 # No child close() will ever run: release the dedicated handle here.
                 if child_session_db is not None:
@@ -568,6 +581,13 @@ def _apply_task_model_pins(task_list: list[dict[str, Any]], routes: list[Any],
     return out, None
 
 
+def _logical_kwargs(route: Any) -> dict[str, Any]:
+    """The private logical request of a Kanban-origin route, absent (old builder contract) for every other route."""
+    from agent.kanban_delegation_policy import LogicalRequest
+    logical = getattr(route, "logical", None)
+    return {"logical_request": logical} if isinstance(logical, LogicalRequest) else {}
+
+
 def _route_overrides(route: Any) -> dict[str, Any]:
     """``_build_child_agent`` kwargs for one task route (``tools.delegate_tool_routes.TaskRoute``)."""
     return {
@@ -597,6 +617,7 @@ def _build_children(
         _child_context = t.get("context")
         if _task_schema is not None:
             _child_context = append_output_contract(_child_context, _task_schema)
+        child = None
         try:
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context, max_iterations=max_iterations,
@@ -606,16 +627,25 @@ def _build_children(
                     "delegation_default" if route.profile_home is not None or route.routing_cfg.get("model")
                     or route.routing_cfg.get("provider") else "parent_inherit"),  # a profile runs its own model
                 **_route_overrides(route),
+                **_logical_kwargs(route),
                 # A spawn always inherits the parent's toolsets; a continued child keeps its own.
                 **{"toolsets": None, "model": route.creds["model"], **(rebuild[i] if rebuild else {})},
             )
+            pin_child_service_tier(child, route.creds)
+            # Construction and the tier overlay can both add SDK kwargs after logical preflight.
+            # Inspect only request tuning, never the concrete route chosen by the native allocator.
+            from agent import kanban_delegation_policy as _policy
+            if _policy.origin_for(parent_agent) is not None:
+                _policy.check_request_overrides(getattr(child, "request_overrides", None))
         except ValueError as exc:
+            if child is not None:
+                _detach_child(parent_agent, child)
+                _close_child(child, "Failed to close child after a refused tier merge")
             # An owner refusal can land mid-batch: the siblings built so far hold reservations.
             for _, _, built in children:
                 _detach_child(parent_agent, built)
                 _close_child(built, "Failed to close child after a refused sibling")
             return [], str(exc)
-        pin_child_service_tier(child, route.creds)
         if isinstance(getattr(child, "_delegate_resume", None), dict):
             child._delegate_resume["route"] = route
         if _task_schema is not None:
@@ -648,6 +678,13 @@ def _routes_for(task_list: list[dict[str, Any]], cfg: dict[str, Any], credential
     """Per-task routes: an internal caller's explicit ``credentials_cfg`` (e.g. /review → auxiliary.review) owns
     every task's route; otherwise the active delegation provider decides each one."""
     from tools.delegate_tool_routes import resolve_task_routes, route_for_config
+    from agent import kanban_delegation_policy as policy
+    try:
+        token = policy.origin_for(parent_agent)
+    except policy.RestrictionError as exc:
+        return [], str(exc)
+    if token is not None:
+        return _restricted_routes(task_list, cfg, credentials_cfg, parent_agent, token)
     if credentials_cfg is None:
         # [daveey] A pinned task resolves only its own route (_apply_task_model_pins): the default is resolved
         # only for the children that actually use it, so an unavailable default never vetoes an explicit pin.
@@ -661,6 +698,43 @@ def _routes_for(task_list: list[dict[str, Any]], cfg: dict[str, Any], credential
     except ValueError as exc:
         return [], str(exc)
     return [route] * len(task_list), None
+
+
+def _restricted_routes(task_list: list[dict[str, Any]], cfg: dict[str, Any], credentials_cfg: Optional[dict[str, Any]],
+                       parent_agent: Any, token: Any) -> tuple[list[Any], Optional[str]]:
+    """Kanban-origin routes: every logical selector/override of every sibling is validated and staged to its class
+    BEFORE any credential resolution; concrete defaults and backend choices canonicalize to the class."""
+    from dataclasses import replace
+    from agent import kanban_delegation_policy as policy
+    from tools.delegate_tool_routes import (
+        _profile_home, _refuse_under_worker_snapshot, resolve_task_routes, route_for_config,
+    )
+    model_class, canonical = "", {}
+    try:
+        classes = [policy.class_for_selectors(t, parent_agent, i) if isinstance(t, dict) else None
+                   for i, t in enumerate(task_list)]
+        if credentials_cfg is not None:
+            model_class, canonical = policy.class_for_config(credentials_cfg, parent_agent)
+    except policy.RestrictionError as exc:
+        return [], str(exc)
+    if credentials_cfg is not None:
+        try:
+            route = replace(route_for_config(canonical, parent_agent),
+                            logical=policy.logical_request(model_class, canonical, token))
+        except ValueError as exc:
+            return [], str(exc)
+        return [route] * len(task_list), None
+
+    def stage(index: int, route: dict[str, Any]) -> dict[str, Any]:
+        if route.get("profile"):  # keep the managed-snapshot refusal; the profile's concrete primary is never used
+            _refuse_under_worker_snapshot(_profile_home(route["profile"]))
+        return policy.canonical_route(route, classes[index] or policy.parent_class(parent_agent), index)
+
+    routes, err = resolve_task_routes(task_list, cfg, parent_agent, stage=stage)
+    if err:
+        return [], err
+    return [r if r.error else replace(r, logical=policy.logical_request(
+        classes[i] or policy.parent_class(parent_agent), r.routing_cfg, token)) for i, r in enumerate(routes)], None
 
 
 def _settle_refused_transcripts(refused: list[dict[str, Any]], live_deleg_id: Optional[str], live_writers: list,
@@ -1125,25 +1199,47 @@ def _model_hidden_task_fields() -> set[str]:
         allowed = False
     return _MODEL_HIDDEN_TASK_FIELDS if allowed else _MODEL_HIDDEN_TASK_FIELDS | set(_TASK_MODEL_PROPERTIES)
 
-def _strip_model_hidden_task_fields(tasks: Any) -> Any:
+def _strip_model_hidden_task_fields(tasks: Any, keep: frozenset = frozenset()) -> Any:
     """Drop trusted-config-only task fields from model-supplied tasks (same list object back when nothing changed)."""
-    hidden = _model_hidden_task_fields()
+    hidden = _model_hidden_task_fields() - keep
     if not isinstance(tasks, list) or not any(isinstance(t, dict) and hidden & t.keys() for t in tasks):
         return tasks
     return [{k: v for k, v in t.items() if k not in hidden} if isinstance(t, dict) else t for t in tasks]
+
+
+def prepare_model_tasks(parent_agent: Any, tasks: Any) -> Any:
+    """Model-facing task list for BOTH strip callers (registry handler, AIAgent dispatch).  A Kanban-origin parent's
+    original tasks are preflighted BEFORE stripping and a valid class selector survives it; every other parent keeps
+    the old stripping.  Raises ``RestrictionError`` (a ValueError) for a refused request."""
+    if not tasks:
+        return _strip_model_hidden_task_fields(tasks)
+    from agent import kanban_delegation_policy as policy
+    if policy.origin_for(parent_agent) is None:
+        return _strip_model_hidden_task_fields(tasks)
+    policy.preflight_tasks(parent_agent, tasks)
+    return _strip_model_hidden_task_fields(tasks, frozenset({"model", "provider"}))
+
+
+def _delegate_handler(args: dict, **kw) -> str:
+    parent_agent = kw.get("parent_agent")
+    try:
+        tasks = prepare_model_tasks(parent_agent, args.get("tasks"))
+    except ValueError as exc:  # RestrictionError
+        return tool_error(str(exc))
+    return delegate_task(
+        goal=args.get("goal"), context=args.get("context"), tasks=tasks,
+        max_iterations=args.get("max_iterations"), role=args.get("role"),
+        background=_model_background_value(args, parent_agent), output_schema=args.get("output_schema"),
+        images=args.get("images"), action=args.get("action"), subagent_id=args.get("subagent_id"),
+        message=args.get("message"), parent_agent=parent_agent,
+    )
 
 
 registry.register(
     name="delegate_task",
     toolset="delegation",
     schema=DELEGATE_TASK_SCHEMA,
-    handler=lambda args, **kw: delegate_task(
-        goal=args.get("goal"), context=args.get("context"), tasks=_strip_model_hidden_task_fields(args.get("tasks")),
-        max_iterations=args.get("max_iterations"), role=args.get("role"),
-        background=_model_background_value(args, kw.get("parent_agent")), output_schema=args.get("output_schema"),
-        images=args.get("images"), action=args.get("action"), subagent_id=args.get("subagent_id"), message=args.get("message"),
-        parent_agent=kw.get("parent_agent"),
-    ),
+    handler=_delegate_handler,
     check_fn=check_delegate_requirements,
     emoji="🔀",
     dynamic_schema_overrides=_build_dynamic_schema_overrides,
