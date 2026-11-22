@@ -177,10 +177,16 @@ def _admit_prompt_turn(
                 getattr(ownership_refusal, "ledger_status", None) in owner_forward.FORWARDABLE_LEDGER_STATES):
             logger.info("automatic turn for %s deferred: gateway queue holds %s work",
                         session.get("session_key") or sid, ownership_refusal.ledger_status)
-        elif (session.get("_synthesized_turn") and reason == "SESSION_NOT_OWNED"
-              and getattr(ownership_refusal, "ownership_cause", None) == "update_marker"):
-            logger.info("automatic turn for %s deferred: update marker writer pid %s is still updating",
-                        session.get("session_key") or sid, ownership_refusal.holder_pid)
+        elif _transient_ownership_refusal(ownership_refusal):
+            logger.info("turn for %s deferred: ownership coordination pending (%s, pid=%s)",
+                        session.get("session_key") or sid, ownership_refusal.ownership_cause,
+                        getattr(ownership_refusal, "holder_pid", 0))
+            if not session.get("_synthesized_turn"):
+                with session["history_lock"]:
+                    _clear_inflight_turn(session)
+                _emit("message.complete", sid, {
+                    "text": "Hermes is updating or checking this chat's owner. This message has not run; please send it again when the update finishes.",
+                    "status": "complete", "usage": {}})
         elif report_ownership_refusal:
             # [daveey] retire_marker=False: this submit wrote no marker; the one on disk is a live turn's.
             _emit_terminal_turn_error(

@@ -807,6 +807,14 @@ def _slot_refusal(rid, sid, session, text, params, refusal, internal_hosted_subm
     """The answer to a refused slot: a ledger refusal of a client submit goes to the owner's FIFO."""
     if getattr(refusal, "ledger_status", None) is not None and not internal_hosted_submit:
         return _submit_to_ledger_owner(rid, sid, session, text, params, refusal)
+    if (_transient_ownership_refusal(refusal) and not internal_hosted_submit
+            and not any(params.get(k) is not None for k in (
+                "truncate_before_row_id", "truncate_before_user_ordinal", "truncate_before_message_id", "rebind_message_ids"))):
+        if (queued := _queue_submit_behind_update_hold(
+                rid, sid, session, text, current_transport() or session.get("transport"),
+                turn_author=params.get("turn_author"), display_kind=params.get("display_kind"),
+                ownership_cause=refusal.ownership_cause)) is not None:
+            return queued
     reason = getattr(refusal, "reason", None)
     data = {"reason": reason} if reason else None
     if reason == "SESSION_NOT_OWNED" and not internal_hosted_submit and params.get("display_kind") is None:

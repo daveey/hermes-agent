@@ -29,7 +29,7 @@ def test_each_emitted_ownership_card_has_one_structured_warning(monkeypatch, cap
             error_surface={"layer": "gateway", "code": "SESSION_NOT_OWNED", "retryable": False}, retire_marker=False)
     assert len(frames) == 1 and frames[0][0] == "message.complete"
     warnings = [r.message for r in caplog.records if "session_ownership_card shown" in r.message]
-    assert warnings == [f"session_ownership_card shown session=owned-chat cause={expected} holder_pid={pid or 0}"]
+    assert warnings == [f"session_ownership_card shown session=owned-chat cause={expected} holder_pid={pid or 0} holder_state={expected}"]
 
 
 def test_nonownership_error_has_no_ownership_warning(monkeypatch, caplog):

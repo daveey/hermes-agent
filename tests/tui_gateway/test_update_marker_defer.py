@@ -76,7 +76,7 @@ def test_automatic_update_marker_refusal_defers(admission, caplog):
     assert admission.errors == []
     assert admission.starts == []
     assert admission.session["_turn_owner_refusal"] == "SESSION_NOT_OWNED"
-    assert "update marker writer pid 123" in caplog.text
+    assert "ownership coordination pending (update_marker, pid=123)" in caplog.text
 
 
 def test_update_deferral_retries_and_recovers(custody, admission, monkeypatch):
@@ -98,7 +98,7 @@ def test_update_deferral_retries_and_recovers(custody, admission, monkeypatch):
     [True, False], ["SESSION_NOT_OWNED", "SESSION_COORDINATION_UNAVAILABLE"],
     ["update_marker", "lease_foreign", "unknown", None]))
 def test_other_refusals_keep_their_card(admission, synthesized, reason, cause):
-    if synthesized and reason == "SESSION_NOT_OWNED" and cause == "update_marker":
+    if reason == "SESSION_NOT_OWNED" and cause == "update_marker":
         return  # the sole positive shape, independently exercised above
     admission.session["_synthesized_turn"] = synthesized
     admission.refusal = SimpleNamespace(reason=reason, ownership_cause=cause, holder_pid=123)
@@ -237,7 +237,11 @@ def test_other_refusal_codes_do_not_probe_markers(custody, monkeypatch, reason):
 def test_unknown_holder_identity_does_not_probe_markers(custody, monkeypatch, pid, birth):
     custody.refusal.holder_pid, custody.refusal.holder_start_time = pid, birth
     monkeypatch.setattr(update_marker_owner, "read_turn_marker", lambda *a: pytest.fail("unexpected marker probe"))
-    assert custody.classify() is custody.refusal
+    result = custody.classify()
+    if pid is None:
+        assert result.ownership_cause == "lease_unknown"
+    else:
+        assert result is custody.refusal
 
 
 def test_writer_dies_during_update_probe(custody, monkeypatch):

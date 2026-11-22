@@ -73,8 +73,8 @@ def test_different_holder_even_in_same_process_stays_fenced(orphan, monkeypatch)
     refusal = server._durable_owner_refusal(orphan.session)
     assert calls == []
     assert refusal.reason == 'SESSION_NOT_OWNED'
-    assert refusal.ownership_cause == 'lease_foreign'
-    assert getattr(refusal, 'holder_pid', None) is None
+    assert refusal.ownership_cause == 'lease_unknown'
+    assert refusal.holder_pid == 0
     assert orphan.db.session_turn_lease_owner('root')['holder'] == foreign
 
 
@@ -99,7 +99,7 @@ def test_receipt_cannot_authorize_a_different_custodian(orphan, monkeypatch, tmp
     monkeypatch.setattr(target, 'release_session_turn_lease', lambda *args: calls.append(args))
     refusal = server._durable_owner_refusal(orphan.session)
     assert refusal.reason == 'SESSION_NOT_OWNED'
-    assert refusal.ownership_cause == 'lease_foreign'
+    assert refusal.ownership_cause == 'lease_unknown'
     assert calls == []
 
 
@@ -112,6 +112,17 @@ def test_successor_racing_settlement_is_re_read_and_fenced(orphan, monkeypatch):
     refusal = server._durable_owner_refusal(orphan.session)
     assert refusal.reason == 'SESSION_NOT_OWNED'
     assert orphan.db.session_turn_lease_owner('root')['holder'] == 'successor'
+
+
+def test_unidentified_durable_holder_defers_without_releasing_it(orphan, monkeypatch):
+    orphan.release('root', orphan.holder)
+    assert orphan.db.try_acquire_session_turn_lease('root', 'opaque-holder')
+    calls = []
+    monkeypatch.setattr(orphan.db, 'release_session_turn_lease', lambda *a: calls.append(a))
+    assert server._admit_prompt_turn('ui', orphan.session, 'notice', [], None, None, None) is None
+    assert orphan.errors == []
+    assert calls == []
+    assert orphan.db.session_turn_lease_owner('root')['holder'] == 'opaque-holder'
 
 
 def test_live_exact_holder_is_not_settled(orphan, monkeypatch):

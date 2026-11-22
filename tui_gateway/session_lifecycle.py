@@ -110,6 +110,11 @@ def _install_borrowed_lease(sid: str, session: dict, frame: dict) -> None:
         surface=str(frame.get("source") or "desktop"), enabled=False)
 
 
+def _transient_ownership_refusal(refusal) -> bool:
+    from tui_gateway.update_marker_owner import is_transient
+    return is_transient(refusal)
+
+
 def _foreign_turn_owner(session: dict):
     key = str(session.get("session_key") or "")
     if not key:
@@ -150,7 +155,13 @@ def _durable_owner_refusal(session: dict):
         f"Details: session {owner['conversation_id']} opened by {surface}. "
         f"Writer: {holder}", SESSION_NOT_OWNED)
     refusal.ownership_cause = "lease_foreign"
-    return refusal
+    # A namespace-qualified remote writer is positive foreign evidence. An opaque
+    # holder is not: keep its fence, but do not offer a destructive takeover.
+    from hermes_state_pidns import pid_namespace_id
+    namespace = next((part[6:] for part in holder.split(":") if part.startswith("pidns=")), None)
+    refusal.holder_remote = bool(namespace and pid_namespace_id() and namespace != pid_namespace_id())
+    from tui_gateway.update_marker_owner import classify_refusal
+    return classify_refusal(_session_home(session), str(session.get("session_key") or ""), refusal)
 
 
 #: Display kinds of turns Hermes starts on its own (no human typed them): the turn-starting notices

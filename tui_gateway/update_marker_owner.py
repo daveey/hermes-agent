@@ -14,13 +14,24 @@ def classify_refusal(home, key, refusal, *, install_root=None):
     """
     if getattr(refusal, "reason", None) != active_sessions.SESSION_NOT_OWNED:
         return refusal
+    if getattr(refusal, "holder_remote", False):
+        return refusal
     pid = getattr(refusal, "holder_pid", None)
+    if pid is None or (isinstance(pid, int) and not isinstance(pid, bool) and pid == 0):
+        return _label(refusal, "lease_unknown", 0, None)
     birth = finite_deadline(getattr(refusal, "holder_start_time", None))
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or birth is None:
         return refusal
     from hermes_cli._startup_fast import project_root_str
     root = Path(install_root) if install_root is not None else Path(project_root_str())
     try:
+        rows = process_identity.ledger_entries(project_root=root, verified_only=True)
+        same_backend = any(row.get("pid") == pid and row.get("create_time") == birth
+                           and row.get("install") == process_identity.install_id(root)
+                           and row.get("purpose") in ("serve", "gateway", "dashboard") for row in rows)
+        from hermes_cli.host_loop_lease import retiring_reason
+        if same_backend and retiring_reason(pid, home=home):
+            return _label(refusal, "lease_retiring", pid, birth)
         marker = read_turn_marker(home, key)
         if (not marker or marker.get("reason") != "core_update_pause"
                 or marker.get("writer_pid") != pid or marker.get("writer_start_time") != birth
@@ -53,8 +64,20 @@ def classify_refusal(home, key, refusal, *, install_root=None):
             return refusal
     except (OSError, ValueError, TypeError):
         return refusal
+    return _label(refusal, "update_marker", pid, birth)
+
+
+WAIT_CAUSES = frozenset({"update_marker", "lease_retiring", "lease_unknown"})
+
+
+def is_transient(refusal):
+    return (getattr(refusal, "reason", None) == active_sessions.SESSION_NOT_OWNED
+            and getattr(refusal, "ownership_cause", None) in WAIT_CAUSES)
+
+
+def _label(refusal, cause, pid, birth):
     result = active_sessions.ActiveSessionRefusal(str(refusal), refusal.reason)
-    result.ownership_cause = "update_marker"
+    result.ownership_cause = cause
     result.holder_pid = pid
     result.holder_start_time = birth
     return result

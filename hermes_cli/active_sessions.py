@@ -682,6 +682,7 @@ def try_acquire_active_session(
                 )
                 # Carry the recorded incarnation, never a newly observed birth for a bare PID.
                 refusal.holder_pid = existing.get("pid")
+                refusal.holder_remote = bool(existing.get("host") and str(existing["host"]) != owner_host())
                 refusal.holder_start_time = existing.get("process_start_time")
                 if (refusal.holder_start_time is not None
                         and _pid_liveness(refusal.holder_pid, refusal.holder_start_time) is True):

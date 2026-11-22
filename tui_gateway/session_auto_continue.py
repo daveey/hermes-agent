@@ -882,7 +882,8 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
 
 
 def _queue_submit_behind_update_hold(rid, sid: str, session: dict, text: Any, transport: Any,
-                                     turn_author: dict | None = None, display_kind: str | None = None) -> dict | None:
+                                     turn_author: dict | None = None, display_kind: str | None = None,
+                                     ownership_cause: str | None = None) -> dict | None:
     """An idle ``prompt.submit`` refused ONLY by the core-update admission hold is queued, not bounced.
 
     The update drainer holds admission for a bounded drain window while the turns in flight finish
@@ -896,7 +897,8 @@ def _queue_submit_behind_update_hold(rid, sid: str, session: dict, text: Any, tr
     # Only a refusal by the update hold itself is labelled: a briefly busy or unreadable fence queues as
     # before (the retry admits it within a tick) but is not "waiting for an update". Read before any other
     # reservation in this context can overwrite the reason.
-    held_by_update = last_refusal() == "held"
+    held_by_update = (ownership_cause in {"update_marker", "lease_retiring"}
+                      if ownership_cause is not None else last_refusal() == "held")
     if not retirement.acquire():
         return None
     retirement.release()
@@ -959,6 +961,9 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             return retry_queued_prompt(rid, sid, session)
         if session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
             return False
+        if _transient_ownership_refusal(_ensure_active_session_slot(sid, session)):
+            from tui_gateway.admission_retry import retry_queued_prompt
+            return retry_queued_prompt(rid, sid, session)
         queue_generation = int(session.get("_queued_prompt_generation", 0))
         _ac_set_queue(session, session.get("queued_prompts") or [])
         session["running"] = True
