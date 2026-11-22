@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import rfc8785
 
@@ -111,6 +111,24 @@ def initialize(conn: sqlite3.Connection, binding: dict, *, board_id: str) -> Non
 def snapshot(conn: sqlite3.Connection) -> dict:
     """Read and validate persisted allocation/custody without business-row hydration."""
     return _read(conn)[0]
+
+
+def guard_import(conn: sqlite3.Connection, tables: tuple[str, ...], only: Mapping[str, set[str]] | None) -> bool:
+    """Fence import scopes under the writer reservation; imports are not replay repair."""
+    _transaction(conn)
+    anchor = conn.execute('SELECT journal_id FROM kanban_sync_state').fetchone()
+    if anchor is None or anchor[0] is None:
+        return False
+    _reserve(conn)
+    _state, encoded = _read(conn)
+    held = list(conn.execute("SELECT table_name,row_uid FROM kanban_sync_outbox WHERE state='rejected'"))
+    if encoded is not None:
+        wire = json.loads(encoded)
+        held.append((wire['table'], wire['uid']))
+    for table, uid in held:
+        if table in tables and (only is None or uid in only.get(table, set())):
+            raise ValueError('import overlaps replay custody; explicit reconciliation required')
+    return True
 
 
 def pending_wire(conn: sqlite3.Connection) -> bytes | None:

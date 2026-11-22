@@ -1630,8 +1630,11 @@ def import_board(conn: sqlite3.Connection, *, tables: Iterable[str] = IMPORT_ORD
     counts: dict[str, int] = {}
     now = time.time_ns() // 1_000_000
     with write_txn(conn):
-        # Rows the service refused before the import (edits of cards it had not seen) are superseded by the full rows.
-        counts["cleared_rejected"] = (0 if only is not None else
+        from hermes_cli.kanban_replay_journal import guard_import
+        tables = tuple(tables)
+        bound = guard_import(conn, tables, only)
+        # Bound rejections retain semantic custody; a bulk import is not authorized repair.
+        counts["cleared_rejected"] = (0 if bound or only is not None else
                                       conn.execute("DELETE FROM kanban_sync_outbox WHERE state = 'rejected'").rowcount)
         for table in tables:
             wanted = None if only is None else only.get(table, set())
