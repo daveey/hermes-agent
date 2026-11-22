@@ -285,6 +285,9 @@ _SYNC_COLUMN_DDL = (
     ("kanban_sync_state", "mirror_pulled_at", "mirror_pulled_at REAL"),
     # Local-only round-robin position; refused revisions must not monopolize bounded batches.
     ("kanban_sync_state", "worker_reserve_cursor", "worker_reserve_cursor TEXT"),
+    # NULL is never-enrolled/unknown, not permission to replace a lost replay journal.
+    ("kanban_sync_state", "journal_id", "journal_id TEXT"),
+    ("kanban_sync_state", "replay_restore_required", "replay_restore_required INTEGER NOT NULL DEFAULT 0"),
 )
 
 # Resolved db paths whose triggers this process installed. Empty = no synced

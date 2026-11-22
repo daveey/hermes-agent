@@ -11,6 +11,14 @@ def binding():
                 last_op_id=None, last_payload_sha256=None, pending=None)
 
 
+def initialize(conn, journal):
+    # Minimal storage fixture; real schema/adoption is covered by test_kanban_replay_binding.
+    conn.execute('CREATE TABLE IF NOT EXISTS kanban_sync_state('
+                 'board_id TEXT PRIMARY KEY, journal_id TEXT, replay_restore_required INTEGER NOT NULL DEFAULT 0)')
+    conn.execute("INSERT OR IGNORE INTO kanban_sync_state(board_id) VALUES ('fixture-board')")
+    journal.initialize(conn, binding(), board_id='fixture-board')
+
+
 def test_allocate_rollback_and_restart_keep_one_exact_successor(tmp_path):
     from hermes_cli import kanban_replay_journal as journal
 
@@ -18,7 +26,7 @@ def test_allocate_rollback_and_restart_keep_one_exact_successor(tmp_path):
     conn = sqlite3.connect(path)
     with conn:
         conn.execute('BEGIN IMMEDIATE')
-        journal.initialize(conn, binding())
+        initialize(conn, journal)
     conn.execute('BEGIN IMMEDIATE')
     first = journal.issue(conn, {'client_op_id': 'operation-0001', 'fields': {'n': 1.0}})
     assert json.loads(first)['replay']['sequence'] == '1'
@@ -46,10 +54,10 @@ def test_mutation_requires_caller_transaction(action):
     conn = sqlite3.connect(':memory:')
     with conn:
         conn.execute('BEGIN IMMEDIATE')
-        journal.initialize(conn, binding())
+        initialize(conn, journal)
     with pytest.raises(ValueError, match='caller transaction required'):
         if action == 'initialize':
-            journal.initialize(conn, binding())
+            journal.initialize(conn, binding(), board_id='fixture-board')
         elif action == 'issue':
             journal.issue(conn, {'client_op_id': 'operation-0001'})
         else:
@@ -67,7 +75,7 @@ def test_corrupt_custody_never_retries_or_records(defect):
     conn = sqlite3.connect(':memory:')
     with conn:
         conn.execute('BEGIN IMMEDIATE')
-        journal.initialize(conn, binding())
+        initialize(conn, journal)
         encoded = journal.issue(conn, {'client_op_id': 'operation-0001'})
     wire = json.loads(encoded)
     state = journal.snapshot(conn)
@@ -107,7 +115,7 @@ def test_invalid_intent_never_allocates(intent, expected):
     conn = sqlite3.connect(':memory:')
     with conn:
         conn.execute('BEGIN IMMEDIATE')
-        journal.initialize(conn, binding())
+        initialize(conn, journal)
     with pytest.raises(ValueError, match=expected):
         with conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -124,7 +132,7 @@ def test_two_connections_cannot_allocate_two_successors(tmp_path):
     first, second = sqlite3.connect(path), sqlite3.connect(path, timeout=0)
     with first:
         first.execute('BEGIN IMMEDIATE')
-        journal.initialize(first, binding())
+        initialize(first, journal)
     first.execute('BEGIN IMMEDIATE')
     issued = journal.issue(first, {'client_op_id': 'operation-0001'})
     second.execute('BEGIN')
@@ -151,7 +159,7 @@ def test_exhaustion_and_identity_reuse_cannot_allocate(settled, op_id, expected)
     conn = sqlite3.connect(':memory:')
     with conn:
         conn.execute('BEGIN IMMEDIATE')
-        journal.initialize(conn, binding())
+        initialize(conn, journal)
         state = dict(binding(), settled=settled, last_op_id='operation-0001', last_payload_sha256='0' * 64)
         conn.execute('UPDATE kanban_replay_sender1 SET state=?', (json.dumps(state),))
     with pytest.raises(ValueError, match=expected):
@@ -168,7 +176,7 @@ def test_callback_failure_cannot_commit_partial_bookkeeping():
     conn = sqlite3.connect(':memory:')
     with conn:
         conn.execute('BEGIN IMMEDIATE')
-        journal.initialize(conn, binding())
+        initialize(conn, journal)
         conn.execute('CREATE TABLE outcomes(verdict TEXT)')
         wire = json.loads(journal.issue(conn, {'client_op_id': 'operation-0001'}))
     remote = dict(binding(), mode='STRICT', session='1', h='1', a='0', last_op_id='operation-0001',
@@ -196,7 +204,7 @@ def test_recovered_verdict_bookkeeping_and_custody_commit_together(tmp_path):
     conn = sqlite3.connect(tmp_path / 'board.db')
     with conn:
         conn.execute('BEGIN IMMEDIATE')
-        journal.initialize(conn, binding())
+        initialize(conn, journal)
         conn.execute('CREATE TABLE outcomes (verdict TEXT)')
         wire = json.loads(journal.issue(conn, {'client_op_id': 'operation-0001'}))
     remote = dict(binding(), mode='STRICT', session='1', h='1', a='0',

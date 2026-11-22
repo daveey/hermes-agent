@@ -17,7 +17,7 @@ from hermes_cli.kanban_replay_wire import freeze, verify
 
 _SCHEMA = """CREATE TABLE IF NOT EXISTS kanban_replay_sender1 (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    state TEXT NOT NULL, wire BLOB
+    board_id TEXT NOT NULL, state TEXT NOT NULL, wire BLOB
 )"""
 
 
@@ -71,19 +71,41 @@ def _read(conn: sqlite3.Connection) -> tuple[dict, bytes | None]:
         raise ValueError('missing journal state')
     state = json.loads(row[0])
     _validate(state)
+    anchor = conn.execute('SELECT s.journal_id FROM kanban_sync_state s '
+                          'JOIN kanban_replay_sender1 j ON s.board_id=j.board_id '
+                          'WHERE j.singleton=1').fetchone()
+    if anchor is None or anchor[0] != state['journal_id']:
+        raise ValueError('sync journal binding mismatch')
     _check_wire(state, row[1])
     return state, row[1]
 
 
-def initialize(conn: sqlite3.Connection, binding: dict) -> None:
-    """Install an explicitly bound empty journal, without taking remote authority."""
+def initialize(conn: sqlite3.Connection, binding: dict, *, board_id: str) -> None:
+    """Bind a first journal atomically; never reset one after loss.
+
+    The caller must obtain the serving Board's authenticated enrollment first.
+    This local binding is not remote enrollment or migration readiness.
+    """
     _transaction(conn)
     _validate(binding)
     if binding['settled'] != '0' or binding['pending'] is not None:
         raise ValueError('initial journal must be empty')
-    conn.execute(_SCHEMA)
-    conn.execute('INSERT INTO kanban_replay_sender1(singleton,state) VALUES (1,?)',
-                 (json.dumps(binding),))
+    conn.execute('SAVEPOINT replay_initialize1')
+    try:
+        updated = conn.execute('UPDATE kanban_sync_state SET journal_id=? '
+                               'WHERE board_id=? AND journal_id IS NULL',
+                               (binding['journal_id'], board_id))
+        if updated.rowcount != 1:
+            raise ValueError('journal already bound; recovery required')
+        conn.execute(_SCHEMA)
+        conn.execute('INSERT INTO kanban_replay_sender1(singleton,board_id,state) VALUES (1,?,?)',
+                     (board_id, json.dumps(binding)))
+        conn.execute('RELEASE replay_initialize1')
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute('ROLLBACK TO replay_initialize1')
+            conn.execute('RELEASE replay_initialize1')
+        raise
 
 
 def snapshot(conn: sqlite3.Connection) -> dict:
@@ -100,6 +122,10 @@ def issue(conn: sqlite3.Connection, intent: dict) -> bytes:
     """Freeze only the dependency-ordered head selected by the serialized sender."""
     _reserve(conn)
     state = snapshot(conn)
+    restore = conn.execute('SELECT replay_restore_required FROM kanban_sync_state '
+                           'WHERE board_id=(SELECT board_id FROM kanban_replay_sender1 WHERE singleton=1)').fetchone()
+    if restore[0] != 0:
+        raise ValueError('journal restore reconciliation required')
     if state['pending'] is not None:
         raise ValueError('outstanding issued envelope')
     if 'replay' in intent:
@@ -149,4 +175,24 @@ def recover(conn: sqlite3.Connection, remote: dict, record: Callable[[dict], Non
                 conn.execute('ROLLBACK TO replay_record1')
                 conn.execute('RELEASE replay_record1')
             raise
+    return decision
+
+
+def mark_restore_required(conn: sqlite3.Connection) -> None:
+    """Recovery tooling marks a copied database before any sender may allocate."""
+    _reserve(conn)
+    snapshot(conn)
+    conn.execute('UPDATE kanban_sync_state SET replay_restore_required=1 '
+                 'WHERE board_id=(SELECT board_id FROM kanban_replay_sender1 WHERE singleton=1)')
+
+
+def reconcile_restore(conn: sqlite3.Connection, remote: dict, record: Callable[[dict], None]) -> dict:
+    """Clear the restore hold only after exact byte/verdict reconciliation.
+
+    Caller authenticates the serving Board and current session, and owns COMMIT.
+    An incompatible copy remains held; this does not rotate a lost journal.
+    """
+    decision = recover(conn, remote, record)
+    conn.execute('UPDATE kanban_sync_state SET replay_restore_required=0 '
+                 'WHERE board_id=(SELECT board_id FROM kanban_replay_sender1 WHERE singleton=1)')
     return decision
