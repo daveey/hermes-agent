@@ -107,14 +107,18 @@ def _retire(*observers: Optional[_Observer]) -> None:
                 obs.close()
 
 
-def _open_observer(path: str, ident: tuple) -> _Observer:
+def _open_reader(path: str, *, check_same_thread: bool = True) -> sqlite3.Connection:
     from hermes_state_guard import ensure_kanban_test_isolation
     from hermes_cli.kanban_generation import open_ro
 
     ensure_kanban_test_isolation(Path(path))
     # Guarded and registered (recover() runs first, remember() records its -shm generation): never
     # an unregistered handle that could pin a deleted generation where recover() cannot retire it.
-    conn = open_ro(Path(path), check_same_thread=False)
+    return open_ro(Path(path), check_same_thread=check_same_thread)
+
+
+def _open_observer(path: str, ident: tuple) -> _Observer:
+    conn = _open_reader(path, check_same_thread=False)
     try:
         if _ident(path) != ident:  # replaced between stat and open
             raise sqlite3.OperationalError("board file replaced while opening observer")
@@ -297,8 +301,7 @@ def incremental(key: tuple, path: str, build: Callable, fallback: Callable) -> d
                 rows = hit[1]
             cursor = hit[0]
         else:
-            from hermes_cli.kanban_generation import open_ro
-            conn = open_ro(Path(path))
+            conn = _open_reader(path)
             conn.row_factory = sqlite3.Row
             try:
                 conn.execute("BEGIN")
