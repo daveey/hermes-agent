@@ -139,6 +139,97 @@ def test_restore_with_checkpoint_in_same_interval_matches_fresh_reader(board):
     assert _runs("sync.reader_keep/checkpoint") == 1
 
 
+SWAPPED = ("CREATE TABLE u (v TEXT)", "CREATE TABLE t (v TEXT)", "CREATE TABLE pad (v TEXT)",
+           "INSERT INTO t VALUES ('img-t')", "INSERT INTO u VALUES ('img-u')")  # t and u trade root pages
+WIDER = ("CREATE TABLE t (z TEXT, v TEXT)", "CREATE TABLE u (v TEXT)", "CREATE TABLE pad (v TEXT)",
+         "INSERT INTO t VALUES ('img-z', 'img-t')")  # v is t's second column
+
+
+def _image(tmp_path, statements):
+    """The bytes of another database: its own schema, written by its own connection."""
+    other = tmp_path / "image.db"
+    conn = sqlite3.connect(other, isolation_level=None)
+    for statement in statements:
+        conn.execute(statement)
+    conn.close()
+    return other.read_bytes()
+
+
+@pytest.mark.parametrize("statements", [SWAPPED, WIDER], ids=["swapped-roots", "other-columns"])
+@pytest.mark.parametrize("mode", ["PASSIVE", "TRUNCATE"])
+@pytest.mark.parametrize("restore_first", [False, True], ids=["checkpoint-then-restore", "restore-then-checkpoint"])
+def test_restore_of_another_schema_under_the_same_cookie_reopens(board, tmp_path, statements, mode, restore_first):
+    """A checkpoint and a raw restore in one interval, the image's schema cookie equal to the
+    live one: SQLite sees no schema change, so the reader's parsed schema must not be kept."""
+    path, writer, watch = board
+    image = _image(tmp_path, statements)
+    _two_images(writer, path)
+    assert path.read_bytes()[40:44] == image[40:44]  # equal schema cookies: SQLite's check passes
+    writer.execute("INSERT INTO u VALUES ('pending')")  # frames the checkpoint will backfill
+    gen, row = watch.query(path, VALUE)
+    assert row == ("b",)
+    old = _reader(watch, path)
+    if restore_first:
+        _rewrite(path, image)
+        _checkpoint(writer, mode)
+    else:
+        _checkpoint(writer, mode)
+        _rewrite(path, image)
+    fresh = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        expected = fresh.execute(VALUE).fetchall()
+    finally:
+        fresh.close()
+    assert _moved(watch, path)
+    assert watch.read(path, VALUE, lambda conn: conn.execute(VALUE).fetchall()) == (gen, expected)
+    assert _reader(watch, path) is not old
+    assert _runs("sync.reader_open.reason/changed") == 1
+    assert _runs("sync.reader_keep/checkpoint") == 0
+
+
+def test_schema_change_through_sqlite_reopens_at_the_next_checkpoint(board):
+    path, writer, watch = board
+    gen, row = watch.query(path, VALUE, unchanged_ok=True)
+    assert row == ("a",)
+    old = _reader(watch, path)
+    writer.execute("ALTER TABLE t ADD COLUMN w TEXT DEFAULT 'new'")
+    writer.execute("INSERT INTO pad VALUES (?)", (PAD,))
+    _checkpoint(writer, "PASSIVE")
+    assert _moved(watch, path)
+    assert watch.query(path, "SELECT v, w FROM t", unchanged_ok=True) == (gen, ("a", "new"))
+    assert _reader(watch, path) is not old
+    assert _runs("sync.reader_keep/checkpoint") == 0
+
+
+def test_file_moving_while_the_reader_opens_is_never_kept(board, monkeypatch):
+    """The schema rows are read after the stat the reader is stored with: a file that moved in between
+    may not be the one the schema was parsed from, so the next checkpoint reopens."""
+    from hermes_cli import kanban_sync_board_watch as module
+
+    path, writer, watch = board
+    real = module.schema_rows
+
+    def moved_under_the_read(conn):
+        rows = real(conn)
+        stat = os.stat(path)
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+        return rows
+
+    monkeypatch.setattr(module, "schema_rows", moved_under_the_read)
+    writer.execute("INSERT INTO pad VALUES (?)", (PAD,))  # frames outstanding: the checkpoint below is provable
+    assert watch.query(path, VALUE, unchanged_ok=True)[1] == ("a",)
+    monkeypatch.setattr(module, "schema_rows", real)
+    assert watch._conns[str(path)][6] is None
+    old = _reader(watch, path)
+    base = evidence.read(path)
+    _checkpoint(writer, "PASSIVE")
+    assert evidence.checkpointed(base, evidence.read(path))
+    assert watch.query(path, VALUE, unchanged_ok=True)[1] == ("a",)
+    assert _reader(watch, path) is not old
+    assert watch._conns[str(path)][6] == real(_reader(watch, path))
+    assert _runs("sync.reader_keep/checkpoint") == 0
+
+
 def test_wal_restart_with_backfilled_baseline_is_not_proof(board):
     path, writer, watch = board
     _checkpoint(writer, "PASSIVE")

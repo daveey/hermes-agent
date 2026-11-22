@@ -27,6 +27,18 @@ def path_gone(path: str) -> bool:
     return False
 
 
+def schema_rows(conn: sqlite3.Connection) -> list:
+    """The ``sqlite_schema`` rows as *conn* reads them from the file now.
+
+    The rows are plain table content at page 1, read without consulting what the connection
+    parsed from them earlier, so a kept reader can be asked whether its parsed schema still
+    describes the file. The schema cookie cannot answer that: a restored image carries its own
+    counter, which can equal the live one over a different schema. Kept as rows and compared
+    with ``==``: hashing them cost four times the read (0.63 ms against 0.16 ms for the hub
+    board's 239 rows, 2026-11-22)."""
+    return conn.execute("SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema ORDER BY rowid").fetchall()
+
+
 class BoardWatch:
     """One long-lived read-only connection per board file, for the sync loop's cheap questions.
 
@@ -43,7 +55,9 @@ class BoardWatch:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._conns: dict[str, tuple] = {}  # path -> (file identity, reader, generation, wal state)
+        # path -> (file identity, reader, generation, wal state, data_version of that wal state,
+        #          resolved path, schema rows or None)
+        self._conns: dict[str, tuple] = {}
         self._gen = 0
         self._answers: dict[str, dict[str, tuple[Any, Any]]] = {}  # path -> tag -> (data_version, answer)
 
@@ -85,9 +99,25 @@ class BoardWatch:
         # The checkpoint baseline is read after the stat it is stored with: whatever moves the
         # file between the two leaves the next comparison without proof, so it reopens.
         real = os.path.realpath(key)  # SQLite names the sidecars by the resolved path
-        self._conns[key] = (identity, conn, gen, _wal_evidence.read(real), None, real)
+        self._conns[key] = (identity, conn, gen, _wal_evidence.read(real), None, real,
+                            self._opened_schema(conn, key, identity))
         _sync_cpu.note_reader_open(time.thread_time() - began, reason)
         return conn, gen
+
+    @staticmethod
+    def _opened_schema(conn: sqlite3.Connection, key: str, identity: tuple[int, int, int, int]) -> Optional[list]:
+        """The schema rows this new reader parsed, for a later keep to compare; None = never keep.
+
+        This first statement makes the reader parse the schema and then reads the rows. A file that
+        moved since the stat may have been swapped between those two steps, so the rows are only
+        trusted when the file still has the identity the reader is stored with. An unreadable schema
+        is left for the caller's own first read to report."""
+        try:
+            rows = schema_rows(conn)
+            st = os.stat(key)
+        except (sqlite3.Error, OSError):
+            return None
+        return rows if (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size) == identity else None
 
     def _kept_over_checkpoint(self, key: str, ent: tuple, identity: tuple[int, int, int, int]) -> bool:
         """Keep the reader when SQLite's wal-index proves the main file moved in a checkpoint.
@@ -97,8 +127,11 @@ class BoardWatch:
         Kept only for the same inode, no smaller, with proof from ``kanban_sync_wal_evidence``;
         a raw copy or restore shows none and takes the reopen path above. The proof says a
         checkpoint ran, not that nothing else wrote the file, so the kept reader also gives up
-        its page cache and its answers, as a new one would: only its parsed schema survives,
-        and SQLite checks that against the file's schema cookie on the next read."""
+        its page cache and its answers, as a new one would. Only its parsed schema survives,
+        and only while the file's ``sqlite_schema`` rows, read again here, are the ones it was
+        parsed from: a restored image with another schema under the same schema cookie reopens
+        (SQLite's own cookie check would let the stale parse answer from the wrong pages). A
+        reader stored without rows (None) compares unequal and is never kept."""
         if ent[0][:2] != identity[:2] or identity[3] < ent[0][3]:
             return False
         began = time.thread_time()
@@ -107,10 +140,12 @@ class BoardWatch:
             return False
         try:
             ent[1].execute("PRAGMA shrink_memory")
+            if schema_rows(ent[1]) != ent[6]:
+                return False
         except sqlite3.Error:
             return False
         self._answers.pop(key, None)
-        self._conns[key] = (identity, ent[1], ent[2], now, ent[4], ent[5])
+        self._conns[key] = (identity, ent[1], ent[2], now, ent[4], ent[5], ent[6])
         _sync_cpu.note_reader_keep(time.thread_time() - began)
         return True
 
@@ -122,7 +157,7 @@ class BoardWatch:
         after ``_conn`` accepted the file as it is, so the baseline still follows its stat."""
         ent = self._conns.get(key)
         if ent is not None and ent[4] != version:
-            self._conns[key] = (*ent[:3], _wal_evidence.read(ent[5]), version, ent[5])
+            self._conns[key] = (*ent[:3], _wal_evidence.read(ent[5]), version, *ent[5:])
 
     def _drop(self, key: str) -> None:
         self._answers.pop(key, None)
