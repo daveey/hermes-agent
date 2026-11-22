@@ -110,7 +110,7 @@ def test_evidence_shared_between_context_and_snapshot_and_not_between_requests(c
     finally:
         conn.set_trace_callback(None)
     assert result['cards'][0]['pr'] == URL
-    histories = [q for q in queries if 'FROM task_events WHERE task_id=' in q and 'ORDER BY id' in q]
+    histories = [q for q in queries if 'FROM task_events WHERE task_id' in q and 'ORDER BY' in q]
     assert len(histories) == 1
     conn.execute("UPDATE tasks SET status='archived' WHERE id='c'")
     conn.commit()

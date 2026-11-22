@@ -167,6 +167,9 @@ class Sources(Evidence):
                 self._rows.update((r['id'], r) for r in db.execute(
                     f'SELECT * FROM tasks WHERE id IN ({marks})', batch))
         self.rows = sorted(self._rows.values(), key=lambda r: (r['created_at'], r['id']))
+        # Batch only histories selected from this source, never a losing copy.
+        for db in (local, fleet):
+            self._readers[id(db)].rows = [row for row in self.rows if self._source[row['id']] is db]
 
     def connection(self, task_id) -> sqlite3.Connection:
         if task_id not in self._source and task_id not in self._deleted:

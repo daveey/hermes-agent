@@ -40,12 +40,22 @@ class Evidence:
         from hermes_cli import kanban_lanes_flow as flow
 
         if task_id not in self._events:
-            events = self.conn.execute(
-                "SELECT id, kind, payload FROM task_events WHERE task_id=? ORDER BY id",
-                (task_id,)).fetchall()
-            self._events[task_id] = [
-                {"id": event["id"], "kind": event["kind"], "payload": flow._payload(dict(event))}
-                for event in events]
+            # Every projection visits the open cards. Read their histories in
+            # bounded batches on first demand; terminal parents remain lazy.
+            ids = list(dict.fromkeys([row['id'] for row in self.rows
+                                      if row['id'] not in self._events] + [task_id]))
+            loaded = {tid: [] for tid in ids}
+            for start in range(0, len(ids), 400):
+                batch = ids[start:start + 400]
+                marks = ','.join('?' for _ in batch)
+                events = self.conn.execute(
+                    f"SELECT task_id, id, kind, payload FROM task_events "
+                    f"WHERE task_id IN ({marks}) ORDER BY task_id, id", batch).fetchall()
+                for event in events:
+                    loaded[event['task_id']].append(
+                        {"id": event["id"], "kind": event["kind"], "payload": flow._payload(dict(event))})
+            # A failed batch must not leave a partially populated view.
+            self._events.update(loaded)
         return self._events[task_id]
 
     def parents(self, task_id):
