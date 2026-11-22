@@ -141,6 +141,9 @@ def run_owned_tick(conn, tick, dispatcher_id, board, dry_run):
             return DispatchResult(skipped_owned=True, ownership_error=str(exc))
         if owner is not None and dispatcher_id != owner:
             return DispatchResult(skipped_owned=True, dispatch_owner=owner)
+        if not dry_run:
+            from hermes_cli.kanban_model_retirement import sweep as retire_model_policy
+            retire_model_policy(conn)
         from hermes_cli import kanban_ratio_routing as ratio
         try:
             ratio.begin_tick(conn)  # ratio routing re-reads this board's start counts once per tick

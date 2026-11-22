@@ -8,6 +8,25 @@ import json
 import sqlite3
 from typing import Optional
 
+_UNSET = object()
+
+
+def _edit_snapshot_matches(conn, task_id, status, expected_body, home_open_only):
+    """Recheck maintenance custody and body CAS under edit_task's write transaction."""
+    if home_open_only:
+        from hermes_cli.kanban_wake_check import foreign_copy
+        if status in ('done', 'archived') or foreign_copy(conn, task_id):
+            return False
+    if expected_body is not _UNSET:
+        stored = conn.execute('SELECT body FROM tasks WHERE id=?', (task_id,)).fetchone()
+        return stored['body'] == expected_body
+    return True
+
+
+def _append_edit_comment(conn, task_id, audit_comment):
+    if audit_comment is not None:
+        _kb.add_comment(conn, task_id, *audit_comment)
+
 
 class PriorityLowerRefused(ValueError):
     """An edit would lower a card's priority without a reason (``require_lower_reason``). [daveey]"""
@@ -73,6 +92,8 @@ def edit_task(
     priority_reason: Optional[str] = None, require_lower_reason: bool = False,
     priority_bump: Optional[int] = None,
     admission_class: Optional[str] = None, admission_frees: Optional[str] = None,
+    expected_body: object = _UNSET, home_open_only: bool = False,
+    audit_comment: Optional[tuple[str, str]] = None,
 ) -> bool:
     """Edit task fields, optionally backfilling a completed task's result.
 
@@ -97,6 +118,8 @@ def edit_task(
     with _kb.write_txn(conn):
         status = _kb._task_status(conn, task_id)
         if status is None or (result is not None and status != "done"):
+            return False
+        if not _edit_snapshot_matches(conn, task_id, status, expected_body, home_open_only):
             return False
         previous_priority = conn.execute("SELECT priority FROM tasks WHERE id=?", (task_id,)).fetchone()[0] or 0
         if priority_bump is not None:
@@ -176,6 +199,7 @@ def edit_task(
                 },
                 run_id=run_id,
             )
+        _append_edit_comment(conn, task_id, audit_comment)
     _kb.notify_task_updated(conn, task_id, changed_fields, board=board)
     return True
 
