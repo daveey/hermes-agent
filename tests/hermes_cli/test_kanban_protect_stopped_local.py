@@ -163,6 +163,36 @@ def add_target(conn, actor, args):
     return target, old, {**args, 'task_id': target, 'source_event_uid': source, 'source_run_uid': run_uid}
 
 
+@pytest.mark.parametrize('mutation', ['move_id', 'replace_episode', 'replace_receipt', 'change_origin'])
+def test_uid_bootstrap_does_not_allow_evidence_row_escape_or_replace(board, monkeypatch, mutation):
+    import sqlite3
+    from hermes_cli import kanban_protect_stopped as protect
+    _, _, session, target, _, args = fixture(board, monkeypatch)
+    with scoped_current_session_id(session):
+        result = protect.protect(board, board='default', **args)
+    episode = dict(board.execute("SELECT * FROM task_events WHERE task_id=? AND kind=?", (target, decision.EVENT)).fetchone())
+    assert episode['uid'] is None
+    if mutation == 'move_id':
+        sql, params = "UPDATE task_events SET uid='escape',id=id+100000 WHERE id=?", (episode['id'],)
+    elif mutation == 'change_origin':
+        # Legacy unsynced schemas lack this optional column; the guarded bootstrap
+        # must pin it too whenever a board later acquires it.
+        if 'origin_gateway' not in {r[1] for r in board.execute('PRAGMA table_info(task_events)')}:
+            board.execute('ALTER TABLE task_events ADD COLUMN origin_gateway TEXT')
+        from hermes_cli import kanban_protect_guards
+        kanban_protect_guards.install(board)
+        sql, params = "UPDATE task_events SET uid='escape',origin_gateway='foreign' WHERE id=?", (episode['id'],)
+    else:
+        row = episode if mutation == 'replace_episode' else dict(board.execute('SELECT * FROM task_events WHERE uid=?', (result['event_uid'],)).fetchone())
+        columns = list(row)
+        row['kind'], row['payload'] = 'note', '{}'
+        sql = f"INSERT OR REPLACE INTO task_events ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})"
+        params = tuple(row[c] for c in columns)
+    with pytest.raises(sqlite3.IntegrityError, match='protect_evidence_immutable'):
+        board.execute(sql, params)
+    assert decision.execution_restricted(board, target)
+
+
 def test_two_protections_on_one_unsynced_board(board, monkeypatch):
     from hermes_cli import kanban_protect_stopped as protect
     from hermes_cli.kanban_containment_connections import bootstrap
@@ -194,11 +224,11 @@ def test_existing_episode_protection_keeps_uid_bootstrap_and_containment_usable(
     bootstrap(board)
     assert board.execute("SELECT COUNT(*) FROM task_events WHERE uid IS NULL").fetchone()[0] == 0
     row = board.execute("SELECT id FROM task_events WHERE task_id=? AND kind='decision_hold_restricted'", (target,)).fetchone()
-    if row is not None:
-        with pytest.raises(sqlite3.IntegrityError, match='protect_evidence_immutable'):
-            board.execute('DELETE FROM task_events WHERE id=?', (row[0],))
-        with pytest.raises(sqlite3.IntegrityError, match='protect_evidence_immutable'):
-            board.execute("UPDATE task_events SET payload='{}' WHERE id=?", (row[0],))
+    assert row is not None
+    with pytest.raises(sqlite3.IntegrityError, match='protect_evidence_immutable'):
+        board.execute('DELETE FROM task_events WHERE id=?', (row[0],))
+    with pytest.raises(sqlite3.IntegrityError, match='protect_evidence_immutable'):
+        board.execute("UPDATE task_events SET payload='{}' WHERE id=?", (row[0],))
     episode = board.execute("SELECT id FROM task_events WHERE task_id=? AND kind=?", (target, decision.EVENT)).fetchone()[0]
     with pytest.raises(sqlite3.IntegrityError, match='protect_evidence_immutable'):
         board.execute('DELETE FROM task_events WHERE id=?', (episode,))

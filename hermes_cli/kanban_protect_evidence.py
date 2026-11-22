@@ -47,8 +47,7 @@ def rows(hub, board, wire, home):
             or p.get('run_uid') != wire['source_run_uid'] or p.get('reason_code') != 'provider_refusal'
             or p.get('tripped') is not True or p.get('final_status') != 'triage'
             or p.get('infrastructure', False) is not False or run.get('ended_at') is None
-            or run.get('status') == 'running' or target.get('created_on') != home
-            or target.get('status') not in ('triage', 'archived') or target.get('current_run_uid') is not None):
+            or run.get('status') == 'running' or target.get('created_on') != home):
         raise ValueError('protect canonical target/source/run changed')
     return source, run, target
 

@@ -17,12 +17,20 @@ def install(conn):
                 "OR OLD.id=json_extract(ps.payload,'$.episode_row_id') "
                 "OR OLD.id=json_extract(ps.payload,'$.restriction_row_id')))")
     # Lazy uid bootstrap on unsynced boards assigns NULL -> uid only; any other change stays fenced.
-    uid_only = ("(OLD.uid IS NULL AND NEW.uid IS NOT NULL AND NEW.task_id IS OLD.task_id AND NEW.kind IS OLD.kind "
-                "AND NEW.payload IS OLD.payload AND NEW.run_id IS OLD.run_id AND NEW.created_at IS OLD.created_at)")
+    columns = {r[1] for r in conn.execute('PRAGMA table_info(task_events)')}
+    origin_same = ' AND NEW.origin_gateway IS OLD.origin_gateway' if 'origin_gateway' in columns else ''
+    uid_only = ("(OLD.uid IS NULL AND NEW.uid IS NOT NULL AND NEW.id IS OLD.id "
+                "AND NEW.task_id IS OLD.task_id AND NEW.kind IS OLD.kind "
+                "AND NEW.payload IS OLD.payload AND NEW.run_id IS OLD.run_id AND NEW.created_at IS OLD.created_at"
+                + origin_same + ")")
     runs = ("EXISTS (SELECT 1 FROM task_events ps WHERE ps.kind='decision_protected_stopped' "
             "AND ps.task_id=OLD.task_id AND OLD.uid=json_extract(ps.payload,'$.source_run_uid'))")
     links = f"OLD.parent_id IN ({protected}) OR OLD.child_id IN ({protected})"
     changes = {
+        # REPLACE does not fire DELETE triggers with SQLite's default recursive_triggers=OFF.
+        'event_insert': ('BEFORE INSERT ON task_events',
+                         'EXISTS (SELECT 1 FROM task_events AS OLD WHERE '
+                         f'(OLD.id=NEW.id OR OLD.uid=NEW.uid) AND ({evidence}))'),
         'event_update': ('BEFORE UPDATE ON task_events', f'({evidence}) AND NOT {uid_only}'),
         'event_delete': ('BEFORE DELETE ON task_events', evidence),
         'run_update': ('BEFORE UPDATE ON task_runs', runs),
@@ -37,5 +45,12 @@ def install(conn):
                         'OR NEW.assignee IS NOT OLD.assignee)'),
     }
     for name, (when, predicate) in changes.items():
-        conn.execute(f"CREATE TRIGGER IF NOT EXISTS protect_stopped_{name} {when} WHEN {predicate} "
-                     "BEGIN SELECT RAISE(ABORT,'protect_evidence_immutable'); END")
+        trigger = f'protect_stopped_{name}'
+        ddl = (f"CREATE TRIGGER {trigger} {when} WHEN {predicate} "
+               "BEGIN SELECT RAISE(ABORT,'protect_evidence_immutable'); END")
+        old = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (trigger,)).fetchone()
+        if old and old[0].replace('IF NOT EXISTS ', '') == ddl:
+            continue
+        # Runs inside the caller's write transaction; no connection sees an unfenced gap.
+        conn.execute(f'DROP TRIGGER IF EXISTS {trigger}')
+        conn.execute(ddl)

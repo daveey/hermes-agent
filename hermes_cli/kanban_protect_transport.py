@@ -141,9 +141,18 @@ def confirm(conn, hub, board, request_uid):
           client._row_change('task_events',source),client._row_change('task_events',episode),
           client._row_change('task_events',event)]
     sync.apply_remote_changes(conn,rows,new_cursor=state['cursor'],board=board)
-    # Existing budget episodes acquire a separate monotone restriction. Wait for
-    # normal authenticated sync to carry it; never manufacture it from this receipt.
-    if not proof.projected(conn, wire['task'], p['episode_uid']):
+    # The receipt acknowledges history; it never promises the target is STILL held.
+    # Pull a bounded authenticated feed before reporting current protection, so a
+    # renewal of the adopted episode cannot be missed by the direct row refresh.
+    pulled = client.pull(conn, hub, board, observers=False)
+    if pulled.more:
+        raise ValueError('protect current projection incomplete; preserve frozen command')
+    renewed = conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='scope_renewed' "
+                           "AND json_valid(payload) AND json_extract(payload,'$.episode')=? LIMIT 1",
+                           (wire['task'], p['episode_uid'])).fetchone() is not None
+    held = (not renewed and target.get('status') in ('triage', 'archived')
+            and target.get('current_run_uid') is None and proof.projected(conn, wire['task'], p['episode_uid']))
+    if not held and not renewed:
         raise ValueError('protect restriction projection prerequisite; preserve frozen command')
     with write_txn(conn):
         changed=conn.execute("UPDATE kanban_protect_commands SET delivery_state='confirmed',canonical_receipt_json=? "
@@ -152,4 +161,5 @@ def confirm(conn, hub, board, request_uid):
         if changed!=1:
             raise ValueError('protect custody changed during confirmation')
     return {'ok':True,'task_id':wire['task'],'receipt_uid':wire['event_uid'],'episode_uid':p['episode_uid'],
-            'delivery_state':'confirmed','execution_authority':False,'dependency_satisfied':False,'terminal_for_run':False}
+            'delivery_state':'confirmed','protection_state':'held_confirmed' if held else 'recorded_hold_unconfirmed',
+            'execution_authority':False,'dependency_satisfied':False,'terminal_for_run':False}

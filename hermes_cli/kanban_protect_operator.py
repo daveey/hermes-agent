@@ -76,9 +76,10 @@ def _finish(conn, own, payload, result, *, outcome='applied'):
         old = conn.execute("SELECT finished_at FROM operator_calls WHERE request_uid=? AND side='execute'", (uid,)).fetchone()
         if old is None or old[0] is not None:
             return
-        courier.log(conn, request_uid=uid, side='execute', outcome=outcome, finished=True,
-                    detail=('exact canonical stop receipt and held replica confirmed' if outcome == 'applied'
-                            else 'canonical refusal recorded; no stop receipt'))
+        detail = ('exact canonical stop receipt and held replica confirmed' if outcome == 'applied'
+                  else 'canonical refusal recorded; no stop receipt' if outcome == 'refused'
+                  else 'historical stop receipt confirmed; current hold not confirmed after separate renewal')
+        courier.log(conn, request_uid=uid, side='execute', outcome=outcome, finished=True, detail=detail)
         kb._append_event(conn, target, courier.RESULT_KIND, {
             'request_uid': uid, 'action': ACTION, 'outcome': outcome, 'executor_gateway': own,
             'detail': 'Administrative protection only; no execution authority', 'protection': result,
@@ -129,9 +130,10 @@ def tick(conn, own, board):
                 _BACKOFF.pop(old['request_uid'], None)
                 done.append((old['request_uid'], 'refused'))
                 continue
-            _finish(conn, own, payload, result)
+            outcome = 'applied' if result['protection_state'] == 'held_confirmed' else 'recorded'
+            _finish(conn, own, payload, result, outcome=outcome)
             _BACKOFF.pop(old['request_uid'], None)
-            done.append((old['request_uid'], 'applied'))
+            done.append((old['request_uid'], outcome))
         except (ValueError, OSError, client.HubError) as exc:
             delay = min(_BACKOFF_MAX, _BACKOFF.get(old['request_uid'], (0.0, _BACKOFF_START / 2))[1] * 2)
             _BACKOFF[old['request_uid']] = (time.monotonic() + delay, delay)

@@ -77,6 +77,35 @@ def composed(tmp_path, monkeypatch, request):
         conn.close()
 
 
+def renew_adoption(c):
+    hub, board, target = c['hub'], c['board'], c['target']
+    receipt = json.loads(hub.row_evidence(board, 'task_events', c['wire']['event_uid'])['row']['payload'])
+    comment, renewal = 'm-'+uuid.uuid4().hex, 'n-'+uuid.uuid4().hex
+    body = 'Explicit bounded fixture renewal'
+    def up(table, uid, fields):
+        return {'client_op_id':'u-'+uuid.uuid4().hex,'op':'upsert','table':table,'uid':uid,'fields':fields,'hlc':f'{time.time_ns()//1_000_000:013d}-0000-fixture'}
+    assert all(r['status'] == 'applied' for r in hub.ops(board, [
+        up('task_comments',comment,{'task_id':target,'body':body,'author':'human','created_at':int(time.time())+5}),
+        up('task_events','e-'+uuid.uuid4().hex,{'task_id':target,'kind':'commented','created_at':int(time.time())+5,'payload':json.dumps({'comment_uid':comment,'writer_kind':'human'})})])['results'])
+    assert hub.ops(board,[{'client_op_id':renewal,'op':'renew_scope','task':target,'event_uid':renewal,'episode':receipt['episode_uid'],
+        'mandate_comment_uid':comment,'mandate_body':body,'payload':{'version':1,'actor_kind':'human','actor_session':None,'actor_profile':'default',
+        'authority_kind':'human','authority_ref':None,'reason':'bounded fixture renewal'}}])['results'][0]['status']=='applied'
+
+
+def test_recorded_stop_reconciles_after_authorised_renewal_without_claiming_current_protection(composed):
+    from hermes_cli import kanban_protect_transport as transport
+    c = composed
+    hub, board, target = c['hub'], c['board'], c['target']
+    assert hub.ops(board, [c['wire']])['results'][0]['status'] == 'applied'
+    renew_adoption(c)
+    result = transport.confirm(c['conn'], hub, board, c['request_uid'])
+    assert result['delivery_state'] == 'confirmed'
+    assert result['protection_state'] == 'recorded_hold_unconfirmed'
+    assert result['execution_authority'] is False
+    assert transport.command(c['conn'], c['request_uid'])['request_json'] == c['frozen']['request_json']
+    assert hub.row_evidence(board, 'tasks', target)['row']['status'] == 'triage'
+
+
 def test_home_stop_lost_reply_restart_exact_receipt(composed):
     from hermes_cli import kanban_protect_transport as transport
     c = composed
@@ -159,7 +188,8 @@ def test_real_applied_response_lost_inside_confirm_then_reopen(composed):
         assert transport.confirm(reopened, c['hub'], c['board'], c['request_uid'])['delivery_state'] == 'confirmed'
 
 
-def test_actual_incoming_courier_lost_reply_restart_one_terminal_result(composed, monkeypatch):
+@pytest.mark.parametrize('renewed', [False, True])
+def test_actual_incoming_courier_lost_reply_restart_one_terminal_result(composed, monkeypatch, renewed):
     from contextlib import contextmanager
     from hermes_cli import kanban_operator_call as courier, kanban_protect_transport as transport
     c = composed
@@ -189,18 +219,22 @@ def test_actual_incoming_courier_lost_reply_restart_one_terminal_result(composed
         row = conn.execute("SELECT outcome,finished_at FROM operator_calls WHERE side='execute' AND request_uid=?", (uid,)).fetchone()
         assert tuple(row) == ('accepted_pending_canonical', None)
         assert transport.command(conn, uid)['request_json'] == c['frozen']['request_json']
+        if renewed:
+            renew_adoption(c)
+        expected = 'recorded' if renewed else 'applied'
         conn.close()
         with kbc.connect(c['home']/'kanban.db') as reopened:
             monkeypatch.setattr(client.Hub, 'ops', original)
             courier._MARK.clear()
             from hermes_cli import kanban_protect_operator as _operator
             _operator._BACKOFF.clear()  # a restart forgets in-memory backoff
-            assert (uid, 'applied') in courier.apply_incoming(reopened)
+            assert (uid, expected) in courier.apply_incoming(reopened)
             assert courier.apply_incoming(reopened) == []
             results = reopened.execute("SELECT payload FROM task_events WHERE kind='operator_call_result'").fetchall()
             assert len(results) == 1
             result = json.loads(results[0][0])
-            assert result['outcome'] == 'applied' and result['protection']['execution_authority'] is False
+            assert result['outcome'] == expected and result['protection']['execution_authority'] is False
+            assert result['protection']['protection_state'] == ('recorded_hold_unconfirmed' if renewed else 'held_confirmed')
             assert transport.command(reopened, uid)['request_json'] == c['frozen']['request_json']
     finally:
         rep.close()
