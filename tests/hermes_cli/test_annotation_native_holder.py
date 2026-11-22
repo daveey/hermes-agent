@@ -698,3 +698,82 @@ def test_wal_commit_racing_its_notification_is_confirmed(tmp_path, monkeypatch):
             conn.close()
             ksa._reset_cache_for_tests()
     assert not thread.is_alive()
+
+
+_READER = (
+    'import sqlite3, sys\n'
+    'for _ in range(12):\n'
+    '    conn = sqlite3.connect(sys.argv[1], uri=True)\n'
+    '    assert conn.execute("SELECT status FROM tasks").fetchall()\n'
+    '    conn.close()\n'
+)
+
+
+@pytest.mark.parametrize('wal,mode', [(True, '?mode=ro'), (True, ''), (False, '')])
+def test_foreign_reader_sessions_do_not_project(tmp_path, monkeypatch, wal, mode):
+    """Another process that opens, selects and closes commits nothing.
+
+    SQLite opens -wal/-shm (and, by default, the main file) read-write even to
+    read, so every reader close raises IN_CLOSE_WRITE on a watched name. Real
+    loop, real FileEvents, real projection: no read may follow, and a later
+    commit must still be projected.
+    """
+    import subprocess
+    import sys
+
+    scope = ('native-reader-test', 'default')
+    path = tmp_path / 'kanban.db'
+    conn = helpers._board(path, [('t1', 'running', 's1')])
+    if wal:
+        assert conn.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+    conn.execute('SELECT * FROM tasks').fetchall()
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    monkeypatch.setattr(disk, 'FORCE', True)
+    monkeypatch.setattr(ksa, '_origin_scope', lambda: scope)
+    monkeypatch.setattr(ksa, '_board_db_paths', lambda: [path])
+    monkeypatch.setattr(ksa, '_hub_db_path', lambda: None)
+    monkeypatch.setattr(ksa, '_replica_paths', list)
+    monkeypatch.setattr(ksa, '_remote_cards', lambda *a, **kw: [])
+    monkeypatch.setattr(ksa, '_waiting_sources', {})
+    monkeypatch.setattr(ksa, '_done_checks', {})
+    monkeypatch.setattr(host, 'core_sha', lambda: 'a' * 40)
+    monkeypatch.setattr(host, '_watch_paths', lambda scope: ([str(path)], []))
+    monkeypatch.setattr(host, '_discovery_paths', lambda: (set(), set()))
+    ksa._reset_cache_for_tests()
+    monkeypatch.setattr(host, '_known', {scope: contextvars.copy_context()})
+    disk.touch_demand(scope)
+    ready, done, stop = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+    refresh = ksa._refresh_annotation_locked
+
+    def record(scope):
+        result = refresh(scope)
+        calls.append(dict(result[0]))
+        ready.set()
+        if not result[0]:
+            done.set()
+        return result
+    monkeypatch.setattr(ksa, '_refresh_annotation_locked', record)
+    settle = max(host.SETTLE_S) + .5
+    with FileEvents() as events:
+        thread = threading.Thread(target=run, args=(
+            events, stop, SimpleNamespace(held=lambda: True, beat=lambda: None),
+            lambda: host._event_refresh(events)))
+        thread.start()
+        try:
+            assert ready.wait(5)
+            stop.wait(settle)
+            quiet = len(calls)
+            subprocess.run([sys.executable, '-c', _READER, f'file:{path}{mode}'], check=True, timeout=30)
+            stop.wait(settle)
+            assert len(calls) == quiet, f'{len(calls) - quiet} projections followed 12 reader sessions'
+            disk.touch_demand(scope)
+            conn.execute("UPDATE tasks SET status='done' WHERE id='t1'")
+            assert done.wait(settle), 'commit after reader sessions was not projected'
+        finally:
+            stop.set()
+            events.wake()
+            thread.join(5)
+            conn.close()
+            ksa._reset_cache_for_tests()
+    assert not thread.is_alive()

@@ -1,4 +1,5 @@
 """Real native waits with independent lease maintenance."""
+import itertools
 import resource
 import threading
 import time
@@ -108,6 +109,42 @@ def test_one_shot_deadline_and_read_error_retry(tmp_path):
             assert done.wait(1)
             assert not stop.wait(.08)
             assert len(calls) == 3
+        finally:
+            stop.set()
+            events.wake()
+            thread.join(2)
+        assert not thread.is_alive()
+
+
+def test_write_burst_is_coalesced_and_last_write_is_read(tmp_path):
+    """A steady writer gets a bounded refresh rate, and its final write is read."""
+    path = tmp_path / 'source'
+    path.write_text('0')
+    stop, ready = threading.Event(), threading.Event()
+    reads = []
+    with FileEvents() as events:
+        def refresh():
+            events.replace([path])
+            reads.append((time.monotonic(), path.read_text()))
+            ready.set()
+        lease = SimpleNamespace(held=lambda: True, beat=lambda: None)
+        thread = threading.Thread(target=run, args=(events, stop, lease, refresh))
+        thread.start()
+        try:
+            assert ready.wait(1)
+            stop.wait(.5)
+            first = len(reads)
+            began = time.monotonic()
+            for index in range(1, 41):  # 20 writes/s for 2 s
+                path.write_text(str(index))
+                stop.wait(.05)
+            assert reads[first][0] - began < .2, 'first write of a burst waited for the gap'
+            stop.wait(1)
+            burst = reads[first:]
+            assert len(burst) <= 12, f'{len(burst)} refreshes for a 2 s burst'
+            assert burst[-1][1] == '40'
+            gaps = [b[0] - a[0] for a, b in itertools.pairwise(burst)]
+            assert min(gaps) >= .24
         finally:
             stop.set()
             events.wake()

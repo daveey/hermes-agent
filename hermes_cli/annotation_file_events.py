@@ -11,7 +11,10 @@ import threading
 from pathlib import Path
 
 _HEADER = struct.Struct('iIII')
-_CHANGE = 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800
+# No IN_CLOSE_WRITE: SQLite readers open -wal/-shm (and by default the main file)
+# read-write, so their close would wake the holder with nothing committed. Every
+# write, truncate, create, rename and delete still raises one of these.
+_CHANGE = 0x2 | 0x4 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800
 _LOST = 0x400 | 0x800 | 0x2000 | 0x8000
 _OVERFLOW = 0x4000
 
