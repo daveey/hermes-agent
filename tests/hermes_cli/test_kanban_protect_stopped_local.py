@@ -143,3 +143,83 @@ def test_exact_latest_decision_owner_without_direct_parent(board, monkeypatch, c
                 protect.protect(board, board='default', **args)
         else:
             assert protect.protect(board, board='default', **args)['ok']
+
+
+def add_target(conn, actor, args):
+    """A second ended legacy target under the same actor, same shape as `fixture`."""
+    from hermes_cli.kanban_containment_connections import bootstrap
+    target = kb.create_task(conn, title='second legacy target fixture', assignee='default')
+    assert kb.claim_task(conn, target, claimer='default')
+    old = kb.get_task(conn, target).current_run_id
+    kb._end_run(conn, target, outcome='crashed', status='crashed')
+    conn.execute("UPDATE tasks SET status='scheduled',current_run_id=NULL,claim_lock=NULL,claim_expires=NULL WHERE id=?", (target,))
+    kb.link_tasks(conn, actor, target)
+    bootstrap(conn)
+    run_uid = conn.execute('SELECT uid FROM task_runs WHERE id=?', (old,)).fetchone()[0]
+    kb._append_event(conn, target, 'failure_finalized', {'run_uid': run_uid, 'reason_code': 'provider_refusal', 'tripped': True,
+                     'final_status': 'triage', 'trigger_outcome': 'crashed'}, run_id=old)
+    bootstrap(conn)
+    source = conn.execute("SELECT uid FROM task_events WHERE task_id=? AND kind='failure_finalized'", (target,)).fetchone()[0]
+    return target, old, {**args, 'task_id': target, 'source_event_uid': source, 'source_run_uid': run_uid}
+
+
+def test_two_protections_on_one_unsynced_board(board, monkeypatch):
+    from hermes_cli import kanban_protect_stopped as protect
+    from hermes_cli.kanban_containment_connections import bootstrap
+    actor, _, session, first, _, args = fixture(board, monkeypatch)
+    second, _, args2 = add_target(board, actor, args)
+    with scoped_current_session_id(session):
+        one = protect.protect(board, board='default', **args)
+        two = protect.protect(board, board='default', **args2)
+        assert protect.protect(board, board='default', **args2) == two
+    assert one['event_uid'] != two['event_uid']
+    assert kb.get_task(board, first).status == kb.get_task(board, second).status == 'triage'
+    assert decision.execution_restricted(board, first) and decision.execution_restricted(board, second)
+    bootstrap(board)
+
+
+def test_existing_episode_protection_keeps_uid_bootstrap_and_containment_usable(board, monkeypatch):
+    import sqlite3
+    from hermes_cli import kanban_protect_stopped as protect
+    from hermes_cli.kanban_containment_connections import bootstrap
+    _, _, session, target, _, args = fixture(board, monkeypatch)
+    kb._append_event(board, target, decision.EVENT, {'cause': 'budget', 'accounting_boundary': False})
+    bootstrap(board)
+    args['expected_episode'] = decision.pending_episode(board, target)['uid']
+    # An unrelated unbootstrapped run/event on the board must still receive its uid after protection.
+    with scoped_current_session_id(session):
+        protect.protect(board, board='default', **args)
+    kb._append_event(board, target, 'diagnostic_after', {})
+    bootstrap(board)
+    bootstrap(board)
+    assert board.execute("SELECT COUNT(*) FROM task_events WHERE uid IS NULL").fetchone()[0] == 0
+    row = board.execute("SELECT id FROM task_events WHERE task_id=? AND kind='decision_hold_restricted'", (target,)).fetchone()
+    if row is not None:
+        with pytest.raises(sqlite3.IntegrityError, match='protect_evidence_immutable'):
+            board.execute('DELETE FROM task_events WHERE id=?', (row[0],))
+        with pytest.raises(sqlite3.IntegrityError, match='protect_evidence_immutable'):
+            board.execute("UPDATE task_events SET payload='{}' WHERE id=?", (row[0],))
+    episode = board.execute("SELECT id FROM task_events WHERE task_id=? AND kind=?", (target, decision.EVENT)).fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError, match='protect_evidence_immutable'):
+        board.execute('DELETE FROM task_events WHERE id=?', (episode,))
+    assert decision.execution_restricted(board, target)
+
+
+@pytest.mark.parametrize('bootstrapped', [False, True])
+def test_default_path_restriction_episode_is_fenced_by_row_and_child_stays_held(board, monkeypatch, bootstrapped):
+    import sqlite3
+    from hermes_cli import kanban_protect_stopped as protect
+    from hermes_cli.kanban_containment_connections import bootstrap
+    _, _, session, target, _, args = fixture(board, monkeypatch)
+    child = kb.create_task(board, title='held verifier fixture', assignee='default', parents=[target])
+    with scoped_current_session_id(session):
+        result = protect.protect(board, board='default', **args)
+    if bootstrapped:
+        bootstrap(board)
+    assert kb.archive_task(board, target)
+    row = board.execute("SELECT id FROM task_events WHERE task_id=? AND kind=?", (target, decision.EVENT)).fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError, match='protect_evidence_immutable'):
+        board.execute('DELETE FROM task_events WHERE id=?', (row,))
+    kb.recompute_ready(board)
+    assert kb.get_task(board, child).status == 'todo'
+    assert decision.execution_restricted(board, target) and result['dependency_satisfied'] is False

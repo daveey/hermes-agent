@@ -193,6 +193,8 @@ def test_actual_incoming_courier_lost_reply_restart_one_terminal_result(composed
         with kbc.connect(c['home']/'kanban.db') as reopened:
             monkeypatch.setattr(client.Hub, 'ops', original)
             courier._MARK.clear()
+            from hermes_cli import kanban_protect_operator as _operator
+            _operator._BACKOFF.clear()  # a restart forgets in-memory backoff
             assert (uid, 'applied') in courier.apply_incoming(reopened)
             assert courier.apply_incoming(reopened) == []
             results = reopened.execute("SELECT payload FROM task_events WHERE kind='operator_call_result'").fetchall()

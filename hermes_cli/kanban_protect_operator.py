@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_operator_call as courier
@@ -10,6 +11,9 @@ from hermes_cli import kanban_protect_stopped as kernel
 from hermes_cli import kanban_protect_transport as transport
 
 _log = logging.getLogger(__name__)
+# Unresolvable pending rows back off per request (in-memory; a restart retries once, then backs off again).
+_BACKOFF: dict[str, tuple[float, float]] = {}
+_BACKOFF_START, _BACKOFF_MAX = 15.0, 900.0
 ACTION = transport.KIND
 
 
@@ -73,7 +77,8 @@ def _finish(conn, own, payload, result, *, outcome='applied'):
         if old is None or old[0] is not None:
             return
         courier.log(conn, request_uid=uid, side='execute', outcome=outcome, finished=True,
-                    detail='exact canonical stop receipt and held replica confirmed')
+                    detail=('exact canonical stop receipt and held replica confirmed' if outcome == 'applied'
+                            else 'canonical refusal recorded; no stop receipt'))
         kb._append_event(conn, target, courier.RESULT_KIND, {
             'request_uid': uid, 'action': ACTION, 'outcome': outcome, 'executor_gateway': own,
             'detail': 'Administrative protection only; no execution authority', 'protection': result,
@@ -103,6 +108,8 @@ def tick(conn, own, board):
     done = []
     for row in rows:
         old = dict(row)
+        if _BACKOFF.get(old['request_uid'], (0.0, 0.0))[0] > time.monotonic():
+            continue
         try:
             wire = json.loads(old['request_json'])
             from hermes_cli import kanban_protect_evidence as evidence
@@ -119,11 +126,15 @@ def tick(conn, own, board):
                 result = transport.confirm(conn, hub, board, old['request_uid'])
             except transport.Rejected as exc:
                 _finish(conn, own, payload, {'ok': False, 'canonical_refusal': exc.result}, outcome='refused')
+                _BACKOFF.pop(old['request_uid'], None)
                 done.append((old['request_uid'], 'refused'))
                 continue
             _finish(conn, own, payload, result)
+            _BACKOFF.pop(old['request_uid'], None)
             done.append((old['request_uid'], 'applied'))
         except (ValueError, OSError, client.HubError) as exc:
+            delay = min(_BACKOFF_MAX, _BACKOFF.get(old['request_uid'], (0.0, _BACKOFF_START / 2))[1] * 2)
+            _BACKOFF[old['request_uid']] = (time.monotonic() + delay, delay)
             _log.info('kanban: stop-only request %s pending canonical evidence: %s', old['request_uid'], exc)
     return done
 

@@ -126,6 +126,7 @@ def protect(conn, *, board, task_id, **args):
                         "AND json_extract(payload,'$.source_event_uid')=?", (task_id, KIND, args['source_event_uid'])).fetchone():
             raise ValueError('protection_already_recorded; recover original request, never renew deadline')
         stop = eligible_target(conn, task_id, actor, args)
+        restriction_row = None
         cause = {'cause': 'scope_stopped', 'accounting_boundary': False,
                  'reason': 'Explicit home administrative stop adoption; legacy provider provenance unattested',
                  'source_event_uid': args['source_event_uid'], 'source_run_uid': args['source_run_uid']}
@@ -133,7 +134,9 @@ def protect(conn, *, board, task_id, **args):
             kb._append_event(conn, task_id, decision.EVENT, cause)
         elif not decision.execution_restricted(conn, task_id):
             kb._append_event(conn, task_id, 'decision_hold_restricted', {**cause, 'episode': stop.get('uid') or str(stop['id'])})
+            restriction_row = conn.execute("SELECT MAX(id) FROM task_events WHERE task_id=? AND kind='decision_hold_restricted'", (task_id,)).fetchone()[0]
         stop = decision.pending_episode(conn, task_id)
+        episode_row = int(stop['id'])
         episode = stop.get('uid') or str(stop['id'])
         conn.execute("UPDATE tasks SET status='triage' WHERE id=?", (task_id,))
         result = {'ok': True, 'task_id': task_id, 'event_uid': uid, 'episode_uid': episode,
@@ -141,7 +144,8 @@ def protect(conn, *, board, task_id, **args):
                   'execution_authority': False}
         kb._append_event(conn, task_id, KIND, {'version': 1, 'request_json': frozen,
                           'source_event_uid': args['source_event_uid'], 'source_run_uid': args['source_run_uid'],
-                          'episode_uid': episode, 'actor_task': actor.task, 'actor_run_uid': actor.run_uid,
+                          'episode_uid': episode, 'episode_row_id': episode_row, 'restriction_row_id': restriction_row,
+                          'actor_task': actor.task, 'actor_run_uid': actor.run_uid,
                           'proof_class': 'administrative_adoption;historical_provider_unattested',
                           'disposition': args, 'result': result})
         conn.execute("UPDATE task_events SET uid=? WHERE id=(SELECT MAX(id) FROM task_events WHERE task_id=? AND kind=?)", (uid, task_id, KIND))

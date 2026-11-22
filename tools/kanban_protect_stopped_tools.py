@@ -1,5 +1,6 @@
 """Registered stop-only administrative protection; no original workload admission."""
 import json
+import sqlite3
 
 from tools.kanban_containment_tools import _schema
 
@@ -33,6 +34,6 @@ def handle(args, **kwargs):
             state = sync_state(conn)
             slug = state['board_id'] if state else board_slug_for_path(conn.execute('PRAGMA database_list').fetchone()[2])
             return json.dumps(service.request(conn, board=slug, **{k: v for k, v in args.items() if k != 'board'}))
-    except (ValueError, ContainmentRefused, SupervisorRequestError, OSError) as exc:
+    except (ValueError, ContainmentRefused, SupervisorRequestError, OSError, sqlite3.IntegrityError) as exc:
         return json.dumps({'ok': False, 'terminal_for_run': False, 'execution_authority': False,
                            'error': str(exc), 'next_step': 'Preserve exact original request; resolve the stated canonical prerequisite.'})

@@ -13,12 +13,17 @@ def install(conn):
                 "OR OLD.uid=json_extract(ps.payload,'$.source_event_uid') "
                 "OR OLD.uid=json_extract(ps.payload,'$.episode_uid') "
                 "OR (OLD.kind='decision_hold_restricted' AND json_extract(OLD.payload,'$.source_event_uid')="
-                "json_extract(ps.payload,'$.source_event_uid'))))")
+                "json_extract(ps.payload,'$.source_event_uid')) "
+                "OR OLD.id=json_extract(ps.payload,'$.episode_row_id') "
+                "OR OLD.id=json_extract(ps.payload,'$.restriction_row_id')))")
+    # Lazy uid bootstrap on unsynced boards assigns NULL -> uid only; any other change stays fenced.
+    uid_only = ("(OLD.uid IS NULL AND NEW.uid IS NOT NULL AND NEW.task_id IS OLD.task_id AND NEW.kind IS OLD.kind "
+                "AND NEW.payload IS OLD.payload AND NEW.run_id IS OLD.run_id AND NEW.created_at IS OLD.created_at)")
     runs = ("EXISTS (SELECT 1 FROM task_events ps WHERE ps.kind='decision_protected_stopped' "
             "AND ps.task_id=OLD.task_id AND OLD.uid=json_extract(ps.payload,'$.source_run_uid'))")
     links = f"OLD.parent_id IN ({protected}) OR OLD.child_id IN ({protected})"
     changes = {
-        'event_update': ('BEFORE UPDATE ON task_events', evidence),
+        'event_update': ('BEFORE UPDATE ON task_events', f'({evidence}) AND NOT {uid_only}'),
         'event_delete': ('BEFORE DELETE ON task_events', evidence),
         'run_update': ('BEFORE UPDATE ON task_runs', runs),
         'run_delete': ('BEFORE DELETE ON task_runs', runs),
