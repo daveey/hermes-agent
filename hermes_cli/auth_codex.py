@@ -765,6 +765,9 @@ def _probe_codex_quota_restored(
     Probes are throttled per access token (module-local cache) so the hot selection path can fire
     this freely.
     """
+    from agent.codex_boot_recovery import defer_recovery
+    if defer_recovery():
+        return False
     from hermes_cli.auth import _codex_quota_probe_cache, _nonempty_str
     token = _stripped(access_token)
     # Real Codex access tokens are JWTs. Refusing to probe non-JWT tokens avoids pointless
@@ -828,6 +831,9 @@ def _refresh_expired_codex_probe_token(
     the stale token's probe slot, so neither the refresh nor the doomed 401 probe fire again
     until the interval has elapsed.
     """
+    from agent.codex_boot_recovery import defer_recovery
+    if defer_recovery():
+        return None
     from hermes_cli.auth import _codex_quota_probe_cache
     token, refresh = _stripped(access_token), _stripped(refresh_token)
     if not token or not refresh or not _codex_access_token_is_expiring(token, 0):

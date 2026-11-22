@@ -471,18 +471,21 @@ def _construct_agent(frame, factory, policy, **kwargs):
     still books the one-shot exit mapping (quota wall 75, re-login 78) before the crash."""
     from gateway.session_worker_construct import worker_route
     from hermes_cli.kanban_quota_recovery import recover_exception
-    for attempt in range(2):
-        try:
-            return factory(**{**kwargs, **worker_route(policy, kwargs)})
-        except Exception as exc:
-            if json.loads(frame['policy'].get('kanban_json') or 'null') is not None:
-                healed = attempt == 0 and recover_exception(exc)
-                exc._kanban_quota_probe_attempted = True
-                if healed:
-                    continue
-            from gateway.session_kanban import record_start_failure
-            record_start_failure(frame, exc)
-            raise
+    from agent.codex_boot_recovery import construction_scope, recovery_deferred
+    kanban = json.loads(frame['policy'].get('kanban_json') or 'null') is not None
+    with construction_scope(kanban):
+        for attempt in range(2):
+            try:
+                return factory(**{**kwargs, **worker_route(policy, kwargs)})
+            except Exception as exc:
+                if kanban:
+                    healed = attempt == 0 and not recovery_deferred() and recover_exception(exc)
+                    exc._kanban_quota_probe_attempted = True
+                    if healed:
+                        continue
+                from gateway.session_kanban import record_start_failure
+                record_start_failure(frame, exc)
+                raise
 
 
 def hello():
