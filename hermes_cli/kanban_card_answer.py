@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Callable
 
 from hermes_cli import kanban_db as kb
@@ -18,6 +19,13 @@ LIFECYCLE = ("created", "blocked", "block_loop_detected", "unblocked", "archived
 
 class AnswerRefused(ValueError):
     """A stale, conflicting or unverified answer must leave the card untouched."""
+
+
+class _AlreadyRecorded(Exception):
+    """Internal transaction exit carrying the winner's independently read receipt."""
+
+    def __init__(self, receipt):
+        self.receipt = receipt
 
 
 def encoded(value) -> str:
@@ -158,7 +166,7 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
     if any(not isinstance(request[k], str) or not request[k] for k in fields):
         raise AnswerRefused("invalid_answer")
     if (request["ownerGateway"] != owner_gateway or request["ownerProfile"] != owner_profile
-            or request["board"] != board or len(request["operationId"]) > 200
+            or request["board"] != board or not re.fullmatch(r'[A-Za-z0-9._:-]{1,200}', request["operationId"])
             or len(request["choice"]) > 2000 or len(request["generation"]) != 64):
         raise AnswerRefused("invalid_answer")
     _owner(conn, request['task'], owner_gateway, require_primary=require_primary)
@@ -208,9 +216,18 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
     transition = kb.archive_task if archive else kb.unblock_task
     from hermes_cli.kanban_reason_comment import RecordedDecisionComment
     provenance = {**request, "originGateway": origin}
-    comment = RecordedDecisionComment("user-steps", note, provenance)
+
+    def before_insert(c):
+        old = _receipt(c, request, fingerprint)
+        if old is not None:
+            raise _AlreadyRecorded(old)
+
+    comment = RecordedDecisionComment("user-steps", note, provenance, before_insert)
     if informational:
         with kb.write_txn(conn):
+            old = _receipt(conn, request, fingerprint)
+            if old is not None:
+                return old
             error = fence(conn)
             if error:
                 raise AnswerRefused(error)
@@ -218,8 +235,11 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
                            writer_kind='agent', recorded_decision=provenance)
             kb._append_event(conn, request['task'], 'card_answer_recorded', {FIELD: receipt})
         return _receipt(conn, request, fingerprint)
-    transition(conn, request["task"], precondition=fence, comment=comment,
-               event_extra={FIELD: receipt})
+    try:
+        transition(conn, request["task"], precondition=fence, comment=comment,
+                   event_extra={FIELD: receipt})
+    except _AlreadyRecorded as done:
+        return done.receipt
     recorded = _receipt(conn, request, fingerprint)
     if not recorded:
         raise AnswerRefused("ask_changed_or_held")

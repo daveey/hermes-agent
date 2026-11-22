@@ -14,7 +14,7 @@ import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,7 @@ class RecordedDecisionComment:
     author: str
     body: str
     provenance: dict
+    before_insert: Optional[Callable[[sqlite3.Connection], None]] = None
 
 
 Comment = Optional[tuple[str, str] | RecordedDecisionComment]  # legacy (author, body) remains valid
@@ -55,6 +56,8 @@ def reason_comment(conn: sqlite3.Connection, task_id: str, comment: Comment) -> 
 
     state = _ReasonComment()
     decision = comment if isinstance(comment, RecordedDecisionComment) else None
+    if decision is not None and decision.before_insert is not None:
+        decision.before_insert(conn)  # lock held; no tentative duplicate comment yet
     if isinstance(comment, RecordedDecisionComment):
         author, body = comment.author, comment.body
     else:

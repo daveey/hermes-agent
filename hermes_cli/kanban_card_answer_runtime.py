@@ -131,7 +131,7 @@ def main(argv=None) -> int:
         out, code = {'ok': False, 'refused': str(exc) or 'refused'}, 2
     except (OSError, sqlite3.OperationalError):
         out, code = {'ok': False, 'retryable': True, 'error': 'unavailable'}, 3
-    except (ValueError, TypeError, KeyError, RuntimeError) as exc:
+    except Exception as exc:  # health: allow BLE001 -- top-level module protocol returns a fixed internal_error JSON envelope
         out, code = {'ok': False, 'error': 'internal_error', 'type': type(exc).__name__}, 1
     print(json.dumps(out, sort_keys=True, ensure_ascii=False, default=str))
     return code
