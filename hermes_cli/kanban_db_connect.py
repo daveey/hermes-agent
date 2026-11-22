@@ -84,6 +84,8 @@ def _sqlite_connect(path: Path, *, check_same_thread: bool = True) -> sqlite3.Co
         conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         from hermes_cli.kanban_containment_connections import register
         register(conn)
+        from hermes_cli.kanban_sync_writer_gate import register as register_writer
+        register_writer(conn)
     except BaseException:
         # A half-open connection would leak its fd AND leave a stale entry in the
         # connect_tracked registry (cleared only on close), permanently blocking
