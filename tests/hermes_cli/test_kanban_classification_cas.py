@@ -21,9 +21,9 @@ def args(tid, cas):
 
 def request(tid):
     return dict(client_op_id="correction-1", op="reclassify_parked", task=tid, expected_revision=1,
-                expected_event_uid="withdrawn-ask", expected_spend_episode="unchanged-stop",
+                expected_event_uid="withdrawn-ask", expected_event_version=2, expected_spend_episode="unchanged-stop",
                 expected_parents=["parent"], expected_parent_links=[dict(uid="parent>task", version=1)],
-                disposition_comment_uid="owner-disposition", reason="Keep parked")
+                disposition_comment_uid="owner-disposition", disposition_comment_version=3, reason="Keep parked")
 
 
 def parked():

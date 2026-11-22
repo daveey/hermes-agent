@@ -536,11 +536,14 @@ hermes kanban --board <board> block <task> '<reason>' --metadata-only \
 
 The operation is `reclassify_parked`, with an explicit retained `client_op_id`,
 `task`, `reason` matching the CLI reason, `expected_revision`,
-`expected_event_uid` (the latest withdrawn metadata-only ask classification),
+`expected_event_uid` and `expected_event_version` (the exact latest withdrawn
+metadata-only ask classification row),
 `expected_spend_episode` (the current pending stop UID or null), sorted
 `expected_parents`, `expected_parent_links` (matching ordered `{uid,version}`
-link snapshots), and `disposition_comment_uid` (the home-authored disposition
-already recorded on this exact task). The enrolled home gateway authenticates
+link snapshots), and `disposition_comment_uid` plus `disposition_comment_version`
+(the exact home-authored disposition row already recorded on this task).
+Editing either evidence row invalidates the frozen request even if its UID and
+the task revision stay unchanged. The enrolled home gateway authenticates
 canonical ingress; free-form actor labels are not credentials. Worker entry is
 refused; use the authorized, audited owner operator transport, never stripped
 worker identity or direct SQLite edits.
