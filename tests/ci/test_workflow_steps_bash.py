@@ -114,3 +114,97 @@ def test_a_bash_that_does_not_answer_is_not_selected(fake_path, tmp_path, monkey
     bash, reason = workflow_steps.find_replay_bash()
     assert bash is None
     assert f"{old / 'bash'} (bash unknown version)" in reason
+
+
+# The replay memo (workflow_steps._REPLAYED) must not outlive the PATH / known dirs it was filled
+# under. These tests share one STEP, so any order of them (or of other files' replays of the same
+# script in this process) used to hand test_no_bash4_anywhere... a hit from a bash 4 run: the hit
+# skipped replay_bash(), so nothing skipped and the test failed whole-file yet passed alone.
+
+
+@pytest.fixture
+def memo(monkeypatch):
+    """A private replay memo; the list records the bash of every replay that really spawned."""
+    spawned: list[str] = []
+    real = workflow_steps._execute
+
+    def counting(*args, **kwargs):
+        spawned.append(workflow_steps.replay_bash())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(workflow_steps, "_REPLAYED", {})
+    monkeypatch.setattr(workflow_steps, "_execute", counting)
+    return spawned
+
+
+def _bash4_dir(parent: Path, name: str, real: str) -> tuple[Path, Path]:
+    directory = parent / name
+    directory.mkdir()
+    return directory, _executable(directory / "bash", f'#!/bin/sh\nexec "{real}" "$@"\n')
+
+
+def _skip_reason() -> str:
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        workflow_steps.outputs(STEP, {})
+    return str(skipped.value)
+
+
+def test_a_memoized_replay_never_hides_a_path_without_bash4(fake_path, memo, tmp_path, monkeypatch):
+    old, real = fake_path
+    first, new = _bash4_dir(tmp_path, "first", real)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(workflow_steps, "BASH4_KNOWN_DIRS", (str(empty),), raising=False)
+    both = os.pathsep.join((str(first), str(old)))
+    monkeypatch.setenv("PATH", both)
+
+    assert workflow_steps.outputs(STEP, {})["count"] == "2"  # fills the memo under bash 4
+    assert memo == [str(new)]
+
+    monkeypatch.setenv("PATH", str(old))  # same step, env and cwd: only PATH changed
+    reason = _skip_reason()
+    assert f"{old / 'bash'} (bash 3)" in reason
+    assert "bash >= 4" in reason and str(empty) in reason
+    assert memo == [str(new)]  # skipped before any spawn
+
+    monkeypatch.setenv("PATH", both)  # back: the first entry is still memoized
+    assert workflow_steps.outputs(STEP, {})["count"] == "2"
+    assert memo == [str(new)]
+
+
+def test_a_memoized_replay_never_hides_a_known_dir_change(fake_path, memo, tmp_path, monkeypatch):
+    old, real = fake_path
+    brew, new = _bash4_dir(tmp_path, "brew", real)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(workflow_steps, "BASH4_KNOWN_DIRS", (str(brew),), raising=False)
+
+    assert workflow_steps.outputs(STEP, {})["count"] == "2"  # bash 3 on PATH, bash 4 in a known dir
+    assert memo == [str(new)]
+
+    monkeypatch.setattr(workflow_steps, "BASH4_KNOWN_DIRS", (str(empty),), raising=False)
+    reason = _skip_reason()
+    assert f"{old / 'bash'} (bash 3)" in reason
+    assert "bash >= 4" in reason and str(empty) in reason and str(brew) not in reason
+    assert memo == [str(new)]
+
+    monkeypatch.setattr(workflow_steps, "BASH4_KNOWN_DIRS", (str(brew),), raising=False)
+    assert workflow_steps.outputs(STEP, {})["count"] == "2"
+    assert memo == [str(new)]
+
+
+def test_the_memo_still_serves_one_bash_and_reselects_another(fake_path, memo, tmp_path, monkeypatch):
+    old, real = fake_path
+    first, one = _bash4_dir(tmp_path, "one", real)
+    second, two = _bash4_dir(tmp_path, "two", real)
+    monkeypatch.setattr(workflow_steps, "BASH4_KNOWN_DIRS", (), raising=False)
+
+    monkeypatch.setenv("PATH", os.pathsep.join((str(first), str(old))))
+    for _ in range(3):
+        assert int(workflow_steps.outputs(STEP, {})["major"]) >= 4
+    assert memo == [str(one)]  # three replays, one spawn
+
+    monkeypatch.setenv("PATH", os.pathsep.join((str(second), str(old))))
+    workflow_steps.outputs(STEP, {})
+    workflow_steps.outputs(STEP, {})
+    assert memo == [str(one), str(two)]  # the other bash is its own entry, then memoized too

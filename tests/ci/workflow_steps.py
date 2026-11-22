@@ -128,15 +128,36 @@ def replay_bash() -> str:
     return bash
 
 
+# A replayed step is a pure function of its rendered script, env and cwd within one process.
+# The routing tests replay the same unmutated workflow dozens of times (363 Bash runs, 37
+# distinct, in the Windows lane's selection); each Git Bash spawn costs ~0.5 s on a loaded
+# Windows runner, which pushed the file past the runner's 300 s per-file cap.
+_REPLAYED: dict[tuple, tuple[dict, list]] = {}
+
+
 def _run(step: dict, ctx: dict, cwd: Path | None = None, *, receipt: bool = False) -> tuple[dict, list]:
     required(step, ctx)
     assert step.get("shell", "bash") == "bash", "only safe Bash selection steps are replayed"
+    # Selected before the memo is read, and part of its key: the bash is a function of the ambient
+    # PATH and BASH4_KNOWN_DIRS, which the step's own text, env and cwd do not name. Without it a
+    # hit replays another PATH's result and never reaches replay_bash(), so a PATH with no bash 4+
+    # neither skips nor re-selects (test_workflow_steps_bash.py). replay_bash() is itself memoized
+    # per (PATH, known dirs), so this costs one dict lookup per replay, not a probe.
+    bash = replay_bash()
+    key = (bash, gha.render(step["run"], ctx), receipt, str(cwd),
+           tuple((k, gha.to_string(gha.render(v, ctx))) for k, v in step.get("env", {}).items()))
+    if key not in _REPLAYED:
+        _REPLAYED[key] = _execute(step, ctx, cwd, receipt=receipt, bash=bash)
+    outputs, calls = _REPLAYED[key]
+    return dict(outputs), list(calls)
+
+
+def _execute(step: dict, ctx: dict, cwd: Path | None, *, receipt: bool, bash: str) -> tuple[dict, list]:
     with tempfile.TemporaryDirectory(prefix="workflow-replay-", ignore_cleanup_errors=True) as directory:
         root = Path(directory)
         output, calls = root / "outputs", root / "calls"
         output.touch()
         calls.touch()
-        bash = replay_bash()
         # Steps call git too. Linux reaches it through os.defpath; on Windows the bash found
         # first may be Git's usr\bin (no git.exe), so git's own dir rides along like bash's.
         git = locate_command("git").command[0]
