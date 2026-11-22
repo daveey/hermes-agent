@@ -167,9 +167,9 @@ def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: i
 
 
 def command(args: argparse.Namespace) -> int:
-    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
     try:
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             payload = renew(conn, args.task_id, episode=args.episode, comment_id=args.mandate_comment,
                             reason=args.reason)
     except RenewalRefused as exc:

@@ -342,3 +342,34 @@ def test_i_renewal_leaves_the_spend_window_runs_and_tokens_unchanged(board, monk
     assert budget._window_start(board, tid, 2999999999) == since
     assert budget.spend(board, tid) == spent
     assert decision.restricted_floor(board, tid) == floor and decision.restricted_since(board, tid) is None
+
+
+def argv(*args):
+    """The installed entry point: argparse, the dispatcher table and the command's own database connection."""
+    import argparse
+    from hermes_cli import kanban
+    from hermes_cli.kanban_parser import build_parser
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers())
+    return kanban.kanban_command(parser.parse_args(['kanban', 'renew-scope', *args]))
+
+
+def test_j_the_command_line_renews_and_refuses_through_its_own_connection(board, monkeypatch, capsys):
+    tid, session, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    request = (tid, '--episode', episode, '--mandate-comment', str(comment), '--reason', 'origin chat authorized', '--json')
+    ancestry(monkeypatch, {'HERMES_SESSION_ID': CHAT}, {'HERMES_KANBAN_TASK': tid, 'HERMES_SESSION_ID': session}, {})
+    monkeypatch.setenv('HERMES_SESSION_ID', CHAT)
+    assert argv(*request) == 1
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])['error'] == 'own_run'
+    assert decision.execution_restricted(board, tid)
+    ancestry(monkeypatch, {'HERMES_SESSION_ID': CHAT, 'HERMES_AGENT': '1'}, {'HERMES_SESSION_ID': CHAT}, {})
+    assert argv(*request) == 0
+    reply = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert reply['ok'] and reply['episode'] == episode and reply['authority_kind'] == 'chat'
+    assert board.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='scope_renewed'", (tid,)).fetchone()[0] == 1
+    assert decision.restricted_since(board, tid) is None
+    assert argv(*request[:-1]) == 1  # the stop is already renewed: text output, nothing written twice
+    assert 'renew-scope refused' in capsys.readouterr().out
+    assert board.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='scope_renewed'", (tid,)).fetchone()[0] == 1
