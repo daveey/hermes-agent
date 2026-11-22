@@ -73,8 +73,10 @@ def test_exact_history_comparison_rejects_mutations(mutation):
         conn.execute("INSERT INTO task_events VALUES (1, 't', 'created', 1)")
         history = board_read._rows_by_task(conn, 'task_events', ['t'])['t']
         assert board_read._same_events(conn, 't', history)
+        assert board_read._same_event_histories(conn, {'t': history}) == {'t': True}
         conn.execute(mutation)
         assert not board_read._same_events(conn, 't', history)
+        assert board_read._same_event_histories(conn, {'t': history}) == {'t': False}
         assert conn.row_factory is sqlite3.Row
 
 
@@ -83,8 +85,10 @@ def test_exact_empty_history_and_independent_task():
         conn.row_factory = sqlite3.Row
         conn.execute('CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, payload)')
         assert board_read._same_events(conn, 't', ())
+        assert board_read._same_event_histories(conn, {'t': (), 'other': ()}) == {'t': True, 'other': True}
         conn.execute("INSERT INTO task_events VALUES (1, 'other', 'x')")
         assert board_read._same_events(conn, 't', ())
+        assert board_read._same_event_histories(conn, {'t': (), 'other': ()}) == {'t': True, 'other': False}
         conn.execute("INSERT INTO task_events VALUES (2, 't', 'x')")
         assert not board_read._same_events(conn, 't', ())
 

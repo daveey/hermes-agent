@@ -266,10 +266,11 @@ def content_version(path: str) -> Optional[tuple]:
 
 
 def incremental(key: tuple, path: str, build: Callable, fallback: Callable) -> dict:
-    """Read cursor, delta and volatile overlay in ONE snapshot on the guarded observer.
+    """Read cursor, delta and volatile overlay in ONE short-lived guarded snapshot.
 
     Serialize a board's refreshes through its observer lock, so concurrent readers cannot
-    publish an older result over a newer cursor. No transaction survives a call.
+    publish an older result over a newer cursor. Only the commit-clock observer survives;
+    the row reader closes before projection, including on a failed build.
     """
     from hermes_cli import kanban_task_change
 
@@ -285,29 +286,26 @@ def incremental(key: tuple, path: str, build: Callable, fallback: Callable) -> d
             hit = _entries.get(cache_key)
         if not current:
             return fallback()
-        conn = obs.conn
-        factory = conn.row_factory
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("BEGIN")
-            # Sample while holding this observer's refresh lock and snapshot. A
-            # version captured by version() before the lock can predate another
-            # refresh. This key includes bookkeeping commits, unlike P2.
-            commit_key = (obs.gen, *obs.ident,
-                          conn.execute("PRAGMA schema_version").fetchone()[0],
-                          conn.execute("PRAGMA data_version").fetchone()[0])
-            if hit is not None and len(hit) > 2 and hit[0] is not None and hit[2] == commit_key:
-                from hermes_cli import loop_accounting
-                with loop_accounting.pass_("kanban.board.rows", skipped=True):
-                    rows = hit[1]
-                cursor = hit[0]
-            else:
+        # Retain only the observer's commit clock, not a history-reader connection.
+        # Sample before opening the snapshot: a later commit invalidates next read.
+        commit_key = (obs.gen, *obs.ident,
+                      obs.conn.execute("PRAGMA schema_version").fetchone()[0],
+                      obs.conn.execute("PRAGMA data_version").fetchone()[0])
+        if hit is not None and len(hit) > 2 and hit[0] is not None and hit[2] == commit_key:
+            from hermes_cli import loop_accounting
+            with loop_accounting.pass_("kanban.board.rows", skipped=True):
+                rows = hit[1]
+            cursor = hit[0]
+        else:
+            from hermes_cli.kanban_generation import open_ro
+            conn = open_ro(Path(path))
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("BEGIN")
                 changed, cursor = kanban_task_change.changed_since(conn, hit[0] if hit else None)
                 rows = build(conn, hit[1] if hit else None, changed)
-        finally:
-            if conn.in_transaction:
-                conn.rollback()
-            conn.row_factory = factory
+            finally:
+                conn.close()  # even on build/read failure; before Python projection/rules
         with _lock:
             if _observers.get(str(path)) is obs:
                 _entries[cache_key] = (cursor, rows, commit_key)
