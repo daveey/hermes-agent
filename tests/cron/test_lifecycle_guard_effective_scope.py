@@ -28,5 +28,17 @@ def test_effective_visit_retains_distinct_execution_and_later_context(tmp_path):
     assert not unvisited_scopes(visited, budget, path, python_source=False, nested=False)
     budget.integer_context = True
     assert unvisited_scopes(visited, budget, path, python_source=False, nested=False)
+    budget.integer_context = False
     budget.alias_names = None
     assert unvisited_scopes(visited, budget, path, python_source=False, nested=False)
+
+
+def test_effective_visit_retains_distinct_working_directory(tmp_path):
+    caller = tmp_path / 'a'
+    scripts = caller / 'b'
+    scripts.mkdir(parents=True)
+    (scripts / 'x.sh').write_text("alias ll='ls -l'\n./helper.sh\n")
+    (caller / 'helper.sh').write_text('true\n')
+    (scripts / 'helper.sh').write_text('hermes gateway restart\n')
+    assert guard.scan_gateway_lifecycle(
+        'BASH_ENV=b/x.sh bash -c true; b/x.sh', cwd=str(caller)) == (True, None)
