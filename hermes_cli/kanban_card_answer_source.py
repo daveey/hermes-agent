@@ -39,7 +39,8 @@ def _recorded(path: Path, *, source: dict, owner_gateway: str, request_id: str, 
     The ordinary projection row and immutable frozen request still apply.
     """
     ns = json.dumps([source['gateway'], source['profile']], separators=(',', ':'), ensure_ascii=False)
-    conn = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
+    # User-steps ActionStore, not a Kanban board; this adapter never opens board files.
+    conn = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)  # noqa: kanban-lockguard
     conn.row_factory = sqlite3.Row
     try:
         conn.execute('BEGIN')
