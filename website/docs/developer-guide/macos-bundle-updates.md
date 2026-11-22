@@ -79,6 +79,48 @@ into memory and crashes downloading one that size
 ([electron/electron#55089](https://github.com/electron/electron/issues/55089)).
 The Darwin publish job waits for the arm64 build and its smoke, and serializes channel writes.
 
+## Checkout updater: backend/client skew
+
+Checkout-managed updates are not atomic backend-and-client updates. The backend
+checkout can advance while Desktop remains open and its bundle swap is deferred.
+The POSIX handoff's `mac_swap` stages and rolls back **the bundle**, not the
+already committed backend code. Copy/install failure keeps or restores the old
+app and reports an `app-swap` follow-up warning; it does not undo the code update.
+Matching current install stamps therefore do not establish update atomicity.
+
+A legacy client without session mutation identity receives HTTP 409
+`client_upgrade_required`. The backend must not accept an unfenced edit to hide
+the mismatch. Desktop retains a client-install-wide update reminder for that
+refusal, including across ordinary notification clearing and renderer/app
+relaunch (when localStorage is available). It stores only an acknowledgement bit,
+not the failed edit, session identity or error text. The action opens **client**
+Updates, even while viewing a remote backend; a Cloud-served webapp offers reload.
+Nothing applies or restarts automatically. Explicit dismissal acknowledges the
+note; a later refusal restores it. Opening Updates alone does not establish
+compatibility or clear the reminder. After updating, retry the refused edit;
+this recovery does not replay it automatically.
+
+External `hermes-sync` safeguards are complementary: `desktop_contract_skew`
+recognizes changed session-contract files or a recent upgrade refusal, but still
+waits for the user to be away and for Desktop turns to finish before swapping.
+`desktop_bundle_lag` records lag in `deploy-check.json` and escalates overdue swaps.
+Those safeguards do not guarantee compatibility during the deferred interval.
+Do not bypass their drain/idle gates or force a busy app restart.
+
+Regression coverage:
+
+- `tests/hermes_cli/test_session_mutation_legacy_client.py` exercises real HTTP
+  refusal and verifies legacy archive/rename/delete do not change session state.
+- `tests/scripts/desktop_update/test_post_commit_bundle_failure.py` executes the
+  production shell swap functions on disposable old/new bundles after a real Git
+  contract commit. Copy failure and install-rename failure retain the advanced
+  code and complete old bundle, with an actionable warning.
+- `apps/desktop/src/store/client-upgrade-recovery.test.ts` exercises persistence,
+  reload, explicit acknowledgement, coalescing and client update targeting.
+
+These are controlled mechanism proofs, not a signed macOS installation test and
+not evidence for the cause of an earlier incident whose logs are unavailable.
+
 ## Verification limits
 
 Helper tests exercise the strategy, native-event ordering, feed validation,

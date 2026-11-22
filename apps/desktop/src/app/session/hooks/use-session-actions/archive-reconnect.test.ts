@@ -6,7 +6,7 @@ import { en } from '@/i18n/en'
 import { startArchiveTrace } from '@/lib/archive-trace'
 import { $confirmRequest, settleConfirm } from '@/store/confirm'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
-import { $notifications, clearNotifications, readableError } from '@/store/notifications'
+import { $notifications, clearNotifications, dismissNotification, readableError } from '@/store/notifications'
 
 import { commitArchive } from './archive-commit'
 import { archivePreflight } from './archive-soft-hide'
@@ -25,6 +25,8 @@ beforeEach(() => {
 })
 afterEach(() => {
   settleConfirm(false)
+  // Upgrade-required recovery deliberately survives ordinary clearing; acknowledge fixture notices.
+  for (const notice of $notifications.get()) {dismissNotification(notice.id)}
   clearNotifications()
   $connectionsRegistry.set(null)
   vi.unstubAllGlobals()

@@ -5,6 +5,7 @@ import { errorDiagnostic, errorField } from '@/lib/error-diagnostic'
 import { isOutOfSyncRpcParams } from '@/lib/gateway-rpc'
 import { servedByHermesCloud } from '@/lib/hermes-cloud-host'
 import { isTimeoutError } from '@/lib/with-timeout'
+import { clientUpgradeNote, hasClientUpgradeNote } from '@/store/client-upgrade-recovery'
 import { type ErrorToastCategory, recordFriction } from '@/store/desktop-metrics'
 import { requestBackendRestart, requestRoute } from '@/store/recovery-requests'
 
@@ -402,6 +403,10 @@ export function notifyError(
   const readable = readableError(error, fallback)
   logErrorToDesktopLog(error, fallback)
 
+  if (/\bclient_upgrade_required\b/.test(errorDiagnostic(error, fallback).text)) {
+    return showNotification(clientUpgradeNote(), 'rpc_out_of_sync')
+  }
+
   const category: ErrorToastCategory =
     readable.category === 'unclassified' && isTimeoutError(error) ? 'timeout' : readable.category
 
@@ -445,4 +450,9 @@ export function clearNotifications() {
     timers.delete(item.id)
     item.onDismiss?.()
   }
+}
+
+// Rehydrate a refused client's recovery affordance, not the refused mutation itself.
+if (hasClientUpgradeNote()) {
+  showNotification(clientUpgradeNote(), null)
 }
