@@ -36,7 +36,7 @@ from typing import Any, Iterator, Optional
 _log = logging.getLogger(__name__)
 
 OP = "operator"
-CARD_ACTIONS = ("comment", "move", "unblock", "creator_archive", "spend_promote")
+CARD_ACTIONS = ("comment", "move", "unblock", "creator_archive", "spend_promote", "protect_stopped")
 LABEL_PUBLISH = "label_publish"  # names a machine, not a card (kanban_operator_labels)
 ACTIONS = (*CARD_ACTIONS, LABEL_PUBLISH)
 OWNER_ONLY = ("complete", "archive", "link", "unlink", "block", "edit", "assign", "delete", "reclaim")
@@ -116,6 +116,9 @@ def is_operator(raw_ops: Any) -> bool:
 
 def normalize_op(i: int, op: dict) -> dict:
     action = str(op.get("action") or "").strip()
+    if action == "protect_stopped":
+        from hermes_cli import kanban_protect_operator as protection
+        return protection.normalize(i, op)
     if action in OWNER_ONLY:
         raise _err("operator_action_refused", f"op {i}: {action} of another gateway's card stays with its owner; "
                    f"the operator call only does {', '.join(ACTIONS)}")
@@ -302,15 +305,21 @@ def _rate_refusal(conn: sqlite3.Connection, requester: str) -> Optional[str]:
     return None
 
 
+def _label_preflight(conn, requester, op):
+    from hermes_cli import kanban_operator_labels as kol
+    synced = _synced(conn)
+    own = _own_gateway(conn) if synced else None
+    return kol.preflight(conn, requester, op, own=own, synced=synced,
+                         rate=_rate_refusal(conn, requester) if own else None)
+
+
 def preflight_op(conn: sqlite3.Connection, requester: str, op: dict) -> dict:
     from hermes_cli import kanban_capability_routing as kcr
     from hermes_cli import kanban_db as kb
-    if op.get("action") == LABEL_PUBLISH:
-        from hermes_cli import kanban_operator_labels as kol
-        synced = _synced(conn)
-        own = _own_gateway(conn) if synced else None
-        return kol.preflight(conn, requester, op, own=own, synced=synced,
-                             rate=_rate_refusal(conn, requester) if own else None)
+    from hermes_cli import kanban_protect_operator as protection
+    special = {"protect_stopped": protection.preflight, LABEL_PUBLISH: _label_preflight}.get(op.get("action"))
+    if special is not None:
+        return special(conn, requester, op)
     target = op["task_id"]
     verdict = {**op}
 
@@ -404,9 +413,14 @@ def start(conn: sqlite3.Connection, req: dict, executor: str) -> str:
                "caller": caller, "requested_at": int(req["created_at"]),
                "supervisor_request_id": req["id"],
                "home": verdict.get("home")}
+    if op['action'] == 'protect_stopped':
+        payload['version'] = 1
+    state = {"phase": PHASE, "request_uid": uid, "home": verdict.get("home"),
+             "deadline": int(time.time()) + DEADLINE_S}
     with kb.write_txn(conn):
         before = _outbox_rows(conn)
-        kb._append_event(conn, requester, REQUEST_KIND, payload)
+        kb._append_event(conn, requester, REQUEST_KIND, payload,
+                         run_id=req.get('requester_run_id') if op['action'] == 'protect_stopped' else None)
         if before is None or (_outbox_rows(conn) or 0) <= before:
             conn.execute("DELETE FROM task_events WHERE id = (SELECT MAX(id) FROM task_events WHERE task_id = ? "
                          "AND kind = ?)", (requester, REQUEST_KIND))
@@ -418,17 +432,14 @@ def start(conn: sqlite3.Connection, req: dict, executor: str) -> str:
             ev = conn.execute("SELECT uid FROM task_events WHERE id = (SELECT MAX(id) FROM task_events WHERE "
                               "task_id = ? AND kind = ?)", (requester, REQUEST_KIND)).fetchone()
             log(conn, request_uid=uid, side="request", outcome="forwarded", op=op, caller=caller, board=board,
-                request_event_uid=ev[0] if ev else None, supervisor_request_id=req["id"])
+                request_event_uid=ev[0] if ev else None, supervisor_request_id=req["id"], executor_gateway=verdict.get('home'))
+            cur = conn.execute("UPDATE supervisor_requests SET result_json=? WHERE id=? AND status='accepted' "
+                               "AND executor=?", (json.dumps(state), req["id"], executor))
             failed = False
     if failed:
         _finish(conn, req, executor, "rejected", results=[{**op, "outcome": "not_applied", "detail": "not_synced"}],
                 error="not_synced: this board cannot carry the request to the card's home")
         return "rejected"
-    state = {"phase": PHASE, "request_uid": uid, "home": verdict.get("home"),
-             "deadline": int(time.time()) + DEADLINE_S}
-    with kb.write_txn(conn):
-        cur = conn.execute("UPDATE supervisor_requests SET result_json=? WHERE id=? AND status='accepted' "
-                           "AND executor=?", (json.dumps(state), req["id"], executor))
     return PHASE if cur.rowcount == 1 else "lost_lease"
 
 
@@ -514,7 +525,7 @@ def poll(conn: sqlite3.Connection, executor: str, *, now: Optional[int] = None) 
         res = _result_for(conn, answered_on, state["request_uid"], state.get("home"), _board_slug(conn))
         if res is _RETRY:
             res = None
-        if res is None and now < int(state.get("deadline") or 0):
+        if res is None and (op.get("action") == "protect_stopped" or now < int(state.get("deadline") or 0)):
             continue
         if res is None:
             status, outcome, detail = "failed", "failed", (f"{state.get('home') or 'the home gateway'} did not "
@@ -857,7 +868,11 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
                 if labels:
                     done.append((uid, kol.handle(conn, own, event, payload, refusal)))
                     continue
-                outcome, _detail = _execute_one(conn, payload, own, refusal)
+                if payload.get("action") == "protect_stopped":
+                    from hermes_cli import kanban_protect_operator as protection
+                    outcome = protection.handle(conn, own, event, payload, refusal)
+                else:
+                    outcome, _detail = _execute_one(conn, payload, own, refusal)
                 done.append((uid, outcome))
             # A held watermark rescans from the deferred call each tick: page on past it, or calls more than
             # SCAN_BATCH request rows later would wait out the deferral's whole grace.
@@ -882,6 +897,8 @@ def apply_incoming(conn: sqlite3.Connection) -> list[tuple[str, str]]:
             _PERSISTED[key] = time.time()
     if own == kol.HOME:
         kol.tick(conn, own, board)  # start queued label jobs, answer finished ones on the requesters' cards
+    from hermes_cli import kanban_protect_operator as protection
+    done.extend(protection.tick(conn, own, board))
     return done
 
 

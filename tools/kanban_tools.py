@@ -1957,15 +1957,12 @@ _handle_link = _kanban_handler("kanban_link")(_graph.handle_link)
 _handle_unlink = _kanban_handler("kanban_unlink")(_graph.handle_unlink)
 _handle_supervisor_request = _kanban_handler("kanban_supervisor_request")(_graph.handle_supervisor_request)
 from tools.kanban_tools_self_heal import check_unblock as _check_kanban_unblock_fn
-from tools import kanban_containment_tools as _containment
-from tools import kanban_retain_tools as _retain
+from tools import kanban_stop_registrations as _stops
 from tools.kanban_tools_self_heal import handle_unblock as _handle_unblock_fn, granted_board as _granted_board
 _check_kanban_unblock = no_cache_check_fn(_check_kanban_unblock_fn)
 _handle_unblock = _kanban_handler("kanban_unblock")(_handle_unblock_fn)
 _TOOLS = (
-    ("kanban_retain", _retain.SCHEMA, _kanban_handler("kanban_retain")(_retain.handle), "⏸"),
-    ("kanban_contain", _containment.CONTAIN_SCHEMA, _kanban_handler("kanban_contain")(_containment.handle_contain), "⏸"),
-    ("kanban_resume_contained", _containment.RESUME_SCHEMA, _kanban_handler("kanban_resume_contained")(_containment.handle_resume), "▶"),
+    *_stops.entries(_kanban_handler),
     ("kanban_show", KANBAN_SHOW_SCHEMA, _handle_show, "📋"),
     ("kanban_list", KANBAN_LIST_SCHEMA, _handle_list, "📋"),
     ("kanban_complete", KANBAN_COMPLETE_SCHEMA, _handle_complete, "✔"),
