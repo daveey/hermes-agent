@@ -11,7 +11,8 @@ import { $notifications, clearNotifications, readableError } from '@/store/notif
 import { commitArchive } from './archive-commit'
 import { archivePreflight } from './archive-soft-hide'
 import { confirmLinkedArchive } from './confirm-linked-archive'
-import { reportDroppedArchiveQueues } from './reconnect-archive-preflight'
+import { reconnectArchivePreflight, reportDroppedArchiveQueues } from './reconnect-archive-preflight'
+import { refreshArchiveTasks } from './refresh-archive-tasks'
 
 const row = { id: 'archive-proof', connection_id: 'owner', profile: 'work', kanban_unknown: true } as SessionInfo
 const hidden = () => ({ end: vi.fn(), hid: true, ids: [row.id], restore: vi.fn() })
@@ -96,6 +97,8 @@ it.each(['direct', 'preflight reconnect', 'snapshot reconnect', 'PATCH reconnect
 
   if (mode === 'preflight reconnect') {
     expect(events.slice(1, 4)).toEqual(['preflight=waiting-reconnect', 'queued', 'preflight=ok'])
+    expect($notifications.get().some(n => n.message === en.desktop.archiveQueued)).toBe(false)
+    expect(Object.keys(sessionStorage)).toHaveLength(0)
   }
 
   if (mode === 'PATCH reconnect') {
@@ -174,7 +177,7 @@ it('drops reload markers with a visible note, without replay, once; active remou
   await result
 })
 
-it.each(['read-failed', 'not-archived'])('does not fabricate committed evidence from an ACK and %s verification', async failure => {
+it.each(['read-failed', 'not-archived', 'wrong-id'])('does not fabricate committed evidence from an ACK and %s verification', async failure => {
   const logLine = vi.fn()
   vi.stubGlobal('hermesDesktop', { logLine, api: async ({ path, method }: HermesApiRequest) => {
     if (path.includes('mutation-snapshot')) {return { exists: true, runtime_revision: 0, runtime_generation: 1 }}
@@ -182,11 +185,150 @@ it.each(['read-failed', 'not-archived'])('does not fabricate committed evidence 
     if (method === 'PATCH') {return { ok: true }}
 
     if (failure === 'not-archived') {return { id: 'verify-only', archived: false }}
+
+    if (failure === 'wrong-id') {return { id: 'another-session', archived: true }}
     throw new Error('socket hang up')
   } })
   const trace = startArchiveTrace('verify-only')
   expect(await commitArchive({ storedSessionId: 'verify-only', owner: { connectionId: 'owner', profile: 'work' },
     hidden: hidden(), rehide: hidden, copy: en.desktop, onArchived: vi.fn(), retryLabel: 'Retry', trace })).toBe(true)
-  expect(logLine.mock.calls.flat().join('\n')).toContain(`verification-pending:${failure}`)
+  // Verification is diagnostic and may finish after the archive ACK has returned.
+  await vi.advanceTimersByTimeAsync(0)
+  expect(logLine.mock.calls.flat().join('\n')).toContain(`verification-pending:${failure === 'wrong-id' ? 'not-archived' : failure}`)
   expect(logLine.mock.calls.flat().join('\n')).not.toContain(' committed')
+})
+
+it('limits a preflight read to the reconnect window remaining budget', async () => {
+  let resolveRead!: (value: { id: string }) => void
+  const api = vi.fn((_request: HermesApiRequest) => new Promise<{ id: string }>(resolve => {resolveRead = resolve}))
+  vi.stubGlobal('hermesDesktop', { api })
+  const stages: string[] = []
+  const trace = Object.assign((stage: string) => stages.push(stage), { attemptId: 'remaining-budget' })
+  let result: SessionInfo | undefined
+  let finished = false
+
+  const pending = refreshArchiveTasks(row.id, row, 'work', { budgetMs: 125, trace }).then(value => {
+    result = value
+    finished = true
+  })
+
+  expect(api).toHaveBeenCalledWith(expect.objectContaining({
+    path: `/api/sessions/${row.id}`, timeoutMs: 125, connectionId: 'owner', profile: 'work'
+  }))
+  await vi.advanceTimersByTimeAsync(124)
+  expect(finished).toBe(false)
+  await vi.advanceTimersByTimeAsync(1)
+  // Capture the deadline outcome before allowing the read to finish, so a
+  // missing budget cap fails without leaving a never-settling test behind.
+  const finishedAtDeadline = finished
+  const resultAtDeadline = result
+  resolveRead({ id: 'mismatched-cleanup-row' })
+  await pending
+  expect(finishedAtDeadline).toBe(true)
+  expect(resultAtDeadline).toMatchObject({ id: row.id, kanban_unknown: true })
+  expect(stages).toHaveLength(1)
+  expect(stages[0]).toMatch(/^preflight=unknown:no answer within/)
+})
+
+it('keeps a timed-out preflight unknown when its successful task read arrives late', async () => {
+  let resolveTasks!: (value: { tasks: [] }) => void
+
+  const api = vi.fn(async ({ path }: HermesApiRequest) => {
+    if (path === `/api/sessions/${row.id}`) {return { id: row.id }}
+
+    return new Promise<{ tasks: [] }>(resolve => {resolveTasks = resolve})
+  })
+
+  vi.stubGlobal('hermesDesktop', { api })
+  const stages: string[] = []
+  const trace = Object.assign((stage: string) => stages.push(stage), { attemptId: 'late-success' })
+  const pending = refreshArchiveTasks(row.id, row, 'work', { trace })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(api).toHaveBeenCalledTimes(2)
+  expect(api.mock.calls[1][0].path).toBe('/api/session-kanban-tasks?ids=archive-proof')
+  await vi.advanceTimersByTimeAsync(14_000)
+  const result = await pending
+  expect(result).toMatchObject({ id: row.id, kanban_unknown: true })
+  expect(stages).toHaveLength(1)
+  expect(stages[0]).toMatch(/^preflight=unknown:no answer within/)
+  const deadlineStages = [...stages]
+  resolveTasks({ tasks: [] })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(stages).toEqual(deadlineStages)
+  expect(stages).not.toContain('preflight=ok')
+  expect(result?.kanban_unknown).toBe(true)
+})
+
+it('pins an ownerless preflight to the initial primary across reconnect and a registry switch', async () => {
+  $connectionsRegistry.set({ version: 1, primary: 'initial-primary', connections: [], secureTokenStorage: true })
+  let disconnected = true
+
+  const api = vi.fn(async ({ path }: HermesApiRequest) => {
+    if (disconnected) {disconnected = false; throw new Error('socket hang up')}
+
+    if (path === `/api/sessions/${row.id}`) {return { id: row.id }}
+
+    return { tasks: [] }
+  })
+
+  vi.stubGlobal('hermesDesktop', { api })
+  const pending = reconnectArchivePreflight(row.id, { ...row, connection_id: undefined }, 'work', en.desktop)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(api).toHaveBeenCalledOnce()
+  expect($notifications.get().some(n => n.message === en.desktop.archiveQueued)).toBe(true)
+  $connectionsRegistry.set({ version: 1, primary: 'replacement-primary', connections: [], secureTokenStorage: true })
+  await vi.advanceTimersByTimeAsync(1_000)
+  expect(await pending).toMatchObject({ connection_id: 'initial-primary', kanban_unknown: false })
+  expect(api.mock.calls.map(([request]) => [request.connectionId, request.profile])).toEqual([
+    ['initial-primary', 'work'], ['initial-primary', 'work'], ['initial-primary', 'work']
+  ])
+  expect($notifications.get().some(n => n.message === en.desktop.archiveQueued)).toBe(false)
+  expect(Object.keys(sessionStorage)).toHaveLength(0)
+})
+
+it('finishes the ACK while diagnostic verification is pending, and never restores or resends on its rejection', async () => {
+  let rejectVerification!: (error: Error) => void
+  const verification = new Promise<never>((_resolve, reject) => {rejectVerification = reject})
+  const logLine = vi.fn()
+
+  const api = vi.fn(async ({ path, method }: HermesApiRequest) => {
+    if (path.includes('mutation-snapshot')) {return { exists: true, runtime_revision: 0, runtime_generation: 1 }}
+
+    if (method === 'PATCH') {return { ok: true }}
+
+    expect(path).toBe('/api/sessions/pending-verification')
+
+    return verification
+  })
+
+  vi.stubGlobal('hermesDesktop', { api, logLine })
+  const hiddenRow = hidden()
+  const onArchived = vi.fn()
+  let outcome: boolean | undefined
+
+  const pending = commitArchive({ storedSessionId: 'pending-verification', owner: { connectionId: 'owner', profile: 'work' },
+    hidden: hiddenRow, rehide: hidden, copy: en.desktop, onArchived, retryLabel: 'Retry', trace: startArchiveTrace('pending-verification') })
+    .then(value => {outcome = value})
+
+  await vi.advanceTimersByTimeAsync(0)
+  expect(api.mock.calls.filter(([request]) => request.path === '/api/sessions/pending-verification' && !request.method)).toHaveLength(1)
+
+  const beforeDiagnosticFailure = { outcome, ended: hiddenRow.end.mock.calls.length,
+    archived: onArchived.mock.calls.length, restored: hiddenRow.restore.mock.calls.length }
+
+  expect(logLine.mock.calls.flat().join('\n')).not.toContain(' committed')
+  rejectVerification(new Error('socket hang up'))
+  await vi.advanceTimersByTimeAsync(70_000)
+  await pending
+  expect(beforeDiagnosticFailure).toEqual({ outcome: true, ended: 1, archived: 1, restored: 0 })
+  expect(outcome).toBe(true)
+  expect(hiddenRow.end).toHaveBeenCalledOnce()
+  expect(onArchived).toHaveBeenCalledOnce()
+  expect(hiddenRow.restore).not.toHaveBeenCalled()
+  expect(api.mock.calls.filter(([request]) => request.method === 'PATCH')).toHaveLength(1)
+  expect(api).toHaveBeenCalledTimes(3)
+  expect(api.mock.calls.every(([request]) => request.connectionId === 'owner' && request.profile === 'work')).toBe(true)
+  expect(logLine.mock.calls.flat().join('\n')).toContain('verification-pending:read-failed')
+  expect(logLine.mock.calls.flat().join('\n')).not.toContain(' committed')
+  expect($notifications.get().some(n => n.kind === 'error')).toBe(false)
 })

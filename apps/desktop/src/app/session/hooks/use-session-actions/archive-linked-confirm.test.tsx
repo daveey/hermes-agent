@@ -6,6 +6,7 @@ import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { setApiRequestProfile as setRequestProfile } from '@/api/client'
 import { getSession, type SessionInfo, setSessionArchived } from '@/hermes'
 import { registerArchiveGuard, resetArchiveGuardsForTests } from '@/store/archive-guards'
 import { $confirmRequest, settleConfirm } from '@/store/confirm'
@@ -555,6 +556,28 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
 
     expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'local' }))
     expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true, { connectionId: 'local', profile: 'default' }, expect.any(Function))
+  })
+
+  it('pins the invocation active profile for an unlisted unresolved ownerless chat in safety reads and PATCH', async () => {
+    setRequestProfile('work')
+    vi.mocked(getSession).mockRejectedValue(new Error('socket hang up'))
+
+    let release: (value: unknown) => void = () => {}
+    api.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+      .mockImplementation(async ({ path }) => path.includes('session-kanban-tasks') ? { tasks: [] } : { id: 'unlisted', archived: true })
+    const handle = await mountHarness()
+    let done: Promise<void> | undefined
+    act(() => { done = handle.archiveSession('unlisted') })
+    await waitFor(() => expect(api).toHaveBeenCalled())
+    setRequestProfile('other')
+    await act(async () => { release({ id: 'unlisted' }); await done })
+    expect(api.mock.calls.map(([request]) => [request.connectionId, request.profile])).toEqual([
+      ['local', 'work'], ['local', 'work'], ['local', undefined], ['local', 'work']
+    ])
+    expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'local', profile: 'work' }))
+    expect(setSessionArchived).toHaveBeenCalledWith('unlisted', true, { connectionId: 'local', profile: 'work' }, expect.any(Function))
+    setRequestProfile(null)
+    vi.mocked(getSession).mockReset()
   })
 
   it('writes to the resolved nondefault profile, not default, for an ownerless/profileless row', async () => {

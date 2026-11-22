@@ -44,9 +44,10 @@ export async function commitArchive(commit: ArchiveCommit): Promise<boolean> {
     // A write ACK alone is not archived=true evidence. Use the same pinned
     // owner and the real IPC read path. Failed verification never replays a
     // committed mutation or pretends its optimistic DOM is backend truth.
+    // Diagnostic-only: don't hold success/optimistic-hide release behind a slow GET.
     if (commit.trace) {
       const scope = owner && typeof owner === 'object' ? owner : { profile: owner }
-      await Promise.resolve().then(() => hermesApiAs<{ id: string; archived?: boolean | number }>({ connectionId: scope.connectionId ?? null, profile: scope.profile ?? null },
+      void Promise.resolve().then(() => hermesApiAs<{ id: string; archived?: boolean | number }>({ connectionId: scope.connectionId ?? null, profile: scope.profile ?? null },
         { path: `/api/sessions/${encodeURIComponent(storedSessionId)}`, timeoutMs: 6_000 }))
         .then(row => commit.trace?.(row.id === storedSessionId && (row.archived === true || row.archived === 1)
           ? 'committed' : 'verification-pending:not-archived'))

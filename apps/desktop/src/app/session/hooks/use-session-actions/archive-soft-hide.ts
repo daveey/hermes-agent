@@ -1,3 +1,4 @@
+import { getApiRequestProfile } from '@/api/client'
 import type { SessionInfo } from '@/hermes'
 import type { Translations } from '@/i18n/types'
 import type { ArchiveTrace } from '@/lib/archive-trace'
@@ -110,15 +111,21 @@ export async function archivePreflight(
   options?: { skipLinkedConfirm?: boolean },
   trace?: ArchiveTrace
 ): Promise<false | string | undefined> {
+  // Preserve the invocation's implicit profile even if resolution/reconnect
+  // yields after the window switches profiles. Resolve before using fallback;
+  // an ambiguous listed row must still refuse rather than borrow this value.
+  const fallbackProfile = getApiRequestProfile() || 'default'
   const stampedProfile = archived?.profile?.trim()
-  const profile = stampedProfile || (await resolveSessionProfile(storedSessionId))
+  const resolvedProfile = stampedProfile || (await resolveSessionProfile(storedSessionId))
 
-  if (listed && !stampedProfile && !profile?.trim() && $profiles.get().filter(item => item.name.trim()).length > 1) {
+  if (listed && !stampedProfile && !resolvedProfile?.trim() && $profiles.get().filter(item => item.name.trim()).length > 1) {
     hidden.restore()
     notifyError(new Error('Session ownership could not be resolved'), copy.archiveFailed)
 
     return false
   }
+
+  const profile = resolvedProfile || fallbackProfile
 
   try {
     if (!(await confirmLinkedArchive(storedSessionId, archived, profile, copy, options?.skipLinkedConfirm, trace))) {
