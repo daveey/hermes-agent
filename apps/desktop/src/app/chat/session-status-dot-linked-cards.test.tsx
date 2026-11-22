@@ -45,8 +45,8 @@ function dot(value: SessionDotState, runningCardCount?: number) {
   return result
 }
 
-describe('linked-card running presentation', () => {
-  it.each(['idle', 'draft', 'background', 'stalled'] as const)('promotes %s to the identical working dot', value => {
+describe('linked-card activity cannot classify missing canonical status', () => {
+  it.each(['idle', 'draft', 'background', 'stalled'] as const)('keeps %s unknown just like a working claim without published status', value => {
     expect(dot(value, 2)).toEqual(dot('working', 0))
   })
   it.each(['needs-input', 'unread'] as const)('preserves %s precedence', value => {
@@ -54,7 +54,7 @@ describe('linked-card running presentation', () => {
   })
   it('keeps callers without card input unchanged', () => {
     expect(dot('idle')).toEqual(dot('idle', 0))
-    expect(dot('idle').className).toContain('border-(--ui-text-quaternary)')
-    expect(dot('working').className).toContain('bg-(--ui-accent)')
+    expect(dot('idle').className).toContain('amber-500')
+    expect(dot('working').className).toContain('amber-500')
   })
 })

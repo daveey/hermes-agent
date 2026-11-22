@@ -9,6 +9,7 @@ import { reconcilePendingSubmissions } from '@/store/pending-submissions'
 import { $sessions, setSessions } from '@/store/session'
 import { resetStripeTransitionLog, setStripeReasonReporter } from '@/store/session-dot-state'
 import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
+import { canonicalOutcome } from '@/test/canonical-outcome'
 import type { SessionInfo } from '@/types/hermes'
 
 import { SessionRowStatusStripe, useSessionRowStripe } from './session-row-stripe'
@@ -61,6 +62,7 @@ it('a red decision stripe on a chat whose card is running still names the questi
       at: 1,
       items: [{ choices: [], id: 'req-1', question: 'Build A, B and C?', state: 'open' }],
       kind: 'decision',
+      status: canonicalOutcome('stuck').status,
       source: 'derived'
     }
   } as Partial<SessionInfo>)
@@ -83,12 +85,13 @@ it('a red decision stripe on a chat whose card is running still names the questi
   expect(stripe(container)?.getAttribute('aria-label')).toBe('Build A, B and C?')
 })
 
-it("the chat's own live turn still beats the outcome, for the stripe and its tooltip alike", () => {
+it("the chat's own live turn cannot veto the published decision stripe", () => {
   const session = row('working-chat', {
     outcome: {
       at: 1,
       items: [{ choices: [], id: 'req-2', question: 'Q?', state: 'open' }],
       kind: 'decision',
+      status: canonicalOutcome('stuck').status,
       source: 'derived'
     }
   } as Partial<SessionInfo>)
@@ -97,8 +100,8 @@ it("the chat's own live turn still beats the outcome, for the stripe and its too
 
   const { result } = renderHook(() => useSessionRowStripe(session, 'working', true))
 
-  expect(result.current.outcomePainted).toBe(false)
-  expect(result.current.statusStripe).not.toBe('stuck')
+  expect(result.current.outcomePainted).toBe(true)
+  expect(result.current.statusStripe).toBe('stuck')
 })
 
 // [daveey] PR #1878 review: the red reasons of a `needs-input` row read $sessionStates / $pausedQueueSessionIds, which
@@ -113,7 +116,7 @@ it('a red row whose prompt moved to another runtime is re-reported with the new 
     storedSessionId: 'red-chat'
   })
 
-  const session = row('red-chat')
+  const session = row('red-chat', { outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }) })
 
   setSessions([session])
   setStripeReasonReporter((_row, _stripe, _previous, reasons) => {

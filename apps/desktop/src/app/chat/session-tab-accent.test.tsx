@@ -20,6 +20,7 @@ import { $sessionDotStateById, type SessionDotState } from '@/store/session-dot-
 import type * as DotStateModule from '@/store/session-dot-state'
 import { $unavailableWorkSources } from '@/store/session-work-source'
 import { _resetWorkSourceOwnerForTests } from '@/store/work-source-owner'
+import { canonicalOutcome } from '@/test/canonical-outcome'
 import type { SessionInfo } from '@/types/hermes'
 
 import fixture from '../../../../../schemas/fixtures/execution-observations-v1.json'
@@ -33,11 +34,13 @@ vi.mock('@/store/session-dot-state', async importOriginal => ({
 }))
 
 const states = $sessionDotStateById as WritableAtom<Record<string, SessionDotState>>
+
 const row = {
   id: 'session',
   profile: 'default',
   connection_id: 'local',
   message_count: 2,
+  outcome: canonicalOutcome('done'),
   kanban_observed_at: Date.now() / 1000
 } as SessionInfo
 
@@ -62,6 +65,7 @@ beforeEach(() => {
       storedSessionId: row.id,
       source
     })
+
     sessionsHost.reportWorkSourceRead({ ...read, available: true })
   }
 })
@@ -91,13 +95,14 @@ afterEach(() => {
 })
 
 describe('session tab underline', () => {
-  it.each([false, true])('expires observation-derived waiting on the existing tick (listed=%s)', async listed => {
+  it.each([false, true])('does not reclassify published waiting on an observation tick (listed=%s)', async listed => {
     vi.useFakeTimers()
     vi.setSystemTime(1001_000)
 
     const session = {
       ...row,
       kanban_observed_at: 1001,
+      outcome: canonicalOutcome('waiting'),
       execution_observations: [
         {
           ...fixture.base,
@@ -117,6 +122,7 @@ describe('session tab underline', () => {
     if (listed) {
       $sessions.set([session])
     }
+
     const { container } = render(tab(session))
     const stripe = () => container.querySelector('[data-session-tab-accent]')?.getAttribute('data-session-tab-accent')
 
@@ -126,7 +132,7 @@ describe('session tab underline', () => {
       $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
     })
     expect(rowExecution(session)).toMatchObject({ unknown: 1, waiting: 0 })
-    expect(stripe()).toBe('neutral')
+    expect(stripe()).toBe('waiting')
   })
 
   it('scopes the accent on the real workspace and tile tab wrappers', () => {
@@ -136,7 +142,7 @@ describe('session tab underline', () => {
       </WorkspaceTabMenu>
     )
 
-    expect(container.querySelector('[data-session-tab-accent="neutral"]')).not.toBeNull()
+    expect(container.querySelector('[data-session-tab-accent="attention"]')).not.toBeNull()
 
     act(() => {
       $sessions.set([row])
@@ -150,18 +156,18 @@ describe('session tab underline', () => {
     )
     expect(container.querySelector('[data-session-tab-accent="done"]')).not.toBeNull()
     act(() => states.set({ session: 'needs-input' }))
-    expect(container.querySelector('[data-session-tab-accent="stuck"]')).not.toBeNull()
+    expect(container.querySelector('[data-session-tab-accent="done"]')).not.toBeNull()
   })
 
   it.each([
     ['idle', 'done', 'emerald-500'],
     ['unread', 'done', 'emerald-500'],
-    ['needs-input', 'stuck', 'red-500'],
-    ['stalled', 'stuck', 'red-500'],
-    ['working', 'neutral', 'zinc-400'],
-    ['background', 'neutral', 'zinc-400'],
-    ['draft', 'neutral', 'zinc-400']
-  ] as const)('uses the sidebar palette for %s', (state, stripe, color) => {
+    ['needs-input', 'done', 'emerald-500'],
+    ['stalled', 'done', 'emerald-500'],
+    ['working', 'done', 'emerald-500'],
+    ['background', 'done', 'emerald-500'],
+    ['draft', 'done', 'emerald-500']
+  ] as const)('preserves the published done palette despite local %s', (state, stripe, color) => {
     states.set({ session: state })
     // [daveey] A draft has sent nothing: a row with messages overrides a stale `draft` claim (withRowActivity).
     const { container } = render(tab(state === 'draft' ? { ...row, message_count: 0 } : row))
@@ -174,28 +180,23 @@ describe('session tab underline', () => {
     )
   })
 
-  it('reacts to turn, manual blocking, and row metadata changes', () => {
+  it('reacts only to published revisions, not turn, blocking or row metadata', () => {
     const { container, rerender } = render(tab())
     const stripe = () => container.querySelector('[data-session-tab-accent]')!.getAttribute('data-session-tab-accent')
-
     expect(stripe()).toBe('done')
     act(() => states.set({ session: 'needs-input' }))
-    expect(stripe()).toBe('stuck')
+    expect(stripe()).toBe('done')
     act(() => $blockedSessionIds.set(['session']))
-    expect(stripe()).toBe('blocked')
-    act(() => {
-      $blockedSessionIds.set([])
-      states.set({})
-    })
-    rerender(tab({ ...row, cron_active: true }))
-    expect(stripe()).toBe('periodic')
-    rerender(tab({ ...row, kanban_blocked: 1 }))
+    expect(stripe()).toBe('done')
+    rerender(tab({ ...row, cron_active: true, outcome: canonicalOutcome('waiting', { revision: 8 }) }))
+    expect(stripe()).toBe('waiting')
+    rerender(tab({ ...row, kanban_blocked: 1, outcome: canonicalOutcome('stuck', { revision: 9 }) }))
     expect(stripe()).toBe('stuck')
-    rerender(tab({ ...row, archived: true }))
-    expect(stripe()).toBe('neutral')
+    rerender(tab({ ...row, outcome: undefined }))
+    expect(stripe()).toBe('attention')
     rerender(tab(null))
-    expect(stripe()).toBe('neutral')
-    expect(container.firstElementChild!.className).toContain('dark:[--session-status-color:var(--color-zinc-500)]')
+    expect(stripe()).toBe('attention')
+    expect(container.firstElementChild!.className).toContain('[--session-status-color:var(--color-amber-500)]')
   })
 
   it.each([
@@ -204,24 +205,26 @@ describe('session tab underline', () => {
     { kanban_active: 1 },
     { kanban_observed_at: 1 }
   ])('does not mark unverified tree-only rows done: %j', evidence => {
-    const { container } = render(tab({ ...row, ...evidence }))
+    const { container } = render(tab({ ...row, outcome: undefined, ...evidence }))
 
     expect(container.querySelector('[data-session-tab-accent="done"]')).toBeNull()
   })
 
-  it('unread authority does not veto a stored-done tab: only a pending or failed read does', () => {
+  it('legacy done without a published status remains unknown despite unread authority', () => {
     $unavailableWorkSources.set({})
     const { container } = render(tab({ ...row, outcome: { kind: 'done', source: 'derived', at: 1000 } }))
-    expect(container.querySelector('[data-session-tab-accent="done"]')).not.toBeNull()
+    expect(container.querySelector('[data-session-tab-accent="attention"]')).not.toBeNull()
   })
 
   it('does not finish an unread stored tab whose row is missing', () => {
     states.set({ session: 'unread' })
+
     const { container } = render(
       <SessionTabAccent storedSessionId="session">
         <span>Missing</span>
       </SessionTabAccent>
     )
+
     expect(container.querySelector('[data-session-tab-accent="done"]')).toBeNull()
   })
 
