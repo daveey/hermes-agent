@@ -3,12 +3,12 @@ import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 import type { NavigateFunction } from 'react-router'
 
-import { NO_PROJECT_ID } from '@/app/chat/sidebar/projects/workspace-groups'
 import {
   extendRefreshPageToOverlap,
   graftRefreshedTailOntoBackfill,
   olderPageReader
 } from '@/app/chat/transcript-backfill'
+import { $mainDraftSessionCwd, captureMainDraftBeforeTile } from '@/app/session/new-session-cwd'
 import { defaultNewSessionTarget, prepareDefaultNewSession } from '@/app/session/new-session-route'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { setWorkspaceScope } from '@/components/pane-shell/workspace-scope'
@@ -68,7 +68,6 @@ import {
   resolveActiveSourceOwnerRoute,
   resolveNewChatOwnerRoute
 } from '@/store/profile'
-import { $projectScope } from '@/store/project-scope'
 import { projectProfile, resolveNewSessionCwd } from '@/store/projects'
 import { clearAllPrompts } from '@/store/prompts'
 import { clearStoredTranscriptReadOnly, markStoredTranscriptReadOnly } from '@/store/read-only-transcript'
@@ -77,7 +76,6 @@ import {
   $connection,
   $currentCwd,
   $messages,
-  $newChatWorkspaceTarget,
   $sessions,
   $yoloActive,
   getSessionOwnerHints,
@@ -658,15 +656,7 @@ export function useSessionActions({
         // (resolveNewSessionCwd — a project's new session keeps its repo cwd).
         // Home is an explicit detached scope: do not let a stale live cwd from
         // the previously selected project leak into this new session (#84220).
-        const workspaceTarget = $newChatWorkspaceTarget.get()
-        const homeScope = $projectScope.get() === NO_PROJECT_ID
-
-        const cwd =
-          workspaceTarget === null || (workspaceTarget === undefined && homeScope)
-            ? ''
-            : typeof workspaceTarget === 'string'
-              ? workspaceTarget.trim()
-              : $currentCwd.get().trim() || resolveNewSessionCwd()
+        const cwd = $mainDraftSessionCwd.get()
 
         // The EXACT owner for this create: an explicit agent route, else the
         // (registry source, profile) pair the draft was made on. Read ONCE at
@@ -784,7 +774,10 @@ export function useSessionActions({
           // server later returns its own preview/title and supersedes this.
           // The row carries the create route's exact owner (backend profile +
           // connection), never the ambient profile — see upsertOptimisticSession.
-          upsertOptimisticSession(created, stored, null, preview?.trim() || null, null, undefined, capturedRoute)
+          upsertOptimisticSession(
+            { ...created, info: { ...created.info, cwd: created.info?.cwd ?? cwd } },
+            stored, null, preview?.trim() || null, null, undefined, capturedRoute
+          )
           // Anything still parked under the pre-session draft bucket belongs
           // to this chat now (#114122); the composer moves it on scope swap.
           announceNewSessionDraftKey(stored)
@@ -1179,12 +1172,15 @@ export function useSessionActions({
         const runtimeInfo = applyRuntimeInfo(created.info, backgroundRuntimeOptions(capturedRoute, requestedProfile))
         updateSessionState(created.session_id, state => (runtimeInfo ? { ...state, ...runtimeInfo } : state), stored)
 
+        // Capture main before opening the tile can move pane focus.
+        captureMainDraftBeforeTile(dir, runtimeInfo?.cwd)
+
         openSessionTile(stored, dir, options?.anchor, options?.before, workspaceScope)
         patchSessionTile(stored, { runtimeId: created.session_id })
 
         if (dir === 'center' && runtimeInfo?.cwd) {
-          setCurrentCwdTransient(runtimeInfo.cwd)
           setWorkspaceCwdOwner(stored)
+          setCurrentCwdTransient(runtimeInfo.cwd)
         }
 
         focusOpenSession(stored, workspaceScope)

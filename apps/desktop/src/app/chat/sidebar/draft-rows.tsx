@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useLocation } from 'react-router'
 
 import { NEW_CHAT_ROUTE } from '@/app/routes'
+import { $mainDraftSessionCwd } from '@/app/session/new-session-cwd'
 import { noteActiveTreeGroup, revealTreePane } from '@/components/pane-shell/tree/store'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -17,7 +18,6 @@ import {
 } from '@/store/session'
 import { $focusedSessionIsTile, $focusedStoredSessionId } from '@/store/session-focus'
 import { $sessionTiles, focusOpenSession } from '@/store/session-states'
-import { $mainSidebarDraftCwd } from '@/store/sidebar-draft'
 
 import { sessionBucketId, sessionMatchesProjectFilter } from './projects/workspace-groups'
 
@@ -46,7 +46,7 @@ export function SidebarDraftRows({
   const selected = useStore($selectedStoredSessionId)
   const focused = useStore($focusedStoredSessionId)
   const tileFocused = useStore($focusedSessionIsTile)
-  const cwd = useStore($mainSidebarDraftCwd)
+  const cwd = useStore($mainDraftSessionCwd)
   const key = useStore($freshDraftKey)
   const titles = useStore($draftTitles)
   const sessions = useStore($sessions)

@@ -10,7 +10,6 @@ import {
   setCurrentCwdExplicit,
   setNewChatWorkspaceTarget
 } from '@/store/session'
-import { $mainSidebarDraftCwd } from '@/store/sidebar-draft'
 import type { SessionRuntimeInfo } from '@/types/hermes'
 
 interface CwdActionsOptions {
@@ -74,7 +73,7 @@ export function useCwdActions({ activeSessionIdRef, onSessionRuntimeInfo, reques
 
       if (!sessionId) {
         setCurrentCwd(trimmed)
-        $mainSidebarDraftCwd.set(trimmed)
+
         // A folder chosen here is a deliberate workspace pick (#52589) — the
         // gateway must let it beat a named profile's configured terminal.cwd.
         setCurrentCwdExplicit(true)
@@ -94,7 +93,7 @@ export function useCwdActions({ activeSessionIdRef, onSessionRuntimeInfo, reques
           // branch stay consistent with what the agent will use.
           if (info.cwd) {
             setCurrentCwd(info.cwd)
-            $mainSidebarDraftCwd.set(info.cwd)
+
             setNewChatWorkspaceTarget(info.cwd)
           }
 

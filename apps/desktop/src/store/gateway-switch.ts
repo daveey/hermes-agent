@@ -34,7 +34,6 @@ import {
 import { clearAllSessionControl } from '@/store/session-control'
 import { resetSessionPinMirror } from '@/store/session-pin-sync'
 import { clearAllSessionStates } from '@/store/session-states'
-import { $mainSidebarDraftCwd } from '@/store/sidebar-draft'
 import { reloadOpenStarmapGraph, resetStarmapGraph } from '@/store/starmap'
 import { clearAllSessionTodos } from '@/store/todos'
 import { clearTranscriptTailPaging } from '@/store/transcript-tail'
@@ -272,7 +271,7 @@ export function wipeSessionListsForGatewaySwitch(): void {
   // sending on session.create) the previous gateway's folder (#114306).
   // Transient on purpose: the per-backend memory of the old gateway stays.
   setCurrentCwdTransient('')
-  $mainSidebarDraftCwd.set('')
+
   setCurrentBranch('')
 
   // Reaction overlays describe the outgoing backend's messages: $agentReactions

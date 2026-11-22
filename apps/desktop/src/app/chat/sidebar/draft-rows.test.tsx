@@ -11,6 +11,8 @@ vi.mock('@/store/session-states', () => ({ $sessionTiles: atom([]), focusOpenSes
 vi.mock('@/store/session-focus', () => ({ $focusedStoredSessionId: atom(null), $focusedSessionIsTile: atom(false) }))
 vi.mock('@/store/session', () => ({
   $currentCwd: atom(''),
+  $newChatWorkspaceTarget: atom(undefined),
+  $workspaceCwdOwner: atom(null),
   $freshDraftReady: atom(false),
   $selectedStoredSessionId: atom(null),
   $activeSessionId: atom(null),
@@ -22,7 +24,7 @@ vi.mock('@/store/composer', () => ({
   $freshDraftKey: atom('__new__:test'),
   takeSessionDraft: () => ({ text: '', attachments: [] })
 }))
-vi.mock('@/store/projects', () => ({ $projects: atom([]) }))
+vi.mock('@/store/projects', () => ({ $projects: atom([]), resolveNewSessionCwd: () => '' }))
 vi.mock('react-router', () => ({ useLocation: () => ({ pathname: '/' }) }))
 
 import { $draftTitles } from '@/store/composer'
@@ -180,7 +182,7 @@ describe('client-only sidebar drafts', () => {
     expect(rows()).toHaveLength(1)
     rerender(view({ projectId: '__no_project__' }))
     expect(rows()).toHaveLength(2)
-    act(() => $mainSidebarDraftCwd.set('/repo'))
+    act(() => $currentCwd.set('/repo'))
     rerender(view({ projectId: '/repo' }))
     expect(rows()).toHaveLength(2)
     rerender(view({ filter: ['__no_project__'] }))

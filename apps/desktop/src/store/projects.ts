@@ -90,7 +90,6 @@ import {
 } from './projects-move-paths'
 import { renameProjectSessions } from './projects-rename-sessions'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature } from './projects-repo-discovery'
-import { $mainSidebarDraftCwd } from './sidebar-draft'
 
 export {
   type RepoDiscoveryPolicy,
@@ -238,7 +237,6 @@ export function followEnteredProjectCwd(cwd: string): void {
   }
 
   setCurrentCwd(target)
-  $mainSidebarDraftCwd.set(target)
 }
 
 // The project (explicit or auto) that owns `cwd`, by longest path match across
@@ -936,7 +934,6 @@ interface MoveTarget {
   remote: boolean
 }
 
-
 function moveTargetGateway(sessionId: string, profile?: null | string, connectionId?: null | string): MoveTarget {
   const row =
     $sessions.get().find(s => sessionMatchesStoredId(s, sessionId)) ??
@@ -1151,7 +1148,6 @@ export async function moveSessionToProject(
     throw error
   }
 }
-
 
 // [daveey] ⌘⇧P "+ Create project": a new project named `name` with an empty
 // `~/code/<slug>` folder, on the session's own gateway, then the move into it.
