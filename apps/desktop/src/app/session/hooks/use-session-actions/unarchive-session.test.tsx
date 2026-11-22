@@ -162,7 +162,7 @@ describe('unarchiveSession', () => {
     expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('remote-1', true, {
       connectionId: 'mac-mini',
       profile: 'default'
-    })
+    }, expect.any(Function))
   })
 
   it('passes the archived row profile to setSessionArchived', async () => {

@@ -6835,7 +6835,7 @@ describe('removeSession / archiveSession profile routing (#78836)', () => {
       await handle.archiveSession('tg-arch')
     })
 
-    expect(mockSetSessionArchived).toHaveBeenCalledWith('tg-arch', true, { profile: 'winefox' })
+    expect(mockSetSessionArchived).toHaveBeenCalledWith('tg-arch', true, { profile: 'winefox' }, expect.any(Function))
     expect($messagingSessions.get()).toEqual([])
   })
 
@@ -6861,7 +6861,7 @@ describe('removeSession / archiveSession profile routing (#78836)', () => {
 
     expect(onDeselect).toHaveBeenCalledTimes(1)
     expect(navigate).not.toHaveBeenCalled()
-    expect(mockSetSessionArchived).toHaveBeenCalledWith('tg-open', true, { profile: 'winefox' })
+    expect(mockSetSessionArchived).toHaveBeenCalledWith('tg-open', true, { profile: 'winefox' }, expect.any(Function))
   })
 
   it('archiving the open session without onDeselect still drops to a fresh draft', async () => {
