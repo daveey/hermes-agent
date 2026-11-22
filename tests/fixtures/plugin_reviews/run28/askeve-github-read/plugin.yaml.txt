@@ -1,0 +1,5 @@
+name: askeve-github-read
+version: 0.1.0
+description: "Host-side, read-only GitHub reads of softmax-universe/ask-eve for Alpha's authenticated Slack turns. Mints a per-call, repository-selected read-only Ask Eve App token on the host and revokes it before returning; no credential enters the sandbox."
+author: daveey
+license: proprietary

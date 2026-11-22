@@ -1,0 +1,14 @@
+c9cf820db460c913253a38d374bc4d093c866b5b28beaa571edc003b8e2e8598  app-port/vendor/plugins/askeve-github-read/__init__.py
+2f1af139959b8b88c41a3b39b9406ae193892538f956b001b11f73226f7335d1  app-port/vendor/plugins/askeve-github-read/credentials.py
+e0ddb873617b6c2a47d5b3e5d7f5b3d933542a5a793f683013a9dea6bf62f2da  app-port/vendor/plugins/askeve-github-read/github_read.py
+07958fb904ea3e33dd5634198c4520ab5473cc4f5c757c69eefb682186713543  app-port/vendor/plugins/askeve-github-read/plugin.yaml
+7d7cbb06a02d8ff0d323ecb8b25f134bd2d9bcc0f7ad110ef6702fa9e2d5930a  app-port/vendor/plugins/project-work/__init__.py
+66bfb064e6b885433dca7153286a432a86647834f55fb1946ee1a0507835ba60  app-port/vendor/plugins/project-work/client.py
+462227131f572d562657fa4052aa99010ca64ff37ebc6f4d5412d7ad62dd5cd1  app-port/vendor/plugins/project-work/config.py
+d4eb375f8fe057a39ad817387d5a4f323a185789734269687cd19e897cd5d5ec  app-port/vendor/plugins/project-work/errors.py
+6fb80d168829eeceb500ad2fb12b243011ccc4e5a92a2c524e7485ec6e262165  app-port/vendor/plugins/project-work/ingress.py
+9ea48282cd9dc6e6c823fd0ecf72329b74462d9044fbe2ecef9581d5fdd4f20c  app-port/vendor/plugins/project-work/native.py
+09be9a6dc38e53a656ed6b57f5462c156776c584d942f8e8874e771aa28c2e57  app-port/vendor/plugins/project-work/plugin.yaml
+be63a0d6460bf5e17db6ae57ea7d4f106c5fa25da5ae00d70bf33ae6a8565a87  app-port/vendor/plugins/project-work/runtime.py
+2c45f26300167046bb89d66ae5dbed6dfae93895de2607f26cd7be8e0bcedfcf  app-port/vendor/plugins/project-work/service.py
+5569eea2517ce4c46a6b6d3dc648fa5361f7065c364d73517d83cea792740438  app-port/vendor/plugins/project-work/store.py

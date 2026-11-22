@@ -1,0 +1,312 @@
+"""askeve-github-read: host-side, read-only GitHub reads for alpha-askeve's authenticated Slack turns.
+
+Registers exactly one tool, ``askeve_github_read`` (toolset ``askeve-github-read``), and one
+native Slack middleware that records authenticated inbound events. A call runs only when ALL hold:
+
+1. project-work's reviewed sandbox gate (``require_sandbox``), loaded from the sibling
+   ``<resolved plugin dir>/../project-work`` package (never the moving hermes-mods checkout),
+   passes at register() and again at every call;
+2. the native session ContextVars say this is a Slack turn of profile alpha-askeve in workspace
+   T0CC6T956G4, and the turn is not a delegate_task child, cron job, Kanban worker or other
+   non-gateway context;
+3. a matching event (team, channel, message ts, user, thread) was captured by the native Slack
+   middleware within the TTL: an ordinary human workspace member in any channel, or Eve
+   (U0CBMR2Q86B) even when her event carries a bot_id. Other bots, foreign-team identities,
+   edits and stale or missing events refuse.
+
+Then arguments are validated and only after that is a per-call read-only credential minted.
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib
+import importlib.util
+import json
+import logging
+import os
+import sys
+import threading
+import time
+import types
+from collections import OrderedDict
+from pathlib import Path
+
+# Some loaders import a hyphenated plugin folder as a bare ``__init__`` module.
+if not __package__:
+    _pkg = types.ModuleType("_askeve_github_read_plugin")
+    _pkg.__path__ = [str(Path(__file__).resolve().parent)]
+    sys.modules.setdefault(_pkg.__name__, _pkg)
+    __package__ = _pkg.__name__
+
+github_read = importlib.import_module(__package__ + ".github_read")
+credentials = importlib.import_module(__package__ + ".credentials")
+
+log = logging.getLogger("askeve_github_read")
+
+PROFILE = "alpha-askeve"
+TEAM_ID = "T0CC6T956G4"
+EVE_USER_ID = "U0CBMR2Q86B"
+EVENT_TTL = 30 * 60.0            # seconds an observed event authorizes tool calls for its turn
+EVENT_CACHE = 2048
+HUMAN_SUBTYPES = (None, "file_share", "thread_broadcast", "me_message")
+FORBIDDEN_GATE_ROOT = "/home/ubuntu/code/hermes-mods"
+
+
+# ---- sandbox gate -------------------------------------------------------------------------
+class Gate:
+    """Loads project-work's ``require_sandbox`` from the sibling package and re-checks the link
+    at every call. Loading imports project-work's modules but never calls its ``register``."""
+
+    def __init__(self, plugin_dir=None, forbidden_root=FORBIDDEN_GATE_ROOT):
+        self.plugin_dir = Path(plugin_dir or Path(__file__).resolve().parent).resolve()
+        self.forbidden_root = os.path.realpath(forbidden_root)
+        self.resolved = self._resolve()
+        name = "_askeve_github_read_gate_" + hashlib.sha256(self.resolved.encode()).hexdigest()[:16]
+        try:
+            spec = importlib.util.spec_from_file_location(
+                name, os.path.join(self.resolved, "__init__.py"), submodule_search_locations=[self.resolved])
+            if spec is None or spec.loader is None:
+                raise ImportError(name)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+            check = module.require_sandbox
+        except Exception:
+            sys.modules.pop(name, None)
+            raise PermissionError("askeve_github_read cannot load the project-work sandbox gate") from None
+        if not callable(check):
+            raise PermissionError("askeve_github_read: project-work sandbox gate is not callable")
+        self.check = check
+
+    def _resolve(self):
+        sibling = self.plugin_dir.parent / "project-work"
+        if not sibling.exists() or not (sibling / "__init__.py").is_file():
+            raise PermissionError("askeve_github_read requires the sibling project-work sandbox gate")
+        real = os.path.realpath(sibling)
+        if real == self.forbidden_root or real.startswith(self.forbidden_root + os.sep):
+            raise PermissionError("askeve_github_read refuses a project-work gate from the moving hermes-mods checkout")
+        return real
+
+    def __call__(self):
+        if self._resolve() != self.resolved:
+            raise PermissionError("askeve_github_read: project-work gate link changed since register")
+        self.check()
+
+
+# ---- reload-stable live state ---------------------------------------------------------------
+# Core wires a Slack handler factory ONCE per (plugin, qualname) on a live Bolt client and Bolt
+# middleware cannot be removed (gateway/platforms/base.py BasePlatformAdapter._wire_plugin_handlers).
+# A reload-plugins (force re-discovery: hermes_plugins.<slug>.* evicted from sys.modules, imported
+# again, register() run again) therefore leaves the FIRST registration's middleware receiving events
+# while the tool comes from the NEW registration. Both read one per-profile store held in a
+# sys.modules entry OUTSIDE the evicted namespace, and the wired middleware dereferences the newest
+# registration at call time. Schema (version 1, keep stable across plugin versions):
+#   stores[home] -> EventStore-like namespace (events OrderedDict, lock), current[home] -> SlackScope.
+LIVE_MODULE = "_askeve_github_read_live_scope"
+LIVE_VERSION = 1
+
+
+def live_state():
+    holder = sys.modules.get(LIVE_MODULE)
+    if holder is None:
+        fresh = types.ModuleType(LIVE_MODULE)
+        fresh.version, fresh.lock, fresh.stores, fresh.current = LIVE_VERSION, threading.Lock(), {}, {}
+        holder = sys.modules.setdefault(LIVE_MODULE, fresh)   # atomic: first writer wins
+    if getattr(holder, "version", None) != LIVE_VERSION:
+        raise PermissionError("askeve_github_read: unknown live scope holder in this process; restart the gateway")
+    return holder
+
+
+def home_key(home):
+    return os.path.realpath(str(home))
+
+
+def event_store(key):
+    """The one event store for profile home ``key``, created on first use (never replaced)."""
+    holder = live_state()
+    with holder.lock:
+        store = holder.stores.get(key)
+        if store is None:
+            store = holder.stores[key] = types.SimpleNamespace(events=OrderedDict(), lock=threading.Lock())
+        return store
+
+
+def publish(key, scope):
+    holder = live_state()
+    with holder.lock:
+        holder.current[key] = scope
+
+
+def live_middleware(key):
+    """Bolt middleware for profile home ``key`` that dispatches to the newest registration."""
+    async def middleware(body, next, client=None):  # noqa: A002 - Bolt's parameter name
+        try:
+            scope = live_state().current.get(key)
+        except Exception:
+            scope = None
+        if scope is None:
+            # No live registration (plugin disabled/unloaded): observe nothing, route natively.
+            return await next()
+        return await scope.middleware(body, next, client)
+    return middleware
+
+
+# ---- Slack identity scope -----------------------------------------------------------------
+class SlackScope:
+    def __init__(self, *, team_id=TEAM_ID, profile=PROFILE, eve=EVE_USER_ID, ttl=EVENT_TTL,
+                 capacity=EVENT_CACHE, clock=time.monotonic, store=None):
+        self.team_id, self.profile, self.eve = team_id, profile, eve
+        self.ttl, self.capacity, self.clock = ttl, capacity, clock
+        if store is None:
+            store = types.SimpleNamespace(events=OrderedDict(), lock=threading.Lock())
+        self.events, self.lock = store.events, store.lock
+
+    def admit(self, body):
+        """The event's identity tuple if it is admissible, else None. Pure; no side effects."""
+        if not isinstance(body, dict) or body.get("type") != "event_callback" or body.get("team_id") != self.team_id:
+            return None
+        ev = body.get("event")
+        if not isinstance(ev, dict) or ev.get("type") not in ("message", "app_mention"):
+            return None
+        user, channel, ts = ev.get("user"), ev.get("channel"), ev.get("ts")
+        if not all(isinstance(x, str) and x for x in (user, channel, ts)):
+            return None
+        for key in ("user_team", "team", "source_team"):
+            if key in ev and ev.get(key) != self.team_id:
+                return None
+        if ev.get("bot_id") or ev.get("bot_profile"):
+            if user != self.eve or ev.get("subtype") not in HUMAN_SUBTYPES + ("bot_message",):
+                return None
+        elif ev.get("subtype") not in HUMAN_SUBTYPES:
+            return None
+        thread = ev.get("thread_ts")
+        return (self.team_id, channel, ts, user), (thread if isinstance(thread, str) and thread else None)
+
+    def observe(self, body):
+        """Call ONLY from authenticated native Slack Bolt middleware."""
+        admitted = self.admit(body)
+        if admitted is None:
+            return None
+        key, thread = admitted
+        with self.lock:
+            self.events[key] = (thread, self.clock())
+            self.events.move_to_end(key)
+            while len(self.events) > self.capacity:
+                self.events.popitem(last=False)
+        return key
+
+    async def middleware(self, body, next, client=None):  # noqa: A002 - Bolt's parameter name
+        try:
+            self.observe(body)
+        except Exception:
+            log.warning("askeve_github_read: Slack event observation failed")
+        finally:
+            # Native Bolt routing/ack must always run.
+            result = await next()
+        return result
+
+    @staticmethod
+    def _non_gateway_context():
+        """A reason string when this call runs outside an ordinary gateway turn, else None.
+        Any failure to determine the context fails closed."""
+        try:
+            from agent.delegation_context import is_delegated_child_process_context, is_dispatcher_owned_worker_context
+            if is_delegated_child_process_context():
+                return "delegated subagent"
+            if not is_dispatcher_owned_worker_context():
+                return "cron or other non-gateway execution"
+        except Exception:
+            return "unverifiable execution context"
+        try:
+            from agent.runtime_session_store import is_worker_process
+            if is_worker_process():
+                return "worker process"
+        except ImportError:
+            pass
+        except Exception:
+            return "unverifiable execution context"
+        if os.environ.get("HERMES_KANBAN_TASK"):
+            return "kanban worker"
+        return None
+
+    def current(self):
+        """Authenticate this tool call. Returns the event key; raises PermissionError."""
+        reason = self._non_gateway_context()
+        if reason:
+            raise PermissionError(f"askeve_github_read is not available to a {reason}; only to Alpha's Slack turns")
+        try:
+            from gateway import session_context as sc
+            var_map = sc._VAR_MAP
+        except Exception:
+            raise PermissionError("askeve_github_read cannot read the native session context") from None
+
+        def value(name):
+            var = var_map.get(name)
+            v = var.get() if var is not None else None
+            return v if isinstance(v, str) else ""
+        # Never get_session_env(): its process-env fallback is not authentication.
+        if value("HERMES_CRON_SESSION") == "1":
+            raise PermissionError("askeve_github_read is not available to cron jobs")
+        if value("HERMES_SESSION_PLATFORM") != "slack" or value("HERMES_SESSION_PROFILE") != self.profile \
+                or value("HERMES_SESSION_SCOPE_ID") != self.team_id:
+            raise PermissionError("askeve_github_read only runs in an authenticated alpha-askeve Slack turn "
+                                  "in the askevepodcast workspace")
+        user = value("HERMES_SESSION_USER_ID")
+        actor = value("HERMES_SESSION_ACTOR_ID")
+        if actor and actor != user:
+            raise PermissionError("askeve_github_read: turn sender does not match the session user")
+        key = (self.team_id, value("HERMES_SESSION_CHAT_ID"), value("HERMES_SESSION_MESSAGE_ID"), user)
+        with self.lock:
+            entry = self.events.get(key)
+        if entry is None:
+            raise PermissionError("askeve_github_read: no authenticated Slack message for this turn "
+                                  "(other bots, edits and other workspaces are never accepted)")
+        thread, seen = entry
+        if self.clock() - seen > self.ttl:
+            raise PermissionError("askeve_github_read: this turn's Slack message is too old; ask again")
+        allowed = {thread} if thread else {"", key[2]}
+        if value("HERMES_SESSION_THREAD_ID") not in allowed:
+            raise PermissionError("askeve_github_read: session thread does not match the Slack message")
+        return key
+
+
+# ---- tool -------------------------------------------------------------------------------------
+def make_handler(gate, scope, reader):
+    def handler(args, **_kwargs):
+        resource = args.get("resource") if isinstance(args, dict) else None
+        try:
+            gate()
+            scope.current()
+            validated = github_read.validate(args)
+            return json.dumps(reader.read(validated), ensure_ascii=False)
+        except PermissionError as exc:
+            return json.dumps({"ok": False, "repo": github_read.REPO, "error": "refused",
+                               "message": str(exc)[:300]})
+        except credentials.ReadError as exc:
+            return json.dumps(github_read.error_result(resource, exc))
+        except Exception:
+            # Never echo an unexpected exception: its text could carry wire data.
+            return json.dumps(github_read.error_result(resource, RuntimeError()))
+    return handler
+
+
+def register(ctx):
+    from hermes_constants import get_hermes_home
+    home = Path(get_hermes_home())
+    if home.name != PROFILE:
+        log.info("askeve-github-read: not the %s profile; nothing registered", PROFILE)
+        return
+    gate = Gate()
+    gate()                          # fail closed at load
+    credentials.check_dependencies()
+    key = home_key(home)
+    scope = SlackScope(store=event_store(key))
+    reader = github_read.Reader(credentials.Credentials())
+
+    def wire(native, adapter):
+        native.use(live_middleware(key))
+
+    publish(key, scope)
+    ctx.register_platform_handler("slack", wire)
+    ctx.register_tool(name=github_read.TOOL_NAME, toolset=github_read.TOOLSET, schema=github_read.SCHEMA,
+                      handler=make_handler(gate, scope, reader), description=github_read.DESCRIPTION)

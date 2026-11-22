@@ -1,0 +1,16 @@
+{
+  "askeve-github-read": {
+    "manifest_sha256": "7d30ad1e318a714a3d20e506a79e9ac28ea9de464f237fb644a2847a422464d0",
+    "approval": "deleg_8e533dd0",
+    "approval_task": "t_01a1fd2c65f894e3",
+    "approval_comment": 237105,
+    "prefix": "app-port/vendor/plugins/askeve-github-read/"
+  },
+  "project-work": {
+    "manifest_sha256": "7d30ad1e318a714a3d20e506a79e9ac28ea9de464f237fb644a2847a422464d0",
+    "approval": "deleg_8e533dd0",
+    "approval_task": "t_01a1fd2c65f894e3",
+    "approval_comment": 237105,
+    "prefix": "app-port/vendor/plugins/project-work/"
+  }
+}

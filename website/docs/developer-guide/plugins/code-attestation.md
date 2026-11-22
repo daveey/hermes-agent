@@ -22,9 +22,10 @@ withheld.
 }
 ```
 
-The example digest placeholders are not valid records. The shipped registry is
-initially empty: this change does **not** approve any installed external plugin.
-To enroll one, review the exact plugin sources, calculate their SHA256 digests,
+The example digest placeholders are not valid records. The registry enrolls only
+explicitly reviewed byte sets; see [the run28 enrollment](run28-review-records.md)
+for the first records and their independent-review provenance.
+To enroll another, review the exact plugin sources, calculate their SHA256 digests,
 and submit the record through the normal independent core review and CI path.
 Include every executable source and any file whose integrity is part of that
 review. A new plugin revision needs new review and new pinned digests. Installation
