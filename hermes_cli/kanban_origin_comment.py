@@ -99,8 +99,8 @@ def forward(conn, task_id: str, args: dict, body: str) -> dict | None:
     if not session or not ledger.exists():
         return None
     replica = Path(os.environ.get('HERMES_HUB_STATE') or Path.home() / '.local/state/hermes-hub') / 'hub.db'
-    from hermes_cli.kanban_db import get_current_board
-    route = bound_owner(ledger, task_id=task_id, board=args.get('board') or get_current_board(),
+    from hermes_cli.kanban_placement_forward import opened_board
+    route = bound_owner(ledger, task_id=task_id, board=args.get('board') or opened_board(conn),
                         gateway=_gateway(replica), profile=get_active_profile_name(),
                         session=_resolve_session(home / 'state.db', session),
                         resolve_session=lambda sid: _resolve_session(home / 'state.db', sid))
