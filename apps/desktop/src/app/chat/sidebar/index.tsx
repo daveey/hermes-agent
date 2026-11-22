@@ -141,8 +141,8 @@ import { type NewSessionSplitHandler, startNewSessionDrag } from '../new-session
 
 import { useArchivedView } from './archived-view'
 import { SidebarSectionAddButton } from './chrome'
-import { SidebarContributedSections } from './contributed-sections'
 import { SidebarCronJobsSection } from './cron-jobs-section'
+import { SidebarDraftSections } from './draft-sections'
 import {
   enteredContentExists,
   enteredPresentation,
@@ -1578,8 +1578,7 @@ export function ChatSidebar({
               />
             )}
 
-            {/* [daveey] Plugin sections (Kanban's Blocked tasks) sit above Projects. */}
-            {!trimmedQuery && <SidebarContributedSections />}
+            {!trimmedQuery && <SidebarDraftSections {...{ projectFilter, enteredProjectId, showArchived }} />}
 
             {!trimmedQuery && inProject && projectLoadFailed && <SidebarLoadErrorState onRetry={retryProject} />}
             {!trimmedQuery && (

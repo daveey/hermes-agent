@@ -15,8 +15,9 @@ let pendingDraftCreate: null | Promise<void> = null
  * The tab-strip "+" and ⌘T: open a new session as its own tab (stacked into
  * the workspace zone) WITHOUT polluting the session list. Created
  * `listed: false`, so each new tab's in-memory session stays out of the
- * sidebar until its first message persists a turn and a refresh surfaces it —
- * Cursor-style. Several may be open, but only one blank: an untouched draft
+ * backend session list. The sidebar paints a client-only draft row until the
+ * first send replaces it with an optimistic session row. Several may be open,
+ * but only one blank: an untouched draft
  * (main or a tab) of the default owner is fronted instead of minting a
  * twin, and so is a draft still being created (#145594).
  *

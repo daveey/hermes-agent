@@ -1,7 +1,20 @@
-import { act, cleanup, renderHook } from '@testing-library/react'
+import { useStore } from '@nanostores/react'
+import { act, cleanup, render, renderHook } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { SidebarDraftRows } from '@/app/chat/sidebar/draft-rows'
+import {
+  NO_PROJECT_ID,
+  overlayLiveLanes,
+  overlayLivePreviews,
+  sessionBucketId,
+  sessionMatchesProjectFilter,
+  type SidebarProjectTree
+} from '@/app/chat/sidebar/projects/workspace-groups'
 import { notifyNewSessionTargetUnreachable, prepareDefaultNewSession } from '@/app/session/new-session-route'
+import { group } from '@/components/pane-shell/tree/model'
+import { $activeTreeGroup, $layoutTree } from '@/components/pane-shell/tree/store'
 import type { DesktopProfileRoute } from '@/global'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $connectionsRegistry } from '@/store/connections'
@@ -17,6 +30,8 @@ import {
   ensureGatewayAgent
 } from '@/store/profile'
 import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
+import { $sessions, setFreshDraftReady, setSelectedStoredSessionId } from '@/store/session'
+import { $unlistedSessionOwnerRows } from '@/store/session'
 import {
   _resetSessionOwnerHintsForTests,
   applyConfiguredDefaultProjectDir,
@@ -24,6 +39,8 @@ import {
   setConnection,
   setSessions
 } from '@/store/session'
+import { $sessionTiles, closeAllOpenSessionTiles } from '@/store/session-states'
+import { makeSessionInfo } from '@/test/session-info'
 
 import { useSessionActions } from './use-session-actions'
 
@@ -133,6 +150,129 @@ afterEach(() => {
 })
 
 describe('new-session gateway target', () => {
+  it.each(['main', 'tab'])(
+    'replaces a real %s draft with exactly one hub Home row before any tree refresh',
+    async kind => {
+      const old = makeSessionInfo({ id: 'older', last_active: 1, message_count: 1 })
+
+      const home: SidebarProjectTree = {
+        id: NO_PROJECT_ID,
+        isNoProject: true,
+        label: 'Home',
+        path: null,
+        repos: [
+          {
+            id: NO_PROJECT_ID,
+            label: 'Home',
+            path: null,
+            sessionCount: 1,
+            groups: [{ id: NO_PROJECT_ID, label: 'Home', path: null, sessions: [old] }]
+          }
+        ],
+        previewSessions: [old],
+        sessionIds: ['older'],
+        sessionCount: 1
+      }
+
+      function SidebarList() {
+        const sessions = useStore($sessions)
+        const preview = overlayLivePreviews([home], sessions, [], 10)[NO_PROJECT_ID]
+
+        return (
+          <MemoryRouter>
+            <SidebarDraftRows projectId={NO_PROJECT_ID} />
+            {preview.map(row => (
+              <div data-real-row={row.id} key={row.id}>
+                {row.preview || row.id}
+              </div>
+            ))}
+          </MemoryRouter>
+        )
+      }
+
+      const { result } = mountActions()
+      await act(() => setDefaultProfile(HUB))
+      act(() => {
+        $layoutTree.set(group(['workspace'], { active: 'workspace', id: 'draft-test' }))
+        $activeTreeGroup.set('draft-test')
+        $newChatRoute.set(HUB)
+        setActiveSessionId(null)
+        setSelectedStoredSessionId(null)
+        setFreshDraftReady(false)
+        setSessions([old])
+        $projectScope.set(NO_PROJECT_ID)
+      })
+
+      if (kind === 'main') {act(() => result.current.startFreshSessionDraft({ workspaceTarget: null }))}
+      else {
+        await act(() => result.current.openNewSessionTile('center', { cwd: null, listed: false, route: HUB }))
+        // The shell's pane registry adopts a newly created tile asynchronously.
+        act(() => {
+          $layoutTree.set(
+            group(['workspace', 'session-tile:created-stored'], {
+              active: 'session-tile:created-stored',
+              id: 'draft-test'
+            })
+          )
+          $activeTreeGroup.set('draft-test')
+        })
+      }
+
+      render(<SidebarList />)
+      const painted = () => [...document.querySelectorAll('[data-sidebar-draft-id], [data-real-row]')]
+      expect(
+        painted(),
+        JSON.stringify({
+          tiles: $sessionTiles.get(),
+          stubs: $unlistedSessionOwnerRows.get(),
+          notifications: $notifications.get()
+        })
+      ).toHaveLength(2)
+      expect(painted()[0].hasAttribute('data-sidebar-draft-id')).toBe(true)
+      expect($sessions.get().map(row => row.id)).toEqual(['older'])
+
+      if (kind === 'main') {await act(() => result.current.createBackendSessionForSend('First send'))}
+      else {
+        const { listTileSessionRow } = await import('@/app/chat/session-tile-actions')
+        act(() => {
+          listTileSessionRow({
+            cwd: '',
+            preview: 'First send',
+            runtimeId: 'created',
+            storedSessionId: 'created-stored',
+            sessions: $sessions.get()
+          })
+        })
+      }
+
+      expect(painted()).toHaveLength(2)
+      expect(painted()[0].getAttribute('data-real-row')).toBe('created-stored')
+      const row = $sessions.get()[0]
+      expect(row.connection_id).toBe(HUB.connectionId)
+      expect(row.cwd || null).toBeNull()
+      expect(sessionBucketId(row, [])).toBe(NO_PROJECT_ID)
+      expect(sessionMatchesProjectFilter(row, [NO_PROJECT_ID], [])).toBe(true)
+      expect(overlayLiveLanes(home, $sessions.get()).repos[0].groups[0].sessions.map(s => s.id)).toEqual([
+        'created-stored',
+        'older'
+      ])
+      expect(home.previewSessions?.map(s => s.id)).toEqual(['older'])
+      expect(requestGatewayForAgent).toHaveBeenCalledWith(
+        HUB.connectionId,
+        HUB.profile,
+        'session.create',
+        expect.anything(),
+        ...FOREGROUND_CREATE_DIAL
+      )
+      act(() => {
+        closeAllOpenSessionTiles('workspace')
+        $sessionTiles.set([])
+        $unlistedSessionOwnerRows.set([])
+        setFreshDraftReady(false)
+      })
+    }
+  )
+
   it('opening a session on another gateway leaves new sessions on the saved gateway', async () => {
     const { result } = mountActions()
     await act(() => setDefaultProfile(HUB))

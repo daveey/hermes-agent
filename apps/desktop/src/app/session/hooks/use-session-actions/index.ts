@@ -142,6 +142,7 @@ import {
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { forgetSessionUnread } from '@/store/session-unread'
 import { $archivedSessions } from '@/store/sidebar-archive'
+import { $mainSidebarDraftCwd } from '@/store/sidebar-draft'
 import { clearSessionSubagents } from '@/store/subagents'
 import { clearSessionTodos, restoreSessionTodosFromSnapshot } from '@/store/todos'
 import {
@@ -635,6 +636,7 @@ export function useSessionActions({
       setWorkspaceCwdOwner(null)
       setCurrentBranch('')
       // Never clear the composer here — ChatBar's per-thread draft swap owns it.
+      $mainSidebarDraftCwd.set($currentCwd.get())
       setFreshDraftReady(true)
     },
     [activeSessionIdRef, busyRef, navigate, onFreshDraftRouteIntent, resetViewSync, selectedStoredSessionIdRef]
@@ -979,13 +981,10 @@ export function useSessionActions({
   /** Create a fresh session and open it as a tile — leaves the primary chat alone.
    *  Used by the New session row's "Open in split" menu and the tab-strip "+".
    *
-   *  `listed` (default true) controls sidebar visibility. A brand-new backend
-   *  session is IN-MEMORY only until its first turn persists a row, so
-   *  `listSessions(min_messages=1)` already hides an unused one — the sidebar
-   *  pollution comes solely from the optimistic upsert here. The tab-strip "+"
-   *  passes `listed: false` so an unused new tab never clutters the session
-   *  list (Cursor-style draft tab); it surfaces on the next refresh once the
-   *  first message persists a turn. "Open in split" keeps the listed behavior. */
+   *  `listed` (default true) controls optimistic session-list insertion. Backend
+   *  sessions stay in memory until the first persisted turn. `listed: false`
+   *  tabs instead get a client-only sidebar draft, replaced on first send;
+   *  "Open in split" keeps the listed behavior. */
   const openNewSessionTile = useCallback(
     async (
       dir: TileDock = 'right',
