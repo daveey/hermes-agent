@@ -580,6 +580,7 @@ _event_ready: set[tuple[str, ...]] = set()
 SETTLE_S = (0.25, HOLDER_INTERVAL_S)
 _unsettled: set[tuple[str, ...]] = set()
 _settle_deadlines: dict[tuple[str, ...], tuple[float, ...]] = {}
+_coverage_stale: set[bool] = set()  # non-empty: the last coverage install failed
 
 
 def note_deadline(due: float | None) -> None:
@@ -647,7 +648,7 @@ def _event_refresh(events) -> float | None:
         # its demand metadata each control event so first demand still activates it.
         settled |= {scope for scope, ctx in list(_known.items())
                     if scope not in settled and not ctx.run(_scope_interested, scope)}
-        if set(_known) <= settled and (due is None or due > time.time()):
+        if not _coverage_stale and set(_known) <= settled and (due is None or due > time.time()):
             return due
     else:
         _unsettled.update(_known)  # source/overflow/ownership/explicit wake
@@ -673,7 +674,16 @@ def _event_refresh(events) -> float | None:
         directories.update(scoped_dirs)
         controls.update(scoped_controls)
         scopes.append((scope, ctx))
-    events.replace(files, directories=directories, controls=controls)
+    try:
+        events.replace(files, directories=directories, controls=controls)
+    except BaseException:
+        # The event that asked for this refresh is already drained and the
+        # loop's retry arrives as a plain timeout: nothing stays certified, and
+        # the next call reads whatever woke it.
+        _event_ready.clear()
+        _coverage_stale.add(True)
+        raise
+    _coverage_stale.clear()
     _event_ready.clear()
     for scope, ctx in scopes:
         def refresh_scope():
@@ -905,6 +915,7 @@ def start_holder(role: str) -> threading.Thread | None:
 
 def reset() -> None:
     _event_ready.clear()
+    _coverage_stale.clear()
     _unsettled.clear()
     _settle_deadlines.clear()
     _clock_deadlines.clear()
