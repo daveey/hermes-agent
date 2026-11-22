@@ -139,6 +139,26 @@ describe('asking for a delta', () => {
     expect(deltaRequestHeaders('GET', url)).toEqual({})
   })
 
+  it('binds the primary SSH connection, whose scope key is the empty string (sshScopeKey(null))', () => {
+    // [daveey 2026-11-22] "switching sessions ... should be instant": the primary hub tunnel never asked for deltas
+    // because '' read as "not bound", so its sessions/board/tree polls went whole (576 KB vs a 1.9 KB delta) and
+    // filled the link that session clicks wait on.
+    const url = 'http://127.0.0.1:50666/api/profiles/sessions?limit=200'
+
+    expect(deltaRequestHeaders('GET', url)).toEqual({})
+    noteRemoteConnect('http://127.0.0.1:50666', '', Date.now(), () => undefined)
+    expect(deltaRequestHeaders('GET', url)).toEqual({ [DELTA_ACCEPT_HEADER]: 'zstd' })
+    expect(deltaBodyStore.keyFor(url)).toBe('\u0000/api/profiles/sessions?limit=200')
+
+    const body = cards(40)
+
+    decodeDeltaBody(url, whole(body), body)
+    expect(deltaRequestHeaders('GET', url)[DELTA_BASE_HEADER]).toBe(bodyHash(body))
+    deltaBodyStore.unbindScope('')
+    expect(deltaRequestHeaders('GET', url)).toEqual({})
+    expect(deltaBodyStore.keyFor('http://127.0.0.1:50999/api/cron/jobs')).toBeNull()
+  })
+
   it('noteRemoteConnect binds a tunnel to its scope in the shared store', () => {
     const url = 'http://127.0.0.1:50777/api/cron/jobs'
 

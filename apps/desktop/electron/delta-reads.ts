@@ -147,11 +147,14 @@ export class DeltaBodyStore {
    * A remote (SSH-tunnelled) backend now answers at baseUrl for this pool scope. A scope has one tunnel, so one
    * origin: a rebuild on a new local port takes the scope (and its copies) with it, and the old port, which may be
    * handed to something else, is no longer asked for deltas or able to file answers under this scope.
+   *
+   * [daveey] The empty string is a real scope: the primary SSH connection's key (sshScopeKey(null)). Reading it as
+   * "no scope" left the busiest tunnel (the hub's) asking for no deltas at all, so every poll went whole.
    */
   bindRemote(baseUrl: null | string | undefined, scope: string): void {
     const origin = originOf(baseUrl)
 
-    if (origin && scope) {
+    if (origin && typeof scope === 'string') {
       this.unbindScope(scope)
       this.#scopes.set(origin, scope)
     }
@@ -175,7 +178,7 @@ export class DeltaBodyStore {
       const parsed = new URL(url)
       const scope = this.#scopes.get(parsed.origin)
 
-      return scope ? `${scope}\u0000${parsed.pathname}${parsed.search}` : null
+      return scope === undefined ? null : `${scope}\u0000${parsed.pathname}${parsed.search}`
     } catch {
       return null
     }
