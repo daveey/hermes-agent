@@ -83,6 +83,25 @@ class Board:
             + self.extra_config,
             encoding="utf-8",
         )
+        # Kanban requires class routing even when the profile has a concrete default.
+        # Exercise the real allocator and credential boundary, never an admission stub.
+        from urllib.parse import urlsplit
+        assert urlsplit(self.base_url).hostname == "127.0.0.1", self.base_url
+        route = {
+            "provider": "custom", "model": "fake-model", "billing": "metered",
+            "weight": 1, "eligible": True, "funding_verified": True,
+            "capabilities": {"tools": True, "streaming": True, "context_tokens": 200000},
+        }
+        # Metered permission is confined to this disposable home and dummy loopback pool.
+        policy = {"enabled": True, "allow_metered": True, "policy_version": 1,
+                  "routes": {level: [route] for level in ("fast", "standard", "deep")}}
+        with (self.hermes_home / "config.yaml").open("a", encoding="utf-8") as config:
+            config.write("\nmodel_routing: " + json.dumps(policy) + "\n")
+        (self.hermes_home / "auth.json").write_text(json.dumps({
+            "version": 1, "credential_pool": {"custom": [{
+                "id": "loopback", "source": "manual", "auth_type": "api_key",
+                "access_token": "loopback-only", "base_url": self.base_url,
+            }]}}), encoding="utf-8")
         (self.hermes_home / ".env").write_text("OPENAI_API_KEY=sk-fake-e2e\n", encoding="utf-8")
         # Workers run with cwd=<task workspace>; the wrapper pins THIS checkout on the path.
         self.hermes_bin = self.root / "hermes-bin"
@@ -185,5 +204,5 @@ class Board:
     def diag(self, tid: str) -> str:
         return (f"task={json.dumps(self.task(tid), default=str)[:1500]}\n"
                 f"runs={json.dumps(self.runs(tid), default=str)[:2500]}\n"
-                f"events={[(e['kind'], e['payload']) for e in self.events(tid)][-15:]}\n"
+                f"events={json.dumps([(e['kind'], e['payload']) for e in self.events(tid)][-15:], indent=2)}\n"
                 f"log tail:\n{self.worker_log(tid)[-2500:]}")

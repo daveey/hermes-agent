@@ -26,6 +26,19 @@ def test_exec_preserves_explicit_operational_settings(tmp_path, monkeypatch, nam
     assert 'synthetic-secret-excluded' not in json.dumps(env)
 
 
+@pytest.mark.parametrize('cooldown', ['0', '17'])
+def test_exec_preserves_board_cooldown_without_task_identity(tmp_path, monkeypatch, cooldown):
+    from gateway.session_managed_worker import _worker_env
+    name = 'HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS'
+    monkeypatch.setenv(name, cooldown)
+    monkeypatch.setenv('HERMES_KANBAN_TASK', 'synthetic-task')
+    monkeypatch.setenv('HERMES_KANBAN_UNKNOWN_SECRET', 'synthetic-secret')
+    env = _worker_env(SimpleNamespace(profile_id=str(tmp_path)))
+    assert env.get(name) == cooldown
+    assert 'HERMES_KANBAN_TASK' not in env
+    assert 'HERMES_KANBAN_UNKNOWN_SECRET' not in env
+
+
 @pytest.mark.parametrize('desktop_owner', [False, True])
 def test_desktop_completion_owner_crosses_exec_without_backend_token(tmp_path, monkeypatch, desktop_owner):
     from gateway.session_managed_worker import _bootstrap, _worker_env

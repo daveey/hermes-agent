@@ -17,6 +17,9 @@ EXEC_ENV = frozenset({
     'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH',
     'SSH_AUTH_SOCK', 'DISPLAY', 'XDG_CONFIG_HOME', 'XDG_DATA_DIRS', 'LD_LIBRARY_PATH',
     'TERM', 'KUBECONFIG', 'HERMES_BUNDLED_SKILLS',
+    # Host board policy, not task identity: the failed-result observer must book
+    # the same quota backoff as the dispatcher, including the documented zero.
+    'HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS',
 })
 
 

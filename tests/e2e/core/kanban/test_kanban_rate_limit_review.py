@@ -44,7 +44,7 @@ pytestmark = [
 # with a marker in the scratch home tells a reviewer's prompt apart without reading prompt wording.
 REVIEW_SKILL = "sdlc-review"
 REVIEW_MARK = "E2E_REVIEW_LANE_SKILL_5d21c9"
-REVIEW_MODEL = "fake-review-model"  # distinct from the implementer's fake-model
+REVIEW_MODEL = "fake-model"  # independence is a separate execution, not a model name
 RATE_LIMIT_EXIT_CODE = 75  # KANBAN_RATE_LIMIT_EXIT_CODE — documented worker exit contract
 MAX_TICKS = 6  # a healthy rate-limited card is done on tick 3; the rest prove "forever"
 
@@ -115,10 +115,12 @@ class TwoRoleModel:
             return ToolCall("kanban_complete", {"summary": "review: approved"})
         impl_no = sum(1 for a in self.attempts if a.role == "impl")
         if impl_no <= self.rate_limited_attempts:
-            return Error(status=429, message="Rate limit exceeded: quota for this key", retry_after=0)
+            # A zero/expired hint correctly falls back to the real pool's default cooldown.
+            # Give the server a short future reset so the next process tick can retry.
+            return Error(status=429, message="Rate limit exceeded: quota for this key", retry_after=1)
         return ToolCall("kanban_request_review", {
             "summary": "implementation ready for review",
-            "metadata": {"review_model": REVIEW_MODEL, "review_provider": "custom"},
+            "metadata": {"review_model": "class:deep"},
         })
 
     def by_role(self, role: str) -> list[Attempt]:
@@ -226,6 +228,11 @@ def test_clean_handoff_spawns_the_reviewer_on_the_next_tick(tmp_path: Path) -> N
     b, tid, diag = f.board, f.tid, f.diag()
     assert b.task(tid)["status"] == "done", diag
     assert f.run_outcomes() == ["review_requested", "completed"], diag
+    tiers = [e["payload"] for e in b.events(tid, "model_tier")]
+    assert [(t["model"], t["provider"]) for t in tiers] == [
+        ("class:standard", "auto"), (REVIEW_MODEL, "custom")], diag
+    owners = b.events(tid, "owner_admitted")
+    assert len(owners) == 2 and len({e["payload"]["session_id"] for e in owners}) == 2, diag
     assert [t["spawned"] for t in f.ticks] == [1, 1], diag
     assert not any(t["guarded"] for t in f.ticks), diag
     assert [(a.role, a.tick) for a in f.model.attempts] == [("impl", 1), ("review", 2)], diag
