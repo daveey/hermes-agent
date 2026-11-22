@@ -44,7 +44,16 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list, *, allow_nes
             fix_cards[fp] = _systemic.ensure_fix_card(conn, fp, tids, sample, arow["assignee"] if arow else None)
     for tid, pid, claimer, dead in crash_details:
         error_text = dead.error_text
-        if dead.protocol_violation:
+        is_refusal = summary.classify_failure("crashed", {"error": error_text, **dead.event_payload}) == "provider_refusal"
+        if is_refusal:
+            # Content refusals take precedence over clean-exit protocol exemptions.
+            # The shared accountant owns the stop decision and failure charge.
+            tripped = _d._record_task_failure(
+                conn, tid, run_id=dead.run_id, diagnostic=dict(dead.event_payload),
+                error=error_text, outcome="crashed", release_claim=False, end_run=False,
+                allow_nested=allow_nested, event_payload_extra={"pid": pid, "claimer": claimer},
+            )
+        elif dead.protocol_violation:
             from hermes_cli.kanban_failure_release import queue
             if queue(conn, tid, dead.run_id, outcome="crashed", error=error_text,
                      protocol_violation=True, failure_limit=_d._PROTOCOL_VIOLATION_FAILURE_LIMIT,

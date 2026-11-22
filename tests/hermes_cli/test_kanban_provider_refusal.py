@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli import kanban_failure_summary as summary
@@ -11,13 +13,16 @@ from tests.hermes_cli.test_kanban_local_failure_receipt import _local_crash, liv
 OUTPUT = json.loads((Path(__file__).parent / "fixtures/provider_refusal_ev1957427.json").read_text())["worker_output"]
 
 
-def test_first_refusal_stops_and_uses_shared_notice_classifier(live, monkeypatch):
+@pytest.mark.parametrize("clean_exit", [False, True])
+def test_first_refusal_stops_and_uses_shared_notice_classifier(live, monkeypatch, clean_exit):
     tid, rid = _local_crash(live, monkeypatch)
     with kb.write_txn(live):
         live.execute("UPDATE tasks SET max_retries=2 WHERE id=?", (tid,))
         kb._append_event(live, tid, "run_route", {"provider": "openai-codex", "model": "gpt-6.1-sol"}, run_id=rid)
     monkeypatch.setattr(dispatch, "_classify_dead_worker", lambda *a, **kw:
-                        dispatch._DeadWorker("nonzero_exit", 1, "exit 1", "crashed", {"worker_output": OUTPUT}))
+                        dispatch._DeadWorker("clean_exit" if clean_exit else "nonzero_exit",
+                                             0 if clean_exit else 1, "exit", "protocol_violation" if clean_exit else "crashed",
+                                             {"worker_output": OUTPUT}, protocol_violation=clean_exit))
     calls = []
     classify = summary.classify_failure
 
@@ -54,12 +59,20 @@ def test_first_refusal_stops_and_uses_shared_notice_classifier(live, monkeypatch
     assert kb.get_task(live, tid).status == "triage"
 
 
-def test_primary_release_carries_refusal_stop_without_mirror_edits(live):
+@pytest.mark.parametrize("clean_exit", [False, True])
+def test_primary_release_carries_refusal_stop_without_mirror_edits(live, clean_exit):
+    from hermes_cli import kanban_db_sync as sync
     from tests.hermes_cli.test_kanban_failure_transport import _running
     tid, rid = _running(live)
-    dispatch._record_task_failure(live, tid, "exit 1", outcome="crashed", run_id=rid,
-                                  diagnostic={"worker_output": OUTPUT})
+    dead = dispatch._DeadWorker("clean_exit" if clean_exit else "nonzero_exit",
+                               0 if clean_exit else 1, "exit", "protocol_violation" if clean_exit else "crashed",
+                               {"worker_output": OUTPUT}, protocol_violation=clean_exit)
+    dead.run_id = rid
+    with kb.write_txn(live):
+        dispatch._account_crashes(live, [(tid, 987654, "fixture", dead)], allow_nested=True)
     fields = json.loads(live.execute("SELECT fields FROM kanban_sync_outbox WHERE op='release'").fetchone()[0])
+    assert fields["run_uid"] == sync.run_uid(live, rid)
+    assert fields.get("protocol_violation", False) is False
     assert fields["force_trip"] is True
     assert fields["infrastructure"] is False
     assert fields["block_kind"] == "capability"
