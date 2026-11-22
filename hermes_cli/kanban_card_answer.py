@@ -184,7 +184,15 @@ def apply(conn, request: dict, *, owner_gateway: str, owner_profile: str, board:
         raise AnswerRefused("unverified_user_decision")
     current = snapshot(conn, request["task"])
     if current is None or current["generation"] != request["generation"]:
-        raise AnswerRefused("stale_ask")
+        # Another delivery may commit while source verification is in flight.
+        # Resolve its fully validated receipt under the same owner write lock
+        # before interpreting the resulting lifecycle change as a stale ask.
+        with kb.write_txn(conn):
+            _owner(conn, request['task'], owner_gateway, require_primary=require_primary)
+            old = _receipt(conn, request, fingerprint)
+            if old is not None:
+                return old
+            raise AnswerRefused("stale_ask")
     options = current["ask"].get("choices") or [
         {"label": "Unblock", "value": "unblock"}, {"label": "Archive", "value": "archive"},
     ]
