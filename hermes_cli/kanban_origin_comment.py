@@ -42,7 +42,8 @@ def bound_owner(path: Path, *, task_id: str, board: str, gateway: str,
                 continue
             task = json.loads(task_raw)
             ask = task.get('ask_notice') or {}
-            route = {**owner, 'binding_hash': digest, 'ask_event': ask.get('event_id')}
+            route = {**owner, 'binding_hash': digest, 'ask_event': ask.get('event_id'),
+                     'origin_session': origin['session']}
             matches[json.dumps(owner, sort_keys=True)] = route
     if len(matches) > 1:
         raise ValueError('origin_comment_ambiguous')
@@ -98,7 +99,8 @@ def forward(conn, task_id: str, args: dict, body: str) -> dict | None:
     if not session or not ledger.exists():
         return None
     replica = Path(os.environ.get('HERMES_HUB_STATE') or Path.home() / '.local/state/hermes-hub') / 'hub.db'
-    route = bound_owner(ledger, task_id=task_id, board=args.get('board') or 'default',
+    from hermes_cli.kanban_db import get_current_board
+    route = bound_owner(ledger, task_id=task_id, board=args.get('board') or get_current_board(),
                         gateway=_gateway(replica), profile=get_active_profile_name(),
                         session=_resolve_session(home / 'state.db', session),
                         resolve_session=lambda sid: _resolve_session(home / 'state.db', sid))
@@ -106,4 +108,6 @@ def forward(conn, task_id: str, args: dict, body: str) -> dict | None:
         return None
     if args.get('relays_user_message') or args.get('relayed_human'):
         raise ValueError('origin_comment_human_relay_unsupported')
-    return send(route, session=session, body=body)
+    # Authorization follows the live continuation; the durable request and its
+    # writer envelope stay bound to the accepted origin across compression.
+    return send(route, session=route['origin_session'], body=body)
