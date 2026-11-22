@@ -123,6 +123,8 @@ class World:
             p.setenv("HERMES_HOME", str(home))
             p.setenv("HERMES_HUB_STATE", str(home / "courier"))
             p.setenv("HERMES_MAIL_CONFIG", str(home / "mail.json"))
+            from hermes_cli import install_identity
+            p.setattr(install_identity, 'get_install_id', lambda: name + '-install')
             p.setattr(runtime, "Records", Records)
             p.setattr(runtime, "_profile", lambda: (profile, home))  # OS identity/root seam
             p.setattr(self.courier, "_home_for", lambda prof: home if prof == profile else None)
@@ -178,12 +180,12 @@ def record_operation(home, answer, source=SRC, op_id=None):
     path = home / "user-steps/actions.sqlite3"
     path.parent.mkdir(exist_ok=True)
     # Protocol-shaped fixture only; M2 separately exercises the real ActionStore producer.
-    ns = json.dumps([source["gateway"], source["profile"]], separators=(",", ":"))
+    ns = json.dumps(['install:source-install', source["profile"]], separators=(",", ":"))
     label = {"plan-a": "Apply plan A", "plan-b": "Apply plan B"}[answer["choice"]]
     cid = "a" if answer["choice"] == "plan-a" else "b"
     req = dict(requestId="request-one", revision=1, choices=[dict(id="a", effect="answer", label="Apply plan A"),
                                                             dict(id="b", effect="answer", label="Apply plan B")])
-    op = dict(owner=dict(gatewayId=source["gateway"], profile=source["profile"], storedSessionId=source["session"]),
+    op = dict(owner=dict(gatewayId='install:source-install', profile=source["profile"], storedSessionId=source["session"]),
               operationId=answer["operationId"], recordedAt="2026-01-01T00:00:00+00:00", requestId="request-one",
               revision=1, dispatchState="pending",
               decision=dict(requestId="request-one", expectedRevision=1, choiceId=cid),

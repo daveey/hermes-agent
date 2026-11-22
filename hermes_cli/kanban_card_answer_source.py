@@ -38,7 +38,14 @@ def _recorded(path: Path, *, source: dict, owner_gateway: str, request_id: str, 
     coordinates), and choiceValues (request choice ID -> exact owner choice).
     The ordinary projection row and immutable frozen request still apply.
     """
-    ns = json.dumps([source['gateway'], source['profile']], separators=(',', ':'), ensure_ascii=False)
+    # Courier authentication already bound source.gateway in runtime.source.
+    # ActionStore is instead owned by this install, shared across its profiles.
+    from hermes_cli.install_identity import get_install_id
+    install_id = get_install_id()
+    if not install_id:
+        raise AnswerRefused('source_install_identity_unavailable')
+    store_gateway = 'install:' + install_id
+    ns = json.dumps([store_gateway, source['profile']], separators=(',', ':'), ensure_ascii=False)
     # User-steps ActionStore, not a Kanban board; this adapter never opens board files.
     conn = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)  # noqa: kanban-lockguard
     conn.row_factory = sqlite3.Row
@@ -49,7 +56,7 @@ def _recorded(path: Path, *, source: dict, owner_gateway: str, request_id: str, 
         if row is None:
             raise AnswerRefused('source_operation_missing')
         op = json.loads(row['body'])
-        expected_owner = dict(gatewayId=source['gateway'], profile=source['profile'], storedSessionId=source['session'])
+        expected_owner = dict(gatewayId=store_gateway, profile=source['profile'], storedSessionId=source['session'])
         if (op.get('owner') != expected_owner or op.get('operationId') != answer['operationId']
                 or op.get('dispatchState') == 'cancelled' or not op.get('recordedAt')):
             raise AnswerRefused('source_operation_mismatch')

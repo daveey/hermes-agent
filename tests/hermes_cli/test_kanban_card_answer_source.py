@@ -13,7 +13,11 @@ def fixture(tmp_path):
     answer = dict(ownerGateway='owner', ownerProfile='default', board='default', task='t_example',
                   generation='a' * 64, choice='plan-a', operationId='operation-one')
     origin = dict(gateway='origin', profile='work', session='chat-one')
-    owner = dict(gatewayId='origin', profile='work', storedSessionId='chat-one')
+    from hermes_cli.install_identity import get_install_id
+    install_id = get_install_id()
+    assert install_id
+    install_owner = 'install:' + install_id
+    owner = dict(gatewayId=install_owner, profile='work', storedSessionId='chat-one')
     request = dict(requestId='request-one', revision=1, choices=[dict(id='a', effect='answer', label='Apply A')])
     op = dict(owner=owner, operationId='operation-one', recordedAt='2026-01-01T00:00:00+00:00',
               requestId='request-one', revision=1, dispatchState='pending',
@@ -22,7 +26,7 @@ def fixture(tmp_path):
                           executionAuthorized=False, permissionGrants=[]))
     remote = dict(version=1, target={k: v for k, v in answer.items() if k not in ('choice', 'operationId')},
                   choiceValues={'a': 'plan-a'})
-    ns = json.dumps(['origin', 'work'], separators=(',', ':'))
+    ns = json.dumps([install_owner, 'work'], separators=(',', ':'))
     with sqlite3.connect(path) as conn:
         conn.execute('CREATE TABLE operations(namespace TEXT,session TEXT,id TEXT,body TEXT)')
         conn.execute('CREATE TABLE kanban_projections(namespace TEXT,session TEXT,request_id TEXT,board TEXT,task TEXT,snapshot TEXT,request TEXT)')
@@ -46,7 +50,7 @@ def test_exact_operation_and_binding_read_only(tmp_path):
     assert not (tmp_path / 'actions.sqlite3-shm').exists()
 
 
-@pytest.mark.parametrize('field', ['gateway', 'profile', 'session'])
+@pytest.mark.parametrize('field', ['profile', 'session'])
 def test_no_cross_namespace_search(tmp_path, field):
     path, answer, origin, _, _ = fixture(tmp_path)
     origin[field] = 'another'
@@ -91,6 +95,16 @@ def test_unbound_operation_is_not_authority(tmp_path):
     with sqlite3.connect(path) as conn:
         conn.execute('DELETE FROM kanban_projections')
     with pytest.raises(ca.AnswerRefused, match='source_binding_missing'):
+        read(path, answer, origin)
+
+
+@pytest.mark.parametrize('install_id,code', [(None, 'source_install_identity_unavailable'),
+                                            ('another-install', 'source_operation_missing')])
+def test_local_install_identity_is_required(tmp_path, monkeypatch, install_id, code):
+    from hermes_cli import install_identity
+    path, answer, origin, _, _ = fixture(tmp_path)
+    monkeypatch.setattr(install_identity, 'get_install_id', lambda: install_id)
+    with pytest.raises(ca.AnswerRefused, match=code):
         read(path, answer, origin)
 
 
