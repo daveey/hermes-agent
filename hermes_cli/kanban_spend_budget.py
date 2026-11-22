@@ -182,8 +182,8 @@ def usage_fields(agent) -> dict:
 
 
 def _window_start(conn: sqlite3.Connection, task_id: str, cut: int) -> int:
-    from hermes_cli.kanban_spend_decision import restricted_since
-    restriction = restricted_since(conn, task_id)
+    from hermes_cli.kanban_spend_decision import restricted_floor
+    restriction = restricted_floor(conn, task_id)
     if restriction is not None:
         cut = min(cut, restriction)  # cap reset authority only; spend() still counts later run usage
     marks = ",".join("?" for _ in RESET_OUTCOMES)

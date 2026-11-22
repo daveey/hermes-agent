@@ -278,6 +278,13 @@ def _ctx_comments(lines: list[str], conn: sqlite3.Connection, task_id: str, now:
     attacker-influenceable body (defense-in-depth). A comment whose ``commented`` event
     says an agent wrote it (``writer_kind='agent'``) is tagged ``(agent chat)``: David and
     his agents share one profile, so the author alone can't tell them apart. [daveey]"""
+    from hermes_cli.kanban_scope_renewal import mandate as _scope_mandate
+    renewed = _scope_mandate(conn, task_id)
+    if renewed:  # in full: this comment is the scope the run was released for, not thread history
+        lines += ["## Scope renewal mandate",
+                  f"An earlier run stopped this card's scope. It was renewed ({renewed['authority_kind']}, comment "
+                  f"{renewed['mandate_comment_id']}) for exactly the scope below; stop again if the work needs more.",
+                  renewed["body"], ""]
     shown, omitted_note = _ctx_tail(_kb.list_comments(conn, task_id), _CTX_MAX_COMMENTS, "comment")
     if not shown:
         return

@@ -51,12 +51,17 @@ def pending_episode(conn, task_id: str):
         "('spend_budget_triaged','decision_hold_restricted','decision_retained','promoted_manual','archived')", (task_id,))]
     events.sort(key=_event_order, reverse=True)
     receipts = {e['id'] for e in receipt_restrictions(conn, task_id)}
+    from hermes_cli import kanban_scope_renewal as renewal
+    renewed = renewal.covered(conn, task_id)  # scope evidence only; safety is never skipped
     for event in events:
         try:
             payload = json.loads(event['payload'] or '{}')
         except (TypeError, ValueError):
             continue
-
+        if (renewal.key(event) in renewed and isinstance(payload, dict) and (
+                payload.get('superseded_by_safety_stop') is not True if event['id'] in receipts
+                else payload.get('cause') == 'scope_stopped')):
+            continue
         if event['id'] in receipts:
             return next((e for e in events if e['kind'] == EVENT and (e.get('uid') or str(e['id'])) == payload.get('episode_uid')), event)
         if (isinstance(payload, dict) and payload.get('cause') in {'safety_refusal', 'scope_stopped'}
@@ -65,7 +70,9 @@ def pending_episode(conn, task_id: str):
                          and (e.get('uid') or str(e['id'])) == payload.get('episode')),
                         event) if event['kind'] != EVENT else event
     ordinary = [e for e in events if e['kind'] not in ('decision_hold_restricted', 'decision_retained')]
-    return ordinary[0] if ordinary and ordinary[0]['kind'] == EVENT else None
+    if ordinary and ordinary[0]['kind'] == EVENT:
+        return ordinary[0]
+    return renewal.reopened(conn, task_id, ordinary) if renewed else None
 
 
 def pending(conn, task_id: str) -> bool:
@@ -78,7 +85,26 @@ def execution_restricted(conn, task_id: str) -> bool:
 
 
 def restricted_since(conn, task_id: str) -> int | None:
-    """One monotone restriction predicate for release fencing and accounting."""
+    """Execution fencing: the earliest restriction a scope renewal does not cover. Safety is never covered."""
+    import json
+    from hermes_cli import kanban_scope_renewal as renewal
+    renewed = renewal.covered(conn, task_id)
+    if not renewed:
+        return restricted_floor(conn, task_id)
+    times = [e['created_at'] or 0 for e in receipt_restrictions(conn, task_id)
+             if renewal.key(e) not in renewed or json.loads(e['payload']).get('superseded_by_safety_stop') is True]
+    for row in conn.execute("SELECT * FROM task_events WHERE task_id=? AND kind IN "
+                            "('spend_budget_triaged','decision_hold_restricted') AND json_valid(payload) "
+                            "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.cause') END "
+                            "IN ('safety_refusal','scope_stopped')", (task_id,)):
+        event = dict(row)
+        if json.loads(event['payload'])['cause'] == 'safety_refusal' or renewal.key(event) not in renewed:
+            times.append(event['created_at'] or 0)
+    return min(times) if times else None
+
+
+def restricted_floor(conn, task_id: str) -> int | None:
+    """Monotone historical floor for spend accounting: a scope renewal never moves it."""
     row = conn.execute("SELECT MIN(COALESCE(created_at,0)) FROM task_events WHERE task_id=? AND kind IN "
                         "('spend_budget_triaged','decision_hold_restricted') AND json_valid(payload) "
                         "AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.cause') END "
@@ -122,7 +148,9 @@ def execution_refusal(conn, task_id: str) -> str | None:
     if restricted(conn, task_id):
         return 'Provider safety restriction retained; no supported execution release. A budget decision is not clearance. Owning supervisor must resolve the scope/authority boundary without rerunning refused work.'
     if execution_restricted(conn, task_id):
-        return 'Scope stopped; no supported execution release. Owning supervisor must resolve the scope/authority boundary.'
+        from hermes_cli.kanban_scope_renewal import ROUTE
+        return ('Scope stopped; promotion, comments, timers and review do not release it. To renew the scope: '
+                + ROUTE.format(task=task_id) + '.')
     return None
 
 
@@ -138,7 +166,9 @@ def unblock_refusal(conn, task_id: str) -> str | None:
 
 def notice(payload: dict) -> str:
     if payload.get('cause') == 'scope_stopped':
-        return 'Scope stopped without execution authority. Record the administrative decision only; no generic promotion, comment, timer or review releases it.'
+        from hermes_cli.kanban_scope_renewal import ROUTE
+        return ('Scope stopped without execution authority. No generic promotion, comment, timer or review releases it. '
+                'Only an explicit scope renewal does: ' + ROUTE.format(task=payload.get('task_id') or '<task>') + '.')
     if payload.get('cause') == 'safety_refusal':
         return ('Provider safety refusal retained. There is no supported execution release; '
                 'ordinary promotion, review, comments and timers are not clearance. '

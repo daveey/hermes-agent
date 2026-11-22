@@ -674,7 +674,7 @@ def _fmt_resolved_check_drop(ev, n) -> tuple:
 
 def _fmt_spend_budget(ev, n):
     from hermes_cli.kanban_spend_decision import notice
-    body = notice(ev.payload or {})
+    body = notice({**(ev.payload or {}), "task_id": getattr(n, "task_id", None)})
     return f"⏸ {n.head} {body}", body, None
 
 

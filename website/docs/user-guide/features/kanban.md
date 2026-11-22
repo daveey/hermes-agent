@@ -1550,6 +1550,8 @@ hermes kanban edit <id> [--title ...] [--body ...]     # edit task title / body 
         [--priority N]
         [--review-required on|off]                     # 'off' is operator-only (see below)
 hermes kanban promote <id>...                          # move todo/blocked/triage tasks to ready (recovery)
+hermes kanban renew-scope <id> --episode <stop uid> --mandate-comment <comment id> --reason <text>
+                                                       # renew a scope-stopped card's scope (then promote it)
 hermes kanban schedule <id> --at <ISO8601>             # set/clear a task's scheduled_at start time
 hermes kanban diagnostics [--json]                     # board health snapshot (alias: diag)
 hermes kanban link <parent_id> <child_id>

@@ -646,6 +646,15 @@ _SPECS = [
         _arg("--dry-run", action="store_true", help="Validate the promotion without mutating state"),
         _arg("--json", dest="json", action="store_true", help="Emit machine-readable JSON result"),
     ], help="Manually move one or more todo/blocked/triage tasks to ready (recovery path)"),
+    _cmd("renew-scope", [
+        _TASK_ID,
+        _arg("--episode", required=True, help="Uid of the scope stop (spend_budget_triaged event) being renewed"),
+        _arg("--mandate-comment", required=True, type=int,
+             help="Id of your comment on the card, written after the stop, that states the renewed scope"),
+        _arg("--reason", required=True, help="Why the scope is renewed (audit trail)"),
+        _json_flag(),
+    ], help="Renew a scope-stopped card's scope (human operator, owning chat or creator task; never a safety "
+            "stop). Does not promote: run `hermes kanban promote` afterwards"),
     _cmd("spend-budget", [
         _TASK_ID,
         _arg("--runs", type=_nonnegative_int, help="This card's spending-run limit (0 = no limit)"),
