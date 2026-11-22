@@ -186,6 +186,22 @@ def refusal_line(db_path: Any, owner: Owner, missing: dict[str, set[str]]) -> st
 
 # --- the read-only connection -----------------------------------------------------------------------------
 
+class _ReadOnlyCursorMixin:
+    """Keep schema-owner diagnostics on explicit and factory shortcut cursors."""
+
+    def execute(self, *args):
+        return self.connection._translate(super().execute, *args)
+
+    def executemany(self, *args):
+        return self.connection._translate(super().executemany, *args)
+
+    def executescript(self, *args):
+        return self.connection._translate(super().executescript, *args)
+
+
+_READ_ONLY_CURSORS = {}
+
+
 class _ReadOnlyBoard(sqlite3.Connection):
     """A board opened ``mode=ro`` for a non-installed core: SQLite's bare "attempt to write a readonly
     database" (or a statement that needs a table/column this core would have added) becomes
@@ -193,6 +209,15 @@ class _ReadOnlyBoard(sqlite3.Connection):
 
     hermes_schema_refusal = ""
     _SIGNS = ("readonly", "read-only", "has no column named", "no such column", "no such table")
+
+    def cursor(self, factory=sqlite3.Cursor):
+        if not issubclass(factory, _ReadOnlyCursorMixin):
+            if factory not in _READ_ONLY_CURSORS:
+                _READ_ONLY_CURSORS[factory] = type(
+                    f'ReadOnly{factory.__name__}', (_ReadOnlyCursorMixin, factory), {},
+                )
+            factory = _READ_ONLY_CURSORS[factory]
+        return super().cursor(factory)
 
     def _translate(self, call, *args):
         try:

@@ -33,6 +33,7 @@ import weakref
 from typing import Any, Optional
 
 import hermes_state_lockguard as _lockguard
+from hermes_cli.kanban_replace_guard import ProtectedRowReplaceError, ReplaceGuardMixin
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ def lifecycle_factory(factory: type) -> type:
     return cached
 
 
-class _GuardMixin:
+class _GuardMixin(ReplaceGuardMixin):
     """Lift the OFD guard immediately before the real close (see ``hermes_state_lockguard.release``);
     a connection that is garbage-collected unclosed releases through its finalizer instead."""
 
