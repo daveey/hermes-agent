@@ -204,3 +204,50 @@ def test_nothing_in_production_stamps_original_yet():
         if re.search(r"identity_state\s*=\s*'original'|capture_protocol\s*=\s*'", text):
             stamped.append(str(rel))
     assert stamped == [], f"original stamping must wait for the audited capture slice: {stamped}"
+
+
+# --- fail-closed file-level layer: independent of statement shape, quoting, case, verb or directory ---------
+ANY_NAME = re.compile("|".join(CUSTODY), re.IGNORECASE)
+# DML verb whose table is not a plain literal identifier: interpolated, %-formatted, concatenated, placeholder.
+# UPDATE is only SQL when a SET follows shortly (prose such as "update {x}: ..." is not).
+_SLOT = r"\s*[\"'`\[]?\s*(?=[^A-Za-z_\s\"'`\[])"
+DYN_ANY = re.compile(
+    r"\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|DELETE\s+FROM)" + _SLOT
+    + r"|\bUPDATE(?:\s+OR\s+\w+)?" + _SLOT + r"[^;]{0,60}?\bSET\b", re.IGNORECASE)
+
+
+@functools.cache
+def _tracked_python():
+    import subprocess
+    out = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=REPO, capture_output=True, check=True).stdout
+    return sorted(p for p in out.decode().split("\0") if p and not p.startswith("tests/") and p != "hermes_cli/kanban_sync_capture_sites.py")
+
+
+@functools.cache
+def _file_counts():
+    names, dyn = {}, {}
+    for rel in _tracked_python():
+        text = (REPO / rel).read_text(errors="replace")
+        n = len(ANY_NAME.findall(text))
+        if n:
+            names[rel] = n
+        d = len(DYN_ANY.findall(text))
+        if d and (pathlib.PurePath(rel).name.startswith("kanban") or "scripts" in rel.split("/") or n):
+            dyn[rel] = d
+    return names, dyn
+
+
+def _diff(a, b):
+    return {k: (a.get(k), b.get(k)) for k in set(a) | set(b) if a.get(k) != b.get(k)}
+
+
+def test_every_mention_of_a_custody_table_name_is_pinned_per_file_anywhere_in_the_tree():
+    """Quoted, schema-qualified, lowercase, DROP/ALTER, any directory: a changed mention count must be audited."""
+    names, _ = _file_counts()
+    assert names == dict(inv.NAME_MENTIONS), _diff(names, inv.NAME_MENTIONS)
+
+
+def test_every_non_literal_table_statement_is_pinned_per_file():
+    """Interpolated/%-formatted/concatenated tables are counted per file, so a second loop in a listed function shows."""
+    _, dyn = _file_counts()
+    assert dyn == dict(inv.DYNAMIC_STATEMENT_COUNTS), _diff(dyn, inv.DYNAMIC_STATEMENT_COUNTS)
