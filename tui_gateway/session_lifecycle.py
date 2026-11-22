@@ -155,6 +155,8 @@ def _durable_owner_refusal(session: dict):
         f"Details: session {owner['conversation_id']} opened by {surface}. "
         f"Writer: {holder}", SESSION_NOT_OWNED)
     refusal.ownership_cause = "lease_foreign"
+    from tui_gateway.gateway_background_holder import _durable_holder_pid
+    refusal.holder_pid = _durable_holder_pid(holder)
     # A namespace-qualified remote writer is positive foreign evidence. An opaque
     # holder is not: keep its fence, but do not offer a destructive takeover.
     from hermes_state_pidns import pid_namespace_id

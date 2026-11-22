@@ -73,8 +73,8 @@ def test_different_holder_even_in_same_process_stays_fenced(orphan, monkeypatch)
     refusal = server._durable_owner_refusal(orphan.session)
     assert calls == []
     assert refusal.reason == 'SESSION_NOT_OWNED'
-    assert refusal.ownership_cause == 'lease_unknown'
-    assert refusal.holder_pid == 0
+    assert refusal.ownership_cause == 'lease_foreign'
+    assert refusal.holder_pid == os.getpid()
     assert orphan.db.session_turn_lease_owner('root')['holder'] == foreign
 
 
@@ -99,7 +99,7 @@ def test_receipt_cannot_authorize_a_different_custodian(orphan, monkeypatch, tmp
     monkeypatch.setattr(target, 'release_session_turn_lease', lambda *args: calls.append(args))
     refusal = server._durable_owner_refusal(orphan.session)
     assert refusal.reason == 'SESSION_NOT_OWNED'
-    assert refusal.ownership_cause == 'lease_unknown'
+    assert refusal.ownership_cause == 'lease_foreign'
     assert calls == []
 
 
