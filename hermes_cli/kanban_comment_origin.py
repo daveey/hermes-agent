@@ -9,7 +9,7 @@ comments ``WHERE author = 'macbook'`` therefore never sees the relay's ``hub:gw:
   an author spelling names (``hub:gw:<x>``, ``<x>/t_...``), else this gateway's own name;
 * ``hermes kanban wait-comment <task> --after-id N [--from-gateway X] [--contains TEXT]``: the wake probe
   for "a reply arrived": exit 0 on a match, 1 not yet, 2 cannot tell. A gateway matches on
-  ``origin_gateway`` or on any author spelling containing it;
+  ``origin_gateway`` or an exact supported author spelling (relay, card, bare gateway, or gateway-chat);
 * ``author_probe``: the park guard refuses a wake check that filters ``task_comments`` by author
   (``=``, ``like``, ``glob``, ``in``; ``!=`` to skip one's own notes is fine) and names the wait-comment
   command to use. Off switch: ``kanban.author_probe_guard: false``;

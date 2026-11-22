@@ -152,8 +152,9 @@ def _unreachable_task(gateway, target, *, board, until, since, live_timeout) -> 
 def current_gateway(gateway: str) -> str:
     """``gateway`` as this host's hub.db knows it today: a probe parked before an in-place rename still names
     the old gateway (``--gateway mini``), and the owner's records now sit under the new name. Resolved from
-    ``kanban.placement.aliases`` and the local hub.db only (``kanban_gateway_alias.current``): no network, and
-    the name is unchanged until the new one has records here. Never raises."""
+    ``kanban.placement.aliases`` and the local hub.db only (``kanban_gateway_alias.current``): no network.
+    A present explicit partition is never overridden; an absent one needs a unique known equivalent.
+    Map direction can lag feed delivery. Never raises."""
     try:
         from hermes_cli import kanban_gateway_alias
         if len(kanban_gateway_alias.spellings(gateway)) < 2:
