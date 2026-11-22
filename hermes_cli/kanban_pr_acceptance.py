@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from hermes_cli.kanban_pr_merge_time import check_receipt, flag_main_health, merge_evidence, timestamp
+from hermes_cli.kanban_pr_rest import GraphQLRateLimit as _GraphQLRateLimit, UnprotectedBranch, quota_error, read_pr
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -70,6 +71,11 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
                                 text=True, encoding="utf-8", errors="replace", timeout=30,
                                 check=True, env=env)
     except subprocess.CalledProcessError as exc:
+        if endpoint == "graphql" and exc.returncode != 75 and quota_error((exc.stderr or "") + (exc.stdout or "")):
+            raise _GraphQLRateLimit("GitHub GraphQL quota exhausted") from None
+        if (endpoint.endswith("/protection/required_status_checks")
+                and "Branch not protected" in (exc.stderr or "") and "HTTP 404" in (exc.stderr or "")):
+            raise UnprotectedBranch() from None
         # 401/403/404 = the login cannot see this repository (wrong profile identity
         # or missing grant), not a transient API failure. Persist only the status
         # code + endpoint, never gh's stderr (credentials/host details).
@@ -86,6 +92,8 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
         raise
     value = json.loads(result.stdout)
     if isinstance(value, dict) and value.get("errors"):
+        if endpoint == "graphql" and quota_error(json.dumps(value["errors"])):
+            raise _GraphQLRateLimit("GitHub GraphQL quota exhausted")
         raise ValueError("GitHub returned incomplete GraphQL evidence")
     return value
 
@@ -182,6 +190,18 @@ def _assignee_profile_home(assignee: str | None) -> str | None:
         raise _GateAuthError(f"assignee profile {assignee!r} cannot be resolved") from None
 
 
+def _acceptance_pr(query, repo, number, profile_home, receipt):
+    try:
+        repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
+        if repository is None:
+            raise _GateAuthError(f"HTTP 404 on graphql {repo}")
+        return repository["pullRequest"]
+    except _GraphQLRateLimit:
+        pr = read_pr(_api, repo, number, profile_home)
+        receipt["pr_transport"] = "rest_graphql_rate_limit"
+        return pr
+
+
 def collect_acceptance(contract: str, published_pr: str | None,
                        assignee: str | None = None) -> dict:
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
@@ -216,11 +236,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
                  f'{{pullRequest(number:{number:d})'
                  '{headRefOid baseRefName state mergedAt mergeCommit{oid} '
                  'baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}')
-        repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
-        if repository is None:
-            # A private repo the login cannot read resolves to null, not an error.
-            raise _GateAuthError(f"HTTP 404 on graphql {repo}")
-        pr = repository["pullRequest"]
+        pr = _acceptance_pr(query, repo, number, profile_home, receipt)
         sha, branch = pr["headRefOid"], pr["baseRefName"]
         receipt["head_sha"] = sha
         receipt["pr_state"] = pr["state"]
@@ -361,8 +377,12 @@ def pr_closed_unmerged(url: str, assignee: str | None = None) -> bool:
              f'{{pullRequest(number:{int(match[2]):d}){{state}}}}}}')
     try:
         profile_home = _assignee_profile_home(assignee)
-        repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
-        return bool(repository) and repository["pullRequest"]["state"] == "CLOSED"
+        try:
+            repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
+            return bool(repository) and repository["pullRequest"]["state"] == "CLOSED"
+        except _GraphQLRateLimit:
+            pull = _api(f"repos/{match[1]}/pulls/{match[2]}", profile_home=profile_home)
+            return pull["state"] == "closed" and pull["merged"] is False
     except Exception:
         return False
 
