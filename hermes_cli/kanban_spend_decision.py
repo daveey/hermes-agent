@@ -151,7 +151,6 @@ def notice(payload: dict) -> str:
 
 def producer(conn, task_id: str, note: str) -> dict:
     """Inside the stop transaction: one chat-notice route OR one supervisor, never both."""
-    from hermes_cli.kanban_db_notify import is_headless_session
     from hermes_cli.profiles import get_active_profile_name
     import json
     role = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='administrative_decision' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
@@ -167,28 +166,53 @@ def producer(conn, task_id: str, note: str) -> dict:
             "VALUES (?,?,?,'','notify','{\"reason\":\"origin\"}',unixepoch(),"
             "(SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?))",
             (task_id, platform, chat_id, task_id))
-    from hermes_cli.kanban_creator_chats import _chat_links
     from hermes_cli.kanban_origin import gateway_names
-    from hermes_cli.kanban_triage_sweep import _supervisor_profile
+    from hermes_cli.kanban_stranded_park import Liveness, local_chat_dead, settings
 
     task = kb.get_task(conn, task_id)
     assert task is not None
-    # Bind legacy origin sessions before appending the notice so its cursor cannot skip this event.
-    if task.session_id and not is_headless_session(task.session_id):
-        bind("tui", task.session_id)
     own = gateway_names()[0]
+    active = get_active_profile_name()
+    with Liveness(idle=settings()[1]) as liveness:
+        return _route(conn, task_id, task, own, active, bind, note,
+                      lambda gw, profile, session: local_chat_dead(gw, profile, session, own=own, liveness=liveness))
+
+
+def _route(conn, task_id, task, own, active, bind, note, dead) -> dict:
+    """``producer`` body after setup. ``dead``: a chat of this gateway that is archived/hidden/missing, or ended and
+    idle, is no route for the decision: the notice would sit unread (kanban_stranded_park). One ``Liveness`` per
+    call: each state.db is opened at most once."""
+    from hermes_cli.kanban_creator_chats import _chat_links
+    from hermes_cli.kanban_db_notify import is_headless_session
+    from hermes_cli.kanban_triage_sweep import _supervisor_profile
+
+    # Bind legacy origin sessions before appending the notice so its cursor cannot skip this event.
+    if task.session_id and not is_headless_session(task.session_id) and not dead(own, active, task.session_id):
+        bind("tui", task.session_id)
     links = (_chat_links(conn, task_id) if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE name='task_chat_links'").fetchone() else [])
     for link in links:
         session = link["chat_session"]
         gw, profile = link["chat_gateway"], link["chat_profile"] or "default"
         chat_id = f"{gw}/{profile}/{session}"
-        if not is_headless_session(chat_id):
-            local = gw == own and profile == get_active_profile_name()
+        if not is_headless_session(chat_id) and not dead(gw, link["chat_profile"], session):
+            local = gw == own and profile == active
             bind("tui" if local else "hub", session if local else chat_id)
     from hermes_cli.kanban_db_notify import _owning_sub_clause
-    if conn.execute("SELECT 1 FROM kanban_notify_subs s JOIN tasks p ON p.id=s.task_id "
-                    f"WHERE s.task_id=? AND {_owning_sub_clause()} LIMIT 1", (task_id,)).fetchone():
+    from hermes_cli.kanban_origin import OriginError, parse_origin
+    for sub in conn.execute("SELECT s.platform, s.chat_id, s.notifier_profile FROM kanban_notify_subs s "
+                            f"JOIN tasks p ON p.id=s.task_id WHERE s.task_id=? AND {_owning_sub_clause()}",
+                            (task_id,)).fetchall():
+        platform, chat_id, notifier = sub[0], sub[1], sub[2]
+        if platform == "tui" and dead(own, notifier, chat_id):
+            continue
+        if platform == "hub":
+            try:
+                origin = parse_origin(chat_id)
+            except OriginError:
+                origin = None
+            if origin is not None and dead(origin.gateway, origin.profile, origin.session):
+                continue
         return {"kind": "chats"}
     episode = conn.execute("SELECT COALESCE(MAX(id),0) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0]
     from hermes_cli.kanban_refusal_receipt import restricted

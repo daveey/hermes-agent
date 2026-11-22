@@ -1915,18 +1915,18 @@ DEFAULT_CONFIG = {
         "review_dispatch": True,
         # Seconds between dispatcher ticks. Lower = snappier pickup; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,
-        # Auto-block after this many consecutive non-success attempts (spawn_failed, timed_out,
-        # crashed) for the same task/profile. Reassignment resets the streak.
+        # Auto-block after N consecutive non-success runs (spawn_failed/timed_out/crashed) per task/profile; reassign resets.
         "failure_limit": 2,
-        # Worker stdout/stderr log rotation at spawn time (2 MiB + one backup). Raise to keep more
-        # early failure evidence from long-running workers.
+        # Worker stdout/stderr log rotation at spawn (2 MiB + one backup); raise to keep more early failure evidence.
         "worker_log_rotate_bytes": 2 * 1024 * 1024,
         "worker_log_backup_count": 1,
-        # Profile for the root/orchestration task after Triage decomposition; "" = default profile.
-        # Does not control the decomposer LLM path (see auxiliary.kanban_decomposer).
+        # Root/orchestration task profile after Triage decomposition ("" = default); not the decomposer LLM path.
         "orchestrator_profile": "",
-        # Assignee when the orchestrator can't match one to an installed profile; "" = default
-        # profile. A task never ends up with assignee=None.
+        # kanban_stranded_park: parked > stranded_park_seconds, no valid request/live owner -> one request per episode, swept
+        # <= once per stranded_sweep_interval_seconds; ended local chats own until idle; desk chat "<gw>/<profile>/<session>".
+        "stranded_park_seconds": 7200, "stranded_sweep_interval_seconds": 300, "stranded_owner_idle_seconds": 86400,
+        "triage_owner_chat": "",
+        # Assignee when the orchestrator can't match one to an installed profile ("" = default); never None.
         "default_assignee": "",
         # Global concurrency cap (#33488): a positive int caps the HOST's 'running' tasks across every active board
         # and both ready/review lanes (workers share one machine's memory; OOF-30). Unset (None) derives it from

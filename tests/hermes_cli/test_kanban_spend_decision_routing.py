@@ -129,3 +129,43 @@ def test_tui_poller_delivers_the_decision_notice(kanban_home):
     assert "promote" in texts[0] and "archive" in texts[0]
     assert [t for t in server._collect_kanban_notifications({"session_key": "desk-spend"})
             if "recorded decision" in t] == []
+
+
+def _state_session(home, sid, *, ended_ago=None, **flags):
+    from tests.hermes_cli.test_kanban_stranded_park import _session
+    _session(home, sid, ended_ago=ended_ago, active_ago=ended_ago, **flags)
+
+
+@pytest.mark.parametrize("dead", ["ended-idle", "archived", "missing"])
+def test_dead_local_chat_is_no_route_and_a_supervisor_decides(kanban_home, own_gateway, dead):
+    """A chat of this gateway that is ended and idle past kanban.stranded_owner_idle_seconds, archived, or absent
+    from a readable state.db is not bound or counted: the decision goes to a supervisor card (kanban_stranded_park)."""
+    with kbc.connect_closing() as conn:
+        tid = stopped(conn)
+        if dead == "missing":
+            _state_session(kanban_home, "someone-else")
+        else:
+            _state_session(kanban_home, "human-chat", **({"ended_ago": 2 * 86400} if dead == "ended-idle"
+                                                         else {"archived": 1}))
+        _links(conn, tid, (OWN, "default", "human-chat"))
+        notify.add_notify_sub(conn, task_id=tid, platform="tui", chat_id="human-chat")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id='human-chat' WHERE id=?", (tid,))
+        assert budget.hold(conn, tid) == "triage"
+        (event,) = helpers._events(conn, tid, decision.NOTICE)
+        producer = event.payload["producer"]
+        assert producer["kind"] == "supervisor"
+        assert kb.get_task(conn, producer["task_id"]).status not in ("done", "archived")
+
+
+@pytest.mark.parametrize("ended_ago", [None, 3600], ids=["open", "ended-recently"])
+def test_live_local_chat_in_state_db_is_the_route(kanban_home, own_gateway, ended_ago):
+    """An open chat, or one closed recently (a CLI chat closed with cli_close resumes in Desktop), still owns it."""
+    with kbc.connect_closing() as conn:
+        tid = stopped(conn)
+        _state_session(kanban_home, "human-chat", ended_ago=ended_ago)
+        _links(conn, tid, (OWN, "default", "human-chat"))
+        assert budget.hold(conn, tid) == "triage"
+        (event,) = helpers._events(conn, tid, decision.NOTICE)
+        assert event.payload["producer"] == {"kind": "chats"}
+        assert _subs(conn, tid) == [("tui", "human-chat")]

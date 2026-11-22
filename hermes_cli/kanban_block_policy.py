@@ -574,7 +574,8 @@ def sweep_standing_asks(conn: sqlite3.Connection) -> list[str]:
 
 def sweep_blocked_cards(conn: sqlite3.Connection, result) -> None:
     """Dispatcher-tick entry for the parked-card sweeps; each is isolated so one failing never skips the others.
-    The third gives each continuation_exhausted park its resume requester (``kanban_resume_requester``)."""
+    The third gives each continuation_exhausted park its resume requester (``kanban_resume_requester``); the last
+    escalates parks with no request and no live owner (``kanban_stranded_park``)."""
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_resume_requester import ensure_recovery_cards
     for name, sweep, out in (("agent-owned block", sweep_agent_owned_blocks, result.agent_block_escalated),
@@ -584,3 +585,9 @@ def sweep_blocked_cards(conn: sqlite3.Connection, result) -> None:
             out.extend(sweep(conn))
         except sqlite3.Error:
             kb._log.exception("kanban: %s sweep failed", name)
+    # Last: the backstop that no parked card stays invisible (``kanban_stranded_park``) sees what the passes left.
+    try:
+        from hermes_cli.kanban_stranded_park import sweep_stranded_parks
+        sweep_stranded_parks(conn)
+    except Exception:  # health: allow BLE001 -- the stranded-park backstop never breaks the dispatcher tick
+        kb._log.warning("kanban: stranded-park sweep failed", exc_info=True)
