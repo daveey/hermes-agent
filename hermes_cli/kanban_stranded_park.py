@@ -38,6 +38,9 @@ PARK_ENTRY_EVENTS = (
 DEFAULT_PARK_SECONDS = 7200
 DEFAULT_OWNER_IDLE_SECONDS = 86400
 DEFAULT_SWEEP_INTERVAL_SECONDS = 300
+# How long a park waits for the stale-triage sweep before this backstop escalates it anyway: a card that keeps
+# getting events (comments) is never idle enough for that sweep, and it only runs while the dispatcher may spawn.
+DEFAULT_STALE_DEFER_SECONDS = 21600
 SHEPHERD_KIND = "shepherd"
 _SPEND_KEYS = ("limit", "runs", "runs_with_usage", "cost_usd")
 
@@ -54,9 +57,9 @@ def _seconds(value: Any, default: int) -> int:
     return out if out > 0 else default
 
 
-def settings(cfg: Optional[dict] = None) -> tuple[int, int, str, int]:
-    """``(stranded_park_seconds, stranded_owner_idle_seconds, triage_owner_chat, stranded_sweep_interval_seconds)``
-    from ``cfg`` (the full config dict) or the on-disk config."""
+def settings(cfg: Optional[dict] = None) -> tuple[int, int, str, int, int]:
+    """``(stranded_park_seconds, stranded_owner_idle_seconds, triage_owner_chat, stranded_sweep_interval_seconds,
+    stranded_stale_defer_seconds)`` from ``cfg`` (the full config dict) or the on-disk config."""
     if cfg is None:
         try:
             from hermes_cli.config import load_config_readonly
@@ -69,7 +72,8 @@ def settings(cfg: Optional[dict] = None) -> tuple[int, int, str, int]:
     return (_seconds(kanban.get("stranded_park_seconds"), DEFAULT_PARK_SECONDS),
             _seconds(kanban.get("stranded_owner_idle_seconds"), DEFAULT_OWNER_IDLE_SECONDS),
             desk.strip() if isinstance(desk, str) else "",
-            _seconds(kanban.get("stranded_sweep_interval_seconds"), DEFAULT_SWEEP_INTERVAL_SECONDS))
+            _seconds(kanban.get("stranded_sweep_interval_seconds"), DEFAULT_SWEEP_INTERVAL_SECONDS),
+            _seconds(kanban.get("stranded_stale_defer_seconds"), DEFAULT_STALE_DEFER_SECONDS))
 
 
 # --- chat liveness -------------------------------------------------------------------------------------------------
@@ -300,28 +304,30 @@ def _leased(row: dict, now: int) -> bool:
     return bool(row.get("lease_holder")) and (expires is None or int(expires) > now)
 
 
-def _agent_owned(conn: sqlite3.Connection, task_id: str) -> bool:
+def _agent_owned(conn: sqlite3.Connection, task_id: str, *, age: int, defer: int) -> bool:
     """An agent route still owns the park: its open kernel recovery card (continuation_exhausted or
     goal_unachievable), an enforced lane gate, or the stale-triage sweep that will release it. Escalating these
     would turn agent work into a human ask (a recovery card's resume then refuses with human_gate, and the
     requester skips a card with a human_request). A judged goal hold whose recovery card is done owns nothing:
     ``kanban_goal_recovery.current_park`` stays true after recovery ends and that card's brief leaves the source
-    parked, so only this escalation surfaces it."""
+    parked, so only this escalation surfaces it. The stale-triage sweep is waited for only while the park episode
+    is younger than ``defer`` (``kanban.stranded_stale_defer_seconds``): it never releases a card that keeps
+    getting events, and it only runs while the dispatcher may spawn."""
     from hermes_cli.kanban_lanes import gate_refusal
     from hermes_cli.kanban_resume_requester import open_recovery_card
     from hermes_cli.kanban_triage_sweep import awaiting_stale_sweep
     return bool(open_recovery_card(conn, task_id) or gate_refusal(conn, task_id)
-                or awaiting_stale_sweep(conn, task_id))
+                or (age < defer and awaiting_stale_sweep(conn, task_id)))
 
 
-def _excluded(conn: sqlite3.Connection, row: dict, now: int) -> bool:
+def _excluded(conn: sqlite3.Connection, row: dict, now: int, *, age: int, defer: int) -> bool:
     from hermes_cli.kanban_open_asks import card_is_open_human_ask
     tid, kind = row["id"], row.get("block_kind")
     if _leased(row, now) or card_is_open_human_ask(row["status"], kind, row.get("human_request")):
         return True
     if kind in ("time", "lane_gate") or (kind == "dependency" and _dependency_open(conn, tid)):
         return True
-    return _armed_wake(conn, tid) or _agent_owned(conn, tid)
+    return _armed_wake(conn, tid) or _agent_owned(conn, tid, age=age, defer=defer)
 
 
 def _shared_blocker(entry: Optional[dict]) -> bool:
@@ -404,8 +410,8 @@ def _request(conn: sqlite3.Connection, row: dict, entry: Optional[dict], age: in
     }, kind=kind)
 
 
-def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: int, age: int, desk,
-              contained: bool) -> bool:
+def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now: int, age: int, defer: int,
+              desk, contained: bool) -> bool:
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_ask_resolved import store_request
     from hermes_cli.kanban_human_request import NONHUMAN_KINDS
@@ -417,7 +423,8 @@ def _escalate(conn: sqlite3.Connection, row: dict, entry: Optional[dict], *, now
         if fresh is None:
             return False
         fresh = dict(fresh)
-        if fresh["status"] not in PARKED or _excluded(conn, fresh, now) or _escalated(conn, tid, entry):
+        if (fresh["status"] not in PARKED or _excluded(conn, fresh, now, age=age, defer=defer)
+                or _escalated(conn, tid, entry)):
             return False
         if not contained:
             kind = fresh.get("block_kind")
@@ -468,7 +475,7 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
     from hermes_cli.kanban_origin import gateway_names
     from hermes_cli.kanban_wake_check import foreign_ids
 
-    park_s, idle_s, desk_ref, interval = settings(cfg)
+    park_s, idle_s, desk_ref, interval, defer_s = settings(cfg)
     now = int(now if now is not None else time.time())
     if not _due(conn, now, interval):
         return []
@@ -481,16 +488,18 @@ def sweep_stranded_parks(conn: sqlite3.Connection, *, now: Optional[int] = None,
     with Liveness(now=now, idle=idle_s) as liveness:
         for row in rows:
             tid = row["id"]
-            if tid in copies or _excluded(conn, row, now):
+            if tid in copies:
                 continue
             entry = park_entry(conn, tid)
             start = entry["created_at"] if entry else int(row.get("created_at") or 0)
-            if now - start < park_s or _shared_blocker(entry) or _escalated(conn, tid, entry):
+            age = now - start
+            if (age < park_s or _shared_blocker(entry) or _escalated(conn, tid, entry)
+                    or _excluded(conn, row, now, age=age, defer=defer_s)):
                 continue
             try:
                 if live_owner(conn, tid, own=own, liveness=liveness):
                     continue
-                if _escalate(conn, row, entry, now=now, age=now - start, desk=desk,
+                if _escalate(conn, row, entry, now=now, age=age, defer=defer_s, desk=desk,
                              contained=containment.held(conn, tid)):
                     escalated.append(tid)
             except Exception:  # health: allow BLE001 -- one card's failure must not stop the backstop for the rest

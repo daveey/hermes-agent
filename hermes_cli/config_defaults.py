@@ -1922,10 +1922,10 @@ DEFAULT_CONFIG = {
         "worker_log_backup_count": 1,
         # Root/orchestration task profile after Triage decomposition ("" = default); not the decomposer LLM path.
         "orchestrator_profile": "",
-        # kanban_stranded_park: parked > stranded_park_seconds, no valid request/live owner -> one request per episode, swept
-        # <= once per stranded_sweep_interval_seconds; ended local chats own until idle; desk chat "<gw>/<profile>/<session>".
+        # kanban_stranded_park: parked > stranded_park_seconds, no valid request/live owner -> one request per episode (sweep
+        # interval; ended chats own until idle; stale triage waited for <= defer; desk "<gw>/<profile>/<session>").
         "stranded_park_seconds": 7200, "stranded_sweep_interval_seconds": 300, "stranded_owner_idle_seconds": 86400,
-        "triage_owner_chat": "",
+        "stranded_stale_defer_seconds": 21600, "triage_owner_chat": "",
         # Assignee when the orchestrator can't match one to an installed profile ("" = default); never None.
         "default_assignee": "",
         # Global concurrency cap (#33488): a positive int caps the HOST's 'running' tasks across every active board

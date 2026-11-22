@@ -322,7 +322,7 @@ def test_thresholds_come_from_config(kanban_home, own_gateway):
         assert _sweep(conn, now=_later(3), cfg=cfg) == []
         assert _sweep(conn, now=_later(5), cfg=cfg) == [tid]
     assert stranded.settings({}) == (stranded.DEFAULT_PARK_SECONDS, stranded.DEFAULT_OWNER_IDLE_SECONDS, "",
-                                     stranded.DEFAULT_SWEEP_INTERVAL_SECONDS)
+                                     stranded.DEFAULT_SWEEP_INTERVAL_SECONDS, stranded.DEFAULT_STALE_DEFER_SECONDS)
 
 
 def test_sweep_failure_never_breaks_the_tick(kanban_home, monkeypatch, caplog):
@@ -515,3 +515,50 @@ def test_spend_pending_unblock_answer_routes_to_promote(kanban_home, own_gateway
         assert _row(conn, tid)[0] == "triage" and _row(conn, tid)[2]
         assert kb.promote_task(conn, tid, actor="operator", reason="rescoped")[0]
         assert kb.get_task(conn, tid).status == "ready"
+
+
+# --- the stale-sweep deferral is bounded -----------------------------------------------------------------------------
+
+def test_busy_card_waits_for_stale_sweep_only_up_to_the_defer_bound(kanban_home, own_gateway):
+    """A re-entered, uncapped triage card that gets a comment every 30 min is never idle for sweep_stale_triage, so
+    waiting on that sweep would defer it forever: it is escalated once its park passes 6 h, not before."""
+    from hermes_cli.kanban_triage_sweep import awaiting_stale_sweep, sweep_stale_triage
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, capped=False)
+        start = int(time.time())
+        with kb.write_txn(conn):
+            conn.execute("UPDATE task_events SET created_at=? WHERE task_id=?", (start, tid))
+        for k in range(1, 17):  # every 30 min for 8 h
+            kb.add_comment(conn, tid, "someone", f"still looking ({k})")
+            with kb.write_txn(conn):
+                conn.execute("UPDATE task_events SET created_at=? WHERE id=(SELECT MAX(id) FROM task_events "
+                             "WHERE task_id=?)", (start + k * 1800, tid))
+        assert awaiting_stale_sweep(conn, tid)
+        assert sweep_stale_triage(conn, now=start + 8 * HOUR) == []  # never idle an hour
+        assert _sweep(conn, now=start + 3 * HOUR, cfg={}) == []
+        assert _sweep(conn, now=start + 6 * HOUR - 60, cfg={}) == []
+        assert _sweep(conn, now=start + 6 * HOUR, cfg={}) == [tid]
+        assert card_is_open_human_ask(*_row(conn, tid))
+
+
+def test_defer_bound_comes_from_config(kanban_home, own_gateway):
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, capped=False)
+        cfg = {"kanban": {"stranded_stale_defer_seconds": 4 * HOUR}}
+        assert _sweep(conn, now=_later(3), cfg=cfg) == []
+        assert _sweep(conn, now=_later(4.1), cfg=cfg) == [tid]
+
+
+def test_invalid_human_request_is_not_left_to_the_stale_sweep(kanban_home, own_gateway):
+    """sweep_stale_triage skips any card with a stored human_request, so an invalid one is not the sweep's: it is
+    escalated after the normal 2 h and replaced by a valid request."""
+    from hermes_cli.kanban_triage_sweep import awaiting_stale_sweep
+    with kbc.connect_closing() as conn:
+        tid = _parked(conn, capped=False)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET human_request=? WHERE id=?", (json.dumps({"action": "half an ask"}), tid))
+        assert not card_is_open_human_ask(*_row(conn, tid))
+        assert not awaiting_stale_sweep(conn, tid)
+        assert _sweep(conn, now=_later(1), cfg={}) == []
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        assert card_is_open_human_ask(*_row(conn, tid))

@@ -250,10 +250,13 @@ def escalate_stranded_contained(conn: sqlite3.Connection, *, now: Optional[float
 
 def awaiting_stale_sweep(conn: sqlite3.Connection, task_id: str) -> bool:
     """True when :func:`sweep_stale_triage` will still release this card on its own (once idle long enough): in
-    triage, not gate-held, re-entered since its last sweep and not capped, and not a hold the sweep skips (spend
+    triage with no stored human_request, not gate-held, re-entered since its last sweep and not capped, and not a
+    hold the sweep skips (spend
     decision, containment, an open kernel recovery card, a judged goal hold). Such a card is agent-owned; it is not
     stranded."""
-    if conn.execute("SELECT 1 FROM tasks t WHERE t.id = ? AND t.status = 'triage' " + _gate_exclusion()
+    # Any stored human_request (even an invalid one) makes the sweep skip the card, so it is not the sweep's.
+    if conn.execute("SELECT 1 FROM tasks t WHERE t.id = ? AND t.status = 'triage' AND t.human_request IS NULL "
+                    + _gate_exclusion()
                     + "AND " + _PENDING, (task_id, *_PENDING_ARGS)).fetchone() is None:
         return False
     from hermes_cli.kanban_containment_connections import held as containment_held
