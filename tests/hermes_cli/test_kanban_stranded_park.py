@@ -407,12 +407,39 @@ def test_open_recovery_card_owns_the_park(kanban_home, own_gateway, monkeypatch)
         assert _sweep(conn, now=_later(3), cfg={}) == [tid]
 
 
-def test_goal_hold_owns_the_park(kanban_home, own_gateway, monkeypatch):
-    from hermes_cli import kanban_goal_recovery as goal
+def _goal_parked(conn):
+    """A real judged goal park (goal_unachievable, re-kinded blocked event) and its kernel recovery card."""
+    from hermes_cli.kanban_goal_recovery import current_park, park
+    from hermes_cli.kanban_resume_requester import ensure_recovery_cards
+    tid = kb.create_task(conn, title="Deliver exact goal", assignee="default", goal_mode=True)
+    assert kb.claim_task(conn, tid)
+    task = kb.get_task(conn, tid)
+    assert park(conn, task, "Prerequisite unavailable", expected_run_id=task.current_run_id)
+    assert kb.get_task(conn, tid).status == "triage" and current_park(conn, tid)
+    (rec,) = ensure_recovery_cards(conn)
+    return tid, rec
+
+
+def test_goal_park_with_open_recovery_card_is_untouched(kanban_home, own_gateway):
     with kbc.connect_closing() as conn:
-        tid = _parked(conn, status="blocked", event="blocked", kind="needs_input")
-        monkeypatch.setattr(goal, "current_park", lambda c, task_id: task_id == tid)
+        tid, _ = _goal_parked(conn)
         assert _sweep(conn, now=_later(3), cfg={}) == []
+        assert _row(conn, tid)[2] is None
+
+
+def test_goal_park_whose_recovery_finished_is_escalated(kanban_home, own_gateway):
+    """current_park stays true after the goal recovery card completes (its brief leaves the source parked), so it
+    owns nothing: the source is escalated once parked past the threshold."""
+    from hermes_cli.kanban_goal_recovery import current_park
+    with kbc.connect_closing() as conn:
+        tid, rec = _goal_parked(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (rec,))
+        assert current_park(conn, tid)
+        assert _sweep(conn, now=_later(1), cfg={}) == []
+        assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+        status, kind, raw = _row(conn, tid)
+        assert card_is_open_human_ask(status, kind, raw)
 
 
 def test_lane_gate_and_shared_blocker_parks_are_untouched(kanban_home, own_gateway):

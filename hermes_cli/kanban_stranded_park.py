@@ -301,15 +301,17 @@ def _leased(row: dict, now: int) -> bool:
 
 
 def _agent_owned(conn: sqlite3.Connection, task_id: str) -> bool:
-    """An agent route still owns the park: its open kernel recovery card (or a judged goal hold), an enforced lane
-    gate, or the stale-triage sweep that will release it. Escalating these would turn agent work into a human ask
-    (a recovery card's resume then refuses with human_gate, and the requester skips a card with a human_request)."""
-    from hermes_cli.kanban_goal_recovery import current_park
+    """An agent route still owns the park: its open kernel recovery card (continuation_exhausted or
+    goal_unachievable), an enforced lane gate, or the stale-triage sweep that will release it. Escalating these
+    would turn agent work into a human ask (a recovery card's resume then refuses with human_gate, and the
+    requester skips a card with a human_request). A judged goal hold whose recovery card is done owns nothing:
+    ``kanban_goal_recovery.current_park`` stays true after recovery ends and that card's brief leaves the source
+    parked, so only this escalation surfaces it."""
     from hermes_cli.kanban_lanes import gate_refusal
     from hermes_cli.kanban_resume_requester import open_recovery_card
     from hermes_cli.kanban_triage_sweep import awaiting_stale_sweep
-    return bool(open_recovery_card(conn, task_id) or current_park(conn, task_id)
-                or gate_refusal(conn, task_id) or awaiting_stale_sweep(conn, task_id))
+    return bool(open_recovery_card(conn, task_id) or gate_refusal(conn, task_id)
+                or awaiting_stale_sweep(conn, task_id))
 
 
 def _excluded(conn: sqlite3.Connection, row: dict, now: int) -> bool:
