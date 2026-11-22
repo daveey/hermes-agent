@@ -536,3 +536,282 @@ def test_b_renewal_listing_a_confirmed_safety_receipt_never_hides_it(board, monk
     stop = decision.pending_episode(board, tid)
     assert stop is not None and renewal.key(stop) == episode
     assert renewal.mandate(board, tid) is None
+
+
+# Neighbouring clauses of the same predicates (exact-head review round 4): one case per clause.
+
+def test_f_deleted_mandate_stops_covering(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    renew(board, tid, episode, comment)
+    assert not decision.execution_restricted(board, tid)
+    board.execute("DELETE FROM task_comments WHERE id=? AND task_id=?", (comment, tid))
+    board.commit()
+    assert decision.execution_restricted(board, tid)
+    assert kb.promote_task(board, tid, actor='fixture', reason='x')[0] is False
+    assert renewal.mandate(board, tid) is None
+
+
+@pytest.mark.parametrize('damage', [{'version': 2}, {'version': None}, {'episode': ''}, {'episode': None},
+                                    {'covered_restriction_uids': None}, {'covered_restriction_uids': 'EPISODE'},
+                                    {'mandate_comment_uid': ''}, {'mandate_comment_uid': '999999'},
+                                    {'mandate_comment_uid': 'ARABIC'}, {'mandate_body_sha256': None}])
+def test_f_malformed_renewal_row_covers_nothing(board, monkeypatch, damage):
+    tid, _, episode = stopped(board, monkeypatch)
+    comment = mandate(board, tid)
+    row = dict(board.execute('SELECT * FROM task_comments WHERE id=?', (comment,)).fetchone())
+    payload = {'version': 1, 'episode': episode, 'mandate_comment_uid': renewal.comment_ref(row),
+               'mandate_body_sha256': renewal.digest(row['body']), 'covered_restriction_uids': [episode]}
+    kb._append_event(board, tid, 'scope_renewed', payload)
+    board.commit()
+    assert renewal.covered(board, tid) == {episode}, 'the undamaged row is a valid renewal'
+    arabic = str(comment).translate(str.maketrans('0123456789', '٠١٢٣٤٥٦٧٨٩'))  # int() reads it as the same id
+    damage = {k: {'EPISODE': episode, 'ARABIC': arabic}.get(v, v) if isinstance(v, str) else v for k, v in damage.items()}
+    board.execute("UPDATE task_events SET payload=? WHERE task_id=? AND kind='scope_renewed'",
+                  (json.dumps({**payload, **damage}), tid))
+    board.commit()
+    assert not renewal.covered(board, tid) and not renewal.renewals(board, tid)
+    assert decision.execution_restricted(board, tid)
+    assert renewal.key(decision.pending_episode(board, tid)) == episode
+    assert renewal.mandate(board, tid) is None
+
+
+def test_f_renewal_row_with_an_unparseable_payload_covers_nothing(board, monkeypatch):
+    tid, _, _ = stopped(board, monkeypatch)
+    for raw in ('not json', '[1]', None):
+        board.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?,?,?,1)",
+                      (tid, 'scope_renewed', raw))
+    board.commit()
+    assert not renewal.renewals(board, tid)
+    assert decision.execution_restricted(board, tid)
+
+
+def test_f_renewal_naming_another_cards_comment_by_number_covers_nothing(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    other = kb.create_task(board, title='other', assignee='default')
+    row = dict(board.execute('SELECT * FROM task_comments WHERE id=?', (mandate(board, other),)).fetchone())
+    kb._append_event(board, tid, 'scope_renewed', {
+        'version': 1, 'episode': episode, 'mandate_comment_uid': str(row['id']),
+        'mandate_body_sha256': renewal.digest(row['body']), 'covered_restriction_uids': [episode]})
+    board.commit()
+    assert not renewal.covered(board, tid)
+    assert decision.execution_restricted(board, tid)
+
+
+def test_b_restriction_starts_at_the_earliest_evidence_a_renewal_does_not_cover(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    renew(board, tid, episode, mandate(board, tid))
+    assert decision.restricted_since(board, tid) is None
+    for at, cause in ((7000, 'safety_refusal'), (5000, 'scope_stopped'), (9000, 'safety_refusal')):
+        board.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?,?,?,?)",
+                      (tid, 'decision_hold_restricted', json.dumps({'cause': cause, 'episode': episode}), at))
+    board.commit()
+    assert decision.restricted_since(board, tid) == 5000
+
+
+def test_g_each_stop_needs_its_own_renewal_and_the_newest_mandate_is_the_scope(board, monkeypatch):
+    tid, _, first = stopped(board, monkeypatch)
+    kb._append_event(board, tid, 'spend_budget_triaged', {'cause': 'scope_stopped', 'reason': 'again'})
+    board.commit()
+    second = renewal.key(decision.pending_episode(board, tid))
+    assert second != first
+    kb._append_event(board, tid, 'promoted_manual', {})  # a refused promote attempt: it decides neither stop
+    board.commit()
+    link(board, tid)
+    payload = renew(board, tid, second, mandate(board, tid, body='Scope for the second stop.'))
+    assert payload['covered_restriction_uids'] == [second]
+    # Renewing the current stop leaves the older, unrenewed stop restrictive.
+    assert decision.execution_restricted(board, tid)
+    assert renewal.key(decision.pending_episode(board, tid)) == first
+    assert kb.promote_task(board, tid, actor='fixture', reason='x')[0] is False
+    assert renewal.mandate(board, tid) is None
+    payload = renew(board, tid, first, mandate(board, tid, body='Scope for the first stop.'))
+    assert payload['covered_restriction_uids'] == [first]
+    assert not decision.execution_restricted(board, tid)
+    # Both are renewed: the stop that waits for its decision is the one renewed last, under the newest mandate.
+    assert renewal.key(decision.pending_episode(board, tid)) == first
+    assert renewal.mandate(board, tid)['body'] == 'Scope for the first stop.'
+    kb._append_event(board, tid, 'promoted_manual', {})
+    assert not decision.pending(board, tid)
+
+
+def test_f_renewal_covers_only_scope_cause_evidence_of_its_episode(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    kb._append_event(board, tid, 'decision_hold_restricted', {'cause': 'budget', 'episode': episode})
+    kb._append_event(board, tid, 'decision_hold_restricted', {'episode': episode})
+    kb._append_event(board, tid, 'decision_hold_restricted', {'cause': 'scope_stopped', 'episode': 'another-episode'})
+    kb._append_event(board, tid, 'decision_hold_restricted', {'cause': 'scope_stopped', 'episode': episode})
+    board.commit()
+    bound = renewal.key(dict(board.execute("SELECT * FROM task_events WHERE task_id=? AND kind='decision_hold_restricted' "
+                                           "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()))
+    assert renew(board, tid, episode, mandate(board, tid))['covered_restriction_uids'] == sorted([episode, bound])
+    assert decision.execution_restricted(board, tid), "another episode's scope annotation is not covered"
+
+
+def test_f_reason_is_required_and_bounded(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    refused(board, tid, episode, comment, 'invalid_reason', reason='x' * 2001)
+    refused(board, tid, episode, comment, 'invalid_reason', reason='')
+    refused(board, tid, episode, comment, 'invalid_reason', reason=None)
+    assert renew(board, tid, episode, comment, reason=' ' + 'x' * 2000 + ' ')['reason'] == 'x' * 2000
+
+
+def test_f_mandate_bounds_are_on_the_trimmed_body(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    blank = mandate(board, tid)
+    board.execute("UPDATE task_comments SET body=' \n ' WHERE id=?", (blank,))
+    board.commit()
+    refused(board, tid, episode, blank, 'mandate_missing')
+    padded = mandate(board, tid)  # 8000 characters between stored whitespace: the bound is on the trimmed body
+    board.execute("UPDATE task_comments SET body=? WHERE id=?", (' ' + 'x' * 8000 + ' ', padded))
+    board.commit()
+    payload = renew(board, tid, episode, padded)
+    assert payload['mandate_body_sha256'] == renewal.digest(' ' + 'x' * 8000 + ' ')
+    assert not decision.execution_restricted(board, tid), 'the digest is of the body as stored'
+
+
+def test_f_missing_task_or_card_without_a_stop_is_refused(board, monkeypatch):
+    _, _, episode = stopped(board, monkeypatch)
+    with pytest.raises(RenewalRefused) as caught:
+        renew(board, 't_00000000deadbeef', episode, 1, writer=HUMAN)
+    assert caught.value.code == 'no_such_task'
+    plain = kb.create_task(board, title='never stopped', assignee='default')
+    assert renewal.mandate(board, plain) is None and '## Scope renewal mandate' not in kb.build_worker_context(board, plain)
+    board.execute("UPDATE tasks SET status='triage' WHERE id=?", (plain,))
+    board.commit()
+    with pytest.raises(RenewalRefused) as caught:
+        renew(board, plain, episode, mandate(board, plain, kind='human'), writer=HUMAN)
+    assert caught.value.code == 'episode_mismatch'
+    assert not board.execute("SELECT 1 FROM task_events WHERE kind='scope_renewed'").fetchone()
+
+
+def test_f_scope_annotation_without_its_stop_is_not_a_renewable_episode(board, monkeypatch):
+    tid, _, _ = support.bind(board, monkeypatch)
+    board.execute("UPDATE tasks SET status='triage',claim_lock=NULL WHERE id=?", (tid,))
+    kb._append_event(board, tid, 'decision_hold_restricted', {'cause': 'scope_stopped', 'episode': 'ghost-stop'})
+    board.commit()
+    orphan = decision.pending_episode(board, tid)
+    assert orphan['kind'] == 'decision_hold_restricted'
+    for episode in (renewal.key(orphan), 'ghost-stop'):
+        refused(board, tid, episode, mandate(board, tid, kind='human'), 'episode_mismatch', writer=HUMAN)
+
+
+def test_f_agent_authority_never_renews_on_a_comment_recorded_as_human_written(board, monkeypatch):
+    """The writer kind is checked on its own: here the session still matches the renewing chat."""
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    board.execute("UPDATE task_events SET payload=json_set(payload,'$.writer_kind','human') "
+                  "WHERE task_id=? AND kind='commented'", (tid,))
+    board.commit()
+    refused(board, tid, episode, comment, 'mandate_authority')
+
+
+def test_f_chat_authority_without_a_session_matches_no_mandate(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    comment = kb.add_comment(board, tid, 'default', 'Renewed scope.', writer_kind='agent')
+    actor = renewal.Actor('agent', None, 'chat', None, '', 'default')
+    with pytest.raises(RenewalRefused) as caught:
+        renewal.renew_local(board, tid, episode=episode, comment_id=comment, reason='x', actor=actor)
+    assert caught.value.code == 'mandate_authority'
+
+
+def test_f_creator_task_renews_on_a_mandate_its_own_run_wrote_under_another_session(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    creator, writer = running_creator(board, tid)
+    comment = mandate(board, tid, session='local-earlier-run')
+    board.execute("UPDATE task_events SET payload=json_set(payload,'$.writer_task',?) WHERE task_id=? AND kind='commented'",
+                  (creator, tid))
+    board.commit()
+    payload = renew(board, tid, episode, comment, writer=writer, env={'HERMES_KANBAN_WORKER_TASK': creator})
+    assert payload['authority_kind'] == 'creator_task' and payload['actor_session'] == 'local-creator'
+
+
+def test_d_writer_that_is_neither_human_nor_agent_is_refused(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    refused(board, tid, episode, mandate(board, tid), 'identity_unavailable', writer=('service', CHAT, '4242:HERMES_SESSION_ID'))
+
+
+def test_d_creator_task_whose_row_is_gone_is_refused(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    creator, writer = running_creator(board, tid)
+    comment = mandate(board, tid, session='local-creator')
+    board.execute("PRAGMA foreign_keys=OFF")
+    board.execute("DELETE FROM tasks WHERE id=?", (creator,))
+    board.commit()
+    assert renewal._creator_sessions(board, creator) == {'local-creator'}, 'its admission events remain'
+    refused(board, tid, episode, comment, 'not_scope_authority', writer=writer, env={'HERMES_KANBAN_WORKER_TASK': creator})
+
+
+def test_d_session_named_only_by_the_ssh_marker_counts_in_the_ancestry(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    session = 'local-' + 'b' * 64
+    kb._append_event(board, tid, 'owner_admitted', {'session_id': session})
+    board.commit()
+    link(board, tid)
+    comment = mandate(board, tid)
+    with pytest.raises(RenewalRefused) as caught:  # the card's own run, relayed over ssh
+        cli.renew(board, tid, episode=episode, comment_id=comment, reason='x', writer=AGENT,
+                  env={'HERMES_SESSION_ID': CHAT}, ancestry=[{'LC_HERMES_AGENT': session}])
+    assert caught.value.code == 'own_run'
+    with pytest.raises(RenewalRefused) as caught:  # another chat's session
+        cli.renew(board, tid, episode=episode, comment_id=comment, reason='x', writer=AGENT,
+                  env={'HERMES_SESSION_ID': CHAT}, ancestry=[{'LC_HERMES_AGENT': '20261101_000000_abcdef'}])
+    assert caught.value.code == 'identity_unavailable'
+    assert decision.execution_restricted(board, tid)
+
+
+def test_a_human_operator_needs_no_readable_ancestry(board, monkeypatch):
+    from hermes_cli import kanban_comment_writer as writer
+    tid, _, episode = stopped(board, monkeypatch)
+
+    def unreadable(pid):
+        raise writer.Inconclusive('pid 7: environment unreadable')
+    monkeypatch.setattr(writer, '_read_proc', unreadable)
+    payload = cli.renew(board, tid, episode=episode, comment_id=mandate(board, tid, kind='human'), reason='x',
+                        writer=HUMAN, env={})
+    assert payload['authority_kind'] == 'human' and payload['actor_session'] is None
+
+
+def test_ancestry_environs_reads_every_ancestor_and_refuses_what_it_cannot_finish():
+    from hermes_cli import kanban_comment_writer as writer
+    tree = {10: (9, {'A': '1'}), 9: (8, {}), 8: (1, {'B': '2'}), 1: (0, {'INIT': '1'})}
+    assert writer.ancestry_environs(10, read=tree.__getitem__) == [{'A': '1'}, {'B': '2'}, {'INIT': '1'}]
+    assert writer.ancestry_environs(8, read={8: (0, {'B': '2'})}.__getitem__) == [{'B': '2'}]
+    assert writer.ancestry_environs(1, read={1: (7, {'INIT': '1'})}.__getitem__) == [{'INIT': '1'}], 'init ends the walk'
+    with pytest.raises(writer.Inconclusive, match='loop'):
+        writer.ancestry_environs(10, read={10: (9, {'A': '1'}), 9: (10, {})}.__getitem__)
+    with pytest.raises(writer.Inconclusive, match='deeper'):
+        writer.ancestry_environs(10_000, read=lambda pid: (pid - 1, {}))
+    chain = {pid: (pid - 1, {'N': str(pid)}) for pid in range(2, writer.MAX_ANCESTRY + 1)} | {1: (0, {})}
+    assert len(writer.ancestry_environs(writer.MAX_ANCESTRY, read=chain.__getitem__)) == writer.MAX_ANCESTRY - 1
+
+
+def test_h_gateway_notice_names_the_card_in_the_renewal_route():
+    from types import SimpleNamespace
+    from gateway.kanban_watchers_notifier import _fmt_spend_budget
+    text, body, _ = _fmt_spend_budget(SimpleNamespace(payload={'cause': 'scope_stopped'}),
+                                      SimpleNamespace(head='Kanban t_1', task_id='t_00000000deadbeef'))
+    assert 'renew-scope t_00000000deadbeef --episode' in text and 'renew-scope t_00000000deadbeef --episode' in body
+    assert '<task>' in decision.notice({'cause': 'scope_stopped'})
+
+
+def test_j_the_command_line_prints_the_next_step_in_text_mode(board, monkeypatch, capsys):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    ancestry(monkeypatch, {'HERMES_SESSION_ID': CHAT, 'HERMES_AGENT': '1'}, {'HERMES_SESSION_ID': CHAT}, {})
+    monkeypatch.setenv('HERMES_SESSION_ID', CHAT)
+    assert argv(tid, '--episode', 'not-the-episode', '--mandate-comment', str(comment), '--reason', 'x') == 1
+    assert 'renew-scope refused (episode_mismatch)' in capsys.readouterr().out
+    assert argv(tid, '--episode', episode, '--mandate-comment', str(comment), '--reason', 'x') == 0
+    out = capsys.readouterr().out
+    assert f'Scope renewed on {tid} for stop {episode}' in out and f'hermes kanban promote {tid}' in out
+    assert not out.lstrip().startswith('{')

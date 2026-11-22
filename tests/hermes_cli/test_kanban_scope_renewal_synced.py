@@ -146,3 +146,62 @@ def test_board_event_read_back_for_another_task_projects_nothing(live, monkeypat
         return proof
     hub.row_evidence = wrong
     refused_without_projection(live, tid, episode, comment, 'board_unconfirmed')
+
+
+@pytest.mark.parametrize('damage', ['state', 'kind', 'row'])
+def test_board_row_that_is_not_a_live_renewal_projects_nothing(live, monkeypatch, damage):
+    hub = Hub({'decision_retain': 1, 'scope_renewal': 1})
+    tid, episode, comment = stopped(live, monkeypatch, hub)
+    real = hub.row_evidence
+
+    def wrong(board, table, uid):
+        proof = real(board, table, uid)
+        if damage == 'state':
+            proof['state'] = 'deleted'
+        elif damage == 'kind':
+            proof['row']['kind'] = 'diagnostic'
+        else:
+            proof['row'] = None
+        return proof
+    hub.row_evidence = wrong
+    refused_without_projection(live, tid, episode, comment, 'board_unconfirmed')
+
+
+@pytest.mark.parametrize('results', [[], [{'client_op_id': 'someone-elses-op', 'status': 'applied'}],
+                                     [{'status': 'applied'}, {'status': 'applied'}]])
+def test_board_reply_that_does_not_answer_this_request_is_refused(live, monkeypatch, results):
+    hub = Hub({'decision_retain': 1, 'scope_renewal': 1})
+    tid, episode, comment = stopped(live, monkeypatch, hub)
+
+    def ops(board, sent):
+        hub.sent += sent
+        return {'results': [{'client_op_id': sent[0]['client_op_id'], **r} if 'client_op_id' not in r and len(results) > 1
+                            else r for r in results]}
+    hub.ops = ops
+    hub.row_evidence = lambda *a: pytest.fail('an unanswered request must not be read back')
+    refused_without_projection(live, tid, episode, comment, 'board_rejected')
+
+
+@pytest.mark.parametrize('capability', [None, 'scope_renewal', {'scope_renewal': 2}, {'scope_renewal': 0, 'x': 1}])
+def test_board_without_exactly_scope_renewal_v1_is_never_asked(live, monkeypatch, capability):
+    hub = Hub(capability)
+    tid, episode, comment = stopped(live, monkeypatch, hub)
+    refused_without_projection(live, tid, episode, comment, 'board_unsupported')
+    assert not hub.sent
+
+
+@pytest.mark.parametrize('mode,pushes', [('primary', 1), ('shadow', 0)])
+def test_primary_pushes_the_mandate_before_asking_and_no_other_mode_pushes(live, monkeypatch, mode, pushes):
+    from hermes_cli import kanban_sync_client as client
+    hub = Hub({'decision_retain': 1, 'scope_renewal': 1})
+    tid, episode, comment = stopped(live, monkeypatch, hub)
+    calls = []
+
+    def push(conn, target, board, gateway, **kw):
+        assert not hub.sent, 'the mandate comment must be canonical before the Board is asked'
+        calls.append((target, gateway, kw))
+    monkeypatch.setattr(client, 'push', push)
+    monkeypatch.setattr(sync, 'board_mode', lambda conn: mode)
+    renew(live, tid, episode, comment)
+    assert calls == [(hub, 'fixture', {'primary': True})] * pushes
+    assert len(hub.sent) == 1
