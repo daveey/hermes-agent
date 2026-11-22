@@ -72,6 +72,56 @@ def test_explicit_close_still_waits_for_live_lock(tmp_path):
     runner.join(10)
 
 
+def test_finalizer_keeps_nonblocking_acquisition_until_connection_is_closed(tmp_path, monkeypatch):
+    """A contender takes the lock at the first release; no blocking reacquisition is safe."""
+    conn = safe.connect_tracked(tmp_path / "race.db", check_same_thread=False)
+    real_lock = safe._live_lock
+    released, contender_held, finish = threading.Event(), threading.Event(), threading.Event()
+    done = threading.Event()
+
+    class HandoffLock:
+        def acquire(self, blocking=True):
+            return real_lock.acquire(blocking=blocking)
+
+        def release(self):
+            real_lock.release()
+            if not released.is_set():
+                released.set()
+                assert contender_held.wait(5)
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *args):
+            self.release()
+
+    def contend():
+        assert released.wait(5)
+        with real_lock:
+            contender_held.set()
+            finish.wait(10)
+
+    def finalize():
+        with safe.finalizer_close():
+            conn.close()
+        done.set()
+
+    contender = threading.Thread(target=contend, daemon=True)
+    runner = threading.Thread(target=finalize, daemon=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(safe, "_live_lock", HandoffLock())
+        contender.start()
+        runner.start()
+        try:
+            assert done.wait(2), "finalizer released its nonblocking acquisition then blocked reacquiring"
+        finally:
+            finish.set()
+            contender.join(10)
+            runner.join(10)
+    assert not safe.has_live_connection(tmp_path / "race.db")
+
+
 _EXIT_PROBE = """
 import sys, threading
 from pathlib import Path

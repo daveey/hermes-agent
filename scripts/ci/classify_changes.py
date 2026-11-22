@@ -308,6 +308,7 @@ HERMES_STATE_IMPORTS = (
     "agent/skill_commands.py",
     "hermes_cli/__init__.py",
     "hermes_cli/sqlite_runtime.py",
+    "hermes_cli/sqlite_safe_read.py",
     "hermes_cli/timefmt.py",
     "hermes_constants.py",
     "hermes_dir_acl.py",

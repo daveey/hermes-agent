@@ -175,15 +175,16 @@ class _TrackingMixin:
     _hermes_tracked_path: str | None = None
 
     def close(self) -> None:  # type: ignore[misc]
-        if getattr(_finalizer_state, "active", False):
-            if not _live_lock.acquire(blocking=False):
-                _deferred_closes.append(self)
-                return
-            _live_lock.release()  # we own it now (reentrant): the ``with`` below cannot block
-        with _live_lock:
+        finalizing = getattr(_finalizer_state, "active", False)
+        if not _live_lock.acquire(blocking=not finalizing):
+            _deferred_closes.append(self)
+            return
+        try:
             super().close()  # type: ignore[misc]
             self._hermes_tracked_path = None
             _apply_releases()
+        finally:
+            _live_lock.release()
 
 
 class TrackedConnection(_TrackingMixin, sqlite3.Connection):
