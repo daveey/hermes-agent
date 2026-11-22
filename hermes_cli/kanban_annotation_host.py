@@ -695,7 +695,8 @@ def _event_refresh(events) -> float | None:
                 return None
             if not _ksa._annotate_refresh_lock.acquire(blocking=False):
                 return _scope_retry(scope)
-            _holder_ctx.active = True
+            # Native scheduling uses part keys, never the legacy narrow-key gate. Do not build its expensive
+            # inventory in prepare or claim its extended display lifetime: publish the ordinary exact copy.
             # Inner caches can return without emitting their clock boundaries.
             # Preserve those until consumed; replacing the list needs per-cache
             # deadline ownership, not just a successful outer projection.
@@ -738,7 +739,6 @@ def _event_refresh(events) -> float | None:
                 return min(_clock_deadlines[scope], default=None)
             finally:
                 _holder_ctx.deadlines = None
-                _holder_ctx.active = False
                 _ksa._revalidate.force_read.scope = None
                 _ksa._revalidate.force_read.parts = None
                 _ksa._annotate_refresh_lock.release()
