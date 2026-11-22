@@ -837,7 +837,7 @@ class GatewayTurnPrepareMixin:
         # earlier would falsely recover a message that never began processing.
         await self._mark_durable_active_turn(event, session_entry.session_key)
         from gateway.turn_outcome import refresh_gateway_turn_start_outcome
-        refresh_gateway_turn_start_outcome(self, session_entry)
+        await asyncio.to_thread(refresh_gateway_turn_start_outcome, self, session_entry)
 
         # An unreadable store is not an empty conversation: stop before the agent invents continuity
         # from []. Restore task-local context here (before the broad cleanup finally).
