@@ -1555,6 +1555,8 @@
     "desktop.archiveLinkedTasksUnknown",
     "desktop.archiveLinkedTasksValue",
     "desktop.archiveLinkedTitle",
+    "desktop.archiveQueueDropped",
+    "desktop.archiveQueued",
     "desktop.archived",
     "desktop.attachFailed",
     "desktop.attachImages",

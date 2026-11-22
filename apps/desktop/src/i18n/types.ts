@@ -4290,6 +4290,8 @@ export interface Translations extends NoticeTranslations {
     deleteFailed: string
     archived: string
     archiveFailed: string
+    archiveQueued: string
+    archiveQueueDropped: string
     archiveLinkedTitle: (title: string) => string
     archiveLinkedBody: string
     archiveLinkedConfirm: string

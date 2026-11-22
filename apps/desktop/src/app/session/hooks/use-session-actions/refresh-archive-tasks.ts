@@ -1,5 +1,7 @@
 import { hermesApiAs } from '@/api/client'
+import { isReconnectableSessionWriteError } from '@/api/session-write-reconnect'
 import type { SessionInfo } from '@/hermes'
+import type { ArchiveTrace } from '@/lib/archive-trace'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { hasFreshKanbanObservation } from '@/store/kanban-observation'
 
@@ -16,10 +18,13 @@ const isTimeout = (error: unknown) => /timed out/i.test(String((error as Error)?
  * Failed/malformed reads remain unknown, including incomplete ancestry.
  * A fresh row that claims work is read too: its `kanban_active` also counts settled cards still waiting for the chat's
  * close-out, which the task list leaves out, so only the read says what is open. If that read fails, the row stands. */
-export async function refreshArchiveTasks(id: string, session: SessionInfo | undefined, profile: string | undefined): Promise<SessionInfo | undefined> {
+export async function refreshArchiveTasks(id: string, session: SessionInfo | undefined, profile: string | undefined,
+  options?: { retryTransport?: boolean; budgetMs?: number; trace?: ArchiveTrace }): Promise<SessionInfo | undefined> {
   const fresh = hasFreshKanbanObservation(session) && !session?.kanban_unknown && !session?.kanban_remote_stale
 
   if (fresh && !session?.kanban_active && !session?.kanban_blocked) {
+    options?.trace?.('preflight=ok')
+
     return session
   }
 
@@ -40,6 +45,7 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
       const detail = error === undefined ? '' : `: ${String((error as Error)?.message ?? error).slice(0, 200)}`
       const route = `${owner.connectionId ?? '(none)'}/${owner.profile}${session?.connection_id ? '' : ' (no row owner)'}`
       console.error(`[archive-preflight] task status unknown for ${id} via ${route}: ${reason}${detail}`)
+      options?.trace?.(`preflight=unknown:${reason}${detail}`)
     }
 
     return unknown
@@ -51,8 +57,10 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
 
   const request = async <T>(path: string): Promise<T> => {
     try {
-      return await hermesApiAs<T>(owner, { path, timeoutMs: READ_TIMEOUT_MS })
+      return await hermesApiAs<T>(owner, { path, timeoutMs: Math.min(READ_TIMEOUT_MS, options?.budgetMs ?? READ_TIMEOUT_MS) })
     } catch (error) {
+      if (options?.retryTransport && isReconnectableSessionWriteError(error)) {throw error}
+
       if (!isTimeout(error)) {throw error}
 
       return hermesApiAs<T>(owner, { path, timeoutMs: READ_TIMEOUT_MS })
@@ -96,7 +104,9 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
       else {return unknownBecause(`task ${task.id} has status ${task.status}`)}
     }
 
+    if (settled) {return unknown}
     settled = true
+    options?.trace?.('preflight=ok')
 
     return { ...session, kanban_active: active, kanban_blocked: blocked, kanban_unknown: false,
       kanban_remote_stale: 0, kanban_observed_at: Date.now() / 1000 } as SessionInfo
@@ -104,9 +114,11 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
 
   try {
     return await Promise.race([read(), new Promise<SessionInfo>(resolve => {
-      timer = setTimeout(() => resolve(unknownBecause(`no answer within ${OVERALL_BUDGET_MS}ms (${stage})`)), OVERALL_BUDGET_MS)
+      timer = setTimeout(() => resolve(unknownBecause(`no answer within ${OVERALL_BUDGET_MS}ms (${stage})`)), Math.min(OVERALL_BUDGET_MS, options?.budgetMs ?? OVERALL_BUDGET_MS))
     })])
   } catch (error) {
+    if (options?.retryTransport && isReconnectableSessionWriteError(error)) {throw error}
+
     return unknownBecause(`${stage} failed`, error)
   } finally {
     clearTimeout(timer)

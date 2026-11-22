@@ -6,11 +6,12 @@ import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { type SessionInfo, setSessionArchived } from '@/hermes'
+import { getSession, type SessionInfo, setSessionArchived } from '@/hermes'
 import { registerArchiveGuard, resetArchiveGuardsForTests } from '@/store/archive-guards'
 import { $confirmRequest, settleConfirm } from '@/store/confirm'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $pinnedSessionIds } from '@/store/layout'
+import { $notifications } from '@/store/notifications'
 import { $offlineSessions, _resetOfflineSessionsForTests } from '@/store/offline-sessions'
 import { $projectTree } from '@/store/project-tree'
 import { $sessions, _resetSessionOwnerHintsForTests, setSessionOwnerHint, setSessions } from '@/store/session'
@@ -126,7 +127,7 @@ describe('archiveSession linked-work confirmation', () => {
     await act(() => handle.archiveSession('s-1'))
 
     expect($confirmRequest.get()).toBeNull()
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('s-1', true, { profile: 'default' })
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('s-1', true, { profile: 'default' }, expect.any(Function))
   })
 
   it('asks before archiving a chat with open Kanban tasks; Cancel keeps it', async () => {
@@ -185,7 +186,7 @@ describe('archiveSession linked-work confirmation', () => {
       await done
     })
 
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('s-1', true, { profile: 'default' })
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('s-1', true, { profile: 'default' }, expect.any(Function))
     expect($sessions.get()).toEqual([])
   })
 
@@ -356,7 +357,7 @@ describe('offline archive owner isolation', () => {
     const handle = await mountHarness()
     await act(() => handle.archiveSession('s-1', { selectedRow }))
     expect(hubRequest).not.toHaveBeenCalled()
-    expect(setSessionArchived).toHaveBeenCalledWith('s-1', true, { connectionId: 'mini', profile: 'work' })
+    expect(setSessionArchived).toHaveBeenCalledWith('s-1', true, { connectionId: 'mini', profile: 'work' }, expect.any(Function))
   })
   // Offline rows keep main's owner-scoped flow: no bare-id tombstone, no live-slice copy.
   it('does not tombstone another owner\'s cached chat with the same id', async () => {
@@ -493,32 +494,32 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
     await act(() => handle.archiveSession('hub-1'))
 
     expect($confirmRequest.get()).toBeNull()
-    expect(api.mock.calls.map(([request]) => request.connectionId)).toEqual(['hermes-hub', 'hermes-hub', 'hermes-hub'])
+    expect(api.mock.calls.map(([request]) => request.connectionId)).toEqual(['hermes-hub', 'hermes-hub', 'hermes-hub', 'hermes-hub'])
     expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'hermes-hub', sessionId: 'hub-1' }))
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true, hub)
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true, hub, expect.any(Function))
   })
 
-  it('still warns when the owning hub is genuinely unreachable', async () => {
+  it('queues when the owning hub is unreachable and fails visibly at the deadline without a safety override', async () => {
     $projectTree.set([{ previewSessions: [remoteRow()], repos: [] } as never])
     api.mockImplementation(desktopApi('down'))
     const handle = await mountHarness()
+    vi.useFakeTimers()
     let done: Promise<void> | undefined
 
     act(() => {
       done = handle.archiveSession('hub-1')
     })
-    await waitFor(() => expect($confirmRequest.get()).not.toBeNull())
-
-    expect($confirmRequest.get()!.details).toEqual([
-      { label: 'Kanban tasks', value: 'Task status unavailable; work may still be unfinished.' },
-      { label: 'Unverified work', value: 'Session ancestry unavailable; linked work or rented machines may still be active.' }
-    ])
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect($confirmRequest.get()).toBeNull()
+    expect($notifications.get().some(n => n.message.includes('Will archive when reconnected'))).toBe(true)
+    expect(ancestryGuard).not.toHaveBeenCalled()
     expect(api.mock.calls.every(([request]) => request.connectionId === 'hermes-hub')).toBe(true)
-    expect(console.error).toHaveBeenCalledWith(expect.stringMatching(/^\[archive-preflight\] task status unknown for hub-1 via hermes-hub\/default: GET \/api\/sessions\/hub-1 failed: Timed out/))
     await act(async () => {
-      settleConfirm(false)
+      await vi.advanceTimersByTimeAsync(70_000)
       await done
     })
+    vi.useRealTimers()
+    expect($notifications.get().some(n => n.kind === 'error')).toBe(true)
     expect(vi.mocked(setSessionArchived)).not.toHaveBeenCalled()
   })
 
@@ -552,7 +553,19 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
 
     await act(() => handle.archiveSession('hub-1', { selectedRow }))
 
-    expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: undefined }))
-    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true, { profile: 'default' })
+    expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'local' }))
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true, { connectionId: 'local', profile: 'default' }, expect.any(Function))
+  })
+
+  it('writes to the resolved nondefault profile, not default, for an ownerless/profileless row', async () => {
+    const selectedRow = remoteRow({ connection_id: undefined, profile: undefined, kanban_observed_at: Date.now() / 1000 })
+    setSessions([selectedRow])
+    vi.mocked(getSession).mockResolvedValueOnce({ ...selectedRow, profile: 'work' })
+    api.mockImplementation(async () => ({ id: 'hub-1', archived: true }))
+    const handle = await mountHarness()
+    await act(() => handle.archiveSession('hub-1', { selectedRow }))
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true,
+      { connectionId: 'local', profile: 'work' }, expect.any(Function))
+    expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'local', profile: 'work' }))
   })
 })

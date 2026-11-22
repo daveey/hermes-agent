@@ -413,7 +413,7 @@ export function mutateSessionFenced<T>(key: string, read: () => Promise<SessionM
   })
 }
 
-function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: Record<string, unknown>, profile?: ProfileScope): Promise<T> {
+function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: Record<string, unknown>, profile?: ProfileScope, onSend?: () => void): Promise<T> {
   // Null is the window's v1 route (its primary, local or remote); defaulting it to
   // the registry's 'local' source would pin a remote primary's edits to this machine.
   const scope = { connectionId: getApiRequestConnection(), ...sessionScoped(profile) }
@@ -430,6 +430,8 @@ function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: R
 
       return hermesApi<T>({ ...scope, path: params.size ? `${path}?${params}` : path, method, timeoutMs })
     }
+
+    onSend?.()
 
     return hermesApi<T>({ ...scope, path, method, timeoutMs,
       body: { ...payload, ...identity, ...(scope.profile ? { profile: scope.profile } : {}) } })
@@ -459,13 +461,13 @@ function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: R
 // An object owner also carries its CONNECTION [daveey]: a row listed from another
 // gateway (All Gateways sidebar) must be archived on that gateway, not on the
 // active one — otherwise the PATCH 404s locally and the row reappears.
-export function setSessionArchived(id: string, archived: boolean, profile?: ProfileScope): Promise<{ ok: boolean }> {
+export function setSessionArchived(id: string, archived: boolean, profile?: ProfileScope, onSend?: () => void): Promise<{ ok: boolean }> {
   const owner: ProfileScope =
     profile && typeof profile === 'object'
       ? { ...profile, profile: sessionWriteProfile(profile.profile) ?? null }
       : sessionWriteProfile(profile)
 
-  return mutateSessionHttp(id, 'PATCH', { archived, ...(archived ? { pinned: false } : {}) }, owner)
+  return mutateSessionHttp(id, 'PATCH', { archived, ...(archived ? { pinned: false } : {}) }, owner, onSend)
 }
 
 export function setSessionPinnedRemote(id: string, pinned: boolean, profile?: string | null): Promise<{ ok: boolean }> {

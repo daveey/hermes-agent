@@ -4859,6 +4859,8 @@ export const en: Translations = {
     deleteFailed: 'Delete failed',
     archived: 'Archived',
     archiveFailed: 'Archive failed',
+    archiveQueued: 'Will archive when reconnected. Task safety will be checked again first.',
+    archiveQueueDropped: 'A queued archive was cancelled by reload. Review the chat and archive again.',
     archiveLinkedTitle: (title: string) => (title ? `Archive “${title}”?` : 'Archive this chat?'),
     archiveLinkedBody: 'Review the linked-work status below. Archiving only hides the chat; it does not stop any tasks or machines.',
     archiveLinkedConfirm: 'Archive anyway',

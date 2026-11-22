@@ -1,8 +1,11 @@
 import type { SessionInfo } from '@/hermes'
 import type { Translations } from '@/i18n/types'
+import type { ArchiveTrace } from '@/lib/archive-trace'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $pinnedSessionIds } from '@/store/layout'
 import { notifyError } from '@/store/notifications'
 import { archiveIfOfflineCached } from '@/store/offline-session-actions'
+import { sessionActionRow } from '@/store/offline-session-owner'
 import { $profiles } from '@/store/profile'
 import { sessionPinId } from '@/store/session'
 import {
@@ -12,8 +15,18 @@ import {
   untombstoneSessions
 } from '@/store/session-removal'
 
+import { archiveOwnerRow } from './archive-owner'
 import { confirmLinkedArchive } from './confirm-linked-archive'
 import { dropListedSession, type findListedSession, resolveSessionProfile, restoreListedSession } from './utils'
+
+export function captureArchiveOwner(storedSessionId: string, selectedRow: SessionInfo | undefined, listed: ReturnType<typeof findListedSession>): SessionInfo {
+  let row = sessionActionRow(storedSessionId, selectedRow) ?? listed?.session
+
+  // Explicit selection is authoritative; other entry paths resolve like resume.
+  if (!selectedRow) {row = archiveOwnerRow(storedSessionId, row)}
+
+  return { ...row, connection_id: row?.connection_id || $connectionsRegistry.get()?.primary || undefined } as SessionInfo
+}
 
 /**
  * [daveey] Archive hides the row the moment the user asks, before the
@@ -94,7 +107,8 @@ export async function archivePreflight(
   listed: boolean,
   hidden: HiddenRow,
   copy: Translations['desktop'],
-  options?: { skipLinkedConfirm?: boolean }
+  options?: { skipLinkedConfirm?: boolean },
+  trace?: ArchiveTrace
 ): Promise<false | string | undefined> {
   const stampedProfile = archived?.profile?.trim()
   const profile = stampedProfile || (await resolveSessionProfile(storedSessionId))
@@ -106,8 +120,17 @@ export async function archivePreflight(
     return false
   }
 
-  if (!(await confirmLinkedArchive(storedSessionId, archived, profile, copy, options?.skipLinkedConfirm))) {
+  try {
+    if (!(await confirmLinkedArchive(storedSessionId, archived, profile, copy, options?.skipLinkedConfirm, trace))) {
+      trace?.('failed:confirmation-cancelled')
+      hidden.restore()
+
+      return false
+    }
+  } catch (error) {
+    trace?.(`failed:${String(error)}`)
     hidden.restore()
+    notifyError(error, copy.archiveFailed)
 
     return false
   }

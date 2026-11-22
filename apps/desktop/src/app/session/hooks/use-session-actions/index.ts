@@ -21,6 +21,7 @@ import {
   setSessionArchived
 } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { startArchiveTrace } from '@/lib/archive-trace'
 import {
   type ChatMessage,
   preserveLocalAssistantErrors,
@@ -54,7 +55,6 @@ import { pendingSessionReplay, requestGatewayForAgent, retainGatewayForAgent } f
 import { clearSessionGoal } from '@/store/goals'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
-import { sessionActionRow } from '@/store/offline-session-owner'
 import { adoptDraftPreviewTabs, prunePreviewTabsForSession } from '@/store/preview'
 import {
   $activeGatewayProfile,
@@ -170,8 +170,7 @@ import {
 import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-resume'
 
 import { commitArchive } from './archive-commit'
-import { archiveOwnerRow } from './archive-owner'
-import { archivePreflight, softHideArchivedRow } from './archive-soft-hide'
+import { archivePreflight, captureArchiveOwner, softHideArchivedRow } from './archive-soft-hide'
 import { branchThroughRowId } from './branch-boundary'
 import { branchCreateKey } from './branch-create-key'
 import { closeStoredSessionTile } from './close-stored-tile'
@@ -190,6 +189,7 @@ import {
 } from './owner-follow'
 import { reconcilePersistedLiveTurn } from './persisted-live-turn'
 import { provisionalTranscriptPaint, transcriptRestScope } from './provisional-transcript'
+import { reportDroppedArchiveQueues } from './reconnect-archive-preflight'
 import { rememberedOwnerForResume } from './remembered-owner'
 import { restorePendingApproval } from './restore-pending-approval'
 import { pendingClarifyToolPayload, restorePendingClarifyFromSnapshot } from './restore-pending-clarify'
@@ -430,6 +430,7 @@ export function useSessionActions({
 
   // Drop the create/fork guard once the router catches up — or if the user
   // navigates somewhere other than the pending id (left the pre-create route).
+  useEffect(reportDroppedArchiveQueues, [])
   useEffect(() => {
     const pending = pendingCreatedStoredSessionIdRef.current
 
@@ -3430,21 +3431,14 @@ export function useSessionActions({
       options?: { onDeselect?: () => void; skipLinkedConfirm?: boolean; selectedRow?: SessionInfo }
     ) => {
       clearNotifications()
-
+      const trace = startArchiveTrace(storedSessionId)
       const listed = findListedSession(storedSessionId)
       let archived: SessionInfo | undefined
 
       try {
-        archived = sessionActionRow(storedSessionId, options?.selectedRow) ?? listed?.session
-
-        // A selected row is the user's explicit owner; every other door
-        // (hotkey, tile menu, plugins) resolves it like resume does, so a
-        // remote chat whose Recents row is momentarily absent or ownerless is
-        // neither checked nor archived on the registry primary.
-        if (!options?.selectedRow) {
-          archived = archiveOwnerRow(storedSessionId, archived)
-        }
+        archived = captureArchiveOwner(storedSessionId, options?.selectedRow, listed)
       } catch (err) {
+        trace(`failed:${String(err)}`)
         notifyError(err, copy.archiveFailed)
 
         return
@@ -3462,21 +3456,20 @@ export function useSessionActions({
         }
       }
 
-      const profile = await archivePreflight(storedSessionId, archived, Boolean(listed), hidden, copy, options)
+      const profile = await archivePreflight(storedSessionId, archived, Boolean(listed), hidden, copy, options, trace)
 
       if (profile === false) {
         return
       }
 
-      // Route to the row's OWN gateway (mirrors deleteSession's removedOwner): an
-      // All-Gateways row archived via the active connection 404s there. Pinned once,
-      // so a Retry goes to the same owner with the same retained identity.
+      // Pin the same owner/profile the preflight checked, including a resolved profile.
       const archiveOwner = pinSessionWriteOwner(
-        archived?.connection_id ? { connectionId: archived.connection_id, profile: archived.profile || 'default' } : profile
+        archived?.connection_id ? { connectionId: archived.connection_id, profile: profile || 'default' } : profile
       )
 
       await commitArchive({
         copy,
+        trace,
         hidden,
         owner: archiveOwner,
         rehide: () => softHideArchivedRow(storedSessionId, archived, findListedSession(storedSessionId) ?? listed),

@@ -1,5 +1,7 @@
+import { hermesApiAs } from '@/api/client'
 import { type ProfileScope, setSessionArchived } from '@/hermes'
 import type { Translations } from '@/i18n/types'
+import { type ArchiveTrace, startArchiveTrace } from '@/lib/archive-trace'
 import { sessionWriteRetryAction } from '@/lib/session-write-retry'
 import { notifyError } from '@/store/notifications'
 
@@ -8,6 +10,7 @@ import type { softHideArchivedRow } from './archive-soft-hide'
 type HiddenRow = ReturnType<typeof softHideArchivedRow>
 
 interface ArchiveCommit {
+  trace?: ArchiveTrace
   storedSessionId: string
   /** Resolved once (`pinSessionWriteOwner`) before the first attempt; every Retry reuses it. */
   owner: ProfileScope
@@ -30,12 +33,33 @@ export async function commitArchive(commit: ArchiveCommit): Promise<boolean> {
   const { copy, hidden, owner, storedSessionId } = commit
 
   try {
-    await setSessionArchived(storedSessionId, true, owner)
+    let sends = 0
+
+    if (commit.trace) {
+      await setSessionArchived(storedSessionId, true, owner, () => commit.trace?.(`patch-sent n=${++sends}`))
+    } else {
+      await setSessionArchived(storedSessionId, true, owner)
+    }
+
+    // A write ACK alone is not archived=true evidence. Use the same pinned
+    // owner and the real IPC read path. Failed verification never replays a
+    // committed mutation or pretends its optimistic DOM is backend truth.
+    if (commit.trace) {
+      const scope = owner && typeof owner === 'object' ? owner : { profile: owner }
+      await Promise.resolve().then(() => hermesApiAs<{ id: string; archived?: boolean | number }>({ connectionId: scope.connectionId ?? null, profile: scope.profile ?? null },
+        { path: `/api/sessions/${encodeURIComponent(storedSessionId)}`, timeoutMs: 6_000 }))
+        .then(row => commit.trace?.(row.id === storedSessionId && (row.archived === true || row.archived === 1)
+          ? 'committed' : 'verification-pending:not-archived'))
+        .catch(() => commit.trace?.('verification-pending:read-failed'))
+    }
+
     commit.onArchived()
   } catch (err) {
+    commit.trace?.(`failed:${String(err)}`)
     hidden.restore()
     notifyError(err, copy.archiveFailed, {
-      action: sessionWriteRetryAction(err, commit.retryLabel, () => void commitArchive({ ...commit, hidden: commit.rehide() })),
+      action: sessionWriteRetryAction(err, commit.retryLabel, () => void commitArchive({ ...commit,
+        trace: commit.trace ? startArchiveTrace(storedSessionId) : undefined, hidden: commit.rehide() })),
       id: `archive-failed:${storedSessionId}`
     })
 
