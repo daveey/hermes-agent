@@ -47,7 +47,29 @@ def mandate(board, tid, *, session=CHAT, kind='agent', body='Renewed scope: one 
 
 
 def renew(board, tid, episode, comment, *, writer=AGENT, env=None, reason='origin chat authorized the round'):
-    return cli.renew(board, tid, episode=episode, comment_id=comment, reason=reason, writer=writer, env=env or {})
+    """``env``: what the caller's shell was started with, next to the session the writer names."""
+    started = {**({'HERMES_SESSION_ID': writer[1]} if writer[1] else {}), **(env or {})}
+    return cli.renew(board, tid, episode=episode, comment_id=comment, reason=reason, writer=writer, env=started,
+                     ancestry=[started])
+
+
+def ancestry(monkeypatch, *environs):
+    """Model the real process walk: this process started with ``environs[0]``, its parent with the next, ..."""
+    import os
+    from hermes_cli import kanban_comment_writer as writer
+    tree = {os.getpid() if i == 0 else 100 + i: (0 if i == len(environs) - 1 else 101 + i, env)
+            for i, env in enumerate(environs)}
+    monkeypatch.setattr(writer, '_read_proc', lambda pid: tree[pid])
+    return environs[0]
+
+
+def spoofed(board, tid, episode, comment, code, env):
+    """The real command path: no writer or ancestry handed in; identity is read from the (modelled) processes."""
+    with pytest.raises(RenewalRefused) as caught:
+        cli.renew(board, tid, episode=episode, comment_id=comment, reason='x', env=env)
+    assert caught.value.code == code
+    assert not board.execute("SELECT 1 FROM task_events WHERE task_id=? AND kind='scope_renewed'", (tid,)).fetchone()
+    assert decision.execution_restricted(board, tid)
 
 
 def refused(board, tid, episode, comment, code, **kw):
@@ -139,6 +161,41 @@ def test_c_stopped_cards_own_run_is_refused(board, monkeypatch):
     refused(board, tid, episode, comment, 'own_run', writer=('agent', session, '9:HERMES_SESSION_ID'))
     refused(board, tid, episode, comment, 'own_run', env={'HERMES_KANBAN_WORKER_TASK': tid})
     refused(board, tid, episode, comment, 'own_run', env={'HERMES_KANBAN_TASK': tid})
+
+
+def test_c_own_run_naming_the_owning_chats_session_with_its_markers_dropped_is_refused(board, monkeypatch):
+    """``HERMES_SESSION_ID=<owning chat> env -u HERMES_KANBAN_TASK -u HERMES_KANBAN_WORKER_TASK hermes kanban ...``"""
+    tid, session, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)  # written with the same spoofed session
+    shell = {'HERMES_KANBAN_WORKER_TASK': tid, 'HERMES_SESSION_ID': session}
+    env = ancestry(monkeypatch, {'HERMES_SESSION_ID': CHAT}, shell, {})
+    spoofed(board, tid, episode, comment, 'own_run', env)
+    env = ancestry(monkeypatch, {'HERMES_SESSION_ID': CHAT}, {'HERMES_KANBAN_TASK': tid}, {})  # session unbound
+    spoofed(board, tid, episode, comment, 'own_run', env)
+    env = ancestry(monkeypatch, {'HERMES_SESSION_ID': CHAT}, {'HERMES_SESSION_ID': session}, {})
+    spoofed(board, tid, episode, comment, 'own_run', env)
+
+
+def test_d_agent_naming_the_owning_chats_session_is_refused_and_the_chat_itself_renews(board, monkeypatch):
+    from hermes_cli import kanban_comment_writer as writer
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    other = {'HERMES_SESSION_ID': 'local-' + 'a' * 64, 'HERMES_KANBAN_WORKER_TASK': 't_00000000deadbeef'}
+    env = ancestry(monkeypatch, {'HERMES_SESSION_ID': CHAT}, other, {})  # another card's worker
+    spoofed(board, tid, episode, comment, 'identity_unavailable', env)
+    env = ancestry(monkeypatch, {'HERMES_SESSION_ID': CHAT}, {'HERMES_SESSION_ID': '20261101_000000_abcdef'}, {})
+    spoofed(board, tid, episode, comment, 'identity_unavailable', env)  # another chat
+    ancestry(monkeypatch, {'HERMES_AGENT': '1'}, {'HERMES_SESSION_ID': '20261101_000000_abcdef'}, {})
+    spoofed(board, tid, episode, comment, 'identity_unavailable', {'HERMES_SESSION_ID': CHAT})  # set after start
+
+    def unreadable(pid):
+        raise writer.Inconclusive('pid 7: environment unreadable')
+    monkeypatch.setattr(writer, '_read_proc', unreadable)
+    spoofed(board, tid, episode, comment, 'identity_unavailable', {'HERMES_SESSION_ID': CHAT})
+    env = ancestry(monkeypatch, {'HERMES_SESSION_ID': CHAT, 'HERMES_AGENT': '1'}, {'HERMES_SESSION_ID': CHAT}, {})
+    assert cli.renew(board, tid, episode=episode, comment_id=comment, reason='x', env=env)['authority_kind'] == 'chat'
 
 
 @pytest.mark.parametrize('writer', [AGENT, ('agent', None, '4242:HERMES_AGENT'), ('agent', CHAT, 'inconclusive:pid 1'),
@@ -266,6 +323,9 @@ def test_h_notice_and_unblock_text_name_the_route_only_for_scope_stops(board, mo
     assert f'hermes kanban renew-scope {tid} --episode' in text and f'hermes kanban promote {tid}' in text
     notice = decision.notice({'cause': 'scope_stopped', 'task_id': tid})
     assert f'hermes kanban renew-scope {tid} --episode' in notice and 'owning chat' in notice
+    from types import SimpleNamespace
+    from tui_gateway.session_notifications import _kb_spend_budget
+    assert f'renew-scope {tid} --episode' in _kb_spend_budget(SimpleNamespace(id=tid), {'cause': 'scope_stopped'}, '')
     safety = decision.notice({'cause': 'safety_refusal', 'task_id': tid})
     assert 'renew-scope' not in safety
     kb._append_event(board, tid, 'decision_hold_restricted', {'cause': 'safety_refusal'})

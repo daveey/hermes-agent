@@ -1,7 +1,13 @@
 """``hermes kanban renew-scope``: who is asking, and where the renewal is decided. [daveey]
 
-The caller is identified exactly as ``hermes kanban comment`` identifies a comment's writer
-(``kanban_comment_writer.cli_comment_writer``); no flag names a role or session. On a synced board the canonical
+The caller is classified exactly as ``hermes kanban comment`` classifies a comment's writer
+(``kanban_comment_writer.cli_comment_writer``); no flag names a role or session. For a comment the session only
+lowers authority; here it selects it, so the session and the Kanban task are not taken from this process's
+environment alone, which its parent chose (``HERMES_SESSION_ID=<owning chat> env -u HERMES_KANBAN_TASK hermes``).
+They are what the WHOLE process ancestry was started with (:func:`caller_identity`): a task marker on any
+ancestor counts even when the caller dropped it, and an ancestry naming two sessions has no identity. This is
+process provenance, not authentication: a same-user process that leaves its ancestry (double-fork, a command
+handed to another process) is out of its reach, as for comments. On a synced board the canonical
 Board decides and writes the ``scope_renewed`` event (one ``renew_scope`` op, so a card whose home is another
 gateway needs no courier); a board that never synced validates and appends in one local transaction.
 """
@@ -12,7 +18,7 @@ import json
 import os
 import re
 import sqlite3
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence
 
 from hermes_cli import kanban_scope_renewal as renewal
 from hermes_cli.kanban_scope_renewal import Actor, RenewalRefused
@@ -54,19 +60,33 @@ def _owning_sub(conn: sqlite3.Connection, task_id: str, session: str) -> Optiona
     return None
 
 
-def resolve_actor(conn: sqlite3.Connection, task_id: str, *, writer: tuple, env: Mapping[str, str],
+def caller_identity(environs: Sequence[Mapping[str, str]]) -> tuple[set, set]:
+    """``(sessions, tasks)``: every session id and Kanban task named by any of ``environs`` (the start-time
+    environments of the caller and its ancestors, plus the caller's current one)."""
+    from hermes_cli.kanban_comment_writer import marker_session
+    sessions, tasks = set(), set()
+    for env in environs:
+        sessions |= {str(env.get("HERMES_SESSION_ID") or "").strip()[:200], marker_session(env) or ""}
+        tasks |= {str(env.get(name) or "").strip() for name in _TASK_MARKERS}
+    return sessions - {""}, tasks - {""}
+
+
+def resolve_actor(conn: sqlite3.Connection, task_id: str, *, writer: tuple, environs: Sequence[Mapping[str, str]],
                   gateway: str, profile: str) -> Actor:
     """The renewing authority, or :class:`RenewalRefused`. The stopped card's own runs are refused first."""
     from hermes_cli.kanban_archive_scope import _creator_task_id
     kind, session, evidence = writer
     if kind == "human":
         return Actor("human", None, "human", None, gateway, profile)
-    marked = {str(env.get(name) or "").strip() for name in _TASK_MARKERS} - {""}
-    if task_id in marked or (session and session in _sessions(conn, task_id)):
+    sessions, marked = caller_identity(environs)
+    if task_id in marked or (sessions | ({session} if session else set())) & _sessions(conn, task_id):
         raise RenewalRefused("own_run", f"a run of {task_id} cannot renew its own stopped scope")
     if kind != "agent" or not session or not _MARKED.fullmatch(str(evidence)):
         raise RenewalRefused("identity_unavailable", "the caller's identity is missing or ambiguous "
                              f"({evidence}); renew from the owning chat, the creator task or a human terminal")
+    if sessions != {session}:
+        raise RenewalRefused("identity_unavailable", "the caller's process ancestry does not name exactly the "
+                             "session it claims; run renew-scope directly from the authority's own terminal")
     if len(marked) > 1:
         raise RenewalRefused("identity_unavailable", "the caller carries two different task identities")
     creator = _creator_task_id(conn, task_id)
@@ -121,13 +141,21 @@ def _canonical(conn: sqlite3.Connection, board: str, task_id: str, payload: dict
 
 def renew(conn: sqlite3.Connection, task_id: str, *, episode: str, comment_id: int, reason: str,
           board: Optional[str] = None, writer: Optional[tuple] = None,
-          env: Optional[Mapping[str, str]] = None) -> dict:
+          env: Optional[Mapping[str, str]] = None,
+          ancestry: Optional[Sequence[Mapping[str, str]]] = None) -> dict:
+    """``writer``/``env``/``ancestry`` are test seams; the command passes none and each is read from the process."""
     from hermes_cli import kanban_db_sync as sync
-    from hermes_cli.kanban_comment_writer import cli_comment_writer
+    from hermes_cli.kanban_comment_writer import Inconclusive, ancestry_environs, cli_comment_writer
     from hermes_cli.kanban_origin import gateway_names
     from hermes_cli.profiles import get_active_profile_name
     env = os.environ if env is None else env
-    actor = resolve_actor(conn, task_id, writer=writer or cli_comment_writer(env=env), env=env,
+    writer = writer or cli_comment_writer(env=env)
+    if ancestry is None and writer[0] != "human":
+        try:
+            ancestry = ancestry_environs()
+        except Inconclusive as exc:
+            raise RenewalRefused("identity_unavailable", f"the caller's process ancestry could not be read ({exc})")
+    actor = resolve_actor(conn, task_id, writer=writer, environs=[*(ancestry or ()), env],
                           gateway=gateway_names()[0], profile=get_active_profile_name() or "default")
     mode = sync.board_mode(conn)
     if mode == "off" and not sync.sync_state(conn):

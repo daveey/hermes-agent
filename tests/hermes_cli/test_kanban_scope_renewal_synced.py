@@ -68,7 +68,8 @@ def stopped(live, monkeypatch, hub):
 
 
 def renew(live, tid, episode, comment):
-    return cli.renew(live, tid, episode=episode, comment_id=comment, reason='authorized', writer=AGENT, env={})
+    return cli.renew(live, tid, episode=episode, comment_id=comment, reason='authorized', writer=AGENT, env={},
+                     ancestry=[{'HERMES_SESSION_ID': CHAT}])
 
 
 def test_board_applies_and_the_exact_event_is_projected(live, monkeypatch):

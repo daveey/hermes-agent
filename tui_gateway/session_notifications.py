@@ -627,7 +627,7 @@ def _kb_completed(task, payload: dict, title: str) -> str:
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
 def _kb_spend_budget(task, payload, title):
     from hermes_cli.kanban_spend_decision import notice
-    return ": " + notice(payload)
+    return ": " + notice({**(payload or {}), "task_id": getattr(task, "id", None)})
 
 
 def _kb_decision_requested(payload):

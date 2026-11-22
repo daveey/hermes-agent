@@ -119,6 +119,9 @@ def reopened(conn: sqlite3.Connection, task_id: str, ordinary: list[dict]) -> Op
     decision. Without this, a promotion older than the scope annotation would release the card at renewal.
     "After" is arrival order (the row id), as on the Board (its ``ord``): an event's ``created_at`` and uid are
     its writer's clock, and a promotion recorded before the renewal must not decide it whatever time it states.
+    On a synced board a replica's row id is its own arrival order, not the Board's: a promotion another gateway
+    recorded before the renewal can be pulled after it. This reader may then show the stop decided; execution
+    still needs the Board's lease, and the Board decides by its own ``ord`` (``spend_decision_pending``).
     ``ordinary``: stop/promotion/archive events.
     """
     renewed = sorted(renewals(conn, task_id), key=lambda e: int(e["id"]), reverse=True)

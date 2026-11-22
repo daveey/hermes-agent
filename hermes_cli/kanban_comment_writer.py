@@ -262,6 +262,30 @@ def agent_ancestor(pid: Optional[int] = None, *, read: Optional[ProcReader] = No
     raise Inconclusive(f"ancestry deeper than {MAX_ANCESTRY}")
 
 
+def ancestry_environs(pid: Optional[int] = None, *, read: Optional[ProcReader] = None) -> list[Mapping[str, str]]:
+    """Start-time environments of ``pid`` (default: this process) and EVERY ancestor up to init, nearest first.
+
+    Unlike :func:`agent_ancestor` the walk does not stop at the first marker: a caller that needs the identity a
+    process was started with (not only "is this an agent") must see what each ancestor carried, because the
+    nearest process's environment is whatever its parent chose to pass. A skipped OS supervisor contributes
+    nothing. Raises :class:`Inconclusive` when the walk can't be completed."""
+    read = read or _read_proc
+    current = os.getpid() if pid is None else int(pid)
+    seen: set[int] = set()
+    found: list[Mapping[str, str]] = []
+    for _ in range(MAX_ANCESTRY):
+        if current in seen:
+            raise Inconclusive(f"ancestry loop at pid {current}")
+        seen.add(current)
+        ppid, environ = read(current)
+        if environ:
+            found.append(environ)
+        if current == 1 or ppid <= 0:
+            return found
+        current = ppid
+    raise Inconclusive(f"ancestry deeper than {MAX_ANCESTRY}")
+
+
 def is_agent_handle(author: Optional[str]) -> bool:
     """True for an agent comment handle: ``<gateway>/t_<16 hex>`` or ``hub-chat-<6+ hex>``."""
     return _AGENT_HANDLE.fullmatch(author or "") is not None
