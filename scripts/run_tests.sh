@@ -37,6 +37,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Explicit allocator opt-in for address-space-bounded tests. No default is
+# imposed. Validate before launching any Python/test child; a small decimal
+# bound avoids shell arithmetic overflow and libc-specific extreme values.
+ALLOCATOR_ENV=()
+if [ "${MALLOC_ARENA_MAX+x}" = x ]; then
+  if [[ ! "$MALLOC_ARENA_MAX" =~ ^[1-9][0-9]{0,3}$ ]] || (( MALLOC_ARENA_MAX > 1024 )); then
+    echo "error: MALLOC_ARENA_MAX must be a canonical decimal integer from 1 to 1024" >&2
+    exit 2
+  fi
+  ALLOCATOR_ENV+=("MALLOC_ARENA_MAX=$MALLOC_ARENA_MAX")
+fi
+
 # ── Locate python ───────────────────────────────────────────────────────────
 # The suite runs under the checkout's isolated test environment (pm.testenv),
 # and only there: unless the inherited environment is current for this
@@ -233,6 +245,7 @@ exec env -i \
   HOME="$HOME" \
   ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
   ${TEST_ENV[@]+"${TEST_ENV[@]}"} \
+  ${ALLOCATOR_ENV[@]+"${ALLOCATOR_ENV[@]}"} \
   TZ=UTC \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
