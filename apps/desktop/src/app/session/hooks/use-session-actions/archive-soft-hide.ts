@@ -20,13 +20,20 @@ import { archiveOwnerRow } from './archive-owner'
 import { confirmLinkedArchive } from './confirm-linked-archive'
 import { dropListedSession, type findListedSession, resolveSessionProfile, restoreListedSession } from './utils'
 
+// Rows whose connection came from the registry primary pin, not from the row itself.
+const primaryPinned = new WeakSet<object>()
+
 export function captureArchiveOwner(storedSessionId: string, selectedRow: SessionInfo | undefined, listed: ReturnType<typeof findListedSession>): SessionInfo {
   let row = sessionActionRow(storedSessionId, selectedRow) ?? listed?.session
 
   // Explicit selection is authoritative; other entry paths resolve like resume.
   if (!selectedRow) {row = archiveOwnerRow(storedSessionId, row)}
 
-  return { ...row, connection_id: row?.connection_id || $connectionsRegistry.get()?.primary || undefined } as SessionInfo
+  const captured = { ...row, connection_id: row?.connection_id || $connectionsRegistry.get()?.primary || undefined } as SessionInfo
+
+  if (!row?.connection_id) {primaryPinned.add(captured)}
+
+  return captured
 }
 
 /**
@@ -125,7 +132,10 @@ export async function archivePreflight(
     return false
   }
 
-  const profile = resolvedProfile || fallbackProfile
+  // The invocation's profile only stands in for an ownerless row; a row that carries its own
+  // connection keeps the pre-existing 'default' for a missing profile.
+  const ownConnection = Boolean(archived?.connection_id) && !(archived && primaryPinned.has(archived))
+  const profile = resolvedProfile || (ownConnection ? 'default' : fallbackProfile)
 
   try {
     if (!(await confirmLinkedArchive(storedSessionId, archived, profile, copy, options?.skipLinkedConfirm, trace))) {

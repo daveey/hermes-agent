@@ -580,6 +580,38 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
     vi.mocked(getSession).mockReset()
   })
 
+  it('captures the invocation profile before a pending profile resolution settles', async () => {
+    setRequestProfile('work')
+
+    let rejectSession: (error: Error) => void = () => {}
+    vi.mocked(getSession).mockImplementation(() => new Promise((_resolve, reject) => { rejectSession = reject }))
+    api.mockImplementation(async ({ path }: { path: string }) => path.includes('session-kanban-tasks') ? { tasks: [] } : { id: 'unlisted', archived: true })
+    const handle = await mountHarness()
+    let done: Promise<void> | undefined
+    act(() => { done = handle.archiveSession('unlisted') })
+    await waitFor(() => expect(getSession).toHaveBeenCalled())
+    setRequestProfile('other')
+    await act(async () => { rejectSession(new Error('socket hang up')); await done })
+    expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'local', profile: 'work' }))
+    expect(setSessionArchived).toHaveBeenCalledWith('unlisted', true, { connectionId: 'local', profile: 'work' }, expect.any(Function))
+    setRequestProfile(null)
+    vi.mocked(getSession).mockReset()
+  })
+
+  it('keeps default for a row that carries its own connection but no profile, whatever profile is active', async () => {
+    setRequestProfile('work')
+    vi.mocked(getSession).mockRejectedValue(new Error('socket hang up'))
+    $projectTree.set([{ previewSessions: [remoteRow({ profile: undefined })], repos: [] } as never])
+    api.mockImplementation(desktopApi('up'))
+    const handle = await mountHarness()
+    await act(() => handle.archiveSession('hub-1'))
+    expect(api.mock.calls.map(([request]) => request.profile)).not.toContain('work')
+    expect(ancestryGuard).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'hermes-hub', profile: 'default' }))
+    expect(setSessionArchived).toHaveBeenCalledWith('hub-1', true, hub, expect.any(Function))
+    setRequestProfile(null)
+    vi.mocked(getSession).mockReset()
+  })
+
   it('writes to the resolved nondefault profile, not default, for an ownerless/profileless row', async () => {
     const selectedRow = remoteRow({ connection_id: undefined, profile: undefined, kanban_observed_at: Date.now() / 1000 })
     setSessions([selectedRow])

@@ -10,6 +10,7 @@ import { hasFreshKanbanObservation } from '@/store/kanban-observation'
  * inside an overall budget so the dialog never hangs. */
 const READ_TIMEOUT_MS = 6_000
 const OVERALL_BUDGET_MS = 14_000
+const TIMER_GRACE_MS = 250
 
 const isTimeout = (error: unknown) => /timed out/i.test(String((error as Error)?.message ?? error))
 
@@ -114,7 +115,11 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
 
   try {
     return await Promise.race([read(), new Promise<SessionInfo>(resolve => {
-      timer = setTimeout(() => resolve(unknownBecause(`no answer within ${OVERALL_BUDGET_MS}ms (${stage})`)), Math.min(OVERALL_BUDGET_MS, options?.budgetMs ?? OVERALL_BUDGET_MS))
+      // The overall timer trails the capped per-request timeout, so a transport rejection of the last
+      // attempt wins the race and is queued/restored instead of becoming an override dialog.
+      const limit = Math.min(OVERALL_BUDGET_MS, options?.budgetMs === undefined ? OVERALL_BUDGET_MS : options.budgetMs + TIMER_GRACE_MS)
+
+      timer = setTimeout(() => resolve(unknownBecause(`no answer within ${limit}ms (${stage})`)), limit)
     })])
   } catch (error) {
     if (options?.retryTransport && isReconnectableSessionWriteError(error)) {throw error}

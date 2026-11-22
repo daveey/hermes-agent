@@ -215,7 +215,8 @@ it('limits a preflight read to the reconnect window remaining budget', async () 
   expect(api).toHaveBeenCalledWith(expect.objectContaining({
     path: `/api/sessions/${row.id}`, timeoutMs: 125, connectionId: 'owner', profile: 'work'
   }))
-  await vi.advanceTimersByTimeAsync(124)
+  // The overall timer trails the capped request by a 250ms grace so a transport rejection wins.
+  await vi.advanceTimersByTimeAsync(374)
   expect(finished).toBe(false)
   await vi.advanceTimersByTimeAsync(1)
   // Capture the deadline outcome before allowing the read to finish, so a
@@ -257,6 +258,20 @@ it('keeps a timed-out preflight unknown when its successful task read arrives la
   expect(stages).toEqual(deadlineStages)
   expect(stages).not.toContain('preflight=ok')
   expect(result?.kanban_unknown).toBe(true)
+})
+
+it.each([1, 30])('lets a transport rejection %sms after the capped request timeout beat the overall timer', async (lag: number) => {
+  const api = vi.fn(({ timeoutMs }: HermesApiRequest) => new Promise((_resolve, reject) => {
+    setTimeout(() => reject(new Error('Timed out connecting to Hermes backend after 5000ms')), (timeoutMs ?? 0) + lag)
+  }))
+
+  vi.stubGlobal('hermesDesktop', { api })
+
+  const outcome = refreshArchiveTasks(row.id, row, 'work', { retryTransport: true, budgetMs: 5_000 }).then(
+    () => 'resolved', () => 'rejected')
+
+  await vi.advanceTimersByTimeAsync(6_000)
+  expect(await outcome).toBe('rejected')
 })
 
 it('pins an ownerless preflight to the initial primary across reconnect and a registry switch', async () => {
