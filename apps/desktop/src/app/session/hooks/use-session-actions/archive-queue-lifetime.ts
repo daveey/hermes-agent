@@ -2,26 +2,34 @@ import { translateNow } from '@/i18n'
 import type { Translations } from '@/i18n/types'
 import { dismissNotification, notify } from '@/store/notifications'
 
+import { holdArchiveQueueLock } from './archive-queue-lock'
+
 const PREFIX = 'hermes:archive-preflight-queue:'
 const active = new Set<string>()
 const storageKeys = (storage: Storage) => Array.from({ length: storage.length }, (_, index) => storage.key(index) ?? '')
-const windowPrefix = () => `${PREFIX}${encodeURIComponent(new URLSearchParams(window.location.search).get('win') ?? 'main')}:`
 
-/** Persist the existence, not a safety verdict or a mutation to replay. A new
- * renderer explicitly drops its window's old intents with a standing notice. */
-export function reportDroppedArchiveQueues(): void {
-  const legacy = storageKeys(sessionStorage).filter(key => key.startsWith(PREFIX) && !active.has(key))
-  const keys = storageKeys(localStorage).filter(key => key.startsWith(windowPrefix()) && !active.has(key))
-
-  if (!keys.length && !legacy.length) {return}
-  notify({ id: 'archive-queue-reload', kind: 'warning', persistent: true, durationMs: 0,
+/** Locks, unlike URL window types or module memory, distinguish live renderers
+ * from reload/restart orphans. Never retire a peer's still-running intent. */
+export async function reportDroppedArchiveQueues(): Promise<void> {
+  const dropped = () => notify({ id: 'archive-queue-reload', kind: 'warning', persistent: true, durationMs: 0,
     message: translateNow('desktop.archiveQueueDropped') })
-  keys.forEach(key => localStorage.removeItem(key))
-  legacy.forEach(key => sessionStorage.removeItem(key))
+
+  const legacy = storageKeys(sessionStorage).filter(key => key.startsWith(PREFIX) && !active.has(key))
+
+  if (legacy.length) {dropped(); legacy.forEach(key => sessionStorage.removeItem(key))}
+
+  if (!navigator.locks) {return}
+  await Promise.all(storageKeys(localStorage).filter(key => key.startsWith(PREFIX) && !active.has(key)).map(key =>
+    navigator.locks.request(key, { ifAvailable: true }, lock => {
+      if (!lock || localStorage.getItem(key) === null) {return}
+      dropped()
+      localStorage.removeItem(key)
+    })))
 }
 
 export function archiveQueueLifetime(attemptId: string, id: string, copy: Translations['desktop']) {
-  const key = `${windowPrefix()}${attemptId}`
+  const key = `${PREFIX}${attemptId}`
+  let release: (() => void) | undefined
   let queued = false
   let disposed = false
   const controller = new AbortController()
@@ -51,10 +59,18 @@ export function archiveQueueLifetime(attemptId: string, id: string, copy: Transl
         clearTimeout(timer)
       }
     },
-    enqueue: () => {
+    enqueue: async () => {
       if (queued) {return false}
+      release = await holdArchiveQueueLock(key, controller.signal)
+
+      if (disposed || controller.signal.aborted) {
+        release()
+        controller.signal.throwIfAborted()
+        throw new Error(copy.archiveQueueCancelled)
+      }
+
       // If persistence is unavailable, fail visibly rather than silently losing
-      // an intent on restart. Window-scoped keys don't retire other windows' work.
+      // an intent on restart. The held lock, not a URL label, owns this marker.
       localStorage.setItem(key, id)
       queued = true
       notify({ id: key, kind: 'info', persistent: true, durationMs: 0,
@@ -66,7 +82,8 @@ export function archiveQueueLifetime(attemptId: string, id: string, copy: Transl
     dispose: () => {
       disposed = true
       active.delete(key)
-      localStorage.removeItem(key)
+
+      try {localStorage.removeItem(key)} finally {release?.()}
 
       if (queued) {dismissNotification(key)}
     }

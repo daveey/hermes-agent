@@ -114,13 +114,13 @@ it.each(['button', 'dismiss'])('cancels through %s, restores immediately and ign
   expect(Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '').filter(k => k.startsWith('hermes:archive-preflight-queue:'))).toHaveLength(0)
 })
 
-it('reports restart loss from durable storage even without sessionStorage, and leaves other windows alone', () => {
+it('reports orphaned restart markers across window types without sessionStorage', async () => {
   localStorage.setItem('hermes:archive-preflight-queue:main:old-attempt', row.id)
   localStorage.setItem('hermes:archive-preflight-queue:other-window:active-attempt', 'other')
-  reportDroppedArchiveQueues()
+  await reportDroppedArchiveQueues()
   expect($notifications.get().find(n => n.id === 'archive-queue-reload')?.message).toBe(en.desktop.archiveQueueDropped)
   expect(localStorage.getItem('hermes:archive-preflight-queue:main:old-attempt')).toBeNull()
-  expect(localStorage.getItem('hermes:archive-preflight-queue:other-window:active-attempt')).toBe('other')
+  expect(localStorage.getItem('hermes:archive-preflight-queue:other-window:active-attempt')).toBeNull()
 })
 
 it('keeps non-transport unknown as a warning confirmation, never automatic permission', async () => {

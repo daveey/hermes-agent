@@ -430,7 +430,7 @@ export function useSessionActions({
 
   // Drop the create/fork guard once the router catches up — or if the user
   // navigates somewhere other than the pending id (left the pre-create route).
-  useEffect(reportDroppedArchiveQueues, [])
+  useEffect(() => {void reportDroppedArchiveQueues()}, [])
   useEffect(() => {
     const pending = pendingCreatedStoredSessionIdRef.current
 

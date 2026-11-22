@@ -29,7 +29,7 @@ export async function reconnectArchivePreflight(id: string, row: SessionInfo | u
           trace?.('preflight=waiting-reconnect')
           queued = true
 
-          if (queue.enqueue()) {trace?.('queued')}
+          if (await queue.enqueue()) {trace?.('queued')}
         }
 
         throw error

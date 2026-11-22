@@ -6,6 +6,11 @@ import { resetSingleTabsForTests } from './src/components/pane-shell/tree/single
 import { clearPlaybackSourceCache } from './src/lib/playback-source-cache'
 import { resetParkRowsForTests } from './src/store/session-park-rows'
 import { InertResizeObserver } from './src/test/jsdom'
+import { archiveQueueLocksFixture } from './src/test/web-locks'
+
+// Chromium supplies origin-wide Web Locks; jsdom does not. No feature/store
+// imports here: per-file mocks must still run before the action graph loads.
+Object.defineProperty(navigator, 'locks', { configurable: true, value: archiveQueueLocksFixture().locks })
 
 // Shared tooltips measure their arrow through Radix's useSize hook.
 // Geometry assertions still belong in a real browser, not this inert observer. Assigned,
