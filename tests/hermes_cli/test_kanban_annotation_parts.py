@@ -165,6 +165,24 @@ def test_every_gated_refresh_publishes_what_a_cold_full_read_would(world):
         assert _undated(_published()) == _undated(gated)
 
 
+def test_a_board_whose_stat_cannot_vouch_rereads_every_part(world, monkeypatch, tmp_path):
+    bare = tmp_path / 'bare' / 'kanban.db'
+    bare.parent.mkdir()
+    conn = sqlite3.connect(bare, isolation_level=None)  # no revision triggers: stat fallback
+    conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, session_id TEXT)")
+    conn.execute("INSERT INTO tasks VALUES ('t1', 'running', 's1')")
+    try:
+        monkeypatch.setattr(ksa, '_board_db_paths', lambda: [bare])
+        monkeypatch.setattr(host, '_watch_paths', lambda scope: ([str(bare), str(world.plain)], []))
+        assert ksa._board_content_key(bare)[:1] == ('stat',)
+        _refresh()
+        before = _reads(world)
+        _refresh()  # An unsettled file stat cannot certify any part's cached answer.
+        assert _reads(world) == tuple(n + 1 for n in before)
+    finally:
+        conn.close()
+
+
 def test_a_due_provider_deadline_rereads_every_part_without_any_write(world, monkeypatch):
     _refresh()
     assert _reads(world) == (1, 1, 1)
