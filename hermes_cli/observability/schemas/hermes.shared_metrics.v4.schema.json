@@ -4673,6 +4673,7 @@
                 "kanban_heartbeat",
                 "kanban_link",
                 "kanban_list",
+                "kanban_protect_stopped",
                 "kanban_request_changes",
                 "kanban_request_review",
                 "kanban_resume_contained",
