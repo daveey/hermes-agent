@@ -63,9 +63,9 @@ export function useSessionFilters(inputs: SessionFilterInputs) {
 
   const pluginFilters = useContributions(SESSION_FILTER_AREA)
 
-  const matchesFilters = useCallback(
+  const matchesCoreFilters = useCallback(
     // The shared tick must invalidate memoized filters even when the dot stays `background`.
-    (session: SessionInfo, withPlugins: boolean) => {
+    (session: SessionInfo) => {
       // [daveey] A hidden gateway's rows leave every list and lane.
       if (sessionOnHiddenGateway(session, hiddenGatewayIds, gatewayRegistry)) {
         return false
@@ -101,20 +101,7 @@ export function useSessionFilters(inputs: SessionFilterInputs) {
         }
       }
 
-      // [daveey] Plugin `sessions.filter` contributions: ANDed, fail-open.
-      if (withPlugins && !applySessionFilters(session, pluginFilters)) {
-        return false
-      }
-
-      // Same membership the sidebar groups and colors by (backend owner first,
-      // cwd walk otherwise), so a filtered row lands in the lane the user
-      // picked it from.
-      return navigation.matches(
-        session,
-        projectFilter,
-        navigationGroups,
-        sessionMatchesProjectFilter(session, projectFilter, projects, projectOwners, knownProjects)
-      )
+      return true
     },
     [
       hiddenGatewayIds,
@@ -122,22 +109,33 @@ export function useSessionFilters(inputs: SessionFilterInputs) {
       showAutomated,
       pinnedSessionIds,
       statusFilter,
-      projectFilter,
-      navigationGroups,
       profileFilter,
       showAllProfiles,
       prFilter,
       pullRequests,
-      projects,
-      projectOwners,
-      knownProjects,
       dotStates,
-      executionNow,
-      pluginFilters
+      executionNow
     ]
   )
 
-  const sessionMatchesFilters = useCallback((session: SessionInfo) => matchesFilters(session, true), [matchesFilters])
+  // Keep the SDK snapshot independent of plugin registration. A consumer may
+  // re-register its contribution whenever that snapshot changes.
+  const matchesNavigation = useCallback(
+    (session: SessionInfo) =>
+      navigation.matches(
+        session,
+        projectFilter,
+        navigationGroups,
+        sessionMatchesProjectFilter(session, projectFilter, projects, projectOwners, knownProjects)
+      ),
+    [projectFilter, navigationGroups, projects, projectOwners, knownProjects]
+  )
+
+  const sessionMatchesFilters = useCallback(
+    (session: SessionInfo) =>
+      matchesCoreFilters(session) && applySessionFilters(session, pluginFilters) && matchesNavigation(session),
+    [matchesCoreFilters, pluginFilters, matchesNavigation]
+  )
 
   const filtersNarrow = sidebarFiltersNarrow({
     hiddenGatewayIds,
@@ -164,8 +162,11 @@ export function useSessionFilters(inputs: SessionFilterInputs) {
   // What the SDK's `useSidebarSessions` hands plugins: the list with core
   // filters applied but not `sessions.filter` contributions.
   const prePluginSessions = useMemo(
-    () => (coreFiltersNarrow ? scopedSessions.filter(session => matchesFilters(session, false)) : scopedSessions),
-    [scopedSessions, coreFiltersNarrow, matchesFilters]
+    () =>
+      coreFiltersNarrow
+        ? scopedSessions.filter(session => matchesCoreFilters(session) && matchesNavigation(session))
+        : scopedSessions,
+    [scopedSessions, coreFiltersNarrow, matchesCoreFilters, matchesNavigation]
   )
 
   const visibleSessions = useMemo(

@@ -1,5 +1,7 @@
+import { useStore } from '@nanostores/react'
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { useEffect } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -141,6 +143,56 @@ describe('ChatSidebar navigation activity', () => {
     $removedSessionIds.set(new Set())
     $layoutTree.set(null)
     noteActiveTreeGroup(null)
+  })
+
+  it('keeps list-dependent plugin registration stable while reflecting core input changes', () => {
+    resetSidebarView()
+    renderSidebar('/', 'chat')
+    let registrations = 0
+
+    function Consumer() {
+      // This is the SDK useSidebarSessions hook's store subscription.
+      const sessions = useStore($sidebarSessionsPrePlugin)
+
+      useEffect(() => {
+        registrations++
+
+        // Bound the reproduction instead of crashing React with an infinite loop.
+        if (registrations >= 8) {
+          return
+        }
+
+        return registry.register({
+          area: SESSION_FILTER_AREA,
+          id: 'list-consumer',
+          data: { match: (s: { id: string }) => sessions.some(row => row.id === s.id) }
+        })
+      }, [sessions])
+
+      return null
+    }
+
+    const consumer = render(<Consumer />)
+
+    try {
+      expect(registrations).toBe(1)
+      expect($sidebarSessionsPrePlugin.get().map(row => row.id)).toEqual(['tile-one', 'tile-two'])
+
+      act(() => $sessions.set([sessionRows[0]]))
+      expect(registrations).toBe(2)
+      expect($sidebarSessionsPrePlugin.get().map(row => row.id)).toEqual(['tile-one'])
+
+      act(() => $sidebarStatusFilter.set(['draft']))
+      expect(registrations).toBe(3)
+      expect($sidebarSessionsPrePlugin.get()).toEqual([])
+
+      act(() => $sidebarStatusFilter.set([]))
+      expect(registrations).toBe(4)
+      expect($sidebarSessionsPrePlugin.get().map(row => row.id)).toEqual(['tile-one'])
+    } finally {
+      consumer.unmount()
+      act(() => resetSidebarView())
+    }
   })
 
   it('keeps navigation and session activity coherent with the focused pane', () => {
