@@ -29,7 +29,10 @@ def ensure_schema(conn) -> None:
     conn.execute('CREATE TABLE IF NOT EXISTS kanban_actionability_commands ('
                  'op_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, contract_key TEXT NOT NULL, phase TEXT NOT NULL, '
                  'request_json TEXT NOT NULL, request_sha256 TEXT NOT NULL, delivery_state TEXT NOT NULL, '
-                 'canonical_receipt_json TEXT, UNIQUE(task_id,contract_key,phase))')
+                 'canonical_receipt_json TEXT, eligibility_checked_at INTEGER, UNIQUE(task_id,contract_key,phase))')
+    columns = {r[1] for r in conn.execute('PRAGMA table_info(kanban_actionability_commands)')}
+    if 'eligibility_checked_at' not in columns:
+        conn.execute('ALTER TABLE kanban_actionability_commands ADD COLUMN eligibility_checked_at INTEGER')
 
 
 def envelope(task_id: str, payload: dict, phase: str = 'contract') -> dict:
@@ -118,13 +121,80 @@ def own_batch(rows: list[dict]) -> list[dict]:
     return rows
 
 
+def escalation_ready(hub, board: str, wire: dict, cap: dict) -> None:
+    """Eligibility before issuance; only the canonical clock/root can admit it."""
+    if int(cap['hlc'][:13]) // 1000 < wire['payload']['deadline_at']:
+        raise ValueError('actionability_not_due: wait for original canonical deadline')
+    _, root = _evidence(hub, board, wire['contract_uid'], wire['task'], 'actionability_contract', hub.ident.gateway)
+    expected = envelope(wire['task'], wire['payload'], 'contract')
+    if (root.get('contract') != wire['payload'] or root.get('home_gateway') != hub.ident.gateway
+            or root.get('request_uid') != expected['client_op_id']
+            or root.get('request_sha256') != digest(canonical(expected))):
+        raise ValueError('actionability root prerequisite does not attest frozen contract')
+
+
+def _eligibility_capability(hub, board):
+    """Memoize a failed read for this selection too; outages cannot fan out probes."""
+    from hermes_cli.kanban_sync_client import HubError
+    try:
+        return capability(hub, board)
+    except (ValueError, KeyError, TypeError, OSError, HubError) as exc:
+        return exc
+
+
+def eligible_pending(conn, rows, hub, board):
+    """Filter UNISSUED diagnostics before batch limits; preserve their exact custody.
+
+    A raw STRICT sender must call this before assigning any stream sequence. Core
+    currently uses legacy ops, so no already-issued stream slot is reordered here.
+    """
+    from hermes_cli.kanban_sync_client import HubError
+    from hermes_cli.kanban_db_connect import write_txn
+    cap, candidates = None, set()
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='kanban_actionability_commands'").fetchone():
+        with write_txn(conn):
+            ensure_schema(conn)
+        candidates = {r[0] for r in conn.execute(
+            'SELECT c.op_id FROM kanban_actionability_commands c JOIN kanban_sync_outbox o ON o.op_id=c.op_id '
+            "WHERE c.phase='escalation' AND o.state='pending' "
+            "AND (o.retry_after IS NULL OR o.retry_after<=CAST(strftime('%s','now') AS INTEGER)) "
+            'ORDER BY COALESCE(c.eligibility_checked_at,0),c.op_id LIMIT 32')}
+        # Rotate the whole chosen window, including quarantined rows filtered upstream.
+        # A blocked/unsendable prefix therefore cannot monopolize the probe budget.
+        with write_txn(conn):
+            conn.executemany(f'UPDATE kanban_actionability_commands SET eligibility_checked_at={sync._NOW_MS_SQL} '
+                             'WHERE op_id=?', [(op_id,) for op_id in candidates])
+    for row in rows:
+        if row['op'] != KIND:
+            yield row
+            continue
+        try:
+            wire = outbound(conn, row)
+            if wire['phase'] == 'escalation' and row['op_id'] not in candidates:
+                continue
+            cap = cap or _eligibility_capability(hub, board)
+            if isinstance(cap, Exception):
+                raise cap
+            if wire['phase'] == 'escalation':
+                escalation_ready(hub, board, wire, cap)
+        except (ValueError, KeyError, TypeError, OSError, HubError) as exc:
+            error = ('diagnostic prerequisite pending; preserve frozen request: ' + str(exc))[:500]
+            with write_txn(conn):
+                conn.execute('UPDATE kanban_sync_outbox SET last_error=? WHERE op_id=? AND '
+                             "state='pending' AND COALESCE(last_error,'')!=?", (error, row['op_id'], error))
+            continue
+        yield row
+
+
 def before_send(conn, rows, hub, board) -> None:
     retain.before_send(conn, rows, hub, board)
     if any(row['op'] == KIND for row in rows):
-        capability(hub, board)
+        cap = capability(hub, board)
         for row in rows:
             if row['op'] == KIND:
-                outbound(conn, row)
+                wire = outbound(conn, row)
+                if wire['phase'] == 'escalation':
+                    escalation_ready(hub, board, wire, cap)
 
 
 def record_result(conn, row: dict, result: dict) -> str:
@@ -173,7 +243,9 @@ def confirm(conn, hub, board: str, op_id: str) -> dict:
     if not old or old['delivery_state'] == 'rejected':
         raise ValueError('actionability frozen custody unavailable or rejected')
     wire = outbound(conn, {'op': KIND, 'op_id': op_id, 'row_uid': old['task_id'], 'fields': old['request_json']})
-    capability(hub, board)
+    cap = capability(hub, board)
+    if wire['phase'] == 'escalation':
+        escalation_ready(hub, board, wire, cap)
     reply = hub.ops(board, [wire])
     results = reply.get('results', []) if isinstance(reply, dict) else []
     if (not isinstance(results, list) or len(results) != 1 or not isinstance(results[0], dict)

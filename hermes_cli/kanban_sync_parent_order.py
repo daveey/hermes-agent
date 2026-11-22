@@ -9,7 +9,8 @@ def select_pending(conn, hub, board, seen, *, now: int, limit: int, before_head:
     from hermes_cli import kanban_sync_backlog as backlog
     from hermes_cli.kanban_sync_quarantine import pending_rows
 
-    rows = selected = parent_first(conn, pending_rows(conn, now), now, limit)
+    from hermes_cli.kanban_actionability_transport import eligible_pending
+    rows = selected = parent_first(conn, eligible_pending(conn, pending_rows(conn, now), hub, board), now, limit)
     stopped = False
     if before_head:
         rows, stopped = backlog.sendable_before_head(conn, hub, board, rows, seen)

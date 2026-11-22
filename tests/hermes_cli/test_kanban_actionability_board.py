@@ -20,7 +20,8 @@ from tests.hermes_cli import kanban_sync_support as support
 
 
 @pytest.mark.skipif(not os.environ.get('B2_M1_LOCAL_BOARD_URL'), reason='requires isolated local wrangler Board')
-def test_frozen_root_board_replica_deadline_escalation(tmp_path, monkeypatch):
+@pytest.mark.parametrize('prerequisite', ['deadline', 'root'])
+def test_frozen_root_board_replica_deadline_escalation(tmp_path, monkeypatch, prerequisite):
     url = os.environ['B2_M1_LOCAL_BOARD_URL']
     assert url.startswith('http://127.0.0.1:')
     home = support.kanban_home(tmp_path, monkeypatch)
@@ -55,7 +56,25 @@ def test_frozen_root_board_replica_deadline_escalation(tmp_path, monkeypatch):
                    'owner': {'kind': 'unavailable', 'refs': []},
                    'blocker': {'prerequisite': 'explicit administrative disposition', 'trigger': 'supported owner decision', 'evidence': [source['uid']]},
                    'action': 'repair_lifecycle_contract', 'instruction': 'Record diagnostic custody only; never run original scope',
-                   'first_observed': source['created_at'], 'deadline_at': source['created_at'] + 1, 'legacy': False}
+                   'first_observed': source['created_at'], 'deadline_at': source['created_at'] + (5 if prerequisite == 'deadline' else 1), 'legacy': False}
+        import time
+        from tests.waiting import wait_until
+        with kbc.write_txn(conn):
+            pending = act.reserve(conn, tid, payload, phase='escalation')
+        if prerequisite == 'deadline':
+            with kbc.write_txn(conn):
+                root = act.reserve(conn, tid, payload)
+            assert act.confirm(conn, hub, board, root['op_id'])['delivery_state'] == 'confirmed'
+        else:
+            wait_until(lambda: time.time() >= payload['deadline_at'], timeout=3)
+        unrelated = kb.create_task(conn, title='unrelated real HTTP progress', assignee='default')
+        progress = client.push(conn, hub, board, gateway, primary=True)
+        assert progress.applied > 0 and progress.rejected == 0
+        assert hub.row_evidence(board, 'tasks', unrelated)['state'] == 'live'
+        queued = [r for r in sync.outbox(conn) if r['op_id'] == pending['op_id']]
+        assert len(queued) == 1 and queued[0]['attempts'] == 0
+        assert 'prerequisite pending' in queued[0]['last_error']
+        assert act.command(conn, pending['op_id'])['request_json'] == pending['request_json']
         with kbc.write_txn(conn):
             root = act.reserve(conn, tid, payload)
         # Send canonical op but lose its reply before local ACK. Restart keeps exact bytes.
@@ -64,13 +83,12 @@ def test_frozen_root_board_replica_deadline_escalation(tmp_path, monkeypatch):
         conn = kbc.connect(home / 'kanban.db')
         assert act.command(conn, root['op_id'])['request_json'] == root['request_json']
         assert act.confirm(conn, hub, board, root['op_id'])['delivery_state'] == 'confirmed'
-        # No sleeps: move only the isolated producer timestamp before initial publication
-        # is not allowed. A one-second deadline can naturally pass during root roundtrip.
-        import time
-        from tests.waiting import wait_until
-        wait_until(lambda: time.time() >= payload['deadline_at'], timeout=3)
+        # Retain the original deadline; eligibility is not deadline renewal.
+        wait_until(lambda: time.time() >= payload['deadline_at'], timeout=8)
         with kbc.write_txn(conn):
             due = act.reserve(conn, tid, payload, phase='escalation')
+        assert due['request_json'] == pending['request_json']
+        assert client.push(conn, hub, board, gateway, primary=True).rejected == 0
         result = act.confirm(conn, hub, board, due['op_id'])
         assert result['outcome'] == 'route_unavailable' and result['execution_authority'] is False
         assert act.confirm(conn, hub, board, due['op_id']) == result
