@@ -56,15 +56,29 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
   let timer: ReturnType<typeof setTimeout> | undefined
   let stage = 'start'
 
+  const deadline = Date.now() + Math.min(OVERALL_BUDGET_MS, options?.budgetMs ?? OVERALL_BUDGET_MS)
+  const deadlineError = () => new Error(`Timed out connecting to Hermes backend: archive preflight deadline (${stage})`)
+
+  const send = async <T>(path: string): Promise<T> => {
+    const remaining = deadline - Date.now()
+
+    if (settled || remaining <= 0) {throw deadlineError()}
+    const result = await hermesApiAs<T>(owner, { path, timeoutMs: Math.min(READ_TIMEOUT_MS, remaining) })
+
+    if (settled || Date.now() >= deadline) {throw deadlineError()}
+
+    return result
+  }
+
   const request = async <T>(path: string): Promise<T> => {
     try {
-      return await hermesApiAs<T>(owner, { path, timeoutMs: Math.min(READ_TIMEOUT_MS, options?.budgetMs ?? READ_TIMEOUT_MS) })
+      return await send<T>(path)
     } catch (error) {
       if (options?.retryTransport && isReconnectableSessionWriteError(error)) {throw error}
 
       if (!isTimeout(error)) {throw error}
 
-      return hermesApiAs<T>(owner, { path, timeoutMs: READ_TIMEOUT_MS })
+      return send<T>(path)
     }
   }
 
@@ -114,12 +128,17 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
   }
 
   try {
-    return await Promise.race([read(), new Promise<SessionInfo>(resolve => {
-      // The overall timer trails the capped per-request timeout, so a transport rejection of the last
-      // attempt wins the race and is queued/restored instead of becoming an override dialog.
+    return await Promise.race([read(), new Promise<SessionInfo>((resolve, reject) => {
+      // Per-request timeouts share an absolute deadline. The grace lets their transport error win;
+      // if the bridge never settles, the watchdog must reject retry mode, never offer an override.
       const limit = Math.min(OVERALL_BUDGET_MS, options?.budgetMs === undefined ? OVERALL_BUDGET_MS : options.budgetMs + TIMER_GRACE_MS)
 
-      timer = setTimeout(() => resolve(unknownBecause(`no answer within ${limit}ms (${stage})`)), limit)
+      timer = setTimeout(() => {
+        const result = unknownBecause(`no answer within ${limit}ms (${stage})`)
+
+        if (options?.retryTransport) {reject(deadlineError())}
+        else {resolve(result)}
+      }, limit)
     })])
   } catch (error) {
     if (options?.retryTransport && isReconnectableSessionWriteError(error)) {throw error}

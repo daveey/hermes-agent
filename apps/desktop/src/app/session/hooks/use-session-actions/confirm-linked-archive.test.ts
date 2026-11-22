@@ -63,15 +63,16 @@ it('walks compressed ancestors and preserves linked-task confirmation', async ()
   await expect(pending).resolves.toBe(false)
 })
 
-it('bounds a hung task read instead of hanging archive', async () => {
+it('bounds a hung task read with reconnect exhaustion, not an override dialog', async () => {
   vi.useFakeTimers()
   vi.stubGlobal('hermesDesktop', { api: () => new Promise(() => {}) })
+
   const pending = confirmLinkedArchive('tip', { id: 'tip', connection_id: 'owner' } as SessionInfo, 'work', en.desktop)
-  await vi.advanceTimersByTimeAsync(14_000)
-  expect($confirmRequest.get()?.details).toEqual([{ label: 'Kanban tasks', value: en.desktop.archiveLinkedTasksUnknown }])
-  expect($confirmRequest.get()?.description).not.toMatch(/still has work linked/)
-  settleConfirm(false)
-  await expect(pending).resolves.toBe(false)
+    .then(() => 'resolved', error => String(error))
+
+  await vi.advanceTimersByTimeAsync(70_000)
+  expect($confirmRequest.get()).toBeNull()
+  expect(await pending).toMatch(/archive preflight deadline/)
 })
 
 it.each([undefined, 'remote-owner'])('refreshes expired empty observations on the row owner %s', async connectionId => {
