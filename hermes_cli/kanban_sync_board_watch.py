@@ -176,6 +176,9 @@ class BoardWatch:
             gone = [key for key in self._conns if path_gone(key)]
             for key in gone:
                 self._drop(key)
+        if gone:  # the checkpoint baseline reads each board's -shm through a kept pread fd
+            from hermes_cli.sqlite_safe_read import release_unlinked_fds
+            release_unlinked_fds()
         return len(gone)
 
     def reset(self) -> None:
