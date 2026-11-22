@@ -72,12 +72,33 @@ def test_remote_links_miss_preserves_rows_with_bounded_fetches(tmp_path, monkeyp
     monkeypatch.setattr(activity, '_self_gateway', lambda conn: 'local')
     monkeypatch.setattr(activity, '_meta_float', lambda conn, key: None)
     monkeypatch.setattr(activity, '_remote_read_memo', None)
-    monkeypatch.setattr(activity, '_project_replica', lambda path, now, me, rows, *args, **kwargs: rows)
-    # [daveey] A seq-stamped replica is read through ``kanban_replica_rows`` (incremental), in (gw, key) order.
-    monkeypatch.setattr(activity._replica_projection, 'project', lambda view, *args, **kwargs: view.rows())
     if modern:
-        expected = sorted(expected, key=lambda r: (r[0], r[1]))
-    assert activity._read_remote_links(path) == expected
+        # Observe raw transport before scalar consumption, not via Rows.rows():
+        # the detached filtered view intentionally cannot rehydrate raw payloads.
+        paged = activity._replica_rows._paged
+        transported = []
+        def capture(*args, **kwargs):
+            for row in paged(*args, **kwargs):
+                transported.append(tuple(row[:5]))
+                yield row
+        monkeypatch.setattr(activity._replica_rows, '_paged', capture)
+        project = activity._replica_projection.project
+        projected = []
+        def closed_project(view, *args, **kwargs):
+            with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+                conn.execute('SELECT 1')
+            projected.append(True)
+            return project(view, *args, **kwargs)
+        monkeypatch.setattr(activity._replica_projection, 'project', closed_project)
+        # The real projector still rejects malformed task data after closure;
+        # the transport must preserve that raw row rather than silently drop it.
+        with pytest.raises(ValueError, match='invalid replica task data'):
+            activity._read_remote_links(path)
+        assert projected == [True]
+        assert sorted(transported, key=lambda r: (r[0], r[1])) == sorted(expected, key=lambda r: (r[0], r[1]))
+    else:
+        monkeypatch.setattr(activity, '_project_replica', lambda path, now, me, rows, *args, **kwargs: rows)
+        assert activity._read_remote_links(path) == expected
     # [daveey] The incremental reader fetches one aggregate row per page of ``_PAGE`` task rows (a single
     # whole-replica string was a 256 MB+ transient): still bounded by rows / page, never once per task.
     pages = -(-len(rows) // activity._replica_rows._PAGE) if modern else 0  # rows this small fill whole pages
