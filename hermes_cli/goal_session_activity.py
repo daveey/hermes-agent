@@ -11,14 +11,16 @@ Paused, done and cleared goals don't count: nothing resumes them unasked.
 [daveey]
 
 Read-only and cheap: one primary-key range scan of ``state_meta`` per profile
-database, cached by file change signals checked only on requests. No timer or
-retained SQLite handle is needed.
+database, cached by SQLite WAL generation checked only on requests. No timer or
+retained SQLite connection is needed. Unattested/rollback-journal databases are
+read afresh; names-only profile discovery avoids per-entry filesystem stats.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -30,7 +32,6 @@ _KEY_PREFIX = "goal:"
 _cache_lock = threading.Lock()
 # Only immutable answers are retained; SQLite connections close after each scan.
 _cache: dict[Path, tuple[tuple, frozenset[str]]] = {}
-_directories: dict[Path, tuple[tuple, tuple[Path, ...]]] = {}
 _MAX_CACHED_PATHS = 128
 
 
@@ -42,24 +43,27 @@ def _stamp(path: Path) -> tuple:
     return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
 
 
-def _db_stamp(path: Path) -> tuple:
-    return _stamp(path), _stamp(Path(str(path) + "-wal")), _stamp(Path(str(path) + "-journal"))
+def _db_stamp(path: Path) -> tuple | None:
+    from hermes_cli.session_list_flight import data_stamp
+
+    # Stat timestamps can repeat across commits. SQLite's WAL index generation
+    # cannot; the shared reader also rejects torn header copies. Include file
+    # identities so replacement with an equal generation cannot reuse an answer.
+    generation = data_stamp(path)
+    if generation is None:
+        return None
+    return (_stamp(path), _stamp(Path(str(path) + "-wal")),
+            _stamp(Path(str(path) + "-shm")), generation)
 
 
 def _profile_candidates(directory: Path) -> tuple[Path, ...]:
-    before = _stamp(directory)
-    prior = _directories.get(directory)
-    if prior is not None and prior[0] == before:
-        return prior[1]
-    _directories.pop(directory, None)
-    # Include missing state.db candidates: creating one in an existing profile
-    # need not change the profiles directory's mtime.
-    paths = tuple(sorted(p / "state.db" for p in directory.iterdir())) if before else ()
-    if before == _stamp(directory) and len(paths) <= _MAX_CACHED_PATHS:
-        if len(_directories) >= _MAX_CACHED_PATHS:
-            _directories.clear()
-        _directories[directory] = before, paths
-    return paths
+    # One names-only directory read: no glob/is_dir/lexists stat per entry.
+    # Directory timestamps alone miss additions within a filesystem clock tick.
+    try:
+        with os.scandir(directory) as entries:
+            return tuple(sorted(directory / entry.name / "state.db" for entry in entries))
+    except (FileNotFoundError, NotADirectoryError):
+        return ()
 
 
 def _state_db_paths() -> list[Path]:
@@ -72,7 +76,7 @@ def _state_db_paths() -> list[Path]:
         try:
             paths.update(dict.fromkeys(_profile_candidates(root / "profiles")))
         except OSError:
-            _directories.pop(root / "profiles", None)
+            _log.debug("goal profile discovery failed for %s", root, exc_info=True)
     return list(paths)
 
 
@@ -108,15 +112,15 @@ def active_goal_sessions() -> frozenset[str]:
             try:
                 before = _db_stamp(path)
                 prior = _cache.get(path)
-                if prior is not None and prior[0] == before:
+                if before is not None and prior is not None and prior[0] == before:
                     ids.update(prior[1])
                     continue
                 _cache.pop(path, None)
-                if not before[0]:
+                if not _stamp(path):
                     continue
                 active = frozenset(_read_active(path))
                 ids.update(active)
-                if before == _db_stamp(path) and len(_cache) < _MAX_CACHED_PATHS:
+                if before is not None and before == _db_stamp(path) and len(_cache) < _MAX_CACHED_PATHS:
                     _cache[path] = before, active
             except (OSError, sqlite3.Error) as exc:
                 # Never certify errors; the next request retries even without a write.
@@ -154,4 +158,3 @@ def annotate_goal_activity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _reset_cache_for_tests() -> None:
     with _cache_lock:
         _cache.clear()
-        _directories.clear()

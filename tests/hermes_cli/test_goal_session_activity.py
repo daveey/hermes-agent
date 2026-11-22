@@ -72,15 +72,22 @@ def test_committed_goal_change_is_visible_without_ttl(home):
 
 
 def test_unchanged_requests_do_not_repeat_sql_or_profile_glob(home, monkeypatch):
-    _make_state_db(home / "state.db", {"s": {"goal": "g", "status": "active"}})
-    _make_state_db(home / "profiles" / "work" / "state.db", {})
-    assert gsa.active_goal_sessions() == {"s"}
-    monkeypatch.setattr(gsa, "_read_active", lambda _: pytest.fail("unchanged SQL read"))
-    monkeypatch.setattr(Path, "glob", lambda *a: pytest.fail("unchanged profile glob"))
-    monkeypatch.setattr(Path, "iterdir", lambda *a: pytest.fail("unchanged directory scan"))
-    # Advancing time must not force a reread; the database change is the signal.
-    monkeypatch.setattr(time, "monotonic", lambda: 1e12)
-    assert gsa.active_goal_sessions() == {"s"}
+    path = home / "state.db"
+    _make_state_db(path, {"s": {"goal": "g", "status": "active"}})
+    keeper = sqlite3.connect(path)
+    try:
+        keeper.execute("PRAGMA journal_mode=WAL")
+        keeper.execute("SELECT * FROM state_meta").fetchall()  # initialize WAL index
+        assert gsa.active_goal_sessions() == {"s"}
+        assert path in gsa._cache  # prove reuse, not a vacuous result
+        monkeypatch.setattr(gsa, "_read_active", lambda _: pytest.fail("unchanged SQL read"))
+        monkeypatch.setattr(Path, "glob", lambda *a: pytest.fail("unchanged profile glob"))
+        monkeypatch.setattr(Path, "iterdir", lambda *a: pytest.fail("per-entry discovery"))
+        # Advancing time must not force a reread; the database change is the signal.
+        monkeypatch.setattr(time, "monotonic", lambda: 1e12)
+        assert gsa.active_goal_sessions() == {"s"}
+    finally:
+        keeper.close()
 
 
 def test_profile_add_remove_and_database_created_in_existing_profile(home):
@@ -167,3 +174,54 @@ def test_missing_or_schemaless_db_is_harmless(home):
     sqlite3.connect(home / "state.db").close()  # no state_meta table
     rows = [{"id": "s1"}]
     assert gsa.annotate_goal_activity(rows) == [{"id": "s1"}]
+
+
+@pytest.mark.parametrize("wal", [False, True])
+def test_equal_stat_metadata_never_hides_committed_changes(home, monkeypatch, wal):
+    path = home / "state.db"
+    _make_state_db(path, {"s": {"goal": "g", "status": "active"}})
+    conn = sqlite3.connect(path)
+    try:
+        if wal:
+            conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("SELECT * FROM state_meta").fetchall()
+        original = gsa._stamp
+        stamps = {p: original(p) for p in (path, Path(str(path) + "-wal"),
+                                           Path(str(path) + "-shm"))}
+        monkeypatch.setattr(gsa, "_stamp", lambda p: stamps[p] if p in stamps else original(p))
+        assert gsa.active_goal_sessions() == {"s"}
+        if wal:
+            assert path in gsa._cache
+        else:
+            assert path not in gsa._cache
+        conn.execute("DELETE FROM state_meta")
+        conn.commit()
+        assert not gsa.active_goal_sessions()
+    finally:
+        conn.close()
+
+
+def test_directory_discovery_recovers_without_metadata_change(home, monkeypatch):
+    path = home / "profiles" / "work" / "state.db"
+    _make_state_db(path, {"s": {"goal": "g", "status": "active"}})
+    original = gsa.os.scandir
+    with monkeypatch.context() as patch:
+        def denied(p):
+            if p == home / "profiles":
+                raise PermissionError("denied")
+            return original(p)
+        patch.setattr(gsa.os, "scandir", denied)
+        assert not gsa.active_goal_sessions()
+    assert gsa.active_goal_sessions() == {"s"}
+
+
+def test_scoped_home_switch_removes_prior_answer(home, monkeypatch):
+    import hermes_constants
+
+    other = home / "other"
+    _make_state_db(home / "state.db", {"old": {"goal": "g", "status": "active"}})
+    _make_state_db(other / "state.db", {"new": {"goal": "g", "status": "active"}})
+    monkeypatch.setattr(hermes_constants, "get_default_hermes_root", lambda: home / "absent")
+    assert gsa.active_goal_sessions() == {"old"}
+    monkeypatch.setenv("HERMES_HOME", str(other))
+    assert gsa.active_goal_sessions() == {"new"}
