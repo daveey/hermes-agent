@@ -176,8 +176,6 @@ def test_a_cached_board_answers_byte_identically_and_a_new_external_card_shows_o
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET session_id='s1' WHERE id=?", (b,))
         tick(conn, gh, clock, 0)
-        with kea._lock:
-            kea._memo.clear()  # session_external's own 5 s memo predates this change; not under test
         got = stamp(rows())
         assert got[0]["kanban_external"] == 2
         assert json.dumps(got, sort_keys=True) == json.dumps(_fresh_stamp(conn, rows()), sort_keys=True)
@@ -199,6 +197,29 @@ def test_a_board_with_a_scheduled_card_is_reread_after_the_ttl_because_its_state
         wall[0] += kea._TTL_S + 0.1
         stamp([{"id": "s1"}])
         assert len(opens) == 2
+
+
+def test_an_external_card_that_left_is_gone_on_the_next_request_and_stays_gone(kanban_home, gh, clock, monkeypatch):
+    """The read a moved signature asks for must not be answered by ``session_external``'s own 5 s memo: that
+    pre-commit answer would be kept under the new signature until the board's next commit."""
+    with kbc.connect_closing() as conn:
+        a = park(conn, 9001)
+        other = kb.create_task(conn, title="blocked sibling", assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id='s1' WHERE id=?", (a,))
+            conn.execute("UPDATE tasks SET status='blocked', session_id='s1' WHERE id=?", (other,))
+        tick(conn, gh, clock, 0)
+        stamp, _opens = _counting(monkeypatch, conn)
+        wall = [time.time()]
+        monkeypatch.setattr(kea.time, "time", lambda: wall[0])
+        rows = lambda: [{"id": "s1", "kanban_parked": 2}]
+        assert stamp(rows())[0].get("kanban_external") == 1
+        wall[0] += 2.0
+        with kb.write_txn(conn):  # the last scheduled card leaves; a parked sibling keeps the board in play
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (a,))
+        for step in (1.0, 6.0, 60.0, 600.0):
+            wall[0] += step
+            assert "kanban_external" not in stamp(rows())[0], step
 
 
 def test_an_unknown_signature_reads_the_board_every_time(kanban_home, monkeypatch):

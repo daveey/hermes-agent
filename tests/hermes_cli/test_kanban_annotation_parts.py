@@ -200,6 +200,35 @@ def test_an_old_counts_read_is_renewed_so_the_published_read_time_stays_adoptabl
     assert _reads(world) == (2, 1, 1)
 
 
+def test_the_renewal_reads_this_scopes_counts_age_not_the_last_scope_read(world, monkeypatch):
+    _refresh()
+    assert world.counts == 1
+    monkeypatch.setattr(host, 'STRICT_REFRESH_AGE_S', 5.0)
+    with ksa._cache_lock:  # this scope's counts were read a while ago
+        ksa._cache_read_at -= 10.0
+        ksa._count_scopes.remember_locked()
+    monkeypatch.setattr(ksa, '_origin_scope', lambda: ('annotation-parts-test', 'other'))
+    ksa._all_counts()  # another profile's poll now owns the active count slot, read just now
+    assert world.counts == 2
+    monkeypatch.setattr(ksa, '_origin_scope', lambda: SCOPE)
+    _refresh()
+    assert world.counts == 3, "this scope's old counts were not renewed"
+
+
+def test_deadlines_dropped_while_nobody_polled_force_the_read_when_demand_returns(world, monkeypatch):
+    _refresh()
+    world.deadline = time.time() + 30  # a done check's declared wall-time boundary
+    _refresh()
+    interested = host._scope_interested
+    monkeypatch.setattr(host, '_scope_interested', lambda scope: False)
+    _refresh()  # a source write wakes the holder meanwhile: the scope's deadlines are dropped
+    assert SCOPE not in host._clock_deadlines
+    world.flagged, world.deadline = False, None  # the verdict moved at a boundary nobody is waiting for now
+    monkeypatch.setattr(host, '_scope_interested', interested)
+    _refresh(source=False)  # demand is back
+    assert _published()[10] == {}, 'a verdict that moved at a declared wall time was served from the cache'
+
+
 def test_a_burst_of_board_writes_is_a_bounded_number_of_reads_and_the_last_write_shows(world, monkeypatch):
     monkeypatch.setattr(host, 'SETTLE_S', (0.25, host.HOLDER_INTERVAL_S))
     monkeypatch.setattr(host, '_watch_paths', lambda scope: ([str(world.board), str(world.plain)], []))

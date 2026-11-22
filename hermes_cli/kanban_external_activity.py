@@ -149,7 +149,9 @@ def _board_external(path, open_ro, parked_pairs, signature, wall: float) -> dict
         return {}
     try:
         pairs = parked_pairs(conn)
-        found = session_external(conn, pairs, key=key) if pairs else {}
+        # With a signature the stored contribution is the only memo: ``session_external``'s own ``_TTL_S`` memo
+        # would hand back the answer from before the commit that moved the signature, to be kept under the new one.
+        found = session_external(conn, pairs, key=key if sig is None else "", now=wall) if pairs else {}
         clocked = bool(pairs) and _clocked(conn, pairs)
     except sqlite3.Error:
         logger.debug("kanban external read failed for %s", path, exc_info=True)

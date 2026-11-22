@@ -59,6 +59,18 @@ def restore_locked(scope: tuple[str, ...]) -> None:
     _entries.move_to_end(scope)
 
 
+def read_at_locked(scope: tuple[str, ...]) -> float | None:
+    """Monotonic time of the read behind ``scope``'s counts, whichever scope owns the active slot; None = none."""
+    from hermes_cli import kanban_session_activity as ksa
+
+    if ksa._cache is None:
+        return None
+    if ksa._cache_scope == scope:
+        return ksa._cache_read_at
+    saved = _entries.get(scope)
+    return None if saved is None else saved[0][_FIELDS.index("_cache_read_at")]
+
+
 def result_locked(include_waiting: bool, include_snapshot: bool) -> tuple:
     """Annotation identities travel with their count generation; caller holds the cache lock."""
     from hermes_cli import kanban_session_activity as ksa

@@ -690,6 +690,8 @@ def _event_refresh(events) -> float | None:
         def refresh_scope():
             if not _scope_interested(scope):
                 _clock_deadlines.pop(scope, None)
+                # A deadline dropped here may have come due unseen: the part keys vouch for nothing after it.
+                _parts.failed(scope)
                 return None
             if not _ksa._annotate_refresh_lock.acquire(blocking=False):
                 return _scope_retry(scope)
@@ -706,9 +708,12 @@ def _event_refresh(events) -> float | None:
             # not one: it re-takes the keys, which is what shows a commit the first read was too early for. The
             # counts are also read once their last read is ``STRICT_REFRESH_AGE_S`` old, so the published
             # ``read_at`` is renewed before exact adopters drop the copy at ``_COUNTS_MAX_AGE_S``.
+            # The age is this scope's own: the active count slot belongs to whichever scope was read last.
+            with _ksa._cache_lock:
+                read_at = _ksa._count_scopes.read_at_locked(scope)
             forced, part_keys = _parts.plan(
                 scope, clock=len(_holder_ctx.deadlines) != len(pending),
-                renew=time.monotonic() - _ksa._cache_read_at >= STRICT_REFRESH_AGE_S)
+                renew=read_at is None or time.monotonic() - read_at >= STRICT_REFRESH_AGE_S)
             _ksa._revalidate.force_read.scope = scope
             _ksa._revalidate.force_read.parts = forced
             try:
