@@ -118,8 +118,18 @@ class FileEvents:
             except BlockingIOError:
                 pass  # A full pipe is already a pending wake.
 
+    def _readable(self, timeout):
+        # poll accepts valid descriptors above FD_SETSIZE, unlike select().
+        waiter = select.poll()
+        for fd in (self._fd, self._wake_read):
+            waiter.register(fd, select.POLLIN)
+        ready = waiter.poll(None if timeout is None else max(0, timeout * 1000))
+        if any(mask & (select.POLLERR | select.POLLHUP | select.POLLNVAL) for _, mask in ready):
+            raise OSError(errno.EIO, 'annotation notification descriptor unavailable')
+        return {fd for fd, _ in ready}
+
     def wait(self, timeout=None):
-        readable, _, _ = select.select([self._fd, self._wake_read], [], [], timeout)
+        readable = self._readable(timeout)
         changed = self._wake_read in readable
         self.control_only = not changed
         if changed:

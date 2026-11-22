@@ -571,6 +571,15 @@ _wake = threading.Event()  # compatibility for direct legacy holder callers
 _native_events: list = []
 _clock_deadlines: dict[tuple[str, ...], list[float]] = {}
 _event_ready: set[tuple[str, ...]] = set()
+# A source notification can precede the visibility of the commit it announces:
+# SQLite WAL appends (and with synchronous=FULL fsyncs) the -wal frames, then
+# publishes the commit through the memory-mapped -shm index, which emits no
+# event. A read answering a source invalidation is therefore confirmed by
+# bounded one-shot re-reads; those confirmations never schedule further ones,
+# so an idle source stays unread.
+SETTLE_S = (0.25, HOLDER_INTERVAL_S)
+_unsettled: set[tuple[str, ...]] = set()
+_settle_deadlines: dict[tuple[str, ...], tuple[float, ...]] = {}
 
 
 def note_deadline(due: float | None) -> None:
@@ -640,6 +649,8 @@ def _event_refresh(events) -> float | None:
                     if scope not in settled and not ctx.run(_scope_interested, scope)}
         if set(_known) <= settled and (due is None or due > time.time()):
             return due
+    else:
+        _unsettled.update(_known)  # source/overflow/ownership/explicit wake
     files, directories, controls, scopes = set(), set(), set(), []
     deadlines = []
     for scope, ctx in list(_known.items()):
@@ -675,13 +686,23 @@ def _event_refresh(events) -> float | None:
             # Inner caches can return without emitting their clock boundaries.
             # Preserve those until consumed; replacing the list needs per-cache
             # deadline ownership, not just a successful outer projection.
-            _holder_ctx.deadlines = [t for t in _clock_deadlines.get(scope, ()) if t > time.time()]
+            confirmations = _settle_deadlines.get(scope, ())
+            _holder_ctx.deadlines = [t for t in _clock_deadlines.get(scope, ())
+                                     if t > time.time() and t not in confirmations]
             _ksa._revalidate.force_read.scope = scope
             try:
                 _ksa._refresh_annotation_locked(scope)
                 _, due = waiting_events(time.time())
                 note_deadline(due)
-                _clock_deadlines[scope] = sorted(set(_holder_ctx.deadlines))
+                now = time.time()
+                if scope in _unsettled:
+                    # Coalesce: a newer invalidation replaces pending confirmations.
+                    _unsettled.discard(scope)
+                    confirmations = tuple(now + delay for delay in SETTLE_S)
+                else:
+                    confirmations = tuple(t for t in confirmations if t > now)
+                _settle_deadlines[scope] = confirmations
+                _clock_deadlines[scope] = sorted({*_holder_ctx.deadlines, *confirmations})
                 _event_ready.add(scope)
                 return min(_clock_deadlines[scope], default=None)
             finally:
@@ -884,6 +905,8 @@ def start_holder(role: str) -> threading.Thread | None:
 
 def reset() -> None:
     _event_ready.clear()
+    _unsettled.clear()
+    _settle_deadlines.clear()
     _clock_deadlines.clear()
     _known.clear()
     _touched.clear()

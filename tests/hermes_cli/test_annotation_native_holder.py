@@ -16,6 +16,47 @@ from hermes_cli.annotation_file_events import FileEvents
 from tests.hermes_cli import test_kanban_annotation_host as helpers
 
 
+def _no_confirmations(monkeypatch, delays=()):
+    """Isolate scheduling units from (or pin) the post-invalidation confirmations."""
+    monkeypatch.setattr(host, 'SETTLE_S', delays)
+    monkeypatch.setattr(host, '_unsettled', set())
+    monkeypatch.setattr(host, '_settle_deadlines', {})
+
+
+def test_source_invalidation_gets_bounded_coalesced_confirmations(monkeypatch, tmp_path):
+    scope = ('confirm-test',)
+    monkeypatch.setattr(host, '_known', {scope: contextvars.copy_context()})
+    monkeypatch.setattr(host, '_clock_deadlines', {})
+    monkeypatch.setattr(host, '_event_ready', set())
+    _no_confirmations(monkeypatch, (0.25, 2.0))
+    monkeypatch.setattr(host, '_watch_paths', lambda scope: ([], []))
+    monkeypatch.setattr(host, '_discovery_paths', lambda: (set(), set()))
+    monkeypatch.setattr(host, 'waiting_events', lambda now: (set(), None))
+    monkeypatch.setattr(disk, '_path', lambda scope: tmp_path / 'copy')
+    monkeypatch.setattr(disk, 'demand_age', lambda scope: 0)
+    monkeypatch.setattr(ksa, '_origin_scope', lambda: scope)
+    now = [100.0]
+    monkeypatch.setattr(host.time, 'time', lambda: now[0])
+    calls = []
+    monkeypatch.setattr(ksa, '_refresh_annotation_locked', calls.append)
+    events = SimpleNamespace(replace=lambda *a, **kw: None, control_only=False)
+    assert host._event_refresh(events) == 100.25  # a source read is not yet settled
+    assert host._clock_deadlines[scope] == [100.25, 102.0]
+    now[0] = 100.125
+    assert host._event_refresh(events) == 100.375  # a newer invalidation replaces, never stacks
+    assert host._clock_deadlines[scope] == [100.375, 102.125]
+    events.control_only = True  # demand churn / timer expiry carry no source event
+    assert host._event_refresh(events) == 100.375
+    assert len(calls) == 2, 'demand consumed a confirmation'
+    now[0] = 100.5
+    assert host._event_refresh(events) == 102.125
+    now[0] = 102.25
+    assert host._event_refresh(events) is None, 'a confirmation scheduled another one'
+    assert len(calls) == 4
+    assert host._event_refresh(events) is None
+    assert len(calls) == 4, 'settled source was read again while idle'
+
+
 def test_failed_scope_does_not_starve_other_scopes(monkeypatch, tmp_path):
     current = contextvars.ContextVar('annotation-test-scope')
     scopes = [('failed',), ('healthy',)]
@@ -27,6 +68,7 @@ def test_failed_scope_does_not_starve_other_scopes(monkeypatch, tmp_path):
     monkeypatch.setattr(host, '_known', contexts)
     monkeypatch.setattr(host, '_clock_deadlines', {})
     monkeypatch.setattr(host, '_event_ready', set())
+    _no_confirmations(monkeypatch)
     monkeypatch.setattr(host, '_watch_paths', lambda scope: ([], []))
     monkeypatch.setattr(host, 'waiting_events', lambda now: (set(), None))
     monkeypatch.setattr(disk, '_path', lambda scope: tmp_path / scope[0])
@@ -58,6 +100,7 @@ def test_dormant_scope_does_not_amplify_active_demand(monkeypatch, tmp_path):
     monkeypatch.setattr(host, '_known', contexts)
     monkeypatch.setattr(host, '_clock_deadlines', {})
     monkeypatch.setattr(host, '_event_ready', set())
+    _no_confirmations(monkeypatch)
     monkeypatch.setattr(host, '_watch_paths', lambda scope: ([], []))
     monkeypatch.setattr(host, '_discovery_paths', lambda: (set(), set()))
     monkeypatch.setattr(host, 'waiting_events', lambda now: (set(), None))
@@ -93,6 +136,7 @@ def test_coverage_failure_does_not_starve_healthy_scope(monkeypatch, tmp_path):
     monkeypatch.setattr(host, '_known', contexts)
     monkeypatch.setattr(host, '_clock_deadlines', {})
     monkeypatch.setattr(host, '_event_ready', set())
+    _no_confirmations(monkeypatch)
     broken = [True]
     def paths(scope):
         if scope == failed and broken[0]:
@@ -127,6 +171,7 @@ def test_scope_deadlines_preserve_cached_clocks_and_retry(monkeypatch, tmp_path,
     monkeypatch.setattr(host, '_known', {scope: contextvars.copy_context()})
     monkeypatch.setattr(host, '_clock_deadlines', {scope: [10000.0]})
     monkeypatch.setattr(host, '_event_ready', {scope})
+    _no_confirmations(monkeypatch)
     monkeypatch.setattr(host.time, 'time', lambda: 100.0)
     monkeypatch.setattr(host, '_watch_paths', lambda scope: ([], []))
     monkeypatch.setattr(host, '_discovery_paths', lambda: (set(), set()))
@@ -247,7 +292,7 @@ def test_real_projection_removal_and_read_recovery(tmp_path, monkeypatch, action
     ksa._reset_cache_for_tests()
     monkeypatch.setattr(host, '_known', {scope: contextvars.copy_context()})
     disk.touch_demand(scope)
-    ready, changed, failed, stop = (threading.Event() for _ in range(4))
+    ready, changed, failed, stop, reread = (threading.Event() for _ in range(5))
     fail_next = []
     original_parts = ksa._read_annotation_parts
     original_refresh = ksa._refresh_annotation_locked
@@ -317,7 +362,9 @@ def test_real_projection_removal_and_read_recovery(tmp_path, monkeypatch, action
         result = original_refresh(scope)
         outputs.append(result)
         ready.set()
-        if len(outputs) > 1:
+        reread.set()
+        # Confirmation re-reads of an unchanged source are not transitions.
+        if len(outputs) > 1 and outputs[-1] != outputs[-2]:
             changed.set()
         return result
 
@@ -356,12 +403,16 @@ def test_real_projection_removal_and_read_recovery(tmp_path, monkeypatch, action
                 assert outputs[-1][9] == {}
                 assert outputs[-1][0] == {'s1': 1}
             elif action in ('watch-loss', 'overflow'):
+                # Let the ownership read's confirmations finish: the re-read below
+                # must come from the loss itself, with unchanged output.
+                stop.wait(max(host.SETTLE_S) + .5)
+                reread.clear()
                 if action == 'watch-loss':
                     # Real kernel IN_IGNORED, not a mocked refresh or wake result.
                     assert events._lib.inotify_rm_watch(events._fd, next(iter(events._names))) == 0
                 else:
                     # Inject the kernel's overflow packet at the read boundary;
-                    # retain real select, decoding, scheduling and projection.
+                    # retain the real wait, decoding, scheduling and projection.
                     from hermes_cli import annotation_file_events as native
                     original_read = native.os.read
                     injected = []
@@ -373,7 +424,7 @@ def test_real_projection_removal_and_read_recovery(tmp_path, monkeypatch, action
                         return data
                     monkeypatch.setattr(native.os, 'read', overflow_read)
                     disk.touch_demand(scope)
-                assert changed.wait(1), 'notification loss did not invalidate the real projection'
+                assert reread.wait(1), 'notification loss did not invalidate the real projection'
                 assert outputs[-1][0] == {'s1': 1}
                 changed.clear()
                 writer.execute("UPDATE tasks SET status='done' WHERE id='t1'")
@@ -445,6 +496,11 @@ def test_real_projection_idle_and_changed_source(tmp_path, monkeypatch):
         try:
             assert ready.wait(5)
             assert calls[0][0] == {'s1': 1}
+            # The initial ownership read gets its bounded visibility confirmations;
+            # after them nothing may read while idle, whatever the demand churn.
+            stop.wait(max(host.SETTLE_S) + .5)
+            assert len(calls) <= 1 + len(host.SETTLE_S)
+            updated.clear()
             idle_until = time.monotonic() + 61
             while time.monotonic() < idle_until:
                 disk.touch_demand(scope)
@@ -465,3 +521,74 @@ def test_real_projection_idle_and_changed_source(tmp_path, monkeypatch):
     assert usage[0] < 500
     print(f'actual projection fixture voluntary cs/s with demand churn: {usage[0]:.3f}')
     ksa._reset_cache_for_tests()
+
+
+def test_wal_commit_racing_its_notification_is_confirmed(tmp_path, monkeypatch):
+    """A -wal write notifies before the mmap'd index publishes the commit.
+
+    Real WAL writer, real projection, no wake/request/unrelated event: every
+    committed transition must reach the projection, and the source must go
+    unread again once the bounded confirmations are spent.
+    """
+    scope = ('native-wal-test', 'default')
+    path = tmp_path / 'kanban.db'
+    conn = helpers._board(path, [('t1', 'running', 's1')])
+    assert conn.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+    conn.execute('SELECT * FROM tasks').fetchall()  # sidecars exist before the watches
+    monkeypatch.setenv('HERMES_KANBAN_HOME', str(tmp_path))
+    monkeypatch.setattr(disk, 'FORCE', True)
+    monkeypatch.setattr(ksa, '_origin_scope', lambda: scope)
+    monkeypatch.setattr(ksa, '_board_db_paths', lambda: [path])
+    monkeypatch.setattr(ksa, '_hub_db_path', lambda: None)
+    monkeypatch.setattr(ksa, '_replica_paths', list)
+    monkeypatch.setattr(ksa, '_remote_cards', lambda *a, **kw: [])
+    monkeypatch.setattr(ksa, '_waiting_sources', {})
+    monkeypatch.setattr(ksa, '_done_checks', {})
+    monkeypatch.setattr(host, 'core_sha', lambda: 'a' * 40)
+    monkeypatch.setattr(host, '_watch_paths', lambda scope: ([str(path)], []))
+    monkeypatch.setattr(host, '_discovery_paths', lambda: (set(), set()))
+    ksa._reset_cache_for_tests()
+    monkeypatch.setattr(host, '_known', {scope: contextvars.copy_context()})
+    disk.touch_demand(scope)
+    ready, stop = threading.Event(), threading.Event()
+    seen = {True: threading.Event(), False: threading.Event()}
+    calls = []
+    delays = []
+    refresh = ksa._refresh_annotation_locked
+
+    def record(scope):
+        result = refresh(scope)
+        calls.append(dict(result[0]))
+        ready.set()
+        seen[bool(result[0])].set()
+        return result
+    monkeypatch.setattr(ksa, '_refresh_annotation_locked', record)
+    settle = max(host.SETTLE_S) + .5
+    with FileEvents() as events:
+        thread = threading.Thread(target=run, args=(
+            events, stop, SimpleNamespace(held=lambda: True, beat=lambda: None),
+            lambda: host._event_refresh(events)))
+        thread.start()
+        try:
+            assert ready.wait(5)
+            for index in range(24):
+                running = index % 2 == 1
+                seen[running].clear()
+                disk.touch_demand(scope)
+                began = time.monotonic()
+                conn.execute('UPDATE tasks SET status=? WHERE id=?', ('running' if running else 'done', 't1'))
+                assert seen[running].wait(settle), f'commit {index} never projected: {calls[-4:]}'
+                delays.append(time.monotonic() - began)
+            print(f'WAL commit→projection: max {max(delays):.3f}s, '
+                  f'{sum(d > .2 for d in delays)} of {len(delays)} needed a confirmation read')
+            stop.wait(settle)
+            quiet = len(calls)
+            stop.wait(3)
+            assert len(calls) == quiet, f'WAL source did not settle: {quiet} -> {len(calls)}'
+        finally:
+            stop.set()
+            events.wake()
+            thread.join(5)
+            conn.close()
+            ksa._reset_cache_for_tests()
+    assert not thread.is_alive()

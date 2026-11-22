@@ -15,7 +15,7 @@ pytestmark = pytest.mark.skipif(not sys.platform.startswith('linux'), reason='Li
 def test_queue_overflow_invalidates_every_snapshot(tmp_path, monkeypatch):
     with FileEvents() as events:
         events.replace([tmp_path / 'input'])
-        monkeypatch.setattr(module.select, 'select', lambda *args: ([events._fd], [], []))
+        monkeypatch.setattr(events, '_readable', lambda timeout: {events._fd})
         reads = iter([struct.pack('iIII', -1, 0x4000, 0, 0)])
 
         def read(*args):
@@ -33,7 +33,7 @@ def test_watch_loss_invalidates_snapshot(tmp_path, monkeypatch, mask):
     with FileEvents() as events:
         events.replace([tmp_path / 'input'])
         wd = next(iter(events._names))
-        monkeypatch.setattr(module.select, 'select', lambda *args: ([events._fd], [], []))
+        monkeypatch.setattr(events, '_readable', lambda timeout: {events._fd})
         reads = iter([struct.pack('iIII', wd, mask, 0, 0)])
 
         def read(*args):
@@ -50,7 +50,7 @@ def test_watch_loss_invalidates_snapshot(tmp_path, monkeypatch, mask):
 def test_continuous_events_have_bounded_drain(tmp_path, monkeypatch):
     with FileEvents() as events:
         events.replace([tmp_path / 'input'])
-        monkeypatch.setattr(module.select, 'select', lambda *args: ([events._fd], [], []))
+        monkeypatch.setattr(events, '_readable', lambda timeout: {events._fd})
         calls = []
 
         def read(*args):
@@ -72,6 +72,30 @@ def test_file_write_wakes_without_input_polling(tmp_path):
         source.write_text('after')
         assert events.wait(0.8)
         assert not events.wait(0)
+
+
+def test_high_descriptors_deliver_source_and_explicit_wake(tmp_path):
+    import fcntl
+    import resource
+
+    if resource.getrlimit(resource.RLIMIT_NOFILE)[0] <= 1100:
+        pytest.skip('host cannot hold a descriptor above FD_SETSIZE')
+    source = tmp_path / 'high-fd-input'
+    with FileEvents() as events:
+        events.replace([source])
+        # Duplicate real descriptors, without consuming a thousand unrelated FDs.
+        for attribute in ('_fd', '_wake_read'):
+            old = getattr(events, attribute)
+            high = fcntl.fcntl(old, fcntl.F_DUPFD_CLOEXEC, 1100)
+            setattr(events, attribute, high)
+            os.close(old)
+        source.write_text('changed')
+        assert events.wait(.8)
+        assert not events.control_only
+        assert not events.wait(0)
+        events.wake()
+        assert events.wait(.8)
+        assert not events.control_only
 
 
 def test_wake_after_owner_close_is_harmless():
