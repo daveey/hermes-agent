@@ -1822,9 +1822,8 @@ def _child_uids(conn: sqlite3.Connection, table: str, task_ids: set[str],
 
 
 def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> dict[str, Any]:
-    """This gateway's live cards against the shadow copy of the service. Rows with an unanswered local edit are
-    reported as pending, not as differences. Exact audited retain refusals for ended runs remain
-    visible command audits, not replica mutations; all other rejected writes remain differences."""
+    """Compare own rows, pending edits, and rejected mutations; exact audited ended-run retain
+    refusals stay visible as command audits rather than replica differences."""
     pending_tasks = {r[0] for r in live.execute(
         "SELECT DISTINCT CASE WHEN table_name = 'tasks' THEN row_uid ELSE json_extract(fields, '$.task_id') END "
         "FROM kanban_sync_outbox WHERE state = 'pending'")}
@@ -1854,10 +1853,8 @@ def diff(live: sqlite3.Connection, shadow: sqlite3.Connection, gateway: str) -> 
         n = len(lv ^ sh)
         if n:
             children[table] = n
-    from hermes_cli.kanban_sync_retain_drift import audited_rejection
-    rejected_rows = [dict(r) for r in live.execute("SELECT * FROM kanban_sync_outbox WHERE state = 'rejected'")]
-    audits = [r['op_id'] for r in rejected_rows if audited_rejection(live, shadow, r)]
-    rejected = len(rejected_rows)
+    from hermes_cli.kanban_sync_retain_drift import rejected_summary
+    rejected, audits = rejected_summary(live, shadow)
     clean = not (missing or extra or fields or children or rejected - len(audits))
     return {"clean": clean, "checked": len(checked), "pending": len(pending_tasks & set(live_tasks)),
             "missing_in_shadow": missing, "extra_in_shadow": extra, "field_mismatch": fields,

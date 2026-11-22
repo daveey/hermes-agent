@@ -9,6 +9,12 @@ import hashlib
 import sqlite3
 
 
+def rejected_summary(live: sqlite3.Connection, shadow: sqlite3.Connection) -> tuple[int, list[str]]:
+    """Count every rejection and identify only independently custody-matched retain audits."""
+    rows = [dict(r) for r in live.execute("SELECT * FROM kanban_sync_outbox WHERE state = 'rejected'")]
+    return len(rows), [r['op_id'] for r in rows if audited_rejection(live, shadow, r)]
+
+
 def audited_rejection(live: sqlite3.Connection, shadow: sqlite3.Connection, op: dict) -> bool:
     """Fail closed unless immutable custody attests this definitive rejection."""
     from hermes_cli.kanban_retain_transport import canonical, command, frozen_wire
