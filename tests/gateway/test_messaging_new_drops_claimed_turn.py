@@ -14,6 +14,8 @@ import pytest
 
 from tests.waiting import async_wait_until
 
+pytestmark = pytest.mark.usefixtures('authority_cwd_in_tmp')
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('case', ['new', 'viewer_new', 'resume', 'stop_compression'])

@@ -15,6 +15,8 @@ from tests.waiting import async_wait_until
 from tui_gateway.hosted_room_peer_http import PeerRunsHTTPError
 from tui_gateway.hosted_room_peer_transport import build_member_dispatch
 
+pytestmark = pytest.mark.usefixtures('authority_cwd_in_tmp')
+
 gateway, linked_peer = peers.gateway, peers.linked_peer
 
 

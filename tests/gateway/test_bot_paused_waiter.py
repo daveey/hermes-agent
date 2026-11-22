@@ -8,6 +8,8 @@ from tests.waiting import async_wait_until
 
 pytest_plugins = ['tests.gateway.test_session_bot_retry']
 
+pytestmark = pytest.mark.usefixtures('authority_cwd_in_tmp')
+
 
 @pytest.mark.asyncio
 async def test_paused_bot_follower_rearms_until_its_durable_completion(bot, monkeypatch):

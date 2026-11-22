@@ -6,6 +6,8 @@ import pytest
 
 pytest_plugins = ('tests.gateway.test_session_bot_retry',)
 
+pytestmark = pytest.mark.usefixtures('authority_cwd_in_tmp')
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('cancel_count', [1, 3])

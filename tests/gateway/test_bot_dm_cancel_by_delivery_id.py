@@ -13,6 +13,8 @@ from hermes_state_runtime import RuntimeStoreError
 from tests.gateway import test_session_bot_retry as retry_suite
 from tests.gateway.test_session_bot_retry import KEY, _admissions, _settle_quietly
 
+pytestmark = pytest.mark.usefixtures('authority_cwd_in_tmp')
+
 bot = retry_suite.bot  # the retry suite's owner fixture: a real authority and Bot Chat
 
 AUTHOR = {'id': 'bot:scribe', 'name': 'scribe', 'is_bot': True}

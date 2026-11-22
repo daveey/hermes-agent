@@ -12,6 +12,8 @@ import pytest
 
 from tests.waiting import async_wait_until
 
+pytestmark = pytest.mark.usefixtures('authority_cwd_in_tmp')
+
 
 async def _owner(tmp_path, monkeypatch):
     from gateway.config import GatewayConfig
