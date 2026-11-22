@@ -30,6 +30,7 @@ import { $paneStates, ensurePaneRegistered, setPaneOpen, setPaneWidthOverride } 
 import { $showAllProfiles, setShowAllProfiles } from './profile'
 import type { PullRequestBucket } from './pull-requests'
 import type { SessionStatusBucket } from './session-dot-state'
+import { clearSessionFilterContributions } from './session-filter'
 
 export const SIDEBAR_DEFAULT_WIDTH = 237
 export const SIDEBAR_MAX_WIDTH = 360
@@ -960,6 +961,8 @@ function clearSidebarFilters() {
   $sidebarPrFilter.set([])
   $sidebarShowArchived.set(false)
   $sidebarShowAutomated.set(false)
+  // Plugins' own `sessions.filter` selections go with the core ones.
+  clearSessionFilterContributions()
 }
 
 /** Every knob the filter menu owns, back to the sidebar as it ships. Ordering

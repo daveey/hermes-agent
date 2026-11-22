@@ -18,6 +18,7 @@
  *  - `ui.*` — the design language, so plugin UI looks native by default.
  */
 
+import { useStore } from '@nanostores/react'
 import { computed, type ReadableAtom } from 'nanostores'
 import type { ReactNode } from 'react'
 
@@ -46,7 +47,7 @@ import {
 import { onGatewayEvent } from '@/contrib/events'
 import { registry } from '@/contrib/registry'
 import type { WorkspaceMode } from '@/contrib/types'
-import { deleteProfile, getLogs, getStatus, hermesApi, type HermesGateway } from '@/hermes'
+import { deleteProfile, getLogs, getStatus, hermesApi, type HermesGateway, type SessionInfo } from '@/hermes'
 import { traceIdentityChange } from '@/lib/identity-trace'
 import { completeMcpDesktopOAuth } from '@/lib/mcp-dashboard-oauth'
 import {
@@ -92,6 +93,7 @@ import {
   setResumeExhaustedSessionId,
   setSessionOwnerHint
 } from '@/store/session'
+import { $sidebarSessionsPrePlugin } from '@/store/session-filter'
 import { $focusedStoredSessionId } from '@/store/session-focus'
 import {
   $focusedRuntimeId,
@@ -1915,6 +1917,13 @@ export {
 } from '@/lib/transcript-directives'
 export { cn } from '@/lib/utils'
 export { gatewayActivationEpoch, useGatewayActivationEpoch } from '@/store/gateway'
+/** `sessions.filter`: narrow the session list by CONTRIBUTING a predicate
+ *  (`data: SessionFilterContribution` — `match(session)`, optional `label` and
+ *  `onClear`). Every contribution is ANDed with core's own filters; a `match`
+ *  that is not a function or throws counts as matching. `onClear` runs when
+ *  the user resets the sidebar filters. `sessionHasOpenCards` is the same
+ *  open-card test the row's card squares use. */
+export { SESSION_FILTER_AREA, type SessionFilterContribution, sessionHasOpenCards } from '@/store/session-filter'
 /** THE unread store behind `SessionStatusDot`'s emerald dot. A plugin that
  *  learns out-of-band that a session produced something the user hasn't seen
  *  (a roster poll's activity watermark, say) writes HERE rather than keeping
@@ -1934,6 +1943,16 @@ export { ackStoredSessionId, forgetSessionUnread, markSessionUnreadFinished } fr
  *  contribution, not a `host.sidebar` verb, so it is attributed and dropped
  *  on disable. */
 export { SIDEBAR_NAV_PREFS_AREA, type SidebarNavPrefsContribution } from '@/store/sidebar-nav'
+
+/** The sessions the sidebar would list for the active scope with every CORE
+ *  filter applied (hidden gateways, automated, status / profile / PR /
+ *  project filters) but WITHOUT any `sessions.filter` plugin contribution.
+ *  Includes pinned rows; excludes cron and messaging-platform rows, which the
+ *  sidebar lists separately. Empty until a ChatSidebar is mounted. */
+export function useSidebarSessions(): readonly SessionInfo[] {
+  return useStore($sidebarSessionsPrePlugin)
+}
+
 export type { StatusResponse } from '@/types/hermes'
 /** Public SDK name for the shared gateway wire event; kept stable for plugins. */
 export type { GatewayEvent as RpcEvent } from '@hermes/shared'

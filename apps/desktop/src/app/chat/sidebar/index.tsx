@@ -32,7 +32,7 @@ import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $activeConnectionId } from '@/store/connections'
 import { $cronJobs } from '@/store/cron'
 import { recordAction } from '@/store/desktop-metrics'
-import { $hiddenGatewayIds, sessionOnHiddenGateway } from '@/store/gateway-visibility'
+import { $hiddenGatewayIds } from '@/store/gateway-visibility'
 import { $showsAdvancedChrome } from '@/store/interface-mode'
 import { $bindings } from '@/store/keybinds'
 import {
@@ -85,7 +85,6 @@ import {
   type AgentProfileRoute,
   ALL_PROFILES,
   messagingTotalsKey,
-  normalizeProfileKey,
   sidebarProfileForScope
 } from '@/store/profile'
 import { $profileRailVisible } from '@/store/profile-rail-prefs'
@@ -108,7 +107,6 @@ import {
 import {
   $prBranchBySession,
   $pullRequestsByBranch,
-  pullRequestBucket,
   recoverSessionPullRequests,
   refreshPullRequests,
   sessionPrKey
@@ -128,7 +126,7 @@ import {
   markAllSessionsRead,
   sessionPinId
 } from '@/store/session'
-import { $sessionDotStateById, sessionStatusBucket } from '@/store/session-dot-state'
+import { $sessionDotStateById } from '@/store/session-dot-state'
 import { $focusedSessionIsTile, $focusedStoredSessionId } from '@/store/session-focus'
 import { $unconfirmedPinWrites } from '@/store/session-pin-sync'
 import { $removedSessionIds } from '@/store/session-removal'
@@ -169,7 +167,6 @@ import {
   ProjectBackRow,
   projectTreeCwd,
   sessionBucketId,
-  sessionMatchesProjectFilter,
   sessionRecency as sessionTime,
   type SidebarProjectTree,
   type SidebarWorkspaceTree,
@@ -192,12 +189,12 @@ import {
   SidebarStorageCorruptNotice
 } from './section-states'
 import { GlobalSessionRenameDialog } from './session-actions-menu'
-import { sidebarFiltersNarrow } from './session-filters'
 import { buildSessionByAnyId, resolvePinnedSessions, useOfflineFallback } from './session-index'
 import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
 import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
 import { useOverviewPreviews } from './use-overview-previews'
 import { useServerSessionSearch } from './use-server-session-search'
+import { useSessionFilters } from './use-session-filters'
 import { useSidebarDndSensors } from './use-sidebar-dnd-sensors'
 import { useSidebarNavCollapsed } from './use-sidebar-nav-collapsed'
 
@@ -489,88 +486,25 @@ export function ChatSidebar({
 
   const executionNow = useExecutionObservationClock(executionRows)
 
-  const sessionMatchesFilters = useCallback(
-    // The shared tick must invalidate memoized filters even when the dot stays `background`.
-    (session: SessionInfo) => {
-      // [daveey] A hidden gateway's rows leave every list and lane.
-      if (sessionOnHiddenGateway(session, hiddenGatewayIds, gatewayRegistry)) {
-        return false
-      }
-
-      // [daveey] Bot / test rows leave every list and lane unless shown (pinned
-      // and blocked / needs-input rows stay). Same predicate ⌘] / ⌘[ use.
-      if (
-        sessionHiddenAsAutomated(session, showAutomated, {
-          nowSeconds: executionNow,
-          dotState: dotStates[session.id] ?? 'idle',
-          pinnedIds: pinnedSessionIds
-        })
-      ) {
-        return false
-      }
-
-      if (statusFilter.length && !statusFilter.includes(sessionStatusBucket(dotStates[session.id]))) {
-        return false
-      }
-
-      // Narrowing to a few of the profiles on screen. Scoped to one profile the
-      // list is already that profile's, so a stale selection can't blank it.
-      if (showAllProfiles && profileFilter.length && !profileFilter.includes(normalizeProfileKey(session.profile))) {
-        return false
-      }
-
-      if (prFilter.length) {
-        const key = sessionPrKey(session)
-
-        if (!prFilter.includes(pullRequestBucket(key ? pullRequests[key] : undefined))) {
-          return false
-        }
-      }
-
-      // Same membership the sidebar groups and colors by (backend owner first,
-      // cwd walk otherwise), so a filtered row lands in the lane the user
-      // picked it from.
-      return navigation.matches(
-        session,
-        projectFilter,
-        navigationGroups,
-        sessionMatchesProjectFilter(session, projectFilter, projects, projectOwners, knownProjects)
-      )
-    },
-    [
-      hiddenGatewayIds,
-      gatewayRegistry,
-      showAutomated,
-      pinnedSessionIds,
-      statusFilter,
-      projectFilter,
-      navigationGroups,
-      profileFilter,
-      showAllProfiles,
-      prFilter,
-      pullRequests,
-      projects,
-      projectOwners,
-      knownProjects,
-      dotStates,
-      executionNow
-    ]
-  )
-
-  const filtersNarrow = sidebarFiltersNarrow({
+  const { filtersNarrow, pluginFilters, sessionMatchesFilters, visibleSessions } = useSessionFilters({
+    dotStates,
+    executionNow,
+    gatewayRegistry,
     hiddenGatewayIds,
-    showAutomated,
-    statusFilter,
-    projectFilter,
+    knownProjects,
+    navigationGroups,
+    pinnedSessionIds,
     prFilter,
+    profileFilter,
+    projectFilter,
+    projectOwners,
+    projects,
+    pullRequests,
+    scopedSessions,
     showAllProfiles,
-    profileFilter
+    showAutomated,
+    statusFilter
   })
-
-  const visibleSessions = useMemo(
-    () => (filtersNarrow ? scopedSessions.filter(sessionMatchesFilters) : scopedSessions),
-    [scopedSessions, filtersNarrow, sessionMatchesFilters]
-  )
 
   // Recents by activity (last_active || started_at). User send stamps
   // last_active immediately. Ordering by status doesn't sort here — it re-slots
@@ -1211,10 +1145,7 @@ export function ChatSidebar({
   // [daveey] Hiding automated chats is the fork's default view, not a narrowed one: a profile whose
   // chats are all automated (or none) still keeps its empty section.
   const profileListNarrow =
-    hiddenGatewayIds.length > 0 ||
-    statusFilter.length > 0 ||
-    projectFilter.length > 0 ||
-    prFilter.length > 0 ||
+    [hiddenGatewayIds, statusFilter, projectFilter, prFilter, pluginFilters].some(list => list.length > 0) ||
     (showAllProfiles && profileFilter.length > 0)
 
   const profileGroups = useGatewaySessionGroups(agentSessions, ownerGrouped, profileListNarrow)

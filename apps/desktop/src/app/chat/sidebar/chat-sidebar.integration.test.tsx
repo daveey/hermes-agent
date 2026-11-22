@@ -16,6 +16,7 @@ import {
   $sidebarShowArchived,
   $sidebarShowAutomated,
   $sidebarStatusFilter,
+  resetSidebarView,
   setSidebarAgentsGrouped,
   setSidebarGrouping
 } from '@/store/layout'
@@ -32,6 +33,7 @@ import {
   $sessionsLoading,
   $workspaceCwdOwner
 } from '@/store/session'
+import { $sidebarSessionsPrePlugin, SESSION_FILTER_AREA } from '@/store/session-filter'
 import { $removedSessionIds } from '@/store/session-removal'
 import { $archivedSessions } from '@/store/sidebar-archive'
 import { SIDEBAR_NAV_PREFS_AREA } from '@/store/sidebar-nav'
@@ -220,6 +222,36 @@ describe('ChatSidebar navigation activity', () => {
 
     act(() => dispose())
     expect(screen.getByRole('button', { name: 'Kanban' })).toBeTruthy()
+  })
+
+  // `sessions.filter`: a contribution hides non-matching rows, its disposer
+  // restores them, and clearing the sidebar filters calls its onClear.
+  it('hides non-matching session rows while a sessions.filter contribution is registered', () => {
+    renderSidebar('/', 'chat')
+    expect(screen.getByText('Tile one')).toBeTruthy()
+    expect(screen.getByText('Tile two')).toBeTruthy()
+
+    const onClear = vi.fn()
+
+    let dispose = () => {}
+
+    act(() => {
+      dispose = registry.register({
+        area: SESSION_FILTER_AREA,
+        data: { match: (s: { id: string }) => s.id === 'tile-one', onClear },
+        id: 'lane'
+      })
+    })
+    expect(screen.getByText('Tile one')).toBeTruthy()
+    expect(screen.queryByText('Tile two')).toBeNull()
+    // The SDK list stays pre-plugin: both rows.
+    expect($sidebarSessionsPrePlugin.get().map(s => s.id)).toEqual(['tile-one', 'tile-two'])
+
+    act(() => resetSidebarView())
+    expect(onClear).toHaveBeenCalledTimes(1)
+
+    act(() => dispose())
+    expect(screen.getByText('Tile two')).toBeTruthy()
   })
 })
 

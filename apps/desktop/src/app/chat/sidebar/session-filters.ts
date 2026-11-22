@@ -8,6 +8,8 @@ export interface SidebarFilterNarrowInput {
   prFilter: readonly unknown[]
   showAllProfiles: boolean
   profileFilter: readonly unknown[]
+  /** `sessions.filter` plugin contributions: any narrows. */
+  pluginFilters: readonly unknown[]
 }
 
 export function sidebarFiltersNarrow({
@@ -17,7 +19,8 @@ export function sidebarFiltersNarrow({
   projectFilter,
   prFilter,
   showAllProfiles,
-  profileFilter
+  profileFilter,
+  pluginFilters
 }: SidebarFilterNarrowInput): boolean {
   return (
     hiddenGatewayIds.length > 0 ||
@@ -25,6 +28,7 @@ export function sidebarFiltersNarrow({
     statusFilter.length > 0 ||
     projectFilter.length > 0 ||
     prFilter.length > 0 ||
-    (showAllProfiles && profileFilter.length > 0)
+    (showAllProfiles && profileFilter.length > 0) ||
+    pluginFilters.length > 0
   )
 }
