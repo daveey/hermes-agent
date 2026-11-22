@@ -18,6 +18,7 @@ import {
   shownPanesInGroup,
   type TreeSide
 } from '@/components/pane-shell/tree/store'
+import { $registryVersion, registry } from '@/contrib/registry'
 import { matchesQuery } from '@/hooks/use-media-query'
 import { connectionScopedAtom } from '@/lib/connection-scoped'
 import { LAYOUT_KEYS } from '@/lib/layout-persistence'
@@ -30,7 +31,7 @@ import { $paneStates, ensurePaneRegistered, setPaneOpen, setPaneWidthOverride } 
 import { $showAllProfiles, setShowAllProfiles } from './profile'
 import type { PullRequestBucket } from './pull-requests'
 import type { SessionStatusBucket } from './session-dot-state'
-import { clearSessionFilterContributions } from './session-filter'
+import { clearSessionFilterContributions, SESSION_FILTER_AREA } from './session-filter'
 
 export const SIDEBAR_DEFAULT_WIDTH = 237
 export const SIDEBAR_MAX_WIDTH = 360
@@ -431,10 +432,17 @@ export const $sidebarFiltersActive: ReadableAtom<boolean> = computed(
     $sidebarProfileFilter,
     $sidebarPrFilter,
     $sidebarShowArchived,
-    $sidebarShowAutomated
+    $sidebarShowAutomated,
+    $registryVersion
   ],
   (statuses, projects, profiles, prs, archived, automated) =>
-    statuses.length > 0 || projects.length > 0 || profiles.length > 0 || prs.length > 0 || archived || automated
+    statuses.length > 0 ||
+    projects.length > 0 ||
+    profiles.length > 0 ||
+    prs.length > 0 ||
+    archived ||
+    automated ||
+    registry.getArea(SESSION_FILTER_AREA).length > 0
 )
 
 /** Anything at all moved off the shipped view — what makes a reset worth

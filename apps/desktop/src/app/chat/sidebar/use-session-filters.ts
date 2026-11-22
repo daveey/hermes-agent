@@ -4,9 +4,9 @@ import { useContributions } from '@/contrib/react/use-contributions'
 import type { SessionInfo } from '@/hermes'
 import { sessionOnHiddenGateway } from '@/store/gateway-visibility'
 import { normalizeProfileKey } from '@/store/profile'
-import type { $pullRequestsByBranch} from '@/store/pull-requests';
+import type { $pullRequestsByBranch } from '@/store/pull-requests'
 import { pullRequestBucket, sessionPrKey } from '@/store/pull-requests'
-import type { $sessionDotStateById} from '@/store/session-dot-state';
+import type { $sessionDotStateById } from '@/store/session-dot-state'
 import { sessionStatusBucket } from '@/store/session-dot-state'
 import { $sidebarSessionsPrePlugin, applySessionFilters, SESSION_FILTER_AREA } from '@/store/session-filter'
 import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
@@ -137,10 +137,7 @@ export function useSessionFilters(inputs: SessionFilterInputs) {
     ]
   )
 
-  const sessionMatchesFilters = useCallback(
-    (session: SessionInfo) => matchesFilters(session, true),
-    [matchesFilters]
-  )
+  const sessionMatchesFilters = useCallback((session: SessionInfo) => matchesFilters(session, true), [matchesFilters])
 
   const filtersNarrow = sidebarFiltersNarrow({
     hiddenGatewayIds,
@@ -164,16 +161,16 @@ export function useSessionFilters(inputs: SessionFilterInputs) {
     pluginFilters: []
   })
 
-  const visibleSessions = useMemo(
-    () => (filtersNarrow ? scopedSessions.filter(sessionMatchesFilters) : scopedSessions),
-    [scopedSessions, filtersNarrow, sessionMatchesFilters]
-  )
-
   // What the SDK's `useSidebarSessions` hands plugins: the list with core
   // filters applied but not `sessions.filter` contributions.
   const prePluginSessions = useMemo(
     () => (coreFiltersNarrow ? scopedSessions.filter(session => matchesFilters(session, false)) : scopedSessions),
     [scopedSessions, coreFiltersNarrow, matchesFilters]
+  )
+
+  const visibleSessions = useMemo(
+    () => (pluginFilters.length ? scopedSessions.filter(sessionMatchesFilters) : prePluginSessions),
+    [scopedSessions, pluginFilters, sessionMatchesFilters, prePluginSessions]
   )
 
   useEffect(() => {

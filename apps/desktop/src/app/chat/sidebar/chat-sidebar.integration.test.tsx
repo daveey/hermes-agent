@@ -224,6 +224,34 @@ describe('ChatSidebar navigation activity', () => {
     expect(screen.getByRole('button', { name: 'Kanban' })).toBeTruthy()
   })
 
+  it('keeps plugin-only empty filters visible and makes Reset call onClear', async () => {
+    resetSidebarView()
+    $sessionsLoading.set(false)
+    renderSidebar('/', 'chat')
+    let dispose = noop
+    const onClear = vi.fn(() => dispose())
+
+    act(() => {
+      dispose = registry.register({
+        area: SESSION_FILTER_AREA,
+        id: 'empty-lane',
+        data: { match: () => false, onClear }
+      })
+    })
+
+    try {
+      expect(screen.queryByText('No sessions yet')).toBeNull()
+      expect(screen.getAllByText('No sessions match these filters').length).toBeGreaterThan(0)
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Filters' }), { key: 'ArrowDown' })
+      fireEvent.click(await screen.findByText('Reset to defaults'))
+      expect(onClear).toHaveBeenCalledTimes(1)
+      expect(screen.getByText('Tile one')).toBeTruthy()
+    } finally {
+      act(() => dispose())
+      $sessionsLoading.set(true)
+    }
+  })
+
   // `sessions.filter`: a contribution hides non-matching rows, its disposer
   // restores them, and clearing the sidebar filters calls its onClear.
   it('hides non-matching session rows while a sessions.filter contribution is registered', () => {
