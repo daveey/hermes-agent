@@ -32,9 +32,12 @@ REMOVAL = "removal"
 # Installs the immutability / taint guards themselves.
 GUARD_INSTALL = "guard_install"
 
+# Dynamic-table statement audited as unable to name either custody table (fixed table tuple / other store).
+NOT_CUSTODY = "not_custody"
+
 DISPOSITIONS = frozenset({
     ORIGINAL_CANDIDATE, RECOVERY_AMBIGUOUS, SYNTHETIC_UNKNOWN, IDENTITY_ROTATION,
-    WIRE_FREEZE, STATE_ONLY, REMOVAL, GUARD_INSTALL,
+    WIRE_FREEZE, STATE_ONLY, REMOVAL, GUARD_INSTALL, NOT_CUSTODY,
 })
 
 _O = "kanban_sync_outbox"
@@ -87,7 +90,45 @@ SITES: dict[tuple[str, str, str, str], str] = {
     ("kanban_sync_envelope.py", "prune_parents", "DELETE", _P): REMOVAL,
     ("kanban_sync_envelope.py", "retire_parent", "DELETE", _P): REMOVAL,
     ("kanban_sync_rejections.py", "resolve_rejections", "DELETE", _O): REMOVAL,
+    # -- a fixture generator, not a production writer (scripts/ is scanned so it cannot be forgotten)
+    ("gen_source_receipt_fixture.py", "_running", "DELETE", _O): REMOVAL,
     # -- the guards themselves -------------------------------------------------------------------------
     ("kanban_sync_capture_storage.py", "install", "UPDATE", _O): GUARD_INSTALL,
     ("kanban_sync_capture_storage.py", "install", "UPDATE", _P): GUARD_INSTALL,
+}
+
+# Sites whose key legitimately covers several statements; any other key is exactly one statement, so a new
+# statement inside an already-listed function fails the gate until it is audited here.
+SITE_COUNTS: dict[tuple[str, str, str, str], int] = {
+    ("kanban_actionability_transport.py", "record_result", "UPDATE", _O): 2,
+    ("kanban_retain_transport.py", "record_result", "UPDATE", _O): 2,
+    ("kanban_sync_client.py", "push", "UPDATE", _O): 3,
+    ("kanban_sync_divergence.py", "repair_divergence", "INSERT", _O): 2,
+}
+
+# Statements whose table is a parameter or loop variable, so they could reach a custody table without naming it.
+# (file, function, verb, "<dynamic-table>") -> (disposition, can_reach_custody_tables)
+_D = "<dynamic-table>"
+DYNAMIC_SITES: dict[tuple[str, str, str, str], tuple[str, bool]] = {
+    # Rebuild/salvage copies every table row, provenance columns included, into the replacement Board file:
+    # whatever it copies must be treated ambiguous by the capture slice, never carried as 'original'.
+    ("kanban_db_recover.py", "_salvage_table", "INSERT", _D): (RECOVERY_AMBIGUOUS, True),
+    ("kanban_db_recover.py", "_fill_from_backup", "INSERT", _D): (RECOVERY_AMBIGUOUS, True),
+    # Fixed tuples of synced domain tables / own bookkeeping tables; neither custody table is in any of them.
+    ("flaky_intake.py", "_initialize", "UPDATE", _D): (NOT_CUSTODY, False),
+    ("kanban_candidate_receipts.py", "persist", "DELETE", _D): (NOT_CUSTODY, False),
+    ("kanban_containment_connections.py", "bootstrap", "UPDATE", _D): (NOT_CUSTODY, False),
+    ("kanban_db.py", "_delete_task_relations", "DELETE", _D): (NOT_CUSTODY, False),
+    ("kanban_db_connect.py", "_rebuild_drifted_tables", "INSERT", _D): (NOT_CUSTODY, False),
+    ("kanban_db_sync.py", "_delete_row", "DELETE", _D): (NOT_CUSTODY, False),
+    ("kanban_db_sync.py", "_insert_trigger", "UPDATE", _D): (NOT_CUSTODY, False),
+    ("kanban_db_sync.py", "_upsert_row", "INSERT", _D): (NOT_CUSTODY, False),
+    ("kanban_db_sync.py", "_upsert_row", "UPDATE", _D): (NOT_CUSTODY, False),
+    ("kanban_db_sync.py", "install_or_remove", "UPDATE", _D): (NOT_CUSTODY, False),
+    ("kanban_db_sync.py", "repair_ms_timestamps", "UPDATE", _D): (NOT_CUSTODY, False),
+    ("kanban_llm_pacing_history.py", "record", "DELETE", _D): (NOT_CUSTODY, False),
+    ("kanban_scratch_custody_discovery.py", "discover", "INSERT", _D): (NOT_CUSTODY, False),
+    ("kanban_sync_quarantine.py", "adopt", "INSERT", _D): (NOT_CUSTODY, False),
+    ("kanban_sync_quarantine.py", "restore", "INSERT", _D): (NOT_CUSTODY, False),
+    ("kanban_worker_node.py", "_evict_one", "DELETE", _D): (NOT_CUSTODY, False),
 }
