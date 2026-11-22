@@ -34,6 +34,9 @@ def sweep() -> int:
     kept = sys.modules.get("hermes_cli.kanban_kept_reader")
     if kept is not None:
         closed += _guarded(kept.release_gone)
+    notification = sys.modules.get("tui_gateway.notification_reader")
+    if notification is not None:
+        closed += _guarded(notification.release_gone)
     safe_read = sys.modules.get("hermes_cli.sqlite_safe_read")
     if safe_read is not None:
         safe_read.release_unlinked_fds()

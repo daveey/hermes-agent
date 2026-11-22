@@ -96,6 +96,37 @@ def close_all():
                 reader.lock.release()
 
 
+def release_gone() -> int:
+    """Close idle observers of removed boards, without waiting on either owner lock."""
+    from hermes_cli.kanban_sync_board_watch import path_gone
+
+    with _registry_lock:
+        readers = list(_registry.items())
+    closed = 0
+    for key, reader in readers:
+        if not path_gone(key) or not reader.lock.acquire(blocking=False):
+            continue
+        try:
+            with _registry_lock:
+                if _registry.get(key) is not reader:
+                    continue
+            # The pathname may have reappeared while we acquired custody.
+            if not path_gone(key):
+                continue
+            had_connection = reader.conn is not None
+            try:
+                reader.close()
+            except generation.BoardLifecycleBusy:
+                continue  # keep custody registered for a later sweep
+            with _registry_lock:
+                if _registry.get(key) is reader:
+                    del _registry[key]
+            closed += int(had_connection)
+        finally:
+            reader.lock.release()
+    return closed
+
+
 def _reader(path):
     with _registry_lock:
         reader = _registry.get(path)

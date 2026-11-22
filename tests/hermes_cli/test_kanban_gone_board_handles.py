@@ -23,6 +23,7 @@ from hermes_cli import kanban_sync_client as ksc
 from hermes_cli import sqlite_safe_read
 from hermes_cli.kanban_sync_board_watch import BoardWatch, path_gone
 from tests.hermes_cli import test_kanban_sync_push_starvation as loop_support
+from tui_gateway import notification_idle, notification_reader
 
 pytestmark = pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="reads /proc/self/fd")
 
@@ -42,6 +43,7 @@ def home(tmp_path, monkeypatch):
     ksc._WATCH.reset()
     kept.close_all()
     retention.close_all()
+    notification_idle.reset_board_signatures()
 
 
 def _board(slug: str) -> Path:
@@ -118,6 +120,145 @@ def test_shared_cached_reader_of_a_removed_board_is_closed(home):
     assert list(activity._RO_CACHE) == [str(live)]
 
 
+def test_notification_signature_sweep_closes_removed_board_only(home):
+    live, doomed = _board("live"), _board("doomed")
+    for path in (live, doomed):
+        notification_idle.board_signature(path, "chat")
+    with notification_reader.reading(live) as (live_conn, _):
+        pass
+    directory = _remove(doomed)
+    assert gone.sweep() == 1
+    assert _fds_under(directory) == []
+    assert list(notification_reader._registry) == [str(live)]
+    with notification_reader.reading(live) as (conn, retained):
+        assert retained and conn is live_conn
+    assert gone.sweep() == 0
+
+
+def test_borrowed_notification_observer_is_not_closed_or_waited_on(home):
+    doomed = _board("doomed")
+    results, errors = [], []
+
+    def sweep():
+        try:
+            results.append(gone.sweep())
+        except BaseException as exc:
+            errors.append(exc)
+
+    with notification_reader.reading(doomed) as (conn, _):
+        directory = _remove(doomed)
+        thread = threading.Thread(target=sweep)
+        thread.start()
+        thread.join(2)
+        completed_while_borrowed = not thread.is_alive()
+        assert tuple(conn.execute(SQL).fetchone()) == (0,)
+    thread.join(5)
+    assert not thread.is_alive() and not errors
+    assert completed_while_borrowed and results == [0]
+    assert gone.sweep() == 1
+    assert _fds_under(directory) == []
+
+
+def test_notification_sweep_defers_lifecycle_busy_close(home):
+    from hermes_cli import kanban_generation as generation
+
+    doomed = _board("doomed")
+    notification_idle.board_signature(doomed, "chat")
+    directory = _remove(doomed)
+    ready, release = threading.Event(), threading.Event()
+    errors = []
+
+    def hold():
+        try:
+            with generation.lifecycle_access(doomed, timeout=5):
+                ready.set()
+                assert release.wait(10)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert ready.wait(5)
+        assert gone.sweep() == 0
+        assert _fds_under(directory)
+        assert str(doomed) in notification_reader._registry
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive() and not errors
+    assert gone.sweep() == 1
+    assert _fds_under(directory) == []
+
+
+def test_notification_sweep_rechecks_path_after_acquiring_custody(home, monkeypatch):
+    from hermes_cli import kanban_sync_board_watch as watch_module
+
+    live = _board("live")
+    with notification_reader.reading(live) as (old, _):
+        pass
+    calls = []
+
+    def temporarily_gone(path):
+        calls.append(path)
+        return len(calls) == 1
+
+    monkeypatch.setattr(watch_module, "path_gone", temporarily_gone)
+    assert notification_reader.release_gone() == 0
+    assert len(calls) == 2
+    with notification_reader.reading(live) as (conn, retained):
+        assert retained and conn is old
+
+
+def test_notification_sweep_does_not_count_already_evicted_reader(home, monkeypatch):
+    from hermes_cli import kanban_sync_board_watch as watch_module
+
+    doomed = _board("doomed")
+    notification_idle.board_signature(doomed, "chat")
+    directory = _remove(doomed)
+
+    def evicted_meanwhile(path):
+        notification_reader.close_all()
+        return True
+
+    monkeypatch.setattr(watch_module, "path_gone", evicted_meanwhile)
+    assert notification_reader.release_gone() == 0
+    assert _fds_under(directory) == []
+
+
+def test_notification_sweep_does_not_retire_a_replaced_registry_entry(home, monkeypatch):
+    from hermes_cli import kanban_sync_board_watch as watch_module
+
+    live = _board("live")
+    with notification_reader.reading(live) as (conn, _):
+        pass
+    key = str(live)
+    old = notification_reader._registry[key]
+    replacement = notification_reader._Reader(key)
+
+    def replaced_meanwhile(path):
+        notification_reader._registry[key] = replacement
+        return True
+
+    monkeypatch.setattr(watch_module, "path_gone", replaced_meanwhile)
+    try:
+        assert notification_reader.release_gone() == 0
+        assert notification_reader._registry[key] is replacement
+        assert not old.retired and old.conn is conn
+        assert tuple(conn.execute(SQL).fetchone()) == (0,)
+    finally:
+        old.close()
+
+
+def test_notification_sweep_removes_empty_slots_without_counting_a_close(home):
+    doomed = _board("doomed")
+    entry = notification_reader._reader(str(doomed))
+    assert entry is not None and entry.conn is None
+    shutil.rmtree(doomed.parent)
+    assert notification_reader.release_gone() == 0
+    assert str(doomed) not in notification_reader._registry
+
+
 def test_a_borrowed_shared_reader_is_never_closed_under_its_borrower(home):
     doomed = _board("doomed")
     with activity.cached_ro(doomed) as conn:
@@ -190,7 +331,7 @@ def test_only_a_missing_path_counts_as_gone(tmp_path, monkeypatch):
 
 def test_sweep_skips_caches_whose_module_was_never_imported(monkeypatch):
     for name in ("hermes_cli.kanban_sync_client", "hermes_cli.kanban_session_activity",
-                 "hermes_cli.kanban_kept_reader", "hermes_cli.sqlite_safe_read"):
+                 "hermes_cli.kanban_kept_reader", "hermes_cli.sqlite_safe_read", "tui_gateway.notification_reader"):
         monkeypatch.delitem(__import__("sys").modules, name)
     assert gone.sweep() == 0
 
