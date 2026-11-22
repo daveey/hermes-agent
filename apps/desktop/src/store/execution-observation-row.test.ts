@@ -19,7 +19,7 @@ import {
 } from './session-dot-state'
 import { sessionHasStatusStripe } from './sidebar-visible-order'
 
-// Verdicts come ONLY from the shared fixture's `expected.state`; this file maps them onto what the sidebar paints.
+// Activity verdicts come ONLY from the shared fixture's `expected.state`; status paint stays unknown without a published protocol.
 // Nothing here re-calls the projector to decide an expectation.
 type Patch = { set?: Record<string, unknown>; delete?: string[] }
 
@@ -114,16 +114,17 @@ describe('sidebar classification of the shared execution fixture', () => {
       vi.setSystemTime(now * 1000)
       const r = row({ execution_observations: [obs(test)] }, now)
       const { dot, stripe } = classify(r)
+      expect(stripe).toBe('attention') // No published status: local evidence cannot become status authority.
       const state = test.expected.state as string
 
       if (state === 'running' || state === 'queued') {
         // A structured ask the fixture says survives (even beside running work) is outstanding: red, never erased.
-        expect([dot, stripe]).toEqual(['background', test.expected.human_request ? 'stuck' : null])
+        expect(dot).toBe('background')
         expect(rowExecution(r)).toMatchObject({ live: 1, unknown: 0 })
       } else if (state === 'waiting') {
-        expect([dot, stripe]).toEqual(['background', 'waiting'])
+        expect(dot).toBe('background')
       } else if (state === 'needs_user') {
-        expect([dot, stripe]).toEqual(['background', 'stuck'])
+        expect(dot).toBe('background')
       } else if (state === 'done' || state === 'failed' || state === 'cancelled') {
         // Terminal evidence never holds a row; the legacy stamps (none here) decide what it paints.
         expect(dot).toBe('idle')
@@ -145,12 +146,12 @@ describe('sidebar execution wiring', () => {
     vi.setSystemTime(AT * 1000)
   })
 
-  it('treats absent or empty observations as no evidence: legacy decides, nothing fabricated', () => {
+  it('treats absent or empty observations as no activity evidence; missing published status stays unknown', () => {
     for (const execution_observations of [undefined, []]) {
       const r = row(execution_observations ? { execution_observations } : {}, AT)
 
       expect(rowExecution(r)).toBeNull()
-      expect(classify(r)).toEqual({ dot: 'idle', stripe: 'done' })
+      expect(classify(r)).toEqual({ dot: 'idle', stripe: 'attention' })
     }
 
     // Legacy staleness still holds the row with no observations at all.
@@ -193,7 +194,7 @@ describe('sidebar execution wiring', () => {
     const r = row({ execution_observations: [diagnostic] }, AT)
 
     expect(rowExecution(r)).toBeNull()
-    expect(classify(r)).toEqual({ dot: 'idle', stripe: 'done' })
+    expect(classify(r)).toEqual({ dot: 'idle', stripe: 'attention' })
     expect(diagnostic.diagnostics).toEqual([{ code: 'capacity.profile_limit' }])
   })
 
@@ -228,17 +229,17 @@ describe('sidebar execution wiring', () => {
     })
     expect(rowExecution(r)).toMatchObject({ unknown: 1 })
     expect(executionHoldsRow(rowExecution(r))).toBe(true)
-    expect(classify(r)).toEqual({ dot: 'background', stripe: null })
+    expect(classify(r)).toEqual({ dot: 'background', stripe: 'attention' })
     expect(completed.delivery_receipt).toEqual(receipt)
   })
 
-  it('re-evaluates off-screen keyboard stepping at invocation time without another subscription', () => {
+  it('does not reclassify missing published status when local completion evidence expires', () => {
     const receipt = { disposition: 'delivered', evidence_ref: 'completed:42', identity: base.identity, verified: true }
     setSessions([row({ execution_observations: [obs({ set: { delivery_receipt: receipt, state: 'done', valid_until: 1010 } })] }, AT)])
     expect(sessionHasStatusStripe('s1')).toBe(true)
     vi.setSystemTime(1011_000)
     $kanbanObservationTick.set($kanbanObservationTick.get() + 1)
-    expect(sessionHasStatusStripe('s1')).toBe(false)
+    expect(sessionHasStatusStripe('s1')).toBe(true)
   })
 
   it('expires by time alone: running becomes unknown with no new row, without moving the row to done', () => {
@@ -282,13 +283,13 @@ describe('sidebar execution wiring', () => {
 
     const live = row({ execution_observations: [asking] }, AT)
 
-    expect(classify(live)).toEqual({ dot: 'background', stripe: 'stuck' })
+    expect(classify(live)).toEqual({ dot: 'background', stripe: 'attention' })
 
     vi.setSystemTime(1500 * 1000)
     const expired = row({ execution_observations: [asking] }, 1500)
 
     expect(rowExecution(expired)).toMatchObject({ needsUser: 0, outstanding: 1, unknown: 1 })
-    expect(classify(expired)).toEqual({ dot: 'background', stripe: 'stuck' })
+    expect(classify(expired)).toEqual({ dot: 'background', stripe: 'attention' })
   })
 
   it('keeps legacy turn_live working and adds no certainty when evidence is unusable', () => {

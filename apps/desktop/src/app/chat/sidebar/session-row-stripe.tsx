@@ -4,24 +4,21 @@ import { useEffect } from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
-import { reportSessionStripeRemote, type SessionInfo } from '@/hermes'
+import { reportSessionCommittedStripeRemote, reportSessionStripeRemote, type SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { outcomeHasCrons, outcomeHasWatches, outcomeStripe, outcomeTooltip } from '@/lib/session-outcome'
+import { canonicalOutcomeStatus, outcomeHasCrons, outcomeHasWatches, outcomeTooltip } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
 import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
 import { useSessionParked } from '@/lib/use-session-parked'
-import { useWorkSourceUnavailable } from '@/lib/use-work-source-unavailable'
 import { cn } from '@/lib/utils'
+import { setCommittedStripeReporter, useCommittedStripe } from '@/store/committed-stripe-report'
 import { stuckOnPausedQueue } from '@/store/owner-queue-landed'
 import { $pausedQueueSessionIds } from '@/store/owner-queue-reconcile'
 import { $sessions } from '@/store/session'
 import {
   $stuckPromptInputsKey,
-  kanbanStripeCounts,
-  outcomePaintsStripe,
   recordStripeTransition,
   type SessionDotState,
-  sessionStatusStripe,
   type SessionStatusStripe,
   setStripeReasonReporter
 } from '@/store/session-dot-state'
@@ -37,6 +34,10 @@ setStripeReasonReporter((row, stripe, previous, reasons) =>
     reasons
   )
 )
+
+// [daveey] Every committed paint of a row with a canonical envelope (any stripe, not red only) is reported with the
+// revision it painted, so the gateway can compare it with what it published.
+setCommittedStripeReporter(reportSessionCommittedStripeRemote)
 
 /** What a row that is not `needs-input` subscribes to instead of `$stuckPromptInputsKey`: it never changes. */
 const NO_PROMPT_INPUTS = atom('')
@@ -54,28 +55,8 @@ export function useSessionRowStripe(
   live: boolean
 ): { outcomePainted: boolean; statusStripe: null | SessionStatusStripe; userBlocked: boolean } {
   const userBlocked = useSessionParked(session.id, session)
-  // Make time an explicit input so React Compiler cannot cache counts across evidence expiry.
-  const nowSeconds = useExecutionObservationClock(session)
-  const counts = kanbanStripeCounts(session, nowSeconds)
-  const sourceUnavailable = useWorkSourceUnavailable(session)
-
-  const statusStripe = live
-    ? sessionStatusStripe(
-        dotState,
-        session.message_count > 0,
-        userBlocked,
-        counts.blocked,
-        session.cron_active === true,
-        session.review_wait,
-        session.kanban_attention,
-        counts.waiting,
-        counts.stalled,
-        session.outcome,
-        sourceUnavailable,
-        counts.external,
-        counts.externalDown
-      )
-    : null
+  const canonical = canonicalOutcomeStatus(session.outcome)
+  const statusStripe = live ? canonical.stripe : null
 
   // [daveey] desktop.log trace of every stripe change with the row inputs that fed it (`stripe-transition <sid>`),
   // so the next "green while work is queued" report has the payload. Change-only and capped inside. A red row whose
@@ -88,9 +69,9 @@ export function useSessionRowStripe(
     recordStripeTransition(session, statusStripe, dotState, Date.now(), live)
   }, [session, statusStripe, dotState, promptInputsKey, live])
 
-  // Only explain the stripe with the outcome when it actually painted it: open asks and unfinished work override it.
-  const outcomePainted =
-    outcomePaintsStripe(dotState, userBlocked) && statusStripe === outcomeStripe(session.outcome)
+  useCommittedStripe(session, session.outcome, 'row', statusStripe, live)
+
+  const outcomePainted = live && canonical.status === 'canonical'
 
   return { outcomePainted, statusStripe, userBlocked }
 }
@@ -141,7 +122,7 @@ export function SessionRowStatusStripe({ session, statusStripe, outcomePainted }
     return null
   }
 
-  const outcomeKind = outcomePainted && outcomeStripe(session.outcome) ? session.outcome?.kind : undefined
+  const outcomeKind = outcomePainted ? session.outcome?.kind : undefined
   const pausedQueue = statusStripe === 'stuck' && stuckOnPausedQueue(session.id, pausedIds, $sessions.get())
 
   const tipText = pausedQueue

@@ -1,11 +1,8 @@
 import type { CSSProperties, ReactNode } from 'react'
 
+import { canonicalOutcomeStatus } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
-import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
-import { useSessionDotState } from '@/lib/use-session-dot-state'
-import { useSessionParked } from '@/lib/use-session-parked'
-import { useWorkSourceUnavailable } from '@/lib/use-work-source-unavailable'
-import { kanbanStripeCounts, sessionStatusStripe } from '@/store/session-dot-state'
+import { useCommittedStripe } from '@/store/committed-stripe-report'
 import type { SessionInfo } from '@/types/hermes'
 
 interface SessionTabAccentProps {
@@ -18,31 +15,16 @@ interface SessionTabAccentProps {
  *  use neutral grey while non-session tabs keep the theme-primary fallback. */
 export function SessionTabAccent({ children, session, storedSessionId }: SessionTabAccentProps) {
   const id = session?.id ?? storedSessionId
-  const state = useSessionDotState(id, session)
-  const blocked = useSessionParked(id, session)
+  const stripe = session?.archived ? null : canonicalOutcomeStatus(session?.outcome).stripe
+  const reports = Boolean(session) && !session?.archived
 
-  const nowSeconds = useExecutionObservationClock(session)
-  const counts = kanbanStripeCounts(session ?? {}, nowSeconds)
-  const sourceUnavailable = useWorkSourceUnavailable(session)
-
-  const stripe = session?.archived
-    ? null
-    : sessionStatusStripe(
-        state,
-        (session?.message_count ?? 0) > 0,
-        blocked,
-        counts.blocked,
-        session?.cron_active,
-        session?.review_wait,
-        session?.kanban_attention,
-        counts.waiting,
-        counts.stalled,
-        session?.outcome,
-        sourceUnavailable,
-        counts.external,
-        counts.externalDown
-      )
-
+  useCommittedStripe(
+    { connection_id: session?.connection_id, id: id ?? '', profile: session?.profile },
+    session?.outcome,
+    'tab',
+    stripe,
+    reports
+  )
 
   return (
     <span

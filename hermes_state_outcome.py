@@ -835,8 +835,20 @@ def _same(a: Optional[dict], b: Optional[dict]) -> bool:
 
 
 def _write(db: Any, sid: str, outcome: dict) -> None:
-    db._write_rowcount("UPDATE sessions SET outcome_json = ?, outcome_at = ? WHERE id = ?",
-                       (json.dumps(outcome, ensure_ascii=False, separators=(",", ":")), time.time(), sid))
+    """Declarations may update explanation, never replace a concurrently published status."""
+    for _attempt in range(3):
+        raw = (_row(db, sid) or {}).get("outcome_json")
+        current = _parse(raw) or {}
+        merged = {key: value for key, value in outcome.items() if key != "status"}
+        if "status" in current:
+            merged["status"] = current["status"]
+        payload = json.dumps(merged, ensure_ascii=False, separators=(",", ":"))
+        if db._write_rowcount("UPDATE sessions SET outcome_json = ?, outcome_at = ? WHERE id = ? AND outcome_json IS ?",
+                             (payload, time.time(), sid, raw)):
+            outcome.clear()
+            outcome.update(merged)
+            return
+    raise sqlite3.OperationalError("outcome declaration lost publication races")
 
 
 # ── Public API ─────────────────────────────────────────────────────────────

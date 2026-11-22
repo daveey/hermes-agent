@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TRANSLATIONS } from '@/i18n/catalog'
-import { type SessionDotState, sessionStatusStripe } from '@/store/session-dot-state'
+import { sessionStatusStripe } from '@/store/session-dot-state'
+import { canonicalOutcome } from '@/test/canonical-outcome'
 import type { SessionOutcome } from '@/types/session-outcome'
 
 import {
+  canonicalOutcomeStatus,
   outcomeEtaLabel,
   outcomeHasCrons,
   outcomeHasWatches,
@@ -68,87 +70,12 @@ const OLD_LOGIC_CASES: Inputs[] = [
   ['working', true, false, 1, false, 'stuck', 1, 2, 1]
 ]
 
-describe('sessionStatusStripe with a stored outcome', () => {
-  it.each([
-    ['done', 'done'],
-    ['decision', 'stuck'],
-    ['muted', 'blocked'],
-    ['waiting', 'waiting'],
-    ['running', 'waiting'],
-    ['unresolved', 'attention']
-  ] as const)('%s paints %s', (kind, stripe) => {
-    expect(outcomeStripe(OUTCOMES[kind])).toBe(stripe)
-    // Open asks always paint red; without an ask, stored done still cannot hide unfinished work.
-    const held = kind === 'done'
-    expect(sessionStatusStripe('idle', true, false, 0, true, null, 2, 4, 1, OUTCOMES[kind])).toBe(held ? sessionStatusStripe('idle', true, false, 0, true, null, 2, 4, 1) : stripe)
-    expect(sessionStatusStripe('idle', true, false, 3, true, 'stuck', 2, 4, 1, OUTCOMES[kind])).toBe('stuck')
-    expect(sessionStatusStripe('background', false, false, 0, false, null, 0, 0, 0, OUTCOMES[kind])).toBe(held ? sessionStatusStripe('background', false, false, 0, false, null, 0, 0, 0) : stripe)
-    expect(sessionStatusStripe('unread', true, false, 0, false, null, 0, 0, 0, OUTCOMES[kind])).toBe(stripe)
-  })
+describe('sessionStatusStripe without a protocol', () => {
+  it.each(OLD_LOGIC_CASES)('is unknown instead of deriving a color from %j', (...inputs) => {
+    expect(sessionStatusStripe(...inputs)).toBe('attention')
 
-  it.each(OLD_LOGIC_CASES)('outcome absent keeps the old answer: %j', (...inputs) => {
-    const [state, hasTurns, userBlocked, kBlocked, periodic, review, attention, waiting, stalled] = inputs
-
-    const legacy = sessionStatusStripe(
-      state,
-      hasTurns,
-      userBlocked,
-      kBlocked,
-      periodic,
-      review,
-      attention,
-      waiting,
-      stalled
-    )
-
-    expect(
-      sessionStatusStripe(
-        state,
-        hasTurns,
-        userBlocked,
-        kBlocked,
-        periodic,
-        review,
-        attention,
-        waiting,
-        stalled,
-        undefined
-      )
-    ).toBe(legacy)
-    expect(
-      sessionStatusStripe(state, hasTurns, userBlocked, kBlocked, periodic, review, attention, waiting, stalled, null)
-    ).toBe(legacy)
-    // A kind this app does not know falls back too, rather than painting a guess.
-    expect(
-      sessionStatusStripe(state, hasTurns, userBlocked, kBlocked, periodic, review, attention, waiting, stalled, {
-        kind: 'from-the-future'
-      })
-    ).toBe(legacy)
-  })
-
-  it('pins the old answers the fallback must keep', () => {
-    expect(sessionStatusStripe('idle', true)).toBe('done')
-    expect(sessionStatusStripe('idle', false)).toBeNull()
-    expect(sessionStatusStripe('needs-input', true)).toBe('stuck')
-    expect(sessionStatusStripe('idle', true, true)).toBe('blocked')
-    expect(sessionStatusStripe('idle', true, false, 0, false, null, 1)).toBe('attention')
-    expect(sessionStatusStripe('background', true, false, 0, false, null, 0, 2, 1)).toBe('stalled')
-  })
-
-  it.each(['working', 'stalled', 'needs-input'] as SessionDotState[])(
-    'the live dot (%s) still overrides every outcome',
-    state => {
-      for (const outcome of Object.values(OUTCOMES)) {
-        expect(sessionStatusStripe(state, true, false, 0, false, null, 0, 0, 0, outcome)).toBe(
-          sessionStatusStripe(state, true)
-        )
-      }
-    }
-  )
-
-  it('a ⌘B park still beats the outcome', () => {
     for (const outcome of Object.values(OUTCOMES)) {
-      expect(sessionStatusStripe('idle', true, true, 0, false, null, 0, 0, 0, outcome)).toBe('blocked')
+      expect(sessionStatusStripe(inputs[0], inputs[1], false, 0, false, null, 0, 0, 0, outcome)).toBe('attention')
     }
   })
 })
@@ -235,6 +162,21 @@ const receiptOutcome = (disposition: ReceiptDisposition = 'delivered', kind = 'd
 })
 
 describe('completion receipt tooltip projection', () => {
+  it('unknown source coverage cannot accompany a green canonical stripe', () => {
+    const malformed = canonicalOutcome('done', { coverage: { state: 'unknown', reasons: ['source_failed'] } })
+    expect(canonicalOutcomeStatus(malformed)).toEqual({ status: 'unknown', stripe: 'attention', revision: null })
+  })
+
+  it('legacy workflow kinds are explanation, not a second paint classifier', () => {
+    expect(outcomeStripe({ kind: 'done' })).toBe('attention')
+  })
+
+  it('a malformed canonical kind cannot contradict a green stripe', () => {
+    const malformed = JSON.parse(JSON.stringify(canonicalOutcome('done')))
+    malformed.status.kind = 'unresolved'
+    expect(canonicalOutcomeStatus(malformed)).toEqual({ status: 'unknown', stripe: 'attention', revision: null })
+  })
+
   it.each(['delivered', 'superseded', 'contained', 'rejected'] as const)(
     'renders scoped %s without changing workflow status',
     disposition => {
@@ -248,7 +190,7 @@ describe('completion receipt tooltip projection', () => {
       expect(text).toContain('event-source-1')
       expect(text).toContain('run-source-1')
       expect(text).not.toContain('independently_checked')
-      expect(outcomeStripe(outcome)).toBe('done')
+      expect(outcomeStripe(outcome)).toBe('attention') // receipt prose is not a published status protocol
 
       if (disposition === 'superseded') {
         expect(text).toContain('@task:default@remote/t_successor')
@@ -427,7 +369,7 @@ describe('a finished chat that owns a cron', () => {
   }
 
   it('stays green and names what keeps running', () => {
-    expect(outcomeStripe(outcome)).toBe('done')
+    expect(outcomeStripe(outcome)).toBe('attention')
     expect(outcomeHasCrons(outcome)).toBe(true)
     expect(outcomeTooltip(outcome, r)).toBe('Sweep is live.\nKeeps running: gmail-psfc-sweep, j2')
   })
@@ -458,7 +400,7 @@ describe('a finished chat that still watches a card', () => {
   })
 
   it('stays green and names the pending check (title and id) with its wake time', () => {
-    expect(outcomeStripe(outcome)).toBe('done')
+    expect(outcomeStripe(outcome)).toBe('attention')
     expect(outcomeHasWatches(outcome)).toBe(true)
     expect(outcomeTooltip(outcome, r)).toBe(
       `Fix landed.\nStill watching: verify the re-run limit (t_watch1, wakes Wed 09:00)`
@@ -498,15 +440,15 @@ describe('unread dot precedence against the stored outcome', () => {
     ['decision', 'stuck'],
     ['muted', 'blocked']
   ] as const)('an unread %s chat paints the %s tone, not the done emerald', (kind, stripe) => {
-    expect(unreadDotOutcomeStripe(OUTCOMES[kind])).toBe(stripe)
+    expect(unreadDotOutcomeStripe(canonicalOutcome(stripe, {}, OUTCOMES[kind]))).toBe(stripe)
     expect(unreadDotOutcomeStripe(OUTCOMES[kind])).not.toBe('done')
   })
 
-  it('keeps the emerald unread dot for done, no outcome, or an unknown kind', () => {
-    expect(unreadDotOutcomeStripe(OUTCOMES.done)).toBeNull()
-    expect(unreadDotOutcomeStripe(null)).toBeNull()
-    expect(unreadDotOutcomeStripe(undefined)).toBeNull()
-    expect(unreadDotOutcomeStripe({ kind: 'from-the-future' })).toBeNull()
+  it('keeps emerald only for published done; missing or unknown protocols stay amber', () => {
+    expect(unreadDotOutcomeStripe(canonicalOutcome('done', {}, OUTCOMES.done))).toBeNull()
+    expect(unreadDotOutcomeStripe(null)).toBe('attention')
+    expect(unreadDotOutcomeStripe(undefined)).toBe('attention')
+    expect(unreadDotOutcomeStripe({ kind: 'from-the-future' })).toBe('attention')
   })
 
   it('labels the dot unread plus the outcome, never "Finished"', () => {
@@ -516,5 +458,44 @@ describe('unread dot precedence against the stored outcome', () => {
     )
     expect(unreadDotOutcomeLabel(OUTCOMES.decision, r)).toBe('Unread — Waiting on your decision')
     expect(unreadDotOutcomeLabel(OUTCOMES.waiting, r)).not.toContain(r.finishedUnread)
+  })
+})
+
+describe('canonicalOutcomeStatus', () => {
+  it('reads presentation.stripe verbatim with its revision; none paints nothing', () => {
+    expect(canonicalOutcomeStatus(canonicalOutcome('done', { revision: 12 }, { kind: 'unresolved' }))).toEqual({
+      revision: 12,
+      status: 'canonical',
+      stripe: 'done'
+    })
+    expect(canonicalOutcomeStatus(canonicalOutcome('none'))).toEqual({ revision: 7, status: 'canonical', stripe: null })
+  })
+
+  it('is unknown when the outcome carries no envelope at all', () => {
+    expect(canonicalOutcomeStatus(undefined)).toEqual({ revision: null, status: 'unknown', stripe: 'attention' })
+    expect(canonicalOutcomeStatus(null)).toEqual({ revision: null, status: 'unknown', stripe: 'attention' })
+    expect(canonicalOutcomeStatus({ kind: 'done' })).toEqual({ revision: null, status: 'unknown', stripe: 'attention' })
+  })
+
+  it.each([
+    ['another status_version', { status_version: 2 }],
+    ['no revision', { revision: undefined }],
+    ['a fractional revision', { revision: 1.5 }],
+    ['no generation', { generation: undefined }],
+    ['an incomplete identity', { identity: { gateway: 'g', profile: 'p', session_id: 's', owner_epoch: '' } }],
+    ['no coverage', { coverage: undefined }],
+    ['an unknown coverage state', { coverage: { state: 'partial', reasons: [] } }],
+    ['a stripe this app does not know', { presentation: { stripe: 'periodic', reason_codes: [] } }],
+    ['malformed reason codes', { presentation: { stripe: 'done', reason_codes: [1] } }]
+  ])('%s is explicit unknown, never done', (_name, envelope) => {
+    const outcome = canonicalOutcome('done', envelope as never, { kind: 'done' })
+
+    expect(canonicalOutcomeStatus(outcome)).toEqual({ revision: null, status: 'unknown', stripe: 'attention' })
+  })
+
+  it('the unread dot takes its tone from the envelope, not the legacy kind', () => {
+    expect(unreadDotOutcomeStripe(canonicalOutcome('done', {}, { kind: 'waiting' }))).toBeNull()
+    expect(unreadDotOutcomeStripe(canonicalOutcome('waiting', {}, { kind: 'done' }))).toBe('waiting')
+    expect(unreadDotOutcomeStripe({ kind: 'done', status: { status_version: 9 } })).toBe('attention')
   })
 })

@@ -173,20 +173,8 @@ function setMuteWrite(id: string, write: MuteWrite | null): void {
   $muteWriteGuard.set(next)
 }
 
-/** [daveey] The row after a park write, until the next list page brings the backend's own outcome. Muting stamps a
- *  `muted` outcome (what the backend refreshes to); unmuting drops a `muted` one, so the stripe falls back to the
- *  derived logic instead of staying grey on the stale kind. Any other outcome is left as it is. */
-export function withRowMuted(row: SessionInfo, muted: boolean, now: number = Date.now()): SessionInfo {
-  if (muted) {
-    return { ...row, muted, outcome: { kind: 'muted', source: 'derived', at: now / 1000 } }
-  }
-
-  if (row.outcome?.kind === 'muted') {
-    const { outcome: _stale, ...rest } = row
-
-    return { ...rest, muted }
-  }
-
+/** Update the park control optimistically, never author or discard backend status revisions. */
+export function withRowMuted(row: SessionInfo, muted: boolean, _now: number = Date.now()): SessionInfo {
   return { ...row, muted }
 }
 

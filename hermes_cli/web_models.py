@@ -307,6 +307,19 @@ class SessionMute(BaseModel):
 
 class SessionStripeReport(BaseModel):
     """POST /api/sessions/{id}/stripe-report: why the Desktop painted the row (its red reasons). [daveey]"""
+    status_version: Optional[int] = None
+    mounted: Optional[StrictBool] = None
+    observation_client: Optional[str] = Field(None, min_length=1, max_length=128)
+    observation_lifetime: Optional[StrictInt] = Field(None, ge=0)
+    observation_order: Optional[StrictInt] = Field(None, ge=0)
+    status: Optional[str] = None
+    identity: Optional[dict] = None
+    revision: Optional[int] = None
+    generation: Optional[int] = None
+    coverage: Optional[dict] = None
+    surface: Optional[str] = None
+    local_override: Optional[str] = Field(None, max_length=32)
+    reason_codes: list[str] = Field(default_factory=list, max_length=64)
     stripe: Optional[str] = None
     previous: Optional[str] = None
     reasons: list[str] = Field(default_factory=list, max_length=64)

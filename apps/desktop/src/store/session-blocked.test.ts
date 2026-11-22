@@ -9,6 +9,7 @@ vi.mock('@/hermes', async importOriginal => ({
 }))
 
 import { setSessionMutedRemote } from '@/hermes'
+import { canonicalOutcome } from '@/test/canonical-outcome'
 
 import { notifyError } from './notifications'
 import { $sessions, setSessions } from './session'
@@ -312,8 +313,9 @@ describe('one-time migration of local ⌘B parks', () => {
 describe('the row after a park write', () => {
   const paint = (r: SessionInfo) => sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, r.outcome)
 
-  it('unmuting drops a stale `muted` outcome so the stripe falls back to the derived logic', async () => {
-    setSessions([row({ muted: true, outcome: { kind: 'muted' } })])
+  it('unmuting preserves published status until the backend publishes its next revision', async () => {
+    const published = canonicalOutcome('blocked', {}, { kind: 'muted' })
+    setSessions([row({ muted: true, outcome: published })])
     $blockedSessionIds.set(['s1'])
     vi.mocked(setSessionMutedRemote).mockResolvedValue({ ok: true, muted: false })
 
@@ -321,20 +323,21 @@ describe('the row after a park write', () => {
     await vi.waitFor(() => expect(mutedOf('s1')).toBe(false))
 
     const after = $sessions.get()[0]
-    expect(after.outcome).toBeUndefined()
+    expect(after.outcome).toEqual(published)
     expect(isSessionParked('s1')).toBe(false)
-    expect(paint(after)).toBe('done')
+    expect(paint(after)).toBe('blocked')
   })
 
-  it('muting stamps a `muted` outcome', async () => {
-    setSessions([row({ muted: false, outcome: { kind: 'done', summary: 'shipped' } })])
+  it('muting never stamps a client-authored status outcome', async () => {
+    const published = canonicalOutcome('done', {}, { kind: 'done', summary: 'shipped' })
+    setSessions([row({ muted: false, outcome: published })])
     vi.mocked(setSessionMutedRemote).mockResolvedValue({ ok: true, muted: true })
 
     toggleSessionBlocked('s1')
     await vi.waitFor(() => expect(mutedOf('s1')).toBe(true))
 
-    expect($sessions.get()[0].outcome?.kind).toBe('muted')
-    expect(paint($sessions.get()[0])).toBe('blocked')
+    expect($sessions.get()[0].outcome).toEqual(published)
+    expect(paint($sessions.get()[0])).toBe('done')
   })
 
   it('unmuting keeps any outcome other than `muted`', () => {

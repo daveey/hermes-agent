@@ -290,3 +290,67 @@ def test_project_tree_rows_carry_the_list_rows_outcome_and_mute(client, homes):
     for sid in ("open-chat", "done-chat", "muted-chat"):
         for field in _STRIPE_FIELDS:
             assert treed[sid].get(field) == listed[sid].get(field), (sid, field)
+
+
+# ── canonical status: one envelope on every surface, and the paint compared with it ──────────
+
+
+def _paint(status, stripe, **changes):
+    """What a mounted Desktop surface reports after committing ``stripe`` for the envelope ``status``."""
+    return {"status_version": 1, "status": "canonical", "identity": status["identity"],
+            "revision": status["revision"], "generation": status["generation"], "coverage": status["coverage"],
+            "reason_codes": status["presentation"]["reason_codes"], "stripe": stripe, "surface": "row",
+            "mounted": True, "observation_client": "window-1", "observation_lifetime": 1, "observation_order": 1,
+            **changes}
+
+
+@pytest.mark.parametrize("profile", ["default", "worker_beta"])
+def test_one_status_envelope_on_rest_cli_list_and_stamps_and_paint_is_compared_at_its_revision(
+        client, homes, profile, capsys):
+    """Plan231363: REST, CLI, list rows and profile stamps carry the same stored envelope; a committed paint is
+    agreement or drift only at that exact owner and revision."""
+    seed(homes[profile])
+    scope = {"profile": profile}
+    outcome = client.get("/api/sessions/chat/outcome", params={"refresh": 1, **scope}).json()["outcome"]
+    status = outcome["status"]
+    assert status["status_version"] == 1 and status["presentation"]["stripe"] == "done"
+    assert status["coverage"] == {"state": "complete", "reasons": []}
+    # Every read surface answers the same stored envelope.
+    assert client.get("/api/sessions/chat/outcome", params=scope).json()["outcome"]["status"] == status
+    stamps = client.get("/api/profiles/sessions/stamps", params={"ids": "chat", **scope}).json()
+    assert stamps["sessions"][0]["outcome"]["status"] == status
+    if profile == "default":
+        row = next(r for r in client.get("/api/sessions?order=recent").json()["sessions"] if r["id"] == "chat")
+        assert row["outcome"]["status"] == status
+        run_cli("outcome", "chat", "--json")
+        shown = json.loads(capsys.readouterr().out)
+        assert shown["outcome"]["status"] == status
+        assert {(v["state"], v["drift"]) for v in shown["desktop_surfaces"].values()} == {("unknown", None)}
+
+    url = "/api/sessions/chat/stripe-report"
+
+    def post(stripe, **changes):
+        return client.post(url, json={**_paint(status, stripe, **changes), **scope})
+
+    def surfaces():
+        return client.get("/api/sessions/chat/outcome", params={"surfaces": 1, **scope}).json()["desktop_surfaces"]
+
+    # Nothing mounted yet: missing is neither agreement nor drift.
+    assert surfaces()["row"]["drift"] is None and surfaces()["tab"]["drift"] is None
+    agreed = post("done").json()
+    assert agreed["comparison"]["state"] == "agreement" and agreed["comparison"]["drift"] is False
+    assert surfaces()["row"]["drift"] is False and surfaces()["tab"]["drift"] is None
+    # The same revision painted another colour is drift; the matching paint clears it.
+    assert post("waiting", observation_order=2).json()["comparison"]["drift"] is True
+    assert surfaces()["row"]["state"] == "mismatch"
+    assert post("done", observation_order=3).json()["comparison"]["drift"] is False
+    assert surfaces()["row"]["state"] == "agreement"
+    # A paint of an older revision, a live-turn override and an unmount are not agreement and not drift.
+    stale = post("waiting", revision=status["revision"] - 1, observation_order=4).json()["comparison"]
+    assert stale["drift"] is None
+    assert post("none", local_override="live_turn", observation_order=5).json()["comparison"]["drift"] is None
+    assert post("done", mounted=False, observation_order=6).json()["comparison"]["drift"] is None
+    # Another owner's paint is refused, and leaves no observation behind.
+    foreign = {**status["identity"], "owner_epoch": "someone-else"}
+    assert post("waiting", identity=foreign, observation_client="window-2").status_code == 409
+    assert surfaces()["row"]["drift"] is None

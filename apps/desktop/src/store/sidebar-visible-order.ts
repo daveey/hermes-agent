@@ -1,6 +1,6 @@
+import { canonicalOutcomeStatus } from '@/lib/session-outcome'
 import { $messagingSessions, $sessions } from '@/store/session'
 import { isSessionParked } from '@/store/session-blocked'
-import { $sessionDotStateById, kanbanStripeCounts, sessionStatusStripe, withRowActivity } from '@/store/session-dot-state'
 import { sessionHiddenAsAutomated } from '@/store/sidebar-automated'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -122,43 +122,11 @@ export function sessionHasStatusStripe(id: string): boolean {
     return sessionHasStepStripe(row.dataset.sidebarStripe)
   }
 
-  // Not drawn (virtualized off-screen row): derive it from the row model.
-  let hasTurns = false
-
-  for (const entry of sections.values()) {
-    if (entry.turnIds?.includes(id)) {
-      hasTurns = true
-
-      break
-    }
-  }
-
+  // Off-screen rows consume the same published status as mounted rows; no row means no stop.
   const session = [...sections.values()].flatMap(entry => entry.rows ?? []).find(s => s.id === id) ??
     $sessions.get().find(s => s.id === id) ?? $messagingSessions.get().find(s => s.id === id)
 
-  if (!hasTurns) {
-    hasTurns = (session?.message_count ?? 0) > 0
-  }
-
-  return (
-    sessionHasStepStripe(
-      sessionStatusStripe(
-        withRowActivity($sessionDotStateById.get()[id] ?? 'idle', session ?? {}),
-        hasTurns,
-        false,
-        kanbanStripeCounts(session ?? {}).blocked,
-        session?.cron_active === true,
-        session?.review_wait,
-        session?.kanban_attention ?? 0,
-        kanbanStripeCounts(session ?? {}).waiting,
-        kanbanStripeCounts(session ?? {}).stalled,
-        session?.outcome,
-        false,
-        kanbanStripeCounts(session ?? {}).external,
-        kanbanStripeCounts(session ?? {}).externalDown
-      )
-    )
-  )
+  return Boolean(session) && sessionHasStepStripe(canonicalOutcomeStatus(session?.outcome).stripe)
 }
 
 /**

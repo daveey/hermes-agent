@@ -2,7 +2,7 @@ import type { SessionInfo } from '@/types/hermes'
 
 import { $pinnedSessionIds, $sidebarShowAutomated } from './layout'
 import { isSessionParked } from './session-blocked'
-import { $sessionDotStateById, kanbanStripeCounts, type SessionDotState, sessionStatusStripe } from './session-dot-state'
+import { $sessionDotStateById, kanbanStripeCounts, type SessionDotState } from './session-dot-state'
 
 /**
  * [daveey] Automated / test sessions in the sidebar.
@@ -54,31 +54,10 @@ export function automatedRowNeedsAttention(row: AutomatedRow, state: SessionDotS
 
   const counts = kanbanStripeCounts(row, nowSeconds)
 
-  const stripe = sessionStatusStripe(
-    state,
-    (row.message_count ?? 0) > 0,
-    userBlocked,
-    counts.blocked,
-    row.cron_active === true,
-    row.review_wait,
-    row.kanban_attention ?? 0,
-    counts.waiting,
-    // [daveey] No `row.outcome`: an automated row resurfaces only on the signals it always did. An outcome-derived
-    // stripe (e.g. `unresolved` → amber) on bot / smoke-test traffic would flood the sidebar with it.
-    counts.stalled,
-    undefined,
-    false,
-    counts.external,
-    counts.externalDown
-  )
-
-  return (
-    stripe === 'stuck' ||
-    stripe === 'blocked' ||
-    stripe === 'attention' ||
-    stripe === 'stalled' ||
-    stripe === 'external_down'
-  )
+  // Visibility policy is not status/color authority. Missing protocol on a hidden bot must not
+  // resurface every automated row; the surviving row still paints only its canonical status.
+  return userBlocked || counts.blocked > 0 || counts.stalled > 0 || counts.externalDown > 0 ||
+    row.review_wait === 'stuck' || (row.kanban_attention ?? 0) > 0
 }
 
 export function sessionHiddenAsAutomated(

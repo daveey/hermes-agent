@@ -1303,22 +1303,39 @@ async def mute_session_endpoint(session_id: str, body: SessionMute, request: Req
 
 @manage_router.post("/api/sessions/{session_id}/stripe-report")
 async def stripe_report_endpoint(session_id: str, body: SessionStripeReport):
-    """[daveey] The Desktop's reason for painting this row (red ``stuck`` inputs), kept for the agent and the log."""
+    """[daveey] The Desktop's reason for painting this row (red ``stuck`` inputs), kept for the agent and the log.
+    A body that names a ``surface`` is a committed paint: it is kept too, and compared with the stored status only
+    at that status's exact owner and revision (``comparison``); another owner's paint is refused (409)."""
     from hermes_cli import desktop_stripe_report
 
     def _record(db):
         sid = _resolve_session_id(db, session_id) or session_id
+        from hermes_state_outcome import get_outcome
+        if body.surface is None:  # the red-edge reasons report: unqualified, never compared
+            entry = desktop_stripe_report.record(Path(db.db_path).parent, sid, body.stripe, body.reasons,
+                                                 previous=body.previous)
+            return {"ok": True, "report": entry}
+        canonical = (get_outcome(sid, db=db) or {}).get("status")
+        observation = body.model_dump()
+        comparison = desktop_stripe_report.compare(canonical, observation)
+        if comparison["state"] == "refused":
+            raise HTTPException(status_code=409, detail="stripe_report_wrong_owner")
         entry = desktop_stripe_report.record(Path(db.db_path).parent, sid, body.stripe, body.reasons,
-                                             previous=body.previous)
-        return {"ok": True, "report": entry}
+                                             previous=body.previous, observation=observation)
+        # Arrival is not paint order: a delayed mount may arrive after its unmount/new lifetime.
+        if body.surface in desktop_stripe_report.SURFACES:
+            current = desktop_stripe_report.surface_observations(Path(db.db_path).parent, [sid], canonical)
+            comparison = {k: v for k, v in current[body.surface].items() if k != "observation"}
+        return {"ok": True, "report": entry, "comparison": comparison}
 
     return await asyncio.to_thread(_with_db, body.profile, _record, read_only=True)
 
 
 @manage_router.get("/api/sessions/{session_id}/outcome")
 async def get_session_outcome_endpoint(session_id: str, request: Request, refresh: bool = False,
-                                       profile: Optional[str] = None):
-    """[daveey] The chat's stored outcome; ``refresh=1`` re-derives and stores it first."""
+                                       profile: Optional[str] = None, surfaces: bool = False):
+    """[daveey] The chat's stored outcome; ``refresh=1`` re-derives and stores it first. ``surfaces=1`` adds what
+    each mounted Desktop surface last painted, compared with the stored status at its exact revision."""
     from hermes_state_outcome import get_outcome, refresh_outcome
 
     def _read(db):
@@ -1330,7 +1347,10 @@ async def get_session_outcome_endpoint(session_id: str, request: Request, refres
 
             ensure_outcome_hooks()
         outcome = refresh_outcome(sid, "manual", db=db) if refresh else get_outcome(sid, db=db)
-        return {"session_id": sid, "outcome": outcome}
+        if not surfaces:
+            return {"session_id": sid, "outcome": outcome}
+        from hermes_cli.sessions_cmd_outcome import _surface_reports
+        return {"session_id": sid, "outcome": outcome, "desktop_surfaces": _surface_reports(db, sid, outcome)}
 
     if refresh:
         return await _write_on_owner(request, profile, _read)

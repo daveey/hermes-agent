@@ -2,7 +2,9 @@ import { cleanStores } from 'nanostores'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { canonicalOutcome } from '@/test/canonical-outcome'
 import type { SessionInfo } from '@/types/hermes'
+import type { SessionOutcome } from '@/types/session-outcome'
 
 import fixture from '../../../../schemas/fixtures/execution-observations-v1.json'
 
@@ -34,7 +36,9 @@ import {
   noteSessionListSource,
   recordStripeTransition,
   resetStripeTransitionLog,
+  type SessionDotState,
   sessionStatusStripe,
+  sessionStripeLocalOverride,
   setStripeReasonReporter,
   showsRunningArc,
   STRIPE_TRANSITION_LOG_CAP_PER_MIN,
@@ -69,108 +73,21 @@ describe('showsRunningArc', () => {
   })
 })
 
-describe('sessionStatusStripe', () => {
-  it('keeps stored outcomes authoritative during background work, but not a live own turn', () => {
-    const decision = { kind: 'decision', summary: 'Pick A or B' } as const
-
-    expect(hasLiveTurn('background')).toBe(true)
-    expect(showsRunningArc('background')).toBe(true)
-    expect(sessionStatusStripe('background', true, false, 0, false, null, 0, 0, 0, decision as never)).toBe('stuck')
-    expect(sessionStatusStripe('working', true, false, 0, false, null, 0, 0, 0, decision as never)).toBeNull()
-  })
-
-  // [daveey] A chat that handed its work to kanban cards waits on them: grey
-  // `waiting`, never green and never blank, until they finish.
-  it('is waiting (grey) while the chat has open kanban cards', () => {
-    for (const state of ['background', 'idle', 'unread', 'draft'] as const) {
-      expect(sessionStatusStripe(state, true, false, 0, false, null, 0, 1)).toBe('waiting')
+describe('sessionStatusStripe canonical authority', () => {
+  it.each(['done', 'waiting', 'attention', 'blocked', 'stuck', 'none'] as const)(
+    'uses published %s across every activity and mute combination', stripe => {
+      for (const state of ['background', 'draft', 'idle', 'needs-input', 'stalled', 'unread', 'working'] as const) {
+        for (const muted of [false, true]) {
+          expect(sessionStatusStripe(state, true, muted, 2, true, 'stuck', 3, 4, 1, canonicalOutcome(stripe), true, 2, 1))
+            .toBe(stripe === 'none' ? null : stripe)
+        }
+      }
     }
-
-    expect(sessionStatusStripe('working', true, false, 0, false, null, 0, 1)).toBeNull()
-    expect(sessionStatusStripe('needs-input', true, false, 0, false, null, 0, 1)).toBe('stuck')
-    // A card blocked on the user → red with it.
-    expect(sessionStatusStripe('background', true, false, 1, false, null, 0, 1)).toBe('stuck')
-    expect(sessionStatusStripe('idle', true, true, 0, false, null, 0, 1)).toBe('blocked')
-    expect(sessionStatusStripe('idle', true, false, 0, true, null, 0, 1)).toBe('periodic')
-  })
-
-  it('all cards done with results unseen → green (unread); none open, all done → green', () => {
-    // Completion is green only with a fresh authoritative observation.
-    expect(withRowActivity('idle', { kanban_unseen: 1 })).toBe('background')
-    const unseenRow = { kanban_observed_at: Date.now() / 1000, kanban_unseen: 1 }
-    const state = withRowActivity('idle', unseenRow)
-    expect(state).toBe('unread')
-    expect(sessionStatusStripe(state, true, false, 0, false, null, 0, 0)).toBe('done')
-    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0)).toBe('done')
-  })
-
-  it('paints done (green) when a finished turn waits on the user, read or not', () => {
-    expect(sessionStatusStripe('unread', true)).toBe('done')
-    expect(sessionStatusStripe('idle', true)).toBe('done')
-  })
-
-  it('paints blocked (grey) for a user-parked session, over any live state', () => {
-    for (const state of ['idle', 'unread', 'needs-input', 'working', 'draft'] as const) {
-      expect(sessionStatusStripe(state, true, true)).toBe('blocked')
+  )
+  it('does not infer status from activity, counts, mute or legacy kind without the protocol', () => {
+    for (const kind of ['done', 'decision', 'running', 'waiting', 'muted']) {
+      expect(sessionStatusStripe('working', true, true, 3, true, 'stuck', 0, 1, 0, { kind })).toBe('attention')
     }
-  })
-
-  // [daveey] kanban_attention turns a would-be green into amber, and only that.
-  it('paints attention (amber) instead of done when a finished card dropped work', () => {
-    expect(sessionStatusStripe('idle', true, false, 0, false, null, 1)).toBe('attention')
-    expect(sessionStatusStripe('unread', true, false, 0, false, null, 2)).toBe('attention')
-    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0)).toBe('done')
-    // Louder or quieter states keep their own stripe.
-    expect(sessionStatusStripe('needs-input', true, false, 0, false, null, 1)).toBe('stuck')
-    expect(sessionStatusStripe('idle', true, false, 1, false, null, 1)).toBe('stuck')
-    expect(sessionStatusStripe('idle', true, true, 0, false, null, 1)).toBe('blocked')
-    expect(sessionStatusStripe('working', true, false, 0, false, null, 1)).toBeNull()
-  })
-
-  it('paints stuck (red) when an unfinished turn needs help', () => {
-    expect(sessionStatusStripe('needs-input', true)).toBe('stuck')
-    expect(sessionStatusStripe('stalled', true)).toBe('stuck')
-  })
-
-  it('paints nothing while working, or before any turn', () => {
-    for (const state of ['working', 'background', 'draft'] as const) {
-      expect(sessionStatusStripe(state, true)).toBeNull()
-    }
-
-    expect(sessionStatusStripe('idle', false)).toBeNull()
-  })
-
-  it('paints stuck (red) when kanban cards the session created are blocked, even while a turn is working', () => {
-    for (const state of ['idle', 'unread', 'background', 'draft', 'working'] as const) {
-      expect(sessionStatusStripe(state, true, false, 2)).toBe('stuck')
-    }
-
-    expect(sessionStatusStripe('idle', true, true, 1)).toBe('blocked')
-    expect(sessionStatusStripe('idle', true, false, 0)).toBe('done')
-  })
-
-  it('paints periodic (grey loop) for a session owning a live cron job, unless a prompt waits or an ask is open', () => {
-    for (const state of ['idle', 'unread', 'working', 'background', 'stalled'] as const) {
-      expect(sessionStatusStripe(state, true, false, 0, true)).toBe('periodic')
-    }
-
-    expect(sessionStatusStripe('idle', true, false, 3, true)).toBe('stuck')
-    expect(sessionStatusStripe('needs-input', true, false, 0, true)).toBe('stuck')
-    expect(sessionStatusStripe('idle', true, true, 0, true)).toBe('blocked')
-  })
-
-  it('[daveey] a PR waiting on my review is red; on others for <24h is grey; red even while working', () => {
-    for (const state of ['idle', 'unread', 'background'] as const) {
-      expect(sessionStatusStripe(state, true, false, 0, false, 'stuck')).toBe('stuck')
-      expect(sessionStatusStripe(state, true, false, 0, false, 'parked')).toBe('blocked')
-    }
-
-    expect(sessionStatusStripe('working', true, false, 0, false, 'stuck')).toBe('stuck')
-    expect(sessionStatusStripe('working', true, false, 0, false, 'parked')).toBeNull()
-    expect(sessionStatusStripe('needs-input', true, false, 0, false, 'parked')).toBe('stuck')
-    expect(sessionStatusStripe('idle', true, true, 0, false, 'stuck')).toBe('blocked')
-    expect(sessionStatusStripe('idle', true, false, 0, false, null)).toBe('done')
-    expect(sessionStatusStripe('idle', true, false, 0, false, undefined)).toBe('done')
   })
 })
 
@@ -412,9 +329,9 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
 
     expect($kanbanBusySessionIds.get()).toEqual(['s1'])
     expect($sessionDotStateById.get()['s1']).toBe('background')
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
     // Control: a plain finished session still gets its green stripe.
-    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('attention')
   })
 
   it.each([undefined, 1, Infinity, Date.now() / 1000 + 60])('keeps absent or stale observations off done: %s', observed => {
@@ -422,7 +339,7 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
 
     expect($kanbanBusySessionIds.get()).toContain('s1')
     expect(withRowActivity('idle', { kanban_observed_at: observed } as never)).toBe('background')
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
   })
 
   it('expires a zero-work observation even when no list refresh arrives', () => {
@@ -455,7 +372,7 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
 
     setSessions([storedRow('s1', { goal_active: false, kanban_active: 0, kanban_blocked: 0, unread: true })])
     expect($kanbanBusySessionIds.get()).toEqual([])
-    expect(sessionStatusStripe($sessionDotStateById.get().s1, true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get().s1, true)).toBe('attention')
   })
 
   it('folds blocked-only project rows over finished/unseen results after goal completion', () => {
@@ -476,7 +393,7 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
     setSessions([storedRow('s1', { kanban_active: 0 })])
 
     expect($kanbanBusySessionIds.get()).toEqual([])
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
   })
 
   it('keeps a row whose kanban read failed (kanban_unknown) off done, and a stale remote count busy', () => {
@@ -487,11 +404,11 @@ describe('kanban work in flight ($kanbanBusySessionIds)', () => {
     ])
 
     expect($kanbanBusySessionIds.get()).toEqual(['s1', 's2'])
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
-    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBeNull()
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('attention')
     expect(withRowActivity('idle', { kanban_unknown: true })).toBe('background')
     // Control: a session with no kanban stamps still finishes green.
-    expect(sessionStatusStripe($sessionDotStateById.get()['s3'] ?? 'idle', true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s3'] ?? 'idle', true)).toBe('attention')
   })
 
   it('yields to a live turn', () => {
@@ -521,9 +438,9 @@ describe('backend-registered background process ($backgroundActiveSessionIds)', 
 
     expect($backgroundActiveSessionIds.get()).toEqual(['s1'])
     expect($sessionDotStateById.get()['s1']).toBe('background')
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
     // Control: a plain finished session still gets its green stripe.
-    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('attention')
   })
 
   it('goes back to done once the process exits', () => {
@@ -531,7 +448,7 @@ describe('backend-registered background process ($backgroundActiveSessionIds)', 
     setSessions([storedRow('s1')])
 
     expect($backgroundActiveSessionIds.get()).toEqual([])
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
   })
 
   it('yields to a live turn', () => {
@@ -562,13 +479,13 @@ describe('background processes a row lists ($backgroundProcessesBySessionId)', (
     setSessions([storedRow('s1', { background_active: 1, background_processes: [sleep] }), storedRow('s2')])
 
     expect($backgroundProcessesBySessionId.get()).toEqual({ s1: [sleep] })
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
 
     // The next list poll no longer stamps it: badge gone, row green.
     setSessions([storedRow('s1'), storedRow('s2')])
 
     expect($backgroundProcessesBySessionId.get()).toEqual({})
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
   })
 
   it('a confirmed Stop drops the process from the row at once', () => {
@@ -584,7 +501,7 @@ describe('background processes a row lists ($backgroundProcessesBySessionId)', (
 
     expect(none.background_active).toBeUndefined()
     expect($backgroundProcessesBySessionId.get()).toEqual({})
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
     // Control: an id the row doesn't list leaves it untouched.
     expect(withoutBackgroundProcess(row, 'proc_zzz')).toBe(row)
   })
@@ -615,9 +532,9 @@ describe('standing goal in flight ($goalActiveSessionIds)', () => {
 
     expect($goalActiveSessionIds.get()).toEqual(['s1'])
     expect($sessionDotStateById.get()['s1']).toBe('background')
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
     // Control: a plain finished session still gets its green stripe.
-    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s2'] ?? 'idle', true)).toBe('attention')
   })
 
   it('goes back to done once the goal ends', () => {
@@ -625,7 +542,7 @@ describe('standing goal in flight ($goalActiveSessionIds)', () => {
     setSessions([storedRow('s1')])
 
     expect($goalActiveSessionIds.get()).toEqual([])
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
   })
 
   it('yields to a live turn', () => {
@@ -676,7 +593,7 @@ describe('withRowActivity', () => {
     const fresh = { kanban_observed_at: Date.now() / 1000 }
 
     expect(withRowActivity('draft', { ...fresh, message_count: 207 })).toBe('idle')
-    expect(sessionStatusStripe(withRowActivity('draft', { ...fresh, message_count: 207 }), true)).toBe('done')
+    expect(sessionStatusStripe(withRowActivity('draft', { ...fresh, message_count: 207 }), true)).toBe('attention')
     // Still background when the row carries work.
     expect(withRowActivity('draft', { ...fresh, goal_active: true, message_count: 3 })).toBe('background')
 
@@ -691,12 +608,12 @@ describe('withRowActivity', () => {
 
     const during = withRowActivity('idle', { ...row, turn_live: true })
     expect(during).toBe('working')
-    expect(sessionStatusStripe(during, true, false, 0, false, null, 0, 0, 0, decision as never)).toBeNull()
+    expect(sessionStatusStripe(during, true, false, 0, false, null, 0, 0, 0, decision as never)).toBe('attention')
 
     // Control: no live turn, so the stored decision still paints the red stripe.
     const after = withRowActivity('idle', row)
     expect(after).toBe('idle')
-    expect(sessionStatusStripe(after, true, false, 0, false, null, 0, 0, 0, decision as never)).toBe('stuck')
+    expect(sessionStatusStripe(after, true, false, 0, false, null, 0, 0, 0, decision as never)).toBe('attention')
   })
 })
 
@@ -805,14 +722,14 @@ describe('kanban results waiting for an unloaded session ($kanbanUnseenSessionId
 
     expect($kanbanUnseenSessionIds.get()).toEqual(['s1'])
     expect($sessionDotStateById.get()['s1']).toBe('unread')
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('done')
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
   })
 
   it('cards still running keep the row in background (no stripe), even with a result waiting', () => {
     setSessions([storedRow('s1', { kanban_active: 1, kanban_unseen: 1 })])
 
     expect($sessionDotStateById.get()['s1']).toBe('background')
-    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBeNull()
+    expect(sessionStatusStripe($sessionDotStateById.get()['s1'] ?? 'idle', true)).toBe('attention')
   })
 
   it('an orphan-reaped idle session with no cards is green, never working or stalled', () => {
@@ -821,7 +738,7 @@ describe('kanban results waiting for an unloaded session ($kanbanUnseenSessionId
     const state = $sessionDotStateById.get()['s1'] ?? 'idle'
 
     expect(state === 'working' || state === 'stalled').toBe(false)
-    expect(sessionStatusStripe(state, true)).toBe('done')
+    expect(sessionStatusStripe(state, true)).toBe('attention')
   })
 
   it('withRowActivity turns an idle project-tree row with a waiting result green', () => {
@@ -840,7 +757,7 @@ describe('kanbanStripeCounts', () => {
     expect(kanbanStripeCounts(row)).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
     const state = withRowActivity('idle', row)
     expect(state).toBe('background')
-    expect(sessionStatusStripe(state, true, false, 0, false, null, 0, kanbanStripeCounts(row).waiting)).toBeNull()
+    expect(sessionStatusStripe(state, true, false, 0, false, null, 0, kanbanStripeCounts(row).waiting)).toBe('attention')
   })
 
   it('parked-only work waits (grey) and does not paint the dot as running', () => {
@@ -849,21 +766,21 @@ describe('kanbanStripeCounts', () => {
     expect(counts).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 2 })
     const state = withRowActivity('idle', row)
     expect(state).toBe('idle')
-    expect(sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('waiting')
+    expect(sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('attention')
   })
 
   it('a queue held behind a human ask is stuck (red)', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 1, kanban_parked: 0, kanban_held: 1 }
     const counts = kanbanStripeCounts(row)
     expect(counts).toEqual({ blocked: 1, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
-    expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('stuck')
+    expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('attention')
   })
 
   it('held plus live: a held ask is red for a working turn too (the invariant)', () => {
     const row = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 0, kanban_held: 1 }
     const counts = kanbanStripeCounts(row)
-    expect(sessionStatusStripe('working', true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('stuck')
-    expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('stuck')
+    expect(sessionStatusStripe('working', true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('attention')
+    expect(sessionStatusStripe(withRowActivity('idle', row), true, false, counts.blocked, false, null, 0, counts.waiting)).toBe('attention')
   })
 
   it('a backend without kanban_parked keeps the old behaviour (all open cards wait)', () => {
@@ -883,17 +800,13 @@ describe('kanbanStripeCounts', () => {
     const counts = kanbanStripeCounts(row)
     expect(counts).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 1, waiting: 3 })
     const state = withRowActivity('idle', row)
-    expect(sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting, counts.stalled)).toBe(
-      'stalled'
-    )
+    expect(sessionStatusStripe(state, true, false, counts.blocked, false, null, 0, counts.waiting, counts.stalled)).toBe('attention')
   })
 
   it('a human ask (red) beats stalled, and live work hides it', () => {
     const held = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 1, kanban_held: 1, kanban_stalled: 1 }
     const h = kanbanStripeCounts(held)
-    expect(sessionStatusStripe(withRowActivity('idle', held), true, false, h.blocked, false, null, 0, h.waiting, h.stalled)).toBe(
-      'stuck'
-    )
+    expect(sessionStatusStripe(withRowActivity('idle', held), true, false, h.blocked, false, null, 0, h.waiting, h.stalled)).toBe('attention')
     const live = { kanban_observed_at: Date.now() / 1000, kanban_active: 2, kanban_parked: 1, kanban_stalled: 1 }
     expect(kanbanStripeCounts(live)).toEqual({ blocked: 0, external: 0, externalDown: 0, externalUnknown: 0, stalled: 0, waiting: 0 })
   })
@@ -919,90 +832,9 @@ describe('kanbanStripeCounts', () => {
 })
 
 // [daveey] ⌘B > live turn > stuck/red (incl external_down) > external > stalled > waiting > done
-describe('sessionStatusStripe external-run precedence', () => {
-  const idle = 'idle' as const
-
-  it('⌘B (userBlocked) beats every kanban colour including external_down', () => {
-    expect(sessionStatusStripe(idle, true, true, 0, false, null, 0, 1, 1, null, false, 1, 1)).toBe('blocked')
-  })
-
-  it('a live working turn has no stripe even with external_down', () => {
-    expect(sessionStatusStripe('working', true, false, 0, false, null, 0, 1, 1, null, false, 1, 1)).toBeNull()
-  })
-
-  it('stuck/red (human kanban block) beats external and external_down', () => {
-    expect(sessionStatusStripe(idle, true, false, 1, false, null, 0, 1, 1, null, false, 1, 1)).toBe('stuck')
-  })
-
-  it('external_down is red at the stuck tier and beats light-blue external, stalled, waiting', () => {
-    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 1, null, false, 1, 1)).toBe('external_down')
-  })
-
-  it('external (sky) beats stalled and waiting', () => {
-    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 1, null, false, 1, 0)).toBe('external')
-  })
-
-  it('stalled still beats waiting when there is no external work', () => {
-    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 1, null, false, 0, 0)).toBe('stalled')
-  })
-
-  it('waiting when parked with no external/stalled/red', () => {
-    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 1, 0, null, false, 0, 0)).toBe('waiting')
-  })
-
-  it('done when the chat has turns and nothing is waiting', () => {
-    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 0, 0, null, false, 0, 0)).toBe('done')
-  })
-
-  it('absent external fields keep today: parked-only is waiting, not external', () => {
-    expect(sessionStatusStripe(idle, true, false, 0, false, null, 0, 2, 0)).toBe('waiting')
-  })
-
-  it('backgroundDotLabel is external when kanban_external is stamped', () => {
-    const row = {
-      kanban_active: 1,
-      kanban_external: 1,
-      kanban_observed_at: Date.now() / 1000,
-      kanban_parked: 1
-    }
-
-    expect(backgroundDotLabel(row)).toBe('external')
-  })
-
-  it('backgroundDotLabel is external_down for down-only rows', () => {
-    const row = {
-      kanban_active: 1,
-      kanban_external_down: 1,
-      kanban_observed_at: Date.now() / 1000,
-      kanban_parked: 1
-    }
-
-    expect(backgroundDotLabel(row)).toBe('external_down')
-  })
-
-  it('cards without count stamps still count as background work', () => {
-    const now = Date.now() / 1000
-
-    const row = {
-      kanban_external_cards: [
-        {
-          external: {
-            adapter: 'github_run',
-            health: 'ok',
-            job: 'running',
-            next_due_at: now + 300,
-            observed_at: now,
-            reason: "job 'tests'",
-            service: 'GitHub Actions'
-          },
-          task_id: 't_a'
-        }
-      ],
-      kanban_observed_at: now,
-      message_count: 4
-    }
-
-    expect(withRowActivity('idle', row)).toBe('background')
+describe('external-run activity is not status authority', () => {
+  it('stays unknown until a canonical status is published', () => {
+    expect(sessionStatusStripe('working', true, false, 0, false, null, 0, 1, 1, null, false, 1, 1)).toBe('attention')
   })
 })
 
@@ -1164,7 +996,7 @@ describe('stuckReasons and the red report', () => {
     ).toEqual(['kanban-blocked:3 on=default/t_a held=2'])
     expect(stuckReasons({ ...row, review_wait: 'stuck', review_wait_pr: 'o/r#9' }, 'idle')).toEqual(['review:o/r#9'])
     expect(stuckReasons({ ...row, review_wait: 'stuck' }, 'idle')).toEqual(['review:?'])
-    expect(stuckReasons({ ...row, outcome: { kind: 'decision' } } as never, 'idle')).toEqual(['outcome:decision'])
+    expect(stuckReasons({ ...row, outcome: canonicalOutcome('stuck', {}, { kind: 'decision' }) } as never, 'idle')).toEqual(['outcome:decision'])
     // An open ask (a blocked card here) is red whatever the dot says; the outcome only covers the non-red stripes.
     expect(
       stuckReasons({ ...row, kanban_blocked: 1, outcome: { kind: 'decision' }, review_wait: 'stuck' } as never, 'working')
@@ -1177,8 +1009,10 @@ describe('stuckReasons and the red report', () => {
       ...row,
       outcome: { kind: 'decision', items: [{ id: 'question', question: 'Choose?', state: 'resolved' }] }
     }
+
     expect(stuckReasons(settled, 'idle')).toEqual([])
-    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, settled.outcome)).toBe('waiting')
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, settled.outcome)).toBe('attention')
+
     const recorded = {
       ...row,
       outcome: {
@@ -1186,12 +1020,15 @@ describe('stuckReasons and the red report', () => {
         items: [{ id: 'question', question: 'Choose?', state: 'open', resolution: { operationId: 'pending' } }]
       }
     }
+
     expect(stuckReasons(recorded, 'idle')).toEqual([])
-    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, recorded.outcome)).toBe('waiting')
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, recorded.outcome)).toBe('attention')
+
     const open = {
       ...row,
-      outcome: { kind: 'decision', items: [{ id: 'question', question: 'Choose?', state: 'open' }] }
+      outcome: canonicalOutcome('stuck', {}, { kind: 'decision', items: [{ id: 'question', question: 'Choose?', state: 'open' }] })
     }
+
     expect(stuckReasons(open, 'idle')).toEqual(['outcome:decision'])
     expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, open.outcome)).toBe('stuck')
   })
@@ -1233,59 +1070,6 @@ describe('stuckReasons and the red report', () => {
 })
 
 describe('open human ask invariant (blocked > 0 && !parked => stuck)', () => {
-  const dots = ['background', 'draft', 'idle', 'needs-input', 'stalled', 'unread', 'working'] as const
-  const kinds = [null, 'done', 'running', 'waiting', 'decision', 'unknown-kind'] as const
-  const outcomeOf = (kind: (typeof kinds)[number]) => (kind ? ({ kind } as unknown as SessionInfo['outcome']) : null)
-
-  // Seeded generator: the property must hold for every combination, not a few hand-picked ones.
-  const rng = (seed: number) => () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296
-
-  it('paints stuck whenever a human ask is open and the row is not parked, whatever outcome/periodic/dot say', () => {
-    const next = rng(20261120)
-    const bools = [false, true]
-    const reviews = [null, 'parked', 'stuck'] as const
-
-    const cases = dots.flatMap(dot =>
-      kinds.flatMap(kind =>
-        bools.flatMap(periodic =>
-          bools.flatMap(hasTurns =>
-            bools.flatMap(parked => reviews.map(review => ({ dot, hasTurns, kind, parked, periodic, review })))
-          )
-        )
-      )
-    )
-
-    for (const { dot, hasTurns, kind, parked, periodic, review } of cases) {
-      const blocked = 1 + Math.floor(next() * 5)
-      const waiting = Math.floor(next() * 3)
-
-      const stripe = sessionStatusStripe(
-        dot,
-        hasTurns,
-        parked,
-        blocked,
-        periodic,
-        review,
-        Math.floor(next() * 2),
-        waiting,
-        0,
-        outcomeOf(kind)
-      )
-
-      expect(stripe, `${dot}/${kind}/periodic=${periodic}/parked=${parked}/review=${review}`).toBe(
-        parked ? 'blocked' : 'stuck'
-      )
-    }
-
-    expect(cases.length).toBeGreaterThan(400)
-  })
-
-  it('does not paint red from the invariant when no ask is open', () => {
-    for (const kind of ['done', 'running', 'waiting'] as const) {
-      expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, outcomeOf(kind))).not.toBe('stuck')
-    }
-  })
-
   it('counts needs_you authoritatively and falls back to kanban_blocked + kanban_held without it', () => {
     const base = { kanban_active: 2, kanban_parked: 0 }
 
@@ -1346,5 +1130,58 @@ describe('open human ask invariant (blocked > 0 && !parked => stuck)', () => {
     recordStripeTransition({ id: 'late', kanban_blocked: 1 } as never, 'done', 'idle', 3_000, true)
     expect(report).toHaveBeenCalledTimes(1)
     setStripeReasonReporter(null)
+  })
+})
+
+// [daveey] Plan231363: the backend reducer's envelope is the status. Nothing this window fetched may repaint it.
+describe('sessionStatusStripe with a canonical envelope', () => {
+  const STRIPES = ['done', 'waiting', 'attention', 'blocked', 'stuck', 'none'] as const
+  const painted = (stripe: (typeof STRIPES)[number]) => (stripe === 'none' ? null : stripe)
+
+  // Every fetched input says something else: blocked cards, a cron, a stuck review, dropped work, parked cards.
+  const noisy = (state: SessionDotState, outcome: SessionOutcome, sourceUnavailable: boolean, parked = false) =>
+    sessionStatusStripe(state, true, parked, 3, true, 'stuck', 2, 4, 1, outcome, sourceUnavailable, 1, 1)
+
+  it.each(STRIPES)('paints %s from the envelope whatever the fetched inputs and the legacy kind say', stripe => {
+    for (const kind of ['done', 'waiting', 'unresolved', 'decision']) {
+      for (const state of ['idle', 'unread', 'background', 'draft'] as const) {
+        expect(noisy(state, canonicalOutcome(stripe, {}, { kind }), false)).toBe(painted(stripe))
+      }
+    }
+  })
+
+  it.each(STRIPES)('a pending, failed or completed work-source read never changes a %s paint', stripe => {
+    const outcome = canonicalOutcome(stripe, {}, { kind: 'done' })
+
+    // The read that used to veto a backend `done` to grey: refetch and reconnect toggle it, the paint holds.
+    const paints = [true, false, true, false].map(unavailable => noisy('idle', outcome, unavailable))
+
+    expect(new Set(paints)).toEqual(new Set([painted(stripe)]))
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, outcome, true)).toBe(painted(stripe))
+  })
+
+  it('an envelope this app cannot read is explicit unknown (amber), never a guess from the legacy kind', () => {
+    const done = { kind: 'done' } as const
+
+    for (const status of [{ status_version: 2 }, {}, { ...canonicalOutcome('done').status, revision: -1 }]) {
+      expect(noisy('idle', { ...done, status } as SessionOutcome, false)).toBe('attention')
+    }
+
+    expect(noisy('idle', { ...done, status: null } as never, false)).toBe('attention')
+  })
+
+  it('local activity and mute cannot override canonical done', () => {
+    const done = canonicalOutcome('done')
+    expect(noisy('working', done, true)).toBe('done')
+    expect(noisy('idle', done, true, true)).toBe('done')
+    expect(sessionStripeLocalOverride('working', false, done)).toBeNull()
+    expect(sessionStripeLocalOverride('idle', true, done)).toBeNull()
+  })
+
+  it('a stored outcome that predates the envelope is unknown', () => {
+    const legacy = { kind: 'done' } as const
+
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, legacy)).toBe('attention')
+    expect(sessionStatusStripe('idle', true, false, 0, false, null, 0, 1, 0, legacy)).toBe('attention')
   })
 })

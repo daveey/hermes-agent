@@ -9,7 +9,6 @@ import { $gateway, setPrimaryGateway, setPrimaryGatewayConnection } from '@/stor
 import { $profiles } from '@/store/profile'
 import { $activeSessionId, $cronSessions, $messagingSessions, _resetSessionOwnerHintsForTests, setSessions } from '@/store/session'
 import { $sessionControlBySession, clearAllSessionControl, refreshSessionControl } from '@/store/session-control'
-import { sessionStatusStripe } from '@/store/session-dot-state'
 import { $sessionTiles, clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import { $unavailableWorkSources, beginWorkSourceRead } from '@/store/session-work-source'
 import { _resetWorkSourceOwnerForTests } from '@/store/work-source-owner'
@@ -18,11 +17,8 @@ import { makeSessionInfo } from '@/test/session-info'
 const CONTROL = { goal: null, heartbeat: null, loop: null, revision: 'r1', updated_at: 1 }
 const DONE = { kind: 'done', source: 'derived', at: 1000 } as const
 
-function stripe(unavailable: boolean) {
-  return sessionStatusStripe('idle', true, false, 0, false, null, 0, 0, 0, DONE, unavailable)
-}
 
-describe('control authority at the real idle row hook', () => {
+describe('control source evidence at the real idle row hook (not status authority)', () => {
   const request = vi.fn(async () => ({ control: CONTROL }))
 
   const ambient = vi.fn(async () => {
@@ -87,7 +83,7 @@ describe('control authority at the real idle row hook', () => {
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
-      expect(stripe(result.current)).toBe('done')
+      expect(result.current).toBe(false)
       request.mockRejectedValueOnce(new Error('session.control.read timed out'))
       await act(async () => {
         await refreshSessionControl('rt-main')
@@ -95,11 +91,11 @@ describe('control authority at the real idle row hook', () => {
       expect(request).toHaveBeenCalledWith('session.control.read', { session_id: 'rt-main' })
       expect(ambient).not.toHaveBeenCalled()
       expect($sessionControlBySession.get()['rt-main']?.error).toContain('timed out')
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
       await act(async () => {
         await refreshSessionControl('rt-main')
       })
-      expect(stripe(result.current)).toBe('done')
+      expect(result.current).toBe(false)
     } finally {
       unmount()
     }
@@ -152,20 +148,20 @@ describe('control authority at the real idle row hook', () => {
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
-      expect(stripe(result.current)).toBe('done')
+      expect(result.current).toBe(false)
       act(() => {
         setPrimaryGateway(
           { onEvent: () => () => undefined, onState: () => () => undefined, request, connectionState: 'open' } as never,
           'default'
         )
       })
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
       act(() => {
         for (const read of reads) {
           sessionsHost.reportWorkSourceRead({ ...read, available: true })
         }
       })
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
     } finally {
       $activeSessionId.set(null)
       unmount()
@@ -210,7 +206,7 @@ describe('control authority at the real idle row hook', () => {
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
       act(() => {
         for (const source of ['process', 'subagent', 'control'] as const) {
           const token = sessionsHost.beginWorkSourceRead({
@@ -223,7 +219,7 @@ describe('control authority at the real idle row hook', () => {
           sessionsHost.reportWorkSourceRead({ ...token, available: true })
         }
       })
-      expect(stripe(result.current)).toBe('done')
+      expect(result.current).toBe(false)
     } finally {
       $activeSessionId.set(null)
       unmount()
@@ -241,9 +237,9 @@ describe('control authority at the real idle row hook', () => {
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
-      expect(stripe(result.current)).toBe('done')
+      expect(result.current).toBe(false)
       act(() => { $sessionTiles.set([{ storedSessionId: row.id, runtimeId: 'rt-next', ownerRoute: { connectionId: 'local', profile: 'default' } }]) })
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
     } finally { unmount() }
   })
 
@@ -310,7 +306,7 @@ describe('control authority at the real idle row hook', () => {
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
     } finally {
       $activeSessionId.set(null)
       unmount()
@@ -336,7 +332,7 @@ describe('control authority at the real idle row hook', () => {
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
       act(() => {
         for (const source of ['lineage', 'tasks', 'process', 'subagent', 'control'] as const) {
           const read = sessionsHost.beginWorkSourceRead({
@@ -349,7 +345,7 @@ describe('control authority at the real idle row hook', () => {
           sessionsHost.reportWorkSourceRead({ ...read, available: true })
         }
       })
-      expect(stripe(result.current)).toBe('done') // a complete current read set still earns green
+      expect(result.current).toBe(false) // a complete current read set clears source unavailability
     } finally {
       $activeSessionId.set(null)
       unmount()
@@ -362,7 +358,7 @@ describe('control authority at the real idle row hook', () => {
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
-      expect(stripe(result.current)).toBe('done')
+      expect(result.current).toBe(false)
       act(() => {
         const read = sessionsHost.beginWorkSourceRead({
           connectionId: 'local',
@@ -374,7 +370,7 @@ describe('control authority at the real idle row hook', () => {
         expect(read.authorityEpoch).not.toBeUndefined()
         sessionsHost.reportWorkSourceRead({ ...read, available: false })
       })
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
     } finally {
       unmount()
     }
@@ -392,9 +388,9 @@ describe('control authority at the real idle row hook', () => {
 
     try {
       // Displayed through the alias: no reads is no proof.
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
       act(() => $activeSessionId.set(null))
-      expect(stripe(result.current)).toBe('done')
+      expect(result.current).toBe(false)
       // Undisplayed: a failed current read under the alias vetoes.
       act(() => {
         const read = sessionsHost.beginWorkSourceRead({
@@ -406,7 +402,7 @@ describe('control authority at the real idle row hook', () => {
 
         sessionsHost.reportWorkSourceRead({ ...read, available: false })
       })
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
     } finally {
       $activeSessionId.set(null)
       unmount()
@@ -419,7 +415,7 @@ describe('control authority at the real idle row hook', () => {
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
-      expect(stripe(result.current)).toBe('done')
+      expect(result.current).toBe(false)
       act(() => {
         beginWorkSourceRead({
           connectionId: 'local',
@@ -429,7 +425,7 @@ describe('control authority at the real idle row hook', () => {
           authorityEpoch: undefined
         })
       })
-      expect(stripe(result.current)).not.toBe('done')
+      expect(result.current).toBe(true)
     } finally {
       unmount()
     }
@@ -443,11 +439,11 @@ describe('control authority at the real idle row hook', () => {
     const { result, unmount } = renderHook(() => useWorkSourceUnavailable(row))
 
     try {
-      expect(stripe(result.current)).toBe('done')
+      expect(result.current).toBe(false)
       act(() => {
         sessionsHost.beginWorkSourceRead({ connectionId: 'local', profile: 'default', storedSessionId: row.id, source: 'tasks' })
       })
-      expect(stripe(result.current)).not.toBe('done') // a pending current read still holds it
+      expect(result.current).toBe(true) // a pending current read still holds it
     } finally {
       unmount()
     }

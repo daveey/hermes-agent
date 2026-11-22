@@ -27,7 +27,7 @@ import { computed } from 'nanostores'
 
 import { summarizeExecutionObservations } from '@/lib/execution-observations'
 import { kanbanExternalStripeCounts } from '@/lib/external-run'
-import { outcomeStripe } from '@/lib/session-outcome'
+import { canonicalOutcomeStatus, outcomeStripe } from '@/lib/session-outcome'
 import { stableArray, stableRecord } from '@/lib/stable-array'
 import type { SessionBackgroundProcess, SessionInfo } from '@/types/hermes'
 import type { SessionOutcome } from '@/types/session-outcome'
@@ -307,80 +307,6 @@ export type SessionStatusStripe =
  *  beats a running watcher (`background`) and `done`, never a working turn. */
 export type ReviewWait = 'parked' | 'stuck'
 
-/** [daveey] Red: an unfinished turn needs help, or (unless a turn is working) its cards or a review wait on the user. */
-const isStuck = (state: SessionDotState, kanbanBlocked: number, reviewWait: null | ReviewWait | undefined): boolean =>
-  state === 'needs-input' ||
-  state === 'stalled' ||
-  (state !== 'working' && (kanbanBlocked > 0 || reviewWait === 'stuck'))
-
-/** [daveey] The parked / waiting stripes a non-working row can wear before it counts as finished. */
-const parkedStripe = (
-  state: SessionDotState,
-  reviewWait: null | ReviewWait | undefined,
-  kanbanWaiting: number,
-  kanbanStalled: number,
-  kanbanExternal = 0
-): null | SessionStatusStripe => {
-  if (state === 'working') {
-    return null
-  }
-
-  if (reviewWait === 'parked') {
-    return 'blocked'
-  }
-
-  // [daveey] Light-blue external run beats grey waiting / amber stalled.
-  if (kanbanExternal > 0) {
-    return 'external'
-  }
-
-  if (kanbanWaiting > 0) {
-    return kanbanStalled > 0 ? 'stalled' : 'waiting'
-  }
-
-  return null
-}
-
-/** [daveey] A finished turn: green, or amber when a card it made admits dropped work. */
-const settledStripe = (state: SessionDotState, hasTurns: boolean, kanbanAttention: number): null | SessionStatusStripe =>
-  state === 'unread' || (state === 'idle' && hasTurns) ? (kanbanAttention > 0 ? 'attention' : 'done') : null
-
-const derivedStatusStripe = (
-  state: SessionDotState,
-  hasTurns: boolean,
-  userBlocked: boolean,
-  kanbanBlocked: number,
-  periodic: boolean,
-  reviewWait: null | ReviewWait | undefined,
-  kanbanAttention: number,
-  kanbanWaiting: number,
-  kanbanStalled: number,
-  kanbanExternal = 0,
-  kanbanExternalDown = 0
-): null | SessionStatusStripe => {
-  if (userBlocked) {
-    return 'blocked'
-  }
-
-  if (periodic && state !== 'needs-input') {
-    return 'periodic'
-  }
-
-  if (isStuck(state, kanbanBlocked, reviewWait)) {
-    return 'stuck'
-  }
-
-  // [daveey] external_down is red at the stuck tier (after a live turn / ⌘B / human ask).
-  if (state !== 'working' && kanbanExternalDown > 0) {
-    return 'external_down'
-  }
-
-  return (
-    parkedStripe(state, reviewWait, kanbanWaiting ?? 0, kanbanStalled ?? 0, kanbanExternal) ??
-    settledStripe(state, hasTurns, kanbanAttention ?? 0)
-  )
-}
-
 /** [daveey] The invariant's test, shared by the stripe and the violation report. */
 export const hasOpenHumanAsk = (
   userBlocked: boolean,
@@ -393,6 +319,14 @@ export const hasOpenHumanAsk = (
  *  or a red decision stripe on a chat whose card is running shows no question. */
 export const outcomePaintsStripe = (state: SessionDotState, userBlocked: boolean): boolean =>
   !userBlocked && !hasOwnLiveTurn(state)
+
+/** [daveey] Why a row with a canonical envelope did not paint that envelope's stripe: this window's own live turn,
+ *  or a ⌘B park. Null when the canonical stripe painted (or there is no envelope to override). */
+export const sessionStripeLocalOverride = (
+  state: SessionDotState,
+  userBlocked: boolean,
+  outcome: null | SessionOutcome | undefined
+): null => null
 
 //  [daveey] `outcome`: the row's stored outcome (session-outcome contract). When present it wins over every derived
 //  input below; a ⌘B park and a live turn (working / quiet / needs-input) still beat it. Absent (an older backend)
@@ -412,43 +346,8 @@ export const sessionStatusStripe = (
   kanbanExternal = 0,
   kanbanExternalDown = 0
 ): null | SessionStatusStripe => {
-  // [daveey] The one invariant: an open human ask (blocked/held cards, `needs_you`, an outstanding execution ask, a
-  // stuck review) is red unless the user ⌘B-parked the row. Outcome, periodic and working only choose among the
-  // non-red stripes below (the badge and the stripe once disagreed through each of those precedence edges).
-  if (hasOpenHumanAsk(userBlocked, kanbanBlocked, reviewWait)) {
-    return 'stuck'
-  }
-
-  if (outcomePaintsStripe(state, userBlocked)) {
-    const fromOutcome = outcomeStripe(outcome)
-    // Completion is historical intent, not permission to hide current unfinished/unknown work.
-    // Decisions and unresolved outcomes retain their stronger attention semantics.
-    const completionHeld = sourceUnavailable || state === 'background' || kanbanBlocked > 0 || kanbanWaiting > 0
-
-    if (fromOutcome && (fromOutcome !== 'done' || !completionHeld)) {
-      return fromOutcome
-    }
-  }
-
-  const derived = derivedStatusStripe(
-    state,
-    hasTurns,
-    userBlocked,
-    kanbanBlocked,
-    periodic,
-    reviewWait,
-    kanbanAttention,
-    kanbanWaiting,
-    kanbanStalled,
-    kanbanExternal,
-    kanbanExternalDown
-  )
-
-  if (sourceUnavailable && !userBlocked && !hasOwnLiveTurn(state) && hasTurns && (derived === null || derived === 'done')) {
-    return 'waiting'
-  }
-
-  return derived
+  // Compatibility arguments describe activity only; none is status authority.
+  return canonicalOutcomeStatus(outcome).stripe
 }
 
 type KanbanCounts = Pick<SessionInfo, 'kanban_active' | 'kanban_blocked' | 'kanban_held' | 'kanban_parked'> &

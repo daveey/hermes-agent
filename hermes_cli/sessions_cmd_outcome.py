@@ -77,7 +77,8 @@ def cmd_outcome(db, args):
     outcome = refresh_outcome(sid, "manual", db=db) if args.refresh else get_outcome(sid, db=db)
     stripe = _stripe_report(db, sid)
     if args.json:
-        print(json.dumps({"session_id": sid, "outcome": outcome, "desktop_stripe": stripe}, indent=2,
+        print(json.dumps({"session_id": sid, "outcome": outcome, "desktop_stripe": stripe,
+                          "desktop_surfaces": _surface_reports(db, sid, outcome)}, indent=2,
                          ensure_ascii=False))
     else:
         print(f"{sid}  {_describe(outcome)}")
@@ -168,3 +169,13 @@ def cmd_outcome_audit(db, args):
     print(f"{'Kind':<11} {'Reason':<12} {'Age h':>6}  {'Title':<40} ID\n" + "─" * 100)
     for r in rows:
         print(f"{(r['kind'] or '-'):<11} {(r['reason'] or ''):<12} {r['age_h']:>6}  {r['title'][:40]:<40} {r['id']}")
+
+
+def _surface_reports(db, sid: str, outcome):
+    """Read-only diagnostics over the same stored canonical envelope used by every consumer."""
+    from pathlib import Path
+    from hermes_cli.desktop_stripe_report import surface_observations
+    from hermes_state_outcome import _lineage_ids
+
+    return surface_observations(Path(db.db_path).parent, [sid, *_lineage_ids(db, sid)],
+                                (outcome or {}).get("status"))

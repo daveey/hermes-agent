@@ -103,6 +103,93 @@ def assert_done(status):
     assert (status["kind"], status["presentation"]["stripe"], status["coverage"]["state"]) == ("done", "done", "complete")
 
 
+def test_declaration_cron_receipt_cannot_restore_an_older_status_revision(db, board, monkeypatch):
+    import cron.session_ownership as ownership
+    turn(db)
+    first = refresh(db)
+    successor = []
+
+    def release(*args, **kwargs):
+        add_card(board, "t_running", "running")
+        successor.append(refresh(db, "card_change"))
+        return [], []
+
+    monkeypatch.setattr(ownership, "release_for_database", release)
+    so.declare_outcome("chat", {"kind": "done", "summary": "all done"}, db=db)
+    assert successor[0]["revision"] > first["revision"]
+    assert so.get_outcome("chat", db=db)["status"] == successor[0]
+
+
+@pytest.mark.parametrize("value", [[], {"decision_items": [{}]}, {"waiting_on": [{"kind": "unsupported", "id": "work"}]}])
+def test_malformed_control_source_is_unknown_then_recovers(db, value):
+    turn(db)
+    so.register_outcome_provider("invalid", lambda sid: value)
+    status = refresh(db)
+    assert status["coverage"]["state"] == "unknown"
+    assert status["presentation"]["stripe"] != "done"
+    so.register_outcome_provider("invalid", lambda sid: None)
+    assert_done(refresh(db))
+
+
+@pytest.mark.parametrize("value", [{"status": "active"}, {"status": "unsupported", "goal": "work"}])
+def test_malformed_goal_source_is_unknown_then_recovers(db, value):
+    turn(db)
+    db._write_rowcount("INSERT INTO state_meta(key, value) VALUES (?, ?)", ("goal:chat", json.dumps(value)))
+    status = refresh(db)
+    assert status["coverage"]["state"] == "unknown"
+    assert status["presentation"]["stripe"] != "done"
+    db._write_rowcount("DELETE FROM state_meta WHERE key = ?", ("goal:chat",))
+    assert_done(refresh(db))
+
+
+def test_transcript_read_failure_publishes_unknown_instead_of_leaving_stored_green(db, monkeypatch):
+    turn(db)
+    first = refresh(db)
+    tail = so._tail
+
+    def fail(*args):
+        raise sqlite3.OperationalError("transcript temporarily unavailable")
+
+    monkeypatch.setattr(so, "_tail", fail)
+    failed = refresh(db)
+    assert failed["coverage"]["state"] == "unknown"
+    assert failed["presentation"]["stripe"] != "done"
+    assert failed["revision"] > first["revision"]
+    assert so.get_outcome("chat", db=db)["status"] == failed
+    monkeypatch.setattr(so, "_tail", tail)
+    assert_done(refresh(db))
+
+
+def test_observed_child_lost_end_without_parent_notice_never_becomes_green(db):
+    turn(db)
+    db.create_session("child", source="subagent", parent_session_id="chat")
+    assert refresh(db)["kind"] == "waiting"  # linked child work, not the parent's own running turn
+    db.end_session("child", end_reason="delegation_unknown")
+    lost = refresh(db)
+    assert lost["presentation"]["stripe"] != "done"
+    assert any(item["id"] == "subagent:child" for item in lost["failures"])
+
+
+@pytest.mark.parametrize("reader", ["_generation", "_identity"])
+def test_turn_metadata_failure_publishes_unknown_then_recovers(db, monkeypatch, reader):
+    import hermes_state_session_status_snapshot as snapshot
+    turn(db)
+    first = refresh(db)
+    original = getattr(snapshot, reader)
+
+    def fail(*args):
+        raise sqlite3.OperationalError("turn metadata read failed")
+
+    monkeypatch.setattr(snapshot, reader, fail)
+    failed = refresh(db)
+    assert failed["coverage"]["state"] == "unknown"
+    assert failed["presentation"]["stripe"] != "done"
+    assert failed["revision"] > first["revision"]
+    assert so.get_outcome("chat", db=db)["status"] == failed
+    monkeypatch.setattr(snapshot, reader, original)
+    assert_done(refresh(db))
+
+
 # ── row 1: all work terminal and the owning turn settled is green, whatever the reply says ────────
 
 
@@ -429,3 +516,27 @@ def test_a_failed_board_read_is_replayed_not_reread_as_empty(db, monkeypatch):
     assert status["presentation"]["stripe"] != "done"
     assert status["reason"] == "source_unknown"
     assert any(reason.startswith("cards:") for reason in status["coverage"]["reasons"])
+
+
+# ── row 3: real linked work and a human ask move the one status, one revision per change ─────────
+
+
+def test_linked_work_and_ask_transitions_publish_one_revision_each(db, board):
+    """waiting -> decision -> waiting -> done on the real card store; a refresh with no change publishes nothing."""
+    turn(db)
+    add_card(board, "t_work", "running")
+    seen = [refresh(db)]
+    with sqlite3.connect(board) as conn:
+        conn.execute("UPDATE tasks SET status = 'blocked', block_kind = 'needs_input', human_request = ? WHERE id = ?",
+                     (json.dumps(HUMAN_REQUEST), "t_work"))
+    ksa._reset_cache_for_tests()
+    seen.append(refresh(db, "card_change"))
+    set_card(board, "t_work", "running")
+    seen.append(refresh(db, "card_change"))
+    set_card(board, "t_work", "done")
+    seen.append(refresh(db, "card_change"))
+    assert [s["presentation"]["stripe"] for s in seen] == ["waiting", "stuck", "waiting", "done"]
+    assert [s["revision"] for s in seen] == [1, 2, 3, 4]
+    assert {s["generation"] for s in seen} == {seen[0]["generation"]}
+    assert all(s["coverage"]["state"] == "complete" for s in seen)
+    assert refresh(db, "manual") == seen[-1]

@@ -1,46 +1,78 @@
 /**
  * [daveey] A chat's stored outcome (session-outcome contract): the backend keeps exactly one per non-archived chat
  * (`row.outcome`), and the sidebar paints from it instead of guessing from idleness. This module maps it to the
- * row's status stripe and to the stripe's tooltip. A row without `outcome` (an older backend) maps to nothing, and
- * `sessionStatusStripe` falls back to its old derivation.
+ * row's status stripe and to the stripe's tooltip. An outcome that carries the canonical envelope (`outcome.status`)
+ * paints `presentation.stripe` and nothing else (`canonicalOutcomeStatus`). A row without `outcome`, or whose stored
+ * outcome predates the envelope, is explicitly unknown; it never inherits heuristic green.
  */
 import type { Translations } from '@/i18n'
 import type { SessionStatusStripe } from '@/store/session-dot-state'
-import type { SessionOutcome, SessionOutcomeWaitingOn } from '@/types/session-outcome'
+import type { SessionOutcome, SessionOutcomeWaitingOn, SessionStatusEnvelope } from '@/types/session-outcome'
 
-/** The stripe an outcome paints. done → green, decision → red, muted → grey (parked, like ⌘B), waiting / running
- *  → the existing grey "waiting" glyph, unresolved → amber (the `attention` tone). Null for a kind this app does
- *  not know, so the caller falls back to the old logic rather than painting a guess. */
-export const outcomeStripe = (outcome: null | SessionOutcome | undefined): null | SessionStatusStripe => {
-  switch (outcome?.kind) {
-    case 'done':
-      return 'done'
+const CANONICAL_STRIPES: readonly string[] = ['attention', 'blocked', 'done', 'none', 'stuck', 'waiting']
+const IDENTITY_KEYS = ['gateway', 'profile', 'session_id', 'owner_epoch'] as const
 
-    case 'decision':
-      // A recorded choice settles the human ask, not its delivery. Keep old/unknown
-      // item shapes red, but explicit settled-only lists are agent-side waits.
-      return outcome.items?.length &&
-        outcome.items.every(
-          item =>
-            Boolean(item.resolution) || ['resolved', 'superseded', 'cancelled', 'withdrawn'].includes(item.state ?? '')
-        )
-        ? 'waiting'
-        : 'stuck'
+const isCount = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 
-    case 'muted':
-      return 'blocked'
+const isStringList = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every(item => typeof item === 'string')
 
-    case 'waiting':
+const hasValidPresentation = ({ coverage, kind, presentation }: SessionStatusEnvelope): boolean => Boolean(
+  presentation && CANONICAL_STRIPES.includes(presentation.stripe) && isStringList(presentation.reason_codes) &&
+  (presentation.stripe !== 'done' || (coverage?.state === 'complete' && kind === 'done'))
+)
 
-    case 'running':
-      return 'waiting'
+/** What a stored outcome's envelope says to paint. `unknown` is an explicit non-green state: the envelope is there
+ *  but this app cannot read it (another `status_version`, or malformed), and it never guesses from `kind`. */
+export type CanonicalOutcomeStatus =
+  | { revision: null; status: 'unknown'; stripe: 'attention' }
+  | { revision: number; status: 'canonical'; stripe: null | SessionStatusStripe }
 
-    case 'unresolved':
-      return 'attention'
+/** [daveey] The canonical status selector every surface (row, dot, tab, stepping) uses. Missing, malformed or unsupported data is unknown.
+ *  `status_version` 1 gives `presentation.stripe` verbatim (`none` = no stripe), independent of any client refetch,
+ *  work-source completeness, card count or the legacy `kind`. */
+export const canonicalOutcomeStatus = (
+  outcome: null | SessionOutcome | undefined
+): CanonicalOutcomeStatus => {
+  const envelope = outcome?.status
+  const unknown = { revision: null, status: 'unknown', stripe: 'attention' } as const
 
-    default:
-      return null
+  if (envelope === undefined) {
+    return unknown
   }
+
+  if (envelope === null || typeof envelope !== 'object') {
+    return unknown
+  }
+
+  const { coverage, generation, identity, presentation, revision, status_version: version } = envelope
+
+  if (
+    version !== 1 ||
+    !['done', 'unresolved', 'muted', 'decision', 'waiting', 'running'].includes(envelope.kind ?? '') ||
+    !isCount(revision) ||
+    !isCount(generation) ||
+    !identity ||
+    !IDENTITY_KEYS.every(key => typeof identity[key] === 'string' && identity[key].length > 0) ||
+    !coverage ||
+    !['complete', 'unknown'].includes(coverage.state) ||
+    !isStringList(coverage.reasons) ||
+    !presentation || !hasValidPresentation(envelope)
+  ) {
+    return unknown
+  }
+
+  return {
+    revision,
+    status: 'canonical',
+    stripe: presentation.stripe === 'none' ? null : (presentation.stripe as SessionStatusStripe)
+  }
+}
+
+/** Compatibility entry point for diagnostics: the same canonical selector, never legacy kind inference. */
+export const outcomeStripe = (outcome: null | SessionOutcome | undefined): null | SessionStatusStripe => {
+  return canonicalOutcomeStatus(outcome).stripe
 }
 
 /** [daveey] The tone an UNREAD dot takes from the stored outcome. The emerald unread dot means "finished, not yet
@@ -48,7 +80,8 @@ export const outcomeStripe = (outcome: null | SessionOutcome | undefined): null 
  *  done, so its unread dot paints that outcome's stripe colour instead (still filled, so it still reads as new).
  *  Null = keep the emerald unread dot (outcome `done`, no outcome, or a kind this app does not know). */
 export const unreadDotOutcomeStripe = (outcome: null | SessionOutcome | undefined): null | SessionStatusStripe => {
-  const stripe = outcomeStripe(outcome)
+  const canonical = canonicalOutcomeStatus(outcome)
+  const stripe = canonical.stripe
 
   return stripe && stripe !== 'done' ? stripe : null
 }

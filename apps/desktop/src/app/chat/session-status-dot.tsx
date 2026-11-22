@@ -1,12 +1,10 @@
 import type { CSSProperties } from 'react'
 
 import { type Translations, useI18n } from '@/i18n'
-import { formatSessionExternalHover } from '@/lib/external-run'
-import { unreadDotOutcomeLabel, unreadDotOutcomeStripe } from '@/lib/session-outcome'
+import { canonicalOutcomeStatus } from '@/lib/session-outcome'
 import { sessionStatusStripeColor } from '@/lib/session-status-stripe'
-import { useExecutionObservationClock } from '@/lib/use-execution-observation-clock'
-import { useBackgroundDotLabel, useSessionDotState } from '@/lib/use-session-dot-state'
 import { cn } from '@/lib/utils'
+import { useCommittedStripe } from '@/store/committed-stripe-report'
 import type { BackgroundDotLabel, SessionDotState } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
 import type { SessionOutcome } from '@/types/session-outcome'
@@ -24,10 +22,6 @@ type DotVariant = {
 
 // Shared size for every dot, including settled sessions.
 const DOT_BASE = 'size-1.5 rounded-full'
-
-// [daveey] Tailwind sky-400 / red-500, the external and external_down stripe hues.
-const EXTERNAL_BLUE = '#38bdf8'
-const EXTERNAL_RED = '#ef4444'
 
 // Three colors and one fill/hollow axis, none of it moving. Motion on a 6px
 // circle can only say "something is happening" — which the row's arc already
@@ -97,55 +91,29 @@ const DOT_VARIANTS: Record<SessionDotState, DotVariant> = {
  *  render a session — the sidebar's status filter, say. */
 export const sessionDotClassName = (state: SessionDotState): string => DOT_VARIANTS[state].className
 
-/** [daveey] The variant a session's dot paints. Unread is emerald only for a chat that is actually done: a stored
- *  outcome that is waiting / running / unresolved / decision / muted repaints the unread dot in that outcome's stripe
- *  colour (still filled, so it still reads as new), because users read emerald as done. Every other state ignores
- *  the outcome: the live-turn states already outrank it, and idle stays hollow grey.
- *  [daveey] `backgroundLabel`: what the `background` claim rests on. `unknown` (only unknown or unfresh work evidence)
- *  and `waiting` (only known waiting work) keep the same hollow dot but say so rather than asserting "running". */
+/** Every session dot consumes the same backend status as the row and tab. Activity is not status authority. */
 export const sessionDotVariant = (
-  state: SessionDotState,
+  _state: SessionDotState,
   outcome?: null | SessionOutcome,
-  backgroundLabel: BackgroundDotLabel = 'running'
+  _backgroundLabel: BackgroundDotLabel = 'running'
 ): DotVariant => {
-  if (state === 'background' && backgroundLabel !== 'running') {
-    const label = (r: Translations['sidebar']['row']) =>
-      backgroundLabel === 'unknown'
-        ? r.backgroundUnknown
-        : backgroundLabel === 'waiting'
-          ? r.backgroundWaiting
-          : backgroundLabel === 'external_down'
-            ? r.backgroundExternalDown
-            : r.backgroundExternal
+  const status = canonicalOutcomeStatus(outcome)
+  const stripe = status.stripe
 
-    // [daveey] External run: filled light blue (down: red), the same hues as the row stripe. Literal colours (not
-    // class names) so the paint is the same wherever the dot renders and can be asserted as a computed colour.
-    const external = backgroundLabel === 'external' || backgroundLabel === 'external_down'
-
-    return {
-      ...DOT_VARIANTS.background,
-      ariaLabel: label,
-      ...(external
-        ? {
-            className: DOT_BASE,
-            style: { backgroundColor: backgroundLabel === 'external' ? EXTERNAL_BLUE : EXTERNAL_RED }
-          }
-        : {}),
-      title: label
-    }
-  }
-
-  const stripe = state === 'unread' ? unreadDotOutcomeStripe(outcome) : null
-
-  if (!stripe || !outcome) {
-    return DOT_VARIANTS[state]
-  }
+  const label = (r: Translations['sidebar']['row']) =>
+    status.status === 'unknown' ? r.backgroundUnknown
+      : stripe === 'done' ? r.outcomeDone
+        : stripe === 'stuck' ? r.outcomeDecision
+          : stripe === 'blocked' ? r.outcomeMuted
+            : stripe === 'attention' ? r.outcomeUnresolved(null)
+              : stripe === 'waiting' ? r.outcomeWaiting
+                : r.sessionRunning
 
   return {
-    ariaLabel: r => unreadDotOutcomeLabel(outcome, r),
-    className: cn(DOT_BASE, 'bg-(--session-status-color)', sessionStatusStripeColor(stripe)),
+    ariaLabel: label,
+    className: cn(DOT_BASE, stripe === 'done' ? 'bg-(--ui-success)' : stripe ? 'bg-(--session-status-color)' : 'border border-(--ui-text-quaternary)', sessionStatusStripeColor(stripe)),
     role: 'status',
-    title: r => unreadDotOutcomeLabel(outcome, r)
+    title: label
   }
 }
 
@@ -179,45 +147,22 @@ export interface SessionStatusDotProps {
 export function SessionStatusDot({
   storedSessionId,
   session,
-  runningCardCount = 0,
   branchStem,
   className
 }: SessionStatusDotProps) {
   const { t } = useI18n()
   const r = t.sidebar.row
 
-  // Selector, not a plain useStore: the map is rebuilt whenever any session's
-  // status changes, but a given dot only repaints when ITS OWN state flips.
-  const agentState = useSessionDotState(storedSessionId, session)
+  const status = canonicalOutcomeStatus(session?.outcome)
+  const variant = sessionDotVariant('idle', session?.outcome)
 
-  const agentBackgroundLabel = useBackgroundDotLabel(storedSessionId, session, agentState)
-
-  const dotState =
-    runningCardCount > 0 &&
-    agentState !== 'needs-input' &&
-    agentState !== 'unread' &&
-    agentBackgroundLabel !== 'external' &&
-    agentBackgroundLabel !== 'external_down'
-      ? 'working'
-      : agentState
-
-  const backgroundLabel = dotState === 'background' ? agentBackgroundLabel : 'running'
-
-  const variant = sessionDotVariant(dotState, session?.outcome, backgroundLabel)
-
-  const nowSeconds = useExecutionObservationClock(session)
-
-  const externalHover =
-    backgroundLabel === 'external' || backgroundLabel === 'external_down'
-      ? formatSessionExternalHover(
-          session?.kanban_external_cards,
-          nowSeconds,
-          (session?.kanban_external ?? 0) + (session?.kanban_external_down ?? 0)
-        )
-      : null
-
-  const title = externalHover ?? variant.title?.(r)
-  const aria = externalHover ?? variant.ariaLabel?.(r)
+  useCommittedStripe(
+    { connection_id: session?.connection_id, id: session?.id ?? storedSessionId ?? '', profile: session?.profile },
+    session?.outcome,
+    'dot',
+    status.stripe,
+    Boolean(session) && !session?.archived
+  )
 
   return (
     <span className={cn('flex items-center gap-0.5', className)}>
@@ -226,21 +171,14 @@ export function SessionStatusDot({
           {branchStem}
         </span>
       ) : null}
-      {dotState === 'idle' ? (
-        // Rendered even with no color to paint: an empty dot of the same size
-        // keeps every row's title on one left edge, so a session finishing
-        // can't shift the list under the pointer.
-        <span aria-hidden="true" className={variant.className} />
-      ) : (
-        <span
-          aria-label={aria}
-          className={variant.className}
-          data-background-label={dotState === 'background' ? backgroundLabel : undefined}
-          role={variant.role}
-          style={variant.style}
-          title={title}
-        />
-      )}
+      <span
+        aria-label={variant.ariaLabel?.(r)}
+        className={variant.className}
+        data-session-status-dot={status.stripe ?? 'none'}
+        role={variant.role}
+        style={variant.style}
+        title={variant.title?.(r)}
+      />
     </span>
   )
 }

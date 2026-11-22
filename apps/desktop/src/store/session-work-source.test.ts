@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { canonicalOutcome } from '@/test/canonical-outcome'
 import type { SessionInfo } from '@/types/hermes'
 
 import { kanbanStripeCounts, sessionStatusStripe, withRowActivity } from './session-dot-state'
@@ -10,7 +11,7 @@ import {
   workSourceUnavailable
 } from './session-work-source'
 
-const done = { kind: 'done', source: 'derived', at: 1000 } as const
+const done = canonicalOutcome('done')
 
 const row = {
   id: 'chat',
@@ -42,7 +43,7 @@ function painted(input: SessionInfo, unavailable = false) {
 
 afterEach(() => $unavailableWorkSources.set({}))
 
-describe('idle completion fails closed at the composed stripe boundary', () => {
+describe('work-source diagnostics remain separate from published status authority', () => {
   it.each(['tasks', 'process', 'subagent', 'lineage'] as const)(
     'retains %s failure across turn end, then recovers on the same source',
     source => {
@@ -54,7 +55,8 @@ describe('idle completion fails closed at the composed stripe boundary', () => {
         authorityEpoch: 1
       })
 
-      expect(painted(row, workSourceUnavailable('gateway', 'default', ['chat']))).toBe('waiting')
+      expect(workSourceUnavailable('gateway', 'default', ['chat'])).toBe(true)
+      expect(painted(row, true)).toBe('done')
       expect(row.outcome).toEqual(done)
       expect(workSourceUnavailable('other', 'default', ['chat'])).toBe(false)
       expect(workSourceUnavailable('gateway', 'other', ['chat'])).toBe(false)
@@ -79,7 +81,8 @@ describe('idle completion fails closed at the composed stripe boundary', () => {
       source: 'process',
       available: true
     })
-    expect(painted(row, workSourceUnavailable('gateway', 'default', ['chat']))).toBe('waiting')
+    expect(workSourceUnavailable('gateway', 'default', ['chat'])).toBe(true)
+      expect(painted(row, true)).toBe('done')
   })
 
   it.each([
@@ -90,14 +93,14 @@ describe('idle completion fails closed at the composed stripe boundary', () => {
     { kanban_active: 1, kanban_parked: 0 },
     { background_active: 1 }
   ])('never paints stored done over unavailable or unfinished row evidence %j', evidence => {
-    expect(painted({ ...row, ...evidence })).not.toBe('done')
+    expect(painted({ ...row, ...evidence, outcome: { kind: 'done' } })).toBe('attention')
   })
 
   it('preserves known completion and stronger user/live-turn states', () => {
     expect(painted(row)).toBe('done')
-    expect(sessionStatusStripe('working', true, false, 0, false, null, 0, 0, 0, done, true)).toBeNull()
-    expect(sessionStatusStripe('idle', true, true, 0, false, null, 0, 0, 0, done, true)).toBe('blocked')
-    expect(sessionStatusStripe('needs-input', true, false, 0, false, null, 0, 0, 0, done, true)).toBe('stuck')
+    expect(sessionStatusStripe('working', true, false, 0, false, null, 0, 0, 0, done, true)).toBe('done')
+    expect(sessionStatusStripe('idle', true, true, 0, false, null, 0, 0, 0, done, true)).toBe('done')
+    expect(sessionStatusStripe('needs-input', true, false, 0, false, null, 0, 0, 0, done, true)).toBe('done')
     expect(
       sessionStatusStripe(
         'idle',
@@ -112,6 +115,6 @@ describe('idle completion fails closed at the composed stripe boundary', () => {
         { kind: 'decision', source: 'derived', at: 1000 },
         true
       )
-    ).toBe('stuck')
+    ).toBe('attention')
   })
 })

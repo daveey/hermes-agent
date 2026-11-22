@@ -1,6 +1,7 @@
 import { isMissingRestEndpoint, isUnroutedRestPath } from '@/lib/gateway-rpc'
 import { maybeBackfillLegacySessionOwners } from '@/lib/legacy-session-owner-backfill'
 import { stampRowsWithOwningConnection } from '@/lib/session-owner-stamp'
+import type { CommittedStripeReport } from '@/store/committed-stripe-report'
 import { pageHonorsLatestOrder, recordTranscriptTail } from '@/store/transcript-tail'
 import type {
   PaginatedSessions,
@@ -519,6 +520,29 @@ export function reportSessionStripeRemote(
     path: `/api/sessions/${encodeURIComponent(row.id)}/stripe-report`,
     method: 'POST',
     body: { previous, reasons: [...reasons], stripe, ...(owner ? { profile: owner } : {}) }
+  })
+}
+
+/** [daveey] Tell the row's own gateway which canonical status a mounted surface committed (done, waiting, attention,
+ *  none or unknown, not red only), qualified by the envelope's identity / revision / generation / coverage so the
+ *  backend can fence stale paints. `reasons` mirrors `reason_codes` for the pre-envelope route model; a backend
+ *  without the qualified fields ignores them and one without the route 404s (the caller retries a bounded number of
+ *  times and drops it). */
+export function reportSessionCommittedStripeRemote(
+  row: Pick<SessionInfo, 'connection_id' | 'id' | 'profile'>,
+  report: CommittedStripeReport
+): Promise<{ ok: boolean }> {
+  const owner = sessionWriteProfile(row.profile)
+
+  const scope: ProfileScope = row.connection_id
+    ? { connectionId: row.connection_id, profile: owner ?? 'default' }
+    : owner
+
+  return hermesApi<{ ok: boolean }>({
+    ...sessionScoped(scope),
+    path: `/api/sessions/${encodeURIComponent(row.id)}/stripe-report`,
+    method: 'POST',
+    body: { ...report, previous: null, reasons: [...report.reason_codes], ...(owner ? { profile: owner } : {}) }
   })
 }
 

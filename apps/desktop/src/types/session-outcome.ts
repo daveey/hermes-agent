@@ -43,8 +43,27 @@ export interface CompletionReceipt {
 /** Source revision/namespace is projected unchanged, including future additive provenance fields. */
 export type CompletionReceiptSource = Record<string, unknown>
 
+/** Presentation stripes the backend reducer may select (`presentation.stripe`). `none` paints nothing. */
+export type CanonicalStripe = 'attention' | 'blocked' | 'done' | 'none' | 'stuck' | 'waiting'
+
+/** [daveey] Canonical status envelope (`outcome.status`, `status_version` 1), reduced by the backend from work
+ *  evidence only. `presentation.stripe` is the status every surface paints; nothing else on the row selects it. */
+export interface SessionStatusEnvelope {
+  status_version?: number
+  kind?: SessionOutcomeKind | string
+  /** Monotonic per qualified owner: it changes exactly when the published status does. */
+  revision?: number
+  identity?: { gateway: string; profile: string; session_id: string; owner_epoch: string }
+  /** The request generation the status was reduced for. */
+  generation?: number
+  coverage?: { state: 'complete' | 'unknown'; reasons: string[] }
+  presentation?: { stripe: CanonicalStripe | string; reason_codes: string[] }
+}
+
 /** [daveey] A chat's stored outcome, as list rows carry it (`row.outcome`). */
 export interface SessionOutcome {
+  /** Absent only from a backend (or a stored outcome) that predates the envelope. */
+  status?: SessionStatusEnvelope
   kind: SessionOutcomeKind | string
   source?: 'declared' | 'derived'
   /** Epoch seconds. */

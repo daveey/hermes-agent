@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { canonicalOutcome } from '@/test/canonical-outcome'
+
 import type * as DotStateModule from './session-dot-state'
 import type { SessionDotState } from './session-dot-state'
 
@@ -131,12 +133,12 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
 
   // a: green (read, finished turn)  b: no stripe (no turns)  c: working
   // d: red (blocked)  e: green (unread)
-  function setup(verified = true) {
+  function setup(verified = true, statuses: Record<string, 'done' | 'none' | 'stuck'> = { a: 'done', b: 'none', c: 'none', d: 'stuck', e: 'done' }) {
     const anchor = document.createElement('span')
     document.body.append(anchor)
     publishSidebarSection(key, {
       anchor,
-      rows: verified ? ['a', 'b', 'c', 'd', 'e'].map(id => ({ id, kanban_observed_at: Date.now() / 1000 }) as never) : [],
+      rows: verified ? ['a', 'b', 'c', 'd', 'e'].map(id => ({ id, outcome: canonicalOutcome(statuses[id]) }) as never) : [],
       ids: ['a', 'b', 'c', 'd', 'e'],
       turnIds: ['a', 'c', 'd', 'e'],
       virtualized: true
@@ -150,7 +152,7 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
     expect(nextSidebarSessionId('a', 1, false)).toBeNull()
   })
 
-  it.each([{ kanban_active: 1 }, { kanban_unknown: true }, { kanban_observed_at: 1 }])('skips unverified offscreen tree rows: %j', evidence => {
+  it.each([{ kanban_active: 1 }, { kanban_unknown: true }, { kanban_observed_at: 1 }])('offers unverified extant tree rows as unknown attention: %j', evidence => {
     setup()
     const anchor = document.createElement('span')
     document.body.append(anchor)
@@ -158,7 +160,7 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
       anchor, ids: ['a', 'e'], turnIds: ['a', 'e'], virtualized: true,
       rows: [{ id: 'e', kanban_observed_at: Date.now() / 1000, ...evidence } as never]
     })
-    expect(nextSidebarSessionId('a', 1, false)).toBeNull()
+    expect(nextSidebarSessionId('a', 1, false)).toBe('e')
   })
 
   it('lands only on rows with a status stripe, including read-but-finished (green) ones', () => {
@@ -170,14 +172,14 @@ describe('nextSidebarSessionId (⌘] / ⌘[)', () => {
   })
 
   it('does not fall back to an unstriped neighbour when nothing else has a stripe', () => {
-    setup()
+    setup(true, { a: 'done', b: 'none', c: 'none', d: 'none', e: 'none' })
     dots.value = { a: 'idle', b: 'idle', c: 'working', d: 'working', e: 'working' }
     expect(nextSidebarSessionId('a', 1, false)).toBeNull()
     expect(nextSidebarSessionId('a', -1, false)).toBeNull()
   })
 
   it('archive fallback and ⇧ still take the plain neighbour', () => {
-    setup()
+    setup(true, { a: 'done', b: 'none', c: 'none', d: 'none', e: 'none' })
     dots.value = { a: 'idle', b: 'idle', c: 'working', d: 'working', e: 'working' }
     expect(nextSidebarSessionId('a', 1, false, true)).toBe('b')
     expect(nextSidebarSessionId('a', 1, true)).toBe('b')

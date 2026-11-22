@@ -35,6 +35,7 @@ import {
   resumeDesktopBootForRetry,
   setDesktopBootStep
 } from '@/store/boot'
+import { flushCommittedStripeReports } from '@/store/committed-stripe-report'
 import { resetBackgroundPollingGuard } from '@/store/composer-status'
 import { primaryWireSource, recordConnectionWire } from '@/store/connection-wire'
 import { noteBackendDrop, noteBackendExited } from '@/store/desktop-metrics'
@@ -605,6 +606,7 @@ export function useGatewayBoot({
         // A manual retry may finish after the user has moved to another route.
         if (!manual || (isActivePrimary() && gatewayActivationEpoch() === manual.activationEpoch)) {
           reconcileBusyStatesOnReconnect()
+          void flushCommittedStripeReports()
           // Bounded: `reconnecting` stays set until these settle, and while it
           // is set a drop of the socket just reopened is not redialed. A hung
           // refresh would latch the primary closed until a reload.

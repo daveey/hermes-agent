@@ -145,10 +145,19 @@ def _control_items(sid: str) -> tuple[list[dict], list[dict]]:
     decisions, waits = [], []
     for _name, fn in list(so._providers.items()):
         result = fn(sid)
-        if not isinstance(result, dict):
+        if result is None:  # providers may explicitly have no contribution for this session
             continue
-        decisions += [i for i in map(so._decision_item, result.get("decision_items") or ()) if i]
-        waits += [i for i in map(so._wait_item, result.get("waiting_on") or ()) if i]
+        if not isinstance(result, dict):
+            raise ValueError("malformed control result")
+        for key, normalizer, target in (("decision_items", so._decision_item, decisions), ("waiting_on", so._wait_item, waits)):
+            values = result.get(key) or []
+            if not isinstance(values, list):
+                raise ValueError("malformed control items")
+            for value in values:
+                item = normalizer(value)
+                if item is None:
+                    raise ValueError("malformed control item")
+                target.append(item)
     return decisions, waits
 
 
@@ -177,10 +186,12 @@ def _goal_items(db: Any, ids: list[str]) -> list[dict]:
         if row is None or row["value"] in (None, ""):
             continue
         data = json.loads(row["value"])
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or data.get("status") not in ("active", "paused", "done", "cleared"):
             raise ValueError("malformed goal record")
-        if data.get("status") == "active" and str(data.get("goal") or "").strip():
-            items.append({"kind": "goal", "id": f"goal:{sid}", "state": "running"})
+        if data["status"] in ("active", "paused"):
+            if not isinstance(data.get("goal"), str) or not data["goal"].strip():
+                raise ValueError("malformed open goal")
+            items.append({"kind": "goal", "id": f"goal:{sid}", "state": "running" if data["status"] == "active" else "waiting"})
     return items
 
 
@@ -193,6 +204,22 @@ def _subagent_items(db: Any, ids: list[str], since: float) -> tuple[list[dict], 
     def tagged(items: list[dict]) -> list[dict]:
         return [{"id": f"subagent:{item['id']}", "state": item["state"]} for item in items]
 
+    # Closed child rows are still evidence: reaping/loss must not erase a child seen running.
+    from hermes_state_common import _placeholders, _sql_json_extract
+    ended = db._read_all(
+        "SELECT id, ended_at, end_reason FROM sessions WHERE parent_session_id IN (" + _placeholders(ids) + ")"
+        " AND ended_at IS NOT NULL AND end_reason != 'compression' AND ended_at >= ?"
+        " AND (source = 'subagent' OR " + _sql_json_extract('model_config', '$._delegate_from') + " IS NOT NULL)",
+        (*ids, time.time() - so.SUBAGENT_LOST_BOUND_S))
+    for row in ended:
+        tail = so._without_finished_notes(so._tail(db, row["id"]))
+        turn = _transcript_turn(tail)["state"]
+        if row["end_reason"] in ("agent_close", "completed") and turn == "completed":
+            continue
+        item = {"id": str(row["id"]), "state": "failed" if turn == "failed" else "lost"}
+        every.append(item)
+        if not since or float(row["ended_at"]) >= since:
+            current.add(item["id"])
     return (tagged(so._subagent_items(db, ids)) + tagged([i for i in every if i["id"] in current]),
             tagged([i for i in every if i["id"] not in current]))
 
@@ -203,12 +230,6 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
     so = _so()
     prior = stored.get("status") if isinstance(stored, dict) else None
     prior = prior if isinstance(prior, dict) and prior.get("status_version") == STATUS_VERSION else None
-    ids = so._lineage_ids(db, tip)
-    identity = _identity(db, tip, ids)
-    same_owner = prior is not None and prior.get("identity") == identity
-    generation, since = _generation(db, tip)
-    if same_owner:  # a rewound transcript never regresses the generation it already published
-        generation = max(generation, int(prior.get("generation") or 0))
     errors: dict[str, str] = {}
 
     def read(name: str, fn: Callable[[], Any], empty: Any) -> Any:
@@ -219,8 +240,16 @@ def canonical_status(db: Any, tip: str, stored: Optional[dict], *, trigger: str,
             errors[name] = f"{_SINGULAR.get(name, name)}_read_failed:{type(exc).__name__}"
             return empty
 
+    ids = read("turn", lambda: so._lineage_ids(db, tip), [tip])
+    fallback_identity = (prior or {}).get("identity") or {
+        "gateway": "local", "profile": "default", "session_id": tip, "owner_epoch": "unknown"}
+    identity = read("turn", lambda: _identity(db, tip, ids), fallback_identity)
+    same_owner = prior is not None and prior.get("identity") == identity
+    generation, since = read("turn", lambda: _generation(db, tip), (int((prior or {}).get("generation") or 0), 0.0))
+    if same_owner:  # a rewound transcript never regresses the generation it already published
+        generation = max(generation, int(prior.get("generation") or 0))
     row = so._row(db, tip) or {}
-    tail = so._without_finished_notes(so._tail(db, tip))
+    tail = read("turn", lambda: so._without_finished_notes(so._tail(db, tip)), [])
     live = read("turn", lambda: _live_tokens(db, tip) - concluding, set())
     kept = (prior.get("turn_evidence") or {}) if same_owner else {}
     turn, evidence = _turn(tail, live, concluding, trigger, kept, generation)
@@ -284,7 +313,11 @@ def refresh(db: Any, sid: str, trigger: str, concluding: frozenset[str]) -> dict
         row = so._row(db, tip)
         shared = so._card_read.set({})  # the explanation and the status reduce one card read
         try:
-            derived = so._derive(db, tip, concluding=concluding)
+            try:
+                derived = so._derive(db, tip, concluding=concluding)
+            except Exception:  # health: allow BLE001 -- explanation failure must not retain a stored green status
+                logger.warning("session outcome explanation unreadable for %s", tip, exc_info=True)
+                derived = {"kind": "unresolved", "reason": "source_unknown", "source": "derived", "at": time.time()}
             if row is None:
                 return derived
             raw, fence = row.get("outcome_json"), _user_fence(db, tip)
