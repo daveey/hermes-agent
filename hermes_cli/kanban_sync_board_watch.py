@@ -28,15 +28,20 @@ def path_gone(path: str) -> bool:
 
 
 def schema_rows(conn: sqlite3.Connection) -> list:
-    """The ``sqlite_schema`` rows as *conn* reads them from the file now.
+    """The schema cookie and the ``sqlite_schema`` rows as *conn* reads them from the file now.
 
     The rows are plain table content at page 1, read without consulting what the connection
     parsed from them earlier, so a kept reader can be asked whether its parsed schema still
-    describes the file. The schema cookie cannot answer that: a restored image carries its own
-    counter, which can equal the live one over a different schema. Kept as rows and compared
-    with ``==``: hashing them cost four times the read (0.63 ms against 0.16 ms for the hub
-    board's 239 rows, 2026-11-22)."""
-    return conn.execute("SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema ORDER BY rowid").fetchall()
+    describes the file. Neither half answers that alone. A restored image carries its own
+    cookie, which can equal the live one over a different schema, so the rows are compared.
+    SQLite re-parses a reader's schema by itself when a schema change arrives through the WAL,
+    so the rows stored at open stop being the ones its parse came from; the cookie stored with
+    them then differs from the file's, unless the file is back under the open-time cookie, and
+    then the rows statement makes SQLite parse it again. Kept as rows and compared with ``==``:
+    hashing them cost four times the read (0.63 ms against 0.16 ms for the hub board's 239
+    rows, 2026-11-22)."""
+    return (conn.execute("PRAGMA schema_version").fetchall()
+            + conn.execute("SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema ORDER BY rowid").fetchall())
 
 
 class BoardWatch:
@@ -56,7 +61,7 @@ class BoardWatch:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         # path -> (file identity, reader, generation, wal state, data_version of that wal state,
-        #          resolved path, schema rows or None)
+        #          resolved path, schema cookie + rows or None)
         self._conns: dict[str, tuple] = {}
         self._gen = 0
         self._answers: dict[str, dict[str, tuple[Any, Any]]] = {}  # path -> tag -> (data_version, answer)
@@ -128,10 +133,12 @@ class BoardWatch:
         a raw copy or restore shows none and takes the reopen path above. The proof says a
         checkpoint ran, not that nothing else wrote the file, so the kept reader also gives up
         its page cache and its answers, as a new one would. Only its parsed schema survives,
-        and only while the file's ``sqlite_schema`` rows, read again here, are the ones it was
-        parsed from: a restored image with another schema under the same schema cookie reopens
-        (SQLite's own cookie check would let the stale parse answer from the wrong pages). A
-        reader stored without rows (None) compares unequal and is never kept."""
+        and only while the file's schema cookie and ``sqlite_schema`` rows, read again here,
+        are the ones the reader had when it opened: a restored image with another schema under
+        the same cookie reopens (SQLite's own cookie check would let the stale parse answer
+        from the wrong pages), and so does any file whose cookie moved, because the reader may
+        since have parsed a later schema than the stored rows. A reader stored without rows
+        (None) compares unequal and is never kept."""
         if ent[0][:2] != identity[:2] or identity[3] < ent[0][3]:
             return False
         began = time.thread_time()
