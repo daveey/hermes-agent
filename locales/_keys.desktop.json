@@ -1555,6 +1555,7 @@
     "desktop.archiveLinkedTasksUnknown",
     "desktop.archiveLinkedTasksValue",
     "desktop.archiveLinkedTitle",
+    "desktop.archiveQueueCancelled",
     "desktop.archiveQueueDropped",
     "desktop.archiveQueued",
     "desktop.archived",

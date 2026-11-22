@@ -4,7 +4,7 @@ import type { HermesApiRequest } from '@/global'
 import type { SessionInfo } from '@/hermes'
 import { en } from '@/i18n/en'
 import { $confirmRequest, settleConfirm } from '@/store/confirm'
-import { clearNotifications } from '@/store/notifications'
+import { $notifications, clearNotifications } from '@/store/notifications'
 
 import { archivePreflight } from './archive-soft-hide'
 import { refreshArchiveTasks } from './refresh-archive-tasks'
@@ -69,7 +69,7 @@ it('does not accept a task result arriving after the shared deadline', async () 
   expect(await outcome).toBe('rejected')
 })
 
-it('restores rather than offering Archive anyway when sequential reads exhaust the final reconnect attempt', async () => {
+it('keeps sequential transport read deadlines queued rather than offering Archive anyway', async () => {
   let attempts = 0
 
   const api = vi.fn(({ path, timeoutMs }: HermesApiRequest) => {
@@ -87,7 +87,8 @@ it('restores rather than offering Archive anyway when sequential reads exhaust t
   const outcome = archivePreflight(row.id, row, true, hidden, en.desktop)
   await vi.advanceTimersByTimeAsync(61_000)
   const confirmation = $confirmRequest.get()
-  settleConfirm(false)
+  expect(hidden.restore).not.toHaveBeenCalled()
+  $notifications.get().find(n => n.message === en.desktop.archiveQueued)?.action?.onClick()
   expect(await outcome).toBe(false)
   expect(confirmation).toBeNull()
   expect(hidden.restore).toHaveBeenCalledOnce()

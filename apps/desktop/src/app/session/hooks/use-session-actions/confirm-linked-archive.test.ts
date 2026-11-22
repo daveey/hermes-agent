@@ -4,6 +4,7 @@ import type { SessionInfo } from '@/hermes'
 import { en } from '@/i18n/en'
 import { $confirmRequest, settleConfirm } from '@/store/confirm'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
+import { $notifications } from '@/store/notifications'
 
 import { confirmLinkedArchive } from './confirm-linked-archive'
 
@@ -63,7 +64,7 @@ it('walks compressed ancestors and preserves linked-task confirmation', async ()
   await expect(pending).resolves.toBe(false)
 })
 
-it('bounds a hung task read with reconnect exhaustion, not an override dialog', async () => {
+it('bounds each hung task read but holds the intent until cancelled, not an override dialog', async () => {
   vi.useFakeTimers()
   vi.stubGlobal('hermesDesktop', { api: () => new Promise(() => {}) })
 
@@ -72,7 +73,8 @@ it('bounds a hung task read with reconnect exhaustion, not an override dialog', 
 
   await vi.advanceTimersByTimeAsync(70_000)
   expect($confirmRequest.get()).toBeNull()
-  expect(await pending).toMatch(/archive preflight deadline/)
+  $notifications.get().find(n => n.message === en.desktop.archiveQueued)?.action?.onClick()
+  expect(await pending).toBe(`Error: ${en.desktop.archiveQueueCancelled}`)
 })
 
 it.each([undefined, 'remote-owner'])('refreshes expired empty observations on the row owner %s', async connectionId => {

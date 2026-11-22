@@ -20,10 +20,10 @@ const isTimeout = (error: unknown) => /timed out/i.test(String((error as Error)?
  * A fresh row that claims work is read too: its `kanban_active` also counts settled cards still waiting for the chat's
  * close-out, which the task list leaves out, so only the read says what is open. If that read fails, the row stands. */
 export async function refreshArchiveTasks(id: string, session: SessionInfo | undefined, profile: string | undefined,
-  options?: { retryTransport?: boolean; budgetMs?: number; trace?: ArchiveTrace }): Promise<SessionInfo | undefined> {
+  options?: { retryTransport?: boolean; budgetMs?: number; trace?: ArchiveTrace; forceRefresh?: boolean; signal?: AbortSignal }): Promise<SessionInfo | undefined> {
   const fresh = hasFreshKanbanObservation(session) && !session?.kanban_unknown && !session?.kanban_remote_stale
 
-  if (fresh && !session?.kanban_active && !session?.kanban_blocked) {
+  if (!options?.forceRefresh && fresh && !session?.kanban_active && !session?.kanban_blocked) {
     options?.trace?.('preflight=ok')
 
     return session
@@ -60,10 +60,12 @@ export async function refreshArchiveTasks(id: string, session: SessionInfo | und
   const deadlineError = () => new Error(`Timed out connecting to Hermes backend: archive preflight deadline (${stage})`)
 
   const send = async <T>(path: string): Promise<T> => {
+    options?.signal?.throwIfAborted()
     const remaining = deadline - Date.now()
 
     if (settled || remaining <= 0) {throw deadlineError()}
     const result = await hermesApiAs<T>(owner, { path, timeoutMs: Math.min(READ_TIMEOUT_MS, remaining) })
+    options?.signal?.throwIfAborted()
 
     if (settled || Date.now() >= deadline) {throw deadlineError()}
 

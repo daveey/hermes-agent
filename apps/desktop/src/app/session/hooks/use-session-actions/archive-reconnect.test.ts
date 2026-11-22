@@ -21,6 +21,7 @@ const upgrade = '409: {"detail":"client_upgrade_required: this app is out of syn
 beforeEach(() => {
   vi.useFakeTimers()
   sessionStorage.clear()
+  localStorage.clear()
   clearNotifications()
 })
 afterEach(() => {
@@ -146,18 +147,20 @@ it('reruns ancestry and task safety after a reconnect, never treating unknown as
   expect(await pending).toBe(false)
 })
 
-it('ends a never-recovered queue visibly without sending any PATCH', async () => {
+it('holds a never-recovered queue until the user cancels, without sending any PATCH', async () => {
   const api = vi.fn(async (_request: HermesApiRequest) => {throw new Error('socket hang up')})
   vi.stubGlobal('hermesDesktop', { api })
   const hiddenRow = hidden()
   const result = archivePreflight(row.id, row, true, hiddenRow, en.desktop)
-  await vi.advanceTimersByTimeAsync(70_000)
+  await vi.advanceTimersByTimeAsync(370_000)
+  expect(hiddenRow.restore).not.toHaveBeenCalled()
+  $notifications.get().find(n => n.message === en.desktop.archiveQueued)?.action?.onClick()
   expect(await result).toBe(false)
   expect(hiddenRow.restore).toHaveBeenCalledOnce()
   expect($notifications.get().some(n => n.kind === 'error')).toBe(true)
   expect(api.mock.calls.every(([arg]) => !arg.method)).toBe(true)
   expect($confirmRequest.get()).toBeNull()
-  expect(Object.keys(sessionStorage)).toHaveLength(0)
+  expect(Object.keys(localStorage)).toHaveLength(0)
 })
 
 it('drops reload markers with a visible note, without replay, once; active remounts are not reloads', async () => {
@@ -171,11 +174,12 @@ it('drops reload markers with a visible note, without replay, once; active remou
   expect($notifications.get().filter(n => n.id === 'archive-queue-reload')).toHaveLength(1)
   const result = confirmLinkedArchive(row.id, row, 'work', en.desktop).catch(error => error)
   await vi.advanceTimersByTimeAsync(0)
-  const keys = Object.keys(sessionStorage)
+  const keys = Object.keys(localStorage)
   expect(keys).toHaveLength(1)
   reportDroppedArchiveQueues()
-  expect(Object.keys(sessionStorage)).toEqual(keys)
+  expect(Object.keys(localStorage)).toEqual(keys)
   await vi.advanceTimersByTimeAsync(70_000)
+  $notifications.get().find(n => n.message === en.desktop.archiveQueued)?.action?.onClick()
   await result
 })
 

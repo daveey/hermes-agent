@@ -500,7 +500,7 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
     expect(vi.mocked(setSessionArchived)).toHaveBeenCalledWith('hub-1', true, hub, expect.any(Function))
   })
 
-  it('queues when the owning hub is unreachable and fails visibly at the deadline without a safety override', async () => {
+  it('holds an unreachable hub archive past five minutes and commits on recovery without a second action', async () => {
     $projectTree.set([{ previewSessions: [remoteRow()], repos: [] } as never])
     api.mockImplementation(desktopApi('down'))
     const handle = await mountHarness()
@@ -516,12 +516,17 @@ describe('archive preflight follows the remote owner when Recents lacks it', () 
     expect(ancestryGuard).not.toHaveBeenCalled()
     expect(api.mock.calls.every(([request]) => request.connectionId === 'hermes-hub')).toBe(true)
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(70_000)
+      await vi.advanceTimersByTimeAsync(370_000)
+      expect($notifications.get().some(n => n.message.includes('Will archive when reconnected'))).toBe(true)
+      expect(vi.mocked(setSessionArchived)).not.toHaveBeenCalled()
+      expect($confirmRequest.get()).toBeNull()
+      api.mockImplementation(desktopApi('up'))
+      await vi.advanceTimersByTimeAsync(10_000)
       await done
     })
     vi.useRealTimers()
-    expect($notifications.get().some(n => n.kind === 'error')).toBe(true)
-    expect(vi.mocked(setSessionArchived)).not.toHaveBeenCalled()
+    expect($notifications.get().some(n => n.kind === 'error')).toBe(false)
+    expect(vi.mocked(setSessionArchived)).toHaveBeenCalledOnce()
   })
 
   it('still reports the repair card itself as linked open work', async () => {
