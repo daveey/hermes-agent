@@ -1,3 +1,5 @@
+import '@/test/archive-queue-locks.setup'
+
 // [daveey] Archiving a chat that still has linked work (open Kanban tasks,
 // rented machines reported by a plugin guard) asks first; a chat with nothing
 // linked archives straight away, as before.

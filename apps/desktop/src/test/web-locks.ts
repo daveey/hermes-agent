@@ -1,18 +1,35 @@
-// Shared origin-wide lock fixture; separate module instances/renderers see the
-// same manager, while a reload can release the old renderer's held callbacks.
+// Shared origin-wide exclusive lock fixture. Both request overloads are used
+// by renderer consumers; blocking requests queue instead of failing a peer.
 export function archiveQueueLocksFixture() {
   const held = new Set<string>()
+  const waiters = new Map<string, Array<() => void>>()
+  type Callback = (lock: Lock | null) => unknown
 
   const locks = {
-    request: async (name: string, options: LockOptions, callback: (lock: Lock | null) => unknown) => {
+    request: async (name: string, optionsOrCallback: LockOptions | Callback, callback?: Callback) => {
+      const options = typeof optionsOrCallback === 'function' ? {} : optionsOrCallback
+      const run = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback!
+
       if (held.has(name)) {
-        if (options.ifAvailable) {return callback(null)}
-        throw new Error('duplicate fixture lock')
+        if (options.ifAvailable) {return run(null)}
+        await new Promise<void>(resolve => {
+          const queue = waiters.get(name) ?? []
+          queue.push(resolve)
+          waiters.set(name, queue)
+        })
+      } else {
+        held.add(name)
       }
 
-      held.add(name)
+      try {return await run({ name, mode: 'exclusive' } as Lock)} finally {
+        const queue = waiters.get(name)
+        const next = queue?.shift()
 
-      try {return await callback({ name, mode: 'exclusive' } as Lock)} finally {held.delete(name)}
+        if (next) {next()} else {
+          held.delete(name)
+          waiters.delete(name)
+        }
+      }
     }
   }
 

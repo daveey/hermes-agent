@@ -1,3 +1,5 @@
+import '@/test/archive-queue-locks.setup'
+
 import { afterEach, expect, it, vi } from 'vitest'
 
 import type { SessionInfo } from '@/hermes'
