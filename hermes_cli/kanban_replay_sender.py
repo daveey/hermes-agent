@@ -1,7 +1,8 @@
 """W=1 production push entry for already bound strict journals. [daveey]
 
-No enrollment or activation. Until migration/provenance and all custody paths are
-finished this is a task-upsert tracer only; other intents stop without deletion.
+No enrollment or activation. This WIP handles ordinary upsert/delete intents and
+parent-first transport, but still refuses unintegrated modes/control/dispositions.
+Provenance, drainage and all custody consumers must pass before it can ship.
 """
 import json
 from dataclasses import dataclass
@@ -56,16 +57,19 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
     def source():
         pending = journal.snapshot(conn)['pending']
         row = conn.execute('SELECT * FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],)).fetchone()
-        if row is None:
-            raise ValueError('issued source custody missing')
         wire = json.loads(journal.pending_wire(conn))
         del wire['replay']
+        if row is None:
+            saved = conn.execute('SELECT wire FROM kanban_sync_parent_envelopes WHERE task_id=?', (wire['uid'],)).fetchone()
+            if saved is None or json.loads(saved[0]) != wire:
+                raise ValueError('issued source custody missing')
+            return dict(row_uid=wire['uid'], table_name='tasks', op='upsert', _parent=True)
         if row['wire_json'] is None or json.loads(row['wire_json']) != wire:
             raise ValueError('issued source custody changed')
         if (row['row_uid'] != wire['uid'] or row['table_name'] != wire['table'] or
                 row['op'] != wire['op'] or row['state'] != 'pending'):
             raise ValueError('issued source custody routing changed')
-        return row
+        return dict(row)
 
     def record(verdict):
         pending = journal.snapshot(conn)['pending']
@@ -74,6 +78,8 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
         row = source()
         status = verdict['status']
         if status == 'rejected':
+            if row.get('_parent'):
+                raise ValueError('synthetic rejection requires custody integration')
             reason = f"{verdict.get('reason') or 'rejected'}: {verdict.get('detail') or ''}".strip(': ')
             conn.execute("UPDATE kanban_sync_outbox SET state='rejected', last_error=?, attempts=attempts+1 "
                          "WHERE op_id=?", (reason[:500], pending['op_id']))
@@ -81,31 +87,54 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
             return  # Keep the semantic obligation visible; no sync success or identity rotation.
         if status not in ('applied', 'merged'):
             raise ValueError('tracer final disposition requires custody integration')
-        if verdict.get('version'):
+        if row.get('_parent') and not verdict.get('version'):
+            raise ValueError('synthetic parent authoritative version unavailable')
+        if verdict.get('version') and row['table_name'] == 'tasks':
             conn.execute('UPDATE tasks SET sync_version=MAX(COALESCE(sync_version,0),?) WHERE id=?',
                          (verdict['version'], row['row_uid']))
-        conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],))
+        elif verdict.get('version') and row['table_name'] == 'task_runs':
+            conn.execute('UPDATE task_runs SET sync_version=MAX(COALESCE(sync_version,0),?) WHERE uid=?',
+                         (verdict['version'], row['row_uid']))
+        if row.get('_parent'):
+            from hermes_cli.kanban_sync_envelope import retire_parent
+            retire_parent(conn, row['row_uid'])
+        else:
+            conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],))
         setattr(out, status, getattr(out, status) + 1)
 
     for _ in range(max_batches):
+        from hermes_cli.kanban_sync_parent_order import parent_first, select_pending
+        from time import time
+        rows = []
+        if journal.pending_wire(conn) is None:
+            rows, _, _ = select_pending(conn, hub, board, {}, now=int(time()), limit=1, before_head=False)
         with write_txn(conn):
             decision = journal.recover(conn, remote, record)
             if decision['action'] == 'record':
                 break  # recovery settles exactly one; no newly selected intent this turn
             encoded = journal.pending_wire(conn)
             if encoded is None:
-                rows = [dict(r) for r in conn.execute("SELECT * FROM kanban_sync_outbox WHERE state='pending' "
-                                                      "ORDER BY created_at,rowid LIMIT 1")]
+                if not rows:
+                    break
+                current = conn.execute('SELECT * FROM kanban_sync_outbox WHERE op_id=?', (rows[0]['op_id'],)).fetchone()
+                if current is None or dict(current) != rows[0]:
+                    raise ValueError('selected source changed before issuance')
+                rows = parent_first(conn, rows, int(time()), 1)
                 if not rows:
                     break
                 row = rows[0]
-                if row['table_name'] != 'tasks' or row['op'] != 'upsert':
-                    raise ValueError('tracer requires task upsert head')
+                if row['op'] not in ('upsert', 'delete'):
+                    raise ValueError('tracer operation kind not integrated')
                 from hermes_cli import kanban_sync_envelope as envelopes
                 from hermes_cli import kanban_sync_wire as wire_ops
                 from hermes_cli.kanban_terminal_guard import strip_stale_push
-                intent = envelopes.outbound(conn, row, lambda: strip_stale_push(conn, wire_ops.translate(
-                    client._full_row_if_unseen(conn, row), client._next_hlc(conn, gateway))), supported=True)
+                parents = client._unacked_parents(conn, rows, gateway)
+                if parents:
+                    op, tid = parents[0]
+                    intent = envelopes.parent(conn, tid, lambda: op, supported=True)
+                else:
+                    intent = envelopes.outbound(conn, row, lambda: strip_stale_push(conn, wire_ops.translate(
+                        client._full_row_if_unseen(conn, row), client._next_hlc(conn, gateway))), supported=True)
                 encoded = journal.issue(conn, intent)
             source()  # Validate retained source custody on RETRY as well as final recovery.
         wire = json.loads(encoded)

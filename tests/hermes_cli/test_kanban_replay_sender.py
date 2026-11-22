@@ -458,6 +458,186 @@ def test_ack_disconnect_reopens_without_resending_or_repeating_bookkeeping(live,
         restarted.close()
 
 
+def test_materialized_parent_is_settled_before_earlier_fifo_child(live):
+    tid = kb.create_task(live, title='parent ordering', assignee='worker')
+    kb.add_comment(live, tid, 'author', 'child first in FIFO')
+    with kbc.write_txn(live):
+        live.execute("DELETE FROM kanban_sync_outbox WHERE table_name='task_events'")
+        live.execute("UPDATE kanban_sync_outbox SET created_at=created_at+99999 WHERE table_name='tasks'")
+    receiver = Receiver()
+    first = client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert first.applied == 1 and receiver.sent[0]['table'] == 'tasks'
+    second = client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert second.applied == 1 and receiver.sent[1]['table'] == 'task_comments'
+    assert [w['replay']['sequence'] for w in receiver.sent] == ['1', '2']
+    assert receiver.sent[1]['replay']['ack']['op_id'] == receiver.sent[0]['client_op_id']
+    assert not live.execute('SELECT 1 FROM kanban_sync_outbox').fetchone()
+
+
+def test_synthetic_parent_is_settled_before_child_allocation(live):
+    tid = kb.create_task(live, title='synthetic parent', assignee='worker')
+    with kbc.write_txn(live):
+        live.execute('DELETE FROM kanban_sync_outbox')
+    kb.add_comment(live, tid, 'author', 'child with no captured parent')
+    receiver = Receiver()
+    result = client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert result.applied == 1
+    assert receiver.sent[0]['table'] == 'tasks' and receiver.sent[0]['uid'] == tid
+    assert live.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name='task_comments'").fetchone()
+    assert not live.execute('SELECT 1 FROM kanban_sync_parent_envelopes').fetchone()
+    result = client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert result.applied == 1 and receiver.sent[1]['table'] == 'task_comments'
+    assert receiver.sent[1]['replay']['sequence'] == '2'
+
+
+def test_child_run_ack_updates_its_version_not_a_same_uid_task(live):
+    tid = kb.create_task(live, title='run parent', assignee='worker')
+    other = kb.create_task(live, title='same uid sentinel', assignee='worker')
+    with kbc.write_txn(live):
+        live.execute('UPDATE tasks SET sync_version=2')
+        live.execute('DELETE FROM kanban_sync_outbox')
+        live.execute("INSERT INTO task_runs(task_id,status,started_at,uid) VALUES (?,'running',1,?)", (tid, other))
+    receiver = Receiver()
+    result = client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert result.applied == 1 and receiver.sent[0]['table'] == 'task_runs'
+    assert live.execute('SELECT sync_version FROM task_runs WHERE uid=?', (other,)).fetchone()[0] == 7
+    assert live.execute('SELECT sync_version FROM tasks WHERE id=?', (other,)).fetchone()[0] == 2
+
+
+def test_selection_never_holds_a_writer_transaction(live, monkeypatch):
+    from hermes_cli import kanban_sync_parent_order as order
+    kb.create_task(live, title='selection boundary', assignee='worker')
+    select = order.select_pending
+    def checked(*args, **kwargs):
+        assert not live.in_transaction, 'selection performs network and owns transactions'
+        return select(*args, **kwargs)
+    monkeypatch.setattr(order, 'select_pending', checked)
+    assert client.push(live, Receiver(), 'default', 'macbook', primary=False, max_batches=1).applied == 1
+
+
+@pytest.mark.parametrize('loss', ['before', 'after'])
+def test_synthetic_parent_restart_keeps_wire_and_never_issues_child_early(live, loss):
+    tid = kb.create_task(live, title='synthetic restart', assignee='worker')
+    with kbc.write_txn(live):
+        live.execute('DELETE FROM kanban_sync_outbox')
+    kb.add_comment(live, tid, 'author', 'retained child')
+    receiver = PrecommitFailure() if loss == 'before' else Receiver()
+    receiver.lose_reply = True
+    with pytest.raises(OSError):
+        client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    frozen = journal.pending_wire(live)
+    op = json.loads(frozen)
+    assert op['table'] == 'tasks' and op['uid'] == tid
+    assert live.execute('SELECT wire FROM kanban_sync_parent_envelopes').fetchone()
+    restarted = reopen(live)
+    try:
+        if loss == 'before':
+            resumed = Receiver()
+            resumed.slot = receiver.slot
+            receiver = resumed
+        receiver.lose_reply = False
+        result = client.push(restarted, receiver, 'default', 'macbook', primary=False, max_batches=1)
+        assert result.applied == 1 and len(receiver.sent) == 1
+        actual = json.loads(json.dumps(receiver.sent[0]))
+        actual['replay'].pop('session')
+        assert actual == op
+        assert restarted.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name='task_comments'").fetchone()
+        assert not restarted.execute('SELECT 1 FROM kanban_sync_parent_envelopes').fetchone()
+    finally:
+        restarted.close()
+
+
+def test_synthetic_success_without_version_keeps_custody_not_a_fresh_parent(live):
+    tid = kb.create_task(live, title='parent version unavailable', assignee='worker')
+    with kbc.write_txn(live):
+        live.execute('DELETE FROM kanban_sync_outbox')
+    kb.add_comment(live, tid, 'author', 'child')
+    class MissingVersion(Receiver):
+        def _call(self, method, path, body=None):
+            result = super()._call(method, path, body)
+            if path.endswith('/ops'):
+                verdict = json.loads(self.slot['last_verdict'])
+                verdict.pop('version')
+                self.slot['last_verdict'] = json.dumps(verdict)
+            return result
+    receiver = MissingVersion()
+    for _ in range(2):
+        with pytest.raises(ValueError, match='^synthetic parent authoritative version unavailable$'):
+            client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+        assert journal.snapshot(live)['pending'] is not None
+        assert receiver.slot['a'] == '0'
+    assert len(receiver.sent) == 1
+
+
+@pytest.mark.parametrize('change', ['delete', 'rewrite'])
+def test_selection_race_refuses_before_allocation(live, monkeypatch, change):
+    from hermes_cli import kanban_sync_parent_order as order
+    kb.create_task(live, title='changed selection', assignee='worker')
+    original = order.select_pending
+    def changed(*args, **kwargs):
+        rows, selected, stopped = original(*args, **kwargs)
+        with kbc.write_txn(live):
+            if change == 'delete':
+                live.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (rows[0]['op_id'],))
+            else:
+                live.execute("UPDATE kanban_sync_outbox SET fields='{}' WHERE op_id=?", (rows[0]['op_id'],))
+        return rows, selected, stopped
+    monkeypatch.setattr(order, 'select_pending', changed)
+    receiver = Receiver()
+    with pytest.raises(ValueError, match='^selected source changed before issuance$'):
+        client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert not receiver.sent and journal.snapshot(live)['pending'] is None
+
+
+@pytest.mark.parametrize('change', ['delete', 'rewrite'])
+def test_issued_synthetic_source_damage_retains_pending(live, change):
+    tid = kb.create_task(live, title='synthetic source loss', assignee='worker')
+    with kbc.write_txn(live):
+        live.execute('DELETE FROM kanban_sync_outbox')
+    kb.add_comment(live, tid, 'author', 'child remains')
+    receiver = Receiver()
+    receiver.lose_reply = True
+    with pytest.raises(OSError):
+        client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    frozen = journal.pending_wire(live)
+    with kbc.write_txn(live):
+        if change == 'delete':
+            live.execute('DELETE FROM kanban_sync_parent_envelopes')
+        else:
+            live.execute("UPDATE kanban_sync_parent_envelopes SET wire='{}'")
+    receiver.lose_reply = False
+    with pytest.raises(ValueError, match='^issued source custody missing$'):
+        client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert journal.pending_wire(live) == frozen and receiver.slot['a'] == '0'
+    assert len(receiver.sent) == 1
+
+
+def test_normal_task_delete_drains_without_requiring_a_local_task(live):
+    tid = kb.create_task(live, title='delete transport', assignee='worker')
+    with kbc.write_txn(live):
+        live.execute('DELETE FROM kanban_sync_outbox')
+    assert kb.delete_task(live, tid)
+    receiver = Receiver()
+    result = client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert result.applied == 1 and receiver.sent[0]['op'] == 'delete'
+    assert receiver.sent[0]['uid'] == tid and journal.pending_wire(live) is None
+    assert receiver.slot['a'] == '1'
+
+
+def test_parent_backoff_does_not_allocate_child_or_hide_independent_task(live):
+    from time import time
+    tid = kb.create_task(live, title='backoff parent', assignee='worker')
+    kb.add_comment(live, tid, 'author', 'blocked child')
+    with kbc.write_txn(live):
+        live.execute('UPDATE kanban_sync_outbox SET retry_after=? WHERE row_uid=?', (int(time()) + 600, tid))
+    other = kb.create_task(live, title='independent', assignee='worker')
+    receiver = Receiver()
+    result = client.push(live, receiver, 'default', 'macbook', primary=False, max_batches=1)
+    assert result.applied == 1 and receiver.sent[0]['uid'] == other
+    assert live.execute("SELECT 1 FROM kanban_sync_outbox WHERE table_name='task_comments'").fetchone()
+    assert journal.snapshot(live)['settled'] == '1'
+
+
 @pytest.mark.parametrize('flag', ['primary', 'before_head'])
 def test_unintegrated_push_modes_refuse_before_network(live, flag):
     kb.create_task(live, title='mode custody', assignee='worker')
