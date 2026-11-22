@@ -288,7 +288,9 @@ def _boot_blobs(root, sha):
             continue
         metadata, filename = row.split(b"\t", 1)
         mode, kind, digest = metadata.split()
-        if kind == b"blob" and mode in (b"100644", b"100755") and filename.endswith(b".py"):
+        if (kind == b"blob" and mode in (b"100644", b"100755")
+                and (filename.endswith(b".py")
+                     or filename == b"hermes_cli/data/plugin-review-records.json")):
             blobs[os.fsdecode(filename)] = digest.decode("ascii")
     return blobs
 
@@ -1427,6 +1429,9 @@ class Attestation:
         """
         with self._lock:
             self._inventory_modules()
+            if getattr(self, '_reviewed_plugins', None):
+                from hermes_cli.plugin_review_records import verify_registered
+                verify_registered(self)
             return {"core_root": str(self.core_root), "boot_sha": self.boot_sha,
                     "route": self.route, "generation": self._generation,
                     "unknowns": tuple(sorted(self._unknown))}

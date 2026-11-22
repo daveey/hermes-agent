@@ -1,5 +1,6 @@
 """Strict, dynamically checked availability of the cross-revision capsule ABI."""
 import threading
+import time
 from pathlib import Path
 
 from hermes_cli.kanban_capsule_owner import CONTRACT_CAPABILITY
@@ -35,11 +36,12 @@ def _verified_sha(*, worker=False):
 
 # Advisory only: one in-flight verifier, no cached positives. A slow filesystem
 # must withdraw v2 rather than consume the control client's entire timeout.
-_IDENTIFY_VERIFY_BUDGET_S = 0.5
+_IDENTIFY_VERIFY_BUDGET_S = 0.4  # Leave transport/scheduling headroom inside identify's 0.5s budget.
 _advisory_lock = threading.Lock()
 
 
 def _advisory_sha():
+    deadline = time.monotonic() + _IDENTIFY_VERIFY_BUDGET_S
     if not _advisory_lock.acquire(blocking=False):
         return None
     done = threading.Event()
@@ -63,7 +65,8 @@ def _advisory_sha():
     except RuntimeError:
         _advisory_lock.release()
         return None
-    return result[0] if done.wait(_IDENTIFY_VERIFY_BUDGET_S) else None
+    completed = done.wait(max(0.0, deadline - time.monotonic()))
+    return result[0] if completed and time.monotonic() < deadline else None
 
 
 def available_capabilities(capabilities, *, advertised_sha=None):

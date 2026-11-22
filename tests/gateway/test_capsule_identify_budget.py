@@ -39,7 +39,7 @@ def test_slow_identity_withdraws_only_v2_and_never_reuses_late_positive(tmp_path
             started = time.monotonic()
             answer = await asyncio.to_thread(identify_gateway, home)
             assert answer is not None, 'slow v2 check lost the entire default-timeout identify answer'
-            assert time.monotonic() - started < 1.5
+            assert time.monotonic() - started < 0.5
             assert entered.is_set()
             assert answer['capabilities'] == [CAPABILITY]
             # A hung verifier must not accumulate threads on subsequent requests.
@@ -95,3 +95,24 @@ def test_advisory_thread_start_failure_withdraws_and_releases_slot(monkeypatch):
         assert contract.available_capabilities([CONTRACT_CAPABILITY], advertised_sha='a' * 40) == []
     monkeypatch.setattr(contract, '_verified_sha', lambda: 'a' * 40)
     assert contract.available_capabilities([CONTRACT_CAPABILITY], advertised_sha='a' * 40) == [CONTRACT_CAPABILITY]
+
+
+def test_advisory_charges_startup_and_rejects_completed_late_positive(monkeypatch):
+    from gateway import capsule_contract as contract
+    clock = [10.0]
+    monkeypatch.setattr(contract.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(contract, '_verified_sha', lambda: 'a' * 40)
+
+    class LateThread:
+        def __init__(self, target):
+            self.target = target
+
+        def start(self):
+            clock[0] += 0.51
+            self.target()
+
+    monkeypatch.setattr('agent.memory_provider.spawn_context_thread',
+                        lambda target, **kwargs: LateThread(target))
+    assert contract._advisory_sha() is None
+    assert contract._advisory_lock.acquire(blocking=False)
+    contract._advisory_lock.release()

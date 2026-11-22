@@ -838,6 +838,8 @@ class PluginLoaderMixin:
         from hermes_cli.worker_drain_capability import revoke
         revoke('directory plugin has no reviewed drain coverage')
         plugin_dir = Path(manifest.path)  # type: ignore[arg-type]
+        from hermes_cli.plugin_review_records import register_directory
+        register_directory(manifest_key(manifest), plugin_dir)
         init_file = plugin_dir / "__init__.py"
         if not init_file.exists():
             raise FileNotFoundError(f"No __init__.py in {plugin_dir}")
@@ -874,6 +876,8 @@ class PluginLoaderMixin:
         the referenced attribute (normally ``register``) for the ``module:function`` form."""
         from hermes_cli.worker_drain_capability import revoke
         revoke('entrypoint plugin has no reviewed drain coverage')
+        from hermes_cli.plugin_review_records import unreviewed_entrypoint
+        unreviewed_entrypoint(manifest_key(manifest))
         for ep in _select_entry_point_group(importlib.metadata.entry_points(), ENTRY_POINTS_GROUP):
             if ep.name == manifest.name:
                 return ep.load()
