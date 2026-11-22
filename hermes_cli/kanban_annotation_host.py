@@ -46,6 +46,7 @@ from typing import Any
 
 from hermes_cli import kanban_annotation_disk as _disk
 from hermes_cli import kanban_annotation_mutation as _mutation
+from hermes_cli import kanban_annotation_parts as _parts
 
 log = logging.getLogger("hermes_cli.kanban_session_activity")
 
@@ -697,11 +698,26 @@ def _event_refresh(events) -> float | None:
             # Preserve those until consumed; replacing the list needs per-cache
             # deadline ownership, not just a successful outer projection.
             confirmations = _settle_deadlines.get(scope, ())
-            _holder_ctx.deadlines = [t for t in _clock_deadlines.get(scope, ())
-                                     if t > time.time() and t not in confirmations]
+            started = time.time()
+            pending = [t for t in _clock_deadlines.get(scope, ()) if t not in confirmations]
+            _holder_ctx.deadlines = [t for t in pending if t > started]
+            # [daveey] Force only the parts whose own inputs moved (kanban_annotation_parts). A provider deadline
+            # that came due is a wall-time transition no key sees: it forces them all. A settle confirmation is
+            # not one: it re-takes the keys, which is what shows a commit the first read was too early for. The
+            # counts are also read once their last read is ``STRICT_REFRESH_AGE_S`` old, so the published
+            # ``read_at`` is renewed before exact adopters drop the copy at ``_COUNTS_MAX_AGE_S``.
+            forced, part_keys = _parts.plan(
+                scope, clock=len(_holder_ctx.deadlines) != len(pending),
+                renew=time.monotonic() - _ksa._cache_read_at >= STRICT_REFRESH_AGE_S)
             _ksa._revalidate.force_read.scope = scope
+            _ksa._revalidate.force_read.parts = forced
             try:
-                _ksa._refresh_annotation_locked(scope)
+                try:
+                    _ksa._refresh_annotation_locked(scope)
+                except BaseException:
+                    _parts.failed(scope)
+                    raise
+                _parts.done(scope, part_keys)
                 _, due = waiting_events(time.time())
                 note_deadline(due)
                 now = time.time()
@@ -719,6 +735,7 @@ def _event_refresh(events) -> float | None:
                 _holder_ctx.deadlines = None
                 _holder_ctx.active = False
                 _ksa._revalidate.force_read.scope = None
+                _ksa._revalidate.force_read.parts = None
                 _ksa._annotate_refresh_lock.release()
         try:
             due = ctx.run(refresh_scope)
@@ -926,4 +943,5 @@ def reset() -> None:
     _gates.clear()
     _seen.clear()
     _paths_memo.clear()
+    _parts.reset()
     _pin_set.scope = None

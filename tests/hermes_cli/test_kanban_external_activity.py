@@ -100,3 +100,117 @@ def test_non_external_waits_keep_todays_wait_info(kanban_home):
         tid = park(conn, kind="clock", ref="soak", wake_check=None, clock_only=True)
         info = _local_wait_info(conn, [tid])[tid]
         assert "external" not in info and info["wait_state"] in ("waiting", "stalled")
+
+
+# --- the session list opens a board only when it moved (t_01a204267fa8a30d) ---------------------------------------
+
+def _counting(monkeypatch, conn):
+    """Point the stamp at ``conn``'s board with the real readers; returns (stamp, opens)."""
+    path = Path(str(kbc._main_db_file(conn)))
+    opens: list[Path] = []
+    real_open = ksa._open_ro
+
+    def open_ro(p):
+        opens.append(Path(p))
+        return real_open(p)
+
+    def stamp(rows):
+        return kea.stamp_boards(rows, lambda: [path], open_ro, ksa._parked_pairs, ksa._identity.row_ids)
+    return stamp, opens
+
+
+def _fresh_stamp(conn, rows):
+    """What the pre-cache code answered: every board opened and read."""
+    kea.reset_for_tests()
+    path = Path(str(kbc._main_db_file(conn)))
+    return kea.stamp_boards(rows, lambda: [path], ksa._open_ro, ksa._parked_pairs, ksa._identity.row_ids,
+                            signature=None)
+
+
+def _session_card(conn, sid, **kw):
+    tid = kb.create_task(conn, title=f"card of {sid}", assignee="worker")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='blocked', session_id=? WHERE id=?", (sid, tid))
+    return tid
+
+
+def test_an_unchanged_board_is_not_opened_again_and_a_write_to_it_is_seen_at_once(kanban_home, monkeypatch):
+    with kbc.connect_closing() as conn:
+        _session_card(conn, "s1")  # parked, but nothing scheduled: no external state, no clock input
+        stamp, opens = _counting(monkeypatch, conn)
+        first = stamp([{"id": "s1"}])
+        assert len(opens) == 1
+        for _ in range(20):
+            assert stamp([{"id": "s1"}]) == first
+        assert len(opens) == 1, "an unchanged board must not be opened per request"
+        assert first == _fresh_stamp(conn, [{"id": "s1"}])
+        kea.reset_for_tests()
+        stamp([{"id": "s1"}])
+        before = len(opens)
+        _session_card(conn, "s1")  # any commit to the board moves its signature
+        stamp([{"id": "s1"}])
+        assert len(opens) == before + 1
+        stamp([{"id": "s1"}])
+        assert len(opens) == before + 1
+
+
+def test_a_cached_board_answers_byte_identically_and_a_new_external_card_shows_on_the_next_request(
+        kanban_home, gh, clock, monkeypatch):
+    import json
+    with kbc.connect_closing() as conn:
+        a = park(conn, 8001)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id='s1' WHERE id=?", (a,))
+        tick(conn, gh, clock, 0)
+        stamp, opens = _counting(monkeypatch, conn)
+        rows = lambda: [{"id": "s1", "kanban_parked": 1}, {"id": "s2"}]
+        cold = json.dumps(stamp(rows()), sort_keys=True)
+        warm = json.dumps(stamp(rows()), sort_keys=True)
+        assert len(opens) == 1 and warm == cold
+        assert cold == json.dumps(_fresh_stamp(conn, rows()), sort_keys=True)
+        assert json.loads(cold)[0]["kanban_external"] == 1
+        # a second external card lands: the very next request shows it (no TTL wait)
+        kea.reset_for_tests()
+        stamp(rows())
+        b = park(conn, 8002)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id='s1' WHERE id=?", (b,))
+        tick(conn, gh, clock, 0)
+        with kea._lock:
+            kea._memo.clear()  # session_external's own 5 s memo predates this change; not under test
+        got = stamp(rows())
+        assert got[0]["kanban_external"] == 2
+        assert json.dumps(got, sort_keys=True) == json.dumps(_fresh_stamp(conn, rows()), sort_keys=True)
+
+
+def test_a_board_with_a_scheduled_card_is_reread_after_the_ttl_because_its_state_moves_with_the_clock(
+        kanban_home, gh, clock, monkeypatch):
+    with kbc.connect_closing() as conn:
+        a = park(conn, 8101)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id='s1' WHERE id=?", (a,))
+        tick(conn, gh, clock, 0)
+        stamp, opens = _counting(monkeypatch, conn)
+        wall = [time.time()]
+        monkeypatch.setattr(kea.time, "time", lambda: wall[0])
+        stamp([{"id": "s1"}])
+        stamp([{"id": "s1"}])
+        assert len(opens) == 1
+        wall[0] += kea._TTL_S + 0.1
+        stamp([{"id": "s1"}])
+        assert len(opens) == 2
+
+
+def test_an_unknown_signature_reads_the_board_every_time(kanban_home, monkeypatch):
+    with kbc.connect_closing() as conn:
+        _session_card(conn, "s1")
+        path = Path(str(kbc._main_db_file(conn)))
+        opens = []
+
+        def open_ro(p):
+            opens.append(p)
+            return ksa._open_ro(p)
+        for _ in range(3):
+            kea.stamp_boards([{"id": "s1"}], lambda: [path], open_ro, ksa._parked_pairs, ksa._identity.row_ids,
+                             signature=lambda p: None)
+        assert len(opens) == 3 and not kea._boards

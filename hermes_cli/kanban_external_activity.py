@@ -101,26 +101,84 @@ def stamp_rows(rows: list[dict[str, Any]], by_session: dict[str, dict[str, Any]]
             row.pop("kanban_external_cards", None)
 
 
-def stamp_boards(rows: list[dict[str, Any]], board_paths, open_ro, parked_pairs, row_ids) -> list[dict[str, Any]]:
-    """Read every local board's parked (session, task) pairs and stamp ``rows``; returns ``rows``. Never raises:
-    the session list must render without the external fields."""
+# [daveey] Per board, what one read of it contributed: ``path -> (signature, clocked, read wall time, by-session
+# map)``. The session list used to open every board through the lock guard on every request (58% of the route's
+# samples on the hub, t_01a204267fa8a30d). ``signature`` is the board file's cheap change signal, taken once per
+# request before any read; an unchanged one proves no commit since, so the stored contribution is the answer and
+# the board is not opened. ``clocked``: the board has a scheduled parked card, whose derived state also moves with
+# the reader's clock; such a contribution keeps the ``_TTL_S`` bound ``session_external`` already gave it.
+_boards: dict[str, tuple[str, bool, float, dict]] = {}
+
+
+def board_signature(path) -> Optional[str]:
+    """Moves on every commit to ``path`` (stat, header change counter, WAL-index header); None = unknown."""
+    try:
+        from hermes_cli import kanban_annotation_watch as watch
+        return watch.signature(("external",), [str(path)], [])
+    except (OSError, ValueError, ImportError):
+        logger.debug("kanban external board signature unavailable for %s", path, exc_info=True)
+        return None
+
+
+def _clocked(conn: sqlite3.Connection, pairs) -> bool:
+    """True when any parked card is ``scheduled`` (only those can carry an external state), or when unknown."""
+    ids = sorted({str(t) for _s, t in pairs})
+    try:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            if conn.execute("SELECT 1 FROM tasks WHERE status = 'scheduled' AND id IN "
+                            f"({','.join('?' for _ in chunk)}) LIMIT 1", chunk).fetchone():
+                return True
+    except sqlite3.Error:
+        return True
+    return False
+
+
+def _board_external(path, open_ro, parked_pairs, signature, wall: float) -> dict[str, dict[str, Any]]:
+    """One board's ``session_external`` map: the stored one while the board is unchanged, else a read of it."""
+    key = str(path)
+    sig = signature(path) if signature is not None else None
+    if sig is not None:
+        with _lock:
+            hit = _boards.get(key)
+        if hit is not None and hit[0] == sig and (not hit[1] or 0 <= wall - hit[2] < _TTL_S):
+            return hit[3]
+    try:
+        conn = open_ro(path)
+    except sqlite3.Error:
+        return {}
+    try:
+        pairs = parked_pairs(conn)
+        found = session_external(conn, pairs, key=key) if pairs else {}
+        clocked = bool(pairs) and _clocked(conn, pairs)
+    except sqlite3.Error:
+        logger.debug("kanban external read failed for %s", path, exc_info=True)
+        return {}
+    finally:
+        conn.close()
+    if sig is not None:  # taken before the read: a commit racing it moves the next request's signature
+        with _lock:
+            _boards[key] = (sig, clocked, wall, found)
+    return found
+
+
+def stamp_boards(rows: list[dict[str, Any]], board_paths, open_ro, parked_pairs, row_ids, *,
+                 signature=board_signature) -> list[dict[str, Any]]:
+    """Stamp ``rows`` from every local board's parked (session, task) pairs; returns ``rows``. A board whose
+    ``signature`` has not moved since its last read is not opened. Never raises: the session list must render
+    without the external fields."""
     by_session: dict[str, dict[str, Any]] = {}
     try:
-        for path in board_paths():
-            try:
-                conn = open_ro(path)
-            except sqlite3.Error:
-                continue
-            try:
-                pairs = parked_pairs(conn)
-                for sid, slot in (session_external(conn, pairs, key=str(path)) if pairs else {}).items():
-                    mine = by_session.setdefault(sid, {"counts": [0, 0, 0], "cards": []})
-                    mine["counts"] = [a + b for a, b in zip(mine["counts"], slot["counts"])]
-                    mine["cards"] += slot["cards"]
-            except sqlite3.Error:
-                logger.debug("kanban external read failed for %s", path, exc_info=True)
-            finally:
-                conn.close()
+        wall = time.time()
+        paths = list(board_paths())
+        for path in paths:
+            for sid, slot in _board_external(path, open_ro, parked_pairs, signature, wall).items():
+                mine = by_session.setdefault(sid, {"counts": [0, 0, 0], "cards": []})
+                mine["counts"] = [a + b for a, b in zip(mine["counts"], slot["counts"])]
+                mine["cards"] += slot["cards"]
+        with _lock:
+            for gone in set(_boards) - {str(p) for p in paths}:
+                del _boards[gone]
         stamp_rows(rows, by_session, row_ids)
     except (sqlite3.Error, OSError, ImportError, KeyError, TypeError, ValueError, AttributeError):
         logger.debug("kanban external stamping failed", exc_info=True)
@@ -130,3 +188,4 @@ def stamp_boards(rows: list[dict[str, Any]], board_paths, open_ro, parked_pairs,
 def reset_for_tests() -> None:
     with _lock:
         _memo.clear()
+        _boards.clear()

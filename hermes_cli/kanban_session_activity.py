@@ -954,7 +954,7 @@ def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
     with diag.source("links_display" if stale_ok else "links_strict"):
         # Native source/clock invalidation must cross the inner TTL cache too:
         # state/config inputs and wall-time verdicts can move without this key.
-        if getattr(_revalidate.force_read, 'scope', None) == scope:
+        if _revalidate.forced(scope, 'links'):
             with _links_lock:
                 fingerprint = diag.timed("fingerprint", _links_fingerprint)
                 return _publish_links(scope, fingerprint)

@@ -137,7 +137,7 @@ def attention_task_counts(now: float | None = None) -> dict[str, int]:
     scope = activity._origin_scope()
     mono = activity.time.monotonic()
     wall = activity.time.time() if now is None else now
-    forced = getattr(activity._revalidate.force_read, 'scope', None) == scope
+    forced = activity._revalidate.forced(scope, 'attention')
     hit = None if forced else activity._attention.get(scope, mono, wall=wall)
     if hit is not None:
         activity._host_copy.note_deadline(activity._attention.deadline(scope))

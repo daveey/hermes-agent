@@ -27,7 +27,16 @@ STAT_SETTLED_S = 2.0
 inputs_pin = threading.local()
 # [daveey] ``force_read.scope``: this thread's next counts read of that scope really reads (the annotation holder
 # renewing an aging host copy, ``kanban_annotation_host._holder_refresh``).
+# ``force_read.parts``: the parts that read applies to (``kanban_annotation_parts``); unset or None = every part.
 force_read = threading.local()
+
+
+def forced(scope: tuple[str, ...], part: str) -> bool:
+    """True when this thread's read of ``scope`` must really read ``part`` (bypassing that part's cache)."""
+    if getattr(force_read, "scope", None) != scope:
+        return False
+    parts = getattr(force_read, "parts", None)
+    return parts is None or part in parts
 
 
 def revalidatable(fingerprint: tuple, wall: float) -> bool:
@@ -82,7 +91,7 @@ def counts_fresh(scope: tuple[str, ...], fingerprint: tuple, now: float) -> bool
     cache = _ksa._cache
     if cache is None or _ksa._cache_scope != scope or fingerprint != _ksa._cache_fingerprint:
         return False
-    if getattr(force_read, "scope", None) == scope:
+    if forced(scope, "counts"):
         return False
     if now < cache[0]:
         return True
