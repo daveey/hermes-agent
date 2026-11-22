@@ -88,11 +88,52 @@ def _spawn(tmp_path, sync, role, entry, cid):
            "HERMES_SESSION_ID": f"chat-{entry}-{cid}"}
     for var in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD"):
         env.pop(var, None)
-    runner = tmp_path / "race_runner.py"
-    runner.write_text(RUNNER, encoding="utf-8")
+    # Keep source in each child's argv: rewriting one shared script can truncate it
+    # before a previously spawned interpreter reads it (clean exit, no barrier).
     cases = Path(__file__).with_name("kanban_overlap_failure_cases.json")
-    return subprocess.Popen([sys.executable, str(runner), str(sync), role, entry, str(cases), cid], cwd=str(REPO),
+    return subprocess.Popen([sys.executable, "-c", RUNNER, str(sync), role, entry, str(cases), cid], cwd=str(REPO),
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def test_spawn_keeps_pending_child_source_intact(home, tmp_path, monkeypatch):
+    """Force the first interpreter to read while the second spawn publishes source."""
+    real_popen, real_write = subprocess.Popen, Path.write_text
+    procs, observed = [], []
+    monkeypatch.setattr(sys.modules[__name__], "RUNNER", "import json, sys; print(json.dumps(sys.argv[1:]))")
+
+    def gated_popen(argv, **kwargs):
+        # An owned child waits before exec, not after opening/compiling the runner.
+        gate = "import os, sys; sys.stdin.buffer.read(1); os.execv(sys.executable, [sys.executable, *sys.argv[1:]])"
+        proc = real_popen([sys.executable, "-c", gate, *argv[1:]], stdin=subprocess.PIPE, **kwargs)
+        procs.append(proc)
+        return proc
+
+    def publish(path, data, *args, **kwargs):
+        if path.name == "race_runner.py" and procs:
+            # Path.write_text opens with 'w': a pending interpreter may see this empty inode.
+            with path.open("w", encoding="utf-8"):
+                observed.append(procs[0].communicate(input="x", timeout=10))
+        return real_write(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", gated_popen)
+    monkeypatch.setattr(Path, "write_text", publish)
+    try:
+        first = _spawn(tmp_path, tmp_path, "first", "tool", WORKER_1103)
+        second = _spawn(tmp_path, tmp_path, "second", "cli", CMW_1103)
+        if not observed:
+            observed.append(first.communicate(input="x", timeout=10))
+        second_out, second_err = second.communicate(input="x", timeout=10)
+        first_out, first_err = observed[0]
+        assert first.returncode == second.returncode == 0, (first_err, second_err)
+        assert first_out, (first.returncode, first_out, first_err)
+        assert json.loads(first_out)[1:] == ["first", "tool", str(Path(__file__).with_name(
+            "kanban_overlap_failure_cases.json")), WORKER_1103]
+        assert json.loads(second_out)[1] == "second"
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate(timeout=10)
 
 
 def _open_ids() -> list[str]:
@@ -119,11 +160,18 @@ def _refusal(out: str) -> dict | None:
 def test_concurrent_pair_lands_one_card_and_one_refusal(home, tmp_path, first, second):
     sync = tmp_path / "sync"
     sync.mkdir()
-    procs = {"first": _spawn(tmp_path, sync, "first", *first), "second": _spawn(tmp_path, sync, "second", *second)}
-    outs = {}
-    for role, proc in procs.items():
-        out, err = proc.communicate(timeout=180)
-        outs[role] = (proc.returncode, out, err)
+    procs, outs = {}, {}
+    try:
+        for role, (entry, cid) in (("first", first), ("second", second)):
+            procs[role] = _spawn(tmp_path, sync, role, entry, cid)
+        for role, proc in procs.items():
+            out, err = proc.communicate(timeout=180)
+            outs[role] = (proc.returncode, out, err)
+    finally:
+        for proc in procs.values():
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate(timeout=10)
     assert all((sync / f"{r}.checked").exists() for r in procs), outs  # both passed the first check
     landed = _open_ids()
     assert len(landed) == 1, (landed, outs)
