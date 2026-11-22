@@ -128,12 +128,69 @@ def test_two_gateways_are_told_they_block_each_other():
 def test_holder_description_keeps_a_non_python_dash_c():
     from hermes_state_holders import describe_holder_pid
 
-    proc = subprocess.Popen(["sh", "-c", "read x", "sh"], stdin=subprocess.PIPE)
+    # Popen's exec-error pipe can close before the child's argv is observable.
+    # Wait for the shell itself, as the Python holder fixtures above do.
+    proc = subprocess.Popen(
+        ["sh", "-c", "printf 'ready\\n'; read x", "sh"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
     try:
+        assert proc.stdout.readline().strip() == "ready"
         assert "read x" in describe_holder_pid(proc.pid)
     finally:
         proc.stdin.close()
         proc.wait(timeout=30)
+        proc.stdout.close()
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_non_python_holder_waits_for_child_readiness(monkeypatch):
+    """Model argv being unavailable until the parent observes the child's ready message."""
+    import hermes_state_holders as holders
+
+    popen = subprocess.Popen
+    read_argv = holders._read_proc_argv
+    cmdline = holders.psutil.Process.cmdline
+    children = []
+    ready = False
+
+    def spawn(*args, **kwargs):
+        proc = popen(*args, **kwargs)
+        children.append(proc)
+        if proc.stdout is not None:
+            readline = proc.stdout.readline
+
+            def observe_ready():
+                nonlocal ready
+                line = readline()
+                ready = line.strip() == "ready"
+                return line
+
+            monkeypatch.setattr(proc.stdout, "readline", observe_ready)
+        return proc
+
+    def argv_when_ready(pid):
+        if children and pid == children[0].pid and not ready:
+            return None
+        return read_argv(pid)
+
+    def cmdline_when_ready(proc):
+        if children and proc.pid == children[0].pid and not ready:
+            return []
+        return cmdline(proc)
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(holders, "_read_proc_argv", argv_when_ready)
+    monkeypatch.setattr(holders.psutil.Process, "cmdline", cmdline_when_ready)
+    try:
+        test_holder_description_keeps_a_non_python_dash_c()
+        assert ready
+    finally:
+        # The invoked test must retain cleanup even when its semantic assertion fails.
+        assert len(children) == 1
+        assert children[0].poll() is not None
 
 
 @pytest.mark.platforms("linux", "macos")
