@@ -143,6 +143,8 @@ def test_rotation_exclusion_precedes_resync_and_quota_probe(tmp_path, monkeypatc
     resynced.clear()
     probed.clear()
     auth_codex._codex_quota_probe_cache.clear()
+    from hermes_cli.auth_codex_quota_negative import _path
+    _path().unlink(missing_ok=True)  # force the live-probe non-vacuity control, not the disk throttle
     available, pending = pool._available_entries(clear_expired=True)
     assert resynced == ["A", "B", "C"]
     assert probed == (["B", "C"] if other_walled else ["C"])

@@ -75,6 +75,8 @@ def test_singleton_positive_probe_only_clears_proven_row(tmp_path, monkeypatch, 
     pool, rows, reset = _pool(tmp_path, monkeypatch, other_walled=True)
     assert _rotate(pool, reset) is None
     auth_codex._codex_quota_probe_cache.clear()
+    from hermes_cli.auth_codex_quota_negative import _path
+    _path().unlink(missing_ok=True)  # force a fresh upstream recovery observation
     payload = {"rate_limit": {"primary_window": {"used_percent": 0, "reset_at": reset}}}
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
     monkeypatch.setattr(auth_codex, "_codex_http_client", lambda **kwargs: httpx.Client(transport=transport))
