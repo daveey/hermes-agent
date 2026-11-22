@@ -30985,6 +30985,19 @@
             ],
             "default": null,
             "title": "Live Message Count"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Outcome"
           }
         },
         "required": [

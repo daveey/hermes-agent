@@ -9,7 +9,8 @@
  * required is a claim that every one of those paths supplies it.
  */
 
-import type { ProfileSessionPreview } from '@hermes/plugin-sdk'
+import type { ProfileSessionPreview, SessionStatusDot } from '@hermes/plugin-sdk'
+import type { ComponentProps } from 'react'
 
 import type { GroupEngine } from './group-engine'
 
@@ -41,6 +42,7 @@ export interface ProfileRoute {
  * there is deliberately no stored session-id pointer (see AGENTS.md).
  */
 export interface CanonicalSession {
+  outcome?: NonNullable<ComponentProps<typeof SessionStatusDot>['session']>['outcome']
   /** Durable id, stable across reloads. */
   id?: string
   /** Compression-lineage tip — the live session a durable id currently maps to. */

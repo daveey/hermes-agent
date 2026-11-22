@@ -148,6 +148,7 @@ class ProfileCanonicalSession(Result):
     last_active: float | int = 0
     message_count: int = 0
     live_message_count: int | None = None
+    outcome: dict[str, JsonValue] | None = None
 
 
 class ProfileRow(Result):

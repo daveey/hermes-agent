@@ -102,6 +102,19 @@ interface BotRowProps {
   showHandle?: boolean
 }
 
+function BotCanonicalStatusDot({ bot, connectionId }: { bot: RosterRow, connectionId: string }) {
+  const id = botCanonicalSessionId(bot)
+
+  const session = id ? {
+    id,
+    connection_id: bot.connectionId || connectionId,
+    profile: bot.targetProfile || bot.name,
+    outcome: bot.canonical_session?.outcome
+  } : null
+
+  return <SessionStatusDot session={session} storedSessionId={id} />
+}
+
 export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandle }: BotRowProps) {
   const { t } = useI18n()
   const b = useBots()
@@ -266,16 +279,10 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
-            {/* The session row's own lead cell, so a bot's name sits on the
-                same left edge as every session name above it in the rail.
-                [daveey] No `session` prop, so an unread dot here stays emerald whatever the chat's stored
-                outcome: the canonical Bot Chat is hidden from session listings and the roster's
-                canonical_session summary carries no outcome. Painting the outcome tone here means adding
-                `outcome` to both summary builders (gateway/session_group_controls.py::_bot_sessions and
-                tui_gateway/methods_profiles.py::_canonical_session_row), to ProfileCanonicalSession in
-                tui_gateway/contracts, and passing it through. */}
+            {/* The canonical chat is hidden from session listings; its roster
+                summary carries the same stored envelope and exact owner. */}
             <SidebarRowLead>
-              <SessionStatusDot storedSessionId={canonicalSessionId} />
+              <BotCanonicalStatusDot bot={bot} connectionId={activeConnectionId} />
             </SidebarRowLead>
             {pinned ? (
               <Tip label={b.roster.pinned}>

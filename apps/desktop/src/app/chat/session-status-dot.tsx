@@ -127,7 +127,7 @@ export interface SessionStatusDotProps {
    *  and no turn behind it, which is the draft state by definition. */
   storedSessionId: null | string
   /** The session row supplies outcome and execution evidence on every surface. */
-  session?: null | SessionInfo
+  session?: null | Pick<SessionInfo, 'id' | 'profile' | 'connection_id' | 'outcome' | 'archived'>
   /** Sidebar-only activity; other surfaces retain their agent-only presentation. */
   runningCardCount?: number
   /** TUI-style tree stem for a branched session (`└─ ` / `├─ `). */

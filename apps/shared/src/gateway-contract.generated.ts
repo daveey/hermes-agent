@@ -2176,6 +2176,7 @@ export interface ProfileCanonicalSession {
   last_active?: number
   message_count?: number
   live_message_count?: number | null
+  outcome?: Record<string, unknown> | null
 }
 /** ``clone_from`` omitted = fresh profile + bundled skills (with ``clone_all``: a full copy of the active profile, no bundled skills); ``mirror_credentials`` and ``share_auth`` default on (the bot page's defaults) so a headless bot has a provider. */
 export interface ProfilesCreateParams {

@@ -172,13 +172,15 @@ def _canonical_session_row(db, profile_path):
         if row.get("archived") and not _resurrect_recoverable_canonical(db, profile_path, session_id):
             return None
         tip = _try(lambda: db.get_compression_tip(session_id), None) or session_id
-        tip_row = db.get_session(tip) or row
+        from hermes_state_outcome import stamp_outcome_rows
+        tip_row = stamp_outcome_rows([db.get_session(tip) or row])[0]
         started = row.get("started_at") or 0
         return {
             "id": session_id, "resolved_id": tip, "root_title": row.get("title") or "",
             "title": tip_row.get("title") or "", "preview": _latest_message_preview(db, tip),
             "started_at": tip_row.get("started_at") or started,
             "last_active": tip_row.get("last_activity_at") or tip_row.get("started_at") or started,
+            "outcome": tip_row["outcome"],
             "message_count": tip_row.get("message_count") or 0, **_live_count_field(db, tip)}
     except Exception:
         return None

@@ -399,6 +399,7 @@ def _read_bot_sessions(db, subject, operator):
     # mid-poll) refuses rather than reopening a writer into a home that is being deleted.
     with db._read_ctx(reopen=False) as conn:
         def summary(root):
+            from hermes_state_outcome import stamp_outcome_rows
             tip = db._compression_tip_on(conn, root['id'])
             target = conn.execute('SELECT * FROM sessions WHERE id=?', (tip,)).fetchone() or root
             message = conn.execute(
@@ -411,7 +412,8 @@ def _read_bot_sessions(db, subject, operator):
                     'preview': text[:80] + '...' if len(text) > 80 else text,
                     'started_at': target['started_at'] or 0,
                     'last_active': target['last_activity_at'] or target['started_at'] or 0,
-                    'message_count': target['message_count'] or 0}
+                    'message_count': target['message_count'] or 0,
+                    'outcome': stamp_outcome_rows([dict(target)])[0]['outcome']}
 
         fields: dict = {'last_session': None, 'worker_session': None, 'canonical_session': None}
         # The named registry is not a recency window and canonical chats are hidden.
