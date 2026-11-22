@@ -5,8 +5,8 @@ parent-envelope table must be classified in ``kanban_sync_capture_sites`` before
 table name is interpolated are resolved through module-level string constants; an interpolation that cannot be
 resolved (a parameter such as ``table``) is a ``<dynamic-table>`` site and must be audited explicitly, because it
 can reach the custody tables without naming them. Dynamic statements are only scanned in
-``kanban*`` modules, ``scripts/`` or that name a custody table (the custody tables live only in the Board
-database, which only those modules open).
+``kanban*`` modules, ``scripts/`` or that name a custody table. A second, fail-closed layer pins every SQL
+write fragment per function in any tracked file that mentions "kanban", whether or not it names a table.
 Nothing here certifies a capture or activates replay fencing.
 
 Convention: like the other static guards that read source, this is a deliberate source-reading gate (it is the
@@ -71,6 +71,8 @@ def _scan() -> dict[tuple[str, str, str, str], list[str]]:
     parsed = {}
     for path, _ in _production():
         text = path.read_text()
+        if "kanban" not in text.lower() and "scripts" not in path.parts:  # Board DB is only reached via kanban modules
+            continue
         tree = ast.parse(text)
         in_scope = path.name.startswith("kanban") or "scripts" in path.parts or any(t in text for t in CUSTODY)
         parsed[path] = (tree, _constants(tree), in_scope)
@@ -207,13 +209,15 @@ def test_nothing_in_production_stamps_original_yet():
 
 
 # --- fail-closed file-level layer: independent of statement shape, quoting, case, verb or directory ---------
-ANY_NAME = re.compile("|".join(CUSTODY), re.IGNORECASE)
-# DML verb whose table is not a plain literal identifier: interpolated, %-formatted, concatenated, placeholder.
-# UPDATE is only SQL when a SET follows shortly (prose such as "update {x}: ..." is not).
-_SLOT = r"\s*[\"'`\[]?\s*(?=[^A-Za-z_\s\"'`\[])"
-DYN_ANY = re.compile(
-    r"\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|DELETE\s+FROM)" + _SLOT
-    + r"|\bUPDATE(?:\s+OR\s+\w+)?" + _SLOT + r"[^;]{0,60}?\bSET\b", re.IGNORECASE)
+# A custody table name as a whole identifier: the modules kanban_sync_outbox_age/_observation are not mentions.
+ANY_NAME = re.compile(r"(?<![A-Za-z0-9_])(?:" + "|".join(CUSTODY) + r")(?![A-Za-z0-9_])", re.IGNORECASE)
+# Any fragment of a SQL write / schema change / schema read inside a string constant. Fragments are matched
+# one string constant at a time, so concatenated, %-formatted, f-string, ``+=`` and join-built statements are
+# still counted; none of them has to name a table. It is only ever applied to files that mention "kanban".
+FRAG = re.compile(
+    r"\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|DELETE\s+FROM|DROP\s+(?:TABLE|TRIGGER|INDEX|VIEW)"
+    r"|ALTER\s+TABLE|UPDATE(?:\s+OR\s+\w+)?\s+[^\s;]{1,80}\s+SET"
+    r"|(?:INSERT|REPLACE|DELETE|UPDATE)(?:\s+OR\s+\w+)?\s*$|writable_schema|sqlite_(?:master|schema))", re.IGNORECASE)
 
 
 @functools.cache
@@ -223,18 +227,40 @@ def _tracked_python():
     return sorted(p for p in out.decode().split("\0") if p and not p.startswith("tests/") and p != "hermes_cli/kanban_sync_capture_sites.py")
 
 
+def _owner(stack):
+    return ".".join(stack[:2]) or "<module>"
+
+
+def _fragments(tree):
+    counts: dict[str, int] = {}
+
+    def visit(node, stack):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, stack + [child.name] if len(stack) < 2 else stack)
+                continue
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                n = len(FRAG.findall(child.value))
+                if n:
+                    counts[_owner(stack)] = counts.get(_owner(stack), 0) + n
+            visit(child, stack)
+
+    visit(tree, [])
+    return counts
+
+
 @functools.cache
 def _file_counts():
-    names, dyn = {}, {}
+    names, frags = {}, {}
     for rel in _tracked_python():
         text = (REPO / rel).read_text(errors="replace")
         n = len(ANY_NAME.findall(text))
         if n:
             names[rel] = n
-        d = len(DYN_ANY.findall(text))
-        if d and (pathlib.PurePath(rel).name.startswith("kanban") or "scripts" in rel.split("/") or n):
-            dyn[rel] = d
-    return names, dyn
+        if "kanban" in text.lower() or ANY_NAME.search(text):
+            for owner, count in _fragments(ast.parse(text)).items():
+                frags[f"{rel}::{owner}"] = count
+    return names, frags
 
 
 def _diff(a, b):
@@ -247,7 +273,7 @@ def test_every_mention_of_a_custody_table_name_is_pinned_per_file_anywhere_in_th
     assert names == dict(inv.NAME_MENTIONS), _diff(names, inv.NAME_MENTIONS)
 
 
-def test_every_non_literal_table_statement_is_pinned_per_file():
-    """Interpolated/%-formatted/concatenated tables are counted per file, so a second loop in a listed function shows."""
-    _, dyn = _file_counts()
-    assert dyn == dict(inv.DYNAMIC_STATEMENT_COUNTS), _diff(dyn, inv.DYNAMIC_STATEMENT_COUNTS)
+def test_every_sql_write_fragment_in_a_kanban_touching_file_is_pinned_per_function():
+    """Any write/DDL/schema-read fragment, named or not, in any tracked file that touches kanban, counted per function."""
+    _, frags = _file_counts()
+    assert frags == dict(inv.WRITE_FRAGMENTS), _diff(frags, inv.WRITE_FRAGMENTS)
