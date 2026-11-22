@@ -53,6 +53,8 @@ def parsed_from(conn: sqlite3.Connection, real: str) -> Optional[list]:
     stores a DESC index in ascending order, and a reader that parsed format 4 walks it the wrong
     way (wrong rows, no error). SQLite writes the number once, with the first table, so on a
     live board the main file's copy never changes after that. Read with a lock-safe ``pread``."""
+    if not hasattr(os, "pread"):  # no lock-safe header evidence on this platform: never keep
+        return None
     header = pread_lock_safe(real, 44, 4)
     return None if header is None else [header] + schema_rows(conn)
 

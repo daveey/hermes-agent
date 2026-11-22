@@ -100,6 +100,31 @@ def _moved(watch, path):
     return watch._conns[str(path)][0][2:] != (stat.st_mtime_ns, stat.st_size)
 
 
+def test_missing_pread_reads_and_reopens_conservatively(board, monkeypatch):
+    """Platforms without pread still read boards; no checkpoint may keep their reader."""
+    path, writer, watch = board
+    image = _two_images(writer, path)
+    monkeypatch.delattr(os, "pread", raising=False)
+    gen, row = watch.query(path, VALUE, unchanged_ok=True)
+    assert row == ("b",)
+    old = _reader(watch, path)
+    assert watch._conns[str(path)][6] is None
+    writer.execute("INSERT INTO pad VALUES (?)", (PAD,))
+    _checkpoint(writer, "TRUNCATE")
+    assert _moved(watch, path)
+    assert watch.query(path, VALUE, unchanged_ok=True) == (gen, ("b",))
+    assert _reader(watch, path) is not old
+    writer.execute("UPDATE t SET v = 'later'")
+    assert watch.query(path, VALUE, unchanged_ok=True) == (gen, ("later",))
+    _checkpoint(writer, "TRUNCATE")
+    old = _reader(watch, path)
+    _rewrite(path, image)
+    assert _moved(watch, path)
+    assert watch.query(path, VALUE, unchanged_ok=True) == (gen, ("a",))
+    assert _reader(watch, path) is not old
+    assert _runs("sync.reader_keep/checkpoint") == 0
+
+
 def test_same_inode_raw_restore_reopens(board):
     path, writer, watch = board
     image = _two_images(writer, path)
