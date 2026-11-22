@@ -63,8 +63,35 @@ def test_primary_adapter_failure_does_not_fallback_to_local_authority(primary, m
     from hermes_cli import kanban_primary_execution
     def fail(*args, **kwargs):
         raise sqlite3.OperationalError('unreadable')
-    monkeypatch.setattr(kanban_primary_execution, 'attach', fail)
+    monkeypatch.setattr(kanban_primary_execution, 'materialize', fail)
     assert all(value['state'] == 'unknown' for value in read_all(primary))
+
+
+def test_primary_count_derivation_runs_after_close(primary, monkeypatch):
+    from hermes_cli import kanban_primary_execution as adapter
+
+    opened, derived = [], []
+    original_open, original_derive = activity._open_ro, adapter.attach_materialized
+
+    def open_one(path):
+        conn = original_open(path)
+        opened.append(conn)
+        return conn
+
+    def derive(values, rows, **scope):
+        assert len(opened) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            opened[0].execute('SELECT 1')
+        result = original_derive(values, rows, **scope)
+        derived.append(result)
+        return result
+
+    monkeypatch.setattr(activity, '_open_ro', open_one)
+    monkeypatch.setattr(adapter, 'attach_materialized', derive)
+    reads, complete = activity._read_board(primary, parked=True, stalled=True)
+    assert complete and derived
+    assert reads['execution']['card']['state'] == 'running'
+    assert reads['execution']['card']['observed_at'] == 990
 
 
 def test_primary_current_run_projects_running_in_every_consumer(primary):

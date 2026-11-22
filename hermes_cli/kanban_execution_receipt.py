@@ -64,17 +64,29 @@ def assemble_done(conn, ids, *, board, gateway, profile, observed_at):
     the caller already knows are done. Must run on an authoritative LOCAL board, like
     ``kanban_execution_source.assemble``: a pulled mirror cannot attest its owner.
     """
+    inputs = materialize_done(conn, ids, board=board, gateway=gateway, profile=profile)
+    return derive_done(inputs, board=board, gateway=gateway, profile=profile, observed_at=observed_at)
+
+
+def materialize_done(conn, ids, *, board, gateway, profile):
+    """Materialize completion facts and admitted receipts in the caller's snapshot."""
     from hermes_cli.kanban_completion_inputs import read_completions
     from hermes_cli.kanban_completion_receipt_projection import read_completed_many
 
     ids = list(dict.fromkeys(ids))
     if not ids or not (gateway and profile):
-        return {}
+        return {}, {}
     facts = read_completions(conn, ids)
     candidates = [tid for tid, f in facts.items() if f.status == "done" and f.verified and not f.legacy]
     bundles = read_completed_many(conn, candidates, board=board, gateway=gateway)
+    return {tid: facts[tid] for tid in candidates}, bundles
+
+
+def derive_done(inputs, *, board, gateway, profile, observed_at):
+    """Pure observation derivation; does not own a source connection."""
+    facts, bundles = inputs
     out = {}
-    for tid in candidates:
+    for tid in facts:
         raw = done_raw(tid, facts[tid], bundles.get(tid), board=board, gateway=gateway, profile=profile,
                        observed_at=observed_at)
         if raw is not None:
@@ -89,14 +101,34 @@ def counts_done(conn, *, board, gateway, profile, observed_at, counted_sub_claus
     constant batch of :func:`assemble_done`. Optional evidence: any adapter failure, or a non-authoritative
     mirror (``authority`` raises), yields nothing, so done is simply not observed (never inferred).
     """
+    inputs = materialize_counts(conn, board=board, gateway=gateway, profile=profile, observed_at=observed_at,
+                                counted_sub_clause=counted_sub_clause, authority=authority, window=window)
+    return derive_counts(inputs, board=board, gateway=gateway, profile=profile, observed_at=observed_at)
+
+
+def materialize_counts(conn, *, board, gateway, profile, observed_at, counted_sub_clause, authority, window):
+    """Read the sidebar done bucket without deriving execution observations."""
     from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS
     from hermes_cli.kanban_session_activity_recent_done import done_pairs_on
 
     try:
         authority(conn)
         pairs = done_pairs_on(conn, observed_at - window, counted_sub_clause)
-        raws = assemble_done(conn, {tid for _, tid in pairs}, board=board, gateway=gateway, profile=profile,
-                             observed_at=observed_at)
+        inputs = materialize_done(conn, {tid for _, tid in pairs}, board=board, gateway=gateway, profile=profile)
+    except ADAPTER_ERRORS:
+        import logging
+        logging.getLogger(__name__).debug("done evidence unavailable for board %s", board, exc_info=True)
+        return [], ({}, {})
+    return pairs, inputs
+
+
+def derive_counts(materialized, *, board, gateway, profile, observed_at):
+    """Pure sidebar bucket derivation, retaining the optional-evidence fallback."""
+    from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS
+
+    pairs, inputs = materialized
+    try:
+        raws = derive_done(inputs, board=board, gateway=gateway, profile=profile, observed_at=observed_at)
     except ADAPTER_ERRORS:
         import logging
         logging.getLogger(__name__).debug("done evidence unavailable for board %s", board, exc_info=True)

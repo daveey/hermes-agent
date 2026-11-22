@@ -14,6 +14,7 @@ seconds because the sidebar polls.
 
 from __future__ import annotations
 
+
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli.kanban_ro_batch import batch as _ro_batch
 from hermes_cli import kanban_activity_identity as _identity
@@ -366,6 +367,10 @@ def _stalled_counts(pairs: set[tuple[str, str]], parked: dict[str, tuple], event
     if not pairs:
         return {}
     info = _describe_waits(parked, events, now=now)
+    from hermes_cli.kanban_wait_info import STALL_AFTER_S
+    for wait in info.values():
+        if wait.get('agent_owned') and wait.get('waiting_since') is not None:
+            _host_copy.note_deadline(wait['waiting_since'] + STALL_AFTER_S)
     out: dict[str, int] = {}
     for sid, tid in pairs:
         if (info.get(tid) or {}).get("wait_state") == "stalled":
@@ -622,7 +627,14 @@ def _read_remote_links(path: Path, now: float | None = None, *,
         version_column = 'version' if 'version' in columns else 'NULL'
         info_rows = conn.execute("SELECT gw, data FROM replica WHERE coll = 'gateway' AND key = 'info'").fetchall()
         last_ok, offline = _meta_float(conn, "last_ok"), _meta_float(conn, "offline_since")
+        if last_ok is not None and offline is None:
+            _host_copy.note_deadline(last_ok + HUB_STALE_AFTER_S + .001)
+        for beat, window in _scope_heartbeats(info_rows).values():
+            _host_copy.note_deadline(beat)
+            _host_copy.note_deadline(beat + window + .001)
         key = view = rows = probe = None
+        packed = '[]'
+        memo_hit = None
         stale = offline is not None or last_ok is None or now - last_ok > HUB_STALE_AFTER_S
         if live and {'seq', 'version'} <= columns:
             probe = conn.execute(_REPLICA_PROBE).fetchone()
@@ -637,38 +649,44 @@ def _read_remote_links(path: Path, now: float | None = None, *,
             # memo compares those instead of ``last_ok`` itself.
             if (key is not None and memo is not None and memo[0] == key and memo[1] <= now
                     and memo[6] == stale and memo[7] == _replica_synced(memo[8], last_ok)):
-                if qualified_out is not None:
-                    qualified_out.update(memo[4])
-                if owners_out is not None:
-                    owners_out.update(memo[5])
-                if moved_out is not None:
-                    moved_out.update(memo[9])
-                if closed_out is not None:
-                    closed_out.update(memo[10])
-                _note_known_gateways(moved_out, info_rows)
-                return list(memo[3])  # cards are read-only, as in ``_links_cache``
-        if key is not None:  # [daveey] a miss reads and re-projects only the rows whose seq moved
-            from hermes_cli.kanban_replica_memo import finish
-            view = _replica_rows.read(conn, path, version_column, probe, ident, me=me)
-            cards = finish(view, now, me, info_rows, last_ok, offline, key, stale,
-                          qualified_out=qualified_out, owners_out=owners_out,
-                          moved_out=moved_out, closed_out=closed_out)
-            _note_known_gateways(moved_out, info_rows)
-            return cards
+                memo_hit = memo
+        if key is not None:
+            if memo_hit is None:  # a miss materializes only rows whose seq moved
+                from hermes_cli.kanban_replica_scalar_rows import SnapshotRows
+                view = _replica_rows.read(conn, path, version_column, probe, ident, me=me)
+                # The filtered reader is lazy and snapshot-bound, not detached.
+                if isinstance(view, SnapshotRows):
+                    view = view.consume()
         else:
             # Aggregate raw text, not json(data): malformed task JSON retains its per-row decode semantics.
             # sqlite3 releases/reacquires the GIL per fetched row; under contention 12k rows can stall for 90s.
             packed = conn.execute(f"SELECT json_group_array(json_array(gw, key, data, updated_at, {version_column})) "
                                   "FROM replica WHERE coll = 'tasks'").fetchone()[0]
-            rows = [tuple(row) for row in json.loads(packed)]
     finally:
         conn.close()
-    if key is None:
+    # Finish and publish only detached data: no source handle survives projection.
+    if memo_hit is not None:
+        if qualified_out is not None:
+            qualified_out.update(memo_hit[4])
+        if owners_out is not None:
+            owners_out.update(memo_hit[5])
+        if moved_out is not None:
+            moved_out.update(memo_hit[9])
+        if closed_out is not None:
+            closed_out.update(memo_hit[10])
+        cards = list(memo_hit[3])
+    elif key is not None:
+        from hermes_cli.kanban_replica_memo import finish
+        cards = finish(view, now, me, info_rows, last_ok, offline, key, stale,
+                       qualified_out=qualified_out, owners_out=owners_out,
+                       moved_out=moved_out, closed_out=closed_out)
+    else:
+        rows = [tuple(row) for row in json.loads(packed)]
         cards = _project_replica(path, now, me, rows, info_rows, last_ok, offline,
                                 qualified_out=qualified_out, owners_out=owners_out, moved_out=moved_out,
                                 closed_out=closed_out)
-        _note_known_gateways(moved_out, info_rows)
-        return cards
+    _note_known_gateways(moved_out, info_rows)
+    return cards
 
 
 def _replica_synced(seen_at: dict[str, float], last_ok: float | None) -> tuple:
@@ -934,6 +952,12 @@ def _links_entry(stale_ok: bool, *, with_rows: bool = False):
 
 def _links_lookup(scope: tuple, stale_ok: bool) -> tuple:
     with diag.source("links_display" if stale_ok else "links_strict"):
+        # Native source/clock invalidation must cross the inner TTL cache too:
+        # state/config inputs and wall-time verdicts can move without this key.
+        if getattr(_revalidate.force_read, 'scope', None) == scope:
+            with _links_lock:
+                fingerprint = diag.timed("fingerprint", _links_fingerprint)
+                return _publish_links(scope, fingerprint)
         hit = _links_cache.get(scope)
         # A warm display read still precedes ALL fingerprint and lock work.
         if stale_ok and hit is not None:
@@ -1296,14 +1320,17 @@ def _require_local_execution_authority(conn: sqlite3.Connection) -> None:
 
 
 def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, Any], bool]:
-    """Every count read of one board, on its shared connection in one read transaction (one snapshot; five fresh
-    opens cost ~5 ms on a board with no rows): ``(reads, complete)``. ``complete`` is False when a display-only read
-    failed (unseen/stalled log and count nothing, as before); such a read is not memoized, so the next pass retries."""
+    """Every count read of one board in one short-lived read transaction.
+
+    The connection is closed before these detached results reach waiting-provider
+    callbacks or cross-board derivation. ``complete`` is False when a display-only
+    read failed; such results are not memoized and the next pass retries.
+    """
     global _pairs_sink
     reads: dict[str, Any] = {}
     read_at = time.time()
     complete = True
-    with cached_ro(path) as conn:
+    with contextlib.closing(_open_ro(path)) as conn:
         conn.execute("BEGIN")
         try:
             try:
@@ -1323,29 +1350,22 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                 from hermes_cli.kanban_execution_source import assemble, safe_raw, unknown_raw
                 from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_scope
                 gateway, profile = card_scope(path)
-                from hermes_cli.kanban_primary_execution import PrimaryMirror, attach
+                from hermes_cli.kanban_primary_execution import PrimaryMirror, materialize
+                sources, replica_rows = None, None
                 try:
                     try:
                         _require_local_execution_authority(conn)
                     except PrimaryMirror:
-                        replica = attach(conn, tasks, board=_board_slug(path), gateway=gateway, profile=profile)
-                        reads["execution"] = {
-                            tid: replica.get(tid) or unknown_raw(tasks[tid], gateway=gateway, profile=profile,
-                                                                 board=_board_slug(path))
-                            for _, tid in reads["pairs"]}
+                        replica_rows = materialize(conn, tasks)
                     else:
                         sources = assemble(conn, {tid for _, tid in reads["pairs"]}, board=_board_slug(path),
                                            gateway=gateway, profile=profile, observed_at=read_at)
-                        reads["execution"] = {tid: safe_raw(source["task"], source) for tid, source in sources.items()}
                 except ADAPTER_ERRORS:
-                    # Optional evidence only: legacy counts and asks stay; each card is an explicit unknown.
+                    # Preserve legacy counts/asks; derive explicit unknowns after close.
                     _log.debug("kanban execution source failed for %s", path, exc_info=True)
-                    reads["execution"] = {tid: unknown_raw(tasks[tid], gateway=gateway, profile=profile,
-                                                           board=_board_slug(path))
-                                          for _, tid in reads["pairs"]}
             finally:
                 _pairs_sink = outer
-            reads["done_pairs"], reads["done_execution"] = _receipts.counts_done(
+            done_inputs = _receipts.materialize_counts(
                 conn, board=_board_slug(path), gateway=gateway, profile=profile, observed_at=read_at,
                 counted_sub_clause=_counted_sub_clause, authority=_require_local_execution_authority,
                 window=ATTENTION_WINDOW_S)
@@ -1365,6 +1385,24 @@ def _read_board(path: Path, *, parked: bool, stalled: bool) -> tuple[dict[str, A
                     complete = False
         finally:
             conn.execute("COMMIT")
+    try:
+        if sources is not None:
+            reads["execution"] = {tid: safe_raw(source["task"], source) for tid, source in sources.items()}
+        else:
+            from hermes_cli.kanban_primary_execution import attach_materialized
+            replica = (attach_materialized(replica_rows, tasks, board=_board_slug(path),
+                                           gateway=gateway, profile=profile)
+                       if replica_rows is not None else {})
+            reads["execution"] = {
+                tid: replica.get(tid) or unknown_raw(tasks[tid], gateway=gateway, profile=profile,
+                                                    board=_board_slug(path))
+                for _, tid in reads["pairs"]}
+    except ADAPTER_ERRORS:
+        _log.debug("kanban execution derivation failed for %s", path, exc_info=True)
+        reads["execution"] = {tid: unknown_raw(tasks[tid], gateway=gateway, profile=profile,
+                                               board=_board_slug(path)) for _, tid in reads["pairs"]}
+    reads["done_pairs"], reads["done_execution"] = _receipts.derive_counts(
+        done_inputs, board=_board_slug(path), gateway=gateway, profile=profile, observed_at=read_at)
     reads["source_read_at"] = read_at
     return reads, complete
 
@@ -1402,6 +1440,10 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
             reads = None
         if reads is None:  # [daveey] a busy board reuses its last good counts (kanban-359833be53)
             reads, complete, fresh = _busy.board_reads(path, key, hit, sink is not None, stalled is not None, _read_board)
+            if not (fresh and complete):
+                # Event-driven holders cannot rely on another commit to recover
+                # from busy last-good or partial display reads.
+                _host_copy.note_deadline(time.time() + _host_copy.HOLDER_INTERVAL_S)
             if fresh:
                 _board_memo.pop(str(path), None)
             if fresh and complete:
@@ -1436,15 +1478,9 @@ def _read_local_boards(active: dict[str, int], blocked: dict[str, int], unseen: 
 _waiting_sources: dict[str, Any] = {}
 
 
-def register_waiting_source(name: str, fn, inputs=None) -> None:
-    """Register (or replace, ``fn=None`` removes) a plugin source of waiting card ids per session. [daveey] ``inputs()``
-    (optional) returns a JSON key that moves whenever ``fn`` could answer differently: other processes may then adopt
-    this host's annotation instead of re-running ``fn`` (``kanban_annotation_host``)."""
-    _host_copy.declare_inputs(name, fn, inputs)
-    if fn is None:
-        _waiting_sources.pop(name, None)
-    else:
-        _waiting_sources[name] = fn
+def register_waiting_source(name: str, fn, inputs=None, *, watch_paths=None, next_deadline=None) -> None:
+    """Register a waiting provider with optional no-DB watch/deadline declarations."""
+    _host_copy.register_waiting_source(name, fn, inputs, watch_paths=watch_paths, next_deadline=next_deadline)
 
 
 def _extra_waiting() -> dict[str, set[str]]:
@@ -1671,19 +1707,11 @@ _done_checks: dict[str, Callable[[dict[str, Any]], bool]] = {}
 _attention = _AttentionCache(_ATTENTION_TTL_S, max_age_s=_ATTENTION_MAX_AGE_S)
 
 
-def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool]) -> Callable[[], None]:
-    """Register ``fn(card) -> bool`` (True = this completed card needs attention). ``card`` has ``id``, ``title``,
-    ``summary`` (latest run summary, else ``result``), ``completed_at``, ``board`` and ``board_path``. Re-registering a
-    name replaces it; the returned callable unregisters."""
-    _done_checks[name] = fn
-    _attention.clear()
-
-    def _dispose() -> None:
-        if _done_checks.get(name) is fn:
-            _done_checks.pop(name, None)
-            _attention.clear()
-
-    return _dispose
+def register_done_check(name: str, fn: Callable[[dict[str, Any]], bool], *,
+                        watch_paths=None, next_deadline=None) -> Callable[[], None]:
+    """Register a done check with optional no-DB watch/deadline declarations."""
+    from hermes_cli.kanban_session_activity_attention import register_done_check as register
+    return register(name, fn, watch_paths=watch_paths, next_deadline=next_deadline)
 
 
 def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any]]]:
@@ -1692,39 +1720,9 @@ def _read_recent_done(path: Path, since: float) -> list[tuple[str, dict[str, Any
 
 
 def attention_task_counts(now: float | None = None) -> dict[str, int]:
-    """``{session_id: completed cards a registered check flags}`` over the last ``ATTENTION_WINDOW_S``. Cached;
-    a check that raises counts as False."""
-    if not _done_checks:
-        return {}
-    scope = _origin_scope()
-    mono = time.monotonic()
-    hit = _attention.get(scope, mono)
-    if hit is not None:
-        return hit
-    inputs = _revalidate.attention_key()
-    hit = _attention.get(scope, mono, inputs)
-    if hit is not None:
-        return hit
-    since = (time.time() if now is None else now) - ATTENTION_WINDOW_S
-    checks = list(_done_checks.values())
-    paths = list(_board_db_paths())
-    boards = tuple(str(p) for p in paths)
-    pairs: set[tuple[str, str]] = set()
-    for path in paths:
-        try:
-            recent = _recent_done.memoized(path, since, _read_recent_done, _revalidate.board_memo_key, scope)  # [daveey]
-        except sqlite3.Error as exc:
-            _log.debug("kanban attention read failed for %s: %s", path, exc)
-            continue
-        for sid, card in recent:
-            key = (boards, str(path), str(card["id"]), card.get("completed_at"), card.get("title"), card.get("summary"))
-            if _attention.verdict(key, mono, lambda card=card: _run_done_checks(checks, card)):
-                pairs.add((sid, key[2]))
-    counts: dict[str, int] = {}
-    for sid, _tid in pairs:
-        counts[sid] = counts.get(sid, 0) + 1
-    _attention.put(scope, mono, counts, inputs)
-    return counts
+    """Count recent completed cards requiring attention, preserving scoped freshness."""
+    from hermes_cli.kanban_session_activity_attention import attention_task_counts as counts
+    return counts(now)
 
 
 # [daveey] The read itself lives with the host copy that publishes it (kanban_annotation_host); monkeypatching

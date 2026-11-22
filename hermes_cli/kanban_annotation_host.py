@@ -36,6 +36,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -107,6 +108,72 @@ def _waiting_inputs(sources: dict[str, Any]) -> tuple[list, bool]:
             out.append([name, _code_id(fn), _UNDECLARED])
             complete = False
     return out, complete
+
+
+# Event coverage is distinct from fingerprint inputs: obtaining a fingerprint may
+# read SQL, whereas these callbacks must only enumerate paths / retained deadlines.
+_event_sources: dict[str, tuple[Any, Any, Any]] = {}
+_done_event_sources: dict[str, tuple[Any, Any, Any]] = {}
+_event_warned: set[tuple[str, str]] = set()
+
+
+def declare_events(name, fn, watch_paths, next_deadline, *, done_check=False) -> None:
+    registry = _done_event_sources if done_check else _event_sources
+    if fn is None or watch_paths is None:
+        registry.pop(name, None)
+    else:
+        registry[name] = (fn, watch_paths, next_deadline)
+
+
+def register_waiting_source(name: str, fn, inputs=None, *, watch_paths=None, next_deadline=None) -> None:
+    """Register a waiting provider; ``fn=None`` removes it.
+
+    ``inputs()`` is its exact JSON cache key. ``watch_paths()`` declares every file
+    dependency (SQLite sidecars are added by the holder); ``next_deadline()`` returns
+    its next absolute wall-clock transition or None. Event callbacks must not read
+    databases. Undeclared providers retain a logged, bounded 60-second fallback.
+    """
+    from hermes_cli import kanban_session_activity as activity
+    declare_inputs(name, fn, inputs)
+    declare_events(name, fn, watch_paths, next_deadline)
+    if fn is None:
+        activity._waiting_sources.pop(name, None)
+    else:
+        activity._waiting_sources[name] = fn
+    wake_holder()
+
+
+def waiting_events(now: float) -> tuple[set[Path], float | None]:
+    """Paths plus earliest absolute wall deadline; undeclared sources stay bounded.
+
+    An empty declared path list explicitly means a clock-only/pure provider.
+    None from next_deadline means no pending clock transition, not unknown inputs.
+    """
+    from hermes_cli import kanban_session_activity as _ksa
+
+    paths: set[Path] = set()
+    deadlines: list[float] = []
+    providers = [('waiting source', name, fn, _event_sources.get(name))
+                 for name, fn in list(_ksa._waiting_sources.items())]
+    providers += [('done check', name, fn, _done_event_sources.get(name))
+                  for name, fn in list(_ksa._done_checks.items())]
+    for kind, name, fn, declaration in providers:
+        if declaration is None or declaration[0] is not fn:
+            if (kind, name) not in _event_warned:
+                log.warning("annotation %s %s has no watch_paths; using bounded 60s refresh", kind, name)
+                _event_warned.add((kind, name))
+            deadlines.append(now + HOLDER_REFRESH_AGE_S)
+            continue
+        try:
+            paths.update(Path(p) for p in declaration[1]())
+            due = declaration[2]() if declaration[2] is not None else None
+            if due is not None:
+                due = float(due)
+                deadlines.append(due if math.isfinite(due) and due > now else now + HOLDER_INTERVAL_S)
+        except Exception:  # health: allow BLE001 -- plugin failure retains bounded recovery
+            log.warning("annotation %s %s event declaration failed", kind, name, exc_info=True)
+            deadlines.append(now + HOLDER_INTERVAL_S)
+    return paths, min(deadlines, default=None)
 
 
 # -- code identity ------------------------------------------------------------------------------------------------
@@ -500,7 +567,136 @@ _holder: list = []
 # come. ``_seen``: the last signature observed.
 _gates: dict[tuple[str, ...], tuple[str, float, float | None]] = {}
 _seen: dict[tuple[str, ...], str | None] = {}
-_wake = threading.Event()  # an in-process kick wakes the holder before its next tick
+_wake = threading.Event()  # compatibility for direct legacy holder callers
+_native_events: list = []
+_clock_deadlines: dict[tuple[str, ...], list[float]] = {}
+_event_ready: set[tuple[str, ...]] = set()
+
+
+def note_deadline(due: float | None) -> None:
+    """Record a clock boundary while projecting already-read source rows."""
+    pending = getattr(_holder_ctx, 'deadlines', None)
+    if pending is not None and due is not None and due > time.time():
+        pending.append(due)
+
+
+def wake_holder() -> None:
+    """Wake native demand/registration changes without reading any source."""
+    _wake.set()
+    for events in tuple(_native_events):
+        events.wake()
+
+
+def _discovery_paths() -> tuple[set[Path], set[Path]]:
+    """Watch creation as well as existing inputs, using the readers' roots."""
+    from hermes_constants import get_hermes_home
+    from hermes_cli import kanban_db, kanban_sync_client
+
+    home = get_hermes_home()
+    boards = kanban_db.boards_root()
+    hub = Path(os.environ.get('HERMES_HUB_STATE') or str(Path.home() / '.local/state/hermes-hub'))
+    mail = Path(os.environ.get('HERMES_MAIL_CONFIG') or str(Path.home() / '.config/hermes-mail/config.json'))
+    files = {kanban_db.kanban_home() / 'kanban.db', hub / 'hub.db',
+             home / 'config.yaml', mail, kanban_db.current_board_path()}
+    directories = {boards, kanban_sync_client.shadow_path('default').parent}
+    if boards.is_dir():
+        directories.update(p for p in boards.iterdir() if p.is_dir())
+    return files, directories
+
+
+def _scope_interested(scope: tuple[str, ...]) -> bool:
+    """Read only demand-file metadata, never source DBs, in the scope's context."""
+    from hermes_cli import kanban_session_activity as _ksa
+
+    age = _disk.demand_age(scope)
+    return age is not None and age <= DEMAND_WINDOW_S and _ksa._origin_scope() == scope
+
+
+def _scope_retry(scope: tuple[str, ...]) -> float:
+    now = time.time()
+    due = now + HOLDER_INTERVAL_S
+    _clock_deadlines[scope] = sorted({due, *[t for t in _clock_deadlines.get(scope, ()) if t > now]})
+    return due
+
+
+def _event_refresh(events) -> float | None:
+    """Install all scope coverage before reading; return the next one-shot due time.
+
+    Re-enumeration is event-driven, including absent source parents and discovery
+    directories. No lease beat enters this function.
+    """
+    from hermes_cli import kanban_session_activity as _ksa
+
+    # Demand files carry interest, not source invalidation. Keep the existing
+    # descriptor (and queued source events) when all scopes are already current.
+    due = min((t for times in _clock_deadlines.values() for t in times), default=None)
+    # A failed/busy scope has an explicit retry deadline, not a valid result.
+    # Demand churn must not bypass that backoff; a source event still does.
+    settled = _event_ready | {scope for scope, times in _clock_deadlines.items() if times}
+    if getattr(events, 'control_only', False):
+        # An unrequested scope is settled for this wake, not certified. Recheck
+        # its demand metadata each control event so first demand still activates it.
+        settled |= {scope for scope, ctx in list(_known.items())
+                    if scope not in settled and not ctx.run(_scope_interested, scope)}
+        if set(_known) <= settled and (due is None or due > time.time()):
+            return due
+    files, directories, controls, scopes = set(), set(), set(), []
+    deadlines = []
+    for scope, ctx in list(_known.items()):
+        def coverage():
+            _paths_memo.pop(scope, None)
+            dbs, plain = _watch_paths(scope)
+            plugin, _ = waiting_events(time.time())
+            discovery_files, discovery_dirs = _discovery_paths()
+            demand_path = _disk._path(scope)
+            return ({*(Path(p) for p in dbs + plain), *plugin, *discovery_files},
+                    discovery_dirs,
+                    {demand_path.with_suffix('.demand'), demand_path.with_suffix('.strict-demand')})
+        try:
+            scoped_files, scoped_dirs, scoped_controls = ctx.run(coverage)
+        except Exception:  # health: allow BLE001 -- one profile's unavailable discovery must not starve peers
+            log.warning('annotation scope coverage failed', exc_info=True)
+            deadlines.append(_scope_retry(scope))
+            continue
+        files.update(scoped_files)
+        directories.update(scoped_dirs)
+        controls.update(scoped_controls)
+        scopes.append((scope, ctx))
+    events.replace(files, directories=directories, controls=controls)
+    _event_ready.clear()
+    for scope, ctx in scopes:
+        def refresh_scope():
+            if not _scope_interested(scope):
+                _clock_deadlines.pop(scope, None)
+                return None
+            if not _ksa._annotate_refresh_lock.acquire(blocking=False):
+                return _scope_retry(scope)
+            _holder_ctx.active = True
+            # Inner caches can return without emitting their clock boundaries.
+            # Preserve those until consumed; replacing the list needs per-cache
+            # deadline ownership, not just a successful outer projection.
+            _holder_ctx.deadlines = [t for t in _clock_deadlines.get(scope, ()) if t > time.time()]
+            _ksa._revalidate.force_read.scope = scope
+            try:
+                _ksa._refresh_annotation_locked(scope)
+                _, due = waiting_events(time.time())
+                note_deadline(due)
+                _clock_deadlines[scope] = sorted(set(_holder_ctx.deadlines))
+                _event_ready.add(scope)
+                return min(_clock_deadlines[scope], default=None)
+            finally:
+                _holder_ctx.deadlines = None
+                _holder_ctx.active = False
+                _ksa._revalidate.force_read.scope = None
+                _ksa._annotate_refresh_lock.release()
+        try:
+            due = ctx.run(refresh_scope)
+        except Exception:  # health: allow BLE001 -- failed scopes must not starve healthy scopes
+            log.warning('annotation scope refresh failed', exc_info=True)
+            due = _scope_retry(scope)
+        if due is not None:
+            deadlines.append(due)
+    return min(deadlines, default=None)
 
 
 def kick(scope: tuple[str, ...]) -> None:
@@ -513,7 +709,7 @@ def kick(scope: tuple[str, ...]) -> None:
         _mutation.record(scope)
     except (OSError, ValueError):
         log.warning("kanban annotation mutation cue not recorded", exc_info=True)
-    _wake.set()
+    wake_holder()
 
 
 def demand(scope: tuple[str, ...], *, strict: bool = False) -> None:
@@ -526,10 +722,13 @@ def demand(scope: tuple[str, ...], *, strict: bool = False) -> None:
     if now - _touched.get(key, -1e9) < DEMAND_TOUCH_S:
         return
     _touched[key] = now
+    new_scope = scope not in _known
     _known[scope] = contextvars.copy_context()
     _disk.touch_demand(scope)
     if strict:
         _disk.touch_demand(scope, strict=True)
+    if new_scope:
+        wake_holder()
 
 
 def _renew_age(scope: tuple[str, ...]) -> float:
@@ -658,19 +857,24 @@ def start_holder(role: str) -> threading.Thread | None:
     except Exception:  # health: allow BLE001 -- a scope polls register themselves too
         log.debug("kanban annotation holder: own scope unavailable", exc_info=True)
 
+    from hermes_cli.annotation_file_events import FileEvents
+    from hermes_cli.annotation_event_loop import run
+    try:
+        events = FileEvents()
+    except (OSError, NotImplementedError):
+        # Local request reads remain authoritative. Never disguise a timed poll
+        # as native notification support on an unsupported platform.
+        log.warning("annotation native holder unavailable; using request reads", exc_info=True)
+        return None
+    _native_events.append(events)
+
     def loop() -> None:
-        while not stop.is_set():
-            # [daveey] A tick polls only watch signatures of sleeping scopes; an in-process kick wakes it at once.
-            _wake.wait(HOLDER_INTERVAL_S)
-            _wake.clear()
-            if stop.is_set():
-                break
-            try:
-                if lease.held():
-                    _holder_pass()
-                    lease.beat()
-            except Exception:  # health: allow BLE001 -- the refresher must outlive one bad pass
-                log.warning("kanban annotation holder pass failed", exc_info=True)
+        try:
+            run(events, stop, lease, lambda: _event_refresh(events), interval=HOLDER_INTERVAL_S)
+        finally:
+            _native_events.remove(events)
+            events.close()
+            lease.release()
 
     thread = spawn_context_thread(loop, name="kanban-annotation-holder")
     thread.start()
@@ -679,6 +883,8 @@ def start_holder(role: str) -> threading.Thread | None:
 
 
 def reset() -> None:
+    _event_ready.clear()
+    _clock_deadlines.clear()
     _known.clear()
     _touched.clear()
     _code_ids.clear()

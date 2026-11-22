@@ -13,14 +13,19 @@ def attach(conn, rows, *, gateway, profile, board):
     attempt's UID and executor event; task timestamps, pull time and read time attest nothing.
     Missing old-schema columns leave the ordinary unknown path intact.
     """
+    return attach_materialized(materialize(conn, rows), rows, gateway=gateway, profile=profile, board=board)
+
+
+def materialize(conn, rows):
+    """Fetch current-run tuples; the returned list owns no cursor or connection."""
     tasks = {r[1] for r in conn.execute('PRAGMA table_info(tasks)')}
     runs = {r[1] for r in conn.execute('PRAGMA table_info(task_runs)')}
     events = {r[1] for r in conn.execute('PRAGMA table_info(task_events)')}
     if not ({'id', 'status', 'current_run_id', 'assignee'} <= tasks
             and {'id', 'task_id', 'uid', 'status', 'ended_at'} <= runs
             and {'task_id', 'run_id', 'kind', 'created_at', 'uid'} <= events):
-        return {}
-    values = {}
+        return []
+    values = []
     ids = list(rows)
     for start in range(0, len(ids), 500):
         chunk = ids[start:start + 500]
@@ -31,17 +36,23 @@ def attach(conn, rows, *, gateway, profile, board):
             'ON r.id=t.current_run_id AND r.task_id=t.id '
             "WHERE t.status='running' AND r.status='running' AND r.ended_at IS NULL "
             f"AND t.id IN ({','.join('?' for _ in chunk)})")
-        for tid, uid, beat, assignee in conn.execute(query, (*LIVENESS_KINDS, *chunk)):
-            evidence = run_evidence({'status': 'running', 'run_uid': uid, 'run_beat': beat})
-            if evidence is None:
-                continue
-            row = rows[tid]
-            row.update(board=board, status='running', assignee=assignee)
-            from hermes_cli.kanban_execution_observations import _request
-            row['human_request'] = _request(row.get('human_request'))
-            # Display enrichment runs only on lists; it must not change the shared evidence record.
-            # Evidence ownership is private adapter data, not remote-card UI routing.
-            row['_replica_run'] = {**evidence, 'activity_at': None, 'activity_kind': None,
-                                   'scope': {'gateway': gateway, 'owner_profile': profile}}
-            values[tid] = raw(row)
+        values.extend(conn.execute(query, (*LIVENESS_KINDS, *chunk)).fetchall())
     return values
+
+
+def attach_materialized(values, rows, *, gateway, profile, board):
+    """Derive executor evidence after the source transaction has closed."""
+    out = {}
+    for tid, uid, beat, assignee in values:
+        evidence = run_evidence({'status': 'running', 'run_uid': uid, 'run_beat': beat})
+        if evidence is None:
+            continue
+        row = rows[tid]
+        row.update(board=board, status='running', assignee=assignee)
+        from hermes_cli.kanban_execution_observations import _request
+        row['human_request'] = _request(row.get('human_request'))
+        # Evidence ownership is private adapter data, not remote-card UI routing.
+        row['_replica_run'] = {**evidence, 'activity_at': None, 'activity_kind': None,
+                               'scope': {'gateway': gateway, 'owner_profile': profile}}
+        out[tid] = raw(row)
+    return out

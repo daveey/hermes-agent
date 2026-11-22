@@ -75,6 +75,34 @@ def observation(row):
 
 # --- the canonical session-task entry path -------------------------------------------------------
 
+def test_done_count_derives_after_source_connection_close(board, monkeypatch):
+    from hermes_cli import kanban_execution_receipt as adapter
+
+    tid = finish(board, card(board))
+    opened, derived = [], []
+    original_open, original_raw = activity._open_ro, adapter.done_raw
+
+    def open_one(path):
+        conn = original_open(path)
+        opened.append(conn)
+        return conn
+
+    def derive(*args, **kwargs):
+        assert len(opened) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            opened[0].execute('SELECT 1')
+        result = original_raw(*args, **kwargs)
+        derived.append(result)
+        return result
+
+    monkeypatch.setattr(activity, '_open_ro', open_one)
+    monkeypatch.setattr(adapter, 'done_raw', derive)
+    reads, complete = activity._read_board(kb.kanban_db_path(board='default'), parked=True, stalled=True)
+    assert complete and derived
+    assert reads['done_execution'][tid]['state'] == 'done'
+    assert reads['done_pairs'] == [('session', tid)]
+
+
 def test_real_delivered_completion_is_done_with_exact_run_and_receipt_ref(board):
     tid = finish(board, card(board))
     value = observation(done_listing(tid))
