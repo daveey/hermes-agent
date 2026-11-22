@@ -4,12 +4,14 @@ import json
 from tools.kanban_containment_tools import _schema
 
 SCHEMA = _schema('kanban_retain',
-    'End only this admitted run in non-executing decision triage without completing acceptance, '
-    'renewing spend or granting execution. No synthetic authority or human ask is required. '
+    'End this admitted run in non-executing decision triage. '
+    'Does not complete acceptance, renew spend or grant execution. '
+    'No synthetic authority or human ask is required. '
     'Provide an administrative next step, evidence and release prerequisite; unavailable authority '
     'stays unavailable. Comments, timers and review completion cannot release a restricted scope. '
     'After terminal_for_run=true stop. Unknown delivery preserves the exact request; do not replace it.',
-    {'summary': {'type': 'string', 'minLength': 1, 'maxLength': 2000},
+    {'summary': {'type': 'string', 'minLength': 1,
+                 'description': 'Bounded handoff summary, at most 2000 characters.'},
      'reason': {'type': 'string', 'enum': ['decision_pending', 'scope_stopped', 'capability_unavailable']},
      'next_step': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
      'release_condition': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
