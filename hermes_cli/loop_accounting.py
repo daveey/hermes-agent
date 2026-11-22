@@ -336,6 +336,12 @@ def span_open(name: str) -> tuple:
         return token
 
 
+def span_discard(token: tuple) -> None:
+    """Retire an abandoned span on any thread without recording a completed pass."""
+    with _lock:
+        _open_intervals.close(token[1], id(token))
+
+
 def span_close(token: tuple, *, error: bool = False, error_kind: Optional[str] = None) -> bool:
     with _lock:
         return _span_close_locked(token, error=error, error_kind=error_kind)
@@ -345,9 +351,9 @@ def _span_close_locked(token: tuple, *, error: bool = False, error_kind: Optiona
     """Close a :func:`span_open` token. False (nothing recorded) when called on another thread. ``error_kind``
     names the exception class of an ``error`` (else it counts as ``unknown``)."""
     name, tid, c0, w0, acc0 = token
+    _open_intervals.close(tid, id(token))
     if tid != _native_id():
         return False
-    _open_intervals.close(tid, id(token))
     cpu = _thread_time() - c0
     wall = _perf() - w0
     with _lock:

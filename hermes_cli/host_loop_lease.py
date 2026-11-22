@@ -410,7 +410,7 @@ class HostLoopLease:
 
     def release(self) -> None:
         """Give the lease up (shutdown). A later ``held()`` competes for it again."""
-        self._pass = None  # a held() with no beat() (shut down mid-pass) records no pass
+        self._account_pass(discard=True)  # shutdown abandons the pass without booking its CPU
         with self._mu:
             if self._held:
                 self._drop()
@@ -428,13 +428,16 @@ class HostLoopLease:
 
     # -- internals -----------------------------------------------------------------------------
 
-    def _account_pass(self, *, error: bool = False) -> None:
+    def _account_pass(self, *, error: bool = False, discard: bool = False) -> None:
         opened, self._pass = self._pass, None
         if opened is None:
             return
         try:
             from hermes_cli import loop_accounting
-            loop_accounting.span_close(opened, error=error)  # a beat() on another thread records nothing
+            if discard:
+                loop_accounting.span_discard(opened)
+            else:
+                loop_accounting.span_close(opened, error=error)  # a foreign beat retires without booking
         except Exception:  # health: allow BLE001 -- accounting never touches the lease
             logger.debug("host loop %s: pass accounting failed", self.name, exc_info=True)
 
