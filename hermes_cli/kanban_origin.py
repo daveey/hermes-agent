@@ -335,10 +335,10 @@ def adopt_next_step(task_id: str, board: str, *, env: Optional[Mapping[str, str]
         session = _safe(_turn_session_id(env, explicit_env), "<origin-session-id>")
         # "custom" = a HERMES_HOME outside ~/.hermes: no profile name to pass; the CLI resolves its own.
         origin_profile = my_profile if my_profile != "custom" else ""
-    if me and owner_gw == me and (not worker or run_on == me):
-        # Card and chat on the same gateway: a tui subscription binds them, no courier involved.
-        pflag = "" if owner_profile == my_profile else f"-p {owner_profile} "
-        step = f"hermes {pflag}kanban --board {board} origin-adopt {task_id} --local"
+    if me and owner_gw == me and owner_profile == my_profile and (not worker or run_on == me):
+        # Local provenance and tui subscriptions are profile-local. Cross-profile
+        # adoption keeps both identities through the existing courier route.
+        step = f"hermes kanban --board {board} origin-adopt {task_id} --local"
         who = ("A worker is fenced from that on its own board: report to the chat with cross_session instead, or "
                "have the chat run it:" if worker else "Bind this chat to it by running in a terminal here:")
         return {"next_step": step, "run_on": me, "complete": "<" not in step,

@@ -266,7 +266,36 @@ def test_chat_refusal_for_card_on_another_local_profile_names_it(board, tmp_path
     _hub_state(tmp_path, monkeypatch, "hub", [("hub", "work/release/t_rel1")])
     monkeypatch.setenv("HERMES_SESSION_ID", "s_local")
     refused = _refuse("t_rel1", board="release")
-    assert refused["next_step"] == "hermes -p work kanban --board release origin-adopt t_rel1 --local"
+    assert refused["next_step"] == (
+        "hermes-hub adopt-task hub work/release/t_rel1 --origin-session s_local "
+        "--origin-profile default --id adopt:t_rel1:s_local")
+    assert refused["run_on"] == "hub"
+
+
+def test_cross_profile_hint_executes_through_courier_owner_entry(board, tmp_path, monkeypatch):
+    """Keep source profile provenance; never switch the chat into the target profile."""
+    import shlex
+    from tools.registry import registry
+    conn, tid = board
+    _hub_state(tmp_path, monkeypatch, "hub", [("hub", f"work/default/{tid}")])
+    monkeypatch.setenv("HERMES_SESSION_ID", "s_local")
+    words = shlex.split(_refuse(tid)["next_step"])
+    assert words[:2] == ["hermes-hub", "adopt-task"]
+    # The courier contract carries both profiles independently into the trusted
+    # owner entrypoint; no local state.db lookup in the target profile is needed.
+    profile, slug, task = words[3].split("/")
+    request = {"request_id": words[words.index("--id") + 1],
+               "owner": {"gateway": words[2], "profile": profile, "board": slug, "task_id": task},
+               "origin": {"gateway": "hub", "profile": words[words.index("--origin-profile") + 1],
+                          "session": words[words.index("--origin-session") + 1]}}
+    monkeypatch.setenv("HERMES_PROFILE", "work")
+    result = json.loads(registry.dispatch("kanban_origin_adopt", {"task_id": tid, "board": "default"},
+                                         origin_intent=request))
+    assert result["adopted"] is True, result
+    binding = result["origin_creation"]["binding"]
+    assert binding["owner"]["profile"] == "work"
+    assert binding["origin"] == {"gateway": "hub", "profile": "default", "session": "s_local"}
+    assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
 
 
 def test_worker_refusal_points_at_origin_gateway_cli(board, tmp_path, monkeypatch):
