@@ -15,7 +15,7 @@ _CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 # Provider/model refusals. Deliberately specific: a bare "refused" also matches "connection refused".
 _REFUSAL_RE = re.compile(
     r"model declined|safety refusal|declined (?:to|the) (?:assist|help|comply|answer|request)"
-    r"|refus(?:ed|al) (?:to|by the model)|(?:model|assistant) refus|stop_reason\W+refusal"
+    r"|refusal by the model|(?:model|assistant) refus|stop_reason\W+refusal"
     r"|cannot (?:assist|help) with (?:that|this)|can'?t (?:assist|help) with (?:that|this)"
     r"|violates? (?:our )?(?:usage|safety) polic"
     r"|This content was flagged for possible cybersecurity risk",

@@ -95,8 +95,36 @@ def test_refusals_do_not_create_a_systemic_crash_fix_card(live, monkeypatch):
     assert all(kb.get_task(live, tid).status == "triage" for tid in tids)
 
 
-def test_nonrefusal_keeps_retry_budget(live, monkeypatch):
+def test_notice_quotes_provider_message_after_long_preamble():
+    message = "This content was flagged for possible cybersecurity risk. " + "detail " * 40
+    text = summary.describe_failure("crashed", "fixture", {
+        "worker_output": "launcher context " * 30 + "Provider said: " + message,
+        "provider": "openai-codex", "model": "gpt-6.1-sol", "run_number": 203994,
+    })
+    assert f"run 203994: '{message[:200]}'. Not a worker crash" in text
+    assert "launcher context" not in text
+
+
+@pytest.mark.parametrize("error", ["sqlite refused to open file", OUTPUT])
+def test_infrastructure_failure_stays_uncharged(live, monkeypatch, error):
+    tid, rid = _local_crash(live, monkeypatch)
+    assert dispatch._record_task_failure(
+        live, tid, error, outcome="reclaimed", infrastructure=True, run_id=rid,
+    ) is False
+    assert kb.get_task(live, tid).consecutive_failures == 0
+    assert kb.get_task(live, tid).status != "triage"
+
+
+@pytest.mark.parametrize("output", [
+    "plain nonzero exit",
+    "hermes-core-wt ship refused to land PR #3993: missing review",
+    "ssh: the remote host refused to connect; retry later",
+    "sqlite refused to open file",
+])
+def test_nonrefusal_keeps_retry_budget(live, monkeypatch, output):
     tid, _ = _local_crash(live, monkeypatch)
+    monkeypatch.setattr(dispatch, "_classify_dead_worker", lambda *a, **kw:
+                        dispatch._DeadWorker("nonzero_exit", 1, "exit", "crashed", {"worker_output": output}))
     with kb.write_txn(live):
         live.execute("UPDATE tasks SET max_retries=2 WHERE id=?", (tid,))
     assert dispatch.detect_crashed_workers(live) == [tid]

@@ -40,9 +40,9 @@ def _record_task_failure(
     import json
 
     evidence = {"error": error, **(event_payload_extra or {}), **(diagnostic or {})}
-    refusal = summary.classify_failure(outcome, evidence) == "provider_refusal"
+    refusal = not infrastructure and summary.classify_failure(outcome, evidence) == "provider_refusal"
     if refusal:
-        force_trip, infrastructure, block_kind = True, False, "capability"
+        force_trip, block_kind = True, "capability"
     _kb = dispatch._kb
     if failure_limit is None:
         failure_limit = dispatch.DEFAULT_FAILURE_LIMIT
