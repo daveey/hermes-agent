@@ -247,6 +247,19 @@ def test_g_promotion_older_than_the_scope_annotation_does_not_release_a_renewed_
     assert not decision.pending(board, tid)
 
 
+def test_g_promotion_recorded_before_the_renewal_never_decides_it_whatever_time_it_claims(board, monkeypatch):
+    """A refused promote attempt leaves its event behind; its timestamp is its writer's clock, not arrival."""
+    tid, _, episode = stopped(board, monkeypatch)
+    kb._append_event(board, tid, 'promoted_manual', {})
+    board.execute("UPDATE task_events SET created_at=created_at+3600 WHERE task_id=? AND kind='promoted_manual'", (tid,))
+    board.commit()
+    link(board, tid)
+    renew(board, tid, episode, mandate(board, tid))
+    assert decision.pending(board, tid), 'a promotion recorded before the renewal must not release it'
+    kb._append_event(board, tid, 'promoted_manual', {})  # its clock is an hour behind the stale row's claim
+    assert not decision.pending(board, tid), 'one recorded after the renewal is the decision'
+
+
 def test_h_notice_and_unblock_text_name_the_route_only_for_scope_stops(board, monkeypatch):
     tid, _, _ = stopped(board, monkeypatch)
     text = decision.unblock_refusal(board, tid)

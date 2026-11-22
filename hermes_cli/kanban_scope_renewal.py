@@ -117,15 +117,16 @@ def reopened(conn: sqlite3.Connection, task_id: str, ordinary: list[dict]) -> Op
 
     A renewal re-opens its stop at the renewal's position: only a promotion or archive recorded after it is that
     decision. Without this, a promotion older than the scope annotation would release the card at renewal.
-    ``ordinary``: stop/promotion/archive events, newest first.
+    "After" is arrival order (the row id), as on the Board (its ``ord``): an event's ``created_at`` and uid are
+    its writer's clock, and a promotion recorded before the renewal must not decide it whatever time it states.
+    ``ordinary``: stop/promotion/archive events.
     """
-    from hermes_cli.kanban_sync_divergence import _event_order
-    renewed = sorted(renewals(conn, task_id), key=_event_order, reverse=True)
+    renewed = sorted(renewals(conn, task_id), key=lambda e: int(e["id"]), reverse=True)
     if not renewed:
         return None
-    decided = next((e for e in ordinary if e["kind"] != STOP), None)
+    decided = max((int(e["id"]) for e in ordinary if e["kind"] != STOP), default=-1)
     for renewal in renewed:
-        if decided is not None and _event_order(decided) > _event_order(renewal):
+        if decided > int(renewal["id"]):
             return None
         stop = next((e for e in ordinary if e["kind"] == STOP and key(e) == renewal["payload"]["episode"]), None)
         if stop is not None:
