@@ -22,9 +22,13 @@ def test_replica_bookkeeping_does_not_repeat_plan_or_backfill(live, ledger, kanb
         # Schema growth must not turn cursor writes into a main-file rewrite signal.
         replica.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         settled = f._settled(live, ledger, kanban_home, spies)
+        before = rev.read_key(replica, rev.SHADOW_TABLES)
+        stamp = ksc.shadow_path(f.BOARD).stat().st_mtime_ns
         for i in range(4):
             with kbc.write_txn(replica):
                 replica.execute('UPDATE kanban_sync_state SET cursor=cursor+1, pulled_at=?', (i,))
+            assert rev.read_key(replica, rev.SHADOW_TABLES) == before
+            assert ksc.shadow_path(f.BOARD).stat().st_mtime_ns == stamp
             f._pass(kanban_home)
         assert spies == {'reconcile': 0, 'backfill': 0}
         assert f._links(live) == settled
