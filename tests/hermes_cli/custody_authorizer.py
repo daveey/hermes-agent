@@ -25,30 +25,41 @@ def caller():
     return "<unknown>", "<unknown>"
 
 
-class _RememberConnection:
+class _RememberExecution:
+    def _connection(self):
+        return self.connection if isinstance(self, sqlite3.Cursor) else self
+
     def execute(self, *args, **kwargs):
+        connection = self._connection()
+        connection._custody_before()
         try:
             return super().execute(*args, **kwargs)
         finally:
-            after = getattr(self, "_custody_after", None)
-            if after:
-                after()
+            connection._custody_after()
 
     def executemany(self, *args, **kwargs):
+        connection = self._connection()
+        connection._custody_before()
         try:
             return super().executemany(*args, **kwargs)
         finally:
-            after = getattr(self, "_custody_after", None)
-            if after:
-                after()
+            connection._custody_after()
 
     def executescript(self, *args, **kwargs):
+        connection = self._connection()
+        connection._custody_before()
         try:
             return super().executescript(*args, **kwargs)
         finally:
-            after = getattr(self, "_custody_after", None)
-            if after:
-                after()
+            connection._custody_after()
+
+
+class _RememberConnection(_RememberExecution):
+    def cursor(self, factory=sqlite3.Cursor):
+        classes = self._custody_cursor_classes
+        if factory not in classes:
+            classes[factory] = type("CustodyCursor", (_RememberExecution, factory), {})
+        return super().cursor(factory=classes[factory])
 
 
 class CustodyGuard:
@@ -87,16 +98,25 @@ class CustodyGuard:
             finally:
                 cursor.close()
 
+        def adopt():
+            # Never issue SQL from an authorizer: recursive preparation can crash SQLite/Python
+            # when another trigger has an unresolved UDF. Resolve backup/reopen identities before
+            # the caller's statement, retaining fail-closed unknown identities.
+            for schema in ("main", "temp"):
+                try:
+                    rows = definitions(schema)
+                except sqlite3.DatabaseError:
+                    # The caller, not this observer, owns corrupt/locked database handling.
+                    continue
+                for name, sql in rows:
+                    key = (database_key, schema, name)
+                    if key not in self.triggers:
+                        identity = self.trigger_definitions.get(sql)
+                        if identity is not None:
+                            self.triggers[key] = identity
+
         def creator(schema, trigger):
-            key = (database_key, schema, trigger)
-            if key not in self.triggers:
-                # A backup/reopen can adopt only an exact definition observed at creation,
-                # never merely a familiar name. This also covers backup-to-memory fixtures.
-                for _, sql in definitions(schema, trigger):
-                    identity = self.trigger_definitions.get(sql)
-                    if identity is not None:
-                        self.triggers[key] = identity
-            return self.triggers.get(key, ("<unknown-trigger>", trigger))
+            return self.triggers.get((database_key, schema, trigger), ("<unknown-trigger>", trigger))
 
         def remember():
             if database_key not in self.pending:
@@ -108,7 +128,9 @@ class CustodyGuard:
                     if identity is not None:
                         self.trigger_definitions[sql] = identity
 
+        connection._custody_before = adopt
         connection._custody_after = remember
+        connection._custody_cursor_classes = {}
 
         def authorize(action, table, column, schema, trigger):
             identity = caller()

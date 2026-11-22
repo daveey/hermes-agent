@@ -193,6 +193,45 @@ def test_successful_backup_retains_exact_trigger_creator(guarded):
         target.close()
 
 
+@pytest.mark.parametrize("use_cursor", [False, True])
+def test_backup_trigger_adoption_never_reenters_sqlite_authorizer(use_cursor):
+    depths = []
+
+    class Observe(sqlite3.Connection):
+        def set_authorizer(self, callback):
+            depth = 0
+
+            def observed(*args):
+                nonlocal depth
+                depth += 1
+                depths.append(depth)
+                try:
+                    return callback(*args)
+                finally:
+                    depth -= 1
+
+            return super().set_authorizer(observed if callback else None)
+
+    connect = CustodyGuard().factory(sqlite3.dbapi2.connect)
+    source = connect(":memory:", factory=Observe)
+    target = connect(":memory:", factory=Observe)
+    try:
+        source.executescript("CREATE TABLE domain(x); CREATE TABLE kanban_sync_outbox(x); "
+                             "CREATE TRIGGER fixture AFTER INSERT ON domain "
+                             "BEGIN INSERT INTO kanban_sync_outbox VALUES(new.x); END;")
+        source.backup(target)
+        depths.clear()
+        executor = target.cursor() if use_cursor else target
+        executor.execute("INSERT INTO domain VALUES(7)")
+        assert target.execute("SELECT x FROM kanban_sync_outbox").fetchall() == [(7,)]
+        assert max(depths) == 1, "schema SQL must run outside the authorizer callback"
+        if use_cursor:
+            executor.close()
+    finally:
+        source.close()
+        target.close()
+
+
 def test_custom_connection_class_is_stable_across_opens():
     class Custom(sqlite3.Connection):
         pass
