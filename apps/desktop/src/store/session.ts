@@ -346,7 +346,7 @@ export function setRememberedRoute(path: null | string, profile: string): void {
   persistString(profileNavigationKey(LAST_ROUTE_KEY, profile), path)
 }
 
-let configuredDefaultProjectDir = ''
+export const $configuredDefaultProjectDir = atom('')
 
 function workspaceCwdKey(connection: HermesConnection | null = $connection.get()): string {
   const profile = connection?.profile?.trim() || 'default'
@@ -367,26 +367,26 @@ function workspaceCwdKey(connection: HermesConnection | null = $connection.get()
 export const getRememberedWorkspaceCwd = (): string => storedString(workspaceCwdKey())?.trim() || ''
 export type NewChatWorkspaceTarget = null | string | undefined
 
-export const getConfiguredDefaultProjectDir = (): string => configuredDefaultProjectDir
+export const getConfiguredDefaultProjectDir = (): string => $configuredDefaultProjectDir.get()
 
 export async function syncConfiguredDefaultProjectDir(shouldPublish: () => boolean = () => true): Promise<string> {
   const settings = window.hermesDesktop?.settings?.getDefaultProjectDir
 
   if (!settings) {
     if (shouldPublish()) {
-      configuredDefaultProjectDir = ''
+      $configuredDefaultProjectDir.set('')
     }
 
-    return configuredDefaultProjectDir
+    return $configuredDefaultProjectDir.get()
   }
 
   const { dir } = await settings()
 
   if (shouldPublish()) {
-    configuredDefaultProjectDir = dir?.trim() || ''
+    $configuredDefaultProjectDir.set(dir?.trim() || '')
   }
 
-  return configuredDefaultProjectDir
+  return $configuredDefaultProjectDir.get()
 }
 
 /** Align the renderer workspace with the main-process default (home dir when
@@ -449,7 +449,7 @@ export async function ensureDefaultWorkspaceCwd(shouldPublish: () => boolean = (
 }
 
 export function applyConfiguredDefaultProjectDir(dir: null | string | undefined): void {
-  configuredDefaultProjectDir = dir?.trim() || ''
+  $configuredDefaultProjectDir.set(dir?.trim() || '')
 }
 
 interface AppAtom<T> {

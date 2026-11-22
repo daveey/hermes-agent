@@ -12,7 +12,6 @@ import {
   sessionMatchesProjectFilter,
   type SidebarProjectTree
 } from '@/app/chat/sidebar/projects/workspace-groups'
-import { $mainDraftSessionCwd } from '@/app/session/new-session-cwd'
 import { notifyNewSessionTargetUnreachable, prepareDefaultNewSession } from '@/app/session/new-session-route'
 import { group } from '@/components/pane-shell/tree/model'
 import { $activeTreeGroup, $layoutTree } from '@/components/pane-shell/tree/store'
@@ -149,11 +148,11 @@ beforeEach(() => {
     profile: { setDefault: async (route: DesktopProfileRoute) => route }
   } as never
   vi.mocked(requestGatewayForAgent).mockReset()
-  vi.mocked(requestGatewayForAgent).mockResolvedValue({
+  vi.mocked(requestGatewayForAgent).mockImplementation(async (_connection, _profile, _method, params) => ({
     session_id: 'created',
     stored_session_id: 'created-stored',
-    info: {}
-  })
+    info: { cwd: params?.cwd || '' }
+  }))
 })
 
 afterEach(() => {
@@ -174,6 +173,91 @@ afterEach(() => {
 })
 
 describe('new-session gateway target', () => {
+  it.each(['new-chat profile', 'active profile'])('rebuckets a mounted row after only the %s changes', async input => {
+    const { browserDefaultProjectDirKey } = await import('@/lib/browser-settings')
+    const { result } = mountActions()
+    act(() => {
+      result.current.startFreshSessionDraft()
+      $currentCwd.set('')
+      $newChatWorkspaceTarget.set(undefined)
+      $newChatProfile.set(null)
+      $projects.set([{ id: 'p1', name: 'Project', folders: [{ path: '/repo' }] }] as never)
+      document.documentElement.dataset.hermesDesktopHost = 'browser'
+      localStorage.setItem(browserDefaultProjectDirKey('/', 'beta'), '/repo')
+    })
+    const view = render(
+      <MemoryRouter>
+        <SidebarDraftRows projectId="p1" />
+        <SidebarDraftRows projectId={NO_PROJECT_ID} />
+      </MemoryRouter>
+    )
+    try {
+      expect(
+        view.container.querySelector('[data-sidebar-draft-project]')?.getAttribute('data-sidebar-draft-project')
+      ).toBe(NO_PROJECT_ID)
+      act(() => (input === 'new-chat profile' ? $newChatProfile.set('beta') : $activeGatewayProfile.set('beta')))
+      expect(
+        view.container.querySelector('[data-sidebar-draft-project]')?.getAttribute('data-sidebar-draft-project')
+      ).toBe('p1')
+      expect(prePrSendCwd()).toBe('/repo')
+    } finally {
+      delete document.documentElement.dataset.hermesDesktopHost
+      localStorage.removeItem(browserDefaultProjectDirKey('/', 'beta'))
+      act(() => $projects.set([]))
+    }
+  })
+  it.each(['tree', 'default dir'])('reevaluates both row and send after a %s-only fallback update', async input => {
+    const { $projectTree } = await import('@/store/projects')
+    const { result } = mountActions()
+    await act(() => setDefaultProfile(HUB))
+    act(() => {
+      applyConfiguredDefaultProjectDir('')
+      $projectTree.set([])
+      $projects.set([{ id: 'p1', name: 'Project', folders: [{ path: '/repo' }] }] as never)
+      $layoutTree.set(group(['workspace'], { active: 'workspace', id: 'fallback' }))
+      $activeTreeGroup.set('fallback')
+      setSelectedStoredSessionId(null)
+      result.current.startFreshSessionDraft()
+      $currentCwd.set('')
+      $newChatWorkspaceTarget.set(undefined)
+      $projectScope.set(input === 'tree' ? 'p1' : ALL_PROJECTS)
+    })
+    // Warm the real send before changing only a fallback input.
+    await act(() => result.current.createBackendSessionForSend('Warm fallback'))
+    act(() => {
+      result.current.startFreshSessionDraft()
+      $currentCwd.set('')
+      $newChatWorkspaceTarget.set(undefined)
+    })
+    const view = render(
+      <MemoryRouter>
+        <SidebarDraftRows projectId="p1" />
+        <SidebarDraftRows projectId={NO_PROJECT_ID} />
+      </MemoryRouter>
+    )
+    expect(
+      view.container.querySelector('[data-sidebar-draft-project]')?.getAttribute('data-sidebar-draft-project')
+    ).toBe(NO_PROJECT_ID)
+    act(() => {
+      if (input === 'tree') {
+        $projectTree.set([{ id: 'p1', label: 'Project', path: '/repo', repos: [], sessionCount: 0 }])
+      } else {
+        applyConfiguredDefaultProjectDir('/repo')
+      }
+    })
+    expect
+      .soft(view.container.querySelector('[data-sidebar-draft-project]')?.getAttribute('data-sidebar-draft-project'))
+      .toBe('p1')
+    const expected = prePrSendCwd()
+    expect(expected).toBe('/repo')
+    await act(() => result.current.createBackendSessionForSend('Fresh fallback'))
+    const call = vi.mocked(requestGatewayForAgent).mock.calls.findLast(call => call[2] === 'session.create')!
+    expect(call[3]?.cwd).toBe(expected)
+    act(() => {
+      $projectTree.set([])
+      $projects.set([])
+    })
+  })
   it.each(['enter project after tile', 'pick same tile folder', 'choose same cwd', 'return to tile cwd', 'close tile'])(
     'preserves main workspace intent after %s',
     async operation => {
@@ -217,8 +301,7 @@ describe('new-session gateway target', () => {
       })
       const expectedCwd = operation === 'enter project after tile' ? '/new-project' : '/other-project'
 
-      const expectedBucket =
-        operation === 'close tile' ? 'original' : operation === 'enter project after tile' ? 'next' : 'tile'
+      const expectedBucket = operation === 'enter project after tile' ? 'next' : 'tile'
 
       const view = render(
         <MemoryRouter>
@@ -236,9 +319,7 @@ describe('new-session gateway target', () => {
       const call = vi.mocked(requestGatewayForAgent).mock.calls.findLast(call => call[2] === 'session.create')!
       expect(call[3]?.cwd).toBe(expectedCwd)
       expect(call[3]?.cwd || '').toBe(beforeSendCwd)
-      expect(sessionBucketId($sessions.get()[0], $projects.get())).toBe(
-        operation === 'close tile' ? 'tile' : expectedBucket
-      )
+      expect(sessionBucketId($sessions.get()[0], $projects.get())).toBe(expectedBucket)
       expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(0)
       act(() => {
         $projects.set([])
@@ -293,10 +374,10 @@ describe('new-session gateway target', () => {
 
       await act(() => ensureDefaultWorkspaceCwd())
     } else if (operation.startsWith('normalized')) {
-      vi.mocked(requestGatewayForAgent).mockImplementation(async (_connection, _profile, method) =>
+      vi.mocked(requestGatewayForAgent).mockImplementation(async (_connection, _profile, method, params) =>
         method === 'config.get'
           ? { cwd: '/repo' }
-          : { session_id: 'created', stored_session_id: 'created-stored', info: {} }
+          : { session_id: 'created', stored_session_id: 'created-stored', info: { cwd: params?.cwd || '' } }
       )
       await act(async () =>
         startWorkspaceSession({
@@ -397,7 +478,7 @@ describe('new-session gateway target', () => {
 
       expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(1)
       expect(placement()).toBe('p1')
-      expect($mainDraftSessionCwd.get()).toBe(operation === 'pick folder' ? '/repo/normalized' : '/repo')
+      expect(prePrSendCwd()).toBe(operation === 'pick folder' ? '/repo/normalized' : '/repo')
 
       if (operation !== 'switch gateway') {
         await act(() => result.current.createBackendSessionForSend('First send'))

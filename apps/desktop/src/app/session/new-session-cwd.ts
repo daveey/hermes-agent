@@ -1,61 +1,58 @@
-import { computed } from 'nanostores'
+import { useStore } from '@nanostores/react'
 
 import { NO_PROJECT_ID } from '@/app/chat/sidebar/projects/workspace-groups'
+import { $activeGatewayProfile, $newChatProfile } from '@/store/profile'
 import { $projectScope } from '@/store/project-scope'
-import { $projects, resolveNewSessionCwd } from '@/store/projects'
-import { $currentCwd, $newChatWorkspaceTarget, type NewChatWorkspaceTarget } from '@/store/session'
+import { $projectTree, resolveNewSessionCwd } from '@/store/projects'
+import { $configuredDefaultProjectDir, $connection, $currentCwd, $newChatWorkspaceTarget } from '@/store/session'
 import { $focusedSessionIsTile } from '@/store/session-focus'
-import { $mainSidebarDraftCwd, $sidebarBorrowedTileCwd } from '@/store/sidebar-draft'
+import { $sessionTiles } from '@/store/session-states'
+import { $mainSidebarDraftCwd, $sidebarBorrowedTileCwd, $sidebarBorrowedTileId } from '@/store/sidebar-draft'
 
-/** Pure extraction of the pre-existing first-send workspace computation. */
-export function resolveMainDraftCwd(
-  target: NewChatWorkspaceTarget,
-  homeScope: boolean,
-  currentCwd: string,
-  fallbackCwd: string
-): string {
-  return target === null || (target === undefined && homeScope)
+/** Fresh display read only. The send path deliberately keeps its original inline expression. */
+export function mainSidebarDisplayCwd(): string {
+  const target = $newChatWorkspaceTarget.get()
+  const scope = $projectScope.get()
+  const currentCwd = $currentCwd.get()
+  const borrowedCwd = $sidebarBorrowedTileCwd.get()
+  const borrowedId = $sidebarBorrowedTileId.get()
+  const tileOpen = $sessionTiles.get().some(tile => tile.storedSessionId === borrowedId)
+  const borrowed = $focusedSessionIsTile.get() || (tileOpen && borrowedCwd !== null && currentCwd === borrowedCwd)
+  const displayCwd = borrowed ? $mainSidebarDraftCwd.get() || '' : currentCwd
+
+  return target === null || (target === undefined && scope === NO_PROJECT_ID)
     ? ''
     : typeof target === 'string'
       ? target.trim()
-      : currentCwd.trim() || fallbackCwd
+      : displayCwd.trim() || (borrowed ? $mainSidebarDraftCwd.get() || '' : resolveNewSessionCwd())
 }
 
-/** Display-only snapshot before a center tile borrows the workspace for Files. */
-export function captureMainDraftBeforeTile(dir: string, cwd?: null | string): void {
+/** Subscribe to every fallback input, but evaluate afresh on every render (no computed cache). */
+export function useMainSidebarDisplayCwd(): string {
+  'use no memo'
+  // The fallback reads stores imperatively; React Compiler must not hoist this read.
+  useStore($newChatWorkspaceTarget)
+  useStore($projectScope)
+  useStore($currentCwd)
+  useStore($projectTree)
+  useStore($newChatProfile)
+  useStore($activeGatewayProfile)
+  useStore($configuredDefaultProjectDir)
+  useStore($connection)
+  useStore($mainSidebarDraftCwd)
+  useStore($sidebarBorrowedTileCwd)
+  useStore($sidebarBorrowedTileId)
+  useStore($focusedSessionIsTile)
+  useStore($sessionTiles)
+
+  return mainSidebarDisplayCwd()
+}
+
+/** Capture before a center tile borrows the workspace for Files. */
+export function captureMainDraftBeforeTile(dir: string, cwd: null | string | undefined, storedId: string): void {
   if (dir === 'center' && cwd) {
-    $mainSidebarDraftCwd.set($mainSidebarDisplayCwd.get())
+    $mainSidebarDraftCwd.set(mainSidebarDisplayCwd())
     $sidebarBorrowedTileCwd.set(cwd)
+    $sidebarBorrowedTileId.set(storedId)
   }
 }
-
-export const $mainDraftSessionCwd = computed(
-  [$newChatWorkspaceTarget, $projectScope, $currentCwd, $projects],
-  (target, scope, currentCwd) =>
-    resolveMainDraftCwd(target, scope === NO_PROJECT_ID, currentCwd, resolveNewSessionCwd())
-)
-
-// Tile paint must not move the main draft's display. A subsequent main choice
-// wins immediately. This selector is NEVER an input to session.create.
-export const $mainSidebarDisplayCwd = computed(
-  [
-    $newChatWorkspaceTarget,
-    $projectScope,
-    $currentCwd,
-    $projects,
-    $mainSidebarDraftCwd,
-    $sidebarBorrowedTileCwd,
-    $focusedSessionIsTile
-  ],
-  (target, scope, currentCwd, _projects, initialCwd, borrowedCwd, tileFocused) => {
-    const borrowed = tileFocused || (borrowedCwd !== null && currentCwd === borrowedCwd)
-    const displayCwd = borrowed ? initialCwd || '' : currentCwd
-
-    return resolveMainDraftCwd(
-      target,
-      scope === NO_PROJECT_ID,
-      displayCwd,
-      borrowed ? initialCwd || '' : resolveNewSessionCwd()
-    )
-  }
-)

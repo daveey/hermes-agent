@@ -10,6 +10,8 @@ vi.mock('@/i18n', () => ({ useI18n: () => ({ t: { sidebar: { nav: { 'new-session
 vi.mock('@/store/session-states', () => ({ $sessionTiles: atom([]), focusOpenSession: state.focus }))
 vi.mock('@/store/session-focus', () => ({ $focusedStoredSessionId: atom(null), $focusedSessionIsTile: atom(false) }))
 vi.mock('@/store/session', () => ({
+  $configuredDefaultProjectDir: atom(''),
+  $connection: atom(null),
   $currentCwd: atom(''),
   $newChatWorkspaceTarget: atom(undefined),
   $workspaceCwdOwner: atom(null),
@@ -24,7 +26,7 @@ vi.mock('@/store/composer', () => ({
   $freshDraftKey: atom('__new__:test'),
   takeSessionDraft: () => ({ text: '', attachments: [] })
 }))
-vi.mock('@/store/projects', () => ({ $projects: atom([]), resolveNewSessionCwd: () => '' }))
+vi.mock('@/store/projects', () => ({ $projectTree: atom([]), $projects: atom([]), resolveNewSessionCwd: () => '' }))
 vi.mock('react-router', () => ({ useLocation: () => ({ pathname: '/' }) }))
 
 import { $draftTitles } from '@/store/composer'

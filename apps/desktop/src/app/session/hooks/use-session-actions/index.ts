@@ -3,12 +3,13 @@ import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 import type { NavigateFunction } from 'react-router'
 
+import { NO_PROJECT_ID } from '@/app/chat/sidebar/projects/workspace-groups'
 import {
   extendRefreshPageToOverlap,
   graftRefreshedTailOntoBackfill,
   olderPageReader
 } from '@/app/chat/transcript-backfill'
-import { $mainDraftSessionCwd, captureMainDraftBeforeTile } from '@/app/session/new-session-cwd'
+import { captureMainDraftBeforeTile } from '@/app/session/new-session-cwd'
 import { defaultNewSessionTarget, prepareDefaultNewSession } from '@/app/session/new-session-route'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { setWorkspaceScope } from '@/components/pane-shell/workspace-scope'
@@ -68,6 +69,7 @@ import {
   resolveActiveSourceOwnerRoute,
   resolveNewChatOwnerRoute
 } from '@/store/profile'
+import { $projectScope } from '@/store/project-scope'
 import { projectProfile, resolveNewSessionCwd } from '@/store/projects'
 import { clearAllPrompts } from '@/store/prompts'
 import { clearStoredTranscriptReadOnly, markStoredTranscriptReadOnly } from '@/store/read-only-transcript'
@@ -76,6 +78,7 @@ import {
   $connection,
   $currentCwd,
   $messages,
+  $newChatWorkspaceTarget,
   $sessions,
   $yoloActive,
   getSessionOwnerHints,
@@ -657,7 +660,15 @@ export function useSessionActions({
         // (resolveNewSessionCwd — a project's new session keeps its repo cwd).
         // Home is an explicit detached scope: do not let a stale live cwd from
         // the previously selected project leak into this new session (#84220).
-        const cwd = $mainDraftSessionCwd.get()
+        const workspaceTarget = $newChatWorkspaceTarget.get()
+        const homeScope = $projectScope.get() === NO_PROJECT_ID
+
+        const cwd =
+          workspaceTarget === null || (workspaceTarget === undefined && homeScope)
+            ? ''
+            : typeof workspaceTarget === 'string'
+              ? workspaceTarget.trim()
+              : $currentCwd.get().trim() || resolveNewSessionCwd()
 
         // The EXACT owner for this create: an explicit agent route, else the
         // (registry source, profile) pair the draft was made on. Read ONCE at
@@ -775,10 +786,7 @@ export function useSessionActions({
           // server later returns its own preview/title and supersedes this.
           // The row carries the create route's exact owner (backend profile +
           // connection), never the ambient profile — see upsertOptimisticSession.
-          upsertOptimisticSession(
-            { ...created, info: { ...created.info, cwd: created.info?.cwd ?? cwd } },
-            stored, null, preview?.trim() || null, null, undefined, capturedRoute
-          )
+          upsertOptimisticSession(created, stored, null, preview?.trim() || null, null, undefined, capturedRoute)
           // Anything still parked under the pre-session draft bucket belongs
           // to this chat now (#114122); the composer moves it on scope swap.
           announceNewSessionDraftKey(stored)
@@ -972,13 +980,9 @@ export function useSessionActions({
     [navigate, startFreshSessionDraft]
   )
 
-  /** Create a fresh session and open it as a tile — leaves the primary chat alone.
-   *  Used by the New session row's "Open in split" menu and the tab-strip "+".
-   *
-   *  `listed` (default true) controls optimistic session-list insertion. Backend
-   *  sessions stay in memory until the first persisted turn. `listed: false`
-   *  tabs instead get a client-only sidebar draft, replaced on first send;
-   *  "Open in split" keeps the listed behavior. */
+  /** New tile from the split menu or tab-strip "+", leaving primary chat alone.
+   *  `listed` controls optimistic insertion; false tabs get client-only sidebar
+   *  drafts until first send. Backend rows still wait for a persisted turn. */
   const openNewSessionTile = useCallback(
     async (
       dir: TileDock = 'right',
@@ -1174,7 +1178,7 @@ export function useSessionActions({
         updateSessionState(created.session_id, state => (runtimeInfo ? { ...state, ...runtimeInfo } : state), stored)
 
         // Capture main before opening the tile can move pane focus.
-        captureMainDraftBeforeTile(dir, runtimeInfo?.cwd)
+        captureMainDraftBeforeTile(dir, runtimeInfo?.cwd, stored)
 
         openSessionTile(stored, dir, options?.anchor, options?.before, workspaceScope)
         patchSessionTile(stored, { runtimeId: created.session_id })
