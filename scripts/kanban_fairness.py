@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import subprocess
 import sys
 
@@ -81,7 +80,7 @@ def _arm(args) -> int:
     clock_error_ns = None
     if args.writer_clocks:
         scaled = args.clock_error_s * 1_000_000_000
-        if not math.isfinite(scaled) or not 0 <= scaled < 2**63:
+        if not 0 <= scaled < 2**63:
             raise ValueError("clock-error-s must yield a nonnegative signed-64-bit nanosecond bound")
         clock_error_ns = int(scaled)
     if args.db:

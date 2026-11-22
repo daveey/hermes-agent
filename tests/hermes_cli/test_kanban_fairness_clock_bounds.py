@@ -59,6 +59,17 @@ def test_deep_persisted_clock_reports_gap_without_advancing(conn, tmp_path, monk
     assert receipts["journal_seq"] == 0
 
 
+def test_blob_task_id_reports_type_error_gap_without_advancing(conn, tmp_path):
+    kb.create_task(conn, title="blob", assignee="a")
+    journal.arm(conn, "blob")
+    # SQLite TEXT affinity retains BLOB values; export must record the failure
+    # rather than escape or advance past evidence it could not serialize.
+    conn.execute(f"UPDATE {journal.JOURNAL} SET task_id=?", (b"\xff\x00",))
+    receipts = store.drain(conn, tmp_path)
+    assert {"code": "export_failed", "detail": "TypeError"} in receipts["gaps"]
+    assert receipts["journal_seq"] == 0
+
+
 def test_pre_upgrade_session_can_be_inspected_and_sealed(conn):
     journal.arm(conn, "old")
     conn.execute(f"ALTER TABLE {journal.SESSION} DROP COLUMN clock_error_ns")
