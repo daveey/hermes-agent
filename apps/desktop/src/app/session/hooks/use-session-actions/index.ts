@@ -140,7 +140,7 @@ import {
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { forgetSessionUnread } from '@/store/session-unread'
 import { $archivedSessions } from '@/store/sidebar-archive'
-import { $mainSidebarDraftCwd } from '@/store/sidebar-draft'
+import { $mainSidebarDraftCwd, $sidebarBorrowedTileCwd } from '@/store/sidebar-draft'
 import { clearSessionSubagents } from '@/store/subagents'
 import { clearSessionTodos, restoreSessionTodosFromSnapshot } from '@/store/todos'
 import {
@@ -635,6 +635,7 @@ export function useSessionActions({
       setCurrentBranch('')
       // Never clear the composer here — ChatBar's per-thread draft swap owns it.
       $mainSidebarDraftCwd.set($currentCwd.get())
+      $sidebarBorrowedTileCwd.set(null)
       setFreshDraftReady(true)
     },
     [activeSessionIdRef, busyRef, navigate, onFreshDraftRouteIntent, resetViewSync, selectedStoredSessionIdRef]

@@ -3,56 +3,59 @@ import { computed } from 'nanostores'
 import { NO_PROJECT_ID } from '@/app/chat/sidebar/projects/workspace-groups'
 import { $projectScope } from '@/store/project-scope'
 import { $projects, resolveNewSessionCwd } from '@/store/projects'
-import { $currentCwd, $newChatWorkspaceTarget, $workspaceCwdOwner, type NewChatWorkspaceTarget } from '@/store/session'
+import { $currentCwd, $newChatWorkspaceTarget, type NewChatWorkspaceTarget } from '@/store/session'
 import { $focusedSessionIsTile } from '@/store/session-focus'
-import { $sessionTiles } from '@/store/session-states'
-import { $mainSidebarDraftCwd } from '@/store/sidebar-draft'
+import { $mainSidebarDraftCwd, $sidebarBorrowedTileCwd } from '@/store/sidebar-draft'
 
-/** The draft preview and first send must resolve the same workspace intent. */
+/** Pure extraction of the pre-existing first-send workspace computation. */
 export function resolveMainDraftCwd(
   target: NewChatWorkspaceTarget,
   homeScope: boolean,
   currentCwd: string,
   fallbackCwd: string
 ): string {
-  if (target === null || (target === undefined && homeScope)) {
-    return ''
-  }
-
-  if (typeof target === 'string') {
-    return target.trim()
-  }
-
-  return currentCwd.trim() || fallbackCwd
+  return target === null || (target === undefined && homeScope)
+    ? ''
+    : typeof target === 'string'
+      ? target.trim()
+      : currentCwd.trim() || fallbackCwd
 }
 
-/** The only boundary lending main's ambient cwd to a different chat. */
+/** Display-only snapshot before a center tile borrows the workspace for Files. */
 export function captureMainDraftBeforeTile(dir: string, cwd?: null | string): void {
   if (dir === 'center' && cwd) {
-    $mainSidebarDraftCwd.set($mainDraftSessionCwd.get())
+    $mainSidebarDraftCwd.set($mainSidebarDisplayCwd.get())
+    $sidebarBorrowedTileCwd.set(cwd)
   }
 }
 
 export const $mainDraftSessionCwd = computed(
+  [$newChatWorkspaceTarget, $projectScope, $currentCwd, $projects],
+  (target, scope, currentCwd) =>
+    resolveMainDraftCwd(target, scope === NO_PROJECT_ID, currentCwd, resolveNewSessionCwd())
+)
+
+// Tile paint must not move the main draft's display. A subsequent main choice
+// wins immediately. This selector is NEVER an input to session.create.
+export const $mainSidebarDisplayCwd = computed(
   [
     $newChatWorkspaceTarget,
     $projectScope,
     $currentCwd,
-    $focusedSessionIsTile,
-    $mainSidebarDraftCwd,
     $projects,
-    $workspaceCwdOwner,
-    $sessionTiles
+    $mainSidebarDraftCwd,
+    $sidebarBorrowedTileCwd,
+    $focusedSessionIsTile
   ],
-  (target, scope, currentCwd, tileFocused, initialCwd, _projects, cwdOwner, tiles) => {
-    // A center tile lends its cwd to Files even after focus returns to main.
-    const tileCwd = tileFocused || tiles.some(tile => tile.storedSessionId === cwdOwner)
+  (target, scope, currentCwd, _projects, initialCwd, borrowedCwd, tileFocused) => {
+    const borrowed = tileFocused || (borrowedCwd !== null && currentCwd === borrowedCwd)
+    const displayCwd = borrowed ? initialCwd || '' : currentCwd
 
     return resolveMainDraftCwd(
       target,
       scope === NO_PROJECT_ID,
-      tileCwd ? initialCwd || '' : currentCwd,
-      tileCwd ? initialCwd || '' : resolveNewSessionCwd()
+      displayCwd,
+      borrowed ? initialCwd || '' : resolveNewSessionCwd()
     )
   }
 )

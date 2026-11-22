@@ -32,8 +32,15 @@ import {
   ensureGatewayAgent
 } from '@/store/profile'
 import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
-import { $projects, followEnteredProjectCwd } from '@/store/projects'
-import { $sessions, setFreshDraftReady, setSelectedStoredSessionId } from '@/store/session'
+import { $projects, followEnteredProjectCwd, resolveNewSessionCwd } from '@/store/projects'
+import {
+  $currentCwd,
+  $newChatWorkspaceTarget,
+  $sessions,
+  setFreshDraftReady,
+  setNewChatWorkspaceTarget,
+  setSelectedStoredSessionId
+} from '@/store/session'
 import { $unlistedSessionOwnerRows } from '@/store/session'
 import {
   _resetSessionOwnerHintsForTests,
@@ -67,6 +74,18 @@ vi.mock('@/store/gateway', async original => ({
 
 const HUB = { connectionId: 'hermes-hub', profile: 'default' }
 const FOREGROUND_CREATE_DIAL = [undefined, undefined, { spawnPriority: 'foreground' }] as const
+
+// Oracle copied verbatim from the pre-PR send path, independent of display selectors.
+function prePrSendCwd() {
+  const workspaceTarget = $newChatWorkspaceTarget.get()
+  const homeScope = $projectScope.get() === NO_PROJECT_ID
+
+  return workspaceTarget === null || (workspaceTarget === undefined && homeScope)
+    ? ''
+    : typeof workspaceTarget === 'string'
+      ? workspaceTarget.trim()
+      : $currentCwd.get().trim() || resolveNewSessionCwd()
+}
 
 function mountActions() {
   const ref = <T,>(current: T) => ({ current })
@@ -155,6 +174,78 @@ afterEach(() => {
 })
 
 describe('new-session gateway target', () => {
+  it.each(['enter project after tile', 'pick same tile folder', 'choose same cwd', 'return to tile cwd', 'close tile'])(
+    'preserves main workspace intent after %s',
+    async operation => {
+      const { closeSessionTile } = await import('@/store/session-states')
+      const { result } = mountActions()
+      await act(() => setDefaultProfile(HUB))
+      act(() => {
+        $projects.set([
+          { id: 'original', name: 'Original', folders: [{ path: '/repo' }] },
+          { id: 'next', name: 'Next', folders: [{ path: '/new-project' }] },
+          { id: 'tile', name: 'Tile', folders: [{ path: '/other-project' }] }
+        ] as never)
+        $layoutTree.set(group(['workspace'], { active: 'workspace', id: 'boundary' }))
+        $activeTreeGroup.set('boundary')
+        setSelectedStoredSessionId(null)
+        result.current.startFreshSessionDraft()
+        followEnteredProjectCwd('/repo')
+      })
+      vi.mocked(requestGatewayForAgent).mockResolvedValueOnce({
+        session_id: 'tile-runtime',
+        stored_session_id: 'tile-stored',
+        info: { cwd: '/other-project' }
+      })
+      await act(() => result.current.openNewSessionTile('center', { cwd: '/other-project', listed: false, route: HUB }))
+      act(() => {
+        $layoutTree.set(group(['workspace', 'session-tile:tile-stored'], { active: 'workspace', id: 'boundary' }))
+        $activeTreeGroup.set('boundary')
+
+        if (operation === 'close tile') {
+          closeSessionTile('tile-stored')
+        } else if (operation === 'pick same tile folder') {
+          setNewChatWorkspaceTarget('/other-project')
+        } else if (operation === 'choose same cwd') {
+          setCurrentCwd('/other-project')
+        } else if (operation === 'return to tile cwd') {
+          followEnteredProjectCwd('/new-project')
+          followEnteredProjectCwd('/other-project')
+        } else {
+          followEnteredProjectCwd('/new-project')
+        }
+      })
+      const expectedCwd = operation === 'enter project after tile' ? '/new-project' : '/other-project'
+
+      const expectedBucket =
+        operation === 'close tile' ? 'original' : operation === 'enter project after tile' ? 'next' : 'tile'
+
+      const view = render(
+        <MemoryRouter>
+          <SidebarDraftRows projectId="original" />
+          <SidebarDraftRows projectId="next" />
+          <SidebarDraftRows projectId="tile" />
+        </MemoryRouter>
+      )
+
+      expect
+        .soft(view.container.querySelector('[data-sidebar-draft-project]')?.getAttribute('data-sidebar-draft-project'))
+        .toBe(expectedBucket)
+      const beforeSendCwd = prePrSendCwd()
+      await act(() => result.current.createBackendSessionForSend('First send'))
+      const call = vi.mocked(requestGatewayForAgent).mock.calls.findLast(call => call[2] === 'session.create')!
+      expect(call[3]?.cwd).toBe(expectedCwd)
+      expect(call[3]?.cwd || '').toBe(beforeSendCwd)
+      expect(sessionBucketId($sessions.get()[0], $projects.get())).toBe(
+        operation === 'close tile' ? 'tile' : expectedBucket
+      )
+      expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(0)
+      act(() => {
+        $projects.set([])
+        closeAllOpenSessionTiles('workspace')
+      })
+    }
+  )
   it.each([
     'default seed',
     'gateway and seed',
@@ -196,7 +287,10 @@ describe('new-session gateway target', () => {
         settings: { getDefaultProjectDir: async () => ({ dir: '/repo', defaultLabel: '', resolvedCwd: '/repo' }) }
       } as never
 
-      if (operation === 'gateway and seed') {act(() => wipeSessionListsForGatewaySwitch())}
+      if (operation === 'gateway and seed') {
+        act(() => wipeSessionListsForGatewaySwitch())
+      }
+
       await act(() => ensureDefaultWorkspaceCwd())
     } else if (operation.startsWith('normalized')) {
       vi.mocked(requestGatewayForAgent).mockImplementation(async (_connection, _profile, method) =>
@@ -230,9 +324,13 @@ describe('new-session gateway target', () => {
       act(() => {
         setCurrentCwd('/repo')
 
-        if (operation === 'detached') {setNewChatWorkspaceTarget(null)}
+        if (operation === 'detached') {
+          setNewChatWorkspaceTarget(null)
+        }
 
-        if (operation === 'Home scope') {$projectScope.set(NO_PROJECT_ID)}
+        if (operation === 'Home scope') {
+          $projectScope.set(NO_PROJECT_ID)
+        }
       })
     }
 
@@ -240,11 +338,15 @@ describe('new-session gateway target', () => {
     const expectedBucket = expectedCwd ? 'p1' : NO_PROJECT_ID
     expect(placement()).toBe(expectedBucket)
     expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(1)
+    const beforeSendCwd = prePrSendCwd()
     await act(() => result.current.createBackendSessionForSend('First send'))
     const createCall = vi.mocked(requestGatewayForAgent).mock.calls.findLast(call => call[2] === 'session.create')!
-    expect(createCall[3]?.cwd || '').toBe(expectedCwd)
+    expect(createCall[3]?.cwd || '').toBe(beforeSendCwd)
+    expect(beforeSendCwd).toBe(operation === 'tile workspace' ? '/other-project' : expectedCwd)
     expect($sessions.get()).toHaveLength(1)
-    expect(sessionBucketId($sessions.get()[0], $projects.get())).toBe(expectedBucket)
+    expect(sessionBucketId($sessions.get()[0], $projects.get())).toBe(
+      sessionBucketId(makeSessionInfo({ cwd: beforeSendCwd }), $projects.get())
+    )
     expect(view.container.querySelectorAll('[data-sidebar-draft-id]')).toHaveLength(0)
     act(() => {
       $projects.set([])
