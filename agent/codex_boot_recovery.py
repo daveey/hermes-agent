@@ -1,8 +1,9 @@
 """Keep exhausted Codex recovery off managed Kanban construction's critical path.
 
-A boot never promotes an exhausted row from missing evidence. Recovery runs on a
-separately loaded pool after construction, using the ordinary generation-aware
-persistence path; no shared positive evidence or live agent pool is mutated.
+A boot never promotes an exhausted row from missing evidence. With a usable peer,
+recovery runs on a separately loaded pool after construction. If selection raises
+a typed Codex quota wall, construction restores ordinary inline recovery before
+failing; daemon lifetime is never the only recovery path for an empty pool.
 """
 from __future__ import annotations
 
@@ -22,6 +23,14 @@ def defer_recovery() -> bool:
         return False
     pending[:] = [True]
     return True
+
+
+def resume_inline_recovery() -> None:
+    """No usable credential: do not rely on a daemon surviving failed boot."""
+    pending = _pending.get()
+    if pending is not None:
+        pending.clear()
+    _pending.set(None)
 
 
 def recovery_deferred() -> bool:

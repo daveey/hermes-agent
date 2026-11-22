@@ -470,19 +470,28 @@ def _construct_agent(frame, factory, policy, **kwargs):
     """Agent construction resolves the provider credentials; a Kanban attempt that fails here
     still books the one-shot exit mapping (quota wall 75, re-login 78) before the crash."""
     from gateway.session_worker_construct import worker_route
-    from hermes_cli.kanban_quota_recovery import recover_exception
-    from agent.codex_boot_recovery import construction_scope, recovery_deferred
+    from hermes_cli.kanban_quota_recovery import quota_exception, recover_exception
+    from agent.codex_boot_recovery import construction_scope, recovery_deferred, resume_inline_recovery
     kanban = json.loads(frame['policy'].get('kanban_json') or 'null') is not None
+    probed = False
     with construction_scope(kanban):
-        for attempt in range(2):
+        for _ in range(3):  # fast selection, ordinary selection, one completion-proof retry
             try:
                 return factory(**{**kwargs, **worker_route(policy, kwargs)})
             except Exception as exc:
-                if kanban:
-                    healed = attempt == 0 and not recovery_deferred() and recover_exception(exc)
-                    exc._kanban_quota_probe_attempted = True
-                    if healed:
+                wall = quota_exception(exc)
+                if kanban and wall is not None:
+                    if wall.provider == 'openai-codex' and recovery_deferred():
+                        resume_inline_recovery()
                         continue
+                    if not probed:
+                        probed = True
+                        healed = recover_exception(exc)
+                        exc._kanban_quota_probe_attempted = True
+                        if healed:
+                            continue
+                    else:
+                        exc._kanban_quota_probe_attempted = True
                 from gateway.session_kanban import record_start_failure
                 record_start_failure(frame, exc)
                 raise
