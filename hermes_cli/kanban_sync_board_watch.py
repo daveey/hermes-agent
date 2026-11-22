@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 from hermes_cli import kanban_lockguard as _kanban_lockguard
 from hermes_cli import kanban_sync_cpu as _sync_cpu
 from hermes_cli import kanban_sync_wal_evidence as _wal_evidence
+from hermes_cli.sqlite_safe_read import pread_lock_safe
 
 
 def path_gone(path: str) -> bool:
@@ -44,6 +45,18 @@ def schema_rows(conn: sqlite3.Connection) -> list:
             + conn.execute("SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema ORDER BY rowid").fetchall())
 
 
+def parsed_from(conn: sqlite3.Connection, real: str) -> Optional[list]:
+    """What a reader's parsed schema was built from, as the file has it now; None = cannot tell.
+
+    ``schema_rows`` plus the main file's schema format number (header bytes 44..47), which the
+    parse also holds and no statement reports: a format-1 image under the same cookie and rows
+    stores a DESC index in ascending order, and a reader that parsed format 4 walks it the wrong
+    way (wrong rows, no error). SQLite writes the number once, with the first table, so on a
+    live board the main file's copy never changes after that. Read with a lock-safe ``pread``."""
+    header = pread_lock_safe(real, 44, 4)
+    return None if header is None else [header] + schema_rows(conn)
+
+
 class BoardWatch:
     """One long-lived read-only connection per board file, for the sync loop's cheap questions.
 
@@ -61,7 +74,7 @@ class BoardWatch:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         # path -> (file identity, reader, generation, wal state, data_version of that wal state,
-        #          resolved path, schema cookie + rows or None)
+        #          resolved path, file format + schema cookie + rows, or None)
         self._conns: dict[str, tuple] = {}
         self._gen = 0
         self._answers: dict[str, dict[str, tuple[Any, Any]]] = {}  # path -> tag -> (data_version, answer)
@@ -105,20 +118,21 @@ class BoardWatch:
         # file between the two leaves the next comparison without proof, so it reopens.
         real = os.path.realpath(key)  # SQLite names the sidecars by the resolved path
         self._conns[key] = (identity, conn, gen, _wal_evidence.read(real), None, real,
-                            self._opened_schema(conn, key, identity))
+                            self._opened_schema(conn, key, real, identity))
         _sync_cpu.note_reader_open(time.thread_time() - began, reason)
         return conn, gen
 
     @staticmethod
-    def _opened_schema(conn: sqlite3.Connection, key: str, identity: tuple[int, int, int, int]) -> Optional[list]:
-        """The schema rows this new reader parsed, for a later keep to compare; None = never keep.
+    def _opened_schema(conn: sqlite3.Connection, key: str, real: str,
+                       identity: tuple[int, int, int, int]) -> Optional[list]:
+        """What this new reader parsed its schema from, for a later keep to compare; None = never keep.
 
         This first statement makes the reader parse the schema and then reads the rows. A file that
         moved since the stat may have been swapped between those two steps, so the rows are only
         trusted when the file still has the identity the reader is stored with. An unreadable schema
         is left for the caller's own first read to report."""
         try:
-            rows = schema_rows(conn)
+            rows = parsed_from(conn, real)
             st = os.stat(key)
         except (sqlite3.Error, OSError):
             return None
@@ -133,12 +147,12 @@ class BoardWatch:
         a raw copy or restore shows none and takes the reopen path above. The proof says a
         checkpoint ran, not that nothing else wrote the file, so the kept reader also gives up
         its page cache and its answers, as a new one would. Only its parsed schema survives,
-        and only while the file's schema cookie and ``sqlite_schema`` rows, read again here,
-        are the ones the reader had when it opened: a restored image with another schema under
-        the same cookie reopens (SQLite's own cookie check would let the stale parse answer
-        from the wrong pages), and so does any file whose cookie moved, because the reader may
-        since have parsed a later schema than the stored rows. A reader stored without rows
-        (None) compares unequal and is never kept."""
+        and only while the file's format number, schema cookie and ``sqlite_schema`` rows, read
+        again here, are the ones the reader had when it opened: a restored image with another
+        schema under the same cookie reopens (SQLite's own cookie check would let the stale parse
+        answer from the wrong pages), and so does any file whose cookie moved, because the reader
+        may since have parsed a later schema than the stored rows. A reader stored without them
+        (None), or a file whose header cannot be read now, is never kept."""
         if ent[0][:2] != identity[:2] or identity[3] < ent[0][3]:
             return False
         began = time.thread_time()
@@ -147,7 +161,8 @@ class BoardWatch:
             return False
         try:
             ent[1].execute("PRAGMA shrink_memory")
-            if schema_rows(ent[1]) != ent[6]:
+            parsed = parsed_from(ent[1], ent[5])
+            if parsed is None or parsed != ent[6]:
                 return False
         except sqlite3.Error:
             return False

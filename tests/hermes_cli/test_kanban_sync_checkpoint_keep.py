@@ -22,6 +22,8 @@ def board(tmp_path):
     writer.execute("CREATE TABLE t (v TEXT)")
     writer.execute("CREATE TABLE u (v TEXT)")
     writer.execute("CREATE TABLE pad (v TEXT)")
+    # A board as the loop meets it: its header is in the main file, as after any first checkpoint.
+    assert writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
     writer.execute("INSERT INTO t VALUES ('a')")
     watch = BoardWatch()
     loop_accounting.reset()
@@ -185,6 +187,136 @@ def test_restore_of_another_schema_under_the_same_cookie_reopens(board, tmp_path
     assert _reader(watch, path) is not old
     assert _runs("sync.reader_open.reason/changed") == 1
     assert _runs("sync.reader_keep/checkpoint") == 0
+
+
+@pytest.mark.parametrize("mode", ["PASSIVE", "TRUNCATE"])
+@pytest.mark.parametrize("restore_first", [False, True], ids=["checkpoint-then-restore", "restore-then-checkpoint"])
+def test_restore_of_another_file_format_under_the_same_schema_reopens(board, mode, restore_first):
+    """The image has the live cookie and the live ``sqlite_schema`` rows; only the header's schema
+    format number differs. The reader's parse holds that number too, so it must not be kept."""
+    path, writer, watch = board
+    image = bytearray(_two_images(writer, path))
+    assert image[44:48] == path.read_bytes()[44:48] == (4).to_bytes(4, "big")
+    image[44:48] = (1).to_bytes(4, "big")
+    writer.execute("INSERT INTO u VALUES ('pending')")  # frames the checkpoint will backfill
+    gen, row = watch.query(path, VALUE)
+    assert row == ("b",)
+    old = _reader(watch, path)
+    stored = watch._conns[str(path)][6]
+    if restore_first:
+        _rewrite(path, bytes(image))
+        _checkpoint(writer, mode)
+    else:
+        _checkpoint(writer, mode)
+        _rewrite(path, bytes(image))
+    assert evidence.checkpointed(watch._conns[str(path)][3], evidence.read(path))
+    assert _moved(watch, path)
+    assert watch.query(path, VALUE) == (gen, _fresh(path, VALUE)[0])
+    assert _reader(watch, path) is not old
+    now = watch._conns[str(path)][6]
+    assert now[1:] == stored[1:] and now[0] != stored[0]  # same cookie and rows: the format decided
+    assert _runs("sync.reader_open.reason/changed") == 1
+    assert _runs("sync.reader_keep/checkpoint") == 0
+
+
+DESC = ("CREATE TABLE t (v TEXT)", "CREATE TABLE u (v TEXT)", "CREATE INDEX t_v ON t (v DESC)")
+BY_INDEX = "SELECT v FROM t INDEXED BY t_v WHERE v >= 'img-y' ORDER BY v DESC"
+
+
+@pytest.mark.skipif(not hasattr(sqlite3, "SQLITE_DBCONFIG_LEGACY_FILE_FORMAT"), reason="needs Connection.setconfig")
+def test_restored_legacy_format_image_is_read_as_a_fresh_reader_reads_it(tmp_path):
+    """What the format number changes: a format-1 file stores a DESC index in ascending order.
+    A kept reader that parsed format 4 walked it the wrong way and lost rows without an error."""
+    path, other = tmp_path / "board.db", tmp_path / "image.db"
+    writer = sqlite3.connect(path, isolation_level=None)
+    legacy = sqlite3.connect(other, isolation_level=None)
+    legacy.setconfig(sqlite3.SQLITE_DBCONFIG_LEGACY_FILE_FORMAT, True)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    for conn, rows in ((writer, ("live-a", "live-b")), (legacy, ("img-x", "img-y", "img-z", "img-w"))):
+        for statement in DESC:
+            conn.execute(statement)
+        conn.executemany("INSERT INTO t VALUES (?)", [(row,) for row in rows])
+    _checkpoint(writer, "TRUNCATE")
+    cookie = writer.execute("PRAGMA schema_version").fetchone()[0]
+    legacy.execute(f"PRAGMA schema_version={cookie}")
+    legacy.close()
+    image = other.read_bytes()
+    assert image[44:48] == (1).to_bytes(4, "big") and image[40:44] == path.read_bytes()[40:44]
+    stat = os.stat(path)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns - 10_000_000_000))
+    writer.execute("INSERT INTO u VALUES ('pending')")
+    watch = BoardWatch()
+    loop_accounting.reset()
+    try:
+        before = [("live-b",), ("live-a",)]
+        assert watch.read(path, BY_INDEX, lambda conn: conn.execute(BY_INDEX).fetchall())[1] == before
+        old = _reader(watch, path)
+        _checkpoint(writer, "PASSIVE")
+        _rewrite(path, image)
+        expected = _fresh(path, BY_INDEX)
+        assert expected == [("img-z",), ("img-y",)]
+        assert _moved(watch, path)
+        assert watch.read(path, BY_INDEX, lambda conn: conn.execute(BY_INDEX).fetchall())[1] == expected
+        assert _reader(watch, path) is not old
+        assert _runs("sync.reader_keep/checkpoint") == 0
+    finally:
+        watch.reset()
+        writer.close()
+        loop_accounting.reset()
+
+
+def test_reader_whose_file_header_cannot_be_read_is_not_kept(board, monkeypatch):
+    """No format number at open and none at the keep are not two equal answers: both are doubt."""
+    from hermes_cli import kanban_sync_board_watch as module
+
+    path, writer, watch = board
+    monkeypatch.setattr(module, "pread_lock_safe", lambda *_args: None)
+    writer.execute("INSERT INTO pad VALUES (?)", (PAD,))
+    gen, row = watch.query(path, VALUE)
+    assert row == ("a",)
+    old = _reader(watch, path)
+    assert watch._conns[str(path)][6] is None
+    base = evidence.read(path)
+    _checkpoint(writer, "PASSIVE")
+    assert evidence.checkpointed(base, evidence.read(path))
+    assert _moved(watch, path)
+    assert watch.query(path, VALUE) == (gen, ("a",))
+    assert _reader(watch, path) is not old
+    assert _runs("sync.reader_keep/checkpoint") == 0
+    assert _runs("sync.reader_open.reason/changed") == 1
+
+
+def test_board_whose_header_was_only_in_the_wal_reopens_once_then_keeps(tmp_path):
+    """A board never checkpointed has no format number in its main file yet. The first checkpoint
+    writes one, which differs from what the reader was stored with: one reopen, then keeps."""
+    path = tmp_path / "new.db"
+    writer = sqlite3.connect(path, isolation_level=None)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE t (v TEXT)")
+    writer.execute("INSERT INTO t VALUES ('a')")
+    watch = BoardWatch()
+    loop_accounting.reset()
+    try:
+        assert watch.query(path, VALUE, unchanged_ok=True)[1] == ("a",)
+        first = _reader(watch, path)
+        assert watch._conns[str(path)][6][0] != (4).to_bytes(4, "big")
+        _checkpoint(writer, "PASSIVE")
+        assert watch.query(path, VALUE, unchanged_ok=True)[1] == ("a",)
+        second = _reader(watch, path)
+        assert second is not first and _runs("sync.reader_keep/checkpoint") == 0
+        assert watch._conns[str(path)][6][0] == (4).to_bytes(4, "big")
+        writer.execute("INSERT INTO t VALUES (?)", (PAD,))
+        assert watch.query(path, "SELECT count(*) FROM t", unchanged_ok=True)[1] == (2,)
+        _checkpoint(writer, "PASSIVE")
+        assert _moved(watch, path)
+        assert watch.query(path, "SELECT count(*) FROM t", unchanged_ok=True)[1] == (2,)
+        assert _reader(watch, path) is second and _runs("sync.reader_keep/checkpoint") == 1
+    finally:
+        watch.reset()
+        writer.close()
+        loop_accounting.reset()
 
 
 def test_schema_change_through_sqlite_reopens_at_the_next_checkpoint(board):
@@ -384,7 +516,7 @@ def test_file_moving_while_the_reader_opens_is_never_kept(board, monkeypatch):
     assert evidence.checkpointed(base, evidence.read(path))
     assert watch.query(path, VALUE, unchanged_ok=True)[1] == ("a",)
     assert _reader(watch, path) is not old
-    assert watch._conns[str(path)][6] == real(_reader(watch, path))
+    assert watch._conns[str(path)][6] == module.parsed_from(_reader(watch, path), str(path))
     assert _runs("sync.reader_keep/checkpoint") == 0
 
 
@@ -436,7 +568,8 @@ def test_smaller_restore_reopens_even_with_checkpoint_proof(board):
     assert row == ("b",)
     old = _reader(watch, path)
     base, size = evidence.read(path), os.stat(path).st_size
-    assert watch._conns[str(path)][6][0] == (int.from_bytes(image[40:44], "big"),)  # the image has the reader's cookie
+    assert watch._conns[str(path)][6][1] == (int.from_bytes(image[40:44], "big"),)  # the image has the reader's cookie
+    assert watch._conns[str(path)][6][0] == image[44:48]  # and its file format
     _checkpoint(writer, "PASSIVE")
     _rewrite(path, image)
     assert os.stat(path).st_size < size
