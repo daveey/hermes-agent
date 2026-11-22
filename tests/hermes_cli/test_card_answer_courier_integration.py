@@ -138,11 +138,13 @@ class World:
 
     def runner(self, name):
         def run(cfg, argv, stdin=None, **kw):  # runs the real runtime main in this host
-            assert argv[:4] == ["-p", self.profile[name][0], "--run-module", "hermes_cli.kanban_card_answer_runtime"]
+            assert argv[:2] == ["--run-module", "hermes_cli.kanban_card_answer_runtime"]
+            assert kw['env']['HERMES_PROFILE'] == self.profile[name][0]
+            assert kw['env']['HERMES_HOME'] == str(self.homes[name])
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                rc = runtime.main(argv[4:])
-            self.runs.append((name, argv[4], rc, json.loads(out.getvalue())))
+                rc = runtime.main(argv[2:])
+            self.runs.append((name, argv[2], rc, json.loads(out.getvalue())))
             return rc, out.getvalue(), ""
         return run
 
