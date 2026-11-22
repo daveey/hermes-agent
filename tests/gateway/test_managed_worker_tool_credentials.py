@@ -12,6 +12,8 @@ from tests.gateway.test_managed_turn_contract import assignment
     ({}, {}),
     ({'platform_toolsets': {'cli': ['web']}}, {'EXA_API_KEY': 'synthetic-search'}),
     ({'platform_toolsets': {'cli': "['web']"}}, {'EXA_API_KEY': 'synthetic-search'}),
+    ({'platform_toolsets': {'cli': ['hermes']}}, {'EXA_API_KEY': 'synthetic-search'}),
+    ({'platform_toolsets': {'cli': ['web', 12306]}}, {'EXA_API_KEY': 'synthetic-search'}),
     ({'platform_toolsets': {'acp': ['web']}}, {}),
     ({'platform_toolsets': {'cli': []}}, {}),
     ({'platform_toolsets': {'cli': 'invalid'}}, {}),

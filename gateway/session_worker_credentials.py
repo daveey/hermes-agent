@@ -164,7 +164,7 @@ def tool_environment(authority, policy, config):
     """Only explicitly selected tool credentials; platform delivery stays with the owner."""
     from tools.registry import registry
     from toolsets import resolve_toolset
-    from hermes_cli.toolset_validation import parse_platform_toolsets_value
+    from hermes_cli.toolset_validation import normalize_saved_toolset_names, parse_platform_toolsets_value
     from tools.environments.local_env_policy import _is_hermes_internal_secret
     request = json.loads(policy.request_json)
     platform = 'acp' if policy.source == 'acp' else 'cli'
@@ -173,7 +173,7 @@ def tool_environment(authority, policy, config):
     explicit = parse_platform_toolsets_value(explicit)
     if not explicit:
         return {}
-    permitted = {name for toolset in explicit for name in resolve_toolset(toolset)}
+    permitted = {name for toolset in normalize_saved_toolset_names(explicit) for name in resolve_toolset(toolset)}
     selected = {name for toolset in policy.current_toolsets(config) for name in resolve_toolset(toolset)} & permitted
     names = {name for entry in registry.get_all_entries() if entry.name in selected
              for name in entry.requires_env if isinstance(name, str) and not _is_hermes_internal_secret(name)

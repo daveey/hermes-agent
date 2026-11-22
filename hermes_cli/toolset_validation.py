@@ -31,6 +31,12 @@ def parse_platform_toolsets_value(value: object) -> Optional[list[str]]:
     return None
 
 
+def normalize_saved_toolset_names(names: list) -> list[str]:
+    """Normalize YAML names and expand legacy bundles, without adding default tools."""
+    aliases = {'hermes': ('hermes-cli', 'hermes-api-server')}
+    return [expanded for name in names for expanded in aliases.get(str(name), (str(name),))]
+
+
 def _platform_default_toolset(platform: object) -> str:
     info = PLATFORMS.get(platform)
     return info.default_toolset if info is not None else f"hermes-{platform}"
