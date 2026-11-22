@@ -100,10 +100,19 @@ def test_refusals_do_not_create_a_systemic_crash_fix_card(live, monkeypatch):
     "provider refusal category: cyber",
 ])
 @pytest.mark.parametrize("clean_exit", [False, True])
-def test_history_refusal_tail_stops_without_generic_refused_to(live, monkeypatch, provider_message, clean_exit):
+@pytest.mark.parametrize("copy_kind", ["history", "standard"])
+@pytest.mark.parametrize("ran_actions", [False, True])
+def test_refusal_copy_tail_stops_without_generic_refused_to(
+    live, monkeypatch, provider_message, clean_exit, copy_kind, ran_actions,
+):
+    from agent.turn_failure_copy import REFUSED_TURN_ACTIONS_WARNING, content_policy_copy
     from agent.turn_refusal_history import HISTORY_REFUSAL_COPY
 
-    output = HISTORY_REFUSAL_COPY.format(label="OpenAI", summary=provider_message)[-400:]
+    render = HISTORY_REFUSAL_COPY.format if copy_kind == "history" else content_policy_copy
+    output = render(label="OpenAI", summary=provider_message)
+    if ran_actions:
+        output += "\n\n" + REFUSED_TURN_ACTIONS_WARNING
+    output = output[-400:]
     tid, _ = _local_crash(live, monkeypatch)
     with kb.write_txn(live):
         live.execute("UPDATE tasks SET max_retries=2 WHERE id=?", (tid,))
@@ -121,9 +130,24 @@ def test_history_refusal_tail_stops_without_generic_refused_to(live, monkeypatch
     ).fetchone()[0])
     assert final["reason_code"] == "provider_refusal"
     notice = summary.describe_failure("failure_finalized", "fixture", final)
-    assert f"'{provider_message}'" in notice
+    assert f"'{provider_message}" in notice
     assert "Not a worker crash; no automatic retry" in notice
     assert dispatch.detect_crashed_workers(live) == []
+
+
+@pytest.mark.parametrize("copy_kind,ran_actions,summary_length", [
+    ("history", False, 236), ("history", True, 178),
+    ("standard", False, 297), ("standard", True, 239),
+])
+def test_refusal_copies_preserve_prior_tail_match_boundary(copy_kind, ran_actions, summary_length):
+    from agent.turn_failure_copy import REFUSED_TURN_ACTIONS_WARNING, content_policy_copy
+    from agent.turn_refusal_history import HISTORY_REFUSAL_COPY
+
+    render = HISTORY_REFUSAL_COPY.format if copy_kind == "history" else content_policy_copy
+    output = render(label="OpenAI", summary="x" * summary_length)
+    if ran_actions:
+        output += "\n\n" + REFUSED_TURN_ACTIONS_WARNING
+    assert summary.classify_failure("crashed", {"worker_output": output[-400:]}) == "provider_refusal"
 
 
 def test_notice_quotes_provider_message_after_long_preamble():

@@ -16,8 +16,8 @@ _CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _REFUSAL_RE = re.compile(
     r"model declined|safety refusal|declined (?:to|the) (?:assist|help|comply|answer|request)"
     r"|refusal by the model|(?:model|assistant) refus|stop_reason\W+refusal"
-    # Hermes history-refusal copy can be the only evidence left in the 400-char tail.
-    r"|will be refused too: start a new chat with /new"
+    # Both Hermes refusal copies retain this distinctive guidance in the 400-char tail.
+    r"|start a new chat with /new \(in a Bot Chat, Archive it from its tab menu\)"
     r"|cannot (?:assist|help) with (?:that|this)|can'?t (?:assist|help) with (?:that|this)"
     r"|violates? (?:our )?(?:usage|safety) polic"
     r"|This content was flagged for possible cybersecurity risk",
