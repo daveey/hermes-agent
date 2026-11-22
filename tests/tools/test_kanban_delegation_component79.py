@@ -202,7 +202,7 @@ RELAY_URL = "http://127.0.0.1:9/v1"
 ROUTE_BODY = {"provider": {"order": ["x"], "allow_fallbacks": False}, "models": ["relay-model"], "route": "fallback"}
 
 
-def _real_children(native, monkeypatch, *, route_body=None, tier=None):
+def _real_children(native, monkeypatch, *, route_body=None, tier=None, route_headers=None):
     """Real ``_routes_for`` + ``_build_children`` + ``AIAgent``; ``route_body`` None = native subscription route."""
     from pathlib import Path
     from hermes_cli.config import atomic_config_write, load_config_readonly
@@ -227,6 +227,8 @@ def _real_children(native, monkeypatch, *, route_body=None, tier=None):
         cfg["model_routing"]["allow_metered"] = True
         cfg["custom_providers"] = [{"name": "relay", "base_url": RELAY_URL, "api_key": "k", "model": "relay-model",
                                     "extra_body": deepcopy(route_body)}]
+        if route_headers:
+            cfg["custom_providers"][0]["extra_headers"] = dict(route_headers)
     cfg["model"] = {"context_length": 100000}
     atomic_config_write(home / "config.yaml", cfg)
     monkeypatch.setattr("model_tools.get_tool_definitions", lambda **kw: [])
@@ -327,3 +329,61 @@ def test_built_child_check_refuses_tier_routing_keys_before_reading_the_route():
     child = _built({"extra_body": deepcopy(ROUTE_BODY)})
     with pytest.raises(policy.RestrictionError):
         policy.check_built_child(child, {"extra_body": {"provider": ROUTE_BODY["provider"]}})
+
+
+# ── finite destination/auth names on the caller/tier override surface (placeholder values only) ──
+
+AUTH_NAMES = [("extra_headers", name) for name in (
+    "x-goog-api-key", "X-Goog-Api-Key", "Cookie", "COOKIE", "Proxy-Authorization", "proxy-AUTHORIZATION",
+    "OpenAI-Organization", "openai-organization")] + [("extra_query", "key"), ("extra_query", "api-key"),
+                                                      ("extra_query", "Api-Key")]
+AUTH_IDS = [f"{c}.{n}" for c, n in AUTH_NAMES]
+ROUTE_HEADERS = {"x-goog-api-key": "placeholder", "Cookie": "placeholder", "Proxy-Authorization": "placeholder",
+                 "OpenAI-Organization": "placeholder"}
+
+
+@pytest.mark.parametrize("container,name", AUTH_NAMES, ids=AUTH_IDS)
+def test_auth_names_refused_for_caller_before_construction(native, monkeypatch, container, name):
+    import tools.delegate_tool as dt
+    monkeypatch.setattr(dt, "_build_child_preserving_parent_tools", lambda **kw: pytest.fail("constructed"))
+    routes, error = dt._routes_for([{"goal": "neutral analysis", "model": "class:deep"}],
+                                   {"request_overrides": {container: {name: "placeholder"}}}, None, native)
+    assert routes == [] and error and "destination/auth override" in error
+
+
+@pytest.mark.parametrize("container,name", AUTH_NAMES, ids=AUTH_IDS)
+def test_real_build_children_refuses_tier_auth_names_even_when_the_route_sets_the_same_header(
+        native, monkeypatch, container, name):
+    """Same-key collision: the allocated route's own ``extra_headers`` carry the name with the same value."""
+    children, error, closed = _real_children(native, monkeypatch, route_body={"service_tier": "flex"},
+                                             route_headers=ROUTE_HEADERS, tier={container: {name: "placeholder"}})
+    assert children == [] and error and "destination/auth override" in error
+    assert len(closed) == 1 and closed[0].provider == "custom:relay"  # built, refused before launch, closed
+
+
+@pytest.mark.parametrize("tier", [None, {"extra_headers": {"x-trace-id": "t"}, "extra_query": {"trace": "t"}}],
+                         ids=["route-headers-only", "harmless-tier"])
+def test_real_build_children_keeps_the_allocated_routes_own_auth_headers(native, monkeypatch, tier):
+    """Allocator-owned route headers live on the client, not in delegation overrides, and are not refused."""
+    children, error, closed = _real_children(native, monkeypatch, route_body={"service_tier": "flex"},
+                                             route_headers=ROUTE_HEADERS, tier=tier)
+    try:
+        assert not error, error
+        child, = children
+        assert closed == [] and child.provider == "custom:relay"
+        if tier is None:
+            assert child.request_overrides.get("extra_body") == {"service_tier": "flex"}
+        else:  # harmless tier tuning passes through untouched
+            assert child.request_overrides["extra_headers"] == tier["extra_headers"]
+            assert child.request_overrides["extra_query"] == tier["extra_query"]
+        for name in ROUTE_HEADERS:
+            assert name not in (child.request_overrides.get("extra_headers") or {})
+    finally:
+        for child in children:
+            child.release_clients()
+
+
+@pytest.mark.parametrize("container,name", AUTH_NAMES, ids=AUTH_IDS)
+def test_built_child_check_refuses_auth_names_in_the_final_mapping(container, name):
+    with pytest.raises(policy.RestrictionError, match="destination/auth override"):
+        policy.check_built_child(_built({"extra_body": deepcopy(ROUTE_BODY), container: {name: "placeholder"}}))

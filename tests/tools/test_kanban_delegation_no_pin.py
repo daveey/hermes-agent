@@ -180,6 +180,13 @@ OVERRIDES = [
     {"extra_headers": {"Authorization": "Bearer x"}}, {"extra_headers": {"x-API-Key": "x"}},
     {"extra_headers": {"API-KEY": "x"}}, {"extra_headers": {"HOST": "evil"}},
     {"extra_body": "str"}, {"extra_headers": ["a"]},
+    # finite destination/auth names; values are placeholders, never real secrets
+    {"extra_headers": {"x-goog-api-key": "placeholder"}}, {"extra_headers": {"X-Goog-Api-Key": "placeholder"}},
+    {"extra_headers": {"Cookie": "placeholder"}}, {"extra_headers": {"COOKIE": "placeholder"}},
+    {"extra_headers": {"Proxy-Authorization": "placeholder"}}, {"extra_headers": {"proxy-AUTHORIZATION": "placeholder"}},
+    {"extra_headers": {"OpenAI-Organization": "placeholder"}}, {"extra_headers": {"openai-organization": "placeholder"}},
+    {"extra_query": {"key": "placeholder"}}, {"extra_query": {"api-key": "placeholder"}},
+    {"extra_query": {"API-Key": "placeholder"}},
 ]
 
 

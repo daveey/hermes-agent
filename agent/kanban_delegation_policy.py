@@ -1,7 +1,10 @@
 """Restriction-only classification of Kanban-native delegation lineage.
 
 A managed Kanban worker (and every descendant it builds) may start NEW delegated work only on a logical
-model class, never on a concrete model/provider pin, endpoint, credential or transport override.  This module
+model class, never on a concrete model/provider pin, endpoint or transport override, and never with one of the
+finite destination/auth names below in a request override (``_AUTH_HEADERS``, ``_AUTH_QUERY``).  That list is an
+enumerated refusal, not a general credential detector; credentials the allocator resolves for the selected route
+are not delegation overrides and are untouched.  This module
 holds the pure logical checks and a process-local weak identity map from live agent objects to a restriction
 token.  Nothing here grants authority: ``WorkerCustody.validated`` (creator rights, live lease) is untouched,
 and the token is never serialized, read from the environment, or accepted from a request field.
@@ -41,7 +44,9 @@ _ENTRIES: dict[int, tuple[weakref.ref, _Token]] = {}
 _TRANSPORT_KEYS = ("base_url", "api_key", "api_mode", "command", "args", "acp_command", "acp_args")
 _ROUTING_KEYS = frozenset({"model", "provider", *_TRANSPORT_KEYS, "models", "route", "fallbacks"})
 _WIRE_CONTAINERS = ("extra_body", "extra_query")
-_AUTH_HEADERS = frozenset({"authorization", "x-api-key", "api-key", "host"})
+_AUTH_HEADERS = frozenset({"authorization", "x-api-key", "api-key", "host", "x-goog-api-key", "cookie",
+                           "proxy-authorization", "openai-organization"})  # matched case-insensitively
+_AUTH_QUERY = frozenset({"key", "api-key"})  # extra_query only; api_key is already a routing key
 _KEPT_TUNING = ("request_overrides", "reasoning_effort", "service_tier", "label")
 
 
@@ -133,7 +138,7 @@ def _refuse(index: Optional[int], what: str) -> RestrictionError:
     return RestrictionError(
         f"{_where(index)}{what}. New delegations from a Kanban worker take a model class "
         f"(class:{'|class:'.join(sorted(CLASSES))}) with provider auto; concrete models, providers, endpoints, "
-        f"credentials and routing overrides are not accepted.")
+        f"routing overrides and the listed destination/auth headers and query keys are not accepted.")
 
 
 def class_for_selectors(source: Mapping[str, Any], parent: Any, index: Optional[int] = None) -> str:
@@ -154,7 +159,8 @@ def class_for_selectors(source: Mapping[str, Any], parent: Any, index: Optional[
 
 
 def check_request_overrides(overrides: Any, index: Optional[int] = None) -> None:
-    """Refuse routing keys at the top level and in the SDK merge containers; other tuning is untouched."""
+    """Refuse routing keys at the top level and in the SDK merge containers, and the listed auth names in
+    ``extra_headers`` / ``extra_query``; other tuning is untouched."""
     if overrides is None:
         return
     if not isinstance(overrides, Mapping):
@@ -171,6 +177,8 @@ def check_request_overrides(overrides: Any, index: Optional[int] = None) -> None
         for key in inner:
             if str(key).lower() in _ROUTING_KEYS:
                 raise _refuse(index, f"request_overrides.{name}.{key} is a routing override")
+            if name == "extra_query" and str(key).lower() in _AUTH_QUERY:
+                raise _refuse(index, f"request_overrides.{name}.{key} is a destination/auth override")
     headers = overrides.get("extra_headers")
     if headers is not None:
         if not isinstance(headers, Mapping):
