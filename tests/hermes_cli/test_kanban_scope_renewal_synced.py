@@ -116,3 +116,33 @@ def test_local_validation_refuses_before_any_board_request(live, monkeypatch):
     with pytest.raises(RenewalRefused):
         renew(live, tid, 'not-the-episode', comment)
     assert not hub.sent
+
+
+def refused_without_projection(live, tid, episode, comment, code):
+    with pytest.raises(RenewalRefused) as caught:
+        renew(live, tid, episode, comment)
+    assert caught.value.code == code
+    assert not live.execute("SELECT 1 FROM task_events WHERE kind='scope_renewed'").fetchone()
+    assert decision.execution_restricted(live, tid)
+
+
+def test_synced_board_with_sync_inactive_never_renews_locally(live, monkeypatch):
+    hub = Hub({'decision_retain': 1, 'scope_renewal': 1})
+    tid, episode, comment = stopped(live, monkeypatch, hub)
+    assert sync.sync_state(live)
+    monkeypatch.setattr(sync, 'board_mode', lambda conn: 'off')
+    refused_without_projection(live, tid, episode, comment, 'board_unavailable')
+    assert not hub.sent
+
+
+def test_board_event_read_back_for_another_task_projects_nothing(live, monkeypatch):
+    hub = Hub({'decision_retain': 1, 'scope_renewal': 1})
+    tid, episode, comment = stopped(live, monkeypatch, hub)
+    real = hub.row_evidence
+
+    def wrong(board, table, uid):
+        proof = real(board, table, uid)
+        proof['row']['task_id'] = 't_00000000deadbeef'
+        return proof
+    hub.row_evidence = wrong
+    refused_without_projection(live, tid, episode, comment, 'board_unconfirmed')

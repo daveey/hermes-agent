@@ -373,3 +373,166 @@ def test_j_the_command_line_renews_and_refuses_through_its_own_connection(board,
     assert argv(*request[:-1]) == 1  # the stop is already renewed: text output, nothing written twice
     assert 'renew-scope refused' in capsys.readouterr().out
     assert board.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='scope_renewed'", (tid,)).fetchone()[0] == 1
+
+
+# Guards no earlier test pinned (exact-head review round 3): each case fails if its one clause is dropped.
+
+def test_i_human_mandate_then_renewal_does_not_open_a_fresh_spend_window(board, monkeypatch):
+    """A human comment after the stop would move the window if it followed ``restricted_since`` instead of the floor."""
+    tid, _, episode = stopped(board, monkeypatch)
+    since = budget._window_start(board, tid, 2999999999)
+    note = mandate(board, tid, kind='human')
+    board.execute("UPDATE task_events SET created_at=created_at+50 WHERE task_id=? AND kind='commented'", (tid,))
+    board.commit()
+    assert budget._window_start(board, tid, 2999999999) == since
+    assert renew(board, tid, episode, note, writer=HUMAN)['authority_kind'] == 'human'
+    assert decision.restricted_since(board, tid) is None
+    assert budget._window_start(board, tid, 2999999999) == since
+
+
+def running_creator(board, tid):
+    creator = kb.create_task(board, title='creator', assignee='default')
+    board.execute("UPDATE task_events SET payload=json_set(COALESCE(payload,'{}'),'$.creator_task_id',?) "
+                  "WHERE task_id=? AND kind='created'", (creator, tid))
+    kb._append_event(board, creator, 'owner_admitted', {'session_id': 'local-creator'})
+    board.execute("UPDATE tasks SET status='running' WHERE id=?", (creator,))
+    board.commit()
+    return creator, ('agent', 'local-creator', '7:HERMES_KANBAN_WORKER_TASK')
+
+
+def test_d_unrelated_running_worker_on_its_own_mandate_is_refused(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    other = kb.create_task(board, title='unrelated', assignee='default')
+    kb._append_event(board, other, 'owner_admitted', {'session_id': 'local-other'})
+    board.execute("UPDATE tasks SET status='running' WHERE id=?", (other,))
+    board.commit()
+    comment = mandate(board, tid, session='local-other')
+    refused(board, tid, episode, comment, 'not_scope_authority',
+            writer=('agent', 'local-other', '7:HERMES_KANBAN_WORKER_TASK'), env={'HERMES_KANBAN_WORKER_TASK': other})
+
+
+def test_d_two_task_identities_in_the_ancestry_are_refused(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    creator, writer = running_creator(board, tid)
+    comment = mandate(board, tid, session='local-creator')
+    with pytest.raises(RenewalRefused) as caught:
+        cli.renew(board, tid, episode=episode, comment_id=comment, reason='x', writer=writer,
+                  env={'HERMES_SESSION_ID': 'local-creator', 'HERMES_KANBAN_WORKER_TASK': creator},
+                  ancestry=[{'HERMES_SESSION_ID': 'local-creator', 'HERMES_KANBAN_TASK': 't_00000000deadbeef'}])
+    assert caught.value.code == 'identity_unavailable'
+    assert decision.execution_restricted(board, tid)
+
+
+def test_d_unreadable_ancestor_above_a_marked_caller_is_refused(board, monkeypatch):
+    """The caller's own start-time env names the chat, so the comment writer says agent; only the full walk fails."""
+    import os
+    from hermes_cli import kanban_comment_writer as writer
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+
+    def read(pid):
+        if pid == os.getpid():
+            return 4242, {'HERMES_SESSION_ID': CHAT}
+        raise writer.Inconclusive(f'pid {pid}: environment unreadable')
+    monkeypatch.setattr(writer, '_read_proc', read)
+    assert writer.cli_comment_writer(env={'HERMES_SESSION_ID': CHAT})[0] == 'agent'
+    spoofed(board, tid, episode, comment, 'identity_unavailable', {'HERMES_SESSION_ID': CHAT})
+
+
+def test_f_creator_task_cannot_renew_on_someone_elses_mandate(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    creator, writer = running_creator(board, tid)
+    comment = mandate(board, tid, session='someone-else')
+    refused(board, tid, episode, comment, 'mandate_authority', writer=writer, env={'HERMES_KANBAN_WORKER_TASK': creator})
+
+
+def test_f_owning_chat_cannot_renew_on_a_mandate_a_task_wrote(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    board.execute("UPDATE task_events SET payload=json_set(payload,'$.writer_task','t_00000000deadbeef') "
+                  "WHERE task_id=? AND kind='commented'", (tid,))
+    board.commit()
+    refused(board, tid, episode, comment, 'mandate_authority')
+
+
+def test_f_mandate_with_two_writer_records_is_refused(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    written = board.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='commented' ORDER BY id DESC LIMIT 1",
+                            (tid,)).fetchone()[0]
+    kb._append_event(board, tid, 'commented', json.loads(written))
+    board.commit()
+    refused(board, tid, episode, comment, 'mandate_unattributable')
+
+
+def test_f_human_mandate_written_on_another_gateway_is_refused(board, monkeypatch):
+    from hermes_cli import kanban_origin
+    tid, _, episode = stopped(board, monkeypatch)
+    note = mandate(board, tid, kind='human')
+    board.execute("UPDATE task_events SET origin_gateway='another-gateway' WHERE task_id=? AND kind='commented'", (tid,))
+    board.commit()
+    monkeypatch.setattr(kanban_origin, 'gateway_names', lambda: ('this-gateway', set()))
+    refused(board, tid, episode, note, 'mandate_authority', writer=HUMAN)
+    board.execute("UPDATE task_events SET origin_gateway='this-gateway' WHERE task_id=? AND kind='commented'", (tid,))
+    board.commit()
+    assert renew(board, tid, episode, note, writer=HUMAN)['authority_kind'] == 'human'
+
+
+@pytest.mark.parametrize('change', ["claim_lock='x'", "status='ready'"])
+def test_f_claimed_or_non_triage_card_is_refused(board, monkeypatch, change):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    board.execute(f"UPDATE tasks SET {change} WHERE id=?", (tid,))
+    board.commit()
+    refused(board, tid, episode, comment, 'not_stopped')
+
+
+def forged_renewal_covering(board, tid, episode, comment, extra=()):
+    """A ``scope_renewed`` row that lists every restriction on the card, as a wrong Board answer would."""
+    rows = [dict(r) for r in board.execute(
+        "SELECT * FROM task_events WHERE task_id=? AND kind IN "
+        "('spend_budget_triaged','decision_hold_restricted','decision_retained')", (tid,))]
+    row = dict(board.execute("SELECT * FROM task_comments WHERE id=?", (comment,)).fetchone())
+    kb._append_event(board, tid, 'scope_renewed', {
+        'version': 1, 'episode': episode, 'mandate_comment_uid': renewal.comment_ref(row),
+        'mandate_body_sha256': renewal.digest(row['body']),
+        'covered_restriction_uids': [renewal.key(r) for r in rows] + list(extra)})
+    kb._append_event(board, tid, 'promoted_manual', {})  # recorded after the renewal: decides a scope-only stop
+    board.commit()
+    assert renewal.covered(board, tid)
+
+
+def test_b_renewal_listing_a_safety_annotation_never_hides_it(board, monkeypatch):
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    kb._append_event(board, tid, 'decision_hold_restricted', {'cause': 'safety_refusal', 'episode': episode})
+    board.commit()
+    forged_renewal_covering(board, tid, episode, comment)
+    assert decision.restricted_since(board, tid) is not None
+    stop = decision.pending_episode(board, tid)
+    assert stop is not None and renewal.key(stop) == episode
+    assert renewal.mandate(board, tid) is None
+    assert '## Scope renewal mandate' not in kb.build_worker_context(board, tid)
+
+
+def test_b_renewal_listing_a_confirmed_safety_receipt_never_hides_it(board, monkeypatch):
+    """The receipt is modelled as confirmed (``receipt_restrictions`` returns it); the readers' clauses are real."""
+    tid, _, episode = stopped(board, monkeypatch)
+    link(board, tid)
+    comment = mandate(board, tid)
+    kb._append_event(board, tid, 'decision_retained', {'superseded_by_safety_stop': True, 'episode_uid': episode})
+    board.commit()
+    receipt = dict(board.execute("SELECT * FROM task_events WHERE task_id=? AND kind='decision_retained' "
+                                 "ORDER BY id DESC LIMIT 1", (tid,)).fetchone())
+    monkeypatch.setattr(decision, 'receipt_restrictions', lambda conn, task_id, **kw: [receipt] if task_id == tid else [])
+    forged_renewal_covering(board, tid, episode, comment)
+    assert renewal.key(receipt) in renewal.covered(board, tid)
+    assert decision.restricted_since(board, tid) is not None
+    stop = decision.pending_episode(board, tid)
+    assert stop is not None and renewal.key(stop) == episode
+    assert renewal.mandate(board, tid) is None
