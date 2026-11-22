@@ -79,10 +79,13 @@ def _finish(conn, own, payload, result, *, outcome='applied'):
         detail = ('exact canonical stop receipt and held replica confirmed' if outcome == 'applied'
                   else 'canonical refusal recorded; no stop receipt' if outcome == 'refused'
                   else 'historical stop receipt confirmed; current hold not confirmed after separate renewal')
+        if outcome == 'refused':
+            detail += ': ' + json.dumps(result['canonical_refusal'], sort_keys=True)
+        detail += '; Administrative protection only; no execution authority'
         courier.log(conn, request_uid=uid, side='execute', outcome=outcome, finished=True, detail=detail)
         kb._append_event(conn, target, courier.RESULT_KIND, {
             'request_uid': uid, 'action': ACTION, 'outcome': outcome, 'executor_gateway': own,
-            'detail': 'Administrative protection only; no execution authority', 'protection': result,
+            'detail': detail, 'protection': result,
             'caller': {k: payload['caller'].get(k) for k in ('gateway', 'task_id', 'run_id', 'run_uid')}})
 
 

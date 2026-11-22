@@ -1,5 +1,6 @@
 """Registered stop-only public API and closed operator wire contracts."""
 import json
+import pytest
 
 from gateway.session_context import scoped_current_session_id
 from hermes_cli import kanban_db as kb
@@ -57,6 +58,10 @@ def test_refused_protection_is_not_logged_as_confirmed_receipt(board, monkeypatc
     op._finish(board, 'g', payload, {'ok': False, 'canonical_refusal': {'reason': 'x'}}, outcome='refused')
     row = board.execute("SELECT outcome, detail FROM operator_calls WHERE request_uid='req-1'").fetchone()
     assert row[0] == 'refused' and 'confirmed' not in row[1] and 'no stop receipt' in row[1]
+    event = board.execute('SELECT payload FROM task_events WHERE kind=?', (courier.RESULT_KIND,)).fetchone()
+    detail = json.loads(event[0])['detail']
+    assert 'canonical refusal recorded; no stop receipt' in detail
+    assert 'x' in detail and 'no execution authority' in detail
 
 
 def test_applied_protection_logs_confirmed_receipt(board, monkeypatch):
@@ -64,6 +69,20 @@ def test_applied_protection_logs_confirmed_receipt(board, monkeypatch):
     _, payload = _pending(board, monkeypatch)
     op._finish(board, 'g', payload, {'ok': True})
     assert 'confirmed' in board.execute("SELECT detail FROM operator_calls WHERE request_uid='req-1'").fetchone()[0]
+
+
+@pytest.mark.parametrize('outcome, expected', [
+    ('applied', 'exact canonical stop receipt and held replica confirmed'),
+    ('recorded', 'historical stop receipt confirmed; current hold not confirmed after separate renewal'),
+])
+def test_protection_result_exposes_outcome_specific_detail(board, monkeypatch, outcome, expected):
+    from hermes_cli import kanban_protect_operator as op
+    _, payload = _pending(board, monkeypatch)
+    op._finish(board, 'g', payload, {'ok': True}, outcome=outcome)
+    event = board.execute('SELECT payload FROM task_events WHERE kind=?', (courier.RESULT_KIND,)).fetchone()
+    detail = json.loads(event[0])['detail']
+    assert detail == expected + '; Administrative protection only; no execution authority'
+    assert detail == board.execute("SELECT detail FROM operator_calls WHERE request_uid='req-1'").fetchone()[0]
 
 
 def test_unresolvable_pending_row_backs_off_instead_of_requesting_every_tick(board, monkeypatch):

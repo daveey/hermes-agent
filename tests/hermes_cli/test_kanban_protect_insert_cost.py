@@ -1,6 +1,6 @@
-"""Reviewer probe: cost and reach of protect_stopped_event_insert on an unsynced board."""
+"""Indexed insert-fence coverage with a large unsynced event history."""
 import sqlite3
-import time
+
 
 import pytest
 
@@ -16,27 +16,18 @@ def test_insert_trigger_plan_and_cost(board, monkeypatch):
     from hermes_cli import kanban_protect_stopped as protect
     _, _, session, target, _, args = local.fixture(board, monkeypatch)
     other = kb.create_task(board, title='unrelated card', assignee='default')
-    idx = [tuple(r)[1:3] for r in board.execute("PRAGMA index_list(task_events)")]
-    print('PROBE3 task_events indexes', idx)
-    for name, _u in idx:
-        print('PROBE3 index', name, [r[2] for r in board.execute(f"PRAGMA index_info({name})")])
+
     with kb.write_txn(board):
         board.executemany("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?,?,?,?)",
                           [(other, 'note', '{}', 1)] * 200000)
-    def cost(label):
-        t = time.perf_counter()
+    def append_batch():
         with kb.write_txn(board):
             for _ in range(200):
                 kb._append_event(board, other, 'note', {})
-        print('PROBE3', label, '200 appends ms', round((time.perf_counter() - t) * 1000, 1))
-    cost('before protection')
+    append_batch()
     with scoped_current_session_id(session):
         protect.protect(board, board='default', **args)
-    cost('after protection')
-    sql = board.execute("SELECT sql FROM sqlite_master WHERE name='protect_stopped_event_insert'").fetchone()[0]
-    print('PROBE3 trigger', sql[:200])
-    for row in board.execute("EXPLAIN QUERY PLAN SELECT 1 FROM task_events AS o WHERE (o.id=? OR o.uid=?)", (1, 'x')):
-        print('PROBE3 plan', tuple(row))
+    append_batch()
     assert decision.execution_restricted(board, target)
     plan = [r[3] for r in board.execute(
         "EXPLAIN QUERY PLAN SELECT 1 FROM task_events AS o WHERE (o.id=? OR o.uid=?)", (1, 'x'))]

@@ -1,5 +1,5 @@
 """Real HTTP regression: confirmation preserves the home live-file partition."""
-import json
+
 import time
 import uuid
 
@@ -27,12 +27,11 @@ def test_confirm_keeps_live_file_partitioned(composed, request, monkeypatch):
     home = hub.ident.gateway
     foreign = 'foreign' in request.node.name
     other = _foreign_card(c)
-    row = hub.row_evidence(board, 'tasks', other)['row']
-    print('PROBE topology', 'foreign' if foreign else 'same-home', 'other created_on', row.get('created_on'), 'home', home)
+
     # The production live pull is partitioned (kanban_sync_backlog: pull(..., partition=gateway)).
     client.pull(conn, hub, board, observers=True, partition=home)
     before = {r[0]: r[1] for r in conn.execute('SELECT id, created_on FROM tasks')}
-    print('PROBE before confirm live tasks', json.dumps(before, sort_keys=True))
+
     other2 = _foreign_card(c)  # a foreign change after the live cursor
     assert hub.ops(board, [c['wire']])['results'][0]['status'] == 'applied'
     actual_pull = client.pull
@@ -41,12 +40,12 @@ def test_confirm_keeps_live_file_partitioned(composed, request, monkeypatch):
         calls.append(kwargs)
         return actual_pull(*args, **kwargs)
     monkeypatch.setattr(client, 'pull', observed_pull)
-    result = transport.confirm(conn, hub, board, c['request_uid'])
+    transport.confirm(conn, hub, board, c['request_uid'])
     assert calls == [{'observers': True, 'partition': home}]
     after = {r[0]: r[1] for r in conn.execute('SELECT id, created_on FROM tasks')}
-    print('PROBE after confirm live tasks', json.dumps(after, sort_keys=True), result.get('protection_state'))
+
     leaked = sorted(t for t, gw in after.items() if gw not in (None, home))
-    print('PROBE leaked foreign cards in live file', leaked, 'other', other, 'other2', other2)
+    assert (other2 in after) is not foreign
     if foreign:
         assert other not in before
         assert not leaked, f'confirm() imported another gateway\'s cards into the home live file: {leaked}'

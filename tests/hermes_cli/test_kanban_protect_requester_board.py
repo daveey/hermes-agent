@@ -81,8 +81,7 @@ def test_production_requester_terminal(composed, monkeypatch, renewed):
         courier._MARK.clear()
         _operator._BACKOFF.clear()
         home_done = courier.apply_incoming(c['conn'])
-        print('PROBE2 renewed', renewed, 'home outcome', home_done)
-        print('PROBE2 home execute log', [tuple(r) for r in c['conn'].execute("SELECT outcome, detail FROM operator_calls WHERE side='execute'")])
+        assert (uid, 'recorded' if renewed else 'applied') in home_done
         assert client.push(c['conn'], hub, slug, hub.ident.gateway, primary=True).rejected == 0
         client.pull(rep, hub, slug, observers=False)
         monkeypatch.setattr(client, 'load_identity', lambda: ah.ident)
@@ -90,9 +89,7 @@ def test_production_requester_terminal(composed, monkeypatch, renewed):
         with monkeypatch.context() as dispatch:
             dispatch.delenv('HERMES_KANBAN_TASK')
             out = sr.drain(actor_conn, limit=1, incoming=False)
-        print('PROBE2 requester drain', out['processed'])
-        print('PROBE2 requester supervisor_requests', [tuple(r) for r in actor_conn.execute('SELECT status, error, result_json FROM supervisor_requests')])
-        print('PROBE2 requester request log', [tuple(r) for r in actor_conn.execute("SELECT outcome, detail FROM operator_calls WHERE side='request'")])
+        assert out['processed']
         rows = actor_conn.execute('SELECT status, error, result_json FROM supervisor_requests').fetchall()
         assert len(rows) == 1
         assert rows[0]['status'] == 'done' and rows[0]['error'] is None
@@ -101,7 +98,9 @@ def test_production_requester_terminal(composed, monkeypatch, renewed):
         assert result['protection']['protection_state'] == ('recorded_hold_unconfirmed' if renewed else 'held_confirmed')
         assert result['protection']['execution_authority'] is False
         assert result['protection']['dependency_satisfied'] is False
-        assert result['detail'] == 'Administrative protection only; no execution authority'
+        expected_detail = ('historical stop receipt confirmed; current hold not confirmed after separate renewal' if renewed
+                           else 'exact canonical stop receipt and held replica confirmed')
+        assert result['detail'] == expected_detail + '; Administrative protection only; no execution authority'
         assert actor_conn.execute("SELECT outcome FROM operator_calls WHERE side='request'").fetchone()[0] == 'done'
     finally:
         actor_conn.close()
