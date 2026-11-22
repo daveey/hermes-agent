@@ -100,8 +100,15 @@ def record_result(conn: sqlite3.Connection, row: dict, result: dict) -> str:
                      (str(result.get("reason") or "retain rejected")[:500], op_id))
         state, count = "rejected", "rejected"
     else:
-        conn.execute("UPDATE kanban_sync_outbox SET attempts=attempts+1,retry_after=? WHERE op_id=?",
-                     (int(time.time()) + 30, op_id))
+        # Even an explicit storage_error can be a failed lookup of an already
+        # applied receipt. Attempt exhaustion is not authority to release the run.
+        # Keep the immutable replay path and its concrete prerequisite visible.
+        reason = str(result.get('reason') or result.get('status') or 'missing reply')[:80]
+        detail = str(result.get('detail') or '')[:200]
+        error = (f'retain delivery unknown; replay exact command {op_id} after Board recovery; '
+                 f'require canonical receipt or definitive rejection; {reason}: {detail}')[:500]
+        conn.execute("UPDATE kanban_sync_outbox SET attempts=attempts+1,retry_after=?,last_error=? WHERE op_id=?",
+                     (int(time.time()) + 30, error, op_id))
         state, count = "unknown", "deferred"
     conn.execute("UPDATE kanban_failure_commands SET delivery_state=? WHERE op_id=? AND operation_kind='retain'",
                  (state, op_id))

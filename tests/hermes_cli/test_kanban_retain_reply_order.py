@@ -56,6 +56,39 @@ def test_transient_rejection_never_grants_failure_fallback(live, boundary, reaso
     assert transport.outbound(live, dict(live.execute("SELECT * FROM kanban_sync_outbox WHERE op='retain'").fetchone()))
 
 
+@pytest.mark.parametrize('boundary', ['result', 'confirm'])
+def test_repeated_storage_refusals_keep_recoverable_custody_and_diagnostics(live, boundary):
+    # A lost applied reply followed by receipt-lookup storage failures is still
+    # unknown, not permission to cancel the immutable command or release its run.
+    owned, _receipt, _rows, hub = receipts.fixture(live)
+    result = {'client_op_id': owned['request_uid'], 'status': 'rejected',
+              'reason': 'storage_error', 'detail': 'receipt lookup unavailable'}
+    applied_ops = hub.ops
+    hub.ops = lambda *a: {'results': [result]}
+    for _ in range(25):
+        if boundary == 'result':
+            with kbc.write_txn(live):
+                transport.record_result(live, {'op_id': owned['op_id']}, result)
+        else:
+            with pytest.raises(ValueError):
+                transport.confirm(live, hub, 'default', owned['run_uid'])
+    row = live.execute('SELECT * FROM kanban_sync_outbox WHERE op_id=?', (owned['op_id'],)).fetchone()
+    assert row['attempts'] == 25
+    assert 'storage_error: receipt lookup unavailable' in row['last_error']
+    assert 'replay exact command' in row['last_error']
+    assert owned['op_id'] in row['last_error']
+    assert len(row['last_error']) <= 500
+    assert transport.command(live, owned['run_uid'])['delivery_state'] == 'unknown'
+    rid = live.execute('SELECT id FROM task_runs WHERE uid=?', (owned['run_uid'],)).fetchone()[0]
+    assert release.observer_held(live, rid) and not release.queued(live, rid)
+    assert transport.command(live, owned['run_uid'])['request_json'] == owned['request_json']
+    hub.ops = applied_ops
+    assert transport.confirm(live, hub, 'default', owned['run_uid'])['terminal_for_run']
+    with kbc.write_txn(live):
+        transport.record_result(live, {'op_id': owned['op_id']}, result)
+    assert transport.command(live, owned['run_uid'])['delivery_state'] == 'confirmed'
+
+
 def test_legacy_read_only_command_readers_do_not_migrate(live, monkeypatch):
     # The pre-retain table has no operation/delivery/fallback columns.
     tid, rid = support._running(live)
