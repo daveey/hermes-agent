@@ -4,13 +4,14 @@ import { dismissNotification, notify } from '@/store/notifications'
 
 const PREFIX = 'hermes:archive-preflight-queue:'
 const active = new Set<string>()
+const storageKeys = (storage: Storage) => Array.from({ length: storage.length }, (_, index) => storage.key(index) ?? '')
 const windowPrefix = () => `${PREFIX}${encodeURIComponent(new URLSearchParams(window.location.search).get('win') ?? 'main')}:`
 
 /** Persist the existence, not a safety verdict or a mutation to replay. A new
  * renderer explicitly drops its window's old intents with a standing notice. */
 export function reportDroppedArchiveQueues(): void {
-  const legacy = Object.keys(sessionStorage).filter(key => key.startsWith(PREFIX) && !active.has(key))
-  const keys = Object.keys(localStorage).filter(key => key.startsWith(windowPrefix()) && !active.has(key))
+  const legacy = storageKeys(sessionStorage).filter(key => key.startsWith(PREFIX) && !active.has(key))
+  const keys = storageKeys(localStorage).filter(key => key.startsWith(windowPrefix()) && !active.has(key))
 
   if (!keys.length && !legacy.length) {return}
   notify({ id: 'archive-queue-reload', kind: 'warning', persistent: true, durationMs: 0,

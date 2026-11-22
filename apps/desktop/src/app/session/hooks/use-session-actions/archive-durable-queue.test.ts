@@ -67,7 +67,7 @@ it('holds one attempt past five minutes, then reruns full safety and commits wit
   await vi.advanceTimersByTimeAsync(350_000)
 
   const whileDisconnected = { outcome, archived, queued: $notifications.get().some(n => n.message === en.desktop.archiveQueued),
-    markers: Object.keys(localStorage).filter(k => k.startsWith('hermes:archive-preflight-queue:')).length }
+    markers: Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '').filter(k => k.startsWith('hermes:archive-preflight-queue:')).length }
 
   await vi.advanceTimersByTimeAsync(30_000)
   await pending
@@ -79,7 +79,7 @@ it('holds one attempt past five minutes, then reruns full safety and commits wit
   expect(stages.every((s: string) => s.startsWith(`[archive-trace] ${row.id} ${trace.attemptId} `))).toBe(true)
   expect(stages.filter((s: string) => s.endsWith(' start'))).toHaveLength(1)
   expect(stages.at(-1)).toContain(' committed')
-  expect(Object.keys(localStorage).filter(k => k.startsWith('hermes:archive-preflight-queue:'))).toHaveLength(0)
+  expect(Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '').filter(k => k.startsWith('hermes:archive-preflight-queue:'))).toHaveLength(0)
 })
 
 it.each(['button', 'dismiss'])('cancels through %s, restores immediately and ignores a late successful read', async mode => {
@@ -111,7 +111,7 @@ it.each(['button', 'dismiss'])('cancels through %s, restores immediately and ign
   await vi.advanceTimersByTimeAsync(400_000)
   expect(api).toHaveBeenCalledTimes(2)
   expect($confirmRequest.get()).toBeNull()
-  expect(Object.keys(localStorage).filter(k => k.startsWith('hermes:archive-preflight-queue:'))).toHaveLength(0)
+  expect(Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '').filter(k => k.startsWith('hermes:archive-preflight-queue:'))).toHaveLength(0)
 })
 
 it('reports restart loss from durable storage even without sessionStorage, and leaves other windows alone', () => {

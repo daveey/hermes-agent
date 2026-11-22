@@ -15,7 +15,7 @@ afterEach(() => {
 it('shows a restart drop note from the marker written by a real queue, with a new renderer module and no sessionStorage', async () => {
   const queue = archiveQueueLifetime('renderer-before-restart', 'restart-chat', en.desktop)
   queue.enqueue()
-  expect(Object.keys(localStorage)).toContain('hermes:archive-preflight-queue:main:renderer-before-restart')
+  expect(Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '')).toContain('hermes:archive-preflight-queue:main:renderer-before-restart')
   sessionStorage.clear()
   // A reload/app restart loses module memory, but not the durable marker.
   vi.resetModules()
@@ -42,5 +42,5 @@ it('cancels a queued backoff immediately, without leaving its timer or marker be
   expect(await waiting).toBe(en.desktop.archiveQueueCancelled)
   expect(vi.getTimerCount()).toBeLessThanOrEqual(baselineTimers)
   queue.dispose()
-  expect(Object.keys(localStorage)).toHaveLength(0)
+  expect(Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '')).toHaveLength(0)
 })

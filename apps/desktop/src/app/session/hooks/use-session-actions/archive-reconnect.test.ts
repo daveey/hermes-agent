@@ -160,7 +160,7 @@ it('holds a never-recovered queue until the user cancels, without sending any PA
   expect($notifications.get().some(n => n.kind === 'error')).toBe(true)
   expect(api.mock.calls.every(([arg]) => !arg.method)).toBe(true)
   expect($confirmRequest.get()).toBeNull()
-  expect(Object.keys(localStorage)).toHaveLength(0)
+  expect(Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '')).toHaveLength(0)
 })
 
 it('drops reload markers with a visible note, without replay, once; active remounts are not reloads', async () => {
@@ -174,10 +174,10 @@ it('drops reload markers with a visible note, without replay, once; active remou
   expect($notifications.get().filter(n => n.id === 'archive-queue-reload')).toHaveLength(1)
   const result = confirmLinkedArchive(row.id, row, 'work', en.desktop).catch(error => error)
   await vi.advanceTimersByTimeAsync(0)
-  const keys = Object.keys(localStorage)
+  const keys = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '')
   expect(keys).toHaveLength(1)
   reportDroppedArchiveQueues()
-  expect(Object.keys(localStorage)).toEqual(keys)
+  expect(Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index) ?? '')).toEqual(keys)
   await vi.advanceTimersByTimeAsync(70_000)
   $notifications.get().find(n => n.message === en.desktop.archiveQueued)?.action?.onClick()
   await result
