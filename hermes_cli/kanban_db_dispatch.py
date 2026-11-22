@@ -1269,7 +1269,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
         host_prefix = _kb._host_prefix()
         now_boot, reboot_victims = _host_reboot.victims(rows, lambda r: _kb._claim_is_local(r["claim_lock"] or "",
                                                                                           host_prefix))
-        from hermes_cli.kanban_owner_recovery import apply_attempt_note, owner_reclaim_blocked
+        from hermes_cli.kanban_owner_recovery import apply_attempt_note
         for row in rows:
             lock = row["claim_lock"] or ""
             if not _kb._claim_is_local(lock, host_prefix):
@@ -1284,13 +1284,11 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None,
                 continue
             if _worker_alive(row["worker_pid"], _kb._row_get(row, "worker_started_at")):
                 continue
-            from hermes_cli.kanban_failed_result import reclaim_proof, result_exit_code
-            proof, hold = reclaim_proof(conn, row, failed_results_only=failed_results_only)
+            from hermes_cli.kanban_failed_result import result_exit_code
+            from hermes_cli.kanban_refusal_receipt import reclaim_admission
+            proof, hold = reclaim_admission(conn, row, failed_results_only=failed_results_only)
             if hold:
                 continue
-            if proof is None and owner_reclaim_blocked(conn, row["id"], crash_sweep=True):
-                continue
-
             pid = int(row["worker_pid"])
             # A managed run's authority-recorded exit (its bound interpreter's, under this claim).
             exit_code = result_exit_code(conn, row, proof)

@@ -101,6 +101,9 @@ def scope_refusal(conn: sqlite3.Connection, target: str, requester: Optional[str
     from hermes_cli import kanban_spend_decision as ksd
     from hermes_cli.kanban_continuation import HUMAN_BLOCK_KINDS
     from hermes_cli.kanban_operator_call import COMMENT_MARK
+    from hermes_cli.kanban_refusal_receipt import restricted
+    if restricted(conn, target):
+        return 'Provider safety restriction has no supported execution release; ordinary spend promotion is not clearance'
     row = conn.execute("SELECT status, human_request, block_kind FROM tasks WHERE id = ?", (target,)).fetchone()
     if row is None:
         return f"no such task {target}"
