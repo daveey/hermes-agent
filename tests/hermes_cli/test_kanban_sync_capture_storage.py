@@ -166,6 +166,42 @@ def test_parent_identity_change_taints_and_original_tuple_is_immutable(board):
             board.execute(f"UPDATE kanban_sync_parent_envelopes SET {assignment}")
 
 
+@pytest.mark.parametrize("table,key", [("kanban_sync_outbox", "op_id"), ("kanban_sync_parent_envelopes", "task_id")])
+def test_null_identity_change_taints_exactly_the_changed_row(board, table, key):
+    if table == 'kanban_sync_outbox':
+        original(board, wire='{}')
+    else:
+        board.execute("INSERT INTO kanban_sync_parent_envelopes(task_id,wire,capture_protocol,original_op_id,"
+                      "original_created_at,identity_state) VALUES ('t_parent','{}','capture1','parent-operation',123,'original')")
+    rowid = board.execute(f"SELECT rowid FROM {table}").fetchone()[0]
+    before = tuple(board.execute(f"SELECT {','.join(COLUMNS)} FROM {table}").fetchone())
+    if table == 'kanban_sync_outbox':
+        board.execute("INSERT INTO kanban_sync_outbox(op_id,table_name,row_uid,op,fields,hlc,created_at) "
+                      "VALUES (NULL,'tasks','t_unrelated','upsert','{}','',123)")
+    else:
+        board.execute("INSERT INTO kanban_sync_parent_envelopes(task_id,wire) VALUES (NULL,'{}')")
+    other = board.execute(f"SELECT rowid FROM {table} WHERE {key} IS NULL").fetchone()[0]
+    board.execute(f"UPDATE {table} SET {key}=NULL WHERE rowid=?", (rowid,))
+    actual = tuple(board.execute(f"SELECT {','.join(COLUMNS)} FROM {table} WHERE rowid=?", (rowid,)).fetchone())
+    assert actual == (*before[:3], 'ambiguous')
+    assert tuple(board.execute(f"SELECT {','.join(COLUMNS)} FROM {table} WHERE rowid=?", (other,)).fetchone()) == (None, None, None, None)
+    with pytest.raises(sqlite3.IntegrityError, match='capture provenance is immutable'):
+        board.execute(f"UPDATE {table} SET identity_state='original' WHERE rowid=?", (rowid,))
+
+
+@pytest.mark.parametrize("table", ["kanban_sync_outbox", "kanban_sync_parent_envelopes"])
+@pytest.mark.parametrize("assignment", ["capture_protocol='capture1'", "original_op_id='retrofit'", "original_created_at=123"])
+def test_unknown_capture_tuple_cannot_be_retrofitted_without_state_change(board, table, assignment):
+    if table == 'kanban_sync_outbox':
+        board.execute("INSERT INTO kanban_sync_outbox(op_id,table_name,row_uid,op,fields,hlc,created_at) "
+                      "VALUES ('unknown-operation','tasks','t_unknown','upsert','{}','',123)")
+    else:
+        board.execute("INSERT INTO kanban_sync_parent_envelopes(task_id,wire) VALUES ('t_unknown','{}')")
+    with pytest.raises(sqlite3.IntegrityError, match='capture provenance is immutable'):
+        board.execute(f"UPDATE {table} SET {assignment}")
+    assert tuple(board.execute(f"SELECT {','.join(COLUMNS)} FROM {table}").fetchone()) == (None, None, None, None)
+
+
 def test_upgrade_preserves_historical_bytes_without_inventing_originality():
     from hermes_cli.kanban_sync_capture_storage import install
     conn = sqlite3.connect(':memory:')

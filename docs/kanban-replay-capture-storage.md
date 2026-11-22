@@ -29,6 +29,10 @@ SQLite guards in the caller's existing write transaction:
   fields, base version, HLC, status origin or stored wire;
 - taint synthetic-parent identity/wire changes.
 
+Taint targets the changed SQLite `rowid`, not key equality: ordinary TEXT primary
+keys here are nullable, and changing one to NULL must still taint exactly that row,
+without touching unrelated NULL-key custody.
+
 Freezing a previously unfrozen outbox operation and ordinary attempts/error
 bookkeeping do not taint it. Unexposed coalescing may change fields while
 preserving the capture-time lower bound. `wire_json != NULL` is a conservative

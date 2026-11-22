@@ -45,9 +45,9 @@ def install(conn: sqlite3.Connection) -> None:
         WHEN NEW.identity_state IS NOT 'ambiguous' AND
             (NEW.op_id IS NOT OLD.op_id OR NEW.created_at IS NOT OLD.created_at OR
                 (OLD.wire_json IS NOT NULL AND ({changed})))
-        BEGIN UPDATE kanban_sync_outbox SET identity_state='ambiguous' WHERE op_id=NEW.op_id; END""")
+        BEGIN UPDATE kanban_sync_outbox SET identity_state='ambiguous' WHERE rowid=NEW.rowid; END""")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS replay_capture1_parent_taint
         AFTER UPDATE ON kanban_sync_parent_envelopes
         WHEN NEW.identity_state IS NOT 'ambiguous' AND
             (NEW.task_id IS NOT OLD.task_id OR NEW.wire IS NOT OLD.wire)
-        BEGIN UPDATE kanban_sync_parent_envelopes SET identity_state='ambiguous' WHERE task_id=NEW.task_id; END""")
+        BEGIN UPDATE kanban_sync_parent_envelopes SET identity_state='ambiguous' WHERE rowid=NEW.rowid; END""")
