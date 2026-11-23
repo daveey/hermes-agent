@@ -89,7 +89,8 @@ def courier_plan(conn, args, runs_on, *, cfg=None, gateway=None, request_id=None
     if prior is not None:
         return prior or None
     # validate_creation's own fences: a worker-first card cannot carry a host workspace, board or project.
-    pinned = (runs_on is not None or (args.get("workspace_kind") or "scratch") != "scratch"
+    pinned = (bool(runs_on) or str(args.get("placement") or "auto").strip().lower() != "auto"
+              or (args.get("workspace_kind") or "scratch") != "scratch"
               or args.get("workspace_path") or args.get("project_id")
               or args.get("board") not in (None, "", "default"))
     if conn is not None and conn.in_transaction:

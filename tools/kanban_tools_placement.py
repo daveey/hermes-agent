@@ -45,6 +45,13 @@ def _landing_placement(conn, args, origin, origin_intent, marker, runs_on, *, ti
     """
     marker = _origin_enrollment(args, origin, marker, **effective)
     marker = _courier_landing(conn, args, origin_intent, marker, runs_on, title=title, **effective)
+    if (origin_intent is not None and runs_on == []
+            and str(args.get("placement") or "auto").strip().lower() == "auto"
+            and ((marker or {}).get("hub_admission") or {}).get("admit") is False
+            and ((marker or {}).get("runs_on") or (marker or {}).get("placement_policy"))):
+        # Empty courier labels are not a hub pin: persist admission's pool route.
+        # Else retain [] and its normal sync/lease validation on non-hub intakes.
+        runs_on = None
     if runs_on is None and (marker or {}).get("runs_on"):
         runs_on = list(marker["runs_on"])
     return marker, runs_on

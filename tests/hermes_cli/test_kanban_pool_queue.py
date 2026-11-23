@@ -752,6 +752,36 @@ def test_courier_create_denied_by_hub_admission_joins_the_pool_queue(hub, judge,
     assert len(judge.calls) == 1
 
 
+@pytest.mark.parametrize("queued", [True, False])
+def test_selfwork_auto_empty_labels_denial_persists_pool_route(hub, judge, monkeypatch, queued):
+    """swf-7c606: intake owns storage; runs_on=[] must not become a hub pin."""
+    from tools import kanban_tools as kt
+    monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1"]}})
+    machines = [{**m, "labels": [*m["labels"], "capability:hub-write", "capability:hub-read"]}
+                if m["name"] == "worker-2" else m
+                for m in _machines(held=("worker-1",) if queued else ("worker-1", "worker-2")).values()]
+    wn.set_registry_fetch(lambda: {"me": HUB, "machines": seen_now(machines)})
+    judge.admit_next = False
+    args = {"title": "Unstick dedupe work", "body": "Read hub evidence and verify existing owner.",
+            "assignee": "default", "placement": "auto", "runs_on": [],
+            "requires": ["terminal", "git", "hub:read"]}
+    intent = _intent("swf-7c606dc77bfa7767ebe18a8de3e2e75b28f7b5980c94265e1613b150b2187543")
+    out = json.loads(kt._handle_create(dict(args), origin_intent=intent))
+    assert out.get("created") is True, out
+    tid = out["task_id"]
+    task = kb.get_task(hub.conn, tid)
+    assert {"terminal", "git", "hub:read"} <= set(task.requires)
+    if queued:
+        assert POOL in _runs_on(hub.conn, tid)
+        assert task.placement_policy is None
+    else:
+        assert _runs_on(hub.conn, tid) is None
+        assert task.placement_policy == "worker-first-v1"
+    again = json.loads(kt._handle_create(dict(args), origin_intent=intent))
+    assert again.get("task_id") == tid, again
+    assert len(judge.calls) == 1
+
+
 def test_courier_create_keeps_worker_first_only_without_a_live_queue_label(hub, judge, monkeypatch):
     from tools import kanban_tools as kt
     monkeypatch.setattr(kp, "config", lambda: {**CFG, "worker_pools": {HUB: ["worker-1"]}})
@@ -784,7 +814,10 @@ def test_courier_explicit_machine_pin_still_wins(hub, judge, monkeypatch):
     assert judge.calls == [] and kb.get_task(hub.conn, out["task_id"]).placement_policy is None
 
 
-@pytest.mark.parametrize("extra", [{"runs_on": [f"machine:{HUB}"]}, {"workspace_kind": "dir", "workspace_path": "/srv/x"}])
+@pytest.mark.parametrize("extra", [
+    {"runs_on": [f"machine:{HUB}"]}, {"workspace_kind": "dir", "workspace_path": "/srv/x"},
+    {"placement": "hub", "runs_on": []}, {"placement": "local", "runs_on": []},
+])
 def test_courier_create_pinned_to_the_hub_is_refused_when_denied(hub, judge, monkeypatch, extra):
     # A denied hub pin (or a host workspace) cannot move to the queue: the creator re-places it; no card is made.
     from tools import kanban_tools as kt

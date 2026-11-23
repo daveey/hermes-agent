@@ -92,6 +92,10 @@ def _dispatch_result(raw_result):
         result = json.loads(raw_result) if isinstance(raw_result, str) else None
     except ValueError:
         result = None
+    if (isinstance(result, dict) and result.get('created') is False
+            and isinstance(result.get('code'), str) and result['code'].strip()):
+        # Definitive no-write refusals cannot be repaired by replaying this envelope.
+        return {**result, 'status': 'rejected', 'handoff_complete': False}
     if not isinstance(result, dict) or result.get('handoff_complete') is not False:
         # Dispatch catches exceptions itself. An untyped error may follow a
         # committed write: keep the exact request retryable, never infer absence.
