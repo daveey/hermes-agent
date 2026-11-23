@@ -101,6 +101,14 @@ def _push_strict(conn, hub, board, gateway, *, max_batches):
                          "WHERE op_id=?", (reason[:500], pending['op_id']))
             setattr(out, status, getattr(out, status) + 1)
             return  # Keep the semantic obligation visible; no sync success or identity rotation.
+        if status == 'deferred':
+            if cap.get('deferred_observation') != 'origin_pending1' or row.get('_parent'):
+                raise ValueError('tracer final disposition requires custody integration')
+            from hermes_cli.kanban_replay_deferred import handoff
+            handoff(conn, json.loads(journal.pending_wire(conn)), verdict, local['board_incarnation'])
+            conn.execute('DELETE FROM kanban_sync_outbox WHERE op_id=?', (pending['op_id'],))
+            out.deferred += 1
+            return  # Transport handoff is not authoritative row success.
         if status not in ('applied', 'merged'):
             raise ValueError('tracer final disposition requires custody integration')
         if row.get('_parent') and not verdict.get('version'):
