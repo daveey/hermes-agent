@@ -330,7 +330,34 @@ def _excluded(conn: sqlite3.Connection, row: dict, now: int, *, age: int, defer:
     from hermes_cli.kanban_retained_wait import explanation
     if row["status"] == "triage" and explanation(conn, tid, generated_only=False):
         return True  # a retained card its open parent or recorded wait explains owns no ask (t_01a1ee476b0f4c0b)
+    if _source_asks(conn, row):
+        return True
     return _armed_wake(conn, tid) or _agent_owned(conn, tid, age=age, defer=defer)
+
+
+_DECISION_KEY = "spend-budget-decision:"
+
+
+def _source_asks(conn: sqlite3.Connection, row: dict) -> bool:
+    """A spend-decision supervisor card whose decision is already asked, already made or owned by a newer card. Its
+    source carries an open human ask (promote or archive the source is the decision), the source is gone or no
+    longer spend-pending (promoted, archived, done), or another open supervisor is the source's current decision
+    card. Escalating the parked supervisor then asked David twice for one stop: the source is
+    escalated while ownerless, ``ensure_producer`` opens a new supervisor, that one parks, and it stays parked
+    after the source is answered."""
+    from hermes_cli.kanban_open_asks import card_is_open_human_ask
+    from hermes_cli.kanban_spend_decision import pending
+    key = str(row.get("idempotency_key") or "")
+    if row.get("created_by") != "kanban-spend-budget" or not key.startswith(_DECISION_KEY):
+        return False
+    source_id = key[len(_DECISION_KEY):].split(":", 1)[0]
+    source = conn.execute("SELECT status, block_kind, human_request FROM tasks WHERE id=?", (source_id,)).fetchone()
+    if source is None or source[0] in ("done", "archived") or not pending(conn, source_id):
+        return True
+    if card_is_open_human_ask(source[0], source[1], source[2]):
+        return True
+    current = open_decision_card(conn, source_id)  # a leftover from an earlier stop: the current one owns it
+    return current is not None and current != row["id"]
 
 
 def _shared_blocker(entry: Optional[dict]) -> bool:

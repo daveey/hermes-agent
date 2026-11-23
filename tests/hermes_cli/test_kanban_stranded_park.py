@@ -202,6 +202,71 @@ def test_open_decision_card_owns_until_done(kanban_home, own_gateway):
         assert card_is_open_human_ask(*_row(conn, tid))
 
 
+def _reparked_supervisor(conn):
+    """The hub shape of 2026-11-22/23: a spend-stopped source escalated while ownerless (its supervisor done), then
+    a new supervisor opened for the same episode, which itself parks with no owner."""
+    tid = stopped(conn)
+    assert budget.hold(conn, tid) == "triage"
+    (notice,) = _events(conn, tid, decision.NOTICE)
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (notice["producer"]["task_id"],))
+    assert _sweep(conn, now=_later(3), cfg={}) == [tid]
+    decision.ensure_producer(conn, tid)
+    sup = _events(conn, tid, decision.NOTICE)[-1]["producer"]["task_id"]
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET status='triage', block_kind='transient' WHERE id=?", (sup,))
+        kb._append_event(conn, sup, "agent_block_escalated", {"reason": "decision retained"})
+        kb._append_event(conn, sup, "triage_sweep_capped", {"cap": 3})
+    return tid, sup
+
+
+def test_supervisor_of_an_asking_source_is_not_asked_again(kanban_home, own_gateway):
+    with kbc.connect_closing() as conn:
+        tid, sup = _reparked_supervisor(conn)
+        assert card_is_open_human_ask(*_row(conn, tid))
+        assert _sweep(conn, now=_later(6), cfg={}) == []
+        assert not card_is_open_human_ask(*_row(conn, sup))
+        assert _events(conn, sup, stranded.EVENT) == []
+
+
+def test_supervisor_is_asked_once_its_source_ask_is_gone(kanban_home, own_gateway):
+    with kbc.connect_closing() as conn:
+        tid, sup = _reparked_supervisor(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET human_request=NULL, block_kind='transient' WHERE id=?", (tid,))
+        assert sup in _sweep(conn, now=_later(6), cfg={})
+        assert card_is_open_human_ask(*_row(conn, sup))
+
+
+@pytest.mark.parametrize("answer", ["promoted", "archived"])
+def test_supervisor_of_an_answered_source_is_not_asked(kanban_home, own_gateway, answer):
+    with kbc.connect_closing() as conn:
+        tid, sup = _reparked_supervisor(conn)
+        if answer == "promoted":
+            ok, err = kb.promote_task(conn, tid, actor="david", reason="re-scoped")
+            assert ok, err
+        else:
+            assert kb.archive_task(conn, tid)
+        assert sup not in _sweep(conn, now=_later(6), cfg={})
+        assert not card_is_open_human_ask(*_row(conn, sup))
+
+
+def test_leftover_supervisor_of_an_earlier_stop_is_not_asked(kanban_home, own_gateway):
+    with kbc.connect_closing() as conn:
+        tid, sup = _reparked_supervisor(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET human_request=NULL, block_kind='transient' WHERE id=?", (tid,))
+        old = kb.create_task(conn, title="Spend budget decision: earlier stop", assignee="default",
+                             created_by="kanban-spend-budget", idempotency_key=f"spend-budget-decision:{tid}:1")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='triage', block_kind='transient' WHERE id=?", (old,))
+            kb._append_event(conn, old, "agent_block_escalated", {"reason": "decision retained"})
+            kb._append_event(conn, old, "triage_sweep_capped", {"cap": 3})
+        assert stranded.open_decision_card(conn, tid) == sup
+        escalated = _sweep(conn, now=_later(6), cfg={})
+        assert sup in escalated and old not in escalated
+
+
 def test_transient_triage_card_is_rekinded(kanban_home, own_gateway):
     with kbc.connect_closing() as conn:
         tid = _parked(conn, kind="transient")
