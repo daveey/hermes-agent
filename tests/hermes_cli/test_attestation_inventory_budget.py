@@ -61,7 +61,11 @@ def test_expired_budget_does_not_wait_on_busy_audit_lock(monkeypatch):
 
 
 def test_inventory_expiry_after_final_item_refuses_partial_positive(monkeypatch):
+    from hermes_cli import plugin_review_records
     a = ledger()
+    a._reviewed_plugins = {'fixture': object()}
+    monkeypatch.setattr(plugin_review_records, 'verify_registered',
+                        lambda current: pytest.fail('plugin scan started after inventory expiry'))
     clock = [10.0]
     monkeypatch.setattr(ca.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(a, '_module_snapshot', lambda: [('only', SimpleNamespace(__file__='one.py'))])
@@ -94,6 +98,24 @@ def test_lock_acquisition_timeout_refuses_without_scanning(monkeypatch):
     with pytest.raises(TimeoutError):
         a.integrity_observation(deadline=10.25)
     assert calls == [{'timeout': 0.25}]
+
+
+def test_budget_expiring_during_lock_acquisition_never_starts_inventory(monkeypatch):
+    a = ledger()
+    clock = [10.0]
+    monkeypatch.setattr(ca.time, 'monotonic', lambda: clock[0])
+    released = []
+    class DelayedLock:
+        def acquire(self, **kwargs):
+            clock[0] = 12.0
+            return True
+        def release(self):
+            released.append(True)
+    a._lock = DelayedLock()
+    monkeypatch.setattr(a, '_inventory_modules', lambda **kwargs: pytest.fail('scanned after acquisition expiry'))
+    with pytest.raises(TimeoutError):
+        a.integrity_observation(deadline=11.0)
+    assert released == [True]
 
 
 def test_plugin_verification_expiry_never_returns_positive(monkeypatch):
