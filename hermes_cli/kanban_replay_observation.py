@@ -8,8 +8,11 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from hermes_cli import kanban_replay_deferred as deferred
+from hermes_cli import kanban_replay_episodes as episodes
 from hermes_cli import kanban_replay_journal as journal
 from hermes_cli.kanban_db_connect import write_txn
+
+_sample = episodes.sample
 
 
 _SCHEMA = '''CREATE TABLE IF NOT EXISTS kanban_replay_observation1 (
@@ -67,10 +70,11 @@ def _reserve(conn, local):
         conn.execute('INSERT INTO kanban_replay_observation_reads1 VALUES (?,?,?) '
                      'ON CONFLICT(board_incarnation,task) DO UPDATE SET token=excluded.token', (board, task, token))
         captures = deferred.captures(conn, board, task)
-        return task, token, captures
+        previous_episodes = episodes.begin(conn, board, task)
+        return task, token, captures, previous_episodes
 
 
-def _store(conn, local, task, reply, captures):
+def _store(conn, local, task, reply, captures, started, finished, previous_episodes):
     conn.execute('DELETE FROM kanban_replay_observation1 WHERE board_incarnation=? AND task=?',
                  (local['board_incarnation'], task))
     for entry in reply['entries']:
@@ -79,6 +83,7 @@ def _store(conn, local, task, reply, captures):
                       entry['run'], entry['status'], entry['evidence_sha256']))
     origins = {entry['origin'] for entry in reply['entries']}
     deferred.retire_absent(conn, local['board_incarnation'], task, origins, captures)
+    episodes.replace(conn, local['board_incarnation'], task, reply['entries'], started, finished, previous_episodes)
 
 
 def after_push(conn, hub, root, local, cap):
@@ -89,6 +94,7 @@ def after_push(conn, hub, root, local, cap):
     try:
         result = observe_one(conn, hub, root, local, cap)
     except sqlite3.Error as exc:
+        episodes.interrupt(conn)
         log.warning('Deferred observation storage unavailable: %s', exc)
         return
     if result['status'] == 'unavailable' and result.get('task'):
@@ -104,24 +110,33 @@ def observe_one(conn, hub, root, local, cap):
     """Observe at most one tracked task outside the writer; failure never means empty."""
     from hermes_cli.kanban_sync_client import HubError
     if cap.get('deferred_observation') != 'origin_pending1':
+        episodes.interrupt(conn)
         return dict(status='unavailable')
     reserved = _reserve(conn, local)
     if reserved is None:
         return dict(status='idle')
-    task, token, captures = reserved
+    task, token, captures, previous_episodes = reserved
+    started = _sampling_point(conn, local)
     try:
         reply = hub._call('GET', root + 'deferred?task=' + quote(task, safe=''))
         deferred.validate_membership(reply, local, task)
     except (OSError, ValueError, HubError) as exc:
+        episodes.interrupt(conn)
         with write_txn(conn):
             _release(conn, local['board_incarnation'], task, token)
         return dict(status='unavailable', task=task, reason=str(exc)[:500])
+    finished = _sampling_point(conn, local)
     with write_txn(conn):
         current = conn.execute('SELECT token FROM kanban_replay_observation_reads1 '
                                'WHERE board_incarnation=? AND task=?', (local['board_incarnation'], task)).fetchone()
         if current is None or current['token'] != token or _binding(journal.snapshot(conn)) != _binding(local):
             _release(conn, local['board_incarnation'], task, token)
             return dict(status='superseded', task=task)
-        _store(conn, local, task, reply, captures)
+        _store(conn, local, task, reply, captures, started, finished, previous_episodes)
         _release(conn, local['board_incarnation'], task, token)
     return dict(status='observed', task=task)
+
+
+def _sampling_point(conn, local):
+    process, milliseconds = _sample()
+    return repr((process, episodes.epoch(conn), _binding(local))), milliseconds

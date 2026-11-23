@@ -18,13 +18,24 @@ recapture, including migration from the earlier nullable-token schema. No token 
 an operation ID or result ledger.
 
 `kanban_replay_observation.observed` exposes the **last successful complete** reads;
-these records can be stale and carry no freshness or reachable-time guarantee yet.
+these records can be stale and carry no freshness guarantee.
 Unavailable/invalid reads preserve them and handoff custody. Read/storage failures
 are diagnostic warnings and do not fail already-acknowledged transport. The capacity
 read can occur in addition to the ordinary one-task poll. A separately obtained
 complete empty poll may retire the historical handoff without claiming application.
 
-Fingerprint episode timing, five-minute owner diagnostic delivery and synthetic-parent
+The production observer now stores active fingerprint episodes alongside each
+validated membership read. It conservatively accumulates prior-success completion
+to next-success request-start intervals of at most 60 seconds, excluding request
+latency. Process/monotonic-clock identity, a shared durable interruption token and
+consumed per-task sampling baselines fence failed or overlapping reads. Evidence
+change starts a new episode; complete absence retires it. Accumulated age saturates
+at 300 seconds. `kanban_replay_episodes.diagnostics` exposes due active entries with
+task/origin/fingerprint and retained queue evidence; it is **not a delivery receipt**
+or proof that the current queue is still unresolved. These are controlled-clock,
+future-contract tests, not live reachable-service observations.
+
+Owner diagnostic delivery and delivered-episode deduplication, plus synthetic-parent
 reconciliation remain open; this is not complete deferred support. Observed absence
 never marks status applied or updates sync_version. Captured status/HLC in a handoff
 record describe the requested handoff, not current server queue evidence or proof
@@ -148,6 +159,16 @@ not proof of continuous service availability between samples. It creates no repa
 new op identity, cancellation request, force-delete, or authority to resolve custody.
 The existing owner delivers the dependency or an authorized superseding lifecycle
 operation; separate business-control review is required for explicit cancellation.
+
+Before I/O, reservation consumes the task's previous sampling baseline while
+retaining its durable age/evidence. Settlement may use that saved baseline only
+after the existing per-task read-token and journal-binding checks. A crash or failed
+store therefore cannot leave a reusable baseline. Failure/capability loss also
+changes the shared singleton sampling epoch (and a process-local epoch), so another
+reader does not connect a sample across that known failure. If SQLite is wholly
+unavailable before reservation, durable invalidation itself may fail: log the
+failure, break this process's baseline and preserve custody. This does not certify
+concurrent-writer admission; the sender's single-writer gate remains unfinished.
 
 ## Required implementation proof (still open)
 

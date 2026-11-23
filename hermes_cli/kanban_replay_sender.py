@@ -31,7 +31,12 @@ def push(conn, hub, board, gateway, *, primary, max_batches=25, before_head=Fals
     if (sync.sync_state(conn) or {}).get('journal_id') is not None:
         if primary or before_head:
             raise ValueError('tracer push mode not integrated')
-        return _push_strict(conn, hub, board, gateway, max_batches=max_batches)
+        try:
+            return _push_strict(conn, hub, board, gateway, max_batches=max_batches)
+        except (OSError, ValueError, client.HubError):
+            from hermes_cli.kanban_replay_episodes import interrupt
+            interrupt(conn)
+            raise
     return client._push_legacy(conn, hub, board, gateway, primary=primary,
                                max_batches=max_batches, before_head=before_head, seen=seen)
 
