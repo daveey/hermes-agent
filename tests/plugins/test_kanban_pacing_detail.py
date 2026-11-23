@@ -21,6 +21,13 @@ _UNTIL_TEXT = time.strftime('%Y-%m-%d %H:%MZ', time.gmtime(int(_UNTIL)))
 
 @pytest.mark.parametrize('replica', [False, True])
 def test_card_detail_names_pacing_provider_and_reset(kanban_home, api, monkeypatch, replica):
+    import time
+    from types import SimpleNamespace
+    from hermes_cli import kanban_dispatch_skip as skips
+
+    # Pin the dated view just like the queue-level fixture; today's date drops the day.
+    monkeypatch.setattr(skips, 'time', SimpleNamespace(
+        time=lambda: 0, gmtime=time.gmtime, strftime=time.strftime))
     tid = make_replica_card(kanban_home) if replica else _live_card()
     if replica:
         enable_sync(monkeypatch)

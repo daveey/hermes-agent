@@ -369,7 +369,8 @@ def _read_card_items(ids: list[str]) -> tuple[list[dict], list[dict]]:
         wait = card.get("wait") if isinstance(card.get("wait"), dict) else {}
         human = card_is_open_human_ask(status, card.get("block_kind"), request)
         explained = card.get("retained_wait") if isinstance(card.get("retained_wait"), str) else None
-        if human and not explained:
+        # A notification subscription observes another chat's card; it does not adopt its human decision.
+        if human and not explained and card.get("via") != "subscribed":
             req = request if isinstance(request, dict) else {}
             decisions.append({"id": f"card:{tid}", "question": _str(req.get("action")) or _str(card.get("title")),
                               "choices": _choices(req.get("choices")), "card_id": tid, "state": "open"})

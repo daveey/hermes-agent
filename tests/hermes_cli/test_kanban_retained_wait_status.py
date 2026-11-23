@@ -110,12 +110,16 @@ def test_a_wait_recorded_before_the_retain_or_on_a_closed_card_does_not_explain_
     assert [d["card_id"] for d in decisions] == [tid]
 
 
-def test_a_real_request_on_a_retained_card_still_asks_with_an_open_parent(board) -> None:
-    """Not the sweep's generated ask (no ``stranded_park_escalated`` after the retain): somebody asked David."""
+@pytest.mark.parametrize("swept", [False, True])
+def test_a_real_request_on_a_retained_card_still_asks_with_an_open_parent(board, swept) -> None:
+    """A real ask, including one filed after the sweep's stamp, remains red."""
     real = dict(SWEEP_ASK, action="Approve the restart of the hub gateway. Unblock = restart; archive = skip.",
                 why_human="Only David can approve a gateway restart")
     with kbc.connect_closing() as conn:
-        tid = _retained(conn, parent=_running(conn), swept=False, request=real)
+        tid = _retained(conn, parent=_running(conn), swept=swept, request=real)
+        if swept:
+            with kb.write_txn(conn):
+                kb._append_event(conn, tid, "blocked", {"human_request": real})
     decisions, _ = _items()
     assert [d["card_id"] for d in decisions] == [tid]
 
@@ -132,6 +136,23 @@ def test_the_sweep_writes_no_ask_on_a_retained_card_an_open_parent_explains(boar
             conn.execute("UPDATE tasks SET human_request=NULL WHERE id=?", (orphan,))
         row = dict(conn.execute("SELECT * FROM tasks WHERE id=?", (orphan,)).fetchone())
         assert not ksp._excluded(conn, row, 10**10, age=10**6, defer=0)
+
+
+@pytest.mark.parametrize("reason", ["touch", "shepherd"])
+def test_a_subscription_does_not_adopt_another_cards_human_ask(board, reason) -> None:
+    from hermes_cli.kanban_db_notify import add_notify_sub
+
+    with kbc.connect_closing() as conn:
+        tid = _retained(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET session_id='other-chat' WHERE id=?", (tid,))
+        add_notify_sub(conn, task_id=tid, platform="tui", chat_id="s1", delivery_metadata={"reason": reason})
+    decisions, waits = _items()
+    assert decisions == []
+    assert [w["id"] for w in waits] == ([tid] if reason == "shepherd" else [])
+    # Ownership, rather than an incidental subscription, still owns the red ask.
+    decisions, _ = so._read_card_items(["other-chat"])
+    assert [d["card_id"] for d in decisions] == [tid]
 
 
 def _schedule(args):

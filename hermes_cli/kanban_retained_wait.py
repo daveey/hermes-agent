@@ -68,6 +68,11 @@ def explanation(conn: sqlite3.Connection, task_id: str, *, generated_only: bool 
         swept = _latest(conn, task_id, (SWEEP_EVENT,))
         if swept is None or swept[0] < retained[0]:
             return None
+        # A later explicit ask supersedes the old system stamp, even within the same retained episode.
+        if conn.execute("SELECT 1 FROM task_events WHERE task_id=? AND id>? AND json_valid(payload) "
+                        "AND json_type(payload, '$.human_request')='object' LIMIT 1",
+                        (task_id, swept[0])).fetchone():
+            return None
     parent = _open_parent(conn, task_id)
     if parent:
         return f"card:{parent}"
