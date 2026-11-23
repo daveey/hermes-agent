@@ -906,9 +906,8 @@ def resync(conn: sqlite3.Connection, hub: Hub, board: str, *, observers: bool, p
             if not page.get("more"):
                 break
             after = str(page["next"])
-    from hermes_cli.kanban_db_connect import write_txn
-    with write_txn(conn):
-        conn.execute("UPDATE kanban_sync_state SET cursor = ?", (int(head or 0),))
+    from hermes_cli.kanban_sync_snapshot_tasks import finish_rebuild  # the history replay can reopen a done card
+    finish_rebuild(conn, hub, board, int(head or 0), partition=partition)
     return count
 
 
