@@ -467,10 +467,36 @@ def test_verify_still_requires_every_member_with_content(board):
         sa.verify_complete_archive(_archive(tid))
 
 
-@pytest.mark.parametrize("mode", [stat.S_IFCHR, stat.S_IFBLK])
-def test_device_node_is_still_refused(mode):
+@pytest.mark.parametrize("mode,kind", [(stat.S_IFCHR, "chardev"), (stat.S_IFBLK, "blockdev")])
+def test_device_node_kind_is_contentless(mode, kind):
+    """worker-a2 (2026-11-23): root-filesystem builds hold /dev nodes; refusing them kept 88 GiB forever."""
     from hermes_cli import kanban_scratch_archive as sa
 
-    with pytest.raises(sa.ArchiveRefused, match="device node"):
-        sa._kind(mode | 0o600)
+    assert sa._kind(mode | 0o600) == kind and kind in sa._CONTENTLESS
     assert sa._kind(stat.S_IFIFO | 0o600) == "fifo" and sa._kind(stat.S_IFSOCK | 0o600) == "socket"
+
+
+def test_verify_accepts_recorded_device_without_member(board):
+    from hermes_cli import kanban_scratch_archive as sa
+
+    tid, _ = base._plain_task(lambda p: os.mkfifo(p / "pipe"))
+    assert _gc() == 0
+    manifest_path = _archive(tid) / PAYLOAD / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["entries"]["dev/null"] = {"type": "chardev", "mode": 0o666, "rdev": [1, 3]}
+    manifest_path.write_text(json.dumps(manifest))
+    sa.verify_complete_archive(_archive(tid))
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="mknod of a device node needs root")
+def test_device_node_is_recorded_and_tree_removed(board):
+    def build(p):
+        (p / "dev").mkdir()
+        os.mknod(p / "dev" / "null", stat.S_IFCHR | 0o666, os.makedev(1, 3))
+
+    tid, path = base._plain_task(build)
+    assert _gc() == 0
+    assert not path.exists()
+    rec = _manifest(tid)["entries"]["dev/null"]
+    assert rec["type"] == "chardev" and rec["rdev"] == [1, 3] and "sha256" not in rec
+    assert "dev/null" not in _tree(tid)

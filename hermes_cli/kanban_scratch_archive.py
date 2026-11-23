@@ -50,8 +50,11 @@ Shapes that used to refuse forever archive too (``kanban_scratch_archive_shapes`
   tree is archived as a nested repo; a gitdir outside it gets ``tracked.diff``,
   ``untracked.tar`` and HEAD/branch in meta.json, read through a private copy of
   its index so git never writes to the outside gitdir;
-* a fifo or socket: the manifest records its path, type and mode; it has no
-  content to archive;
+* a fifo, socket or device node: the manifest records its path, type and mode
+  (a device also its ``rdev`` [major, minor]); it has no content to archive;
+* entries owned by another user (a root build under sudo): with passwordless
+  sudo they are recorded and chowned to the worker user first
+  (``kanban_scratch_archive_ownership``);
 * refs whose tip the remote already holds (tags fetched from a promisor remote)
   are no longer bundled, and a ref needing objects the promisor remote vouches
   for is left to the payload (``promised_refs``).
@@ -63,7 +66,7 @@ This preserves existing bytes; it does not repair objects already missing from t
 source. A workspace referencing an external gitdir cannot use that fallback.
 
 Anything it cannot prove safe keeps the workspace: a ``.git`` symlink, a gitlink
-whose gitdir is missing or empty, a device node, unpushed objects that are
+whose gitdir is missing or empty, unpushed objects that are
 missing locally and vouched for by no promisor remote (reason
 ``unrecoverable_objects``), any scan error, source mutation during the archive,
 or any failed archive step. A regular ``.git`` file with no ``gitdir:`` line
@@ -443,7 +446,7 @@ _GZIP_LEVEL = 1
 
 
 # Entries the manifest records (path, type, mode) with no tar member: they hold no content.
-_CONTENTLESS = ("fifo", "socket")
+_CONTENTLESS = ("fifo", "socket", "chardev", "blockdev")
 
 
 def _kind(mode: int) -> str:
@@ -457,7 +460,11 @@ def _kind(mode: int) -> str:
         return "fifo"
     if stat.S_ISSOCK(mode):
         return "socket"
-    raise ArchiveRefused("special file in workspace (device node)")
+    if stat.S_ISCHR(mode):
+        return "chardev"
+    if stat.S_ISBLK(mode):
+        return "blockdev"
+    raise ArchiveRefused("special file in workspace (unknown type)")
 
 
 def _signature(st: os.stat_result) -> list[int]:
@@ -610,6 +617,8 @@ def _scan(root: Path, tar: Optional[tarfile.TarFile] = None,
                     entries[erel] = rec
             elif kind in _CONTENTLESS:
                 if rec is not None:
+                    if kind in ("chardev", "blockdev"):
+                        rec["rdev"] = [os.major(st.st_rdev), os.minor(st.st_rdev)]
                     entries[erel] = rec  # recorded, never opened: reading a fifo could block or drain it
             elif info is not None:
                 if omit is not None and omit(dfd, name, erel, st):
@@ -901,6 +910,8 @@ def archive_workspace(workspace: Path, archive_dir: Path, *, task_id: str,
     no half archive that looks complete. Raises :class:`ArchiveRefused` (or
     ``OSError``) on any failure; the caller then keeps the workspace.
     """
+    from hermes_cli.kanban_scratch_archive_ownership import adopt
+    adopt(workspace)  # root-owned build output: record owners, then chown to the worker user (sudo only)
     layout = _discover(workspace)
     repos, markers = layout.repos, layout.markers
     try:
