@@ -33,11 +33,10 @@ def _json(raw: Any) -> dict:
 def _local_status(conn: sqlite3.Connection, ids: list[str]) -> dict[str, tuple[str, Optional[float]]]:
     """``{id: (status, finished_at)}`` using the terminal transition, never later comments."""
     out: dict[str, tuple[str, Optional[float]]] = {}
-    marks = ",".join("?" * len(ids))
     for tid, status, done_at, last in conn.execute(
-            f"SELECT t.id, t.status, t.completed_at, (SELECT MAX(e.created_at) FROM task_events e "
-            f"WHERE e.task_id = t.id AND e.kind = CASE t.status WHEN 'archived' THEN 'archived' "
-            f"ELSE 'completed' END) FROM tasks t WHERE t.id IN ({marks})", ids):
+            "SELECT t.id, t.status, t.completed_at, (SELECT MAX(e.created_at) FROM task_events e "
+            "WHERE e.task_id = t.id AND e.kind = CASE t.status WHEN 'archived' THEN 'archived' "
+            "ELSE 'completed' END) FROM tasks t WHERE t.id IN (SELECT value FROM json_each(?))", (json.dumps(ids),)):
         out[str(tid)] = (str(status), last if status == "archived" else done_at)
     return out
 
@@ -59,7 +58,7 @@ def _replica_status(ids: list[str]) -> dict[str, tuple[str, Optional[float]]]:
     return out
 
 
-def statuses(conn: sqlite3.Connection, ids: Iterable[str]) -> dict[str, tuple[str, Optional[float]]]:
+def statuses(conn: sqlite3.Connection, ids: Iterable[str], *, replica: Any = ...) -> dict[str, tuple[str, Optional[float]]]:
     want = list(dict.fromkeys(ids))
     if not want:
         return {}
@@ -70,7 +69,10 @@ def statuses(conn: sqlite3.Connection, ids: Iterable[str]) -> dict[str, tuple[st
     missing = [i for i in want if i not in found]
     if missing:
         try:
-            found.update(_replica_status(missing))
+            if replica is ...:
+                found.update(_replica_status(missing))
+            elif replica is not None:
+                found.update(_local_status(replica, missing))
         except Exception:  # replica unreadable: unknown status counts as open
             logger.debug("contained wait: replica status lookup failed", exc_info=True)
     return found
@@ -99,7 +101,7 @@ def _active_episode(conn: sqlite3.Connection, tid: str, marker: str) -> Optional
     return next((e for e in events if e["kind"] == "contained" and e["uid"] == marker), None)
 
 
-def read(conn: sqlite3.Connection, task_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+def read(conn: sqlite3.Connection, task_ids: Iterable[str], *, replica: Any = ...) -> dict[str, dict[str, Any]]:
     """``{task_id: contained facts}`` for the held triage cards among ``task_ids``::
 
         {episode, contained_at, authority: {id, status, at}, producer: {id, status, released} | None}
@@ -111,9 +113,9 @@ def read(conn: sqlite3.Connection, task_ids: Iterable[str]) -> dict[str, dict[st
     try:
         if "containment_episode" not in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
             return {}
-        marks = ",".join("?" * len(ids))
-        rows = conn.execute(f"SELECT id, containment_episode FROM tasks WHERE status = 'triage' "
-                            f"AND containment_episode IS NOT NULL AND id IN ({marks})", ids).fetchall()
+        rows = conn.execute("SELECT id, containment_episode FROM tasks WHERE status = 'triage' "
+                            "AND containment_episode IS NOT NULL AND id IN (SELECT value FROM json_each(?))",
+                            (json.dumps(ids),)).fetchall()
     except sqlite3.Error:
         return {}
     stops: dict[str, tuple[dict, dict]] = {}
@@ -130,7 +132,7 @@ def read(conn: sqlite3.Connection, task_ids: Iterable[str]) -> dict[str, dict[st
         stops[str(tid)] = (stop, spec)
     need = [spec["authority"]["task_id"] for _, spec in stops.values()]
     need += [spec["producer"]["task_id"] for _, spec in stops.values() if isinstance(spec.get("producer"), dict)]
-    known = statuses(conn, need)
+    known = statuses(conn, need) if replica is ... else statuses(conn, need, replica=replica)
     out: dict[str, dict[str, Any]] = {}
     for tid, (stop, spec) in stops.items():
         a_id = spec["authority"]["task_id"]

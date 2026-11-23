@@ -1600,47 +1600,9 @@ def _read_session_tasks(path: Path, ids: list[str], statuses: tuple[str, ...]) -
             return []  # explicitly supported pre-session schema
         from hermes_cli.kanban_session_outcome_tasks import select_listed_local_tasks
         found = select_listed_local_tasks(conn, ids, statuses)
-        from hermes_cli.kanban_execution_source import assemble
-        from hermes_cli.kanban_execution_observations import ADAPTER_ERRORS, card_scope
-        gateway, profile = card_scope(path)
-        for info in found.values():  # board-root owner scope, kept for the failure path too (C9)
-            info["_execution_scope"] = {"gateway": gateway, "profile": profile, "board": _board_slug(path)}
-        from hermes_cli.kanban_primary_execution import PrimaryMirror, attach
-        primary = False
-        try:
-            _require_local_execution_authority(conn)
-            authority = True
-        except PrimaryMirror:
-            authority, primary = False, True
-        except ADAPTER_ERRORS:
-            authority = False  # a pulled mirror attests neither open nor delivered cards
-        try:
-            if primary:
-                attach(conn, found, board=_board_slug(path), gateway=gateway, profile=profile)
-                for info in found.values():
-                    if "_replica_run" not in info:
-                        info["_execution_error"] = True
-            elif authority:
-                sources = assemble(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
-                                   observed_at=read_at)
-                for tid, source in sources.items():
-                    found[tid]["_execution_source"] = source
-            else:
-                raise RuntimeError("local execution authority unavailable")
-        except ADAPTER_ERRORS:
-            # Optional evidence: the task list and asks stay; each card becomes an explicit unknown.
-            _log.debug("kanban execution source failed for %s", path, exc_info=True)
-            for info in found.values():
-                info["_execution_error"] = True
-        if authority:  # receipts are independent of the open-card read, but not of owner authority
-            _receipts.attach_done(conn, found, board=_board_slug(path), gateway=gateway, profile=profile,
-                                  observed_at=read_at)
-        _add_card_details(conn, found)
-        try:
-            for tid, info in _local_wait_info(conn, found).items():
-                found[tid]["wait"] = info
-        except Exception as exc:  # display-only: never fails the task list
-            _log.debug("kanban wait info read failed for %s: %s", path, exc)
+        from hermes_cli.kanban_session_acquisition import LEGACY_REPLICA, enrich_session_tasks
+        from hermes_cli.kanban_execution_observations import card_scope
+        enrich_session_tasks(conn, path, found, observed_at=read_at, scope=card_scope(path), replica=LEGACY_REPLICA)
     board = _board_slug(path)
     return [{**t, "board": board} for t in found.values()]
 

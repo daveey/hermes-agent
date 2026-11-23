@@ -15,6 +15,7 @@ from hermes_cli.kanban_run_model import add_run_models
 
 _PR_URL_RE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _NOTE_CHARS = 200
+LEGACY_REPLICA = ...  # omitted legacy argument owns shadow acquisition/closure
 
 
 def _first_line(text: Any) -> str:
@@ -22,7 +23,26 @@ def _first_line(text: Any) -> str:
     return line[:_NOTE_CHARS]
 
 
-def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]) -> None:
+def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]], *, replica: Any = LEGACY_REPLICA) -> None:
+    """Canonical details in chunks sized for the largest query's fixed bindings."""
+    from hermes_cli.kanban_run_model import _KINDS
+
+    if not found:
+        return
+    size = min(500, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) - len(_KINDS))
+    ids = list(found)
+    owned = replica is LEGACY_REPLICA
+    if owned:
+        replica = _replica_for(conn)
+    try:
+        for start in range(0, len(ids), size):
+            _add_card_details_chunk(conn, {tid: found[tid] for tid in ids[start:start + size]}, replica=replica)
+    finally:
+        if owned and replica is not None:
+            replica.close()
+
+
+def _add_card_details_chunk(conn: sqlite3.Connection, found: dict[str, dict[str, Any]], *, replica: Any = LEGACY_REPLICA) -> None:
     """Per listed card, what the linked-card rows show: the latest event (``activity_kind``/``activity_at``), a
     one-line ``note`` (the newest run summary or comment) and the newest GitHub PR ``pr_url`` found in its
     comments, result or run summaries. One query per table for all listed cards; missing tables are skipped."""
@@ -69,7 +89,7 @@ def _add_card_details(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]
         found[task_id]["pr_url"] = url
     add_run_machines(conn, found)  # where each card runs: the strip's hub/worker mark
     add_run_models(conn, found)  # which model its newest run uses (route class/pin, or attested models)
-    _add_blocked_upstream(conn, found)
+    _add_blocked_upstream(conn, found, replica=replica)
 
 
 def _replica_for(conn: sqlite3.Connection) -> sqlite3.Connection | None:
@@ -206,11 +226,13 @@ def _walk(conn: sqlite3.Connection, task_id: str,
     return None, nearest_open
 
 
-def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, Any]]) -> None:
+def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, Any]], *, replica: Any = LEGACY_REPLICA) -> None:
     """Optional presentation evidence; old schemas remain readable. Replica fills foreign parents."""
     if not found:
         return
-    replica = _replica_for(conn)
+    owned = replica is LEGACY_REPLICA
+    if owned:
+        replica = _replica_for(conn)
     try:
         try:
             root_parents = _root_parents(conn, replica, list(found))
@@ -232,7 +254,7 @@ def _add_blocked_upstream(conn: sqlite3.Connection, found: dict[str, dict[str, A
             elif upstream is not None:
                 card["upstream"] = upstream
     finally:
-        if replica is not None:
+        if owned and replica is not None:
             replica.close()
 
 

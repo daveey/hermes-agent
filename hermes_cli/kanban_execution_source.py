@@ -121,8 +121,11 @@ def assemble(conn, ids, *, board, gateway, profile, observed_at):
         return {}
     schema = _schema(conn)
     out = {}
-    for start in range(0, len(ids), 500):
-        chunk = ids[start:start + 500]
+    # The task/run join binds the same chunk twice. Respect the actual connection
+    # limit (older SQLite builds default to 999), not only the output batch size.
+    chunk_size = min(500, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) // 2)
+    for start in range(0, len(ids), chunk_size):
+        chunk = ids[start:start + chunk_size]
         marks = ','.join('?' for _ in chunk)
         tasks, runs, current = _tasks_runs(conn, chunk, schema)
         events = {}

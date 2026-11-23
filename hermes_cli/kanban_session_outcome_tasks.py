@@ -9,6 +9,7 @@ card details and ``add_cards``.
 from __future__ import annotations
 
 from contextlib import closing
+import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -19,38 +20,57 @@ _log = logging.getLogger("hermes_cli.kanban_session_activity")
 
 def select_listed_local_tasks(conn: sqlite3.Connection, ids: list[str], statuses: tuple[str, ...],
                               ) -> dict[str, dict[str, Any]]:
-    """Tasks on one board that any of ``ids`` created or tui-shepherds, in ``statuses``.
+    """Legacy union view: creator precedence across the supplied lineage."""
+    return select_listed_local_task_set(conn, ids, statuses, strict=False)[0]
 
-    Creator rows win over subscriber rows (``setdefault``). Same pairs ``_read_counts`` counts.
+
+def select_listed_local_task_set(conn: sqlite3.Connection, ids: Iterable[str], statuses: tuple[str, ...], *, strict: bool = True,
+                                 ) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], str]]:
+    """Return canonical cards AND complete ``(session, task) -> via`` membership.
+
+    JSON scopes use two bindings regardless of lineage size. Creator precedence
+    applies per pair as well as to the legacy union. The caller owns row_factory
+    and transaction lifetime; this selector neither opens nor closes a connection.
+    Missing legacy subscriptions are supported; other subscriber SQL errors
+    propagate rather than certifying partial coverage. Only the historical union
+    wrapper opts into ``strict=False`` to retain its optional-read boundary.
     """
     from hermes_cli.kanban_session_activity import _TASK_FIELDS, _counted_sub_clause
     from hermes_cli.kanban_watch import not_watch_sql as _not_watch
 
-    sid_ph = ",".join("?" for _ in ids)
-    st_ph = ",".join("?" for _ in statuses)
+    args = (json.dumps(list(dict.fromkeys(ids))), json.dumps(statuses))
+    sid_ph = "SELECT value FROM json_each(?)"
+    st_ph = "SELECT value FROM json_each(?)"
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
     if "session_id" not in cols:
-        return {}  # explicitly supported pre-session schema
+        return {}, {}  # explicitly supported pre-session schema
     select = ", ".join(f"t.{c}" if c in cols else f"NULL AS {c}" for c in _TASK_FIELDS)
     run_start = "NULL"
     if "current_run_id" in cols and conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'").fetchone():
         run_start = "(SELECT r.started_at FROM task_runs r WHERE r.id = t.current_run_id AND r.task_id = t.id)"
     found: dict[str, dict[str, Any]] = {}
+    pairs: dict[tuple[str, str], str] = {}
     watch = _not_watch(conn)
     for row in conn.execute(
             f"SELECT {select}, {run_start} AS current_run_started_at FROM tasks t "
-            f"WHERE t.session_id IN ({sid_ph}) AND t.status IN ({st_ph}) AND {watch}", (*ids, *statuses)):
+            f"WHERE t.session_id IN ({sid_ph}) AND t.status IN ({st_ph}) AND {watch}", args):
         found[row["id"]] = {**dict(row), "via": "created"}
+        pairs[(row["session_id"], row["id"])] = "created"
     try:
         for row in conn.execute(
-                f"SELECT {select}, {run_start} AS current_run_started_at FROM kanban_notify_subs s "
-                f"JOIN tasks t ON t.id = s.task_id WHERE s.platform = 'tui' AND {_counted_sub_clause(conn)} "
-                f"AND s.chat_id IN ({sid_ph}) AND t.status IN ({st_ph}) AND {watch}", (*ids, *statuses)):
-            found.setdefault(row["id"], {**dict(row), "via": "subscribed"})
+                f"SELECT {select}, {run_start} AS current_run_started_at, s.chat_id AS _member_session "
+                f"FROM kanban_notify_subs s JOIN tasks t ON t.id = s.task_id "
+                f"WHERE s.platform = 'tui' AND {_counted_sub_clause(conn)} "
+                f"AND s.chat_id IN ({sid_ph}) AND t.status IN ({st_ph}) AND {watch}", args):
+            info = dict(row)
+            sid = info.pop("_member_session")
+            found.setdefault(row["id"], {**info, "via": "subscribed"})
+            pairs.setdefault((sid, row["id"]), "subscribed")
     except sqlite3.Error:  # board predates notify subscriptions
-        pass
-    return found
+        if strict and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kanban_notify_subs'").fetchone():
+            raise
+    return found, pairs
 
 
 def append_remote_listed_cards(out: list[dict[str, Any]], ids: list[str], statuses: tuple[str, ...],
