@@ -40,14 +40,15 @@ def page_writer(conn, tables, *, cache):
     """
     from hermes_cli.kanban_db_connect import write_txn
     prepared = _prepare(conn, tables) if cache else None
-    with write_txn(conn):
-        if prepared is not None and conn.execute('PRAGMA schema_version').fetchone()[0] != prepared.version:
-            prepared = _prepare(conn, tables)
-        token = _SCHEMA.set(prepared)
-        try:
+    token = _SCHEMA.set(prepared)
+    try:
+        with write_txn(conn):
+            if prepared is not None and conn.execute('PRAGMA schema_version').fetchone()[0] != prepared.version:
+                prepared = _prepare(conn, tables)
+                _SCHEMA.set(prepared)
             yield
-        finally:
-            _SCHEMA.reset(token)
+    finally:
+        _SCHEMA.reset(token)
 
 
 def table_columns(conn, table):

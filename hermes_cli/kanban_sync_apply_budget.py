@@ -19,7 +19,6 @@ MAX_ROWS = 32
 MAX_TRANSACTION_S = 0.25
 PUSH_INTERVAL_S = 5.0
 WRITER_YIELD_S = 0.1
-_SCHEMA: contextvars.ContextVar[Any] = contextvars.ContextVar("sync_apply_schema", default=None)
 _LIMIT: contextvars.ContextVar[Any] = contextvars.ContextVar("sync_apply_limit", default=None)
 _DEADLINE: contextvars.ContextVar[Any] = contextvars.ContextVar("sync_apply_deadline", default=None)
 _SERVICE: contextvars.ContextVar[Any] = contextvars.ContextVar("sync_pull_service", default=None)
@@ -30,37 +29,10 @@ class ApplyBudgetExceeded(sqlite3.OperationalError):
     """A rolled-back feed batch exceeded its writer budget."""
 
 
-def cached_columns(conn, table):
-    cache = _SCHEMA.get()
-    return cache[1].get(table) if cache is not None and cache[0] is conn else None
-
-
-def columns(conn, table):
-    cached = cached_columns(conn, table)
-    if cached is not None:
-        return cached
-    from hermes_cli.kanban_table_columns import table_columns
-    return table_columns(conn, table)
-
-
 def check_budget():
     deadline = _DEADLINE.get()
     if deadline is not None and time.monotonic() >= deadline:
         raise ApplyBudgetExceeded("feed transaction exceeded writer budget")
-
-
-@contextlib.contextmanager
-def schema_cache(conn):
-    from hermes_cli import kanban_db_sync as sync
-    if _SCHEMA.get() is not None and _SCHEMA.get()[0] is conn:
-        yield
-        return
-    snapshot = {table: sync.table_columns(conn, table) for table in (*sync.SYNCED_TABLES, "kanban_sync_outbox")}
-    token = _SCHEMA.set((conn, snapshot))
-    try:
-        yield
-    finally:
-        _SCHEMA.reset(token)
 
 
 @contextlib.contextmanager
@@ -127,8 +99,7 @@ def apply_page(conn, changes, *, new_cursor, **kwargs):
     # Establish conservative holds for every certified receipt before any prefix
     # can publish readiness. Releases remain held until their event is applied.
     containment.prepare_apply(conn, changes)
-    with schema_cache(conn):
-        return _apply_page(conn, changes, new_cursor=new_cursor, **kwargs)
+    return _apply_page(conn, changes, new_cursor=new_cursor, **kwargs)
 
 
 def _apply_page(conn, changes, *, new_cursor, **kwargs):

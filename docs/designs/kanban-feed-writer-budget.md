@@ -15,7 +15,8 @@ application/VM work, not a real-time guarantee against OS descheduling, one slow
 SQLite opcode, rollback I/O, or COMMIT/fsync. No network I/O runs in a feed writer
 transaction. The atomic repair/snapshot API remains available unchanged.
 
-Schema columns are captured outside the reservation and reused for its page.
+Schema columns are prepared outside each prefix reservation (landed page-writer
+cache) and reused for that reservation.
 A 100 ms scheduling opportunity after each reservation avoids immediately retaking
  the writer ahead of an already waiting dispatcher, including SQLite's busy-handler
  backoff (a 5 ms gap can fall entirely between its retries). SQLite has no FIFO guarantee;

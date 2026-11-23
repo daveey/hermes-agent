@@ -27,8 +27,8 @@ def arm(conn: sqlite3.Connection) -> bool:
         # at CREATE time, then breaks an unrelated later mutation: check first.
         required = {"tasks": {"id", "status"},
                     "kanban_sync_outbox": {"op_id", "row_uid", "table_name", "op", "fields", "status_origin"}}
-        from hermes_cli.kanban_sync_apply_budget import columns
-        if any(not needed <= set(columns(conn, table)) for table, needed in required.items()):
+        from hermes_cli.kanban_sync_apply_schema import table_columns
+        if any(not needed <= set(table_columns(conn, table)) for table, needed in required.items()):
             return False
         conn.execute(f"CREATE TEMP TABLE IF NOT EXISTS {_TABLE} (op_id TEXT PRIMARY KEY, task_id TEXT)")
         conn.execute(f"DELETE FROM temp.{_TABLE}")

@@ -1346,7 +1346,7 @@ def apply_remote_changes(
     from hermes_cli import kanban_containment_replica as containment
     from hermes_cli.kanban_sync_apply_budget import check_budget, transaction_budget
     containment.prepare_apply(conn, changes)
-    with page_writer(conn, SYNCED_TABLES, cache=bool(changes) and keep is None), transaction_budget(conn):
+    with page_writer(conn, (*SYNCED_TABLES, "kanban_sync_outbox"), cache=bool(changes) and keep is None), transaction_budget(conn):
         result.revision_before = _repair_revision(conn)
         # Serialize with set_mode(off): a feed fetched before detach must not
         # overwrite locally held custody after the detach transaction commits.
