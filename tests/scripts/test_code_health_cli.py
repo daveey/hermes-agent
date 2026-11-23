@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,77 @@ from scripts.code_health import cli, gitio
 from scripts.code_health.config import ENFORCEMENT
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize('source, expected', [
+    ('import os\nos.open("x", os.O_RDONLY)', 'K1'),
+    ('import os\nFLAGS = os.O_RDONLY\nos.open("x", FLAGS)', 'K1'),
+    ('import os\nos.open("x", flags)', 'K1'),
+    ('from pathlib import Path\nPath("x").read_bytes()', 'K1'),
+    ('run_git(repo, ["update-ref", ref, oid, old])', 'K2'),
+    ('import sqlite3 as sql\nsql.connect("x")', 'K1-L'),
+    ('from hermes_cli.sqlite_safe_read import connect_tracked as ct\nct("x")', 'K1-L'),
+    ('import os\nos.open("x", os.O_RDONLY | os.O_NONBLOCK)', 'K1'),
+    ('import os\nos.open("x", os.O_RDONLY | os.O_DIRECTORY)', 'K1'),
+    ('import os\nos.open("x", os.O_WRONLY | os.O_CREAT | os.O_EXCL)', 'K1'),
+    ('import os\nos.open("x", flags)  # custody-open: arbitrary waiver', 'K1'),
+    ('open("x")  # custody-read: arbitrary waiver', 'K1'),
+    ('run_git(repo, ["update-ref", "--no-deref", ref, oid, old])', 'K2'),
+    ('run_git(repo, ["update-ref", "--no-deref", "-d", ref])', 'K2'),
+    ('run_git(repo, ["fetch", "--no-tags", str(source), f"{ref}:{ref}"])', 'K2'),
+    ('import sqlite3\nsqlite3.connect(":memory:")', None),
+])
+def test_custody_class_guard_patterns(source, expected):
+    check = runpy.run_path(str(REPO / 'scripts/check'))
+    errors = check['custody_class_errors'](source, 'hermes_cli/kanban_source_refs.py')
+    if expected:
+        assert any(expected in error for error in errors), errors
+    else:
+        assert errors == []
+
+
+@pytest.mark.parametrize('module, old, new, rule', [
+    ('barrier', 'getattr(os, "O_NONBLOCK", 0)', '0', 'K1'),
+    ('barrier', 'getattr(os, "O_NOCTTY", 0)', '0', 'K1'),
+    ('barrier', 'getattr(os, "O_NOFOLLOW", 0)', '0', 'K1'),
+    ('barrier', 'getattr(os, "O_CLOEXEC", 0)', '0', 'K1'),
+    ('barrier', 'flags |= _K1_FLAGS', 'flags = os.O_RDONLY', 'K1'),
+    ('barrier', 'if not stat.S_ISREG(os.fstat(fd).st_mode):', 'if False:', 'K1'),
+    ('refs', 'ref, oid, "0" * len(oid)', 'ref, oid', 'K2'),
+    ('refs', '"-d", ref, oid', '"-d", ref', 'K2'),
+    ('refs', 'symbol["rc"] != 1', 'symbol["rc"] == 1', 'K2'),
+    ('refs', '"--no-deref"', '"--create-reflog"', 'K2'),
+    ('refs', '"--no-write-fetch-head"', '"--write-fetch-head"', 'K2'),
+    ('refs', '"--refmap="', '"--refmap=refs/*:refs/*"', 'K2'),
+    ('refs', 'str(source), oid]', 'str(source), f"{ref}:{ref}"]', 'K2'),
+    ('publication', '"--no-write-fetch-head"', '"--write-fetch-head"', 'K2'),
+    ('publication', '"--refmap="', '"--refmap=refs/*:refs/*"', 'K2'),
+    ('publication', 'name, tip]', 'name, f"{ref}:{ref}"]', 'K2'),
+])
+def test_custody_guard_kills_contract_mutations(module, old, new, rule):
+    check = runpy.run_path(str(REPO / 'scripts/check'))
+    path = f'hermes_cli/kanban_source_{module}.py'
+    source = (REPO / path).read_text()
+    assert old in source
+    assert check['custody_class_errors'](source, path) == []
+    errors = check['custody_class_errors'](source.replace(old, new), path)
+    assert any(rule in error for error in errors), errors
+
+
+@pytest.mark.parametrize('tag', ['a', 'b', 'c', ''])
+def test_custody_sqlite_tag_matches_site_census(tag):
+    check = runpy.run_path(str(REPO / 'scripts/check'))
+    source = ('from hermes_cli.sqlite_safe_read import connect_tracked\n'
+              'def _connect():\n    return connect_tracked("x")  # custody-sqlite: ' + tag)
+    errors = check['custody_class_errors'](source, 'hermes_cli/kanban_source_pin_store.py')
+    assert bool(errors) == (tag != 'a')
+
+
+def test_custody_guard_attaches_to_required_named_ci_invocation():
+    check = runpy.run_path(str(REPO / 'scripts/check'))
+    jobs = check['_jobs'](['footguns'], None, None)
+    assert jobs['source-custody-classes'].argv[-1] == '--custody-only'
+
 _GUARD_SCRIPTS = (
     "scripts/check-windows-footguns.py", "scripts/check_bash_shebangs.py",
     "scripts/check_no_tmp_literals.py", "scripts/check_detached_spawns.py", "scripts/install_root_lint.py",

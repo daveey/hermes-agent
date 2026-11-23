@@ -22,6 +22,7 @@ Hooks are skippable (``--no-verify``); CI is not. The code-health part honours t
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import subprocess
 import sys
@@ -213,6 +214,7 @@ _GUARDS = {
     "dockerfile-downloads": ["scripts/ci/check_dockerfile_downloads.py"],
     "lazy-deps": ["scripts/ci/check_lazy_deps_imports.py"],
     "profile-archives": ["scripts/ci/check_profile_archive_boundary.py"],
+
     # The committed system-prompt / tool-schema snapshot is what the code renders (the same
     # comparison tests/ci/test_prompt_surface.py makes, ~6s). Needs the repo's own dependencies,
     # which the hooks' python has; a push that edits a tool description without re-rendering stops here.
@@ -290,6 +292,10 @@ def _jobs(names: list[str], base: str | None, head: str | None,
             health += ["--base", base] if base else []
             health += ["--head", head] if head else []
             jobs[name] = _Job(health, root, env)
+    # Required CI selects individual checks. Attach the stage guard to those
+    # invocations too, judging the same materialized artifact as other guards.
+    if (root / 'hermes_cli/kanban_source_pin_store.py').exists():
+        jobs['source-custody-classes'] = _Job([sys.executable, 'scripts/check', '--custody-only'], root, env)
     return jobs
 
 
@@ -366,11 +372,173 @@ def _upstream_sync_refused(rev: str) -> bool:
     return guard_push(Path.cwd(), rev) != 0
 
 
+_CUSTODY_STAGE_MODULES = (
+    'hermes_cli/kanban_source_barrier.py', 'hermes_cli/kanban_source_pin_store.py',
+    'hermes_cli/kanban_source_store_schema.py', 'hermes_cli/kanban_source_removal.py',
+    'hermes_cli/kanban_source_publication.py', 'hermes_cli/kanban_source_refs.py',
+    'scripts/ci/upstream_sync_push_argv.py',
+)
+# Stage A census: only the self-created authority store opens SQLite. Grow with
+# later pieces; the full consumer manifest remains separate and is not weakened.
+_CUSTODY_SQLITE = {('hermes_cli/kanban_source_pin_store.py', '_connect'): 'a'}
+
+
+def _custody_flags(node, values):
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    if isinstance(node, ast.Name):
+        return values.get(node.id)
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'os':
+        return getattr(os, node.attr, None)
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'getattr'
+            and len(node.args) >= 2 and isinstance(node.args[0], ast.Name) and node.args[0].id == 'os'
+            and isinstance(node.args[1], ast.Constant)):
+        return getattr(os, node.args[1].value, 0)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left, right = _custody_flags(node.left, values), _custody_flags(node.right, values)
+        return None if left is None or right is None else left | right
+    return None
+
+
+def _custody_shape(node, source: str) -> bool:
+    return ast.dump(node) == ast.dump(ast.parse(source, mode='eval').body)
+
+
+def _custody_open_errors(call, scope, path, values) -> list[str]:
+    flags = _custody_flags(call.args[1], values) if len(call.args) > 1 else None
+    required = sum(getattr(os, name, 0) for name in
+                   ('O_NONBLOCK', 'O_NOFOLLOW', 'O_CLOEXEC', 'O_NOCTTY'))
+    if flags is None or flags & required != required:
+        return ['K1 incomplete or unresolved open flags']
+    if path != 'hermes_cli/kanban_source_barrier.py' or scope is None:
+        return ['K1 raw open outside canonical helpers']
+    if scope.name in {'open_directory', '_open_dir'} and flags & getattr(os, 'O_DIRECTORY', 0):
+        return []
+    if scope.name == 'open_regular':
+        # The fd must be validated immediately, before use or return. Comments
+        # are not exceptions; pin the actual regular-file rejection structure.
+        nodes = sorted((n for n in ast.walk(scope) if isinstance(n, ast.If)
+                        and n.lineno > call.lineno), key=lambda n: n.lineno)
+        if (nodes and _custody_shape(nodes[0].test, 'not stat.S_ISREG(os.fstat(fd).st_mode)')
+                and len(nodes[0].body) == 1 and isinstance(nodes[0].body[0], ast.Raise)):
+            return []
+    return ['K1 raw open lacks canonical directory/regular validation']
+
+
+def _custody_ref_errors(call, scope, path, literals) -> list[str]:
+    if not {'update-ref', 'fetch'} & set(literals):
+        return []
+    if (path == 'hermes_cli/kanban_source_publication.py' and scope is not None
+            and scope.name == 'prove' and ast.unparse(call.func) == 'refs.run_git'
+            and len(call.args) == 2 and _custody_shape(call.args[1],
+                '["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", '
+                '"--no-recurse-submodules", "--", name, tip]')):
+        return []
+    if (path != 'hermes_cli/kanban_source_refs.py' or scope is None
+            or not isinstance(call.func, ast.Name) or call.func.id != 'run_git'
+            or len(call.args) != 2 or not isinstance(call.args[1], ast.List)):
+        return ['K2 mutation outside the checked argv seam']
+    argv = call.args[1]
+    if 'fetch' in literals:
+        expected = ('["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", '
+                    '"--no-recurse-submodules", "--", str(source), oid]')
+        if scope.name == 'restore_ref' and _custody_shape(argv, expected):
+            return []
+        return ['K2 fetch may write destination refs or FETCH_HEAD']
+    expected = {'create_ref': '["update-ref", "--no-deref", ref, oid, "0" * len(oid)]',
+                'delete_exact': '["update-ref", "--no-deref", "-d", ref, oid]'}.get(scope.name)
+    if expected is None or not _custody_shape(argv, expected):
+        return ['K2 mutation lacks exact --no-deref/expected-OID argv']
+    # Require the canonical symbolic-ref probe and an unconditional refusal on
+    # every outcome other than rc=1. Pin both, rather than trusting a string.
+    probes = [n for n in scope.body if isinstance(n, ast.Assign) and n.lineno < call.lineno
+              and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+              and n.targets[0].id == 'symbol']
+    refusals = [n for n in scope.body if isinstance(n, ast.If) and n.lineno < call.lineno
+                and _custody_shape(n.test, 'symbol["status"] != "ok" or symbol["rc"] != 1')]
+    probe = 'run_git(repo, ["symbolic-ref", "-q", ref], budget=budget)'
+    if (len(probes) != 1 or not _custody_shape(probes[0].value, probe)
+            or len(refusals) != 1 or not refusals[0].body
+            or not isinstance(refusals[0].body[0], ast.Return)):
+        return ['K2 mutation lacks symbolic-ref refusal']
+    return []
+
+
+def custody_class_errors(source: str, path: str) -> list[str]:
+    """AST class guard over each landed module, with explicit SQLite census tags."""
+    tree, lines = ast.parse(source), source.splitlines()
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    aliases = {}
+    constants = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases.update({a.asname or a.name: a.name for a in node.names})
+        elif isinstance(node, ast.ImportFrom):
+            aliases.update({a.asname or a.name: (node.module or '') + '.' + a.name for a in node.names})
+        elif isinstance(node, ast.Assign) and parents.get(node) is tree:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id] = _custody_flags(node.value, constants)
+    errors = []
+    for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+        scope = parents.get(call)
+        while scope is not None and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope = parents.get(scope)
+        values = dict(constants)
+        if scope is not None:
+            for assign in sorted(ast.walk(scope), key=lambda n: getattr(n, 'lineno', 0)):
+                if isinstance(assign, ast.Assign) and assign.lineno < call.lineno:
+                    for target in assign.targets:
+                        if isinstance(target, ast.Name):
+                            values[target.id] = _custody_flags(assign.value, values)
+                elif (isinstance(assign, ast.AugAssign) and assign.lineno < call.lineno
+                      and isinstance(assign.target, ast.Name) and isinstance(assign.op, ast.BitOr)):
+                    extra = _custody_flags(assign.value, values)
+                    values[assign.target.id] = (None if extra is None else
+                                               (values.get(assign.target.id) or 0) | extra)
+        spelling = ast.unparse(call.func)
+        first, dot, rest = spelling.partition('.')
+        resolved = aliases.get(first, first) + (dot + rest if dot else '')
+        line = lines[call.lineno - 1]
+        prefix = f'{path}:{call.lineno}'
+        if resolved == 'os.open':
+            errors.extend(prefix + ' ' + error for error in _custody_open_errors(call, scope, path, values))
+        if (spelling == 'open' or isinstance(call.func, ast.Attribute)
+                and call.func.attr in {'open', 'read_text', 'read_bytes'}):
+            if resolved != 'os.open':
+                errors.append(prefix + ' K1 high-level read outside canonical helper')
+        literals = [n.value for n in ast.walk(call) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        errors.extend(prefix + ' ' + error for error in _custody_ref_errors(call, scope, path, literals))
+        sqlite_call = (resolved in {'sqlite3.connect', 'lockguard.connect', 'db.connect'}
+                       or resolved.endswith(('.lockguard.connect', '.db.connect', '.kanban_db.connect'))
+                       or resolved.endswith(('.connect_tracked', '.connect_with_identity'))
+                       or resolved in {'connect_tracked', 'connect_with_identity'})
+        if sqlite_call and ':memory:' not in literals:
+            expected = _CUSTODY_SQLITE.get((path, scope.name if scope is not None else ''))
+            if expected is None or '# custody-sqlite: ' + expected not in line:
+                errors.append(prefix + ' K1-L SQLite tag missing or differs from census')
+    return errors
+
+
+def custody_classes(root: Path) -> int:
+    errors = []
+    for path in _CUSTODY_STAGE_MODULES:
+        try:
+            source = (root / path).read_text(encoding='utf-8')
+            errors.extend(custody_class_errors(source, path))
+        except (OSError, SyntaxError) as exc:
+            errors.append(f'{path}: cannot check: {exc}')
+    for error in errors:
+        print(error)
+    return int(bool(errors))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scripts/check", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", help=f"comma list of: {', '.join(_CHECKS)}")
     parser.add_argument("--base", help="base revision for the code-health ratchet and blob-size")
+    parser.add_argument('--custody-only', action='store_true', help='check landed custody class census')
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--staged", action="store_true",
                         help="check the index (what `git commit` records), not the working tree")
@@ -379,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="run on every commit (default) or every push")
     parser.add_argument("--uninstall-hook", action="store_true", help="remove our git hooks")
     args = parser.parse_args(argv)
+    if args.custody_only:
+        return custody_classes(REPO)
     args.only = _selected(parser, args.only)
     if args.install_hook:
         return install_hook(args.install_hook)

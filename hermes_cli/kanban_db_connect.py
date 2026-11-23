@@ -13,6 +13,7 @@ from hermes_cli import kanban_run_end_lease as _run_end_lease
 from hermes_cli import kanban_schema_owner as _schema_owner
 import contextlib
 import json
+import logging
 import os
 import random
 import re
@@ -1669,8 +1670,90 @@ def _main_db_file(conn: sqlite3.Connection) -> Optional[str]:
     return None
 
 
+class _TxnBoundary:
+    """Opt-in ``write_txn`` boundary: zero busy timeout while open, then restore
+    it and run the idempotent release callback exactly once, before any
+    post-commit hook. Inert when neither ``no_retry`` nor a callback is given."""
+
+    def __init__(self, conn, no_retry, done):
+        self.conn, self.no_retry, self.done = conn, no_retry, done
+        self.prior_timeout: Optional[int] = None
+        self.finished = False
+        self.error: Optional[BaseException] = None
+
+    def arm(self) -> None:
+        if self.no_retry:
+            self.prior_timeout = int(self.conn.execute("PRAGMA busy_timeout").fetchone()[0])
+            self.conn.execute("PRAGMA busy_timeout=0")
+
+    def execute(self, sql: str) -> None:
+        if self.no_retry:
+            self.conn.execute(sql)  # single attempt: no Python BEGIN/COMMIT retry
+        else:
+            _execute_boundary_with_retry(self.conn, sql)
+
+    def rollback(self) -> None:
+        """End SQLite ownership before releasing an opt-in external barrier."""
+        if not (self.no_retry or self.done is not None):
+            with contextlib.suppress(sqlite3.OperationalError):
+                self.conn.execute("ROLLBACK")
+            return
+        try:
+            self.conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            try:
+                live = bool(self.conn.in_transaction)
+            except sqlite3.Error:
+                live = True  # unknown is treated as a live writer
+            if not live:
+                # SQLite already ended the transaction itself (disk full, I/O error): "no
+                # transaction is active" leaves no writer, so the caller's connection stays open.
+                return
+            # A failed rollback can leave the writer live. Closing is the only
+            # safe fallback before boundary_done; never shadow the original error.
+            self.finished = True  # withhold callback if close itself fails
+            try:
+                self.conn.close()
+            except BaseException:
+                logging.getLogger(__name__).exception(
+                    "write_txn: rollback and close failed; withholding boundary_done"
+                )
+            else:
+                self.prior_timeout = None  # closed connections cannot restore it
+                self.finished = False
+
+    def finish(self) -> None:
+        if self.finished:
+            return
+        self.finished = True
+        try:
+            if self.prior_timeout is not None:
+                self.conn.execute(f"PRAGMA busy_timeout={self.prior_timeout}")
+        except BaseException as exc:  # still run the release callback
+            logging.getLogger(__name__).exception(
+                "write_txn: restoring busy_timeout failed; still invoking boundary_done"
+            )
+            self.error = exc
+        if self.done is not None:
+            try:
+                self.done()
+            except BaseException as exc:
+                logging.getLogger(__name__).exception("write_txn: boundary_done failed")
+                self.error = self.error or exc
+
+    def raise_pending(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+
 @contextlib.contextmanager
-def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
+def write_txn(
+    conn: sqlite3.Connection,
+    *,
+    allow_nested: bool = False,
+    no_retry: bool = False,
+    boundary_done=None,
+):
     """IMMEDIATE write transaction; a claim CAS inside is atomic — at most one
     concurrent writer succeeds.
 
@@ -1679,7 +1762,35 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
     ``add_comment``) opt in — helpers with post-commit side effects
     (``complete_task`` & co.) must never run under an open outer transaction,
     since those side effects would fire while the outer txn can still roll back.
+
+    ``no_retry=True`` is a one-attempt mode: SQLite busy_timeout is 0 and BEGIN /
+    COMMIT are not retried; it rejects nesting. ``boundary_done`` is an
+    idempotent release callback invoked once after COMMIT / rollback / BEGIN
+    failure (after the busy timeout is restored) and BEFORE every annotation,
+    run-end-lease and wake hook. Callers should also release in their own
+    ``finally``. A callback or timeout-restore failure after COMMIT skips those
+    hooks (committed bytes remain) and is raised; queued leases are discarded
+    locally and fall back to server expiry. Cleanup errors, including callback
+    BaseException, deliberately never shadow a body/BEGIN/COMMIT error. Opt-in
+    mode rolls back on BaseException before the callback; if rollback fails with
+    a SQLite error, it closes the connection first (withholds the callback if
+    close also fails). The default path is unchanged.
     """
+    if (no_retry or boundary_done is not None) and getattr(conn, "in_transaction", False):
+        raise RuntimeError(
+            "write_txn: no_retry/boundary_done cannot be used inside an "
+            "open transaction (no nested no_retry mode)"
+        )
+    boundary = _TxnBoundary(conn, no_retry, boundary_done)
+    try:
+        with _write_txn_body(conn, allow_nested, boundary) as c:
+            yield c
+    finally:
+        boundary.finish()  # safety net (BaseException / pre-BEGIN failure); idempotent
+
+
+@contextlib.contextmanager
+def _write_txn_body(conn, allow_nested, boundary):
     _kb._assert_not_delegated_child_mutation(_main_db_file(conn))
     if getattr(conn, "in_transaction", False):
         if not allow_nested:
@@ -1705,7 +1816,9 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
     from hermes_cli import kanban_annotation_mutation as annotation_mutation
     from hermes_cli import kanban_sync_status_origin as status_origin
 
-    _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
+    boundary.arm()
+    boundary.execute("BEGIN IMMEDIATE")
+    opt_in = bool(boundary.no_retry or boundary.done is not None)
     try:
         annotation_scope = annotation_mutation.arm(conn)
         _local_status_wake.arm(conn)  # [daveey] record this txn's status changes for the awaited-card wake
@@ -1714,21 +1827,39 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
     except Exception:
         # SQLite may already have auto-rolled-back (EIO, contention, corruption);
         # don't let this secondary failure shadow the real one.
-        with contextlib.suppress(sqlite3.OperationalError):
-            conn.execute("ROLLBACK")
-        _run_end_lease.flush(conn, committed=False)
+        boundary.rollback()
+        boundary.finish()
+        _run_end_lease.flush(conn, committed=False)  # local discard only, no I/O
+        raise
+    except BaseException:
+        if opt_in:
+            boundary.rollback()
+            boundary.finish()
+            _run_end_lease.flush(conn, committed=False)
         raise
     else:
         try:
             status_origin.bind(conn, origin_armed)
-            _execute_boundary_with_retry(conn, "COMMIT")
+            boundary.execute("COMMIT")
         except Exception:
             # COMMIT exhausted retries with the txn still open; roll back so the
             # connection isn't poisoned for the next BEGIN IMMEDIATE.
-            with contextlib.suppress(sqlite3.OperationalError):
-                conn.execute("ROLLBACK")
+            boundary.rollback()
+            boundary.finish()
             _run_end_lease.flush(conn, committed=False)
             raise
+        except BaseException:
+            if opt_in:
+                boundary.rollback()
+                boundary.finish()
+                _run_end_lease.flush(conn, committed=False)
+            raise
+        boundary.finish()
+        if boundary.error is not None:
+            # No network release after failed cleanup. Drop the id(conn)-keyed
+            # queue locally; the Board lease falls back to server expiry.
+            _run_end_lease.flush(conn, committed=False)
+            boundary.raise_pending()
         annotation_mutation.flush(conn, annotation_scope)
         from hermes_cli.fact_source_signal import publish_commit
         publish_commit(_main_db_file(conn))
