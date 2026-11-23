@@ -125,9 +125,7 @@ def record_wall_for_run(conn: sqlite3.Connection, task_id: str, run_id: Optional
             "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'model_tier' "
             "AND (run_id IS ? OR run_id IS NULL) ORDER BY id DESC LIMIT 1", (task_id, run_id)):
             provider = _norm((json.loads(row[0] or "{}")).get("provider"))
-        if not provider:
-            row = conn.execute("SELECT provider_override FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            provider = _norm(row[0]) if row else ""
+        # Never the raw stored provider_override: a legacy row is author evidence, not the route this run used.
     except Exception as exc:
         logger.debug("kanban walls: provider lookup failed for %s (%s)", task_id, exc)
     provider = provider or profile_provider()

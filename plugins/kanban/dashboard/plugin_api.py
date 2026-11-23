@@ -628,6 +628,10 @@ class UpdateTaskBody(BaseModel):
     clear_model_override: bool = False
     reasoning_effort: Optional[str] = None
     clear_reasoning_effort: bool = False
+    # Validated, never applied: a mandatory pin is refused (see validate_update_flags).
+    pin_mandatory: Optional[Any] = None
+    model_pin_mandatory: Optional[Any] = None
+    require_model: Optional[Any] = None
 
 
 class BulkTaskBody(BaseModel):
@@ -656,6 +660,9 @@ class BulkTaskBody(BaseModel):
     clear_model_override: bool = False
     reasoning_effort: Optional[str] = None
     clear_reasoning_effort: bool = False
+    pin_mandatory: Optional[Any] = None
+    model_pin_mandatory: Optional[Any] = None
+    require_model: Optional[Any] = None
 
 
 class _StatusRejected(Exception):
@@ -665,16 +672,22 @@ class _StatusRejected(Exception):
 def _validate_request_entry(payload) -> None:
     """Reject ignored or mixed evidence writes before any assignment/status mutation."""
     from hermes_cli.kanban_human_request import validate_human_request
-    from hermes_cli.kanban_model_neutral import validate_selector, validate_text, validate_review
+    from hermes_cli.kanban_model_neutral import (
+        MANDATORY_FLAGS, validate_explicit_selector, validate_text, validate_review, validate_update_flags)
 
     with _value_error_400():
-        validate_selector(getattr(payload, "model_override", None), getattr(payload, "provider_override", None))
+        validate_update_flags(payload)  # opt-in strict top-level and metadata pins, whatever the target status
+        validate_explicit_selector(getattr(payload, "model_override", None),
+                                   getattr(payload, "provider_override", None))
         validate_text(getattr(payload, "title", None), getattr(payload, "body", None))
         if getattr(payload, "status", None) == "review":
-            validate_review(getattr(payload, "metadata", None) or {})
+            metadata = getattr(payload, "metadata", None) or {}
+            validate_explicit_selector(metadata.get("review_model"), metadata.get("review_provider"),
+                                       mandatory=metadata.get("pin_mandatory") or metadata.get("require_model"))
+            validate_review(metadata)
         validate_human_request(payload.human_request, kind=payload.block_kind)
         if payload.metadata_only:
-            allowed = {"ids", "human_request", "metadata_only", "block_reason"}
+            allowed = {"ids", "human_request", "metadata_only", "block_reason", *MANDATORY_FLAGS}  # inert here
             if payload.model_fields_set - allowed:
                 raise ValueError("metadata-only classification cannot accompany other changes")
             if "human_request" not in payload.model_fields_set or not (payload.block_reason or "").strip():
@@ -1422,23 +1435,9 @@ def dispatch(dry_run: bool = Query(False), max_n: int = Query(8, alias="max"), b
 
 @router.get("/model-options")
 def model_options():
-    """Providers + curated models for the override dropdown via ``inventory.build_models_payload``
-    (same substrate as the Models page) so it can't offer a pair Hermes rejects. Skips pricing
-    and custom-provider probes: a slow/offline local endpoint must not hang the drawer."""
-    try:
-        from hermes_cli.inventory import build_models_payload, load_picker_context
-
-        payload = build_models_payload(
-            load_picker_context(), explicit_only=True, canonical_order=True, probe_custom_providers=False)
-        return {
-            "providers": [
-                {"slug": row.get("slug", ""), "label": row.get("label") or row.get("slug", ""),
-                 "models": list(row.get("models") or [])}
-                for row in payload.get("providers", [])
-                if row.get("models")]}
-    except Exception:
-        log.exception("kanban model-options failed")
-        return {"providers": []}  # empty catalog → the UI falls back to a free-text input
+    """Class-only choices in the existing dropdown shape; empty selection clears."""
+    classes = ('class:fast', 'class:standard', 'class:deep')
+    return {"providers": [{"slug": "auto", "label": "Auto (routing class)", "models": list(classes)}]}
 
 
 # --- Boards CRUD (multi-project support) --------------------------------------

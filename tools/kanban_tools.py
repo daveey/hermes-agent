@@ -11,7 +11,7 @@ import functools
 import json
 
 from hermes_cli.kanban_published_worktree import publication_scope
-from tools.kanban_tools_model_neutral import model_neutral_create
+from tools.kanban_tools_model_neutral import model_neutral_create, model_neutral_review
 import logging
 import os
 import time
@@ -1026,12 +1026,9 @@ def _standing_wait_guard(kb, conn, tid: str, kind: Optional[str], human_request:
     """
     if kind != "needs_input" and not human_request:
         return
-    from agent import standing_instructions as si
-    task = kb.get_task(conn, tid)
-    found = si.explicit_lines(getattr(task, "body", "") or "")
-    for c in kb.list_comments(conn, tid):
-        found += si.explicit_lines(c.body or "")
-    dont_wait = si.says_dont_wait(si.dedupe(found))
+    from hermes_cli.kanban_model_neutral import standing_wait_words
+    texts = [getattr(kb.get_task(conn, tid), "body", "") or "", *(c.body or "" for c in kb.list_comments(conn, tid))]
+    dont_wait = standing_wait_words(texts, _standing_hold_message)  # every emitted form rechecked (S2)
     if not dont_wait:
         return
     run_id = _worker_run_id(tid)
@@ -1040,14 +1037,16 @@ def _standing_wait_guard(kb, conn, tid: str, kind: Optional[str], human_request:
         return  # already held once this run: the agent re-confirmed a human-only need
     with kb.write_txn(conn, allow_nested=True):
         kb._append_event(conn, tid, STANDING_WAIT_EVENT,
-                         {"kind": kind, "standing": dont_wait[:3], "reason": (reason or "")[:300]}, run_id=run_id)
-    quoted = "; ".join(f'"{w}"' for w in dont_wait[:3])
-    raise _Reject(
-        f"Not blocked: this card carries the user's standing instruction {quoted}. Decide it yourself and keep "
-        "going (pick the option the user's goal implies, record the choice in a kanban_comment). A timing or "
-        "consent question is not a reason to wait. Only if this truly needs a human (a credential, a physical "
-        "step, money beyond the approved budget) call kanban_block again with the same reason; that lands it.",
-        "standing_dont_wait")
+                         {"kind": kind, "standing": dont_wait, "reason": (reason or "")[:300]}, run_id=run_id)
+    raise _Reject(_standing_hold_message(dont_wait), "standing_dont_wait")
+
+
+def _standing_hold_message(words: list[str]) -> str:
+    quoted = "; ".join(f'"{w}"' for w in words)
+    return (f"Not blocked: this card carries the user's standing instruction {quoted}. Decide it yourself and keep "
+            "going (pick the option the user's goal implies, record the choice in a kanban_comment). A timing or "
+            "consent question is not a reason to wait. Only if this truly needs a human (a credential, a physical "
+            "step, money beyond the approved budget) call kanban_block again with the same reason; that lands it.")
 
 
 @_kanban_handler("kanban_block")
@@ -1262,6 +1261,7 @@ def _handle_move(args: dict, **kw) -> str:
 
 
 @_kanban_handler("kanban_request_review")
+@model_neutral_review
 def _handle_request_review(args: dict, **kw) -> str:
     """Move implementation into the first-class review phase."""
     tid = _worker_guard("kanban_request_review", args)

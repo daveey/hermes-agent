@@ -29,16 +29,17 @@ _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
 
 
 def _ctx_standing(lines: list[str], task: Task, comments: list) -> None:
-    """Preserve explicit standing instructions even when comment history is capped."""
-    from agent import standing_instructions as si
-    found = si.explicit_lines(task.body or "")
-    for c in comments:
-        found += si.explicit_lines(c.body or "")
-    found = si.dedupe(found)
-    if not found:
+    """Preserve explicit standing instructions even when comment history is capped.
+
+    Direct promotion path: every candidate representation and the final formatted line must pass the
+    unchanged model-neutral recognizer. The raw body/comments still render below."""
+    from hermes_cli.kanban_model_neutral import standing_allowed, standing_candidates
+    found = standing_candidates(task.body or "", *(c.body or "" for c in comments))
+    rendered = [f"standing: {words}" for raw, words in found if standing_allowed(raw, f"standing: {words}")]
+    if not rendered:
         return
     lines.append("## Standing instructions (from the user; in force for this card)")
-    lines += [f"standing: {line}" for line in found]
+    lines += rendered
     lines.append("(These still govern this run: e.g. a standing \"don't wait\" means decide it yourself instead "
                  "of blocking on the user, unless only a human can act — a credential, a physical step.)")
     lines.append("")

@@ -15,3 +15,25 @@ def model_neutral_create(fn):
             return tool_error(str(exc))
         return fn(args, **kwargs)
     return create
+
+
+def model_neutral_review(fn):
+    """Opt-in review-metadata guard before worker guard, goal gate, source registration and staging.
+
+    Ordinary ``tool_error`` refusal (no typed code); metadata flags keep base truthiness (N1).
+    """
+    @wraps(fn)
+    def review(args, **kwargs):
+        from hermes_cli.kanban_model_neutral import validate_explicit_selector, validate_review
+        from tools.registry import tool_error
+        metadata = args.get('metadata')
+        if isinstance(metadata, dict):
+            try:
+                validate_explicit_selector(
+                    metadata.get('review_model'), metadata.get('review_provider'),
+                    mandatory=metadata.get('pin_mandatory') or metadata.get('require_model'))
+                validate_review(metadata)
+            except ValueError as exc:
+                return tool_error(str(exc))
+        return fn(args, **kwargs)
+    return review

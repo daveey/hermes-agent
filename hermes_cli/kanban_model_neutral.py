@@ -91,6 +91,65 @@ def validate_selector(model=None, provider=None, *, mandatory=False):
     return model, ('auto' if model else None)
 
 
+def validate_explicit_selector(model=None, provider=None, *, mandatory=False):
+    """Opt-in exact membership for local update and review request boundaries."""
+    from agent.model_routing import exact_class_selector
+    model, provider = validate_selector(model, provider, mandatory=mandatory)
+    if model and not exact_class_selector(model):
+        raise ValueError(ERROR)
+    return model, provider
+
+
+MANDATORY_FLAGS = ('pin_mandatory', 'model_pin_mandatory', 'require_model')
+
+
+def validate_update_flags(payload):
+    """Opt-in for local REST update/bulk only: null/false/integer zero are inert; anything else refuses.
+
+    Raises ordinary ``ValueError(ERROR)``; no typed wire protocol. Not used by create/DB/selfwork admission.
+    """
+    metadata = getattr(payload, 'metadata', None) or {}
+    values = [getattr(payload, key, None) for key in MANDATORY_FLAGS]
+    if isinstance(metadata, dict):
+        values += [metadata.get(key) for key in ('pin_mandatory', 'require_model')]
+    if not all(value is None or value is False or (type(value) is int and value == 0) for value in values):
+        raise ValueError(ERROR)
+
+
+def standing_allowed(*values):
+    """Direct standing promotion check: the UNCHANGED recognizer accepts every value."""
+    try:
+        validate_text(*values)
+    except ValueError:
+        return False
+    return True
+
+
+def standing_candidates(*texts):
+    """S1/S2 only: deduped (raw_line, words) accepted at every stage before dedupe/limit.
+
+    Raw body/comment bytes are untouched and remain visible elsewhere; the compactor and
+    the default helpers keep their own extraction.
+    """
+    from agent import standing_instructions as si
+    found = []
+    for text in texts:
+        found += si.restricted_explicit_lines(text, standing_allowed)
+    return si.dedupe_candidates(found)
+
+
+def standing_wait_words(texts, render, limit=3):
+    """S2: first ``limit`` don't-wait words whose quoted form and actual message ``render(words)`` pass."""
+    from agent import standing_instructions as si
+    chosen = []
+    for raw, words in standing_candidates(*texts):
+        if len(chosen) == limit:
+            break
+        if si.says_dont_wait([words]) and standing_allowed(raw, words, f'"{words}"', render([*chosen, words])):
+            chosen.append(words)
+    return chosen
+
+
 def validate_text(*values):
     """Reject positive machine directives and explicit named-model obligations.
 

@@ -491,6 +491,10 @@ def _apply_model_tier(conn: sqlite3.Connection, task: Any, *, lane: str, cfg: Op
         _lose_pace_offer(getattr(task, "id", ""), f"route resolution failed: {type(exc).__name__}")
         logger.warning("kanban model tier: resolve failed for %s (%s)", getattr(task, "id", "?"), exc,
                        exc_info=True)
+        # The run never inherits a raw legacy pin: in memory only, the stored row stays author evidence.
+        from hermes_cli.kanban_model_neutral import effective_selector
+        task.model_override, task.provider_override = effective_selector(task)
+        task.model_pin_mandatory = None
         return "error"
     if reason == "pinned" and not _str(getattr(task, "provider_override", None)):
         # A row pinned before pin-time binding (concrete model, NULL provider) used to take its provider from

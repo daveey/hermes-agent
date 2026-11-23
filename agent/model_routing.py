@@ -25,6 +25,11 @@ def is_class_selector(model):
     return isinstance(model, str) and model.startswith("class:")
 
 
+def exact_class_selector(model):
+    """Policy membership only; callers own normalization, never this predicate."""
+    return isinstance(model, str) and model in ('class:fast', 'class:standard', 'class:deep')
+
+
 def _validate_route(route):
     if not isinstance(route, dict):
         raise ModelRoutingError("Route must be an exact provider/model/billing/weight/capabilities mapping")

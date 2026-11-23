@@ -14,7 +14,7 @@ share them so all three agree on what is standing.
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from typing import Callable, Iterable
 
 STANDING_HEADING = "## Standing instructions (still in force)"
 _MAX_LINES = 20
@@ -82,6 +82,41 @@ def dedupe(lines: Iterable[str], limit: int = _MAX_LINES) -> list[str]:
         if line and key not in seen:
             seen.add(key)
             out.append(line)
+    return out[-limit:]
+
+
+def restricted_explicit_lines(text: str, keep: Callable[[str, str], bool]) -> list[tuple[str, str]]:
+    """Opt-in direct promotion: ``(raw_line, words)`` whose every representation ``keep`` accepts.
+
+    Unlike :func:`explicit_lines`, each ``str.splitlines()`` physical line is matched separately, so no
+    candidate crosses LF/CRLF/CR/VT/FF/FS/GS/RS/NEL/U+2028/U+2029. ``keep(raw_line, candidate)`` sees
+    the untruncated words, the collapsed words, the 400-character words and the rendered ``standing:``
+    line; one refusal discards the candidate before any dedupe/limit. Source text is never altered.
+    """
+    if not isinstance(text, str) or "standing:" not in text.lower():
+        return []
+    out: list[tuple[str, str]] = []
+    for raw in text.splitlines():
+        m = _STANDING_LINE.match(raw)
+        if not m:
+            continue
+        words = m.group("words")
+        collapsed = " ".join(words.split())
+        final = collapsed[:_MAX_CHARS]
+        if all(keep(raw, candidate) for candidate in (words, collapsed, final, f"standing: {final}")):
+            out.append((raw, final))
+    return out
+
+
+def dedupe_candidates(pairs: Iterable[tuple[str, str]], limit: int = _MAX_LINES) -> list[tuple[str, str]]:
+    """:func:`dedupe` over already-accepted ``(raw_line, words)``; keys never change emitted words."""
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for raw, words in pairs:
+        key = words.casefold().strip(" .")
+        if words and key not in seen:
+            seen.add(key)
+            out.append((raw, words))
     return out[-limit:]
 
 

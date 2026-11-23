@@ -123,7 +123,8 @@ def parent_class(parent: Any) -> str:
 
 
 def is_class(model: Any) -> bool:
-    return isinstance(model, str) and model.startswith("class:") and model[len("class:"):] in CLASSES
+    from agent.model_routing import exact_class_selector
+    return exact_class_selector(model)
 
 
 def _blank(value: Any) -> bool:
