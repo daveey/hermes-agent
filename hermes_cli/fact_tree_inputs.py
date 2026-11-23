@@ -25,6 +25,11 @@ def capture(targets, source, view, selector, budget):
                     hydrate=drill, session_limit=selector['session_limit'], include_discovered=native and not drill)
         failed = []
         result = profiles._read_profile_db(name, home, failed, read)
+        # Profile fan-out intentionally returns partial trees with per-profile
+        # errors. Native routes have no such envelope: fail the source capture
+        # so ContentOwner retains prior evidence stale (or cold unavailable).
+        if native and failed:
+            raise OSError('native project tree capture failed')
         errors.extend(failed)
         rows.append((name, result))
     return CapturedInput({'rows': rows, 'errors': errors, 'view': view, 'selector': dict(selector)},
